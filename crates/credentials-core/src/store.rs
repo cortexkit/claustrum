@@ -41,8 +41,16 @@ use crate::record::VaultRecord;
 /// other domain chain in the same database).
 const SCHEMA_NAMESPACE: &str = "credentials";
 
-/// The vault schema. One table; the fence table is created lazily by
-/// `with_conn_fenced` on the first fenced write and is not declared here.
+/// The vault schema. The fence table is created lazily by `with_conn_fenced` on
+/// the first fenced write and is not declared here.
+///
+/// `refresh_intent` is the durable crash-safety log for OAuth refresh: a row is
+/// fsynced BEFORE the provider's rotating refresh endpoint is called, and cleared
+/// in the same transaction that commits the new tokens. A row that survives a
+/// restart means a refresh was interrupted between the provider call and the
+/// commit (its outcome is INDETERMINATE — the provider may have rotated), which
+/// startup reconciliation resolves fail-safe. At most one intent per credential
+/// (the id is the primary key), matching the engine's single-flight.
 const MIGRATIONS: &[Migration] = &[Migration {
     version: 1,
     statements: "CREATE TABLE credentials (\
@@ -52,6 +60,13 @@ const MIGRATIONS: &[Migration] = &[Migration {
                      state           TEXT NOT NULL, \
                      envelope        BLOB NOT NULL, \
                      updated_at_ms   INTEGER NOT NULL\
+                 ); \
+                 CREATE TABLE refresh_intent (\
+                     credential_id    TEXT PRIMARY KEY, \
+                     record_version   INTEGER NOT NULL, \
+                     old_refresh_hash TEXT NOT NULL, \
+                     lease_epoch      INTEGER NOT NULL, \
+                     started_at_ms    INTEGER NOT NULL\
                  );",
 }];
 
@@ -98,6 +113,47 @@ pub struct RecordMeta {
     pub key_id_hex: String,
     /// The row's lifecycle state.
     pub state: RecordState,
+}
+
+/// A durable refresh-intent row: the fsynced marker that a refresh is in flight
+/// for a credential, written before the provider's rotating endpoint is called and
+/// cleared in the same transaction that commits the new tokens. A row that
+/// survives a restart marks an INDETERMINATE refresh (the provider may or may not
+/// have rotated) that startup reconciliation resolves fail-safe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefreshIntent {
+    /// The credential being refreshed.
+    pub credential_id: String,
+    /// The record version the refresh started FROM (the commit's CAS guard).
+    pub record_version: u64,
+    /// Hash of the refresh token about to be rotated (see [`refresh_token_hash`]).
+    /// Reconciliation cross-checks it against the stored record's refresh token so
+    /// a legitimate re-login (which clears the intent) is told apart from a rogue
+    /// write that left a stale intent.
+    pub old_refresh_hash: String,
+    /// The store epoch that opened the intent. AUDIT-ONLY: recorded so the audit
+    /// log can label a dangling intent as crash-vs-handover, but it is NEVER an
+    /// input to the reconciliation resolution (kill-9 and lease-handover must
+    /// resolve identically — the convergence property).
+    pub lease_epoch: u64,
+    /// When the intent was opened (Unix ms). Staleness / audit.
+    pub started_at_ms: i64,
+}
+
+/// Domain-separated hash of a refresh token, stored in the intent so reconciliation
+/// can compare it to the record's current refresh token WITHOUT either being a
+/// reversible store of the secret. Hex SHA-256 over a domain label + the token.
+pub fn refresh_token_hash(refresh_token: &str) -> String {
+    let mut h = Sha256::new();
+    h.update(b"cortexkit-credentials/refresh-token-hash/v1");
+    h.update(refresh_token.as_bytes());
+    let digest = h.finalize();
+    use std::fmt::Write;
+    let mut s = String::with_capacity(64);
+    for b in digest {
+        let _ = write!(s, "{b:02x}");
+    }
+    s
 }
 
 /// A store operation failure. Distinct, typed, fail-closed — never a panic.
@@ -199,14 +255,41 @@ impl EncryptedStore {
         EncryptedStore { store, key, key_id }
     }
 
-    /// Apply the vault schema migrations to a freshly opened store. Idempotent.
+    /// Apply the vault schema migrations to a freshly opened store and set the
+    /// vault's durability level. Idempotent. Call once, right after opening, before
+    /// any credential write.
+    ///
+    /// Sets `PRAGMA synchronous=FULL` on the store's connection: the vault's SQLite
+    /// IS its own source of truth (a lost token-rotation commit is unrecoverable),
+    /// so it must fsync every commit. This is stronger than WAL's default
+    /// `synchronous=NORMAL` (which can lose the last transaction on power loss) and
+    /// is set vault-locally rather than in `cortexkit-store`, because the other
+    /// consumers hold rebuildable projections that are correct at NORMAL and should
+    /// not pay FULL's fsync-per-commit. `SqliteStore` is one connection behind a
+    /// mutex, so setting it once here covers every later `with_conn`/
+    /// `with_conn_fenced` call.
     pub fn migrate(store: &SqliteStore) -> Result<(), StoreError> {
-        store.migrate(SCHEMA_NAMESPACE, MIGRATIONS)
+        store.migrate(SCHEMA_NAMESPACE, MIGRATIONS)?;
+        store
+            .with_conn(|c| c.pragma_update(None, "synchronous", "FULL"))
+            .map_err(|e| StoreError::Backend(e.to_string()))
     }
 
     /// The fingerprint of the master key this store seals under.
     pub fn key_id(&self) -> KeyId {
         self.key_id
+    }
+
+    /// Run a closure against the raw underlying connection. Test-only: the
+    /// conformance tests set up lease-handover (a fence-epoch bump) and inspect raw
+    /// rows that the public API deliberately does not expose. Not part of the
+    /// production surface.
+    #[cfg(test)]
+    pub(crate) fn with_raw_conn<T>(
+        &self,
+        f: impl FnOnce(&rusqlite::Connection) -> rusqlite::Result<T>,
+    ) -> Result<T, StoreOpError> {
+        self.store.with_conn(f).map_err(StoreOpError::from)
     }
 
     /// Read non-secret metadata for an id WITHOUT decrypting (plaintext columns).
@@ -280,7 +363,7 @@ impl EncryptedStore {
         // transaction: an existing id leaves zero rows changed (atomic, no separate
         // existence query, no error-string matching). Zero changed => AlreadyExists.
         let changed = self.store.with_conn_fenced(|tx| {
-            tx.execute(
+            let n = tx.execute(
                 "INSERT INTO credentials \
                  (credential_id, record_version, key_id, state, envelope, updated_at_ms) \
                  VALUES (?1, ?2, ?3, 'active', ?4, ?5) \
@@ -292,7 +375,15 @@ impl EncryptedStore {
                     blob,
                     now
                 ],
-            )
+            )?;
+            // An admin write clears any dangling refresh intent for this id in the
+            // SAME transaction: a fresh credential must never inherit a stale intent
+            // from a prior id reuse (and on overwrite this is what stops a boot
+            // reconciliation from undoing a legitimate re-login).
+            if n > 0 {
+                clear_intent_tx(tx, credential_id)?;
+            }
+            Ok(n)
         })?;
         if changed == 0 {
             return Err(StoreOpError::AlreadyExists);
@@ -327,7 +418,7 @@ impl EncryptedStore {
         // version we read, so a concurrent writer that already bumped it leaves zero
         // rows changed (no error-string matching). Zero changed => CasMismatch.
         let changed = self.store.with_conn_fenced(|tx| {
-            tx.execute(
+            let n = tx.execute(
                 "UPDATE credentials \
                  SET record_version = ?2, key_id = ?3, state = 'active', envelope = ?4, \
                      updated_at_ms = ?5 \
@@ -340,7 +431,14 @@ impl EncryptedStore {
                     now,
                     current.record_version as i64
                 ],
-            )
+            )?;
+            // Clear any dangling intent in the same txn (see `create`): an admin
+            // overwrite with fresh valid tokens must clear the old intent, or boot
+            // reconciliation's hash-mismatch check would later undo this re-login.
+            if n > 0 {
+                clear_intent_tx(tx, credential_id)?;
+            }
+            Ok(n)
         })?;
         if changed == 0 {
             return Err(StoreOpError::CasMismatch);
@@ -406,19 +504,42 @@ impl EncryptedStore {
         }
     }
 
-    /// Mark a record `needs_reauth` (authoritative revoke / reported auth failure).
-    /// Written through the fenced path. A no-op (Ok) if the id is absent.
+    /// Mark a record `needs_reauth` (authoritative revoke / reported auth failure)
+    /// and clear any dangling refresh intent for it, atomically. Written through the
+    /// fenced path. A no-op (Ok) if the id is absent.
+    ///
+    /// Clears the intent because an authoritative revoke supersedes any in-flight
+    /// refresh: leaving a stale intent would let boot reconciliation reason about a
+    /// credential the operator has already invalidated.
     pub fn invalidate(&self, credential_id: &str) -> Result<(), StoreOpError> {
-        self.set_state(credential_id, RecordState::NeedsReauth)
+        self.set_state(credential_id, RecordState::NeedsReauth, true)
     }
 
     /// Quarantine a record (`corrupt`). Used by the read path on a decrypt/parse
-    /// failure; idempotent.
+    /// failure; idempotent. Does NOT clear a refresh intent — quarantine is an
+    /// internal integrity flip, not an admin write, and a corrupt record's intent
+    /// (if any) is for reconciliation to resolve, not for this path to discard.
     pub fn quarantine(&self, credential_id: &str) -> Result<(), StoreOpError> {
-        self.set_state(credential_id, RecordState::Corrupt)
+        self.set_state(credential_id, RecordState::Corrupt, false)
     }
 
-    fn set_state(&self, credential_id: &str, state: RecordState) -> Result<(), StoreOpError> {
+    /// Mark a record `needs_reauth` but RETAIN its refresh intent. Used by
+    /// reconciliation when a non-mutating validity check could not be run (transient
+    /// network): the record fails closed now, but the surviving intent lets a later
+    /// retry re-check and restore the credential without a forced re-login.
+    pub fn mark_needs_reauth_retaining_intent(
+        &self,
+        credential_id: &str,
+    ) -> Result<(), StoreOpError> {
+        self.set_state(credential_id, RecordState::NeedsReauth, false)
+    }
+
+    fn set_state(
+        &self,
+        credential_id: &str,
+        state: RecordState,
+        clear_intent: bool,
+    ) -> Result<(), StoreOpError> {
         let now = now_ms();
         self.store
             .with_conn_fenced(|tx| {
@@ -427,9 +548,162 @@ impl EncryptedStore {
                      WHERE credential_id = ?1",
                     rusqlite::params![credential_id, state.as_str(), now],
                 )?;
+                if clear_intent {
+                    clear_intent_tx(tx, credential_id)?;
+                }
                 Ok(())
             })
             .map_err(StoreOpError::from)
+    }
+
+    // ---- refresh intent log (crash-safe rotation) -----------------------
+
+    /// Durably open a refresh intent (txn1 of the refresh state machine): the
+    /// fsynced marker written BEFORE the provider's rotating endpoint is called.
+    ///
+    /// Goes through the fenced path so a superseded writer cannot open an intent,
+    /// and (with `synchronous=FULL`) the row is on disk before this returns —
+    /// guaranteeing a crash during the subsequent network call leaves a recoverable
+    /// intent. `record_version` is the version being refreshed from (the commit's
+    /// CAS guard); `old_refresh_hash` is [`refresh_token_hash`] of the current
+    /// refresh token. Replaces any existing intent for the id (single-flight means
+    /// there is at most one, but a re-open after a transient failure is idempotent).
+    pub fn open_intent(
+        &self,
+        credential_id: &str,
+        record_version: u64,
+        old_refresh_hash: &str,
+    ) -> Result<(), StoreOpError> {
+        let epoch = self.store.epoch();
+        let now = now_ms();
+        self.store
+            .with_conn_fenced(|tx| {
+                tx.execute(
+                    "INSERT INTO refresh_intent \
+                     (credential_id, record_version, old_refresh_hash, lease_epoch, started_at_ms) \
+                     VALUES (?1, ?2, ?3, ?4, ?5) \
+                     ON CONFLICT(credential_id) DO UPDATE SET \
+                       record_version = excluded.record_version, \
+                       old_refresh_hash = excluded.old_refresh_hash, \
+                       lease_epoch = excluded.lease_epoch, \
+                       started_at_ms = excluded.started_at_ms",
+                    rusqlite::params![
+                        credential_id,
+                        record_version as i64,
+                        old_refresh_hash,
+                        epoch as i64,
+                        now
+                    ],
+                )?;
+                Ok(())
+            })
+            .map_err(StoreOpError::from)
+    }
+
+    /// Commit a completed refresh (txn2): seal the new record at
+    /// `expected_version + 1`, write it, and clear the intent — in ONE fenced,
+    /// fsynced transaction, so the new tokens become visible AND the intent clears
+    /// atomically, or neither does.
+    ///
+    /// Fails [`StoreOpError::CasMismatch`] if the stored version is no longer
+    /// `expected_version` (a concurrent write moved it), and
+    /// [`StoreOpError::Fenced`] if a newer instance took the lease mid-commit (the
+    /// lease-handover race) — in which case NOTHING is applied and the caller must
+    /// discard the staged tokens and not retry (reconciliation on the new owner
+    /// resolves the still-dangling intent). The new `record_version` is returned.
+    pub fn commit_refresh(
+        &self,
+        credential_id: &str,
+        expected_version: u64,
+        new_record: &VaultRecord,
+    ) -> Result<u64, StoreOpError> {
+        let next_version = expected_version.saturating_add(1);
+        let mut new_record = new_record.clone();
+        new_record.record_version = next_version;
+        let blob = self.seal_record(credential_id, &new_record)?;
+        let key_id_hex = self.key_id.to_hex();
+        let now = now_ms();
+
+        let changed = self.store.with_conn_fenced(|tx| {
+            let n = tx.execute(
+                "UPDATE credentials \
+                 SET record_version = ?2, key_id = ?3, state = 'active', envelope = ?4, \
+                     updated_at_ms = ?5 \
+                 WHERE credential_id = ?1 AND record_version = ?6",
+                rusqlite::params![
+                    credential_id,
+                    next_version as i64,
+                    key_id_hex,
+                    blob,
+                    now,
+                    expected_version as i64
+                ],
+            )?;
+            // The new tokens and the intent-clear commit together or not at all.
+            if n > 0 {
+                clear_intent_tx(tx, credential_id)?;
+            }
+            Ok(n)
+        })?;
+        if changed == 0 {
+            return Err(StoreOpError::CasMismatch);
+        }
+        Ok(next_version)
+    }
+
+    /// Read the dangling intent for one credential, if any (reconciliation + the
+    /// boot gate's never-serve-dangling check).
+    pub fn read_intent(&self, credential_id: &str) -> Result<Option<RefreshIntent>, StoreOpError> {
+        self.store
+            .with_conn(|c| {
+                c.query_row(
+                    "SELECT credential_id, record_version, old_refresh_hash, lease_epoch, \
+                            started_at_ms FROM refresh_intent WHERE credential_id = ?1",
+                    rusqlite::params![credential_id],
+                    row_to_intent,
+                )
+                .map(Some)
+                .or_else(|e| match e {
+                    rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                    other => Err(other),
+                })
+            })
+            .map_err(StoreOpError::from)
+    }
+
+    /// List every dangling intent (the boot reconciliation scan).
+    pub fn list_intents(&self) -> Result<Vec<RefreshIntent>, StoreOpError> {
+        self.store
+            .with_conn(|c| {
+                let mut stmt = c.prepare(
+                    "SELECT credential_id, record_version, old_refresh_hash, lease_epoch, \
+                            started_at_ms FROM refresh_intent ORDER BY credential_id",
+                )?;
+                let rows = stmt.query_map([], row_to_intent)?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .map_err(StoreOpError::from)
+    }
+
+    /// Clear a dangling intent (reconciliation resolved it). Fenced.
+    pub fn clear_intent(&self, credential_id: &str) -> Result<(), StoreOpError> {
+        self.store
+            .with_conn_fenced(|tx| clear_intent_tx(tx, credential_id).map(|_| ()))
+            .map_err(StoreOpError::from)
+    }
+
+    /// The current refresh token hash stored for a credential, read by decrypting
+    /// the record. Used by reconciliation to compare against an intent's
+    /// `old_refresh_hash`. `None` for a non-OAuth or absent record.
+    pub fn stored_refresh_hash(&self, credential_id: &str) -> Result<Option<String>, StoreOpError> {
+        match self.get(credential_id) {
+            Ok(record) => Ok(record
+                .oauth
+                .as_ref()
+                .map(|o| refresh_token_hash(&o.refresh_token))),
+            Err(StoreOpError::NotFound) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     /// Seal a record into a cipher envelope bound to its id + version.
@@ -455,6 +729,27 @@ fn now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+/// Delete a credential's refresh intent within an open transaction. Returns the
+/// number of rows removed (0 if there was no intent). Used both standalone and as
+/// the intent-clearing step folded into admin writes and the refresh commit.
+fn clear_intent_tx(tx: &rusqlite::Transaction, credential_id: &str) -> rusqlite::Result<usize> {
+    tx.execute(
+        "DELETE FROM refresh_intent WHERE credential_id = ?1",
+        rusqlite::params![credential_id],
+    )
+}
+
+/// Build a [`RefreshIntent`] from a row of the standard intent column projection.
+fn row_to_intent(row: &rusqlite::Row<'_>) -> rusqlite::Result<RefreshIntent> {
+    Ok(RefreshIntent {
+        credential_id: row.get(0)?,
+        record_version: row.get::<_, i64>(1)? as u64,
+        old_refresh_hash: row.get(2)?,
+        lease_epoch: row.get::<_, i64>(3)? as u64,
+        started_at_ms: row.get(4)?,
+    })
 }
 
 #[cfg(test)]

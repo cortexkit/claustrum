@@ -18,19 +18,30 @@
 // refresh adapters, the crash-safe refresh state machine, and the encrypted
 // store.
 
+pub mod engine;
+#[cfg(test)]
+mod engine_tests;
 pub mod envelope;
 pub mod key;
 pub mod oauth;
 pub mod record;
+pub mod refresh_adapters;
 pub mod resolver;
 pub mod store;
 
+pub use engine::{EngineError, ReauthReason, Reconciliation, RefreshEngine};
 pub use envelope::{open, seal, EnvelopeError, RecordBinding};
 pub use key::{KeyId, MasterKey};
 pub use oauth::OAuthCredential;
 pub use record::{CredentialKind, VaultRecord, RECORD_SCHEMA_VERSION};
+pub use refresh_adapters::{
+    HttpResponse, HttpTransport, RefreshAdapter, RefreshError, RefreshedTokens, ValidityOutcome,
+};
 pub use resolver::{
     bootstrap, resolve, KeySource, KeychainCli, MasterKeyError, MasterKeyStore, OperatorPathStore,
     ResolverConfig,
 };
-pub use store::{payload_hash, EncryptedStore, RecordMeta, RecordState, StoreOpError};
+pub use store::{
+    payload_hash, refresh_token_hash, EncryptedStore, RecordMeta, RecordState, RefreshIntent,
+    StoreOpError,
+};

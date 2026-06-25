@@ -39,6 +39,7 @@ cortexkit-store-types = { path = "../commons/crates/cortexkit-store-types" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+proptest = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "process"] }
 async-trait = "0.1"
 
@@ -47,11 +48,15 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 url = "2"
 
-# At-rest encryption: AES-256-GCM AEAD (32-byte master key matches the contract's
-# CSPRNG master key), CSPRNG for keys/nonces, zeroize to scrub key material.
-# The peer confirms the exact AEAD with review before the cipher envelope lands.
-aes-gcm = "0.10"
+# At-rest encryption: XChaCha20-Poly1305 AEAD (256-bit key matches the contract's
+# 32-byte CSPRNG master key). The extended 192-bit random nonce is collision-safe
+# at any realistic write volume, so the envelope carries no "writes-per-key"
+# ceiling to reason about (the structural reason this won over AES-256-GCM, whose
+# 96-bit-nonce birthday bound — though safe at our volume — is a latent invariant a
+# future high-volume reuse of this primitive could approach). CSPRNG for keys and
+# nonces; zeroize scrubs the master key material.
+chacha20poly1305 = "0.10"
 getrandom = "0.2"
-zeroize = "1"
+zeroize = { version = "1", features = ["zeroize_derive"] }
 sha2 = "0.10"
 hmac = "0.12"

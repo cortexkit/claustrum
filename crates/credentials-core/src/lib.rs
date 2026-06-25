@@ -12,6 +12,16 @@
 //! (kill -9 mid-refresh, lease-handover mid-write, fail-closed matrix, envelope
 //! fuzz) that is a ship gate, not a nice-to-have.
 
-// Scaffold baseline: the modules below are the contract's decomposition. Each is
-// filled in over the charter's build steps; this keeps the crate compiling from
-// the first commit (the green-build-before-turn-end rule).
+// Implemented so far: the credential vault's at-rest encryption (the `envelope`
+// module) and master-key custody (`key`, `resolver`). Not yet present in this
+// crate: the typed VaultRecord, the canonical OAuthCredential, the bounded
+// refresh adapters, the crash-safe refresh state machine, and the encrypted
+// store.
+
+pub mod envelope;
+pub mod key;
+pub mod resolver;
+
+pub use envelope::{open, seal, EnvelopeError, RecordBinding};
+pub use key::{KeyId, MasterKey};
+pub use resolver::{bootstrap, resolve, KeySource, MasterKeyError, ResolverConfig};

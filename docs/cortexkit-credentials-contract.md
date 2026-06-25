@@ -301,7 +301,16 @@ thin-core *exception for the credential module only*.
 
 - **Value-level encryption** (each `VaultRecord` encrypted as one unit), so
   `cortexkit-store`'s lease/migration mechanics are unchanged. Cipher envelope
-  carries `cipher_version`, `key_id`, and a per-record nonce.
+  carries `cipher_version`, `key_id`, and a per-record nonce. The AEAD is
+  **XChaCha20-Poly1305** (256-bit key = the 32-byte master key; 192-bit random
+  per-record nonce). XChaCha's extended random nonce is collision-safe at any
+  realistic write volume, so the envelope carries no writes-per-key ceiling to
+  reason about — chosen over AES-256-GCM (whose 96-bit-nonce birthday bound, while
+  safe at this volume, is a latent invariant a future high-volume reuse of this
+  primitive could approach). The envelope's additional authenticated data binds
+  `credential_id` + `record_version` (anti-relocation + anti-rollback), and a
+  single defensive decoder bounds-checks every field so malformed ciphertext
+  returns a typed error and never panics (the fuzz invariant of the §13 gate).
 - **Master key resolution**: desktop = OS keychain (macOS Keychain via `security`;
   specify service/account string + locked-keychain behavior = fail-closed
   `vault_locked`). Headless = an operator-supplied key path **OUTSIDE the data tree**

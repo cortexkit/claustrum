@@ -23,6 +23,7 @@ pub mod engine;
 #[cfg(test)]
 mod engine_tests;
 pub mod envelope;
+pub mod http;
 pub mod key;
 pub mod oauth;
 pub mod record;
@@ -33,6 +34,7 @@ pub mod store;
 pub use audit::{AlarmReason, AuditEntry, AuditOp, AuditRecord};
 pub use engine::{EngineError, ReauthReason, Reconciliation, RefreshEngine};
 pub use envelope::{open, seal, EnvelopeError, RecordBinding};
+pub use http::ReqwestTransport;
 pub use key::{KeyId, MasterKey};
 pub use oauth::OAuthCredential;
 pub use record::{CredentialKind, VaultRecord, RECORD_SCHEMA_VERSION};

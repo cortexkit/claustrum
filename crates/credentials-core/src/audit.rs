@@ -50,6 +50,9 @@ pub enum AuditOp {
     MintHandle,
     /// A capability handle (or all for a credential) was revoked.
     RevokeHandle,
+    /// A read-surface fetch anomaly was detected (an enumeration/rate alarm). Not a
+    /// mutation, but recorded durably so the anomaly survives the connection.
+    FetchAnomaly,
 }
 
 impl AuditOp {
@@ -65,6 +68,7 @@ impl AuditOp {
             AuditOp::ReportAuthFailure => "report_auth_failure",
             AuditOp::MintHandle => "mint_handle",
             AuditOp::RevokeHandle => "revoke_handle",
+            AuditOp::FetchAnomaly => "fetch_anomaly",
         }
     }
 }

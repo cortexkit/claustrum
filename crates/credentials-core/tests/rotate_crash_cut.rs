@@ -20,7 +20,7 @@
 #![cfg(all(unix, feature = "rotate-test-seam"))]
 
 use std::os::unix::process::ExitStatusExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use cortexkit_store::{open_sqlite, Isolation, StorageBackend, StorageDescriptor};
@@ -78,7 +78,7 @@ fn kill_at_cut(cut: &str) -> PathBuf {
 /// Re-open the vault crash-safely from a killed-at-cut rig and assert it never
 /// bricks: resolve finds the matching slot, the credential is readable, the chain
 /// verifies. Returns the resolved key's fingerprint (hex) for cross-cut assertions.
-fn assert_reopens_clean(root: &PathBuf) -> String {
+fn assert_reopens_clean(root: &Path) -> String {
     let data_dir = root.join("data");
     let key_dir = root.join("secrets");
     let db_path = data_dir.join("store.db");
@@ -129,7 +129,7 @@ fn assert_reopens_clean(root: &PathBuf) -> String {
 
 /// A genuinely wrong key (matching neither slot) must still fail closed at the
 /// crash-safe resolve — "never bricks" must not have become "opens under anything".
-fn assert_wrong_key_fails_closed(root: &PathBuf) {
+fn assert_wrong_key_fails_closed(root: &Path) {
     let data_dir = root.join("data");
     let key_dir = root.join("secrets");
     let db_path = data_dir.join("store.db");

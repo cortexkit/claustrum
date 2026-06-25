@@ -24,7 +24,7 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-use credentials_core::audit::{AlarmReason, AuditOp, AuditRecord};
+use credentials_core::audit::{AlarmReason, AuditCtx, AuditOp, AuditRecord};
 use credentials_core::engine::{EngineError, RefreshEngine};
 use credentials_core::store::StoreOpError;
 
@@ -178,20 +178,21 @@ impl ReadSurface {
         self.check_limiter(connection_id, &credential_id).await;
 
         // Only an authentication failure (401/403) invalidates; a 5xx/429 is a
-        // provider hiccup, not a dead credential.
+        // provider hiccup, not a dead credential. The invalidate audits the
+        // revocation feedback in the chain atomically (actor = the connection).
         if params.provider_status == 401 || params.provider_status == 403 {
+            let actor = format!("conn-{connection_id}");
             self.engine
                 .store()
-                .invalidate(&credential_id)
+                .invalidate_audited(
+                    &credential_id,
+                    AuditCtx {
+                        op: AuditOp::ReportAuthFailure,
+                        actor: &actor,
+                        alarm: None,
+                    },
+                )
                 .map_err(|e| map_store_error(&e))?;
-            // Audit the revocation feedback in the chain (actor = the connection).
-            let _ = self.engine.store().append_audit(&AuditRecord {
-                op: AuditOp::ReportAuthFailure,
-                credential_id: Some(credential_id),
-                payload_hash: None,
-                actor: format!("conn-{connection_id}"),
-                alarm: None,
-            });
         }
         Ok(())
     }

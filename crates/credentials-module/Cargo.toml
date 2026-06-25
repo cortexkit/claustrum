@@ -9,6 +9,11 @@ description = "The cortexkit-credentials subc module: registers a reserved Manag
 name = "credentials-module"
 path = "src/main.rs"
 
+# The offline admin CLI — the ONLY write surface, run while the daemon is stopped.
+[[bin]]
+name = "credentials-cli"
+path = "src/bin/credentials_cli.rs"
+
 [dependencies]
 credentials-core = { path = "../credentials-core" }
 subc-protocol = { workspace = true }

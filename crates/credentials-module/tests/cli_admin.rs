@@ -1,0 +1,163 @@
+//! End-to-end tests of the offline admin CLI binary.
+//!
+//! Drives the real `credentials-cli` process against a temp vault dir with an
+//! operator key path (so no keychain is touched), exercising the structural
+//! master-key proof and the audit chain end-to-end: bootstrap a key, put a
+//! credential, mint a handle, list + verify the audit chain. Also proves the
+//! single-writer lease makes admin writes mutually exclusive with a held lease.
+
+use std::path::PathBuf;
+use std::process::Command;
+
+use cortexkit_store::{open_sqlite, Isolation, StorageBackend, StorageDescriptor};
+
+fn cli() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_credentials-cli"))
+}
+
+fn tmp_root(tag: &str) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let d = std::env::temp_dir().join(format!(
+        "ck-cred-cli-{}-{}-{}",
+        std::process::id(),
+        tag,
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&d).unwrap();
+    d
+}
+
+#[test]
+fn bootstrap_put_mint_audit_end_to_end() {
+    let root = tmp_root("e2e");
+    let data_dir = root.join("data");
+    let key_dir = root.join("secrets");
+    std::fs::create_dir_all(&key_dir).unwrap();
+    let key_path = key_dir.join("master.key");
+    std::fs::create_dir_all(&data_dir).unwrap();
+
+    let global = |c: &mut Command| {
+        c.arg("--data-dir")
+            .arg(&data_dir)
+            .arg("--key-path")
+            .arg(&key_path);
+    };
+
+    // bootstrap a master key.
+    let mut c = cli();
+    c.arg("bootstrap");
+    global(&mut c);
+    let out = c.output().expect("run bootstrap");
+    assert!(
+        out.status.success(),
+        "bootstrap: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // put an api_key credential.
+    let mut c = cli();
+    c.arg("put")
+        .arg("--id")
+        .arg("operator:db")
+        .arg("--payload")
+        .arg("sk-secret");
+    global(&mut c);
+    let out = c.output().expect("run put");
+    assert!(
+        out.status.success(),
+        "put: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // mint a handle for it: stdout is the raw handle.
+    let mut c = cli();
+    c.arg("mint-handle").arg("--id").arg("operator:db");
+    global(&mut c);
+    let out = c.output().expect("run mint-handle");
+    assert!(
+        out.status.success(),
+        "mint: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let handle = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    assert!(handle.starts_with("ckh_"), "raw handle on stdout: {handle}");
+
+    // verify-audit: the chain (put + mint_handle entries) must be intact.
+    let mut c = cli();
+    c.arg("verify-audit");
+    global(&mut c);
+    let out = c.output().expect("run verify-audit");
+    assert!(
+        out.status.success(),
+        "verify-audit: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).contains("intact"));
+
+    // audit list shows the operations with the offline-cli actor.
+    let mut c = cli();
+    c.arg("audit");
+    global(&mut c);
+    let out = c.output().expect("run audit");
+    let listing = String::from_utf8_lossy(&out.stdout);
+    assert!(listing.contains("put"), "audit lists the put: {listing}");
+    assert!(
+        listing.contains("mint_handle"),
+        "audit lists the mint: {listing}"
+    );
+    assert!(listing.contains("offline-cli"), "actor recorded: {listing}");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn admin_write_refused_while_lease_held() {
+    // The structural "while stopped" proof: hold the single-writer lease (as the
+    // daemon would) and confirm an admin CLI write is refused with the
+    // daemon-running exit code (3), not applied.
+    let root = tmp_root("lease");
+    let data_dir = root.join("data");
+    let key_dir = root.join("secrets");
+    std::fs::create_dir_all(&key_dir).unwrap();
+    let key_path = key_dir.join("master.key");
+    std::fs::create_dir_all(&data_dir).unwrap();
+
+    let global = |c: &mut Command| {
+        c.arg("--data-dir")
+            .arg(&data_dir)
+            .arg("--key-path")
+            .arg(&key_path);
+    };
+
+    // bootstrap first (no lease held yet).
+    let mut c = cli();
+    c.arg("bootstrap");
+    global(&mut c);
+    assert!(c.output().unwrap().status.success());
+
+    // Now hold the lease (simulating the running daemon).
+    let descriptor = StorageDescriptor {
+        module_id: "cortexkit-credentials".into(),
+        storage_namespace: "vault".into(),
+        isolation: Isolation::Module,
+        backend: StorageBackend::Sqlite {
+            path: data_dir.join("store.db").to_string_lossy().into_owned(),
+        },
+    };
+    let _held = open_sqlite(&descriptor).expect("hold the lease");
+
+    // An admin put must now be refused with exit code 3 (daemon running).
+    let mut c = cli();
+    c.arg("put").arg("--id").arg("x").arg("--payload").arg("y");
+    global(&mut c);
+    let out = c.output().expect("run put while leased");
+    assert!(
+        !out.status.success(),
+        "put must fail while the lease is held"
+    );
+    assert_eq!(out.status.code(), Some(3), "daemon-running exit code");
+
+    drop(_held);
+    let _ = std::fs::remove_dir_all(&root);
+}

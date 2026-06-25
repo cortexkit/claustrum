@@ -33,7 +33,7 @@
 use cortexkit_store::{Migration, SqliteStore, StoreError};
 use sha2::{Digest, Sha256};
 
-use crate::audit::{self, AlarmReason, AuditEntry, AuditRecord};
+use crate::audit::{self, AlarmReason, AuditCtx, AuditEntry, AuditOp, AuditRecord};
 use crate::envelope::{self, EnvelopeError, RecordBinding};
 use crate::key::{KeyId, MasterKey};
 use crate::record::VaultRecord;
@@ -400,15 +400,25 @@ impl EncryptedStore {
             .map_err(StoreOpError::from)
     }
 
-    /// Create a record (CREATE-ONLY): fails [`StoreOpError::AlreadyExists`] if the
-    /// id is already present. The record is sealed at `record_version = 1` and the
-    /// row is written through the epoch-fenced path.
-    pub fn create(&self, credential_id: &str, record: &VaultRecord) -> Result<(), StoreOpError> {
+    /// Create a record (CREATE-ONLY) with an explicit audit context: fails
+    /// [`StoreOpError::AlreadyExists`] if the id is already present. The record is
+    /// sealed at `record_version = 1`, the row is written through the epoch-fenced
+    /// path, any dangling refresh intent is cleared, AND an audit entry is appended
+    /// — all in ONE transaction, so the mutation and its audit record commit
+    /// atomically (the audit chain accounts for the new version, tamper-evidently).
+    pub fn create_audited(
+        &self,
+        credential_id: &str,
+        record: &VaultRecord,
+        ctx: AuditCtx<'_>,
+    ) -> Result<(), StoreOpError> {
         let mut record = record.clone();
         record.record_version = 1;
         let blob = self.seal_record(credential_id, &record)?;
         let key_id_hex = self.key_id.to_hex();
         let now = now_ms();
+        let audit_key = self.audit_key;
+        let payload_hash_hex = hex32(&payload_hash(&record.payload));
 
         // Create-only via INSERT ... ON CONFLICT DO NOTHING inside the fenced
         // transaction: an existing id leaves zero rows changed (atomic, no separate
@@ -433,6 +443,17 @@ impl EncryptedStore {
             // reconciliation from undoing a legitimate re-login).
             if n > 0 {
                 clear_intent_tx(tx, credential_id)?;
+                append_audit_tx(
+                    tx,
+                    &audit_key,
+                    &AuditRecord {
+                        op: ctx.op,
+                        credential_id: Some(credential_id.to_string()),
+                        payload_hash: Some(payload_hash_hex),
+                        actor: ctx.actor.to_string(),
+                        alarm: ctx.alarm,
+                    },
+                )?;
             }
             Ok(n)
         })?;
@@ -442,15 +463,26 @@ impl EncryptedStore {
         Ok(())
     }
 
+    /// Create a record (CREATE-ONLY), auditing it as a vault-owned `Put`. Convenience
+    /// wrapper over [`create_audited`] for callers (and tests) that do not need to
+    /// specify the op/actor; production admin writes use `create_audited` with an
+    /// admin context.
+    pub fn create(&self, credential_id: &str, record: &VaultRecord) -> Result<(), StoreOpError> {
+        self.create_audited(credential_id, record, AuditCtx::vault(AuditOp::Put))
+    }
+
     /// Overwrite an existing record under a compare-and-set on its current payload
-    /// hash. Fails [`StoreOpError::NotFound`] if absent, [`StoreOpError::CasMismatch`]
-    /// if `expected_payload_hash` does not match the current record's payload. On
-    /// success the new record is sealed at `current_version + 1`.
-    pub fn overwrite_cas(
+    /// hash, with an explicit audit context. Fails [`StoreOpError::NotFound`] if
+    /// absent, [`StoreOpError::CasMismatch`] if `expected_payload_hash` does not
+    /// match. On success the new record is sealed at `current_version + 1`, the
+    /// dangling intent is cleared, and the audit entry is appended — all in ONE
+    /// transaction.
+    pub fn overwrite_cas_audited(
         &self,
         credential_id: &str,
         record: &VaultRecord,
         expected_payload_hash: &[u8; 32],
+        ctx: AuditCtx<'_>,
     ) -> Result<(), StoreOpError> {
         // Read + decrypt the current record to verify the CAS precondition. A
         // decrypt failure here quarantines the id (handled by `get`).
@@ -464,6 +496,8 @@ impl EncryptedStore {
         let blob = self.seal_record(credential_id, &record)?;
         let key_id_hex = self.key_id.to_hex();
         let now = now_ms();
+        let audit_key = self.audit_key;
+        let payload_hash_hex = hex32(&payload_hash(&record.payload));
 
         // The version in the WHERE makes the UPDATE itself a compare-and-set on the
         // version we read, so a concurrent writer that already bumped it leaves zero
@@ -488,6 +522,17 @@ impl EncryptedStore {
             // reconciliation's hash-mismatch check would later undo this re-login.
             if n > 0 {
                 clear_intent_tx(tx, credential_id)?;
+                append_audit_tx(
+                    tx,
+                    &audit_key,
+                    &AuditRecord {
+                        op: ctx.op,
+                        credential_id: Some(credential_id.to_string()),
+                        payload_hash: Some(payload_hash_hex),
+                        actor: ctx.actor.to_string(),
+                        alarm: ctx.alarm,
+                    },
+                )?;
             }
             Ok(n)
         })?;
@@ -495,6 +540,22 @@ impl EncryptedStore {
             return Err(StoreOpError::CasMismatch);
         }
         Ok(())
+    }
+
+    /// Overwrite under CAS, auditing as a vault-owned `Overwrite`. Convenience
+    /// wrapper for callers/tests that do not specify an audit context.
+    pub fn overwrite_cas(
+        &self,
+        credential_id: &str,
+        record: &VaultRecord,
+        expected_payload_hash: &[u8; 32],
+    ) -> Result<(), StoreOpError> {
+        self.overwrite_cas_audited(
+            credential_id,
+            record,
+            expected_payload_hash,
+            AuditCtx::vault(AuditOp::Overwrite),
+        )
     }
 
     /// Read and decrypt a record. Fails closed: a quarantined (`corrupt`) row is
@@ -556,22 +617,33 @@ impl EncryptedStore {
     }
 
     /// Mark a record `needs_reauth` (authoritative revoke / reported auth failure)
-    /// and clear any dangling refresh intent for it, atomically. Written through the
-    /// fenced path. A no-op (Ok) if the id is absent.
+    /// and clear any dangling refresh intent for it, with an explicit audit context —
+    /// the state flip, the intent clear, and the audit entry all commit atomically.
+    /// A no-op (Ok) if the id is absent.
     ///
     /// Clears the intent because an authoritative revoke supersedes any in-flight
     /// refresh: leaving a stale intent would let boot reconciliation reason about a
     /// credential the operator has already invalidated.
+    pub fn invalidate_audited(
+        &self,
+        credential_id: &str,
+        ctx: AuditCtx<'_>,
+    ) -> Result<(), StoreOpError> {
+        self.set_state(credential_id, RecordState::NeedsReauth, true, Some(ctx))
+    }
+
+    /// Invalidate, auditing as a vault-owned `Invalidate`. Convenience wrapper for
+    /// callers/tests that do not specify an audit context.
     pub fn invalidate(&self, credential_id: &str) -> Result<(), StoreOpError> {
-        self.set_state(credential_id, RecordState::NeedsReauth, true)
+        self.invalidate_audited(credential_id, AuditCtx::vault(AuditOp::Invalidate))
     }
 
     /// Quarantine a record (`corrupt`). Used by the read path on a decrypt/parse
-    /// failure; idempotent. Does NOT clear a refresh intent — quarantine is an
-    /// internal integrity flip, not an admin write, and a corrupt record's intent
-    /// (if any) is for reconciliation to resolve, not for this path to discard.
+    /// failure; idempotent. Does NOT clear a refresh intent or audit — quarantine is
+    /// an internal integrity flip, not a recorded mutation, and a corrupt record's
+    /// intent (if any) is for reconciliation to resolve, not for this path to discard.
     pub fn quarantine(&self, credential_id: &str) -> Result<(), StoreOpError> {
-        self.set_state(credential_id, RecordState::Corrupt, false)
+        self.set_state(credential_id, RecordState::Corrupt, false, None)
     }
 
     /// Mark a record `needs_reauth` but RETAIN its refresh intent. Used by
@@ -582,7 +654,7 @@ impl EncryptedStore {
         &self,
         credential_id: &str,
     ) -> Result<(), StoreOpError> {
-        self.set_state(credential_id, RecordState::NeedsReauth, false)
+        self.set_state(credential_id, RecordState::NeedsReauth, false, None)
     }
 
     fn set_state(
@@ -590,17 +662,36 @@ impl EncryptedStore {
         credential_id: &str,
         state: RecordState,
         clear_intent: bool,
+        ctx: Option<AuditCtx<'_>>,
     ) -> Result<(), StoreOpError> {
         let now = now_ms();
+        let audit_key = self.audit_key;
         self.store
             .with_conn_fenced(|tx| {
-                tx.execute(
+                let n = tx.execute(
                     "UPDATE credentials SET state = ?2, updated_at_ms = ?3 \
                      WHERE credential_id = ?1",
                     rusqlite::params![credential_id, state.as_str(), now],
                 )?;
                 if clear_intent {
                     clear_intent_tx(tx, credential_id)?;
+                }
+                // Audit the state change only when it actually hit a row and a
+                // context was supplied (quarantine/retain are internal, unaudited).
+                if n > 0 {
+                    if let Some(ctx) = ctx {
+                        append_audit_tx(
+                            tx,
+                            &audit_key,
+                            &AuditRecord {
+                                op: ctx.op,
+                                credential_id: Some(credential_id.to_string()),
+                                payload_hash: None,
+                                actor: ctx.actor.to_string(),
+                                alarm: ctx.alarm,
+                            },
+                        )?;
+                    }
                 }
                 Ok(())
             })
@@ -674,6 +765,8 @@ impl EncryptedStore {
         let blob = self.seal_record(credential_id, &new_record)?;
         let key_id_hex = self.key_id.to_hex();
         let now = now_ms();
+        let audit_key = self.audit_key;
+        let payload_hash_hex = hex32(&payload_hash(&new_record.payload));
 
         let changed = self.store.with_conn_fenced(|tx| {
             let n = tx.execute(
@@ -690,9 +783,22 @@ impl EncryptedStore {
                     expected_version as i64
                 ],
             )?;
-            // The new tokens and the intent-clear commit together or not at all.
+            // The new tokens, the intent-clear, and the audit entry commit together
+            // or not at all — so the refresh's version bump is accounted for in the
+            // chain (a vault-owned RefreshCommit).
             if n > 0 {
                 clear_intent_tx(tx, credential_id)?;
+                append_audit_tx(
+                    tx,
+                    &audit_key,
+                    &AuditRecord {
+                        op: AuditOp::RefreshCommit,
+                        credential_id: Some(credential_id.to_string()),
+                        payload_hash: Some(payload_hash_hex),
+                        actor: "vault".to_string(),
+                        alarm: None,
+                    },
+                )?;
             }
             Ok(n)
         })?;
@@ -907,6 +1013,16 @@ fn clear_intent_tx(tx: &rusqlite::Transaction, credential_id: &str) -> rusqlite:
         "DELETE FROM refresh_intent WHERE credential_id = ?1",
         rusqlite::params![credential_id],
     )
+}
+
+/// Lowercase-hex render of a 32-byte hash (the payload hash, for the audit entry).
+fn hex32(bytes: &[u8; 32]) -> String {
+    use std::fmt::Write;
+    let mut s = String::with_capacity(64);
+    for b in bytes {
+        let _ = write!(s, "{b:02x}");
+    }
+    s
 }
 
 /// Hex SHA-256 of a raw capability handle — the only form of a handle the store

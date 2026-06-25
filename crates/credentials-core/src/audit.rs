@@ -95,6 +95,44 @@ impl AlarmReason {
     }
 }
 
+/// Who is performing a mutation, under what op, and whether it should alarm —
+/// threaded into each store mutation so the audit entry it appends (atomically, in
+/// the mutation's own transaction) records all three. The credential id and payload
+/// hash come from the mutation's own data.
+#[derive(Debug, Clone, Copy)]
+pub struct AuditCtx<'a> {
+    /// The op recorded for this mutation. Distinguishes e.g. a `put` from an
+    /// `import` even though both go through the same create path.
+    pub op: AuditOp,
+    /// The actor: a connection id (`"conn-N"`) for a daemon read-surface action,
+    /// `"offline-cli"` for an admin CLI write, or `"vault"` for a vault-owned action
+    /// (refresh, reconciliation).
+    pub actor: &'a str,
+    /// An alarm reason when this mutation should be flagged (every admin write is
+    /// flagged `AdminWrite`; a blind overwrite is `OverwriteWithoutCas`).
+    pub alarm: Option<AlarmReason>,
+}
+
+impl AuditCtx<'_> {
+    /// A vault-owned action (refresh commit, reconciliation): no alarm.
+    pub fn vault(op: AuditOp) -> AuditCtx<'static> {
+        AuditCtx {
+            op,
+            actor: "vault",
+            alarm: None,
+        }
+    }
+
+    /// An admin CLI write: always alarmed so admin activity is loud.
+    pub fn admin(op: AuditOp) -> AuditCtx<'static> {
+        AuditCtx {
+            op,
+            actor: "offline-cli",
+            alarm: Some(AlarmReason::AdminWrite),
+        }
+    }
+}
+
 /// The data of one audit entry, BEFORE it is sequenced and chained. The store
 /// assigns `seq`/`prev_mac` and computes `entry_mac` at append time.
 #[derive(Debug, Clone)]

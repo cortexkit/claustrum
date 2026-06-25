@@ -52,7 +52,77 @@ impl OAuthCredential {
             None => false,
         }
     }
+
+    /// Parse a source format's raw JSON into the canonical credential. This is the
+    /// import boundary: per-source field knowledge lives HERE, never in the refresh
+    /// path. v1 sources share the `auth.json` shape `{ refresh, access, expires }`
+    /// (epoch-ms expiry) that the opencode / pi / antigravity logins write; the
+    /// `token_url` / `client_id` an adapter needs are NOT in that file (the adapter
+    /// carries the provider defaults), so they are left empty here and the adapter
+    /// fills them. Unknown sources are rejected rather than guessed.
+    pub fn import(source: &str, raw_json: &[u8]) -> Result<Self, ImportError> {
+        match source {
+            "opencode" | "pi" | "antigravity" => Self::from_auth_json(raw_json),
+            other => Err(ImportError::UnknownSource(other.to_string())),
+        }
+    }
+
+    /// Parse the shared `auth.json` per-provider entry: `{ "refresh": ..., "access":
+    /// ..., "expires": <epoch_ms> }`. `expires` is optional.
+    fn from_auth_json(raw_json: &[u8]) -> Result<Self, ImportError> {
+        #[derive(Deserialize)]
+        struct AuthEntry {
+            #[serde(default)]
+            refresh: Option<String>,
+            #[serde(default)]
+            access: Option<String>,
+            #[serde(default)]
+            expires: Option<i64>,
+        }
+        let entry: AuthEntry =
+            serde_json::from_slice(raw_json).map_err(|e| ImportError::Malformed(e.to_string()))?;
+        let refresh_token = entry
+            .refresh
+            .filter(|s| !s.is_empty())
+            .ok_or(ImportError::MissingField("refresh"))?;
+        let access_token = entry.access.unwrap_or_default();
+        Ok(OAuthCredential {
+            access_token,
+            refresh_token,
+            expires_at_ms: entry.expires,
+            // The adapter supplies the provider's token URL / client id; the import
+            // file does not carry them.
+            token_url: String::new(),
+            client_id: None,
+            scopes: Vec::new(),
+        })
+    }
 }
+
+/// A credential-import failure.
+#[derive(Debug)]
+pub enum ImportError {
+    /// The source name is not one of the supported importers.
+    UnknownSource(String),
+    /// The source JSON did not decode.
+    Malformed(String),
+    /// A required field (a refresh token) was absent.
+    MissingField(&'static str),
+}
+
+impl std::fmt::Display for ImportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ImportError::UnknownSource(s) => write!(f, "unknown import source '{s}'"),
+            ImportError::Malformed(m) => write!(f, "malformed import json: {m}"),
+            ImportError::MissingField(field) => {
+                write!(f, "import missing required field '{field}'")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ImportError {}
 
 impl std::fmt::Debug for OAuthCredential {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -102,6 +172,34 @@ mod tests {
         );
         // Non-secret metadata is fine to show.
         assert!(rendered.contains("example.test"));
+    }
+
+    #[test]
+    fn imports_auth_json_shape() {
+        let raw = br#"{"refresh":"r-tok","access":"a-tok","expires":1700000000000}"#;
+        let c = OAuthCredential::import("opencode", raw).expect("import");
+        assert_eq!(c.refresh_token, "r-tok");
+        assert_eq!(c.access_token, "a-tok");
+        assert_eq!(c.expires_at_ms, Some(1_700_000_000_000));
+        // The adapter fills token_url/client_id; the import file does not carry them.
+        assert!(c.token_url.is_empty());
+        assert!(c.client_id.is_none());
+    }
+
+    #[test]
+    fn import_rejects_unknown_source_and_missing_refresh() {
+        assert!(matches!(
+            OAuthCredential::import("nope", b"{}"),
+            Err(ImportError::UnknownSource(_))
+        ));
+        assert!(matches!(
+            OAuthCredential::import("opencode", br#"{"access":"a"}"#),
+            Err(ImportError::MissingField("refresh"))
+        ));
+        assert!(matches!(
+            OAuthCredential::import("opencode", b"not json"),
+            Err(ImportError::Malformed(_))
+        ));
     }
 
     #[test]

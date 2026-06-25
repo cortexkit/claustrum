@@ -10,6 +10,8 @@ This is a **security boundary**. See:
 - [`docs/cortexkit-credentials-contract.md`](docs/cortexkit-credentials-contract.md)
   — the normative security contract (three adversarial review passes).
 - [`docs/charter.md`](docs/charter.md) — the build plan and ground rules.
+- [`docs/operator-runbook.md`](docs/operator-runbook.md) — provisioning the vault
+  and wiring a consumer (bootstrap → import → mint-handle → read → verify-audit).
 
 ## Layout
 

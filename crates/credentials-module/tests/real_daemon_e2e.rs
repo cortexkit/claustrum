@@ -149,6 +149,42 @@ impl SeededVault {
 /// anti-masking guard inside `build_subc_core` panics instead when
 /// `CRED_REQUIRE_DAEMON` is set, so CI can never skip silently.
 async fn start_seeded_vault() -> Option<SeededVault> {
+    // Default seeding: the operator `put`s a static api-key credential.
+    start_vault_with_seed(|ctx| {
+        run_cli(&[
+            "put",
+            "--id",
+            "operator:test",
+            "--payload",
+            "the-secret-bytes",
+            "--data-dir",
+            &ctx.data_dir,
+            "--key-path",
+            &ctx.key_path,
+        ]);
+        ("operator:test".to_string(), b"the-secret-bytes".to_vec())
+    })
+    .await
+}
+
+/// The operator-flow context handed to a seed closure: the resolved data dir and
+/// operator key path (as strings, ready for CLI args). The closure runs the
+/// credential-seeding CLI commands (put / import) and returns the credential id it
+/// seeded plus the plaintext bytes a `credential.get` should return for it.
+struct SeedCtx {
+    data_dir: String,
+    key_path: String,
+}
+
+/// Bootstrap a throwaway master key, run a caller-supplied seeding step (put or
+/// import), mint a handle for the seeded credential, then spawn a real subc-core
+/// supervising the reserved vault against it. This shared setup is used by both the
+/// default `put` flow and the `import --source opencode` test, so neither duplicates
+/// the harness.
+async fn start_vault_with_seed<F>(seed: F) -> Option<SeededVault>
+where
+    F: FnOnce(&SeedCtx) -> (String, Vec<u8>),
+{
     let subc_core = build_subc_core()?;
     let credentials_module = PathBuf::from(env!("CARGO_BIN_EXE_credentials-module"));
     assert!(credentials_module.exists());
@@ -172,8 +208,8 @@ async fn start_seeded_vault() -> Option<SeededVault> {
     let data_dir_s = data_dir.to_string_lossy().to_string();
     let key_path_s = key_path.to_string_lossy().to_string();
 
-    // Bootstrap a master key, put an api-key credential, mint a handle (the operator
-    // flow). The handle's raw value is the CLI's stdout.
+    // Bootstrap a master key, run the caller's seeding step, mint a handle for the
+    // seeded credential (the operator flow). The handle's raw value is the CLI stdout.
     run_cli(&[
         "bootstrap",
         "--data-dir",
@@ -181,21 +217,14 @@ async fn start_seeded_vault() -> Option<SeededVault> {
         "--key-path",
         &key_path_s,
     ]);
-    run_cli(&[
-        "put",
-        "--id",
-        "operator:test",
-        "--payload",
-        "the-secret-bytes",
-        "--data-dir",
-        &data_dir_s,
-        "--key-path",
-        &key_path_s,
-    ]);
+    let (credential_id, payload) = seed(&SeedCtx {
+        data_dir: data_dir_s.clone(),
+        key_path: key_path_s.clone(),
+    });
     let handle = run_cli(&[
         "mint-handle",
         "--id",
-        "operator:test",
+        &credential_id,
         "--data-dir",
         &data_dir_s,
         "--key-path",
@@ -252,7 +281,7 @@ async fn start_seeded_vault() -> Option<SeededVault> {
             connection_file,
         },
         handle,
-        payload: b"the-secret-bytes".to_vec(),
+        payload,
         db_path: data_dir.join("store.db"),
     })
 }
@@ -428,6 +457,117 @@ async fn real_daemon_malformed_request_is_typed_error_not_crash() {
         response["result"]["ready"], true,
         "daemon still serving after malformed input"
     );
+
+    let _ = std::fs::remove_dir_all(&project_root);
+}
+
+/// Operator dogfood on a DISPOSABLE FIXTURE — the exact real operator flow, but on a
+/// fake auth.json (no real credential, throwaway operator-path key, never the
+/// keychain). Proves the import path end-to-end: `credentials-cli import --source
+/// opencode` of an auth.json-shaped fixture, mint a handle, then drive
+/// `credential.get` through the REAL supervised daemon and assert the IMPORTED
+/// access token round-trips, plus `verify-audit` reports the chain intact. It
+/// rehearses the operator flow in docs/operator-runbook.md on a fixture, so the same
+/// flow on a real auth.json is known-good before it is ever run.
+#[tokio::test]
+#[ignore = "builds subc-core in ../subconscious and binds loopback ports"]
+async fn fixture_dogfood_import_opencode_round_trips_through_real_daemon() {
+    // A fake opencode auth.json entry: the shared {refresh, access, expires} shape
+    // the importer parses. Plainly fake values — no real secret.
+    const FAKE_ACCESS: &str = "fixture-access-token-NOT-REAL";
+    let fixture = serde_json::json!({
+        "refresh": "fixture-refresh-token-NOT-REAL",
+        "access": FAKE_ACCESS,
+        "expires": 1_999_999_999_000i64,
+    });
+
+    let mut seeded = match start_vault_with_seed(|ctx| {
+        // Write the fixture auth.json into a temp path (alongside the operator key
+        // dir's parent — any path works; it is read once by the CLI).
+        let json_path = std::path::Path::new(&ctx.key_path)
+            .parent()
+            .unwrap()
+            .join("opencode-auth.json");
+        std::fs::write(&json_path, serde_json::to_vec(&fixture).unwrap()).unwrap();
+        // The real operator command: import the opencode credential.
+        run_cli(&[
+            "import",
+            "--source",
+            "opencode",
+            "--id",
+            "opencode:anthropic",
+            "--json",
+            &json_path.to_string_lossy(),
+            "--data-dir",
+            &ctx.data_dir,
+            "--key-path",
+            &ctx.key_path,
+        ]);
+        // credential.get returns the OAuth credential's access token as the payload
+        // (VaultRecord::new_oauth stores the access token bytes as the payload).
+        (
+            "opencode:anthropic".to_string(),
+            FAKE_ACCESS.as_bytes().to_vec(),
+        )
+    })
+    .await
+    {
+        Some(v) => v,
+        None => {
+            eprintln!("skipping fixture dogfood: sibling subc-core unavailable");
+            return;
+        }
+    };
+
+    let mut consumer = connect_consumer(&seeded.daemon.connection_file).await;
+    wait_for_catalog(&mut consumer, MODULE_ID, SETUP_TIMEOUT).await;
+    let project_root = unique_temp_dir("cred-dogfood-project");
+    std::fs::create_dir_all(&project_root).unwrap();
+    let route_channel = route_open(&mut consumer, &project_root, 1).await;
+
+    // The consumer reads the imported credential by its minted handle, over the
+    // route channel, through the real supervised daemon.
+    let response = credential_get(&mut consumer, route_channel, 2, &seeded.handle).await;
+    let payload = response["result"]["payload"]
+        .as_array()
+        .expect("credential.get returns a payload");
+    let bytes: Vec<u8> = payload.iter().map(|v| v.as_u64().unwrap() as u8).collect();
+    assert_eq!(
+        bytes, seeded.payload,
+        "the imported opencode access token round-trips through the real daemon"
+    );
+
+    // Stop the daemon, then prove the audit chain is intact via the CLI's
+    // verify-audit (the operator's final check; see docs/operator-runbook.md).
+    seeded.stop_daemon().await;
+    let data_dir = seeded
+        .db_path
+        .parent()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let key_path = seeded
+        .daemon
+        .rig
+        .join("secrets/master.key")
+        .to_string_lossy()
+        .to_string();
+    let verify = std::process::Command::new(env!("CARGO_BIN_EXE_credentials-cli"))
+        .args([
+            "verify-audit",
+            "--data-dir",
+            &data_dir,
+            "--key-path",
+            &key_path,
+        ])
+        .output()
+        .expect("run verify-audit");
+    assert!(
+        verify.status.success(),
+        "verify-audit must report the chain intact: {}",
+        String::from_utf8_lossy(&verify.stderr)
+    );
+    assert!(String::from_utf8_lossy(&verify.stdout).contains("intact"));
 
     let _ = std::fs::remove_dir_all(&project_root);
 }

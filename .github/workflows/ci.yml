@@ -110,3 +110,19 @@ jobs:
       # there.
       - name: Security-conformance suite (crash-safety seams)
         run: cargo test --workspace --all-targets --features kill9-test-seam,rotate-test-seam
+
+      # Run the #[ignore]'d real-daemon e2e (incl. the on-the-wire malicious-client
+      # harness) under a real supervised subc-core. This is the ONLY layer that
+      # catches cross-component contract bugs (e.g. a CLI/daemon lease-namespace
+      # split, a broken descriptor/launch-nonce wiring) — a class that already bit
+      # us and that no in-proc test can surface. CRED_REQUIRE_DAEMON=1 is the
+      # anti-masking guard: a missing/unbuildable sibling subc-core FAILS the job
+      # rather than silently skipping, so this gate can never zero-out green.
+      # Ubuntu-only: it spawns the daemon + binds loopback ports (the well-trodden
+      # path mirrored from the llm-runner rig); the Windows leg covers the
+      # cfg(windows) branches via the regular suite above.
+      - name: Real-daemon e2e (ship gate, no silent skip)
+        if: matrix.os == 'ubuntu'
+        env:
+          CRED_REQUIRE_DAEMON: "1"
+        run: cargo test -p credentials-module --test real_daemon_e2e -- --ignored --test-threads=1

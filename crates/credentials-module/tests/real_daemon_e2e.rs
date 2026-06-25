@@ -51,28 +51,58 @@ impl Drop for RealDaemon {
     }
 }
 
-fn subconscious_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join(SUBCONSCIOUS_REL)
-        .canonicalize()
-        .expect("sibling ../subconscious repo must exist for the real-daemon test")
+/// The anti-masking environment switch. When set (CI sets `CRED_REQUIRE_DAEMON=1`),
+/// a missing or unbuildable sibling subc-core is a HARD FAILURE, not a silent skip —
+/// so a real-daemon ship-gate test can never silently zero-out in CI (e.g. if the
+/// sibling checkout or the subc-core build breaks, CI must go red, not green-by-skip).
+/// Unset (a local run without the sibling), the e2e gracefully skips.
+const REQUIRE_DAEMON_ENV: &str = "CRED_REQUIRE_DAEMON";
+
+fn require_daemon() -> bool {
+    std::env::var_os(REQUIRE_DAEMON_ENV).is_some_and(|v| !v.is_empty() && v != "0")
 }
 
-fn build_subc_core() -> PathBuf {
-    let root = subconscious_root();
+/// Resolve the sibling subconscious checkout, or `None` if it is not present.
+/// `None` + `REQUIRE_DAEMON_ENV` set ⇒ panic (CI must not skip silently).
+fn subconscious_root() -> Option<PathBuf> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(SUBCONSCIOUS_REL);
+    match path.canonicalize() {
+        Ok(root) => Some(root),
+        Err(e) => {
+            if require_daemon() {
+                panic!(
+                    "{REQUIRE_DAEMON_ENV} is set but the sibling subconscious checkout is \
+                     missing at {} ({e}) — the real-daemon ship-gate test must not be skipped",
+                    path.display()
+                );
+            }
+            None
+        }
+    }
+}
+
+/// Build subc-core in the sibling and return its binary path, or `None` to skip.
+/// A build failure with `REQUIRE_DAEMON_ENV` set is a hard panic (no silent skip).
+fn build_subc_core() -> Option<PathBuf> {
+    let root = subconscious_root()?;
     let status = std::process::Command::new(env!("CARGO"))
         .current_dir(&root)
         .args(["build", "--bin", "subc-core"])
         .status()
         .expect("run cargo build for subc-core");
-    assert!(status.success(), "building subc-core failed");
+    if !status.success() {
+        if require_daemon() {
+            panic!("{REQUIRE_DAEMON_ENV} is set but building subc-core failed");
+        }
+        return None;
+    }
     let bin = root.join("target/debug/subc-core");
     assert!(
         bin.exists(),
         "subc-core binary missing at {}",
         bin.display()
     );
-    bin
+    Some(bin)
 }
 
 /// Run the admin CLI with the given args; panics with stderr on failure. Returns
@@ -114,9 +144,12 @@ impl SeededVault {
 }
 
 /// Bootstrap + seed a vault via the CLI, then spawn a real subc-core supervising the
-/// reserved vault module against it.
-async fn start_seeded_vault() -> SeededVault {
-    let subc_core = build_subc_core();
+/// reserved vault module against it. Returns `None` when the sibling subc-core is
+/// unavailable AND the run is not requiring the daemon (a graceful local skip); the
+/// anti-masking guard inside `build_subc_core` panics instead when
+/// `CRED_REQUIRE_DAEMON` is set, so CI can never skip silently.
+async fn start_seeded_vault() -> Option<SeededVault> {
+    let subc_core = build_subc_core()?;
     let credentials_module = PathBuf::from(env!("CARGO_BIN_EXE_credentials-module"));
     assert!(credentials_module.exists());
 
@@ -212,7 +245,7 @@ async fn start_seeded_vault() -> SeededVault {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
-    SeededVault {
+    Some(SeededVault {
         daemon: RealDaemon {
             child,
             rig,
@@ -221,7 +254,22 @@ async fn start_seeded_vault() -> SeededVault {
         handle,
         payload: b"the-secret-bytes".to_vec(),
         db_path: data_dir.join("store.db"),
-    }
+    })
+}
+
+/// Start a seeded vault or, when the sibling subc-core is unavailable in a non-CI
+/// run, return `None` so the test skips gracefully. A macro so the `return` exits
+/// the calling test.
+macro_rules! seeded_or_skip {
+    () => {
+        match start_seeded_vault().await {
+            Some(v) => v,
+            None => {
+                eprintln!("skipping real-daemon e2e: sibling subc-core unavailable (set CRED_REQUIRE_DAEMON=1 to require it)");
+                return;
+            }
+        }
+    };
 }
 
 /// The full supervision proof: a real subc-core supervises the reserved vault
@@ -230,7 +278,7 @@ async fn start_seeded_vault() -> SeededVault {
 #[tokio::test]
 #[ignore = "builds subc-core in ../subconscious and binds loopback ports"]
 async fn real_subc_core_supervises_vault_and_serves_credential_get() {
-    let seeded = start_seeded_vault().await;
+    let seeded = seeded_or_skip!();
     let mut consumer = connect_consumer(&seeded.daemon.connection_file).await;
 
     wait_for_catalog(&mut consumer, MODULE_ID, SETUP_TIMEOUT).await;
@@ -258,7 +306,7 @@ async fn real_subc_core_supervises_vault_and_serves_credential_get() {
 #[tokio::test]
 #[ignore = "builds subc-core in ../subconscious and binds loopback ports"]
 async fn real_daemon_unknown_handle_is_not_found() {
-    let seeded = start_seeded_vault().await;
+    let seeded = seeded_or_skip!();
     let mut consumer = connect_consumer(&seeded.daemon.connection_file).await;
     wait_for_catalog(&mut consumer, MODULE_ID, SETUP_TIMEOUT).await;
 
@@ -280,7 +328,7 @@ async fn real_daemon_unknown_handle_is_not_found() {
 #[tokio::test]
 #[ignore = "builds subc-core in ../subconscious and binds loopback ports"]
 async fn real_daemon_over_cap_get_many_is_rejected() {
-    let seeded = start_seeded_vault().await;
+    let seeded = seeded_or_skip!();
     let mut consumer = connect_consumer(&seeded.daemon.connection_file).await;
     wait_for_catalog(&mut consumer, MODULE_ID, SETUP_TIMEOUT).await;
 
@@ -312,7 +360,7 @@ async fn real_daemon_over_cap_get_many_is_rejected() {
 #[tokio::test]
 #[ignore = "builds subc-core in ../subconscious and binds loopback ports"]
 async fn real_daemon_fetch_sweep_raises_durable_alarm() {
-    let mut seeded = start_seeded_vault().await;
+    let mut seeded = seeded_or_skip!();
     let mut consumer = connect_consumer(&seeded.daemon.connection_file).await;
     wait_for_catalog(&mut consumer, MODULE_ID, SETUP_TIMEOUT).await;
 
@@ -346,7 +394,7 @@ async fn real_daemon_fetch_sweep_raises_durable_alarm() {
 #[tokio::test]
 #[ignore = "builds subc-core in ../subconscious and binds loopback ports"]
 async fn real_daemon_malformed_request_is_typed_error_not_crash() {
-    let seeded = start_seeded_vault().await;
+    let seeded = seeded_or_skip!();
     let mut consumer = connect_consumer(&seeded.daemon.connection_file).await;
     wait_for_catalog(&mut consumer, MODULE_ID, SETUP_TIMEOUT).await;
 

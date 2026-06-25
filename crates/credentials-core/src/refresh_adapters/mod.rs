@@ -27,6 +27,9 @@ use async_trait::async_trait;
 use crate::oauth::OAuthCredential;
 
 pub mod anthropic;
+pub mod google;
+pub mod openai;
+pub mod xai;
 
 #[cfg(test)]
 mod fixture;
@@ -110,6 +113,36 @@ pub struct HttpResponse {
     pub status: u16,
     /// Response body bytes.
     pub body: Vec<u8>,
+}
+
+/// Minimal `application/x-www-form-urlencoded` encoder for the form-POST refresh
+/// adapters (Google, xAI). Percent-encodes everything outside the unreserved set,
+/// so OAuth token/secret values (which contain `/`, `+`, `=`) are escaped safely.
+pub(crate) fn form_urlencode(pairs: &[(&str, &str)]) -> String {
+    fn encode(s: &str, out: &mut String) {
+        use std::fmt::Write;
+        for b in s.bytes() {
+            match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                    out.push(b as char)
+                }
+                b' ' => out.push('+'),
+                _ => {
+                    let _ = write!(out, "%{b:02X}");
+                }
+            }
+        }
+    }
+    let mut out = String::new();
+    for (i, (k, v)) in pairs.iter().enumerate() {
+        if i > 0 {
+            out.push('&');
+        }
+        encode(k, &mut out);
+        out.push('=');
+        encode(v, &mut out);
+    }
+    out
 }
 
 /// A bounded per-provider OAuth refresh adapter (see the module docs).

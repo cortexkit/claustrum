@@ -168,53 +168,149 @@ impl std::error::Error for MasterKeyError {}
 /// all of it. Adding a backend is a new `impl` plus a [`KeySource`] variant; no
 /// orchestration changes.
 pub trait MasterKeyStore {
-    /// Load the existing master key. A backend with no key provisioned yet returns
-    /// [`MasterKeyError::NotBootstrapped`]; an unavailable/locked store returns
-    /// [`MasterKeyError::VaultLocked`].
-    fn load(&self, data_dir: &Path) -> Result<MasterKey, MasterKeyError>;
+    /// Load the key in `slot`, or `None` when that slot is empty. An
+    /// unavailable/locked store is [`MasterKeyError::VaultLocked`].
+    ///
+    /// A master-key store holds TWO slots — `Current` and `Next` — so a key
+    /// rotation is crash-safe: the new key is staged in `Next` before the database
+    /// is re-wrapped, and only promoted to `Current` after. At any crash point the
+    /// resolver can find the slot whose key matches the database's recorded
+    /// fingerprint (see [`resolve`]), so the vault never bricks. The common case
+    /// (no rotation in flight) just uses `Current`.
+    fn load_slot(
+        &self,
+        data_dir: &Path,
+        slot: KeySlot,
+    ) -> Result<Option<MasterKey>, MasterKeyError>;
 
-    /// Persist a freshly generated key (first-run only). Implementations must fail
-    /// closed rather than overwrite an existing key.
-    fn store(&self, data_dir: &Path, key: &MasterKey) -> Result<(), MasterKeyError>;
+    /// Persist `key` to `slot`, REPLACING whatever is there. Replace (not
+    /// create-only) is required because a rotation writes `Next` over any stale key
+    /// an aborted prior rotation may have left. First-run clobber-safety is enforced
+    /// ABOVE the backend (in [`bootstrap`]), not here.
+    fn store_slot(
+        &self,
+        data_dir: &Path,
+        slot: KeySlot,
+        key: &MasterKey,
+    ) -> Result<(), MasterKeyError>;
+
+    /// Clear `slot` (idempotent — clearing an empty slot is a no-op success).
+    fn clear_slot(&self, data_dir: &Path, slot: KeySlot) -> Result<(), MasterKeyError>;
 }
 
-/// The macOS Keychain backend (v1, desktop): a generic password addressed by a
-/// fixed service/account, read/written via the `security` CLI. The key never
+/// Which of a master-key store's two slots a key lives in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeySlot {
+    /// The active key the vault is normally opened under.
+    Current,
+    /// The staged key during a rotation handover (the new key, before promotion).
+    Next,
+}
+
+/// The macOS Keychain backend (v1, desktop): generic passwords addressed by a fixed
+/// service + a per-slot account, read/written via the `security` CLI. The key never
 /// touches the data dir, so it ignores `data_dir`.
 pub struct KeychainCli {
     /// Keychain service string (the item's "where").
     pub service: String,
-    /// Keychain account string (the item's "name").
+    /// Keychain account string for the `Current` slot (the item's "name").
     pub account: String,
 }
 
-impl MasterKeyStore for KeychainCli {
-    fn load(&self, _data_dir: &Path) -> Result<MasterKey, MasterKeyError> {
-        load_from_keychain(&self.service, &self.account)
-    }
-
-    fn store(&self, _data_dir: &Path, key: &MasterKey) -> Result<(), MasterKeyError> {
-        store_in_keychain(&self.service, &self.account, key)
+impl KeychainCli {
+    /// The keychain account string for a slot: the configured account for
+    /// `Current`, that account with a `-next` suffix for `Next`.
+    fn account_for(&self, slot: KeySlot) -> String {
+        match slot {
+            KeySlot::Current => self.account.clone(),
+            KeySlot::Next => format!("{}-next", self.account),
+        }
     }
 }
 
-/// The operator-path backend (v1, headless/server): a key file that MUST live
-/// outside the vault data tree. Both load and store enforce the no-co-location
-/// rule against `data_dir` before touching the file.
+impl MasterKeyStore for KeychainCli {
+    fn load_slot(
+        &self,
+        _data_dir: &Path,
+        slot: KeySlot,
+    ) -> Result<Option<MasterKey>, MasterKeyError> {
+        match load_from_keychain(&self.service, &self.account_for(slot)) {
+            Ok(key) => Ok(Some(key)),
+            Err(MasterKeyError::NotBootstrapped) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn store_slot(
+        &self,
+        _data_dir: &Path,
+        slot: KeySlot,
+        key: &MasterKey,
+    ) -> Result<(), MasterKeyError> {
+        replace_in_keychain(&self.service, &self.account_for(slot), key)
+    }
+
+    fn clear_slot(&self, _data_dir: &Path, slot: KeySlot) -> Result<(), MasterKeyError> {
+        delete_from_keychain(&self.service, &self.account_for(slot))
+    }
+}
+
+/// The operator-path backend (v1, headless/server): per-slot key files that MUST
+/// live outside the vault data tree. Every op enforces the no-co-location rule
+/// against `data_dir` before touching a file.
 pub struct OperatorPathStore {
-    /// Absolute path to the key file (64 hex chars = 32 bytes), outside the data dir.
+    /// Absolute path to the `Current` key file (64 hex chars = 32 bytes), outside
+    /// the data dir. The `Next` slot is the same path with a `.next` suffix.
     pub path: PathBuf,
 }
 
+impl OperatorPathStore {
+    fn path_for(&self, slot: KeySlot) -> PathBuf {
+        match slot {
+            KeySlot::Current => self.path.clone(),
+            KeySlot::Next => {
+                let mut s = self.path.clone().into_os_string();
+                s.push(".next");
+                PathBuf::from(s)
+            }
+        }
+    }
+}
+
 impl MasterKeyStore for OperatorPathStore {
-    fn load(&self, data_dir: &Path) -> Result<MasterKey, MasterKeyError> {
-        ensure_outside_data_dir(&self.path, data_dir)?;
-        load_from_operator_path(&self.path)
+    fn load_slot(
+        &self,
+        data_dir: &Path,
+        slot: KeySlot,
+    ) -> Result<Option<MasterKey>, MasterKeyError> {
+        let path = self.path_for(slot);
+        ensure_outside_data_dir(&path, data_dir)?;
+        match load_from_operator_path(&path) {
+            Ok(key) => Ok(Some(key)),
+            Err(MasterKeyError::NotBootstrapped) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
-    fn store(&self, data_dir: &Path, key: &MasterKey) -> Result<(), MasterKeyError> {
-        ensure_outside_data_dir(&self.path, data_dir)?;
-        store_at_operator_path(&self.path, key)
+    fn store_slot(
+        &self,
+        data_dir: &Path,
+        slot: KeySlot,
+        key: &MasterKey,
+    ) -> Result<(), MasterKeyError> {
+        let path = self.path_for(slot);
+        ensure_outside_data_dir(&path, data_dir)?;
+        replace_at_operator_path(&path, key)
+    }
+
+    fn clear_slot(&self, data_dir: &Path, slot: KeySlot) -> Result<(), MasterKeyError> {
+        let path = self.path_for(slot);
+        ensure_outside_data_dir(&path, data_dir)?;
+        match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(MasterKeyError::Io(e)),
+        }
     }
 }
 
@@ -232,19 +328,25 @@ impl KeySource {
     }
 }
 
-/// Load the existing master key, optionally checking it against the vault's
-/// recorded fingerprint. Fails closed on a locked store, a missing key, a
-/// fingerprint mismatch, or a forbidden key/data co-location.
+/// Load the master key, optionally checking it against the vault's recorded
+/// fingerprint. Fails closed on a locked store, a missing key, a fingerprint
+/// mismatch, or a forbidden key/data co-location.
 ///
-/// Backend-agnostic: it prepares the vault dir, delegates the actual load to the
-/// configured [`MasterKeyStore`], then applies the `key_id` wrong-key check above
-/// the backend so every backend gets it uniformly.
+/// This is the simple form used before the database is open (so its key_id is not
+/// yet known): it loads the `Current` slot and checks `expected_key_id` if given.
+/// Once the database is open, [`resolve_for_db`] is the crash-safe form that picks
+/// whichever slot matches the database's recorded fingerprint (so a rotation that
+/// crashed mid-handover still resolves).
 pub fn resolve(
     config: &ResolverConfig,
     expected_key_id: Option<KeyId>,
 ) -> Result<MasterKey, MasterKeyError> {
     ensure_vault_dir(&config.data_dir)?;
-    let key = config.source.backend().load(&config.data_dir)?;
+    let key = config
+        .source
+        .backend()
+        .load_slot(&config.data_dir, KeySlot::Current)?
+        .ok_or(MasterKeyError::NotBootstrapped)?;
     if let Some(expected) = expected_key_id {
         let loaded = key.key_id();
         if loaded != expected {
@@ -254,17 +356,87 @@ pub fn resolve(
     Ok(key)
 }
 
-/// First-run provisioning: generate a CSPRNG master key and persist it to the
-/// configured backend, failing closed if the store is not writable. Returns the
-/// new key (its [`KeyId`] is what the vault records for future wrong-key checks).
+/// Crash-safe resolve against an OPEN database's recorded key fingerprint.
 ///
-/// Backend-agnostic: the CSPRNG generation lives here, above the backend, so every
-/// backend bootstraps the same way and only implements its own persistence.
+/// The database stores its master key's fingerprint in plaintext (the sealed
+/// audit-key row's `key_id`), so the resolver can tell which key the database is
+/// actually sealed under WITHOUT decrypting anything, and pick the matching slot.
+/// This is what makes a rotation crash-safe: at any handover crash point the
+/// database's fingerprint matches EXACTLY ONE of the two slots, and this returns
+/// that key. If NEITHER slot matches, that is a genuine wrong-key/corrupt state
+/// ([`MasterKeyError::KeyMismatch`]), not a recoverable handover — fail-closed.
+///
+/// Tries `Current` first (the common, no-rotation-in-flight case), then `Next`.
+pub fn resolve_for_db(
+    config: &ResolverConfig,
+    db_key_id: KeyId,
+) -> Result<MasterKey, MasterKeyError> {
+    ensure_vault_dir(&config.data_dir)?;
+    let backend = config.source.backend();
+    for slot in [KeySlot::Current, KeySlot::Next] {
+        if let Some(key) = backend.load_slot(&config.data_dir, slot)? {
+            if key.key_id() == db_key_id {
+                return Ok(key);
+            }
+        }
+    }
+    // No slot's key matches the database's recorded fingerprint: a real wrong-key /
+    // corrupt state, distinct from a recoverable mid-rotation handover.
+    Err(MasterKeyError::KeyMismatch {
+        loaded: db_key_id,
+        expected: db_key_id,
+    })
+}
+
+/// First-run provisioning: generate a CSPRNG master key and persist it to the
+/// `Current` slot, failing closed if the slot already holds a key (first-run only)
+/// or the store is not writable. Returns the new key.
+///
+/// Clobber-safety is enforced HERE (above the backend), since the slot store ops are
+/// replace-not-create: a `Current` slot that already holds a key means the vault is
+/// already bootstrapped, so this refuses rather than overwrite.
 pub fn bootstrap(config: &ResolverConfig) -> Result<MasterKey, MasterKeyError> {
     ensure_vault_dir(&config.data_dir)?;
+    let backend = config.source.backend();
+    if backend
+        .load_slot(&config.data_dir, KeySlot::Current)?
+        .is_some()
+    {
+        return Err(MasterKeyError::KeyAlreadyProvisioned(
+            "current key slot is already provisioned".to_string(),
+        ));
+    }
     let key = MasterKey::generate().map_err(|_| MasterKeyError::Csprng)?;
-    config.source.backend().store(&config.data_dir, &key)?;
+    backend.store_slot(&config.data_dir, KeySlot::Current, &key)?;
     Ok(key)
+}
+
+/// Stage a rotation's new key into the `Next` slot (rotation step 1), REPLACING any
+/// stale key a prior aborted rotation left there. The `Current` slot is untouched,
+/// so the vault still opens under the current key until the database is re-wrapped.
+pub fn stage_next(config: &ResolverConfig, new_key: &MasterKey) -> Result<(), MasterKeyError> {
+    ensure_vault_dir(&config.data_dir)?;
+    config
+        .source
+        .backend()
+        .store_slot(&config.data_dir, KeySlot::Next, new_key)
+}
+
+/// Promote the `Next` slot to `Current` and clear `Next` (rotation's final step).
+/// Reads `Next` and copies it into `Current` within the key store (no key handle
+/// needed — the rotation already consumed the new key value). Off the brick-path and
+/// idempotent: a crash before promotion still resolves to `Next` (which matches the
+/// re-wrapped database); a `Next` already cleared (already promoted) is a no-op.
+pub fn promote_next(config: &ResolverConfig) -> Result<(), MasterKeyError> {
+    ensure_vault_dir(&config.data_dir)?;
+    let backend = config.source.backend();
+    let Some(next) = backend.load_slot(&config.data_dir, KeySlot::Next)? else {
+        // Already promoted (next is empty): nothing to do.
+        return Ok(());
+    };
+    backend.store_slot(&config.data_dir, KeySlot::Current, &next)?;
+    backend.clear_slot(&config.data_dir, KeySlot::Next)?;
+    Ok(())
 }
 
 /// Create the vault data directory if absent and tighten it to `0700` on unix
@@ -322,21 +494,6 @@ fn load_from_operator_path(path: &Path) -> Result<MasterKey, MasterKeyError> {
     };
     let key_bytes = decode_hex_key(&raw)?;
     Ok(MasterKey::from_bytes(*key_bytes))
-}
-
-/// Write the key to the operator path as hex, `0600` on unix. Refuses to clobber
-/// an existing key file (bootstrap is first-run only): an existing file is a
-/// distinct "already provisioned" outcome, symmetric with the keychain backend's
-/// duplicate-item rejection.
-fn store_at_operator_path(path: &Path, key: &MasterKey) -> Result<(), MasterKeyError> {
-    if path.exists() {
-        return Err(MasterKeyError::KeyAlreadyProvisioned(format!(
-            "key file {} already exists; refusing to overwrite",
-            path.display()
-        )));
-    }
-    let hex = encode_hex_key(key);
-    write_key_file(path, hex.as_bytes())
 }
 
 /// Map an open failure: an existing file is the "already provisioned" outcome
@@ -447,64 +604,22 @@ fn load_from_keychain(service: &str, account: &str) -> Result<MasterKey, MasterK
     }
 }
 
-/// The outcome of a keychain `add-generic-password` invocation, classified from
-/// its raw exit/output by the PURE [`classify_keychain_add`].
-#[derive(Debug, PartialEq, Eq)]
-enum KeychainAdd {
-    /// The item was created (first-run success).
-    Stored,
-    /// An item already exists for this service/account (errSecDuplicateItem):
-    /// bootstrap must NOT overwrite it (that would brick the vault).
-    AlreadyProvisioned,
-    /// An unclassified failure.
-    Error(String),
-}
-
-/// Map a `security add-generic-password` invocation to an outcome. Pure (no I/O),
-/// so the created/duplicate decision is unit-tested without macOS.
-fn classify_keychain_add(code: Option<i32>, stderr: &str) -> KeychainAdd {
-    if code == Some(0) {
-        return KeychainAdd::Stored;
-    }
-    let haystack = stderr.to_ascii_lowercase();
-    // errSecDuplicateItem is exit 45 and/or the "already exists" message. Without
-    // -U, `security` refuses to replace an existing item, so this is the
-    // first-run-only guard surfacing as a distinct, recoverable signal.
-    if code == Some(45) || haystack.contains("already exists") || haystack.contains("-25299") {
-        return KeychainAdd::AlreadyProvisioned;
-    }
-    KeychainAdd::Error(format!(
-        "security add exited with {code:?}: {}",
-        stderr.trim()
-    ))
-}
-
-/// Store the key as a keychain generic password — FIRST-RUN ONLY.
+/// Replace (create-or-update) a keychain slot's key, via `add-generic-password -U`.
 ///
-/// Deliberately omits `-U`: with `-U`, a stray second bootstrap would silently
-/// REPLACE the existing master key, after which every record sealed under the old
-/// key fails the key_id check and the whole vault is bricked. Without `-U`,
-/// `security` returns errSecDuplicateItem if the item exists, which we surface as
-/// [`MasterKeyError::KeyAlreadyProvisioned`] — symmetric with the operator-path
-/// backend's refuse-to-clobber, so bootstrap is safe-by-construction on both.
-///
-/// Documented residuals of this `security`-CLI write path (accepted for v1; the
-/// signed-app custodian is the hardened future target — see the contract's
-/// master-key model):
-///   1. The key hex is passed as an argv (`-w <hex>`), so it is briefly visible in
-///      the process table to same-user processes during the one-time bootstrap.
-///      This is within the accepted same-user residual (a same-user attacker can
-///      read the item via the CLI anyway), but the Security-framework/signed-app
-///      path avoids even this transient argv exposure.
-///   2. The item is created with the broad default ACL (no `-T`/partition
-///      restriction). The tight code-signature ACL that makes another app's read
-///      prompt the user is only achievable from the signed CK app, not the
-///      unsigned CLI.
-fn store_in_keychain(service: &str, account: &str, key: &MasterKey) -> Result<(), MasterKeyError> {
+/// Unlike [`store_in_keychain`] (first-run-only, no `-U`), a SLOT write must REPLACE
+/// whatever is there: a rotation overwrites the `Next` slot's stale key, and the
+/// first-run clobber-safety is enforced above the backend in [`bootstrap`]. So `-U`
+/// is correct here. (Same argv-exposure residual as the bootstrap write.)
+fn replace_in_keychain(
+    service: &str,
+    account: &str,
+    key: &MasterKey,
+) -> Result<(), MasterKeyError> {
     let hex = encode_hex_key(key);
     let output = std::process::Command::new("security")
         .args([
             "add-generic-password",
+            "-U",
             "-s",
             service,
             "-a",
@@ -514,14 +629,51 @@ fn store_in_keychain(service: &str, account: &str, key: &MasterKey) -> Result<()
         ])
         .output()
         .map_err(|e| MasterKeyError::KeychainExec(e.to_string()))?;
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    match classify_keychain_add(output.status.code(), &stderr) {
-        KeychainAdd::Stored => Ok(()),
-        KeychainAdd::AlreadyProvisioned => Err(MasterKeyError::KeyAlreadyProvisioned(format!(
-            "keychain item {service}/{account} already exists; refusing to overwrite"
-        ))),
-        KeychainAdd::Error(m) => Err(MasterKeyError::KeyStoreUnwritable(m)),
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(MasterKeyError::KeyStoreUnwritable(
+            String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        ))
     }
+}
+
+/// Delete a keychain slot's item (idempotent — a missing item is success).
+fn delete_from_keychain(service: &str, account: &str) -> Result<(), MasterKeyError> {
+    let output = std::process::Command::new("security")
+        .args(["delete-generic-password", "-s", service, "-a", account])
+        .output()
+        .map_err(|e| MasterKeyError::KeychainExec(e.to_string()))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    // errSecItemNotFound (exit 44 / "could not be found") = already absent = success.
+    let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
+    if output.status.code() == Some(44) || stderr.contains("could not be found") {
+        Ok(())
+    } else {
+        Err(MasterKeyError::KeyStoreUnwritable(
+            String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        ))
+    }
+}
+
+/// Write a key file, REPLACING any existing file, `0600` on unix, atomically (write
+/// a temp sibling then rename). Used for a slot write (rotation overwrites `Next`).
+fn replace_at_operator_path(path: &Path, key: &MasterKey) -> Result<(), MasterKeyError> {
+    let hex = encode_hex_key(key);
+    let mut tmp = path.to_path_buf().into_os_string();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+    // create_new the temp so a stale temp from a crashed prior write doesn't get
+    // appended to; remove any leftover temp first.
+    let _ = std::fs::remove_file(&tmp);
+    write_key_file(&tmp, hex.as_bytes())?;
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        MasterKeyError::KeyStoreUnwritable(e.to_string())
+    })?;
+    Ok(())
 }
 
 // ---- hex helpers ---------------------------------------------------------
@@ -772,6 +924,116 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    fn op_config(root: &std::path::Path) -> ResolverConfig {
+        let key_dir = root.join("secrets");
+        std::fs::create_dir_all(&key_dir).unwrap();
+        ResolverConfig {
+            data_dir: root.join("data"),
+            source: KeySource::OperatorPath {
+                path: key_dir.join("master.key"),
+            },
+        }
+    }
+
+    // The two-slot handover's brick-free invariant: at EVERY handover state the
+    // database's recorded key_id matches exactly one slot, and resolve_for_db
+    // returns that key. These simulate each crash point by leaving the slots in the
+    // state a crash at that point would leave them.
+
+    #[test]
+    fn resolve_for_db_picks_current_before_rotation() {
+        let root = tmp_dir("slot-current");
+        let config = op_config(&root);
+        let k1 = bootstrap(&config).expect("bootstrap");
+        // No rotation in flight: db is under k1, only current is set.
+        let got = resolve_for_db(&config, k1.key_id()).expect("resolve");
+        assert_eq!(got.key_id(), k1.key_id());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn resolve_for_db_after_stage_next_still_picks_current() {
+        // Crash point 1: next written, db NOT yet rewrapped (still under k1).
+        let root = tmp_dir("slot-staged");
+        let config = op_config(&root);
+        let k1 = bootstrap(&config).expect("bootstrap");
+        let k2 = MasterKey::generate().unwrap();
+        stage_next(&config, &k2).expect("stage");
+        // db key_id is still k1 → resolve must pick current (k1), ignoring next.
+        let got = resolve_for_db(&config, k1.key_id()).expect("resolve");
+        assert_eq!(
+            got.key_id(),
+            k1.key_id(),
+            "current matches the un-rewrapped db"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn resolve_for_db_after_db_rewrap_picks_next() {
+        // Crash point 2: db rewrapped to k2, both slots present, NOT yet promoted.
+        let root = tmp_dir("slot-rewrapped");
+        let config = op_config(&root);
+        let _k1 = bootstrap(&config).expect("bootstrap");
+        let k2 = MasterKey::generate().unwrap();
+        stage_next(&config, &k2).expect("stage");
+        // db is now under k2 (simulated) → resolve must pick next (k2).
+        let got = resolve_for_db(&config, k2.key_id()).expect("resolve");
+        assert_eq!(got.key_id(), k2.key_id(), "next matches the rewrapped db");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn resolve_for_db_after_promote_picks_current() {
+        // Crash point 3: promoted (current=k2, next cleared), db under k2.
+        let root = tmp_dir("slot-promoted");
+        let config = op_config(&root);
+        let _k1 = bootstrap(&config).expect("bootstrap");
+        let k2 = MasterKey::generate().unwrap();
+        stage_next(&config, &k2).expect("stage");
+        promote_next(&config).expect("promote");
+        let got = resolve_for_db(&config, k2.key_id()).expect("resolve");
+        assert_eq!(got.key_id(), k2.key_id());
+        // next is cleared after promote.
+        assert!(config
+            .source
+            .backend()
+            .load_slot(&config.data_dir, KeySlot::Next)
+            .unwrap()
+            .is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn resolve_for_db_no_matching_slot_fails_closed() {
+        // A db key_id matching NEITHER slot is a genuine wrong-key/corrupt state,
+        // distinct from a recoverable handover — fail closed, do not brick-loop.
+        let root = tmp_dir("slot-nomatch");
+        let config = op_config(&root);
+        let _k1 = bootstrap(&config).expect("bootstrap");
+        let stranger = MasterKey::generate().unwrap();
+        match resolve_for_db(&config, stranger.key_id()) {
+            Err(MasterKeyError::KeyMismatch { .. }) => {}
+            other => panic!("expected KeyMismatch on no-matching-slot, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn promote_is_idempotent() {
+        let root = tmp_dir("slot-promote-idem");
+        let config = op_config(&root);
+        let _k1 = bootstrap(&config).expect("bootstrap");
+        let k2 = MasterKey::generate().unwrap();
+        stage_next(&config, &k2).expect("stage");
+        promote_next(&config).expect("promote 1");
+        // Promoting again (next already cleared) is a no-op success.
+        promote_next(&config).expect("promote 2 idempotent");
+        let got = resolve_for_db(&config, k2.key_id()).expect("resolve");
+        assert_eq!(got.key_id(), k2.key_id());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn hex_round_trips() {
         let key = MasterKey::from_bytes([0x5A; MASTER_KEY_LEN]);
@@ -828,25 +1090,6 @@ mod tests {
         );
         match classify_keychain_find(Some(1), "", "some other failure") {
             KeychainFind::Error(_) => {}
-            other => panic!("expected Error, got {other:?}"),
-        }
-    }
-
-    // The keychain ADD classifier (pure) — the first-run-only / no-clobber guard.
-    #[test]
-    fn keychain_add_classifier_maps_outcomes() {
-        assert_eq!(classify_keychain_add(Some(0), ""), KeychainAdd::Stored);
-        assert_eq!(
-            classify_keychain_add(Some(45), "security: ... already exists ..."),
-            KeychainAdd::AlreadyProvisioned
-        );
-        assert_eq!(
-            classify_keychain_add(Some(45), ""),
-            KeychainAdd::AlreadyProvisioned,
-            "duplicate-item exit alone is enough"
-        );
-        match classify_keychain_add(Some(1), "some other add failure") {
-            KeychainAdd::Error(_) => {}
             other => panic!("expected Error, got {other:?}"),
         }
     }

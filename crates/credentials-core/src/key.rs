@@ -92,6 +92,21 @@ impl KeyId {
         &self.0
     }
 
+    /// Parse a fingerprint from its lowercase-hex rendering (the stored plaintext
+    /// `key_id` column). `None` if the string is not exactly `KEY_ID_LEN` hex bytes.
+    pub fn from_hex(s: &str) -> Option<KeyId> {
+        if s.len() != KEY_ID_LEN * 2 {
+            return None;
+        }
+        let mut bytes = [0u8; KEY_ID_LEN];
+        for (i, chunk) in s.as_bytes().chunks_exact(2).enumerate() {
+            let hi = (chunk[0] as char).to_digit(16)?;
+            let lo = (chunk[1] as char).to_digit(16)?;
+            bytes[i] = ((hi << 4) | lo) as u8;
+        }
+        Some(KeyId(bytes))
+    }
+
     /// Lowercase hex rendering (16 chars). Non-secret; safe to log.
     pub fn to_hex(&self) -> String {
         use std::fmt::Write;

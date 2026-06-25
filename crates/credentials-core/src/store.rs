@@ -348,6 +348,30 @@ impl EncryptedStore {
     /// not pay FULL's fsync-per-commit. `SqliteStore` is one connection behind a
     /// mutex, so setting it once here covers every later `with_conn`/
     /// `with_conn_fenced` call.
+    /// Read the database's recorded master-key fingerprint WITHOUT the master key:
+    /// the plaintext `key_id` of the sealed audit-key row (which always exists from
+    /// vault-init). This is the crash-safe-resolve anchor — the resolver compares it
+    /// to each key-store slot's fingerprint to pick the slot the database is actually
+    /// sealed under (see [`resolver::resolve_for_db`]). `None` on a brand-new vault
+    /// whose audit-key row does not exist yet (then `Current` is the only candidate).
+    pub fn read_db_key_id(store: &SqliteStore) -> Result<Option<KeyId>, StoreError> {
+        let hex: Option<String> = store
+            .with_conn(|c| {
+                c.query_row(
+                    "SELECT key_id FROM vault_secrets WHERE name = ?1",
+                    rusqlite::params![AUDIT_KEY_SECRET_NAME],
+                    |r| r.get::<_, String>(0),
+                )
+                .map(Some)
+                .or_else(|e| match e {
+                    rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                    other => Err(other),
+                })
+            })
+            .map_err(|e| StoreError::Backend(e.to_string()))?;
+        Ok(hex.and_then(|h| KeyId::from_hex(&h)))
+    }
+
     pub fn migrate(store: &SqliteStore) -> Result<(), StoreError> {
         store.migrate(SCHEMA_NAMESPACE, MIGRATIONS)?;
         store

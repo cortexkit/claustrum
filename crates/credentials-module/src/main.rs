@@ -182,14 +182,22 @@ async fn build_surface(ack: &ModuleHelloAckBody) -> Result<ReadSurface, ModuleEr
     let data_dir = sqlite_data_dir(&descriptor)?;
     let resolver_config = resolver_config_from_env(data_dir);
 
-    // Resolve the existing master key (the vault must already be bootstrapped via
-    // the offline CLI). A locked keychain / missing key is a clean fail-closed exit.
-    let key = resolver::resolve(&resolver_config, None)
-        .map_err(|e| ModuleError::Message(format!("master key: {e}")))?;
-
+    // Open + migrate the store first, then read the database's plaintext key
+    // fingerprint and resolve the master key crash-safely: pick whichever key-store
+    // slot matches the database (so a rotation that crashed mid-handover still
+    // opens). A locked keychain / no matching key is a clean fail-closed exit.
     let store =
         open_sqlite(&descriptor).map_err(|e| ModuleError::Message(format!("open store: {e}")))?;
     EncryptedStore::migrate(&store).map_err(|e| ModuleError::Message(format!("migrate: {e}")))?;
+    let key = match EncryptedStore::read_db_key_id(&store)
+        .map_err(|e| ModuleError::Message(format!("read db key id: {e}")))?
+    {
+        Some(db_key_id) => resolver::resolve_for_db(&resolver_config, db_key_id),
+        // Brand-new vault (no audit-key row yet): the current slot is the only key.
+        None => resolver::resolve(&resolver_config, None),
+    }
+    .map_err(|e| ModuleError::Message(format!("master key: {e}")))?;
+
     let store = EncryptedStore::open(store, key)
         .map_err(|e| ModuleError::Message(format!("open vault: {e}")))?;
     let store = Arc::new(store);

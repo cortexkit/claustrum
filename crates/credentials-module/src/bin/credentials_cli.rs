@@ -36,6 +36,7 @@ use std::process::ExitCode;
 
 use cortexkit_store::{open_sqlite, Isolation, StorageBackend, StorageDescriptor, StoreError};
 use credentials_core::audit::{AuditCtx, AuditOp};
+use credentials_core::key::MasterKey;
 use credentials_core::record::{CredentialKind, VaultRecord};
 use credentials_core::resolver::{self, KeySource, MasterKeyError, ResolverConfig};
 use credentials_core::store::{mint_handle, EncryptedStore, StoreOpError};
@@ -145,13 +146,19 @@ fn usage() -> String {
 /// and take the single-writer lease (proof the daemon is stopped). Either failing
 /// is a clean, typed refusal.
 fn open_for_admin(global: &GlobalArgs) -> Result<EncryptedStore, CliError> {
-    let key = resolver::resolve(&resolver_config(global), None).map_err(CliError::MasterKey)?;
     let store = open_sqlite(&descriptor(global)).map_err(|e| match e {
         // A held lease means the daemon is up — the structural "while stopped" gate.
         StoreError::Lease(_) => CliError::DaemonRunning,
         other => CliError::StoreOpen(other),
     })?;
     EncryptedStore::migrate(&store).map_err(CliError::StoreOpen)?;
+    // Crash-safe resolve: pick the key-store slot matching the database's recorded
+    // fingerprint (so a vault left mid-rotation still opens under the right key).
+    let key = match EncryptedStore::read_db_key_id(&store).map_err(CliError::StoreOpen)? {
+        Some(db_key_id) => resolver::resolve_for_db(&resolver_config(global), db_key_id)
+            .map_err(CliError::MasterKey)?,
+        None => resolver::resolve(&resolver_config(global), None).map_err(CliError::MasterKey)?,
+    };
     EncryptedStore::open(store, key).map_err(CliError::Store)
 }
 
@@ -241,22 +248,29 @@ fn cmd_invalidate(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> 
     Ok(())
 }
 
-fn cmd_rotate_master_key(_global: &GlobalArgs) -> Result<(), CliError> {
-    // The DB-side rewrap (credentials-core EncryptedStore::rotate_master_key) is
-    // built + tested: it re-wraps every record and the sealed audit key under the
-    // new key in ONE atomic fenced transaction. What this command still needs is the
-    // crash-safe KEY-STORE coordination: the keychain/operator-path holds ONE key,
-    // and both naive orderings (persist-new-key-then-rewrap, or rewrap-then-persist)
-    // can brick the vault on a crash in the window between the key-store write and
-    // the DB commit (the key store and the DB would disagree on which key the
-    // records are sealed under). The crash-safe answer is a two-slot, resumable
-    // key-store handover (write the new key to a `next` slot, rewrap, then promote),
-    // which is a deliberate design step under review before it lands here.
-    Err(CliError::Usage(
-        "rotate-master-key: DB rewrap is implemented; the crash-safe key-store \
-         handover is pending design review and not yet wired"
-            .to_string(),
-    ))
+fn cmd_rotate_master_key(global: &GlobalArgs) -> Result<(), CliError> {
+    // Crash-safe two-slot handover. The key store holds two slots (current/next);
+    // the database's plaintext key_id is the authority for which key it is sealed
+    // under. Order — brick-free at every crash point:
+    //   1. open under the current key (proves possession + takes the lease),
+    //   2. STAGE the new key into `next` (current still opens the vault),
+    //   3. DB rewrap under the new key in ONE atomic fenced txn (now the db's key_id
+    //      matches `next`),
+    //   4. PROMOTE `next` to `current` and clear `next` (hygiene; off the brick-path).
+    // A crash after (2) resolves via current (db still old); after (3) via next (db
+    // now new); after (4) via current. No state matches neither slot.
+    let mut store = open_for_admin(global)?;
+    let new_key = MasterKey::generate().map_err(|_| CliError::Io("csprng".to_string()))?;
+    let new_key_id = new_key.key_id();
+    let config = resolver_config(global);
+
+    resolver::stage_next(&config, &new_key).map_err(CliError::MasterKey)?;
+    store.rotate_master_key(new_key).map_err(CliError::Store)?;
+    // Promote copies `next` to `current` and clears `next` within the key store, so
+    // it needs no key handle (the new key was consumed by the rewrap above).
+    resolver::promote_next(&config).map_err(CliError::MasterKey)?;
+    println!("rotated master key to key_id {}", new_key_id.to_hex());
+    Ok(())
 }
 
 fn cmd_mint_handle(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {

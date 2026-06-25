@@ -15,6 +15,14 @@ description = "Credential custody logic for the cortexkit-credentials subc modul
 # surface for a security boundary).
 kill9-test-seam = []
 
+# Gates ONLY the master-key-rotation crash-cut helper binary out of release builds.
+# Unlike kill9-test-seam this compiles NO code into the library: the rotation
+# handover's cut points are the boundaries between discrete PUBLIC operations
+# (stage_next -> DB rewrap -> promote), each individually atomic, so the helper just
+# parks after a chosen step using public API — no block-before-commit seam in the
+# vault. The feature exists solely to keep the test binary out of a normal build.
+rotate-test-seam = []
+
 # The kill-9 helper process. Only buildable with the seam feature, so it never
 # ships in a normal build. The conformance integration test spawns it via
 # CARGO_BIN_EXE_kill9_refresh_helper.
@@ -22,6 +30,14 @@ kill9-test-seam = []
 name = "kill9_refresh_helper"
 path = "src/bin/kill9_refresh_helper.rs"
 required-features = ["kill9-test-seam"]
+
+# The master-key-rotation crash-cut helper. Drives the two-slot handover and parks
+# at a chosen cut point so the parent test can SIGKILL it and prove the vault
+# reopens (never bricks) from that on-disk state. Test-only via the seam feature.
+[[bin]]
+name = "rotate_cut_helper"
+path = "src/bin/rotate_cut_helper.rs"
+required-features = ["rotate-test-seam"]
 
 [dependencies]
 serde = { workspace = true }

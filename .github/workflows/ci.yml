@@ -5,6 +5,9 @@ on:
     branches: [master]
   pull_request:
   workflow_call:
+  # Manual trigger, so a commit whose push webhook was missed (GitHub occasionally
+  # drops one) can be re-run without an empty commit: `gh workflow run CI`.
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}

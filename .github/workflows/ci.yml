@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_call:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Linux + Windows matrix. Windows is the load-bearing leg (the cfg(windows)
+  # master-key/operator-path branches and any path handling can't be exercised on
+  # local macOS/Linux). macOS is intentionally not in CI: it is the dev platform
+  # (continuously tested locally) and is where the keychain path is developed.
+  #
+  # Runners are Blacksmith, not GitHub-hosted: this repo is owned by a free-plan
+  # org, where GitHub blocks private-repo Actions jobs at the zero spending limit.
+  # Blacksmith third-party runners do not consume GitHub's included minutes, so CI
+  # runs without an org billing change. Revert to GitHub-hosted labels (and re-add
+  # macOS) if the repo becomes public.
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu
+            runner: blacksmith-2vcpu-ubuntu-2404
+          - os: windows
+            runner: blacksmith-4vcpu-windows-2025
+    defaults:
+      run:
+        working-directory: cortexkit-credentials
+    steps:
+      - name: Checkout cortexkit-credentials
+        uses: actions/checkout@v5
+        with:
+          path: cortexkit-credentials
+
+      # This repo path-deps the private cortexkit/subconscious (subc wire) and
+      # cortexkit/commons (storage libs) siblings. The default GITHUB_TOKEN is
+      # scoped to this repo only, so mint a short-lived token from the org-installed
+      # cortexkit-ci GitHub App (Contents: read) to check both out. Cargo loads the
+      # whole workspace manifest (incl. the sibling path-deps) before resolving any
+      # package, so both must be present or the build fails at manifest-load.
+      - name: Mint cross-repo read token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.CK_CI_APP_ID }}
+          private-key: ${{ secrets.CK_CI_APP_PRIVATE_KEY }}
+          owner: cortexkit
+          repositories: subconscious,commons
+
+      - name: Checkout subconscious
+        uses: actions/checkout@v5
+        with:
+          repository: cortexkit/subconscious
+          path: subconscious
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Checkout commons
+        uses: actions/checkout@v5
+        with:
+          repository: cortexkit/commons
+          path: commons
+          token: ${{ steps.app-token.outputs.token }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      # The real-daemon e2e rig spawns the subc-core daemon as a subprocess; it's a
+      # bin in the sibling subc-core crate. Build it from the sibling checkout so the
+      # rig finds it under ../subconscious/target/debug.
+      - name: Build subc binaries (real-daemon e2e)
+        working-directory: subconscious
+        run: cargo build -p subc-core --bins
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace --all-targets

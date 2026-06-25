@@ -1,0 +1,57 @@
+[workspace]
+resolver = "2"
+members = ["crates/credentials-core", "crates/credentials-module"]
+
+# cortexkit-credentials — a subc-supervised module that holds credentials
+# (OAuth tokens, API keys, DSNs) encrypted at rest and serves each consumer the
+# credential it needs, kept fresh via vault-owned OAuth refresh. It replaces the
+# scattered per-consumer credential acquisition (llm-runner's auth.json read,
+# ai-provider-quota's bespoke OAuth paths) with one custody home.
+#
+# Spec: docs/cortexkit-credentials-contract.md (the security contract — three
+# review passes: Oracle, Athena council, Oracle confirm). Build plan: docs/charter.md.
+#
+# Two-crate split (the standard module shape, template = ai-provider-quota):
+#   credentials-core   = pure custody logic (typed VaultRecord, canonical
+#                        OAuthCredential, value-level encryption envelope,
+#                        bounded refresh adapters, crash-safe refresh state
+#                        machine, master-key resolution). No subc dep.
+#   credentials-module = the thin subc-wire binary: read surface + admin surface,
+#                        capability handles, fault isolation, audit.
+#
+# Wire + storage crates are sibling PATH dependencies for dev (the arrangement
+# AFT and ai-provider-quota use). This repo path-deps TWO siblings:
+#   ../subconscious/crates/*  — subc wire (subc-protocol/subc-transport; subc-core
+#                               dev-only for the in-process daemon in e2e tests)
+#   ../commons/crates/*       — shared storage (cortexkit-store with the epoch-CAS
+#                               with_conn_fenced write path the vault requires,
+#                               cortexkit-lease, cortexkit-store-types)
+# CI must check out both siblings (cargo loads the whole workspace manifest before
+# resolving any -p package).
+[workspace.dependencies]
+subc-protocol = { path = "../subconscious/crates/subc-protocol" }
+subc-transport = { path = "../subconscious/crates/subc-transport" }
+subc-core = { path = "../subconscious/crates/subc-core" }
+
+cortexkit-store = { path = "../commons/crates/cortexkit-store" }
+cortexkit-lease = { path = "../commons/crates/cortexkit-lease" }
+cortexkit-store-types = { path = "../commons/crates/cortexkit-store-types" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "process"] }
+async-trait = "0.1"
+
+# HTTP for OAuth refresh adapters (rustls, no native-tls).
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+url = "2"
+
+# At-rest encryption: AES-256-GCM AEAD (32-byte master key matches the contract's
+# CSPRNG master key), CSPRNG for keys/nonces, zeroize to scrub key material.
+# The peer confirms the exact AEAD with review before the cipher envelope lands.
+aes-gcm = "0.10"
+getrandom = "0.2"
+zeroize = "1"
+sha2 = "0.10"
+hmac = "0.12"

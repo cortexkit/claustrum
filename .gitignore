@@ -1,0 +1,26 @@
+# Rust
+/target
+**/target
+Cargo.lock
+
+# Node
+node_modules
+package-lock.json
+bun.lockb
+
+# Agent tooling
+.alfonso
+.opencode
+.cortexkit
+_bmad-output
+.bmad
+
+# OS / editor
+.DS_Store
+*.swp
+
+# Never commit real credential material, master keys, or vault databases
+*.key
+store.db
+*.vault
+/secrets

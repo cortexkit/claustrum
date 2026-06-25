@@ -1,0 +1,25 @@
+[package]
+name = "credentials-core"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Credential custody logic for the cortexkit-credentials subc module: typed VaultRecord, canonical OAuthCredential, value-level encryption envelope, bounded refresh adapters, crash-safe refresh state machine, master-key resolution. Pure logic, wire-agnostic."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+reqwest = { workspace = true }
+chrono = { workspace = true }
+url = { workspace = true }
+cortexkit-store = { workspace = true }
+cortexkit-lease = { workspace = true }
+cortexkit-store-types = { workspace = true }
+aes-gcm = { workspace = true }
+getrandom = { workspace = true }
+zeroize = { workspace = true }
+sha2 = { workspace = true }
+hmac = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

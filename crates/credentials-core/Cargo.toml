@@ -5,6 +5,24 @@ edition = "2021"
 publish = false
 description = "Credential custody logic for the cortexkit-credentials subc module: typed VaultRecord, canonical OAuthCredential, value-level encryption envelope, bounded refresh adapters, crash-safe refresh state machine, master-key resolution. Pure logic, wire-agnostic."
 
+[features]
+# Compiles a test-only pre-commit seam INTO the refresh engine: a hook that fires
+# after the intent is durably committed and the new tokens are staged, but BEFORE
+# the commit transaction. The kill-9 conformance harness uses it to park a helper
+# process at exactly that point so a parent test can SIGKILL it and prove
+# reconciliation resolves the interrupted refresh to needs_reauth. OFF by default —
+# the release vault contains no block-before-commit code path at all (zero release
+# surface for a security boundary).
+kill9-test-seam = []
+
+# The kill-9 helper process. Only buildable with the seam feature, so it never
+# ships in a normal build. The conformance integration test spawns it via
+# CARGO_BIN_EXE_kill9_refresh_helper.
+[[bin]]
+name = "kill9_refresh_helper"
+path = "src/bin/kill9_refresh_helper.rs"
+required-features = ["kill9-test-seam"]
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -126,6 +126,14 @@ pub struct RefreshEngine {
     // only to look up/insert a lock handle (never across an await); the per-id
     // tokio mutex is the one held across the refresh await.
     inflight: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    // Test-only crash seam: fired AFTER the intent is durably committed and the new
+    // tokens are staged, but BEFORE the commit transaction. The kill-9 conformance
+    // helper sets this to a closure that signals readiness and parks forever, so a
+    // parent test can SIGKILL it at exactly the response->commit gap. Compiled in
+    // ONLY under the `kill9-test-seam` feature, so the release vault has no
+    // block-before-commit path at all.
+    #[cfg(feature = "kill9-test-seam")]
+    pre_commit: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
 }
 
 impl RefreshEngine {
@@ -145,7 +153,16 @@ impl RefreshEngine {
             http,
             skew_ms: DEFAULT_EXPIRY_SKEW_MS,
             inflight: Mutex::new(HashMap::new()),
+            #[cfg(feature = "kill9-test-seam")]
+            pre_commit: Mutex::new(None),
         }
+    }
+
+    /// Install the test-only pre-commit hook (see the field docs). Available only
+    /// under the `kill9-test-seam` feature; the kill-9 helper uses it to park.
+    #[cfg(feature = "kill9-test-seam")]
+    pub fn set_pre_commit_hook(&self, hook: Box<dyn Fn() + Send + Sync>) {
+        *self.pre_commit.lock().unwrap_or_else(|p| p.into_inner()) = Some(hook);
     }
 
     /// Override the expiry skew (mostly for tests).
@@ -239,6 +256,19 @@ impl RefreshEngine {
         match adapter.refresh(oauth, &*self.http).await {
             Ok(tokens) => {
                 let new_record = apply_refreshed(record, oauth, tokens);
+
+                // Test-only crash seam: the intent is durably committed and the new
+                // tokens are staged, but the commit transaction has NOT run. The
+                // kill-9 helper parks here so a parent test can SIGKILL it at exactly
+                // this point. No-op (and absent entirely) in a release build.
+                #[cfg(feature = "kill9-test-seam")]
+                {
+                    let hook = self.pre_commit.lock().unwrap_or_else(|p| p.into_inner());
+                    if let Some(hook) = hook.as_ref() {
+                        hook();
+                    }
+                }
+
                 match self
                     .store
                     .commit_refresh(credential_id, record.record_version, &new_record)

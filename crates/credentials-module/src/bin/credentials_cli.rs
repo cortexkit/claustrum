@@ -152,7 +152,7 @@ fn open_for_admin(global: &GlobalArgs) -> Result<EncryptedStore, CliError> {
         other => CliError::StoreOpen(other),
     })?;
     EncryptedStore::migrate(&store).map_err(CliError::StoreOpen)?;
-    Ok(EncryptedStore::new(store, key))
+    EncryptedStore::open(store, key).map_err(CliError::Store)
 }
 
 fn cmd_bootstrap(global: &GlobalArgs) -> Result<(), CliError> {
@@ -242,11 +242,20 @@ fn cmd_invalidate(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> 
 }
 
 fn cmd_rotate_master_key(_global: &GlobalArgs) -> Result<(), CliError> {
-    // Rotation (decrypt-all-old -> re-encrypt-all-new -> atomic key_id swap) is a
-    // larger operation; it is wired in a dedicated follow-up. The command exists so
-    // the surface is complete and discoverable.
+    // The DB-side rewrap (credentials-core EncryptedStore::rotate_master_key) is
+    // built + tested: it re-wraps every record and the sealed audit key under the
+    // new key in ONE atomic fenced transaction. What this command still needs is the
+    // crash-safe KEY-STORE coordination: the keychain/operator-path holds ONE key,
+    // and both naive orderings (persist-new-key-then-rewrap, or rewrap-then-persist)
+    // can brick the vault on a crash in the window between the key-store write and
+    // the DB commit (the key store and the DB would disagree on which key the
+    // records are sealed under). The crash-safe answer is a two-slot, resumable
+    // key-store handover (write the new key to a `next` slot, rewrap, then promote),
+    // which is a deliberate design step under review before it lands here.
     Err(CliError::Usage(
-        "rotate-master-key is not yet implemented in this build".to_string(),
+        "rotate-master-key: DB rewrap is implemented; the crash-safe key-store \
+         handover is pending design review and not yet wired"
+            .to_string(),
     ))
 }
 

@@ -112,10 +112,10 @@ async fn kill9_between_response_and_commit_resolves_to_needs_reauth() {
     };
     let store = open_sqlite(&descriptor).expect("reopen after kill");
     EncryptedStore::migrate(&store).expect("migrate");
-    let store = Arc::new(EncryptedStore::new(
-        store,
-        MasterKey::from_bytes([9u8; MASTER_KEY_LEN]),
-    ));
+    let store = Arc::new(
+        EncryptedStore::open(store, MasterKey::from_bytes([9u8; MASTER_KEY_LEN]))
+            .expect("open vault"),
+    );
 
     // Before reconciliation: the intent is dangling and the OLD token is still
     // stored (the staged token never reached disk).

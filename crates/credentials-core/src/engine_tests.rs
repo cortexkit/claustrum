@@ -123,7 +123,7 @@ fn tmp_descriptor() -> (std::path::PathBuf, StorageDescriptor) {
 fn open_store(descriptor: &StorageDescriptor, seed: u8) -> EncryptedStore {
     let store = open_sqlite(descriptor).expect("open");
     EncryptedStore::migrate(&store).expect("migrate");
-    EncryptedStore::new(store, MasterKey::from_bytes([seed; MASTER_KEY_LEN]))
+    EncryptedStore::open(store, MasterKey::from_bytes([seed; MASTER_KEY_LEN])).expect("open vault")
 }
 
 fn stale_oauth_record() -> VaultRecord {
@@ -390,7 +390,8 @@ async fn lease_handover_fences_commit_and_converges_to_needs_reauth() {
     reopened
         .with_conn(|c| c.execute("UPDATE cortexkit_fence SET epoch = 0 WHERE id = 0", []))
         .expect("reset synthetic fence to let the new owner write");
-    let new_store = EncryptedStore::new(reopened, MasterKey::from_bytes([8u8; MASTER_KEY_LEN]));
+    let new_store =
+        EncryptedStore::open(reopened, MasterKey::from_bytes([8u8; MASTER_KEY_LEN])).expect("open");
     let (eng, _calls) = engine(new_store, StubAdapter::new("stub"));
     let outcomes = eng.reconcile().await.expect("reconcile");
     assert!(matches!(

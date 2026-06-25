@@ -190,7 +190,9 @@ async fn build_surface(ack: &ModuleHelloAckBody) -> Result<ReadSurface, ModuleEr
     let store =
         open_sqlite(&descriptor).map_err(|e| ModuleError::Message(format!("open store: {e}")))?;
     EncryptedStore::migrate(&store).map_err(|e| ModuleError::Message(format!("migrate: {e}")))?;
-    let store = Arc::new(EncryptedStore::new(store, key));
+    let store = EncryptedStore::open(store, key)
+        .map_err(|e| ModuleError::Message(format!("open vault: {e}")))?;
+    let store = Arc::new(store);
 
     let http =
         Arc::new(ReqwestTransport::new().map_err(|e| ModuleError::Message(format!("http: {e}")))?);

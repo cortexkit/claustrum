@@ -110,9 +110,22 @@ const MIGRATIONS: &[Migration] = &[
                          alarm_reason   TEXT, \
                          prev_mac       TEXT NOT NULL, \
                          entry_mac      TEXT NOT NULL\
+                     ); \
+                     CREATE TABLE vault_secrets (\
+                         name      TEXT PRIMARY KEY, \
+                         key_id    TEXT NOT NULL, \
+                         envelope  BLOB NOT NULL\
                      );",
     },
 ];
+
+/// The `vault_secrets` row name for the audit-chain HMAC key. The audit key is a
+/// CSPRNG secret created once and SEALED under the master key (so the audit log is
+/// unforgeable without the master key), re-sealed on master-key rotation but never
+/// regenerated — keeping one continuously-verifiable chain across rotations. Its
+/// envelope uses this fixed pseudo-id and version 0 as the AAD binding.
+const AUDIT_KEY_SECRET_NAME: &str = "__vault_audit_key__";
+const AUDIT_KEY_RECORD_VERSION: u64 = 0;
 
 /// The non-secret lifecycle state of a stored record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -222,6 +235,12 @@ pub enum StoreOpError {
     Fenced { holder_epoch: u64, db_epoch: u64 },
     /// A serialization failure building the record body.
     Encode(String),
+    /// The vault's sealed audit key is missing on a non-empty vault — a genuinely
+    /// corrupt state (it is created once at init and never deleted). Fail-closed:
+    /// the audit chain cannot be verified, so the vault refuses to open rather than
+    /// silently regenerating the key (which would make all existing entries
+    /// unverifiable).
+    CorruptVault(String),
     /// An underlying storage/backend error.
     Store(String),
 }
@@ -248,6 +267,7 @@ impl std::fmt::Display for StoreOpError {
                 "fenced write rejected: holder epoch {holder_epoch} < database epoch {db_epoch}"
             ),
             StoreOpError::Encode(m) => write!(f, "record encode failed: {m}"),
+            StoreOpError::CorruptVault(m) => write!(f, "vault corrupt: {m}"),
             StoreOpError::Store(m) => write!(f, "storage error: {m}"),
         }
     }
@@ -293,17 +313,26 @@ pub struct EncryptedStore {
 }
 
 impl EncryptedStore {
-    /// Wrap an already-open, migrated [`SqliteStore`] with a master key. The store
-    /// must have had [`EncryptedStore::migrate`] applied (open paths do this).
-    pub fn new(store: SqliteStore, key: MasterKey) -> Self {
+    /// Wrap an already-open, migrated [`SqliteStore`] with a master key, loading (or
+    /// creating, on a brand-new vault) the sealed audit-chain key.
+    ///
+    /// The audit key is a CSPRNG secret created ONCE — when the vault is brand-new
+    /// (no credentials, no audit entries, no existing audit_key row) — and SEALED
+    /// under the master key. On every later open it is LOADED and decrypted; a wrong
+    /// master key fails that decrypt the same way it fails a record decrypt
+    /// (fail-closed, not a panic). It is NEVER regenerated for an existing vault: a
+    /// missing audit_key row on a non-empty vault is [`StoreOpError::CorruptVault`]
+    /// (regenerating would silently make every existing audit entry unverifiable).
+    /// The store must have had [`EncryptedStore::migrate`] applied first.
+    pub fn open(store: SqliteStore, key: MasterKey) -> Result<Self, StoreOpError> {
         let key_id = key.key_id();
-        let audit_key = crate::audit::derive_audit_key(&key);
-        EncryptedStore {
+        let audit_key = load_or_create_audit_key(&store, &key)?;
+        Ok(EncryptedStore {
             store,
             key,
             key_id,
             audit_key,
-        }
+        })
     }
 
     /// Apply the vault schema migrations to a freshly opened store and set the
@@ -980,6 +1009,106 @@ impl EncryptedStore {
         Ok(audit::verify_chain(&self.audit_key, &entries))
     }
 
+    // ---- master-key rotation --------------------------------------------
+
+    /// Rotate the master key: re-wrap every record and the sealed audit key under
+    /// `new_key`, swap every `key_id` column to the new fingerprint, and append a
+    /// `RotateMasterKey` audit entry — ALL in ONE fenced transaction, so it is
+    /// atomic (all-or-nothing). A `Fenced`/failed transaction leaves the OLD key
+    /// opening everything (fail-closed); only post-commit is the old key dead.
+    ///
+    /// The caller MUST persist `new_key` to the key store BEFORE calling this, so a
+    /// crash right after commit leaves the vault openable by the persisted new key.
+    /// The audit_key VALUE is unchanged (only re-sealed), so the chain stays one
+    /// continuously-verifiable sequence across the rotation; the `RotateMasterKey`
+    /// entry is MAC'd with that stable audit key and chains cleanly.
+    ///
+    /// A record that fails to decrypt under the OLD key is already corrupt; it is
+    /// left untouched (it cannot be re-wrapped) rather than failing the whole
+    /// rotation — per-record fault isolation. It was already unreadable, so dropping
+    /// the old key loses nothing further.
+    ///
+    /// On success the store's in-memory key + key_id are swapped to the new key.
+    pub fn rotate_master_key(&mut self, new_key: MasterKey) -> Result<(), StoreOpError> {
+        let old_key = &self.key;
+        let new_key_id_hex = new_key.key_id().to_hex();
+        let audit_key = self.audit_key;
+
+        // Re-seal the audit-key secret under the new key (value unchanged).
+        let audit_binding = RecordBinding {
+            credential_id: AUDIT_KEY_SECRET_NAME,
+            record_version: AUDIT_KEY_RECORD_VERSION,
+        };
+        let new_audit_envelope =
+            envelope::seal(&new_key, &audit_key, &audit_binding).map_err(StoreOpError::Decrypt)?;
+
+        self.store
+            .with_conn_fenced(|tx| {
+                // Snapshot every record id + version + current envelope.
+                let rows: Vec<(String, i64, Vec<u8>)> = {
+                    let mut stmt = tx.prepare(
+                        "SELECT credential_id, record_version, envelope FROM credentials",
+                    )?;
+                    let mapped = stmt.query_map([], |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, i64>(1)?,
+                            r.get::<_, Vec<u8>>(2)?,
+                        ))
+                    })?;
+                    mapped.collect::<rusqlite::Result<Vec<_>>>()?
+                };
+
+                for (id, version, old_blob) in rows {
+                    let binding = RecordBinding {
+                        credential_id: &id,
+                        record_version: version as u64,
+                    };
+                    // Decrypt with the old key; a record that does not decrypt is
+                    // already corrupt — leave it untouched (per-record isolation).
+                    let plaintext = match envelope::open(old_key, &old_blob, &binding) {
+                        Ok(pt) => pt,
+                        Err(_) => continue,
+                    };
+                    // Re-seal under the new key (same id + version => same AAD).
+                    let new_blob = envelope::seal(&new_key, &plaintext, &binding)
+                        .map_err(|_| rusqlite_err("re-seal under new key failed"))?;
+                    tx.execute(
+                        "UPDATE credentials SET envelope = ?2, key_id = ?3 \
+                         WHERE credential_id = ?1",
+                        rusqlite::params![id, new_blob, new_key_id_hex],
+                    )?;
+                }
+
+                // Re-seal the audit-key secret row under the new key.
+                tx.execute(
+                    "UPDATE vault_secrets SET envelope = ?2, key_id = ?3 WHERE name = ?1",
+                    rusqlite::params![AUDIT_KEY_SECRET_NAME, new_audit_envelope, new_key_id_hex],
+                )?;
+
+                // Append the vault-global RotateMasterKey entry (no credential_id),
+                // MAC'd with the stable audit key so the chain stays continuous.
+                append_audit_tx(
+                    tx,
+                    &audit_key,
+                    &AuditRecord {
+                        op: AuditOp::RotateMasterKey,
+                        credential_id: None,
+                        payload_hash: None,
+                        actor: "offline-cli".to_string(),
+                        alarm: Some(AlarmReason::AdminWrite),
+                    },
+                )?;
+                Ok(())
+            })
+            .map_err(StoreOpError::from)?;
+
+        // Commit succeeded: the new key now opens everything. Swap in-memory state.
+        self.key_id = new_key.key_id();
+        self.key = new_key;
+        Ok(())
+    }
+
     /// Seal a record into a cipher envelope bound to its id + version.
     fn seal_record(
         &self,
@@ -1012,6 +1141,93 @@ fn clear_intent_tx(tx: &rusqlite::Transaction, credential_id: &str) -> rusqlite:
     tx.execute(
         "DELETE FROM refresh_intent WHERE credential_id = ?1",
         rusqlite::params![credential_id],
+    )
+}
+
+/// Load the vault's sealed audit key, or create it on a brand-new vault.
+///
+/// The audit key lives in `vault_secrets` under [`AUDIT_KEY_SECRET_NAME`], sealed
+/// with the master key (AAD bound to that pseudo-id + version 0). On an existing
+/// row: decrypt it (a wrong master key fails closed here). On no row: only create a
+/// fresh CSPRNG key if the vault is genuinely EMPTY (no credentials, no audit
+/// entries); otherwise the row's absence is corruption and we fail closed rather
+/// than regenerate (which would orphan every existing audit entry).
+fn load_or_create_audit_key(
+    store: &SqliteStore,
+    key: &MasterKey,
+) -> Result<[u8; 32], StoreOpError> {
+    let binding = RecordBinding {
+        credential_id: AUDIT_KEY_SECRET_NAME,
+        record_version: AUDIT_KEY_RECORD_VERSION,
+    };
+
+    // Read the existing sealed audit-key envelope, if any.
+    let existing: Option<Vec<u8>> = store
+        .with_conn(|c| {
+            c.query_row(
+                "SELECT envelope FROM vault_secrets WHERE name = ?1",
+                rusqlite::params![AUDIT_KEY_SECRET_NAME],
+                |r| r.get::<_, Vec<u8>>(0),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(other),
+            })
+        })
+        .map_err(StoreOpError::from)?;
+
+    if let Some(blob) = existing {
+        // Decrypt with the master key — fail-closed on a wrong key (KeyMismatch) or
+        // tampering, never a panic.
+        let plaintext = envelope::open(key, &blob, &binding).map_err(StoreOpError::Decrypt)?;
+        let bytes: [u8; 32] = plaintext
+            .as_slice()
+            .try_into()
+            .map_err(|_| StoreOpError::CorruptVault("audit key is not 32 bytes".to_string()))?;
+        return Ok(bytes);
+    }
+
+    // No audit-key row. Only a brand-new (empty) vault may create one.
+    let non_empty: bool = store
+        .with_conn(|c| {
+            c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM credentials) OR EXISTS(SELECT 1 FROM audit_log)",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|v| v != 0)
+        })
+        .map_err(StoreOpError::from)?;
+    if non_empty {
+        return Err(StoreOpError::CorruptVault(
+            "audit key missing on a non-empty vault (refusing to regenerate)".to_string(),
+        ));
+    }
+
+    // Brand-new vault: mint a fresh audit key and seal it under the master key.
+    let audit_key = crate::audit::generate_audit_key()
+        .map_err(|_| StoreOpError::Store("csprng".to_string()))?;
+    let blob = envelope::seal(key, &audit_key, &binding).map_err(StoreOpError::Decrypt)?;
+    let key_id_hex = key.key_id().to_hex();
+    store
+        .with_conn_fenced(|tx| {
+            tx.execute(
+                "INSERT INTO vault_secrets (name, key_id, envelope) VALUES (?1, ?2, ?3)",
+                rusqlite::params![AUDIT_KEY_SECRET_NAME, key_id_hex, blob],
+            )?;
+            Ok(())
+        })
+        .map_err(StoreOpError::from)?;
+    Ok(audit_key)
+}
+
+/// Wrap a message as a rusqlite error so a non-sql failure inside a transaction
+/// closure (e.g. an envelope seal failure during rotation) rolls the txn back.
+fn rusqlite_err(msg: &str) -> rusqlite::Error {
+    rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISMATCH),
+        Some(msg.to_string()),
     )
 }
 
@@ -1203,7 +1419,7 @@ mod tests {
         let store = open_sqlite(&descriptor).expect("open");
         EncryptedStore::migrate(&store).expect("migrate");
         let key = MasterKey::from_bytes([seed; MASTER_KEY_LEN]);
-        (root, EncryptedStore::new(store, key))
+        (root, EncryptedStore::open(store, key).expect("open vault"))
     }
 
     fn oauth_record() -> VaultRecord {
@@ -1337,10 +1553,12 @@ mod tests {
     }
 
     #[test]
-    fn wrong_key_does_not_decrypt_and_quarantines() {
-        // A record sealed under one key, then opened by a store holding a DIFFERENT
-        // key: the key_id check inside the envelope catches it, the row is
-        // quarantined, and nothing panics.
+    fn wrong_key_fails_closed_at_open() {
+        // A vault sealed under one key, then OPENED with a DIFFERENT key: the wrong
+        // key fails to decrypt the sealed audit key, so open() itself fails closed
+        // (KeyMismatch) — the vault never opens under the wrong key, and nothing
+        // panics. This is stronger than the old per-record check: a wrong key is
+        // rejected up front, before any credential is touched.
         let (root, store) = tmp_store(8);
         store.create("id", &oauth_record()).expect("create");
         let db_path = root.join("store.db");
@@ -1357,12 +1575,12 @@ mod tests {
             },
         };
         let reopened = open_sqlite(&descriptor).expect("reopen");
-        let wrong = EncryptedStore::new(reopened, MasterKey::from_bytes([0xEE; MASTER_KEY_LEN]));
-        match wrong.get("id") {
-            Err(StoreOpError::Decrypt(_)) => {}
-            other => panic!("expected Decrypt on wrong key, got {other:?}"),
+        let result = EncryptedStore::open(reopened, MasterKey::from_bytes([0xEE; MASTER_KEY_LEN]));
+        match result {
+            Err(StoreOpError::Decrypt(EnvelopeError::KeyMismatch { .. })) => {}
+            Err(other) => panic!("expected KeyMismatch at open under wrong key, got {other:?}"),
+            Ok(_) => panic!("expected open to fail closed under the wrong key"),
         }
-        assert_eq!(wrong.meta("id").unwrap().state, RecordState::Corrupt);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1461,6 +1679,77 @@ mod tests {
         assert_eq!(all.len(), 2);
         assert_eq!(all[0].seq, 1);
         assert_eq!(all[1].seq, 2);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rotate_master_key_rewraps_and_chain_stays_verifiable() {
+        let (root, mut store) = tmp_store(20);
+        store.create("a", &oauth_record()).expect("create a");
+        store.create("b", &oauth_record()).expect("create b");
+        // The audit chain has two put entries; capture its length.
+        let before = store.read_audit(None).unwrap().len();
+        assert!(store.verify_audit_chain().unwrap().is_none());
+
+        // Rotate to a new master key.
+        let new_key = MasterKey::from_bytes([0x77; MASTER_KEY_LEN]);
+        let new_key_id = new_key.key_id();
+        store.rotate_master_key(new_key).expect("rotate");
+
+        // Records are still readable (re-wrapped under the new key), unchanged plaintext.
+        assert_eq!(store.get("a").unwrap().payload, b"payload-bytes");
+        assert_eq!(store.get("b").unwrap().payload, b"payload-bytes");
+        // The key_id columns were swapped to the new fingerprint.
+        assert_eq!(store.meta("a").unwrap().key_id_hex, new_key_id.to_hex());
+        // The chain is STILL one continuously-verifiable sequence (stable audit key)
+        // and grew by exactly one RotateMasterKey entry.
+        assert_eq!(
+            store.verify_audit_chain().unwrap(),
+            None,
+            "chain spans rotation"
+        );
+        let after = store.read_audit(None).unwrap();
+        assert_eq!(after.len(), before + 1);
+        assert_eq!(after.last().unwrap().op, "rotate_master_key");
+        assert!(
+            after.last().unwrap().credential_id.is_none(),
+            "vault-global entry"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rotated_vault_reopens_only_under_new_key() {
+        let (root, mut store) = tmp_store(21);
+        store.create("a", &oauth_record()).unwrap();
+        let db_path = root.join("store.db");
+        let new_key = MasterKey::from_bytes([0x88; MASTER_KEY_LEN]);
+        store
+            .rotate_master_key(MasterKey::from_bytes([0x88; MASTER_KEY_LEN]))
+            .unwrap();
+        drop(store);
+
+        let descriptor = StorageDescriptor {
+            module_id: "cortexkit-credentials".into(),
+            storage_namespace: "vault".into(),
+            isolation: Isolation::Module,
+            backend: StorageBackend::Sqlite {
+                path: db_path.to_string_lossy().into_owned(),
+            },
+        };
+        // The OLD key no longer opens the vault (audit-key decrypt fails closed).
+        let reopened = open_sqlite(&descriptor).unwrap();
+        let old_result =
+            EncryptedStore::open(reopened, MasterKey::from_bytes([20u8; MASTER_KEY_LEN]));
+        assert!(
+            old_result.is_err(),
+            "old key must not reopen a rotated vault"
+        );
+        // The NEW key opens it and the records are intact.
+        let reopened = open_sqlite(&descriptor).unwrap();
+        let store = EncryptedStore::open(reopened, new_key).expect("new key opens");
+        assert_eq!(store.get("a").unwrap().payload, b"payload-bytes");
+        assert_eq!(store.verify_audit_chain().unwrap(), None);
         let _ = std::fs::remove_dir_all(&root);
     }
 

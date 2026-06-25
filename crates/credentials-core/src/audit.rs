@@ -15,14 +15,9 @@
 //! boundary.)
 
 use hmac::{Hmac, Mac};
-use sha2::{Digest, Sha256};
-
-use crate::key::MasterKey;
+use sha2::Sha256;
 
 type HmacSha256 = Hmac<Sha256>;
-
-/// Domain-separation label for deriving the audit-chain key from the master key.
-const AUDIT_KEY_DOMAIN: &[u8] = b"cortexkit-credentials/audit-chain/v1";
 
 /// The genesis predecessor mac for the first chain entry (a fixed, non-secret
 /// constant — the chain's anchor).
@@ -165,14 +160,14 @@ pub struct AuditEntry {
     pub entry_mac: String,
 }
 
-/// Derive the audit-chain HMAC key from the master key (domain-separated), so the
-/// chain key is bound to the same secret as record encryption but is not the master
-/// key itself.
-pub fn derive_audit_key(master: &MasterKey) -> [u8; 32] {
-    let mut h = Sha256::new();
-    h.update(AUDIT_KEY_DOMAIN);
-    h.update(master.as_bytes());
-    h.finalize().into()
+/// Generate a fresh CSPRNG audit-chain HMAC key. Created ONCE at vault init and
+/// then SEALED under the master key (see the store's `vault_secrets`); the value is
+/// stable across master-key rotations (only its wrapping key changes), so the chain
+/// stays continuously verifiable. NEVER regenerated for an existing vault.
+pub fn generate_audit_key() -> Result<[u8; 32], getrandom::Error> {
+    let mut k = [0u8; 32];
+    getrandom::getrandom(&mut k)?;
+    Ok(k)
 }
 
 /// The MAC-covered content of one audit entry (everything the chain authenticates
@@ -273,10 +268,11 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::key::MASTER_KEY_LEN;
 
-    fn key() -> MasterKey {
-        MasterKey::from_bytes([3u8; MASTER_KEY_LEN])
+    /// A fixed test audit key (in production this is a CSPRNG secret sealed under
+    /// the master key; tests just need a deterministic key).
+    fn test_key() -> [u8; 32] {
+        [3u8; 32]
     }
 
     fn entry(seq: i64, prev: &str, ak: &[u8; 32]) -> AuditEntry {
@@ -313,17 +309,15 @@ mod tests {
     }
 
     #[test]
-    fn audit_key_is_deterministic_and_domain_separated() {
-        let k = key();
-        assert_eq!(derive_audit_key(&k), derive_audit_key(&k));
-        // Not the bare master key bytes, not a bare SHA of them.
-        let bare: [u8; 32] = Sha256::digest([3u8; MASTER_KEY_LEN]).into();
-        assert_ne!(derive_audit_key(&k), bare);
+    fn generated_audit_keys_differ() {
+        let a = generate_audit_key().expect("csprng");
+        let b = generate_audit_key().expect("csprng");
+        assert_ne!(a, b, "fresh audit keys are distinct");
     }
 
     #[test]
     fn valid_chain_verifies() {
-        let ak = derive_audit_key(&key());
+        let ak = test_key();
         let e1 = entry(1, GENESIS_MAC, &ak);
         let e2 = entry(2, &e1.entry_mac, &ak);
         let e3 = entry(3, &e2.entry_mac, &ak);
@@ -332,7 +326,7 @@ mod tests {
 
     #[test]
     fn tampered_entry_breaks_chain() {
-        let ak = derive_audit_key(&key());
+        let ak = test_key();
         let e1 = entry(1, GENESIS_MAC, &ak);
         let mut e2 = entry(2, &e1.entry_mac, &ak);
         let e3 = entry(3, &e2.entry_mac, &ak);
@@ -343,7 +337,7 @@ mod tests {
 
     #[test]
     fn reordered_entries_break_chain() {
-        let ak = derive_audit_key(&key());
+        let ak = test_key();
         let e1 = entry(1, GENESIS_MAC, &ak);
         let e2 = entry(2, &e1.entry_mac, &ak);
         // e2 before e1: e2.prev_mac (e1's mac) != genesis.
@@ -352,16 +346,16 @@ mod tests {
 
     #[test]
     fn wrong_key_fails_verification() {
-        let ak = derive_audit_key(&key());
+        let ak = test_key();
         let e1 = entry(1, GENESIS_MAC, &ak);
-        let other = derive_audit_key(&MasterKey::from_bytes([9u8; MASTER_KEY_LEN]));
+        let other = [9u8; 32];
         // A different audit key cannot reproduce the mac.
         assert_eq!(verify_chain(&other, &[e1]), Some(1));
     }
 
     #[test]
     fn optional_field_presence_changes_mac() {
-        let ak = derive_audit_key(&key());
+        let ak = test_key();
         let base = MacFields {
             seq: 1,
             ts_ms: 1,

@@ -18,6 +18,7 @@
 // refresh adapters, the crash-safe refresh state machine, and the encrypted
 // store.
 
+pub mod audit;
 pub mod engine;
 #[cfg(test)]
 mod engine_tests;
@@ -29,6 +30,7 @@ pub mod refresh_adapters;
 pub mod resolver;
 pub mod store;
 
+pub use audit::{AlarmReason, AuditEntry, AuditOp, AuditRecord};
 pub use engine::{EngineError, ReauthReason, Reconciliation, RefreshEngine};
 pub use envelope::{open, seal, EnvelopeError, RecordBinding};
 pub use key::{KeyId, MasterKey};
@@ -46,6 +48,6 @@ pub use resolver::{
     ResolverConfig,
 };
 pub use store::{
-    payload_hash, refresh_token_hash, EncryptedStore, RecordMeta, RecordState, RefreshIntent,
-    StoreOpError,
+    handle_hash, mint_handle, payload_hash, refresh_token_hash, EncryptedStore, MintedHandle,
+    RecordMeta, RecordState, RefreshIntent, StoreOpError,
 };

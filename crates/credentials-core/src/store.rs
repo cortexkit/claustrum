@@ -33,6 +33,7 @@
 use cortexkit_store::{Migration, SqliteStore, StoreError};
 use sha2::{Digest, Sha256};
 
+use crate::audit::{self, AlarmReason, AuditEntry, AuditRecord};
 use crate::envelope::{self, EnvelopeError, RecordBinding};
 use crate::key::{KeyId, MasterKey};
 use crate::record::VaultRecord;
@@ -51,24 +52,67 @@ const SCHEMA_NAMESPACE: &str = "credentials";
 /// commit (its outcome is INDETERMINATE — the provider may have rotated), which
 /// startup reconciliation resolves fail-safe. At most one intent per credential
 /// (the id is the primary key), matching the engine's single-flight.
-const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    statements: "CREATE TABLE credentials (\
-                     credential_id   TEXT PRIMARY KEY, \
-                     record_version  INTEGER NOT NULL, \
-                     key_id          TEXT NOT NULL, \
-                     state           TEXT NOT NULL, \
-                     envelope        BLOB NOT NULL, \
-                     updated_at_ms   INTEGER NOT NULL\
-                 ); \
-                 CREATE TABLE refresh_intent (\
-                     credential_id    TEXT PRIMARY KEY, \
-                     record_version   INTEGER NOT NULL, \
-                     old_refresh_hash TEXT NOT NULL, \
-                     lease_epoch      INTEGER NOT NULL, \
-                     started_at_ms    INTEGER NOT NULL\
-                 );",
-}];
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        statements: "CREATE TABLE credentials (\
+                         credential_id   TEXT PRIMARY KEY, \
+                         record_version  INTEGER NOT NULL, \
+                         key_id          TEXT NOT NULL, \
+                         state           TEXT NOT NULL, \
+                         envelope        BLOB NOT NULL, \
+                         updated_at_ms   INTEGER NOT NULL\
+                     ); \
+                     CREATE TABLE refresh_intent (\
+                         credential_id    TEXT PRIMARY KEY, \
+                         record_version   INTEGER NOT NULL, \
+                         old_refresh_hash TEXT NOT NULL, \
+                         lease_epoch      INTEGER NOT NULL, \
+                         started_at_ms    INTEGER NOT NULL\
+                     );",
+    },
+    // Capability handles + the tamper-evident audit chain.
+    //
+    // `handles`: a credential is read by an unguessable 256-bit capability handle,
+    // not its public alias. Only the handle's SHA-256 HASH is stored (the raw handle
+    // is returned once at mint and written into the consumer's 0600 config), so a
+    // database leak yields no usable handle — just which credential_ids exist and
+    // how many handles each has (metadata, never a secret), which is why these are
+    // plaintext columns while credential payloads stay value-encrypted. Handles are
+    // per-credential revocable (revoke one, or all for a credential, and mint a fresh
+    // one without re-login).
+    //
+    // `audit_log`: an append-only, HMAC-chained record of EVERY durable mutation
+    // (admin writes, refresh commits, revocations), so every credential version is
+    // accounted for and an unexplained version bump is a detectable chain gap. Each
+    // entry's `entry_mac` is HMAC(audit_key, prev_mac || fields), keyed by a
+    // master-key-derived audit key, so the log cannot be forged or repaired without
+    // the master key. `alarm` flags a detected anomaly (overwrite-without-CAS,
+    // fetch-rate anomaly, admin write) as a durable, queryable row rather than a live
+    // notification.
+    Migration {
+        version: 2,
+        statements: "CREATE TABLE handles (\
+                         handle_hash    TEXT PRIMARY KEY, \
+                         credential_id  TEXT NOT NULL, \
+                         created_at_ms  INTEGER NOT NULL, \
+                         revoked        INTEGER NOT NULL DEFAULT 0\
+                     ); \
+                     CREATE INDEX idx_handles_credential ON handles(credential_id); \
+                     CREATE TABLE audit_log (\
+                         seq            INTEGER PRIMARY KEY AUTOINCREMENT, \
+                         ts_ms          INTEGER NOT NULL, \
+                         op             TEXT NOT NULL, \
+                         credential_id  TEXT, \
+                         payload_hash   TEXT, \
+                         actor          TEXT NOT NULL, \
+                         alarm          INTEGER NOT NULL DEFAULT 0, \
+                         alarm_reason   TEXT, \
+                         prev_mac       TEXT NOT NULL, \
+                         entry_mac      TEXT NOT NULL\
+                     );",
+    },
+];
 
 /// The non-secret lifecycle state of a stored record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -245,6 +289,7 @@ pub struct EncryptedStore {
     store: SqliteStore,
     key: MasterKey,
     key_id: KeyId,
+    audit_key: [u8; 32],
 }
 
 impl EncryptedStore {
@@ -252,7 +297,13 @@ impl EncryptedStore {
     /// must have had [`EncryptedStore::migrate`] applied (open paths do this).
     pub fn new(store: SqliteStore, key: MasterKey) -> Self {
         let key_id = key.key_id();
-        EncryptedStore { store, key, key_id }
+        let audit_key = crate::audit::derive_audit_key(&key);
+        EncryptedStore {
+            store,
+            key,
+            key_id,
+            audit_key,
+        }
     }
 
     /// Apply the vault schema migrations to a freshly opened store and set the
@@ -706,6 +757,123 @@ impl EncryptedStore {
         }
     }
 
+    // ---- capability handles ---------------------------------------------
+
+    /// Resolve a raw capability handle to its credential id. Hashes the presented
+    /// handle and looks up a NON-revoked row; returns [`StoreOpError::NotFound`]
+    /// when the handle is unknown or revoked (the read surface maps that to a
+    /// uniform not-found so a probe cannot tell "wrong handle" from "revoked").
+    pub fn resolve_handle(&self, raw_handle: &str) -> Result<String, StoreOpError> {
+        let h = handle_hash(raw_handle);
+        self.store
+            .with_conn(|c| {
+                c.query_row(
+                    "SELECT credential_id FROM handles \
+                     WHERE handle_hash = ?1 AND revoked = 0",
+                    rusqlite::params![h],
+                    |r| r.get::<_, String>(0),
+                )
+                .map(Some)
+                .or_else(|e| match e {
+                    rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                    other => Err(other),
+                })
+            })
+            .map_err(StoreOpError::from)?
+            .ok_or(StoreOpError::NotFound)
+    }
+
+    /// Record a freshly minted handle for a credential, storing only its hash. Runs
+    /// through the epoch-fenced write path, like every durable mutation.
+    pub fn put_handle_hash(
+        &self,
+        handle_hash_hex: &str,
+        credential_id: &str,
+    ) -> Result<(), StoreOpError> {
+        let now = now_ms();
+        self.store
+            .with_conn_fenced(|tx| {
+                tx.execute(
+                    "INSERT INTO handles (handle_hash, credential_id, created_at_ms, revoked) \
+                     VALUES (?1, ?2, ?3, 0)",
+                    rusqlite::params![handle_hash_hex, credential_id, now],
+                )?;
+                Ok(())
+            })
+            .map_err(StoreOpError::from)
+    }
+
+    /// Revoke a single handle by its raw value (idempotent — revoking an unknown or
+    /// already-revoked handle is a no-op success). The update runs through the
+    /// epoch-fenced write path, like every durable mutation.
+    pub fn revoke_handle(&self, raw_handle: &str) -> Result<(), StoreOpError> {
+        let h = handle_hash(raw_handle);
+        self.store
+            .with_conn_fenced(|tx| {
+                tx.execute(
+                    "UPDATE handles SET revoked = 1 WHERE handle_hash = ?1",
+                    rusqlite::params![h],
+                )?;
+                Ok(())
+            })
+            .map_err(StoreOpError::from)
+    }
+
+    /// Revoke ALL handles for a credential (e.g. on invalidate / suspected leak).
+    /// Returns the number revoked. Runs through the epoch-fenced write path.
+    pub fn revoke_all_handles(&self, credential_id: &str) -> Result<usize, StoreOpError> {
+        self.store
+            .with_conn_fenced(|tx| {
+                tx.execute(
+                    "UPDATE handles SET revoked = 1 \
+                     WHERE credential_id = ?1 AND revoked = 0",
+                    rusqlite::params![credential_id],
+                )
+            })
+            .map_err(StoreOpError::from)
+    }
+
+    // ---- audit chain ----------------------------------------------------
+
+    /// Append one entry to the tamper-evident audit chain, computing its HMAC over
+    /// the previous entry's mac, in a fenced write. Standalone variant; mutation
+    /// paths that must audit atomically use [`append_audit_tx`] inside their own
+    /// transaction.
+    pub fn append_audit(&self, record: &AuditRecord) -> Result<AuditEntry, StoreOpError> {
+        let audit_key = self.audit_key;
+        self.store
+            .with_conn_fenced(|tx| append_audit_tx(tx, &audit_key, record))
+            .map_err(StoreOpError::from)
+    }
+
+    /// Read the audit chain (oldest first), capped at `limit` most-recent entries
+    /// when `limit` is `Some`. Used by status/monitoring to surface alarms and by
+    /// the integrity check.
+    pub fn read_audit(&self, limit: Option<usize>) -> Result<Vec<AuditEntry>, StoreOpError> {
+        self.store
+            .with_conn(|c| {
+                // Fetch newest-first with the cap, then reverse to chain order.
+                let cap: i64 = limit.map(|n| n as i64).unwrap_or(-1); // -1 = no limit
+                let mut stmt = c.prepare(
+                    "SELECT seq, ts_ms, op, credential_id, payload_hash, actor, alarm, \
+                            alarm_reason, prev_mac, entry_mac \
+                     FROM audit_log ORDER BY seq DESC LIMIT ?1",
+                )?;
+                let rows = stmt.query_map(rusqlite::params![cap], row_to_audit)?;
+                let mut v = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+                v.reverse();
+                Ok(v)
+            })
+            .map_err(StoreOpError::from)
+    }
+
+    /// Verify the full audit chain against the master-key-derived audit key.
+    /// Returns the seq of the first broken entry, or `None` if it verifies.
+    pub fn verify_audit_chain(&self) -> Result<Option<i64>, StoreOpError> {
+        let entries = self.read_audit(None)?;
+        Ok(audit::verify_chain(&self.audit_key, &entries))
+    }
+
     /// Seal a record into a cipher envelope bound to its id + version.
     fn seal_record(
         &self,
@@ -739,6 +907,146 @@ fn clear_intent_tx(tx: &rusqlite::Transaction, credential_id: &str) -> rusqlite:
         "DELETE FROM refresh_intent WHERE credential_id = ?1",
         rusqlite::params![credential_id],
     )
+}
+
+/// Hex SHA-256 of a raw capability handle — the only form of a handle the store
+/// persists (a database leak yields no usable handle).
+pub fn handle_hash(raw_handle: &str) -> String {
+    let mut h = Sha256::new();
+    h.update(b"cortexkit-credentials/handle/v1");
+    h.update(raw_handle.as_bytes());
+    let digest = h.finalize();
+    use std::fmt::Write;
+    let mut s = String::with_capacity(64);
+    for b in digest {
+        let _ = write!(s, "{b:02x}");
+    }
+    s
+}
+
+fn base64url(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(ALPHABET[((n >> 18) & 0x3F) as usize] as char);
+        out.push(ALPHABET[((n >> 12) & 0x3F) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(ALPHABET[((n >> 6) & 0x3F) as usize] as char);
+        }
+        if chunk.len() > 2 {
+            out.push(ALPHABET[(n & 0x3F) as usize] as char);
+        }
+    }
+    out
+}
+
+pub struct MintedHandle {
+    pub raw: String,
+    pub hash: String,
+}
+
+/// Mint a fresh capability handle: 256 CSPRNG bits as a `ckh_`-prefixed base64url
+/// string. The raw value is returned once; only its hash is ever persisted.
+pub fn mint_handle() -> Result<MintedHandle, getrandom::Error> {
+    let mut bytes = [0u8; 32];
+    getrandom::getrandom(&mut bytes)?;
+    let value = format!("ckh_{}", base64url(&bytes));
+    let hash = handle_hash(&value);
+    Ok(MintedHandle { raw: value, hash })
+}
+
+/// Append an audit entry within an open transaction: read the current tip mac,
+/// compute this entry's mac over it, insert it. Used both standalone and folded
+/// into a mutation's own transaction so the audit entry and the mutation commit
+/// together. The single-writer lease guarantees no concurrent appender, so reading
+/// the tip and inserting the next seq is race-free.
+pub(crate) fn append_audit_tx(
+    tx: &rusqlite::Transaction,
+    audit_key: &[u8; 32],
+    record: &AuditRecord,
+) -> rusqlite::Result<AuditEntry> {
+    let prev_mac: String = tx
+        .query_row(
+            "SELECT entry_mac FROM audit_log ORDER BY seq DESC LIMIT 1",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .unwrap_or_else(|_| audit::GENESIS_MAC.to_string());
+
+    let next_seq: i64 = tx
+        .query_row("SELECT COALESCE(MAX(seq), 0) + 1 FROM audit_log", [], |r| {
+            r.get(0)
+        })
+        .unwrap_or(1);
+
+    let ts_ms = now_ms();
+    let op = record.op.as_str();
+    let alarm = record.alarm.is_some();
+    let alarm_reason = record.alarm.map(AlarmReason::as_str);
+    let entry_mac = audit::compute_entry_mac(
+        audit_key,
+        &prev_mac,
+        &audit::MacFields {
+            seq: next_seq,
+            ts_ms,
+            op,
+            credential_id: record.credential_id.as_deref(),
+            payload_hash: record.payload_hash.as_deref(),
+            actor: &record.actor,
+            alarm,
+            alarm_reason,
+        },
+    );
+
+    tx.execute(
+        "INSERT INTO audit_log \
+         (seq, ts_ms, op, credential_id, payload_hash, actor, alarm, alarm_reason, prev_mac, entry_mac) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        rusqlite::params![
+            next_seq,
+            ts_ms,
+            op,
+            record.credential_id,
+            record.payload_hash,
+            record.actor,
+            alarm as i64,
+            alarm_reason,
+            prev_mac,
+            entry_mac,
+        ],
+    )?;
+
+    Ok(AuditEntry {
+        seq: next_seq,
+        ts_ms,
+        op: op.to_string(),
+        credential_id: record.credential_id.clone(),
+        payload_hash: record.payload_hash.clone(),
+        actor: record.actor.clone(),
+        alarm,
+        alarm_reason: alarm_reason.map(String::from),
+        prev_mac,
+        entry_mac,
+    })
+}
+
+fn row_to_audit(row: &rusqlite::Row<'_>) -> rusqlite::Result<AuditEntry> {
+    Ok(AuditEntry {
+        seq: row.get(0)?,
+        ts_ms: row.get(1)?,
+        op: row.get(2)?,
+        credential_id: row.get(3)?,
+        payload_hash: row.get(4)?,
+        actor: row.get(5)?,
+        alarm: row.get::<_, i64>(6)? != 0,
+        alarm_reason: row.get(7)?,
+        prev_mac: row.get(8)?,
+        entry_mac: row.get(9)?,
+    })
 }
 
 /// Build a [`RefreshIntent`] from a row of the standard intent column projection.
@@ -954,6 +1262,126 @@ mod tests {
         assert_eq!(by_id["a"].state, RecordState::Active);
         assert_eq!(by_id["b"].state, RecordState::NeedsReauth);
         assert_eq!(by_id["a"].key_id_hex, store.key_id().to_hex());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn handle_mint_resolve_revoke() {
+        let (root, store) = tmp_store(10);
+        store.create("opencode:anthropic", &oauth_record()).unwrap();
+        let h = mint_handle().expect("mint");
+        assert!(h.raw.starts_with("ckh_"));
+        assert_eq!(h.hash, handle_hash(&h.raw));
+        store
+            .put_handle_hash(&h.hash, "opencode:anthropic")
+            .unwrap();
+        // Resolve maps the raw handle to its credential id.
+        assert_eq!(store.resolve_handle(&h.raw).unwrap(), "opencode:anthropic");
+        // Revoke makes it resolve to NotFound (uniform with an unknown handle).
+        store.revoke_handle(&h.raw).unwrap();
+        assert!(matches!(
+            store.resolve_handle(&h.raw),
+            Err(StoreOpError::NotFound)
+        ));
+        // An unknown handle is also NotFound (no distinction leaked).
+        assert!(matches!(
+            store.resolve_handle("ckh_bogus"),
+            Err(StoreOpError::NotFound)
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn revoke_all_handles_for_credential() {
+        let (root, store) = tmp_store(11);
+        store.create("id", &oauth_record()).unwrap();
+        let h1 = mint_handle().unwrap();
+        let h2 = mint_handle().unwrap();
+        store.put_handle_hash(&h1.hash, "id").unwrap();
+        store.put_handle_hash(&h2.hash, "id").unwrap();
+        let n = store.revoke_all_handles("id").unwrap();
+        assert_eq!(n, 2, "both handles revoked");
+        assert!(matches!(
+            store.resolve_handle(&h1.raw),
+            Err(StoreOpError::NotFound)
+        ));
+        assert!(matches!(
+            store.resolve_handle(&h2.raw),
+            Err(StoreOpError::NotFound)
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn audit_chain_appends_and_verifies() {
+        let (root, store) = tmp_store(12);
+        let e1 = store
+            .append_audit(&AuditRecord {
+                op: crate::audit::AuditOp::Put,
+                credential_id: Some("id".into()),
+                payload_hash: Some("abcd".into()),
+                actor: "offline-cli".into(),
+                alarm: None,
+            })
+            .expect("append 1");
+        assert_eq!(e1.seq, 1);
+        assert_eq!(e1.prev_mac, crate::audit::GENESIS_MAC);
+        let e2 = store
+            .append_audit(&AuditRecord {
+                op: crate::audit::AuditOp::Overwrite,
+                credential_id: Some("id".into()),
+                payload_hash: Some("ef01".into()),
+                actor: "offline-cli".into(),
+                alarm: Some(AlarmReason::OverwriteWithoutCas),
+            })
+            .expect("append 2");
+        assert_eq!(e2.seq, 2);
+        assert_eq!(e2.prev_mac, e1.entry_mac, "chain links");
+        assert!(e2.alarm);
+        // The full chain verifies under the store's master-key-derived audit key.
+        assert_eq!(store.verify_audit_chain().unwrap(), None);
+        // read_audit returns chain order, oldest first.
+        let all = store.read_audit(None).unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].seq, 1);
+        assert_eq!(all[1].seq, 2);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn audit_chain_detects_tampering() {
+        let (root, store) = tmp_store(13);
+        for i in 0..3 {
+            store
+                .append_audit(&AuditRecord {
+                    op: crate::audit::AuditOp::RefreshCommit,
+                    credential_id: Some(format!("id{i}")),
+                    payload_hash: Some("hh".into()),
+                    actor: "conn-1".into(),
+                    alarm: None,
+                })
+                .unwrap();
+        }
+        assert_eq!(
+            store.verify_audit_chain().unwrap(),
+            None,
+            "clean chain verifies"
+        );
+        // Tamper with a row's payload_hash directly (a key-less attacker editing the
+        // db) — the HMAC no longer matches, so verification flags the broken seq.
+        store
+            .with_raw_conn(|c| {
+                c.execute(
+                    "UPDATE audit_log SET payload_hash = 'tampered' WHERE seq = 2",
+                    [],
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            store.verify_audit_chain().unwrap(),
+            Some(2),
+            "tampered entry detected"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }

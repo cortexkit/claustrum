@@ -311,16 +311,34 @@ thin-core *exception for the credential module only*.
   `credential_id` + `record_version` (anti-relocation + anti-rollback), and a
   single defensive decoder bounds-checks every field so malformed ciphertext
   returns a typed error and never panics (the fuzz invariant of the §13 gate).
-- **Master key resolution**: desktop = OS keychain (macOS Keychain via `security`;
-  specify service/account string + locked-keychain behavior = fail-closed
-  `vault_locked`). Headless = an operator-supplied key path **OUTSIDE the data tree**
-  (e.g. `/run/secrets`, systemd `LoadCredential`) — **co-location with `store.db` is
-  FORBIDDEN** (the council called a 0600 key beside the ciphertext "security
-  theater"; a single backup leaks both). Fail-closed if the key path resolves under
-  the data dir. Vault dir is `0700`.
-- **Bootstrap (first run)**: generate a 32-byte key via OS CSPRNG, store in
-  keychain (desktop) / the operator path (headless). Fail-closed if neither is
-  writable.
+- **Master key resolution is a pluggable `MasterKeyStore`** — a backend trait so new
+  custody mechanisms slot in without restructuring the resolver. Backends:
+  - **macOS Keychain** (v1, via the `security` CLI; fixed service/account string;
+    locked keychain → fail-closed `vault_locked`). The key never touches the data dir.
+  - **Operator key path** (v1, headless/server): an operator-supplied key file
+    **OUTSIDE the data tree** (e.g. `/run/secrets`, systemd `LoadCredential`) —
+    **co-location with `store.db` is FORBIDDEN** (a plaintext key beside the
+    ciphertext means one backup leaks both). Fail-closed if the key path resolves
+    under the data dir.
+  - **CK-app-delivered** (future): the productized CortexKit app is the natural
+    **signed keychain custodian** — it creates the keychain item with an ACL bound to
+    its own code signature, so another app reading the item triggers a user prompt (a
+    real barrier against other apps + casual same-user processes, and the prompt is a
+    detection signal). It then delivers the master key to the module. The v1
+    `security`-CLI path is WEAKER (any same-user process invoking `security` can read
+    the broadly-scoped item) and **REMAINS a supported path for setups without the
+    signed app** (headless, server) — not throwaway dev scaffolding. NEITHER path
+    defeats a determined same-user attacker (process injection, invoking our own
+    binary) — that is the inherent local ceiling every OS keychain shares; the wins
+    are off-box protection (theft / backup / other-user), casual-process resistance,
+    and audit.
+  - **DPAPI** (future, Windows) / **Secret Service** (future, Linux desktop).
+  The `key_id` wrong-key check (expected fingerprint → fail-closed `vault_locked`
+  before any record decrypt) lives ABOVE the backend in the resolver, so it applies
+  uniformly to every backend.
+- **Bootstrap (first run)**: generate a 32-byte key via OS CSPRNG, store in the
+  active backend (keychain / operator path). Fail-closed if neither is writable.
+  Vault dir is `0700`.
 - **Rotation is a v1 op, not a deferred stub** (the council called key_id-without-an-op
   a trap): ship **`credential.rotate_master_key`** (decrypt-all-old → re-encrypt-all
   -new → atomic `key_id` swap under the lease). The trigger UI can defer; the op must

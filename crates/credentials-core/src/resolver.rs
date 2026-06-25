@@ -1,26 +1,35 @@
 //! Master-key resolution: where the vault's 32-byte master key comes from, and
 //! the fail-closed rules around it.
 //!
-//! Two sources, matching the contract:
-//! - **Keychain** (desktop): a macOS Keychain generic password, addressed by a
-//!   fixed service/account. A locked keychain fails closed as `vault_locked`
-//!   rather than blocking on an interactive unlock prompt.
-//! - **Operator path** (headless): an operator-provisioned key file that MUST live
-//!   OUTSIDE the vault data tree. Co-locating the key beside `store.db` is
-//!   forbidden — a single backup that captured both the ciphertext and its key
-//!   would defeat at-rest encryption entirely — so resolution fails closed if the
-//!   key file resolves to a directory under the data dir.
+//! ## Pluggable backends
 //!
-//! First-run [`bootstrap`] mints a CSPRNG key into the chosen store, failing
+//! Custody is a pluggable [`MasterKeyStore`] backend trait so new mechanisms slot
+//! in without restructuring the resolver. Two backends ship in v1:
+//! - [`KeychainCli`] (desktop): a macOS Keychain generic password, addressed by a
+//!   fixed service/account read via the `security` CLI. A locked keychain fails
+//!   closed as `vault_locked` rather than blocking on an interactive unlock prompt.
+//! - [`OperatorPathStore`] (headless/server): an operator-provisioned key file that
+//!   MUST live OUTSIDE the vault data tree. Co-locating the key beside `store.db` is
+//!   forbidden — a single backup that captured both the ciphertext and its key would
+//!   defeat at-rest encryption entirely — so resolution fails closed if the key file
+//!   resolves to a directory under the data dir.
+//!
+//! Future backends (a signed-app key delivery, Windows DPAPI, Linux Secret Service)
+//! implement the same trait and add a [`KeySource`] variant; the orchestration below
+//! is backend-agnostic, so they need no resolver changes.
+//!
+//! First-run [`bootstrap`] mints a CSPRNG key into the active backend, failing
 //! closed if the store is not writable. The vault directory is created `0700`.
 //!
-//! ## Wrong-key fast-fail
+//! ## Wrong-key fast-fail (above the backend)
 //!
 //! [`resolve`] takes an optional expected [`KeyId`] (the fingerprint the vault
 //! recorded for the key its records are sealed under). If the loaded key's
 //! fingerprint does not match, resolution fails with [`MasterKeyError::KeyMismatch`]
 //! BEFORE any record is decrypted — so supplying the wrong or a rotated key is a
-//! single clean `vault_locked`, not a flood of per-record decrypt failures.
+//! single clean `vault_locked`, not a flood of per-record decrypt failures. This
+//! check lives in the resolver, ABOVE the backend, so it applies uniformly to every
+//! backend.
 //!
 //! ## Testability
 //!
@@ -86,6 +95,12 @@ pub enum MasterKeyError {
     KeyStoreUnwritable(String),
     /// Stored key material is not a valid 32-byte hex key.
     InvalidKeyMaterial(String),
+    /// Bootstrap was attempted but a master key is ALREADY provisioned in this
+    /// backend. Bootstrap is strictly first-run; refusing to clobber an existing
+    /// key is what stops a stray second bootstrap from replacing the key every
+    /// existing record is sealed under (which would brick the whole vault). Both
+    /// v1 backends raise this symmetrically.
+    KeyAlreadyProvisioned(String),
     /// Running the keychain CLI failed (spawn error, non-macOS host, ...).
     KeychainExec(String),
     /// A filesystem error preparing the vault dir or reading/writing the key.
@@ -124,6 +139,9 @@ impl std::fmt::Display for MasterKeyError {
                 data_dir.display()
             ),
             MasterKeyError::KeyPathInvalid(m) => write!(f, "operator key path is unusable: {m}"),
+            MasterKeyError::KeyAlreadyProvisioned(m) => {
+                write!(f, "a master key is already provisioned: {m}")
+            }
             MasterKeyError::KeyStoreUnwritable(m) => write!(f, "key store is not writable: {m}"),
             MasterKeyError::InvalidKeyMaterial(m) => {
                 write!(f, "stored key material is invalid: {m}")
@@ -137,21 +155,96 @@ impl std::fmt::Display for MasterKeyError {
 
 impl std::error::Error for MasterKeyError {}
 
+/// A master-key custody backend: the mechanism that holds the 32-byte key (a
+/// keychain item, an operator file, a future signed-app delivery, ...).
+///
+/// A backend does exactly two things — load the existing key and store a freshly
+/// generated one on first-run bootstrap — and is handed the vault `data_dir` so a
+/// backend that lives on the filesystem can enforce its placement rules (the
+/// operator-path backend forbids co-location under the data tree). Everything
+/// shared across backends — directory `0700` setup, the CSPRNG key generation, and
+/// the `key_id` wrong-key check — lives ABOVE the backend in [`resolve`] /
+/// [`bootstrap`], so a new backend implements only its own load/store and inherits
+/// all of it. Adding a backend is a new `impl` plus a [`KeySource`] variant; no
+/// orchestration changes.
+pub trait MasterKeyStore {
+    /// Load the existing master key. A backend with no key provisioned yet returns
+    /// [`MasterKeyError::NotBootstrapped`]; an unavailable/locked store returns
+    /// [`MasterKeyError::VaultLocked`].
+    fn load(&self, data_dir: &Path) -> Result<MasterKey, MasterKeyError>;
+
+    /// Persist a freshly generated key (first-run only). Implementations must fail
+    /// closed rather than overwrite an existing key.
+    fn store(&self, data_dir: &Path, key: &MasterKey) -> Result<(), MasterKeyError>;
+}
+
+/// The macOS Keychain backend (v1, desktop): a generic password addressed by a
+/// fixed service/account, read/written via the `security` CLI. The key never
+/// touches the data dir, so it ignores `data_dir`.
+pub struct KeychainCli {
+    /// Keychain service string (the item's "where").
+    pub service: String,
+    /// Keychain account string (the item's "name").
+    pub account: String,
+}
+
+impl MasterKeyStore for KeychainCli {
+    fn load(&self, _data_dir: &Path) -> Result<MasterKey, MasterKeyError> {
+        load_from_keychain(&self.service, &self.account)
+    }
+
+    fn store(&self, _data_dir: &Path, key: &MasterKey) -> Result<(), MasterKeyError> {
+        store_in_keychain(&self.service, &self.account, key)
+    }
+}
+
+/// The operator-path backend (v1, headless/server): a key file that MUST live
+/// outside the vault data tree. Both load and store enforce the no-co-location
+/// rule against `data_dir` before touching the file.
+pub struct OperatorPathStore {
+    /// Absolute path to the key file (64 hex chars = 32 bytes), outside the data dir.
+    pub path: PathBuf,
+}
+
+impl MasterKeyStore for OperatorPathStore {
+    fn load(&self, data_dir: &Path) -> Result<MasterKey, MasterKeyError> {
+        ensure_outside_data_dir(&self.path, data_dir)?;
+        load_from_operator_path(&self.path)
+    }
+
+    fn store(&self, data_dir: &Path, key: &MasterKey) -> Result<(), MasterKeyError> {
+        ensure_outside_data_dir(&self.path, data_dir)?;
+        store_at_operator_path(&self.path, key)
+    }
+}
+
+impl KeySource {
+    /// Build the [`MasterKeyStore`] backend this source names. The one place that
+    /// maps config to a backend instance — a new backend adds a match arm here.
+    pub fn backend(&self) -> Box<dyn MasterKeyStore> {
+        match self {
+            KeySource::Keychain { service, account } => Box::new(KeychainCli {
+                service: service.clone(),
+                account: account.clone(),
+            }),
+            KeySource::OperatorPath { path } => Box::new(OperatorPathStore { path: path.clone() }),
+        }
+    }
+}
+
 /// Load the existing master key, optionally checking it against the vault's
 /// recorded fingerprint. Fails closed on a locked store, a missing key, a
 /// fingerprint mismatch, or a forbidden key/data co-location.
+///
+/// Backend-agnostic: it prepares the vault dir, delegates the actual load to the
+/// configured [`MasterKeyStore`], then applies the `key_id` wrong-key check above
+/// the backend so every backend gets it uniformly.
 pub fn resolve(
     config: &ResolverConfig,
     expected_key_id: Option<KeyId>,
 ) -> Result<MasterKey, MasterKeyError> {
     ensure_vault_dir(&config.data_dir)?;
-    let key = match &config.source {
-        KeySource::Keychain { service, account } => load_from_keychain(service, account)?,
-        KeySource::OperatorPath { path } => {
-            ensure_outside_data_dir(path, &config.data_dir)?;
-            load_from_operator_path(path)?
-        }
-    };
+    let key = config.source.backend().load(&config.data_dir)?;
     if let Some(expected) = expected_key_id {
         let loaded = key.key_id();
         if loaded != expected {
@@ -162,19 +255,15 @@ pub fn resolve(
 }
 
 /// First-run provisioning: generate a CSPRNG master key and persist it to the
-/// configured store, failing closed if the store is not writable. Returns the
-/// new key (and its [`KeyId`] is what the vault records for future
-/// wrong-key checks).
+/// configured backend, failing closed if the store is not writable. Returns the
+/// new key (its [`KeyId`] is what the vault records for future wrong-key checks).
+///
+/// Backend-agnostic: the CSPRNG generation lives here, above the backend, so every
+/// backend bootstraps the same way and only implements its own persistence.
 pub fn bootstrap(config: &ResolverConfig) -> Result<MasterKey, MasterKeyError> {
     ensure_vault_dir(&config.data_dir)?;
     let key = MasterKey::generate().map_err(|_| MasterKeyError::Csprng)?;
-    match &config.source {
-        KeySource::Keychain { service, account } => store_in_keychain(service, account, &key)?,
-        KeySource::OperatorPath { path } => {
-            ensure_outside_data_dir(path, &config.data_dir)?;
-            store_at_operator_path(path, &key)?;
-        }
-    }
+    config.source.backend().store(&config.data_dir, &key)?;
     Ok(key)
 }
 
@@ -236,16 +325,32 @@ fn load_from_operator_path(path: &Path) -> Result<MasterKey, MasterKeyError> {
 }
 
 /// Write the key to the operator path as hex, `0600` on unix. Refuses to clobber
-/// an existing key file (bootstrap is first-run only).
+/// an existing key file (bootstrap is first-run only): an existing file is a
+/// distinct "already provisioned" outcome, symmetric with the keychain backend's
+/// duplicate-item rejection.
 fn store_at_operator_path(path: &Path, key: &MasterKey) -> Result<(), MasterKeyError> {
     if path.exists() {
-        return Err(MasterKeyError::KeyStoreUnwritable(format!(
+        return Err(MasterKeyError::KeyAlreadyProvisioned(format!(
             "key file {} already exists; refusing to overwrite",
             path.display()
         )));
     }
     let hex = encode_hex_key(key);
     write_key_file(path, hex.as_bytes())
+}
+
+/// Map an open failure: an existing file is the "already provisioned" outcome
+/// (`create_new` is atomic, so this also closes the check-then-write race the
+/// `path.exists()` pre-check leaves open); anything else is unwritable.
+fn map_create_new_err(path: &Path, e: std::io::Error) -> MasterKeyError {
+    if e.kind() == std::io::ErrorKind::AlreadyExists {
+        MasterKeyError::KeyAlreadyProvisioned(format!(
+            "key file {} already exists; refusing to overwrite",
+            path.display()
+        ))
+    } else {
+        MasterKeyError::KeyStoreUnwritable(e.to_string())
+    }
 }
 
 #[cfg(unix)]
@@ -257,7 +362,7 @@ fn write_key_file(path: &Path, bytes: &[u8]) -> Result<(), MasterKeyError> {
         .create_new(true)
         .mode(0o600)
         .open(path)
-        .map_err(|e| MasterKeyError::KeyStoreUnwritable(e.to_string()))?;
+        .map_err(|e| map_create_new_err(path, e))?;
     f.write_all(bytes)
         .map_err(|e| MasterKeyError::KeyStoreUnwritable(e.to_string()))?;
     f.flush().map_err(MasterKeyError::Io)?;
@@ -271,7 +376,7 @@ fn write_key_file(path: &Path, bytes: &[u8]) -> Result<(), MasterKeyError> {
         .write(true)
         .create_new(true)
         .open(path)
-        .map_err(|e| MasterKeyError::KeyStoreUnwritable(e.to_string()))?;
+        .map_err(|e| map_create_new_err(path, e))?;
     f.write_all(bytes)
         .map_err(|e| MasterKeyError::KeyStoreUnwritable(e.to_string()))?;
     f.flush().map_err(MasterKeyError::Io)?;
@@ -296,6 +401,13 @@ enum KeychainFind {
 
 /// Map a `security find-generic-password` invocation to an outcome. Pure (no I/O),
 /// so the locked/not-found/found decision is unit-tested without macOS.
+///
+/// Residual: the locked-vs-other decision leans on stderr substring matching,
+/// which is locale/format-fragile and cannot be validated in CI (no macOS keychain
+/// runner). Exit codes are used where stable (44 = not-found). When dogfooding on a
+/// real Mac, capture the actual `security` exit/stderr for the locked and
+/// duplicate cases and pin the classifiers against those real strings rather than
+/// guessing the wire format.
 fn classify_keychain_find(code: Option<i32>, stdout: &str, stderr: &str) -> KeychainFind {
     if code == Some(0) {
         return KeychainFind::Found(stdout.trim().to_string());
@@ -335,13 +447,64 @@ fn load_from_keychain(service: &str, account: &str) -> Result<MasterKey, MasterK
     }
 }
 
+/// The outcome of a keychain `add-generic-password` invocation, classified from
+/// its raw exit/output by the PURE [`classify_keychain_add`].
+#[derive(Debug, PartialEq, Eq)]
+enum KeychainAdd {
+    /// The item was created (first-run success).
+    Stored,
+    /// An item already exists for this service/account (errSecDuplicateItem):
+    /// bootstrap must NOT overwrite it (that would brick the vault).
+    AlreadyProvisioned,
+    /// An unclassified failure.
+    Error(String),
+}
+
+/// Map a `security add-generic-password` invocation to an outcome. Pure (no I/O),
+/// so the created/duplicate decision is unit-tested without macOS.
+fn classify_keychain_add(code: Option<i32>, stderr: &str) -> KeychainAdd {
+    if code == Some(0) {
+        return KeychainAdd::Stored;
+    }
+    let haystack = stderr.to_ascii_lowercase();
+    // errSecDuplicateItem is exit 45 and/or the "already exists" message. Without
+    // -U, `security` refuses to replace an existing item, so this is the
+    // first-run-only guard surfacing as a distinct, recoverable signal.
+    if code == Some(45) || haystack.contains("already exists") || haystack.contains("-25299") {
+        return KeychainAdd::AlreadyProvisioned;
+    }
+    KeychainAdd::Error(format!(
+        "security add exited with {code:?}: {}",
+        stderr.trim()
+    ))
+}
+
+/// Store the key as a keychain generic password — FIRST-RUN ONLY.
+///
+/// Deliberately omits `-U`: with `-U`, a stray second bootstrap would silently
+/// REPLACE the existing master key, after which every record sealed under the old
+/// key fails the key_id check and the whole vault is bricked. Without `-U`,
+/// `security` returns errSecDuplicateItem if the item exists, which we surface as
+/// [`MasterKeyError::KeyAlreadyProvisioned`] — symmetric with the operator-path
+/// backend's refuse-to-clobber, so bootstrap is safe-by-construction on both.
+///
+/// Documented residuals of this `security`-CLI write path (accepted for v1; the
+/// signed-app custodian is the hardened future target — see the contract's
+/// master-key model):
+///   1. The key hex is passed as an argv (`-w <hex>`), so it is briefly visible in
+///      the process table to same-user processes during the one-time bootstrap.
+///      This is within the accepted same-user residual (a same-user attacker can
+///      read the item via the CLI anyway), but the Security-framework/signed-app
+///      path avoids even this transient argv exposure.
+///   2. The item is created with the broad default ACL (no `-T`/partition
+///      restriction). The tight code-signature ACL that makes another app's read
+///      prompt the user is only achievable from the signed CK app, not the
+///      unsigned CLI.
 fn store_in_keychain(service: &str, account: &str, key: &MasterKey) -> Result<(), MasterKeyError> {
     let hex = encode_hex_key(key);
-    // -U updates if the item exists; bootstrap callers guard first-run elsewhere.
     let output = std::process::Command::new("security")
         .args([
             "add-generic-password",
-            "-U",
             "-s",
             service,
             "-a",
@@ -351,12 +514,13 @@ fn store_in_keychain(service: &str, account: &str, key: &MasterKey) -> Result<()
         ])
         .output()
         .map_err(|e| MasterKeyError::KeychainExec(e.to_string()))?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(MasterKeyError::KeyStoreUnwritable(
-            String::from_utf8_lossy(&output.stderr).trim().to_string(),
-        ))
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    match classify_keychain_add(output.status.code(), &stderr) {
+        KeychainAdd::Stored => Ok(()),
+        KeychainAdd::AlreadyProvisioned => Err(MasterKeyError::KeyAlreadyProvisioned(format!(
+            "keychain item {service}/{account} already exists; refusing to overwrite"
+        ))),
+        KeychainAdd::Error(m) => Err(MasterKeyError::KeyStoreUnwritable(m)),
     }
 }
 
@@ -575,9 +739,12 @@ mod tests {
             },
         };
         bootstrap(&config).expect("first bootstrap");
+        // A second bootstrap must refuse to clobber the existing key (which would
+        // brick every record sealed under it), surfacing the distinct
+        // already-provisioned signal — symmetric with the keychain backend.
         match bootstrap(&config) {
-            Err(MasterKeyError::KeyStoreUnwritable(_)) => {}
-            other => panic!("expected KeyStoreUnwritable on re-bootstrap, got {other:?}"),
+            Err(MasterKeyError::KeyAlreadyProvisioned(_)) => {}
+            other => panic!("expected KeyAlreadyProvisioned on re-bootstrap, got {other:?}"),
         }
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -661,6 +828,25 @@ mod tests {
         );
         match classify_keychain_find(Some(1), "", "some other failure") {
             KeychainFind::Error(_) => {}
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    // The keychain ADD classifier (pure) — the first-run-only / no-clobber guard.
+    #[test]
+    fn keychain_add_classifier_maps_outcomes() {
+        assert_eq!(classify_keychain_add(Some(0), ""), KeychainAdd::Stored);
+        assert_eq!(
+            classify_keychain_add(Some(45), "security: ... already exists ..."),
+            KeychainAdd::AlreadyProvisioned
+        );
+        assert_eq!(
+            classify_keychain_add(Some(45), ""),
+            KeychainAdd::AlreadyProvisioned,
+            "duplicate-item exit alone is enough"
+        );
+        match classify_keychain_add(Some(1), "some other add failure") {
+            KeychainAdd::Error(_) => {}
             other => panic!("expected Error, got {other:?}"),
         }
     }

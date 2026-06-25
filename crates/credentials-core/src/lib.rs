@@ -24,4 +24,7 @@ pub mod resolver;
 
 pub use envelope::{open, seal, EnvelopeError, RecordBinding};
 pub use key::{KeyId, MasterKey};
-pub use resolver::{bootstrap, resolve, KeySource, MasterKeyError, ResolverConfig};
+pub use resolver::{
+    bootstrap, resolve, KeySource, KeychainCli, MasterKeyError, MasterKeyStore, OperatorPathStore,
+    ResolverConfig,
+};

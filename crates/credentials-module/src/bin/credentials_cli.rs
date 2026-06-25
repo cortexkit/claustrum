@@ -41,7 +41,15 @@ use credentials_core::record::{CredentialKind, VaultRecord};
 use credentials_core::resolver::{self, KeySource, MasterKeyError, ResolverConfig};
 use credentials_core::store::{mint_handle, EncryptedStore, StoreOpError};
 
-const STORAGE_NAMESPACE: &str = "vault";
+// MUST byte-match the storage namespace the supervising daemon resolves the vault
+// under (the cortexkit-store layer derives the single-writer lease key from
+// (module_id, backend, storage_namespace)). If the CLI and the daemon disagree on
+// the namespace they acquire DIFFERENT lease locks and stop mutually excluding —
+// which would break the rule that an admin write only succeeds while the daemon is
+// stopped, and would fence the daemon's own writes out (the two would keep separate
+// fence-epoch counters over the shared database). The supervising daemon uses
+// "default", so this is a fixed contract value, not a free choice.
+const STORAGE_NAMESPACE: &str = "default";
 const MODULE_ID: &str = "cortexkit-credentials";
 
 fn main() -> ExitCode {

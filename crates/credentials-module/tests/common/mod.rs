@@ -202,3 +202,36 @@ pub async fn credential_get(
     )
     .await
 }
+
+/// `credential.get_many { items: [{handle}, ...] }` on the route channel.
+pub async fn credential_get_many(
+    stream: &mut TcpStream,
+    route_channel: u16,
+    corr: u64,
+    handles: &[&str],
+) -> Value {
+    let items: Vec<Value> = handles
+        .iter()
+        .map(|h| serde_json::json!({ "handle": h }))
+        .collect();
+    raw_route_request(
+        stream,
+        route_channel,
+        corr,
+        serde_json::json!({ "method": "credential.get_many", "params": { "items": items } }),
+    )
+    .await
+}
+
+/// Count `audit_log` rows flagged as an alarm with a given reason, by reading the
+/// vault's sqlite directly. Call only AFTER the daemon is stopped (it holds the
+/// single-writer lease while alive). `db_path` is `<data_dir>/store.db`.
+pub fn count_alarm_rows(db_path: &Path, reason: &str) -> i64 {
+    let conn = rusqlite::Connection::open(db_path).expect("open vault db for audit read");
+    conn.query_row(
+        "SELECT COUNT(*) FROM audit_log WHERE alarm = 1 AND alarm_reason = ?1",
+        rusqlite::params![reason],
+        |r| r.get::<_, i64>(0),
+    )
+    .expect("count alarm rows")
+}

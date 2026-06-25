@@ -136,10 +136,13 @@ fn admin_write_refused_while_lease_held() {
     global(&mut c);
     assert!(c.output().unwrap().status.success());
 
-    // Now hold the lease (simulating the running daemon).
+    // Now hold the lease (simulating the running daemon). The namespace MUST match
+    // the CLI's ("default", what subc delivers) — the lease key is
+    // (module_id, backend, namespace), so a mismatched namespace would take a
+    // DIFFERENT lock and the admin write would (wrongly) not be refused.
     let descriptor = StorageDescriptor {
         module_id: "cortexkit-credentials".into(),
-        storage_namespace: "vault".into(),
+        storage_namespace: "default".into(),
         isolation: Isolation::Module,
         backend: StorageBackend::Sqlite {
             path: data_dir.join("store.db").to_string_lossy().into_owned(),

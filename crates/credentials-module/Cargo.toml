@@ -25,3 +25,7 @@ tokio = { workspace = true }
 
 [dev-dependencies]
 subc-core = { workspace = true }
+# Read the audit_log directly (after stopping the daemon to release the lease) so
+# the on-the-wire malicious-client conformance test can assert the durable alarm
+# rows its adversarial traffic raised actually landed.
+rusqlite = { workspace = true }

@@ -124,14 +124,18 @@ impl ReadSurface {
     /// durable alarm on a first anomaly), then refreshes-if-stale and returns the
     /// payload. All failures are fail-closed non-secret codes.
     pub async fn get(&self, connection_id: u64, params: &GetParams) -> GetOutcome {
+        // The limiter runs on EVERY probe, keyed by the handle, BEFORE resolution —
+        // so an enumeration sweep of UNKNOWN handles (the probe itself is the attack
+        // signal) trips the anomaly detector too, not only sweeps of resolvable
+        // credentials. A resolved-only check would miss enumeration entirely.
+        self.check_limiter(connection_id, &params.handle).await;
+
         let credential_id = match self.engine.store().resolve_handle(&params.handle) {
             Ok(id) => id,
             // Unknown or revoked handle → uniform not_found.
             Err(StoreOpError::NotFound) => return err(ReadError::NotFound),
             Err(e) => return err(map_store_error(&e)),
         };
-
-        self.check_limiter(connection_id, &credential_id).await;
 
         match self
             .engine
@@ -170,12 +174,15 @@ impl ReadSurface {
         connection_id: u64,
         params: &ReportAuthFailureParams,
     ) -> Result<(), ReadError> {
+        // Rate-limit on the presented handle (before resolution), like get — a flood
+        // of report_auth_failure (malicious invalidation DoS) is itself an anomaly.
+        self.check_limiter(connection_id, &params.handle).await;
+
         let credential_id = match self.engine.store().resolve_handle(&params.handle) {
             Ok(id) => id,
             Err(StoreOpError::NotFound) => return Err(ReadError::NotFound),
             Err(e) => return Err(map_store_error(&e)),
         };
-        self.check_limiter(connection_id, &credential_id).await;
 
         // Only an authentication failure (401/403) invalidates; a 5xx/429 is a
         // provider hiccup, not a dead credential. The invalidate audits the
@@ -236,17 +243,21 @@ impl ReadSurface {
         }
     }
 
-    /// Run the per-connection limiter for a fetch; on the FIRST anomaly crossing for
-    /// a connection, raise a durable rate-anomaly audit alarm.
-    async fn check_limiter(&self, connection_id: u64, credential_id: &str) {
+    /// Run the per-connection limiter for one probe, keyed by `probe_key` (the
+    /// presented handle — so the distinct-spread counts distinct handles probed,
+    /// resolvable or not). On the FIRST anomaly crossing for a connection, raise a
+    /// durable rate-anomaly audit alarm. The alarm is connection-scoped
+    /// (`credential_id: None`): an enumeration sweep is about the CONNECTION's
+    /// behavior, and the probed handles may not map to any real credential.
+    async fn check_limiter(&self, connection_id: u64, probe_key: &str) {
         let admission = {
             let mut limiter = self.limiter.lock().await;
-            limiter.admit(connection_id, credential_id, Instant::now())
+            limiter.admit(connection_id, probe_key, Instant::now())
         };
         if let Admission::Anomaly { first: true } = admission {
             let _ = self.engine.store().append_audit(&AuditRecord {
                 op: AuditOp::FetchAnomaly,
-                credential_id: Some(credential_id.to_string()),
+                credential_id: None,
                 payload_hash: None,
                 actor: format!("conn-{connection_id}"),
                 alarm: Some(AlarmReason::FetchRateAnomaly),

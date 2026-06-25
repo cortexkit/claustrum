@@ -31,8 +31,8 @@ use std::{
 use tokio::process::{Child, Command};
 
 use common::{
-    connect_consumer, credential_get, route_open, unique_temp_dir, wait_for_catalog, MODULE_ID,
-    SETUP_TIMEOUT,
+    connect_consumer, count_alarm_rows, credential_get, credential_get_many, raw_route_request,
+    route_open, unique_temp_dir, wait_for_catalog, MODULE_ID, SETUP_TIMEOUT,
 };
 
 const SUBCONSCIOUS_REL: &str = "../../../subconscious";
@@ -96,6 +96,21 @@ struct SeededVault {
     daemon: RealDaemon,
     handle: String,
     payload: Vec<u8>,
+    /// The vault's sqlite path, for reading durable audit/alarm rows AFTER the
+    /// daemon is stopped (it holds the single-writer lease while alive).
+    db_path: PathBuf,
+}
+
+impl SeededVault {
+    /// Stop the supervising daemon (and its child module), releasing the vault's
+    /// single-writer lease so the audit_log can be read directly. Waits for the
+    /// child to exit so the lease is actually free.
+    async fn stop_daemon(&mut self) {
+        let _ = self.daemon.child.start_kill();
+        let _ = self.daemon.child.wait().await;
+        // Give the OS a moment to release the advisory lease the killed tree held.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
 }
 
 /// Bootstrap + seed a vault via the CLI, then spawn a real subc-core supervising the
@@ -205,6 +220,7 @@ async fn start_seeded_vault() -> SeededVault {
         },
         handle,
         payload: b"the-secret-bytes".to_vec(),
+        db_path: data_dir.join("store.db"),
     }
 }
 
@@ -254,6 +270,115 @@ async fn real_daemon_unknown_handle_is_not_found() {
     assert_eq!(
         response["result"]["error"]["code"], "not_found",
         "an unknown handle is a uniform not_found"
+    );
+
+    let _ = std::fs::remove_dir_all(&project_root);
+}
+
+/// Malicious-local-client, on the wire: an over-cap `get_many` is REJECTED (not
+/// truncated) by the live daemon over the real connection file.
+#[tokio::test]
+#[ignore = "builds subc-core in ../subconscious and binds loopback ports"]
+async fn real_daemon_over_cap_get_many_is_rejected() {
+    let seeded = start_seeded_vault().await;
+    let mut consumer = connect_consumer(&seeded.daemon.connection_file).await;
+    wait_for_catalog(&mut consumer, MODULE_ID, SETUP_TIMEOUT).await;
+
+    let project_root = unique_temp_dir("cred-real-daemon-overcap");
+    std::fs::create_dir_all(&project_root).unwrap();
+    let route_channel = route_open(&mut consumer, &project_root, 1).await;
+
+    // 9 handles in one get_many exceeds the cap of 8: the whole call is rejected
+    // with too_many_items, NOT silently truncated to 8.
+    let handles: Vec<&str> = (0..9).map(|_| "ckh_whatever").collect();
+    let response = credential_get_many(&mut consumer, route_channel, 2, &handles).await;
+    let results = response["results"].as_array().expect("results array");
+    assert_eq!(
+        results.len(),
+        1,
+        "over-cap returns a single error, not 9 outcomes"
+    );
+    assert_eq!(
+        results[0]["error"]["code"], "too_many_items",
+        "over-cap get_many is rejected, not truncated"
+    );
+
+    let _ = std::fs::remove_dir_all(&project_root);
+}
+
+/// Malicious-local-client, on the wire: a connection that sweeps many distinct
+/// credentials fast trips the fetch-rate anomaly detector, which raises a DURABLE
+/// audit alarm row — asserted by reading the audit_log after stopping the daemon.
+#[tokio::test]
+#[ignore = "builds subc-core in ../subconscious and binds loopback ports"]
+async fn real_daemon_fetch_sweep_raises_durable_alarm() {
+    let mut seeded = start_seeded_vault().await;
+    let mut consumer = connect_consumer(&seeded.daemon.connection_file).await;
+    wait_for_catalog(&mut consumer, MODULE_ID, SETUP_TIMEOUT).await;
+
+    let project_root = unique_temp_dir("cred-real-daemon-sweep");
+    std::fs::create_dir_all(&project_root).unwrap();
+    let route_channel = route_open(&mut consumer, &project_root, 1).await;
+
+    // Sweep many DISTINCT handles fast (the default distinct ceiling is 16). Each is
+    // unknown (resolves not_found), but the fetch-rate detector keys on the spread of
+    // distinct credential probes on this connection, so > ceiling distinct probes
+    // trips the anomaly. The handles must be distinct so the DISTINCT spread climbs.
+    for i in 0..40u32 {
+        let handle = format!("ckh_sweep_{i}");
+        let _ = credential_get(&mut consumer, route_channel, 100 + i as u64, &handle).await;
+    }
+
+    // Stop the daemon to release the lease, then read the durable alarm rows.
+    seeded.stop_daemon().await;
+    let alarms = count_alarm_rows(&seeded.db_path, "fetch_rate_anomaly");
+    assert!(
+        alarms >= 1,
+        "a fetch sweep over the ceiling must raise at least one durable fetch_rate_anomaly alarm row, got {alarms}"
+    );
+
+    let _ = std::fs::remove_dir_all(&project_root);
+}
+
+/// Malicious-local-client, on the wire: a malformed route request (not a valid
+/// method envelope) is answered with a typed wire error, never crashing the daemon
+/// (a later valid request still succeeds on a fresh connection).
+#[tokio::test]
+#[ignore = "builds subc-core in ../subconscious and binds loopback ports"]
+async fn real_daemon_malformed_request_is_typed_error_not_crash() {
+    let seeded = start_seeded_vault().await;
+    let mut consumer = connect_consumer(&seeded.daemon.connection_file).await;
+    wait_for_catalog(&mut consumer, MODULE_ID, SETUP_TIMEOUT).await;
+
+    let project_root = unique_temp_dir("cred-real-daemon-malformed");
+    std::fs::create_dir_all(&project_root).unwrap();
+    let route_channel = route_open(&mut consumer, &project_root, 1).await;
+
+    // An unknown method is a typed wire error, not a panic/disconnect.
+    let frame = common::raw_route_frame(
+        &mut consumer,
+        route_channel,
+        2,
+        serde_json::json!({ "method": "credential.delete_everything", "params": {} }),
+    )
+    .await;
+    assert_eq!(
+        frame.header.ty,
+        subc_protocol::FrameType::Error,
+        "unknown method => typed wire error"
+    );
+
+    // The daemon is still alive: a valid status request still succeeds.
+    let response = raw_route_request(
+        &mut consumer,
+        route_channel,
+        3,
+        serde_json::json!({ "method": "credential.status", "params": {} }),
+    )
+    .await;
+    assert_eq!(
+        response["result"]["ready"], true,
+        "daemon still serving after malformed input"
     );
 
     let _ = std::fs::remove_dir_all(&project_root);

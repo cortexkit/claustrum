@@ -20,11 +20,17 @@
 
 pub mod envelope;
 pub mod key;
+pub mod oauth;
+pub mod record;
 pub mod resolver;
+pub mod store;
 
 pub use envelope::{open, seal, EnvelopeError, RecordBinding};
 pub use key::{KeyId, MasterKey};
+pub use oauth::OAuthCredential;
+pub use record::{CredentialKind, VaultRecord, RECORD_SCHEMA_VERSION};
 pub use resolver::{
     bootstrap, resolve, KeySource, KeychainCli, MasterKeyError, MasterKeyStore, OperatorPathStore,
     ResolverConfig,
 };
+pub use store::{payload_hash, EncryptedStore, RecordMeta, RecordState, StoreOpError};

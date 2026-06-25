@@ -37,6 +37,10 @@ cortexkit-store = { path = "../commons/crates/cortexkit-store" }
 cortexkit-lease = { path = "../commons/crates/cortexkit-lease" }
 cortexkit-store-types = { path = "../commons/crates/cortexkit-store-types" }
 
+# The same rusqlite (bundled) cortexkit-store uses, so the Connection/Transaction
+# types the fenced-write closures expose unify with ours.
+rusqlite = { version = "0.32", features = ["bundled"] }
+
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 proptest = "1"

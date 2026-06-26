@@ -39,9 +39,8 @@ use serde::Deserialize;
 use serde_json::json;
 use subc_protocol::{
     manifest::{
-        Bindings, ConfigBinding, ConfigSource, IdentityBinding, ManagementOperation,
-        ManagementOperationKind, ModuleManifest, ProviderRole, StorageBinding, StorageKind,
-        StorageScope, TrustTier,
+        Bindings, IdentityBinding, ManagementOperation, ManagementOperationKind, ModuleManifest,
+        ProviderRole, StorageBinding, StorageKind, StorageScope, TrustTier,
     },
     session::{ModuleControlRequest, ModuleControlResponse},
     ErrorBody, Flags, Frame, FrameType, ModuleHelloAckBody, ModuleHelloBody, Priority,
@@ -574,11 +573,6 @@ fn manifest(module_id: &str) -> ModuleManifest {
                 kind: StorageKind::Sqlite,
                 scope: StorageScope::Project,
                 owns_schema: true,
-            },
-            config: ConfigBinding {
-                source: ConfigSource::SubcMediated,
-                tiers: Vec::new(),
-                expansion: std::collections::BTreeMap::new(),
             },
             vault_grants: Vec::new(),
             identity: IdentityBinding {

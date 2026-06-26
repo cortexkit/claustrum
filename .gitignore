@@ -19,6 +19,10 @@ _bmad-output
 .DS_Store
 *.swp
 
+# Cross-repo doc-gen artifacts (generated, not source)
+/ARCHITECTURE.md
+/STRUCTURE.md
+
 # Never commit real credential material, master keys, or vault databases
 *.key
 store.db

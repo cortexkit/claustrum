@@ -36,6 +36,11 @@ subc-core = { path = "../subconscious/crates/subc-core" }
 cortexkit-store = { path = "../commons/crates/cortexkit-store" }
 cortexkit-lease = { path = "../commons/crates/cortexkit-lease" }
 cortexkit-store-types = { path = "../commons/crates/cortexkit-store-types" }
+# Cross-binary path identity: resolves a filesystem path to a canonical, platform-
+# normalized id (macOS /var->/private/var, symlinks, Windows verbatim/drive-case)
+# so two independent binaries agree on a path byte-for-byte. Used to scope the
+# keychain master-key item per-vault by canonical data_dir.
+cortexkit-paths = { path = "../commons/crates/cortexkit-paths" }
 
 # The same rusqlite (bundled) cortexkit-store uses, so the Connection/Transaction
 # types the fenced-write closures expose unify with ours.

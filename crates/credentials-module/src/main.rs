@@ -57,7 +57,10 @@ use tokio::{
 use limiter::{Caps, FetchLimiter};
 use read_surface::{GetManyParams, GetParams, ReadSurface, ReportAuthFailureParams, StatusParams};
 
-const DEFAULT_MODULE_ID: &str = "cortexkit-credentials";
+// The vault's module id — re-exported from the single cross-binary definition site
+// so the daemon and CLI cannot drift. The env var (SUBC_MODULE_ID) still overrides
+// it at launch; this is the fallback for a dev run without a supervisor.
+const DEFAULT_MODULE_ID: &str = credentials_core::contract::MODULE_ID;
 const HELLO_CORR: u64 = 1;
 const EGRESS_BUFFER: usize = 64;
 
@@ -524,10 +527,9 @@ fn resolver_config_from_env(data_dir: PathBuf) -> ResolverConfig {
             path: PathBuf::from(path),
         }
     } else {
-        KeySource::Keychain {
-            service: "cortexkit-credentials".to_string(),
-            account: "master-key".to_string(),
-        }
+        // Fieldless: the keychain item is scoped per-vault by the data dir inside the
+        // backend (contract::keychain_service_for), identical to the CLI's derivation.
+        KeySource::Keychain
     };
     ResolverConfig { data_dir, source }
 }

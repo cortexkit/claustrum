@@ -48,13 +48,13 @@ use crate::key::{KeyId, MasterKey, MASTER_KEY_LEN};
 /// How the master key is stored for this vault.
 #[derive(Debug, Clone)]
 pub enum KeySource {
-    /// macOS Keychain generic password (the desktop default).
-    Keychain {
-        /// Keychain service string (the item's "where").
-        service: String,
-        /// Keychain account string (the item's "name").
-        account: String,
-    },
+    /// macOS Keychain generic password (the desktop default). Fieldless on purpose:
+    /// the keychain item's service is DERIVED from the vault's canonical data
+    /// directory at each op ([`contract::keychain_service_for`]), and the account
+    /// from the slot scheme — so there is no service/account string stored here for
+    /// the CLI and daemon to set differently and drift apart. Two vaults on one
+    /// machine get distinct keychain items because their data directories differ.
+    Keychain,
     /// An operator-provisioned key file (the headless default). Must live OUTSIDE
     /// the vault data tree (enforced at resolve/bootstrap time).
     OperatorPath {
@@ -207,34 +207,45 @@ pub enum KeySlot {
     Next,
 }
 
-/// The macOS Keychain backend (v1, desktop): generic passwords addressed by a fixed
-/// service + a per-slot account, read/written via the `security` CLI. The key never
-/// touches the data dir, so it ignores `data_dir`.
-pub struct KeychainCli {
-    /// Keychain service string (the item's "where").
-    pub service: String,
-    /// Keychain account string for the `Current` slot (the item's "name").
-    pub account: String,
-}
+/// The macOS Keychain backend (v1, desktop): generic passwords read/written via the
+/// `security` CLI. Fieldless on purpose — the item's service is DERIVED per-op from
+/// the vault's canonical data directory ([`contract::keychain_service_for`]) and the
+/// account from the slot scheme, so no service/account string is stored for the CLI
+/// and daemon to set differently. The key never touches the data dir; `data_dir` is
+/// used only to derive the per-vault service scope.
+pub struct KeychainCli;
 
 impl KeychainCli {
-    /// The keychain account string for a slot: the configured account for
-    /// `Current`, that account with a `-next` suffix for `Next`.
-    fn account_for(&self, slot: KeySlot) -> String {
+    /// The keychain account string for a slot: the `Current` account from the
+    /// contract, that account with a `-next` suffix for `Next`.
+    fn account_for(slot: KeySlot) -> String {
         match slot {
-            KeySlot::Current => self.account.clone(),
-            KeySlot::Next => format!("{}-next", self.account),
+            KeySlot::Current => crate::contract::KEYCHAIN_ACCOUNT_CURRENT.to_string(),
+            KeySlot::Next => format!("{}-next", crate::contract::KEYCHAIN_ACCOUNT_CURRENT),
         }
+    }
+
+    /// Derive the per-vault keychain service from the data dir, failing closed if the
+    /// dir cannot be canonicalized (it must exist — every resolve path runs
+    /// `ensure_vault_dir` first, so it does in practice).
+    fn service_for(data_dir: &Path) -> Result<String, MasterKeyError> {
+        crate::contract::keychain_service_for(data_dir).ok_or_else(|| {
+            MasterKeyError::KeyStoreUnwritable(format!(
+                "cannot derive keychain scope: data dir {} is not canonicalizable",
+                data_dir.display()
+            ))
+        })
     }
 }
 
 impl MasterKeyStore for KeychainCli {
     fn load_slot(
         &self,
-        _data_dir: &Path,
+        data_dir: &Path,
         slot: KeySlot,
     ) -> Result<Option<MasterKey>, MasterKeyError> {
-        match load_from_keychain(&self.service, &self.account_for(slot)) {
+        let service = Self::service_for(data_dir)?;
+        match load_from_keychain(&service, &Self::account_for(slot)) {
             Ok(key) => Ok(Some(key)),
             Err(MasterKeyError::NotBootstrapped) => Ok(None),
             Err(e) => Err(e),
@@ -243,15 +254,17 @@ impl MasterKeyStore for KeychainCli {
 
     fn store_slot(
         &self,
-        _data_dir: &Path,
+        data_dir: &Path,
         slot: KeySlot,
         key: &MasterKey,
     ) -> Result<(), MasterKeyError> {
-        replace_in_keychain(&self.service, &self.account_for(slot), key)
+        let service = Self::service_for(data_dir)?;
+        replace_in_keychain(&service, &Self::account_for(slot), key)
     }
 
-    fn clear_slot(&self, _data_dir: &Path, slot: KeySlot) -> Result<(), MasterKeyError> {
-        delete_from_keychain(&self.service, &self.account_for(slot))
+    fn clear_slot(&self, data_dir: &Path, slot: KeySlot) -> Result<(), MasterKeyError> {
+        let service = Self::service_for(data_dir)?;
+        delete_from_keychain(&service, &Self::account_for(slot))
     }
 }
 
@@ -319,10 +332,7 @@ impl KeySource {
     /// maps config to a backend instance — a new backend adds a match arm here.
     pub fn backend(&self) -> Box<dyn MasterKeyStore> {
         match self {
-            KeySource::Keychain { service, account } => Box::new(KeychainCli {
-                service: service.clone(),
-                account: account.clone(),
-            }),
+            KeySource::Keychain => Box::new(KeychainCli),
             KeySource::OperatorPath { path } => Box::new(OperatorPathStore { path: path.clone() }),
         }
     }

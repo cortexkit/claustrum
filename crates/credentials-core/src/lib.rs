@@ -19,6 +19,7 @@
 // store.
 
 pub mod audit;
+pub mod contract;
 pub mod engine;
 #[cfg(test)]
 mod engine_tests;
@@ -32,6 +33,7 @@ pub mod resolver;
 pub mod store;
 
 pub use audit::{AlarmReason, AuditEntry, AuditOp, AuditRecord};
+pub use contract::{keychain_service_for, MODULE_ID, STORAGE_NAMESPACE};
 pub use engine::{EngineError, ReauthReason, Reconciliation, RefreshEngine};
 pub use envelope::{open, seal, EnvelopeError, RecordBinding};
 pub use http::ReqwestTransport;

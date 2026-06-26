@@ -49,6 +49,7 @@ url = { workspace = true }
 cortexkit-store = { workspace = true }
 cortexkit-lease = { workspace = true }
 cortexkit-store-types = { workspace = true }
+cortexkit-paths = { workspace = true }
 rusqlite = { workspace = true }
 # tokio for the engine's per-credential single-flight async lock (sync feature is
 # enough here; the binary brings the full runtime).

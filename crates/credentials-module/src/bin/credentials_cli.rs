@@ -36,21 +36,11 @@ use std::process::ExitCode;
 
 use cortexkit_store::{open_sqlite, Isolation, StorageBackend, StorageDescriptor, StoreError};
 use credentials_core::audit::{AuditCtx, AuditOp};
+use credentials_core::contract::{MODULE_ID, STORAGE_NAMESPACE};
 use credentials_core::key::MasterKey;
 use credentials_core::record::{CredentialKind, VaultRecord};
 use credentials_core::resolver::{self, KeySource, MasterKeyError, ResolverConfig};
 use credentials_core::store::{mint_handle, EncryptedStore, StoreOpError};
-
-// MUST byte-match the storage namespace the supervising daemon resolves the vault
-// under (the cortexkit-store layer derives the single-writer lease key from
-// (module_id, backend, storage_namespace)). If the CLI and the daemon disagree on
-// the namespace they acquire DIFFERENT lease locks and stop mutually excluding —
-// which would break the rule that an admin write only succeeds while the daemon is
-// stopped, and would fence the daemon's own writes out (the two would keep separate
-// fence-epoch counters over the shared database). The supervising daemon uses
-// "default", so this is a fixed contract value, not a free choice.
-const STORAGE_NAMESPACE: &str = "default";
-const MODULE_ID: &str = "cortexkit-credentials";
 
 fn main() -> ExitCode {
     match run() {
@@ -363,10 +353,10 @@ fn parse_global(args: &mut Vec<String>) -> Result<GlobalArgs, CliError> {
         Some(path) => KeySource::OperatorPath {
             path: PathBuf::from(path),
         },
-        None => KeySource::Keychain {
-            service: "cortexkit-credentials".to_string(),
-            account: "master-key".to_string(),
-        },
+        // Fieldless: the keychain item is scoped per-vault by the data dir inside the
+        // backend (contract::keychain_service_for), so there is no service/account
+        // here for the CLI and daemon to set differently.
+        None => KeySource::Keychain,
     };
     Ok(GlobalArgs {
         data_dir: PathBuf::from(data_dir),

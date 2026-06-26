@@ -62,14 +62,20 @@ async fn main() {
     });
 
     let conn = connection_file::read(&subc).expect("read connection file");
-    let endpoint = conn.endpoints.first().expect("connection file has an endpoint");
+    let endpoint = conn
+        .endpoints
+        .first()
+        .expect("connection file has an endpoint");
     let mut stream = TcpStream::connect((endpoint.host.as_str(), endpoint.port))
         .await
         .expect("connect to daemon");
     authenticate_client(&mut stream, &conn, Duration::from_secs(2))
         .await
         .expect("client handshake");
-    eprintln!("[probe] authenticated to {}:{}", endpoint.host, endpoint.port);
+    eprintln!(
+        "[probe] authenticated to {}:{}",
+        endpoint.host, endpoint.port
+    );
 
     wait_for_catalog(&mut stream).await;
     eprintln!("[probe] vault module '{MODULE_ID}' is catalog-live");
@@ -166,10 +172,8 @@ async fn credential_get(stream: &mut TcpStream, route_channel: u16, handle: &str
         Flags::new(false, Priority::Interactive, false),
         route_channel,
         7,
-        serde_json::to_vec(
-            &json!({ "method": "credential.get", "params": { "handle": handle } }),
-        )
-        .unwrap(),
+        serde_json::to_vec(&json!({ "method": "credential.get", "params": { "handle": handle } }))
+            .unwrap(),
     )
     .unwrap();
     write_frame(stream, &frame).await.unwrap();
@@ -211,8 +215,10 @@ fn report(frame: &Frame) {
                 .and_then(|p| p.as_array());
             match payload {
                 Some(arr) => {
-                    let bytes: Vec<u8> =
-                        arr.iter().filter_map(|b| b.as_u64().map(|n| n as u8)).collect();
+                    let bytes: Vec<u8> = arr
+                        .iter()
+                        .filter_map(|b| b.as_u64().map(|n| n as u8))
+                        .collect();
                     println!("OK credential.get returned a Response.");
                     println!(
                         "   payload: {} byte(s), fnv1a64={:016x} (content withheld)",
@@ -224,9 +230,10 @@ fn report(frame: &Frame) {
                     println!("OK Response, but no result.payload array found.");
                     println!(
                         "   result keys: {:?}",
-                        value.get("result").and_then(|r| r.as_object()).map(|o| o
-                            .keys()
-                            .collect::<Vec<_>>())
+                        value
+                            .get("result")
+                            .and_then(|r| r.as_object())
+                            .map(|o| o.keys().collect::<Vec<_>>())
                     );
                 }
             }

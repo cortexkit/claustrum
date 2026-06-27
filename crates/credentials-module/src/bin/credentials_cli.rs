@@ -170,9 +170,18 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
         // bootstrap / rotate-master-key / verify-audit take no per-command flags.
         _ => &[],
     };
+    // Boolean (valueless) flags accepted per command.
+    let bool_flags: &[&str] = match command {
+        "import" => &["--replace"],
+        _ => &[],
+    };
     let mut i = 0;
     while i < args.len() {
         let arg = &args[i];
+        if bool_flags.contains(&arg.as_str()) {
+            i += 1;
+            continue;
+        }
         if value_flags.contains(&arg.as_str()) {
             // Skip the flag AND its value (the value may look like anything).
             i += 2;
@@ -190,8 +199,16 @@ fn usage() -> String {
     "cortexkit-credentials admin CLI (run while the daemon is STOPPED)\n\
      \n\
      Global: --data-dir <dir> (required) [--key-path <file> | keychain default]\n\
+       --data-dir MUST be <data_home>/cortexkit/<module_id> where module_id is the\n\
+       subc.jsonc module key (\"cortexkit-credentials\"), so the CLI and the\n\
+       supervised daemon open the SAME store.\n\
      Commands: bootstrap | put | import | invalidate | rotate-master-key |\n\
-               mint-handle | revoke-handle | revoke-all-handles | audit | verify-audit"
+               mint-handle | revoke-handle | revoke-all-handles | audit | verify-audit\n\
+     import: --source <opencode|pi|antigravity|gemini-cli> --id <id> --json <file>\n\
+             [--provider <key>] [--replace]\n\
+       gemini-cli reads ~/.gemini/oauth_creds.json (single credential, no --provider);\n\
+       opencode/pi/antigravity read auth.json (--provider selects one entry);\n\
+       --replace overwrites an existing id (fix a wrong-source import; keeps handles)."
         .to_string()
 }
 
@@ -288,10 +305,21 @@ fn cmd_import(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     let record = VaultRecord::new_oauth(source, adapter_for(&id), oauth, payload);
 
     let store = open_for_admin(global)?;
-    store
-        .create_audited(&id, &record, AuditCtx::admin(AuditOp::Import))
-        .map_err(CliError::Store)?;
-    println!("imported {id}");
+    // `--replace` overwrites an existing credential UNCONDITIONALLY (re-seal at
+    // version+1, reset to active, keep the handle), for fixing a credential imported
+    // from the wrong source. Without it, import is CREATE-ONLY (an existing id is an
+    // error), so a fresh credential can never be silently clobbered.
+    if has_flag(args, "--replace") {
+        store
+            .overwrite_unconditional_audited(&id, &record, AuditCtx::admin(AuditOp::Import))
+            .map_err(CliError::Store)?;
+        println!("replaced {id}");
+    } else {
+        store
+            .create_audited(&id, &record, AuditCtx::admin(AuditOp::Import))
+            .map_err(CliError::Store)?;
+        println!("imported {id}");
+    }
     Ok(())
 }
 
@@ -439,6 +467,11 @@ fn required(args: &[String], flag: &str) -> Result<String, CliError> {
 fn optional(args: &[String], flag: &str) -> Option<String> {
     let pos = args.iter().position(|a| a == flag)?;
     args.get(pos + 1).cloned()
+}
+
+/// Whether a boolean (valueless) flag is present.
+fn has_flag(args: &[String], flag: &str) -> bool {
+    args.iter().any(|a| a == flag)
 }
 
 fn decode_hash(hex: &str) -> Result<[u8; 32], CliError> {

@@ -595,6 +595,66 @@ impl EncryptedStore {
         Ok(())
     }
 
+    /// Overwrite an existing record UNCONDITIONALLY (no CAS), re-sealing it at
+    /// `current_version + 1` and resetting its state to `active`, with an explicit
+    /// audit context. Fails [`StoreOpError::NotFound`] if the id is absent.
+    ///
+    /// Unlike [`overwrite_cas_audited`], this reads the current version via `meta`
+    /// (plaintext columns, NO decrypt) rather than `get`, so it works even when the
+    /// current record is `needs_reauth` or quarantined — which is exactly the
+    /// re-import case: an operator imported a credential from the wrong source (its
+    /// refresh token is dead → `needs_reauth`) and is replacing it with the correct
+    /// one. The handles table is untouched, so existing handles keep resolving to this
+    /// id (no re-mint). The version bump + state reset + intent clear + audit entry all
+    /// commit in ONE fenced transaction.
+    pub fn overwrite_unconditional_audited(
+        &self,
+        credential_id: &str,
+        record: &VaultRecord,
+        ctx: AuditCtx<'_>,
+    ) -> Result<(), StoreOpError> {
+        // meta() reads plaintext columns only (no decrypt), so a needs_reauth or
+        // quarantined current record does not block the replacement.
+        let current = self.meta(credential_id)?;
+        let next_version = current.record_version.saturating_add(1);
+        let mut record = record.clone();
+        record.record_version = next_version;
+        let blob = self.seal_record(credential_id, &record)?;
+        let key_id_hex = self.key_id.to_hex();
+        let now = now_ms();
+        let audit_key = self.audit_key;
+        let payload_hash_hex = hex32(&payload_hash(&record.payload));
+
+        let changed = self.store.with_conn_fenced(|tx| {
+            let n = tx.execute(
+                "UPDATE credentials \
+                 SET record_version = ?2, key_id = ?3, state = 'active', envelope = ?4, \
+                     updated_at_ms = ?5 \
+                 WHERE credential_id = ?1",
+                rusqlite::params![credential_id, next_version as i64, key_id_hex, blob, now],
+            )?;
+            if n > 0 {
+                clear_intent_tx(tx, credential_id)?;
+                append_audit_tx(
+                    tx,
+                    &audit_key,
+                    &AuditRecord {
+                        op: ctx.op,
+                        credential_id: Some(credential_id.to_string()),
+                        payload_hash: Some(payload_hash_hex),
+                        actor: ctx.actor.to_string(),
+                        alarm: ctx.alarm,
+                    },
+                )?;
+            }
+            Ok(n)
+        })?;
+        if changed == 0 {
+            return Err(StoreOpError::NotFound);
+        }
+        Ok(())
+    }
+
     /// Overwrite under CAS, auditing as a vault-owned `Overwrite`. Convenience
     /// wrapper for callers/tests that do not specify an audit context.
     pub fn overwrite_cas(
@@ -1527,6 +1587,49 @@ mod tests {
             Err(StoreOpError::AlreadyExists) => {}
             other => panic!("expected AlreadyExists, got {other:?}"),
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn unconditional_overwrite_replaces_needs_reauth_record_and_keeps_handle() {
+        let (root, store) = tmp_store(20);
+        // A credential imported from the wrong source whose refresh token is dead:
+        // mark it needs_reauth (as a failed refresh would), and mint a handle for it.
+        store.create("opencode:google", &oauth_record()).unwrap();
+        let h = mint_handle().unwrap();
+        store.put_handle_hash(&h.hash, "opencode:google").unwrap();
+        store.invalidate("opencode:google").unwrap();
+        // A CAS overwrite cannot even read it (get on a needs_reauth row fails closed).
+        assert!(matches!(
+            store.get("opencode:google"),
+            Err(StoreOpError::NeedsReauth)
+        ));
+        // The unconditional overwrite (the --replace path) replaces it regardless of
+        // state, resets it to active, and is immediately gettable again.
+        store
+            .overwrite_unconditional_audited(
+                "opencode:google",
+                &oauth_record(),
+                AuditCtx::admin(AuditOp::Import),
+            )
+            .unwrap();
+        let rec = store.get("opencode:google").expect("active after replace");
+        assert!(rec.record_version >= 2, "version bumped past the original");
+        // The pre-existing handle STILL resolves to the same id — no re-mint needed.
+        assert_eq!(
+            store.resolve_handle(&h.raw).unwrap(),
+            "opencode:google",
+            "handle survives the replace"
+        );
+        // Replacing an ABSENT id is NotFound (not a silent create).
+        assert!(matches!(
+            store.overwrite_unconditional_audited(
+                "nope",
+                &oauth_record(),
+                AuditCtx::admin(AuditOp::Import)
+            ),
+            Err(StoreOpError::NotFound)
+        ));
         let _ = std::fs::remove_dir_all(&root);
     }
 

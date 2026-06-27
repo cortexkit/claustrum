@@ -67,6 +67,13 @@ impl OAuthCredential {
     pub fn import(source: &str, raw_json: &[u8]) -> Result<Self, ImportError> {
         match source {
             "opencode" | "pi" | "antigravity" => Self::from_auth_json(raw_json),
+            // The gemini-cli login (`~/.gemini/oauth_creds.json`) is a SINGLE-credential
+            // file with its own field names. It is the correct source for a Google
+            // credential the GoogleAdapter can refresh: that adapter uses the public
+            // gemini-cli OAuth client, and a Google refresh token only refreshes against
+            // its minting client — so a google token minted by some OTHER client (e.g.
+            // opencode's own) cannot be refreshed here and must come from gemini-cli.
+            "gemini-cli" => Self::from_gemini_creds(raw_json),
             other => Err(ImportError::UnknownSource(other.to_string())),
         }
     }
@@ -93,8 +100,47 @@ impl OAuthCredential {
                     serde_json::to_vec(entry).map_err(|e| ImportError::Malformed(e.to_string()))?;
                 Self::from_auth_json(&sub)
             }
+            // gemini-cli's oauth_creds.json is a SINGLE-credential file, not a
+            // provider-keyed map, so `--provider` does not apply: import it with the
+            // plain `import` path (no `--provider`).
+            "gemini-cli" => Err(ImportError::Malformed(
+                "source 'gemini-cli' is a single-credential file; import without --provider".into(),
+            )),
             other => Err(ImportError::UnknownSource(other.to_string())),
         }
+    }
+
+    /// Parse a gemini-cli `oauth_creds.json`: `{ "access_token": ..., "refresh_token":
+    /// ..., "expiry_date": <epoch_ms> }`. This is the file the gemini-cli login writes
+    /// (`~/.gemini/oauth_creds.json`); `expiry_date` is epoch MILLISECONDS, the same
+    /// unit the canonical credential stores, and is optional. The refresh token is
+    /// required (a credential with no refresh token cannot be kept fresh).
+    fn from_gemini_creds(raw_json: &[u8]) -> Result<Self, ImportError> {
+        #[derive(Deserialize)]
+        struct GeminiCreds {
+            #[serde(default)]
+            access_token: Option<String>,
+            #[serde(default)]
+            refresh_token: Option<String>,
+            #[serde(default)]
+            expiry_date: Option<i64>,
+        }
+        let creds: GeminiCreds =
+            serde_json::from_slice(raw_json).map_err(|e| ImportError::Malformed(e.to_string()))?;
+        let refresh_token = creds
+            .refresh_token
+            .filter(|s| !s.is_empty())
+            .ok_or(ImportError::MissingField("refresh_token"))?;
+        let access_token = creds.access_token.unwrap_or_default();
+        Ok(OAuthCredential {
+            access_token,
+            refresh_token,
+            expires_at_ms: creds.expiry_date,
+            // The GoogleAdapter supplies the gemini-cli public client + token URL.
+            token_url: String::new(),
+            client_id: None,
+            scopes: Vec::new(),
+        })
     }
 
     /// Parse the shared `auth.json` per-provider entry: `{ "refresh": ..., "access":
@@ -239,6 +285,30 @@ mod tests {
         assert!(matches!(
             OAuthCredential::import_provider("opencode", raw, "openai"),
             Err(ImportError::ProviderNotFound(p)) if p == "openai"
+        ));
+    }
+
+    #[test]
+    fn imports_gemini_cli_creds_shape() {
+        // The gemini-cli login file: distinct field names, expiry_date in epoch ms.
+        let raw = br#"{"access_token":"ya29.live","refresh_token":"1//0g-refresh","expiry_date":1700000000000,"token_type":"Bearer"}"#;
+        let c = OAuthCredential::import("gemini-cli", raw).expect("gemini import");
+        assert_eq!(c.refresh_token, "1//0g-refresh");
+        assert_eq!(c.access_token, "ya29.live");
+        assert_eq!(c.expires_at_ms, Some(1_700_000_000_000));
+        assert!(
+            c.token_url.is_empty(),
+            "adapter supplies the gemini token url"
+        );
+        // A gemini-cli file with no refresh token is rejected (can't be kept fresh).
+        assert!(matches!(
+            OAuthCredential::import("gemini-cli", br#"{"access_token":"a"}"#),
+            Err(ImportError::MissingField("refresh_token"))
+        ));
+        // gemini-cli is a single-credential file: --provider does not apply.
+        assert!(matches!(
+            OAuthCredential::import_provider("gemini-cli", raw, "google"),
+            Err(ImportError::Malformed(_))
         ));
     }
 

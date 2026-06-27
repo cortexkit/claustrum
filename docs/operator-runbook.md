@@ -16,6 +16,16 @@ There are two programs:
 > All admin commands take `--data-dir <dir>` (the vault's data directory, holding
 > `store.db`) and a key source: `--key-path <file>` for an operator-path key, or
 > nothing for the macOS keychain default.
+>
+> **`--data-dir` must be `<data_home>/cortexkit/<module_id>`**, where `<module_id>`
+> is the subc.jsonc module key — **`cortexkit-credentials`**, NOT a shortened
+> `credentials`. The supervised daemon derives its store path from the module id
+> verbatim, so the CLI must use the same full id or it opens a *different*
+> (empty) vault under a different keychain scope. On a default desktop:
+>
+> ```sh
+> DATA_DIR=~/.local/share/cortexkit/cortexkit-credentials
+> ```
 
 ---
 
@@ -77,10 +87,27 @@ credentials-cli import \
   --data-dir "$DATA_DIR" --key-path /etc/cortexkit/master.key
 ```
 
-`--source` is one of `opencode | pi | antigravity`. The provider's token URL and
-client id are supplied by the refresh adapter, not the file. The credential `--id`
-is the consumer-facing name; the adapter is inferred from its suffix
-(`opencode:anthropic` → the `anthropic` refresh adapter).
+`--source` is one of `opencode | pi | antigravity | gemini-cli`. The provider's
+token URL and client id are supplied by the refresh adapter, not the file. The
+credential `--id` is the consumer-facing name; the adapter is inferred from its
+suffix (`opencode:anthropic` → the `anthropic` refresh adapter).
+
+Source-specific notes:
+
+- The real `auth.json` is a **map keyed by provider**, so add `--provider <key>`
+  to select one entry (`--source opencode --provider google`). Without it, `--json`
+  must point at a single provider's `{ refresh, access, expires }` object.
+- **Google must be imported from `gemini-cli`, not opencode.** A Google refresh
+  token only refreshes against the OAuth client that minted it; the vault's Google
+  adapter uses the public gemini-cli client, so it can refresh a token from
+  `~/.gemini/oauth_creds.json` but **not** one opencode minted against its own
+  client (that one fails closed to `needs_reauth`). Import Google with
+  `--source gemini-cli --json ~/.gemini/oauth_creds.json` (a single-credential
+  file — no `--provider`).
+- `--replace` overwrites an existing id unconditionally (re-seal at version+1,
+  reset to active), for fixing a credential imported from the wrong source. Existing
+  handles keep resolving to the id — **no re-mint needed**. Without `--replace`,
+  `import` is create-only and an existing id is refused.
 
 **Put a static credential** (API key / DSN / opaque):
 

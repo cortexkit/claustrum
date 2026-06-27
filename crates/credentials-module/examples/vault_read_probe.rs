@@ -257,11 +257,12 @@ fn report(frame: &Frame) {
                 None => {
                     println!("OK Response, but no result.payload array found.");
                     println!(
-                        "   result keys: {:?}",
+                        "   result.error = {}",
                         value
                             .get("result")
-                            .and_then(|r| r.as_object())
-                            .map(|o| o.keys().collect::<Vec<_>>())
+                            .and_then(|r| r.get("error"))
+                            .cloned()
+                            .unwrap_or(Value::Null)
                     );
                 }
             }

@@ -209,11 +209,10 @@ async fn build_surface(ack: &ModuleHelloAckBody) -> Result<ReadSurface, ModuleEr
     let adapters: Vec<Arc<dyn RefreshAdapter>> = vec![
         Arc::new(AnthropicAdapter::new()),
         Arc::new(OpenAiAdapter::new()),
-        // Google needs the OAuth client secret; provided via env (operator-supplied),
-        // empty when unset (a google refresh then fails cleanly rather than panicking).
-        Arc::new(GoogleAdapter::new(
-            std::env::var("CK_GOOGLE_OAUTH_CLIENT_SECRET").unwrap_or_default(),
-        )),
+        // Google defaults to the public gemini-cli client (id + secret) that opencode
+        // mints against; CK_GOOGLE_OAUTH_CLIENT_ID / _SECRET override it. No prod env
+        // is required for the common case.
+        Arc::new(GoogleAdapter::new()),
         Arc::new(XaiAdapter::new()),
     ];
     let engine = Arc::new(RefreshEngine::new(store, adapters, http));

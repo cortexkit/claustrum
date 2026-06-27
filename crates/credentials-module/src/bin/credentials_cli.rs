@@ -220,8 +220,15 @@ fn cmd_import(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     let json_path = required(args, "--json")?;
     let raw =
         std::fs::read(&json_path).map_err(|e| CliError::Io(format!("reading {json_path}: {e}")))?;
-    let oauth = credentials_core::oauth::OAuthCredential::import(&source, &raw)
-        .map_err(|e| CliError::Usage(format!("import parse: {e}")))?;
+    // `--provider <key>` selects one provider's entry from a multi-provider auth.json
+    // (the real on-disk shape); without it, --json must be a single provider's entry.
+    let oauth = match optional(args, "--provider") {
+        Some(provider) => {
+            credentials_core::oauth::OAuthCredential::import_provider(&source, &raw, &provider)
+        }
+        None => credentials_core::oauth::OAuthCredential::import(&source, &raw),
+    }
+    .map_err(|e| CliError::Usage(format!("import parse: {e}")))?;
     let payload = oauth.access_token.clone().into_bytes();
     let record = VaultRecord::new_oauth(source, adapter_for(&id), oauth, payload);
 
@@ -277,17 +284,11 @@ fn cmd_mint_handle(global: &GlobalArgs, args: &[String]) -> Result<(), CliError>
     // The credential must exist before a handle is minted for it.
     store.meta(&id).map_err(CliError::Store)?;
     let handle = mint_handle().map_err(|e| CliError::Io(format!("csprng: {e}")))?;
+    // put_handle_hash folds the MintHandle audit entry into the same fenced txn, so
+    // the mint and its audit record commit atomically (no error-swallowed append).
     store
         .put_handle_hash(&handle.hash, &id)
         .map_err(CliError::Store)?;
-    // Audit the mint.
-    let _ = store.append_audit(&credentials_core::audit::AuditRecord {
-        op: AuditOp::MintHandle,
-        credential_id: Some(id.clone()),
-        payload_hash: None,
-        actor: "offline-cli".to_string(),
-        alarm: Some(credentials_core::audit::AlarmReason::AdminWrite),
-    });
     // The raw handle is printed ONCE; write it into the consumer's 0600 config.
     println!("{}", handle.raw);
     eprintln!("(minted handle for {id}; store it now — it is not recoverable)");

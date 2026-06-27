@@ -60,9 +60,39 @@ impl OAuthCredential {
     /// `token_url` / `client_id` an adapter needs are NOT in that file (the adapter
     /// carries the provider defaults), so they are left empty here and the adapter
     /// fills them. Unknown sources are rejected rather than guessed.
+    ///
+    /// `raw_json` here is a SINGLE provider's entry. The real on-disk `auth.json` is a
+    /// MAP keyed by provider name; use [`import_provider`](Self::import_provider) to
+    /// select one provider's entry from that map.
     pub fn import(source: &str, raw_json: &[u8]) -> Result<Self, ImportError> {
         match source {
             "opencode" | "pi" | "antigravity" => Self::from_auth_json(raw_json),
+            other => Err(ImportError::UnknownSource(other.to_string())),
+        }
+    }
+
+    /// Parse one provider's entry from a multi-provider auth file: the real
+    /// `auth.json` is a JSON object keyed by provider (e.g. `{ "anthropic": { refresh,
+    /// access, expires }, "google": { ... } }`), so `provider = "anthropic"` selects
+    /// that sub-object and parses it like a single entry. This lets an operator point
+    /// the importer at the real file once per provider instead of pre-extracting each
+    /// sub-object by hand. A missing provider key is a typed error.
+    pub fn import_provider(
+        source: &str,
+        raw_json: &[u8],
+        provider: &str,
+    ) -> Result<Self, ImportError> {
+        match source {
+            "opencode" | "pi" | "antigravity" => {
+                let map: serde_json::Value = serde_json::from_slice(raw_json)
+                    .map_err(|e| ImportError::Malformed(e.to_string()))?;
+                let entry = map
+                    .get(provider)
+                    .ok_or_else(|| ImportError::ProviderNotFound(provider.to_string()))?;
+                let sub =
+                    serde_json::to_vec(entry).map_err(|e| ImportError::Malformed(e.to_string()))?;
+                Self::from_auth_json(&sub)
+            }
             other => Err(ImportError::UnknownSource(other.to_string())),
         }
     }
@@ -108,6 +138,8 @@ pub enum ImportError {
     Malformed(String),
     /// A required field (a refresh token) was absent.
     MissingField(&'static str),
+    /// The requested provider key was not present in a multi-provider auth file.
+    ProviderNotFound(String),
 }
 
 impl std::fmt::Display for ImportError {
@@ -117,6 +149,9 @@ impl std::fmt::Display for ImportError {
             ImportError::Malformed(m) => write!(f, "malformed import json: {m}"),
             ImportError::MissingField(field) => {
                 write!(f, "import missing required field '{field}'")
+            }
+            ImportError::ProviderNotFound(p) => {
+                write!(f, "provider '{p}' not found in auth file")
             }
         }
     }
@@ -184,6 +219,27 @@ mod tests {
         // The adapter fills token_url/client_id; the import file does not carry them.
         assert!(c.token_url.is_empty());
         assert!(c.client_id.is_none());
+    }
+
+    #[test]
+    fn import_provider_selects_one_entry_from_a_multi_provider_auth_json() {
+        // The real opencode auth.json shape: a map keyed by provider.
+        let raw = br#"{
+            "anthropic": {"refresh":"a-r","access":"a-a","expires":111},
+            "google":    {"refresh":"g-r","access":"","expires":0}
+        }"#;
+        let a = OAuthCredential::import_provider("opencode", raw, "anthropic").expect("anthropic");
+        assert_eq!(a.refresh_token, "a-r");
+        assert_eq!(a.access_token, "a-a");
+        // Google's already-empty access token imports fine (refresh repopulates it).
+        let g = OAuthCredential::import_provider("opencode", raw, "google").expect("google");
+        assert_eq!(g.refresh_token, "g-r");
+        assert!(g.access_token.is_empty());
+        // A provider key not present is a typed error, not a silent empty import.
+        assert!(matches!(
+            OAuthCredential::import_provider("opencode", raw, "openai"),
+            Err(ImportError::ProviderNotFound(p)) if p == "openai"
+        ));
     }
 
     #[test]

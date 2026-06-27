@@ -942,14 +942,18 @@ impl EncryptedStore {
             .ok_or(StoreOpError::NotFound)
     }
 
-    /// Record a freshly minted handle for a credential, storing only its hash. Runs
-    /// through the epoch-fenced write path, like every durable mutation.
+    /// Record a freshly minted handle for a credential, storing only its hash, AND
+    /// append a `MintHandle` audit entry — both in ONE fenced transaction, so a handle
+    /// can never be minted without a tamper-evident audit record (the same atomicity
+    /// every other durable mutation uses). Mint is admin-only (there is no non-audited
+    /// path), so the actor is fixed and the entry is marked as an admin write.
     pub fn put_handle_hash(
         &self,
         handle_hash_hex: &str,
         credential_id: &str,
     ) -> Result<(), StoreOpError> {
         let now = now_ms();
+        let audit_key = self.audit_key;
         self.store
             .with_conn_fenced(|tx| {
                 tx.execute(
@@ -957,21 +961,47 @@ impl EncryptedStore {
                      VALUES (?1, ?2, ?3, 0)",
                     rusqlite::params![handle_hash_hex, credential_id, now],
                 )?;
+                append_audit_tx(
+                    tx,
+                    &audit_key,
+                    &AuditRecord {
+                        op: AuditOp::MintHandle,
+                        credential_id: Some(credential_id.to_string()),
+                        payload_hash: None,
+                        actor: "offline-cli".to_string(),
+                        alarm: Some(AlarmReason::AdminWrite),
+                    },
+                )?;
                 Ok(())
             })
             .map_err(StoreOpError::from)
     }
 
     /// Revoke a single handle by its raw value (idempotent — revoking an unknown or
-    /// already-revoked handle is a no-op success). The update runs through the
-    /// epoch-fenced write path, like every durable mutation.
+    /// already-revoked handle is a no-op success). The update AND a `RevokeHandle`
+    /// audit entry commit in ONE fenced transaction, so a revocation — the most
+    /// security-relevant handle action — is always tamper-evidently recorded. The
+    /// audit entry is keyed by the handle hash (the raw handle is never stored), not a
+    /// credential id, since revoke-by-handle does not name the credential.
     pub fn revoke_handle(&self, raw_handle: &str) -> Result<(), StoreOpError> {
         let h = handle_hash(raw_handle);
+        let audit_key = self.audit_key;
         self.store
             .with_conn_fenced(|tx| {
                 tx.execute(
                     "UPDATE handles SET revoked = 1 WHERE handle_hash = ?1",
                     rusqlite::params![h],
+                )?;
+                append_audit_tx(
+                    tx,
+                    &audit_key,
+                    &AuditRecord {
+                        op: AuditOp::RevokeHandle,
+                        credential_id: None,
+                        payload_hash: Some(h.clone()),
+                        actor: "offline-cli".to_string(),
+                        alarm: Some(AlarmReason::AdminWrite),
+                    },
                 )?;
                 Ok(())
             })
@@ -979,15 +1009,29 @@ impl EncryptedStore {
     }
 
     /// Revoke ALL handles for a credential (e.g. on invalidate / suspected leak).
-    /// Returns the number revoked. Runs through the epoch-fenced write path.
+    /// Returns the number revoked. The update AND a `RevokeHandle` audit entry (naming
+    /// the credential) commit in ONE fenced transaction.
     pub fn revoke_all_handles(&self, credential_id: &str) -> Result<usize, StoreOpError> {
+        let audit_key = self.audit_key;
         self.store
             .with_conn_fenced(|tx| {
-                tx.execute(
+                let n = tx.execute(
                     "UPDATE handles SET revoked = 1 \
                      WHERE credential_id = ?1 AND revoked = 0",
                     rusqlite::params![credential_id],
-                )
+                )?;
+                append_audit_tx(
+                    tx,
+                    &audit_key,
+                    &AuditRecord {
+                        op: AuditOp::RevokeHandle,
+                        credential_id: Some(credential_id.to_string()),
+                        payload_hash: None,
+                        actor: "offline-cli".to_string(),
+                        alarm: Some(AlarmReason::AdminWrite),
+                    },
+                )?;
+                Ok(n)
             })
             .map_err(StoreOpError::from)
     }
@@ -1646,6 +1690,17 @@ mod tests {
             store.resolve_handle("ckh_bogus"),
             Err(StoreOpError::NotFound)
         ));
+        // The mint and the revoke are BOTH recorded in the tamper-evident audit chain
+        // (atomically, in their own fenced txns), and the chain still verifies.
+        let entries = store.read_audit(None).unwrap();
+        let ops: Vec<&str> = entries.iter().map(|e| e.op.as_str()).collect();
+        assert!(ops.contains(&"mint_handle"), "mint audited: {ops:?}");
+        assert!(ops.contains(&"revoke_handle"), "revoke audited: {ops:?}");
+        assert_eq!(
+            store.verify_audit_chain().unwrap(),
+            None,
+            "chain intact after mint+revoke"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

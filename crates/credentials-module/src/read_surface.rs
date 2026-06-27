@@ -26,6 +26,7 @@ use tokio::sync::Mutex;
 
 use credentials_core::audit::{AlarmReason, AuditCtx, AuditOp, AuditRecord};
 use credentials_core::engine::{EngineError, RefreshEngine};
+use credentials_core::refresh_adapters::RefreshError;
 use credentials_core::store::StoreOpError;
 
 use crate::limiter::{Admission, FetchLimiter, GET_MANY_MAX};
@@ -301,6 +302,14 @@ fn map_engine_error(e: &EngineError) -> ReadError {
     match e {
         EngineError::Store(se) => map_store_error(se),
         EngineError::UnknownAdapter(_) => ReadError::RefreshUnsupported,
+        // A definitively dead refresh token: the adapter already marked the record
+        // needs_reauth (no rotation can recover it), so this is the AUTHORITATIVE
+        // needs-reauth signal — surface it on THIS call, not the next. Returning a
+        // transient RefreshFailed here would cost the consumer a wasted retry and
+        // mislabel the signal; needs_reauth lets it pause for re-auth immediately.
+        EngineError::RefreshFailed(RefreshError::InvalidGrant(_)) => ReadError::NeedsReauth,
+        // Every other refresh failure (transport, decode, unexpected status,
+        // entitlement) is transient/ambiguous and the record is left active ⇒ retry.
         EngineError::RefreshFailed(_) => ReadError::RefreshFailed,
     }
 }

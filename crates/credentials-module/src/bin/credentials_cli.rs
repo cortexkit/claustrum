@@ -106,8 +106,27 @@ fn run() -> Result<(), CliError> {
     }
     let command = args.remove(0);
 
+    // A `--help`/`-h` ANYWHERE prints usage and exits WITHOUT running the command.
+    // This is load-bearing safety, not a convenience: the arg parser pulls the flags
+    // it knows and (before this) silently ignored the rest, so `bootstrap --help`
+    // ignored `--help` and RAN bootstrap — provisioning stray key material on a typo.
+    // Intercepting here, before parse_global / any open-for-admin, makes help a no-op.
+    if command == "help"
+        || command == "--help"
+        || command == "-h"
+        || args.iter().any(|a| a == "--help" || a == "-h")
+    {
+        println!("{}", usage());
+        return Ok(());
+    }
+
     // Pull the global flags (--data-dir, and the key source) out of the arg list.
     let global = parse_global(&mut args)?;
+
+    // Every remaining arg must be an accepted flag for this command (or its value);
+    // an unknown or misspelled flag is a HARD error, never silently ignored. Runs
+    // before dispatch, so a bad invocation never reaches the keychain or the lease.
+    reject_unknown_args(&command, &args)?;
 
     match command.as_str() {
         "bootstrap" => cmd_bootstrap(&global),
@@ -120,15 +139,51 @@ fn run() -> Result<(), CliError> {
         "revoke-all-handles" => cmd_revoke_all_handles(&global, &args),
         "audit" => cmd_audit(&global, &args),
         "verify-audit" => cmd_verify_audit(&global),
-        "help" | "--help" | "-h" => {
-            println!("{}", usage());
-            Ok(())
-        }
         other => Err(CliError::Usage(format!(
             "unknown command '{other}'\n{}",
             usage()
         ))),
     }
+}
+
+/// Reject any leftover arg that is not an accepted flag (or a flag's value) for the
+/// command, AFTER the global flags have been pulled. The arg parser consumes the
+/// flags it knows and ignores the rest, so without this a misspelled or stray flag is
+/// silently dropped. For a command that takes no required flag (such as `bootstrap`),
+/// that silent drop means a typo'd invocation runs the real mutation. This makes a
+/// bad flag a hard usage error before any keychain or lease access.
+fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
+    // The per-command flags that TAKE a value. `--data-dir` / `--key-path` are global
+    // and already removed by parse_global before this runs.
+    let value_flags: &[&str] = match command {
+        "put" => &[
+            "--id",
+            "--payload",
+            "--kind",
+            "--expires-ms",
+            "--expected-hash",
+        ],
+        "import" => &["--source", "--provider", "--id", "--json"],
+        "invalidate" | "mint-handle" | "revoke-all-handles" => &["--id"],
+        "revoke-handle" => &["--handle"],
+        "audit" => &["--limit"],
+        // bootstrap / rotate-master-key / verify-audit take no per-command flags.
+        _ => &[],
+    };
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if value_flags.contains(&arg.as_str()) {
+            // Skip the flag AND its value (the value may look like anything).
+            i += 2;
+            continue;
+        }
+        return Err(CliError::Usage(format!(
+            "unexpected argument '{arg}' for '{command}'\n{}",
+            usage()
+        )));
+    }
+    Ok(())
 }
 
 fn usage() -> String {
@@ -422,5 +477,53 @@ fn resolver_config(global: &GlobalArgs) -> ResolverConfig {
     ResolverConfig {
         data_dir: global.data_dir.clone(),
         source: global.key_source.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn v(args: &[&str]) -> Vec<String> {
+        args.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn accepts_known_flags_with_values() {
+        // import's real flags (global --data-dir/--key-path are already pulled before
+        // this runs, so they are not in the slice here).
+        assert!(reject_unknown_args(
+            "import",
+            &v(&[
+                "--source",
+                "opencode",
+                "--provider",
+                "google",
+                "--id",
+                "opencode:google",
+                "--json",
+                "/p/auth.json"
+            ])
+        )
+        .is_ok());
+        // A flag value that happens to look like a flag name is still a value, not a
+        // leftover (consumed by the preceding flag).
+        assert!(reject_unknown_args("invalidate", &v(&["--id", "--weird-but-valid-id"])).is_ok());
+        // Commands that take no per-command flags accept an empty arg slice.
+        assert!(reject_unknown_args("bootstrap", &v(&[])).is_ok());
+        assert!(reject_unknown_args("verify-audit", &v(&[])).is_ok());
+    }
+
+    #[test]
+    fn rejects_unknown_and_typoed_flags() {
+        // A stray unknown flag is a hard error (not silently ignored).
+        assert!(reject_unknown_args("mint-handle", &v(&["--id", "x", "--bogus"])).is_err());
+        // A typo'd flag name (--it for --id) is rejected — without this it would be
+        // dropped and the command would run with a MISSING id.
+        assert!(reject_unknown_args("invalidate", &v(&["--it", "opencode:anthropic"])).is_err());
+        // A bare positional (no leading flag) is rejected for a no-flag command — this
+        // is the `bootstrap somearg` / `bootstrap --help` class that previously RAN.
+        assert!(reject_unknown_args("bootstrap", &v(&["--help"])).is_err());
+        assert!(reject_unknown_args("bootstrap", &v(&["stray"])).is_err());
     }
 }

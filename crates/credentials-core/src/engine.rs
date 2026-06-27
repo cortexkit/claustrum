@@ -211,12 +211,24 @@ impl RefreshEngine {
         Ok(self.store.get(credential_id)?)
     }
 
-    /// Whether a record's access token is stale: expired (within skew) or below the
-    /// caller's `min_ttl_ms`.
+    /// Whether a record's access token is stale: empty, expired (within skew), or
+    /// below the caller's `min_ttl_ms`.
     fn is_stale(&self, record: &VaultRecord, min_ttl_ms: Option<i64>) -> bool {
         let Some(oauth) = record.oauth.as_ref() else {
             return false;
         };
+        // An empty access token is ALWAYS stale: a zero-byte token can never be served,
+        // so it must trigger a refresh regardless of expiry. This is the first-get case
+        // for a refresh-only login artifact (e.g. an antigravity account that stores
+        // only the refresh token + lets the client mint the access token on first use).
+        // Without this, a record with an empty access token AND no recorded expiry
+        // falls through both checks below (is_access_expired treats no-expiry as
+        // not-expired; the min_ttl branch needs Some(expires_at_ms)) and the empty
+        // token is served as-is. `get` still gates the actual refresh on
+        // `is_refreshable()`, so a non-refreshable empty record is just served as-is.
+        if oauth.access_token.is_empty() {
+            return true;
+        }
         let now = now_ms();
         if oauth.is_access_expired(now, self.skew_ms) {
             return true;

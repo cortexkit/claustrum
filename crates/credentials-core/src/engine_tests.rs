@@ -143,6 +143,25 @@ fn stale_oauth_record() -> VaultRecord {
     )
 }
 
+/// A refresh-only login artifact: an OAuth record imported with an EMPTY access
+/// token and NO recorded expiry (the antigravity case — the account file stores only
+/// the refresh token and lets the client mint the access token on first use).
+fn refresh_only_oauth_record() -> VaultRecord {
+    VaultRecord::new_oauth(
+        "antigravity",
+        "stub",
+        OAuthCredential {
+            access_token: String::new(),
+            refresh_token: "live-refresh".into(),
+            expires_at_ms: None,
+            token_url: String::new(),
+            client_id: None,
+            scopes: vec![],
+        },
+        Vec::new(),
+    )
+}
+
 fn engine(store: EncryptedStore, adapter: StubAdapter) -> (RefreshEngine, Arc<AtomicUsize>) {
     let calls = adapter.calls.clone();
     let eng = RefreshEngine::new(Arc::new(store), vec![Arc::new(adapter)], Arc::new(NoHttp));
@@ -163,6 +182,32 @@ async fn refresh_on_stale_commits_new_tokens_and_bumps_version() {
     assert_eq!(calls.load(Ordering::SeqCst), 1, "exactly one upstream call");
     // The intent is cleared post-commit.
     assert!(eng.store().read_intent("id").unwrap().is_none());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn empty_access_token_refreshes_on_first_get_not_served_empty() {
+    // A refresh-only record (empty access, no expiry) must REFRESH on the first
+    // non-force get, not serve a zero-byte token. A zero-byte access token can never
+    // be validly served.
+    let (root, d) = tmp_descriptor();
+    let store = open_store(&d, 9);
+    store.create("id", &refresh_only_oauth_record()).unwrap();
+    let (eng, calls) = engine(store, StubAdapter::new("stub"));
+
+    // No force_refresh, and the min_ttl the consumer passes does not help (the record
+    // has no expiry, so the ttl branch is never engaged).
+    let got = eng.get("id", Some(600_000), false).await.expect("get");
+    assert_eq!(
+        got.payload, b"refreshed-access",
+        "empty-access record refreshed on first get, not served empty"
+    );
+    assert!(!got.payload.is_empty(), "never serve a zero-byte token");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "exactly one upstream refresh"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 

@@ -205,10 +205,14 @@ fn usage() -> String {
        supervised daemon open the SAME store.\n\
      Commands: bootstrap | put | import | invalidate | rotate-master-key |\n\
                mint-handle | revoke-handle | revoke-all-handles | audit | verify-audit\n\
-     import: --source <opencode|pi|antigravity|gemini-cli> --id <id> --json <file>\n\
-             [--provider <key>] [--replace]\n\
+     import: --source <opencode|pi|gemini-cli|antigravity> --id <id> --json <file>\n\
+             [--provider <key>] [--adapter <name>] [--replace]\n\
+       opencode/pi read auth.json (--provider selects one entry; an apikey:<p> id\n\
+         imports a {type:api,key} entry as a static key, an oauth id imports tokens);\n\
        gemini-cli reads ~/.gemini/oauth_creds.json (single credential, no --provider);\n\
-       opencode/pi/antigravity read auth.json (--provider selects one entry);\n\
+       antigravity reads ~/.config/opencode/antigravity-accounts.json (accounts array;\n\
+         --provider selects an account by email/index, default activeIndex);\n\
+       --adapter overrides the method-derived refresh adapter;\n\
        --replace overwrites an existing id (fix a wrong-source import; keeps handles)."
         .to_string()
 }
@@ -312,11 +316,18 @@ fn cmd_import(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     } else {
         // OAuth (incl. antigravity / chatgpt / legacy) → a refreshable record. The
         // stored adapter is the method's default, overridable with --adapter.
-        let oauth = match &provider_sel {
-            Some(provider) => {
-                credentials_core::oauth::OAuthCredential::import_provider(&source, &raw, provider)
+        let oauth = if source == "antigravity" {
+            // For antigravity the credentials live in the plugin's accounts-array
+            // store instead of the normal provider auth.json file — read the selected
+            // account and pack its refresh.
+            credentials_core::oauth::import_antigravity_account(&raw, provider_sel.as_deref())
+        } else {
+            match &provider_sel {
+                Some(provider) => credentials_core::oauth::OAuthCredential::import_provider(
+                    &source, &raw, provider,
+                ),
+                None => credentials_core::oauth::OAuthCredential::import(&source, &raw),
             }
-            None => credentials_core::oauth::OAuthCredential::import(&source, &raw),
         }
         .map_err(|e| CliError::Usage(format!("import parse: {e}")))?;
         let adapter = optional(args, "--adapter")

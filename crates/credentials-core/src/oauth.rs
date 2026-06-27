@@ -66,7 +66,7 @@ impl OAuthCredential {
     /// select one provider's entry from that map.
     pub fn import(source: &str, raw_json: &[u8]) -> Result<Self, ImportError> {
         match source {
-            "opencode" | "pi" | "antigravity" => Self::from_auth_json(raw_json),
+            "opencode" | "pi" => Self::from_auth_json(raw_json),
             // The gemini-cli login (`~/.gemini/oauth_creds.json`) is a SINGLE-credential
             // file with its own field names. It is the correct source for a Google
             // credential the GoogleAdapter can refresh: that adapter uses the public
@@ -90,7 +90,7 @@ impl OAuthCredential {
         provider: &str,
     ) -> Result<Self, ImportError> {
         match source {
-            "opencode" | "pi" | "antigravity" => {
+            "opencode" | "pi" => {
                 let map: serde_json::Value = serde_json::from_slice(raw_json)
                     .map_err(|e| ImportError::Malformed(e.to_string()))?;
                 let entry = map
@@ -175,6 +175,90 @@ impl OAuthCredential {
     }
 }
 
+/// Parse an antigravity credential from the antigravity-auth opencode plugin's
+/// accounts store (`~/.config/opencode/antigravity-accounts.json`, a `version: 4`
+/// file `{ accounts: [...], activeIndex }`). Each account carries a BARE
+/// `refreshToken` plus an optional `projectId` / `managedProjectId`. This reads the
+/// selected account and PACKS the refresh into the canonical
+/// `<refresh>|<projectId>|<managedProjectId>` form the antigravity refresh adapter
+/// reads back (the project segment is empty when absent; the managed segment is
+/// appended only when present).
+///
+/// `account` selects the account: `None` uses `accounts[activeIndex]`; `Some(s)`
+/// matches an account `email` (forward-compat with multi-account
+/// `antigravity:google:<email>`), or `s` as a numeric index. A store with no usable
+/// account is a typed error.
+pub fn import_antigravity_account(
+    raw_json: &[u8],
+    account: Option<&str>,
+) -> Result<OAuthCredential, ImportError> {
+    // Account fields are camelCase in the on-disk file (refreshToken, managedProjectId).
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Account {
+        #[serde(default)]
+        email: Option<String>,
+        #[serde(default)]
+        refresh_token: Option<String>,
+        #[serde(default)]
+        project_id: Option<String>,
+        #[serde(default)]
+        managed_project_id: Option<String>,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Store {
+        #[serde(default)]
+        accounts: Vec<Account>,
+        #[serde(default)]
+        active_index: usize,
+    }
+    let store: Store =
+        serde_json::from_slice(raw_json).map_err(|e| ImportError::Malformed(e.to_string()))?;
+    if store.accounts.is_empty() {
+        return Err(ImportError::Malformed(
+            "no antigravity accounts in file".into(),
+        ));
+    }
+    let acct = match account {
+        None => store
+            .accounts
+            .get(store.active_index)
+            .or_else(|| store.accounts.first())
+            .ok_or(ImportError::Malformed("activeIndex out of range".into()))?,
+        Some(sel) => store
+            .accounts
+            .iter()
+            .find(|a| a.email.as_deref() == Some(sel))
+            .or_else(|| {
+                sel.parse::<usize>()
+                    .ok()
+                    .and_then(|i| store.accounts.get(i))
+            })
+            .ok_or_else(|| ImportError::ProviderNotFound(sel.to_string()))?,
+    };
+    let refresh = acct
+        .refresh_token
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or(ImportError::MissingField("refreshToken"))?;
+    // Pack as `<refresh>|<projectId>` (empty middle segment when projectId absent),
+    // then append `|<managed>` only if present.
+    let project_segment = acct.project_id.as_deref().unwrap_or("");
+    let packed = match acct.managed_project_id.as_deref().filter(|s| !s.is_empty()) {
+        Some(managed) => format!("{refresh}|{project_segment}|{managed}"),
+        None => format!("{refresh}|{project_segment}"),
+    };
+    Ok(OAuthCredential {
+        access_token: String::new(),
+        refresh_token: packed,
+        expires_at_ms: None,
+        token_url: String::new(),
+        client_id: None,
+        scopes: Vec::new(),
+    })
+}
+
 /// Extract a static API key from an auth file. Returns the raw key bytes for a
 /// `CredentialKind::ApiKey` static record. The real opencode `auth.json` is a map
 /// keyed by provider; `provider` selects one `{ "type": "api", "key": "..." }` entry
@@ -186,7 +270,7 @@ pub fn import_api_key(
     provider: &str,
 ) -> Result<Vec<u8>, ImportError> {
     match source {
-        "opencode" | "pi" | "antigravity" => {
+        "opencode" | "pi" => {
             let map: serde_json::Value = serde_json::from_slice(raw_json)
                 .map_err(|e| ImportError::Malformed(e.to_string()))?;
             let entry = map
@@ -348,6 +432,49 @@ mod tests {
         assert!(matches!(
             import_api_key("opencode", nokey, "x"),
             Err(ImportError::MissingField("key"))
+        ));
+    }
+
+    #[test]
+    fn imports_antigravity_accounts_store_and_packs_managed_project() {
+        // The version:4 accounts-array store the antigravity plugin writes.
+        let raw = br#"{
+            "version": 4,
+            "activeIndex": 1,
+            "accounts": [
+                {"email":"a@x.com","refreshToken":"1//0-aaa","managedProjectId":"proj-a"},
+                {"email":"b@x.com","refreshToken":"1//0-bbb","managedProjectId":"encouraging-env-qwp21"}
+            ]
+        }"#;
+        // activeIndex picks account[1].
+        let c = import_antigravity_account(raw, None).expect("active account");
+        assert_eq!(
+            c.refresh_token, "1//0-bbb||encouraging-env-qwp21",
+            "packs <refresh>||<managed> (empty plain project segment)"
+        );
+        assert!(
+            c.access_token.is_empty(),
+            "antigravity store carries no access token"
+        );
+        // effective_project_id returns the managed id.
+        assert_eq!(
+            crate::refresh_adapters::antigravity::effective_project_id(&c.refresh_token).as_deref(),
+            Some("encouraging-env-qwp21")
+        );
+        // Select a specific account by email (forward-compat multi-account).
+        let a = import_antigravity_account(raw, Some("a@x.com")).expect("by email");
+        assert_eq!(a.refresh_token, "1//0-aaa||proj-a");
+        // Select by numeric index.
+        let byidx = import_antigravity_account(raw, Some("0")).expect("by index");
+        assert_eq!(byidx.refresh_token, "1//0-aaa||proj-a");
+        // An unknown selector is a typed error; an empty store is rejected.
+        assert!(matches!(
+            import_antigravity_account(raw, Some("nope@x.com")),
+            Err(ImportError::ProviderNotFound(_))
+        ));
+        assert!(matches!(
+            import_antigravity_account(br#"{"version":4,"accounts":[]}"#, None),
+            Err(ImportError::Malformed(_))
         ));
     }
 

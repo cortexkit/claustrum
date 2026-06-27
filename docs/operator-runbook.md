@@ -87,23 +87,35 @@ credentials-cli import \
   --data-dir "$DATA_DIR" --key-path /etc/cortexkit/master.key
 ```
 
-`--source` is one of `opencode | pi | antigravity | gemini-cli`. The provider's
-token URL and client id are supplied by the refresh adapter, not the file. The
-credential `--id` is the consumer-facing name; the adapter is inferred from its
-suffix (`opencode:anthropic` → the `anthropic` refresh adapter).
+`--source` is one of `opencode | pi | gemini-cli | antigravity`. The provider's
+token URL and client id are supplied by the refresh adapter, not the file.
+
+**The credential `--id` is `<method>:<provider>[:<account>]`** (e.g. `oauth:anthropic`,
+`apikey:deepseek`, `antigravity:google`). The `<method>` selects the credential kind
+and the refresh adapter the record stores — `oauth`→the provider-named adapter,
+`antigravity`→the `antigravity` adapter, `apikey`→a static key (no adapter). It is
+NOT derived from the id by position (no positional rule is uniform — `oauth:anthropic`
+wants the provider segment, `antigravity:google` the method segment); pass
+`--adapter <name>` to override the method default. A legacy `<provider>[:<account>]`
+id (first segment not a known method) defaults to the provider's oauth adapter.
 
 Source-specific notes:
 
-- The real `auth.json` is a **map keyed by provider**, so add `--provider <key>`
-  to select one entry (`--source opencode --provider google`). Without it, `--json`
-  must point at a single provider's `{ refresh, access, expires }` object.
-- **Google must be imported from `gemini-cli`, not opencode.** A Google refresh
-  token only refreshes against the OAuth client that minted it; the vault's Google
-  adapter uses the public gemini-cli client, so it can refresh a token from
-  `~/.gemini/oauth_creds.json` but **not** one opencode minted against its own
-  client (that one fails closed to `needs_reauth`). Import Google with
-  `--source gemini-cli --json ~/.gemini/oauth_creds.json` (a single-credential
-  file — no `--provider`).
+- **API keys:** an `apikey:<provider>` id imports a `{ "type": "api", "key": "..." }`
+  entry as a static key. The real `auth.json` is a map keyed by provider, so
+  `--provider <key>` selects the entry (`--source opencode --provider deepseek
+  --id apikey:deepseek`). `credential.get` returns the key bytes verbatim.
+- **OAuth (auth.json):** `--provider <key>` selects one provider's
+  `{ refresh, access, expires }` entry from the map. Without it, `--json` must point
+  at a single provider's object.
+- **Google must be imported from `gemini-cli` or `antigravity`, not opencode.** A
+  Google refresh token only refreshes against the OAuth client that minted it.
+  `--source gemini-cli` reads `~/.gemini/oauth_creds.json` (the gemini-cli Code-Assist
+  login, single credential, no `--provider`). `--source antigravity` reads
+  `~/.config/opencode/antigravity-accounts.json` (the antigravity plugin's accounts
+  array; `--provider` selects an account by email or index, default the active one)
+  and is the source for an `antigravity:google` id. An opencode-minted google token
+  cannot be refreshed by either and fails closed to `needs_reauth`.
 - `--replace` overwrites an existing id unconditionally (re-seal at version+1,
   reset to active), for fixing a credential imported from the wrong source. Existing
   handles keep resolving to the id — **no re-mint needed**. Without `--replace`,

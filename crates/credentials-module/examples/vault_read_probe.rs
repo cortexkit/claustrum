@@ -34,6 +34,8 @@ async fn main() {
     let mut subc: Option<PathBuf> = None;
     let mut handle: Option<String> = None;
     let mut root = std::env::temp_dir();
+    let mut force_refresh = false;
+    let mut min_ttl_ms: Option<i64> = None;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -44,6 +46,16 @@ async fn main() {
                 if let Some(value) = args.next() {
                     root = PathBuf::from(value);
                 }
+            }
+            // Force a refresh-on-read regardless of the token's recorded expiry. This
+            // makes the "google's token is dead, the vault refreshes it live" proof
+            // DETERMINISTIC: without it, a credential whose auth.json carried no
+            // `expires` is treated as not-stale and served as-is (no refresh), so an
+            // empty google access token would come back empty and look like a failure.
+            "--force-refresh" => force_refresh = true,
+            // Refresh if the token has less than this many ms of life left.
+            "--min-ttl-ms" => {
+                min_ttl_ms = args.next().and_then(|v| v.parse().ok());
             }
             other => {
                 eprintln!("vault_read_probe: unexpected arg '{other}'");
@@ -83,7 +95,14 @@ async fn main() {
     let route_channel = route_open(&mut stream, &root).await;
     eprintln!("[probe] route.open -> route_channel={route_channel}");
 
-    let body = credential_get(&mut stream, route_channel, &handle).await;
+    let body = credential_get(
+        &mut stream,
+        route_channel,
+        &handle,
+        force_refresh,
+        min_ttl_ms,
+    )
+    .await;
     report(&body);
 }
 
@@ -166,14 +185,23 @@ async fn route_open(stream: &mut TcpStream, root: &std::path::Path) -> u16 {
     value["route_channel"].as_u64().unwrap() as u16
 }
 
-async fn credential_get(stream: &mut TcpStream, route_channel: u16, handle: &str) -> Frame {
+async fn credential_get(
+    stream: &mut TcpStream,
+    route_channel: u16,
+    handle: &str,
+    force_refresh: bool,
+    min_ttl_ms: Option<i64>,
+) -> Frame {
+    let mut params = json!({ "handle": handle, "force_refresh": force_refresh });
+    if let Some(ttl) = min_ttl_ms {
+        params["min_ttl_ms"] = json!(ttl);
+    }
     let frame = Frame::build(
         FrameType::Request,
         Flags::new(false, Priority::Interactive, false),
         route_channel,
         7,
-        serde_json::to_vec(&json!({ "method": "credential.get", "params": { "handle": handle } }))
-            .unwrap(),
+        serde_json::to_vec(&json!({ "method": "credential.get", "params": params })).unwrap(),
     )
     .unwrap();
     write_frame(stream, &frame).await.unwrap();

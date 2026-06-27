@@ -160,6 +160,7 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
         "put" => &[
             "--id",
             "--payload",
+            "--payload-file",
             "--kind",
             "--expires-ms",
             "--expected-hash",
@@ -254,7 +255,31 @@ fn cmd_bootstrap(global: &GlobalArgs) -> Result<(), CliError> {
 
 fn cmd_put(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     let id = required(args, "--id")?;
-    let payload = required(args, "--payload")?.into_bytes();
+    // Payload from EITHER --payload <value> (exact bytes) OR --payload-file <path>
+    // (the file's bytes, trailing whitespace stripped). --payload-file keeps a real
+    // secret OUT of argv (process list / shell history) — the right way to ingest a
+    // bare key file like ~/.config/openai.key.
+    let payload = match (
+        optional(args, "--payload"),
+        optional(args, "--payload-file"),
+    ) {
+        (Some(_), Some(_)) => {
+            return Err(CliError::Usage(
+                "pass only one of --payload or --payload-file".to_string(),
+            ))
+        }
+        (Some(p), None) => p.into_bytes(),
+        (None, Some(path)) => {
+            let raw = std::fs::read_to_string(&path)
+                .map_err(|e| CliError::Io(format!("reading {path}: {e}")))?;
+            raw.trim_end().as_bytes().to_vec()
+        }
+        (None, None) => {
+            return Err(CliError::Usage(
+                "--payload <value> or --payload-file <path> is required".to_string(),
+            ))
+        }
+    };
     let kind = match optional(args, "--kind").as_deref() {
         None | Some("api_key") => CredentialKind::ApiKey,
         Some("dsn") => CredentialKind::Dsn,

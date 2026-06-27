@@ -121,12 +121,15 @@ Source-specific notes:
   handles keep resolving to the id — **no re-mint needed**. Without `--replace`,
   `import` is create-only and an existing id is refused.
 
-**Put a static credential** (API key / DSN / opaque):
+**Put a static credential** (API key / DSN / opaque). Use `--payload-file <path>`
+for a secret so it never appears in the process list or shell history; `--payload
+<value>` passes the exact bytes inline. A bare key file (e.g. `~/.config/openai.key`)
+is read with trailing whitespace stripped:
 
 ```sh
 credentials-cli put \
-  --id operator:my-api-key \
-  --payload "sk-..." \
+  --id apikey:openai \
+  --payload-file ~/.config/openai.key \
   --kind api_key \
   --data-dir "$DATA_DIR" --key-path /etc/cortexkit/master.key
 ```

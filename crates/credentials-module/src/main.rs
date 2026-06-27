@@ -30,8 +30,8 @@ use cortexkit_store::{open_sqlite, StorageDescriptor};
 use credentials_core::engine::RefreshEngine;
 use credentials_core::http::ReqwestTransport;
 use credentials_core::refresh_adapters::{
-    anthropic::AnthropicAdapter, google::GoogleAdapter, openai::OpenAiAdapter, xai::XaiAdapter,
-    RefreshAdapter,
+    anthropic::AnthropicAdapter, antigravity::AntigravityAdapter, google::GoogleAdapter,
+    openai::OpenAiAdapter, xai::XaiAdapter, RefreshAdapter,
 };
 use credentials_core::resolver::{self, KeySource, ResolverConfig};
 use credentials_core::store::EncryptedStore;
@@ -214,6 +214,9 @@ async fn build_surface(ack: &ModuleHelloAckBody) -> Result<ReadSurface, ModuleEr
         // is required for the common case.
         Arc::new(GoogleAdapter::new()),
         Arc::new(XaiAdapter::new()),
+        // Antigravity (Google Code-Assist OAuth) — its own public client, distinct
+        // from the gemini-cli client the google adapter uses.
+        Arc::new(AntigravityAdapter::new()),
     ];
     let engine = Arc::new(RefreshEngine::new(store, adapters, http));
 

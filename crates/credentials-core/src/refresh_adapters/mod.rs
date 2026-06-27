@@ -27,6 +27,7 @@ use async_trait::async_trait;
 use crate::oauth::OAuthCredential;
 
 pub mod anthropic;
+pub mod antigravity;
 pub mod google;
 pub mod openai;
 pub mod xai;

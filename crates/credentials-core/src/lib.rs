@@ -20,6 +20,7 @@
 
 pub mod audit;
 pub mod contract;
+pub mod credential_id;
 pub mod engine;
 #[cfg(test)]
 mod engine_tests;
@@ -34,6 +35,9 @@ pub mod store;
 
 pub use audit::{AlarmReason, AuditEntry, AuditOp, AuditRecord};
 pub use contract::{keychain_service_for, MODULE_ID, STORAGE_NAMESPACE};
+pub use credential_id::{
+    default_refresh_adapter, parse_credential_id, AuthMethod, ParsedCredentialId,
+};
 pub use engine::{EngineError, ReauthReason, Reconciliation, RefreshEngine};
 pub use envelope::{open, seal, EnvelopeError, RecordBinding};
 pub use http::ReqwestTransport;
@@ -41,6 +45,7 @@ pub use key::{KeyId, MasterKey};
 pub use oauth::OAuthCredential;
 pub use record::{CredentialKind, VaultRecord, RECORD_SCHEMA_VERSION};
 pub use refresh_adapters::anthropic::AnthropicAdapter;
+pub use refresh_adapters::antigravity::AntigravityAdapter;
 pub use refresh_adapters::google::GoogleAdapter;
 pub use refresh_adapters::openai::OpenAiAdapter;
 pub use refresh_adapters::xai::XaiAdapter;

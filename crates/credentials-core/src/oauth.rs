@@ -175,6 +175,43 @@ impl OAuthCredential {
     }
 }
 
+/// Extract a static API key from an auth file. Returns the raw key bytes for a
+/// `CredentialKind::ApiKey` static record. The real opencode `auth.json` is a map
+/// keyed by provider; `provider` selects one `{ "type": "api", "key": "..." }` entry
+/// (the shape opencode writes for api-key providers). A missing provider, a
+/// non-api-key entry, or an absent key is a typed error.
+pub fn import_api_key(
+    source: &str,
+    raw_json: &[u8],
+    provider: &str,
+) -> Result<Vec<u8>, ImportError> {
+    match source {
+        "opencode" | "pi" | "antigravity" => {
+            let map: serde_json::Value = serde_json::from_slice(raw_json)
+                .map_err(|e| ImportError::Malformed(e.to_string()))?;
+            let entry = map
+                .get(provider)
+                .ok_or_else(|| ImportError::ProviderNotFound(provider.to_string()))?;
+            // opencode tags api-key entries `"type":"api"`; reject an oauth entry so a
+            // wrong --kind can't silently store an oauth blob as an api key.
+            if let Some(ty) = entry.get("type").and_then(|t| t.as_str()) {
+                if ty != "api" {
+                    return Err(ImportError::Malformed(format!(
+                        "provider '{provider}' is type '{ty}', not 'api' (use the oauth import path)"
+                    )));
+                }
+            }
+            let key = entry
+                .get("key")
+                .and_then(|k| k.as_str())
+                .filter(|s| !s.is_empty())
+                .ok_or(ImportError::MissingField("key"))?;
+            Ok(key.as_bytes().to_vec())
+        }
+        other => Err(ImportError::UnknownSource(other.to_string())),
+    }
+}
+
 /// A credential-import failure.
 #[derive(Debug)]
 pub enum ImportError {
@@ -285,6 +322,32 @@ mod tests {
         assert!(matches!(
             OAuthCredential::import_provider("opencode", raw, "openai"),
             Err(ImportError::ProviderNotFound(p)) if p == "openai"
+        ));
+    }
+
+    #[test]
+    fn imports_api_key_from_auth_json_map() {
+        let raw = br#"{
+            "deepseek": {"type":"api","key":"sk-deep-123"},
+            "anthropic": {"type":"oauth","refresh":"r","access":"a"}
+        }"#;
+        let key = import_api_key("opencode", raw, "deepseek").expect("deepseek key");
+        assert_eq!(key, b"sk-deep-123");
+        // An oauth entry is rejected by the api-key path (wrong --kind guard).
+        assert!(matches!(
+            import_api_key("opencode", raw, "anthropic"),
+            Err(ImportError::Malformed(_))
+        ));
+        // A missing provider is a typed error.
+        assert!(matches!(
+            import_api_key("opencode", raw, "absent"),
+            Err(ImportError::ProviderNotFound(p)) if p == "absent"
+        ));
+        // A missing key is a typed error.
+        let nokey = br#"{"x":{"type":"api"}}"#;
+        assert!(matches!(
+            import_api_key("opencode", nokey, "x"),
+            Err(ImportError::MissingField("key"))
         ));
     }
 

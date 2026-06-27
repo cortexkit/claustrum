@@ -67,6 +67,11 @@ pub struct GetResult {
     pub payload: Vec<u8>,
     pub expires_at_ms: Option<i64>,
     pub record_version: u64,
+    /// The Code-Assist project id for an antigravity credential, a NON-secret value
+    /// the consumer freezes into its render config (it is in the request path).
+    /// Absent for every non-antigravity credential. Never the refresh token.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
 }
 
 /// A non-secret error code returned to a consumer (never leaks why beyond the
@@ -143,11 +148,28 @@ impl ReadSurface {
             .get(&credential_id, params.min_ttl_ms, params.force_refresh)
             .await
         {
-            Ok(record) => GetOutcome::Ok(GetResult {
-                payload: record.payload,
-                expires_at_ms: record.expires_at_ms,
-                record_version: record.record_version,
-            }),
+            Ok(record) => {
+                // For an antigravity credential, surface the non-secret Code-Assist
+                // project id (split from the packed refresh token) so the consumer can
+                // freeze it into its render config. Never exposes the refresh token.
+                let is_antigravity = record.refresh_adapter.as_deref()
+                    == Some(credentials_core::refresh_adapters::antigravity::ADAPTER_NAME);
+                let project_id = if is_antigravity {
+                    record.oauth.as_ref().and_then(|o| {
+                        credentials_core::refresh_adapters::antigravity::effective_project_id(
+                            &o.refresh_token,
+                        )
+                    })
+                } else {
+                    None
+                };
+                GetOutcome::Ok(GetResult {
+                    payload: record.payload,
+                    expires_at_ms: record.expires_at_ms,
+                    record_version: record.record_version,
+                    project_id,
+                })
+            }
             Err(e) => err(map_engine_error(&e)),
         }
     }

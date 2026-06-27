@@ -37,6 +37,7 @@ use std::process::ExitCode;
 use cortexkit_store::{open_sqlite, Isolation, StorageBackend, StorageDescriptor, StoreError};
 use credentials_core::audit::{AuditCtx, AuditOp};
 use credentials_core::contract::{MODULE_ID, STORAGE_NAMESPACE};
+use credentials_core::credential_id::{default_refresh_adapter, parse_credential_id, AuthMethod};
 use credentials_core::key::MasterKey;
 use credentials_core::record::{CredentialKind, VaultRecord};
 use credentials_core::resolver::{self, KeySource, MasterKeyError, ResolverConfig};
@@ -163,7 +164,7 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
             "--expires-ms",
             "--expected-hash",
         ],
-        "import" => &["--source", "--provider", "--id", "--json"],
+        "import" => &["--source", "--provider", "--id", "--json", "--adapter"],
         "invalidate" | "mint-handle" | "revoke-all-handles" => &["--id"],
         "revoke-handle" => &["--handle"],
         "audit" => &["--limit"],
@@ -292,17 +293,42 @@ fn cmd_import(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     let json_path = required(args, "--json")?;
     let raw =
         std::fs::read(&json_path).map_err(|e| CliError::Io(format!("reading {json_path}: {e}")))?;
-    // `--provider <key>` selects one provider's entry from a multi-provider auth.json
-    // (the real on-disk shape); without it, --json must be a single provider's entry.
-    let oauth = match optional(args, "--provider") {
-        Some(provider) => {
-            credentials_core::oauth::OAuthCredential::import_provider(&source, &raw, &provider)
+    let provider_sel = optional(args, "--provider");
+
+    // The credential id (<method>:<provider>[:<account>], or legacy <provider>...)
+    // determines whether this is an api-key (static) or an oauth import, and which
+    // refresh adapter to STORE. The adapter is set EXPLICITLY here, never parsed from
+    // the id suffix — `--adapter` overrides the method's default.
+    let parsed = parse_credential_id(&id);
+    let record = if matches!(parsed.method, Some(AuthMethod::ApiKey)) {
+        // API key → a static record (no adapter, no refresh). `--provider` selects the
+        // entry from a multi-provider auth.json; default to the parsed provider.
+        let provider = provider_sel
+            .clone()
+            .unwrap_or_else(|| parsed.provider.clone());
+        let key = credentials_core::oauth::import_api_key(&source, &raw, &provider)
+            .map_err(|e| CliError::Usage(format!("api-key import: {e}")))?;
+        VaultRecord::new_static(CredentialKind::ApiKey, source, key, None)
+    } else {
+        // OAuth (incl. antigravity / chatgpt / legacy) → a refreshable record. The
+        // stored adapter is the method's default, overridable with --adapter.
+        let oauth = match &provider_sel {
+            Some(provider) => {
+                credentials_core::oauth::OAuthCredential::import_provider(&source, &raw, provider)
+            }
+            None => credentials_core::oauth::OAuthCredential::import(&source, &raw),
         }
-        None => credentials_core::oauth::OAuthCredential::import(&source, &raw),
-    }
-    .map_err(|e| CliError::Usage(format!("import parse: {e}")))?;
-    let payload = oauth.access_token.clone().into_bytes();
-    let record = VaultRecord::new_oauth(source, adapter_for(&id), oauth, payload);
+        .map_err(|e| CliError::Usage(format!("import parse: {e}")))?;
+        let adapter = optional(args, "--adapter")
+            .or_else(|| default_refresh_adapter(parsed.method, &parsed.provider))
+            .ok_or_else(|| {
+                CliError::Usage(format!(
+                    "no refresh adapter for id '{id}'; pass --adapter <name>"
+                ))
+            })?;
+        let payload = oauth.access_token.clone().into_bytes();
+        VaultRecord::new_oauth(source, adapter, oauth, payload)
+    };
 
     let store = open_for_admin(global)?;
     // `--replace` overwrites an existing credential UNCONDITIONALLY (re-seal at
@@ -486,12 +512,6 @@ fn decode_hash(hex: &str) -> Result<[u8; 32], CliError> {
         out[i] = u8::from_str_radix(s, 16).map_err(|_| CliError::Usage("bad hex".into()))?;
     }
     Ok(out)
-}
-
-/// Default the refresh adapter from the credential id prefix (e.g.
-/// `opencode:anthropic` -> `anthropic`). Falls back to the id itself.
-fn adapter_for(id: &str) -> String {
-    id.rsplit(':').next().unwrap_or(id).to_string()
 }
 
 fn descriptor(global: &GlobalArgs) -> StorageDescriptor {

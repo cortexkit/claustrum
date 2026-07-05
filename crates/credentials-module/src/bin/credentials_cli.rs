@@ -41,7 +41,7 @@ use credentials_core::credential_id::{default_refresh_adapter, parse_credential_
 use credentials_core::key::MasterKey;
 use credentials_core::record::{CredentialKind, VaultRecord};
 use credentials_core::resolver::{self, KeySource, MasterKeyError, ResolverConfig};
-use credentials_core::store::{mint_handle, EncryptedStore, StoreOpError};
+use credentials_core::store::{mint_handle, EncryptedStore, RecordState, StoreOpError};
 
 fn main() -> ExitCode {
     match run() {
@@ -138,6 +138,7 @@ fn run() -> Result<(), CliError> {
         "mint-handle" => cmd_mint_handle(&global, &args),
         "revoke-handle" => cmd_revoke_handle(&global, &args),
         "revoke-all-handles" => cmd_revoke_all_handles(&global, &args),
+        "list" => cmd_list(&global),
         "audit" => cmd_audit(&global, &args),
         "verify-audit" => cmd_verify_audit(&global),
         other => Err(CliError::Usage(format!(
@@ -205,7 +206,10 @@ fn usage() -> String {
        subc.jsonc module key (\"cortexkit-credentials\"), so the CLI and the\n\
        supervised daemon open the SAME store.\n\
      Commands: bootstrap | put | import | invalidate | rotate-master-key |\n\
-               mint-handle | revoke-handle | revoke-all-handles | audit | verify-audit\n\
+                mint-handle | revoke-handle | revoke-all-handles | list | audit |\n\
+                verify-audit\n\
+      list: print each credential's id + lifecycle state + version (no secrets),\n\
+            e.g. to find which credential a health probe flagged needs_reauth.\n\
      import: --source <opencode|pi|gemini-cli|antigravity> --id <id> --json <file>\n\
              [--provider <key>] [--adapter <name>] [--replace]\n\
        opencode/pi read auth.json (--provider selects one entry; an apikey:<p> id\n\
@@ -473,6 +477,25 @@ fn cmd_audit(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             e.actor,
             alarm
         );
+    }
+    Ok(())
+}
+
+fn cmd_list(global: &GlobalArgs) -> Result<(), CliError> {
+    // Read-only: id + lifecycle state + version, WITHOUT decrypting any record
+    // (list_meta reads only plaintext columns). This is the operator's offline
+    // "which credential needs action?" view — the counterpart to the live health
+    // probe's needs_reauth ids — so re-importing a stale credential does not
+    // require reading the audit log and inferring.
+    let store = open_for_admin(global)?;
+    let rows = store.list_meta().map_err(CliError::Store)?;
+    for (id, meta) in rows {
+        let state = match meta.state {
+            RecordState::Active => "active",
+            RecordState::NeedsReauth => "needs_reauth",
+            RecordState::Corrupt => "corrupt",
+        };
+        println!("{:<14} v{:<4} {}", state, meta.record_version, id);
     }
     Ok(())
 }

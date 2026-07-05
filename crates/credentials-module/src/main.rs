@@ -398,13 +398,20 @@ fn health_report(health: &credentials_core::health::VaultHealth) -> ModuleContro
     } else if !health.store_readable {
         Some("store unreadable: cannot serve any credential (check disk / lease)".to_string())
     } else if health.needs_reauth > 0 || health.corrupt > 0 {
+        // Name the affected credentials (ids are non-secret) so the alert is an
+        // action, not a lookup. The ids are capped in the snapshot; the counts
+        // above remain the true totals.
+        let mut affected: Vec<&str> = health.needs_reauth_ids.iter().map(String::as_str).collect();
+        affected.extend(health.corrupt_ids.iter().map(String::as_str));
         Some(format!(
-            "{} of {} credentials need operator action ({} needs_reauth, {} corrupt); {} serving",
+            "{} of {} credentials need operator action ({} needs_reauth, {} corrupt); \
+             {} serving [{}]",
             health.needs_reauth + health.corrupt,
             health.credentials_total,
             health.needs_reauth,
             health.corrupt,
             health.active,
+            affected.join(", "),
         ))
     } else {
         None
@@ -414,6 +421,8 @@ fn health_report(health: &credentials_core::health::VaultHealth) -> ModuleContro
         "active": health.active,
         "needsReauth": health.needs_reauth,
         "corrupt": health.corrupt,
+        "needsReauthIds": health.needs_reauth_ids,
+        "corruptIds": health.corrupt_ids,
         "openIntents": health.open_intents,
         "storeReadable": health.store_readable,
         "fencedOut": health.fenced_out,
@@ -775,5 +784,7 @@ mod tests {
         assert_eq!(obj["active"], 1);
         assert_eq!(obj["needsReauth"], 1);
         assert_eq!(obj["storeReadable"], true);
+        // The report NAMES the credential needing action (the seeded dead id).
+        assert_eq!(obj["needsReauthIds"], serde_json::json!(["apikey:dead"]));
     }
 }

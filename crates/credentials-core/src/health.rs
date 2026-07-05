@@ -27,6 +27,13 @@
 
 use crate::store::{RecordMeta, RecordState};
 
+/// Cap on how many affected credential ids the snapshot carries per bucket. The
+/// counts (`needs_reauth`/`corrupt`) remain the true totals; the id lists are a
+/// bounded sample so the health metrics stay well under the prober's 16 KiB cap
+/// even on a pathologically large vault. For a real credential vault (dozens of
+/// records) this always lists every affected id.
+const MAX_LISTED_IDS: usize = 32;
+
 /// The wire-agnostic domain health status. The module maps this onto the subc
 /// protocol `HealthStatus`; core never depends on the protocol crate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +56,14 @@ pub struct VaultHealth {
     pub active: usize,
     pub needs_reauth: usize,
     pub corrupt: usize,
+    /// The ids of credentials in `needs_reauth` (capped at [`MAX_LISTED_IDS`]) so
+    /// the report NAMES which credential to re-import, not just how many. Credential
+    /// ids are non-secret metadata (`<method>:<provider>[:<account>]`) and the
+    /// health lane is authenticated-clients-only, so listing them turns an alert
+    /// into a one-read action.
+    pub needs_reauth_ids: Vec<String>,
+    /// The ids of `corrupt` (quarantined) credentials, same cap and rationale.
+    pub corrupt_ids: Vec<String>,
     /// Open refresh-intent rows at snapshot time. Carried as an opaque metric
     /// only — a nonzero count is NOT a status input because a legitimately
     /// in-flight refresh holds an intent open transiently (txn1 opens it, txn2
@@ -68,6 +83,8 @@ impl VaultHealth {
             active: 0,
             needs_reauth: 0,
             corrupt: 0,
+            needs_reauth_ids: Vec::new(),
+            corrupt_ids: Vec::new(),
             open_intents: 0,
         }
     }
@@ -86,11 +103,23 @@ impl VaultHealth {
         let mut active = 0;
         let mut needs_reauth = 0;
         let mut corrupt = 0;
-        for (_, meta) in metas {
+        let mut needs_reauth_ids = Vec::new();
+        let mut corrupt_ids = Vec::new();
+        for (id, meta) in metas {
             match meta.state {
                 RecordState::Active => active += 1,
-                RecordState::NeedsReauth => needs_reauth += 1,
-                RecordState::Corrupt => corrupt += 1,
+                RecordState::NeedsReauth => {
+                    needs_reauth += 1;
+                    if needs_reauth_ids.len() < MAX_LISTED_IDS {
+                        needs_reauth_ids.push(id.clone());
+                    }
+                }
+                RecordState::Corrupt => {
+                    corrupt += 1;
+                    if corrupt_ids.len() < MAX_LISTED_IDS {
+                        corrupt_ids.push(id.clone());
+                    }
+                }
             }
         }
         // Fenced out outranks everything: this daemon lost write authority, so it
@@ -112,6 +141,8 @@ impl VaultHealth {
             active,
             needs_reauth,
             corrupt,
+            needs_reauth_ids,
+            corrupt_ids,
             open_intents,
         }
     }
@@ -122,8 +153,12 @@ mod tests {
     use super::*;
 
     fn meta(state: RecordState) -> (String, RecordMeta) {
+        meta_id("id", state)
+    }
+
+    fn meta_id(id: &str, state: RecordState) -> (String, RecordMeta) {
         (
-            "id".to_string(),
+            id.to_string(),
             RecordMeta {
                 record_version: 1,
                 key_id_hex: "deadbeef".to_string(),
@@ -150,13 +185,19 @@ mod tests {
 
     #[test]
     fn a_needs_reauth_credential_is_degraded_never_failing() {
-        let metas = vec![meta(RecordState::Active), meta(RecordState::NeedsReauth)];
+        let metas = vec![
+            meta_id("apikey:openai", RecordState::Active),
+            meta_id("oauth:google", RecordState::NeedsReauth),
+        ];
         let h = VaultHealth::summarize(&metas, 0, false);
         // The load-bearing invariant: one credential needing re-auth must NOT
         // escalate to `failing` (which would restart-flap a serving vault).
         assert_eq!(h.status, VaultHealthStatus::Degraded);
         assert_eq!(h.active, 1);
         assert_eq!(h.needs_reauth, 1);
+        // And it NAMES which credential, so the alert is actionable in one read.
+        assert_eq!(h.needs_reauth_ids, vec!["oauth:google".to_string()]);
+        assert!(h.corrupt_ids.is_empty());
     }
 
     #[test]

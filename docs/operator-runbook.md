@@ -177,7 +177,20 @@ vault marks the credential `needs_reauth` rather than serving a dead token.
 
 ---
 
-## 5. Verify the audit chain
+## 5. List credentials (which one needs action?)
+
+To see what the vault holds without decrypting anything (daemon stopped):
+
+```sh
+credentials-cli list --data-dir "$DATA_DIR" --key-path /etc/cortexkit/master.key
+```
+
+Each row is `<state> v<version> <credential_id>` — no secrets. Use it to find
+which credential a health probe flagged: if the daemon's health report says a
+credential is `needs_reauth`, `list` (or the health metrics' `needsReauthIds`)
+names it, and you re-import it with `import ... --replace` (§2).
+
+## 6. Verify the audit chain
 
 Every durable mutation is recorded in a tamper-evident, HMAC-keyed audit chain.
 Check it (daemon stopped):

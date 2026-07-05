@@ -108,6 +108,24 @@ fn bootstrap_put_mint_audit_end_to_end() {
     );
     assert!(listing.contains("offline-cli"), "actor recorded: {listing}");
 
+    // list shows the credential id + its active state (no secrets, no decrypt).
+    let mut c = cli();
+    c.arg("list");
+    global(&mut c);
+    let out = c.output().expect("run list");
+    assert!(
+        out.status.success(),
+        "list: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let rows = String::from_utf8_lossy(&out.stdout);
+    assert!(rows.contains("operator:db"), "list names the id: {rows}");
+    assert!(rows.contains("active"), "list shows state: {rows}");
+    assert!(
+        !rows.contains("sk-secret"),
+        "list must never print the payload: {rows}"
+    );
+
     let _ = std::fs::remove_dir_all(&root);
 }
 

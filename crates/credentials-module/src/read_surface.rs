@@ -283,7 +283,7 @@ impl ReadSurface {
         // refresh holds one open), so a scan failure here must not flip serving
         // health — default to 0 rather than masking a readable store as failing.
         let open_intents = store.list_intents().map(|i| i.len()).unwrap_or(0);
-        VaultHealth::summarize(&metas, open_intents)
+        VaultHealth::summarize(&metas, open_intents, store.is_fenced_out())
     }
 
     /// Run the per-connection limiter for one probe, keyed by `probe_key` (the

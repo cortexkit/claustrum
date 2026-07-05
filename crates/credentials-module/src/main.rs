@@ -389,8 +389,14 @@ fn health_report(health: &credentials_core::health::VaultHealth) -> ModuleContro
         VaultHealthStatus::Degraded => HealthStatus::Degraded,
         VaultHealthStatus::Failing => HealthStatus::Failing,
     };
-    let detail = if !health.store_readable {
-        Some("store unreadable: cannot serve any credential (lease lost or store gone)".to_string())
+    let detail = if health.fenced_out {
+        Some(
+            "fenced out by a newer writer: this daemon lost the single-writer lease \
+             (find the other writer)"
+                .to_string(),
+        )
+    } else if !health.store_readable {
+        Some("store unreadable: cannot serve any credential (check disk / lease)".to_string())
     } else if health.needs_reauth > 0 || health.corrupt > 0 {
         Some(format!(
             "{} of {} credentials need operator action ({} needs_reauth, {} corrupt); {} serving",
@@ -410,6 +416,7 @@ fn health_report(health: &credentials_core::health::VaultHealth) -> ModuleContro
         "corrupt": health.corrupt,
         "openIntents": health.open_intents,
         "storeReadable": health.store_readable,
+        "fencedOut": health.fenced_out,
     });
     ModuleControlResponse::HealthCheck {
         status,

@@ -30,6 +30,8 @@
 //! the per-record quarantine the availability contract requires (NOT a whole-DB
 //! reset — auto-wiping on perceived corruption is itself a data-loss/DoS vector).
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use cortexkit_store::{Migration, SqliteStore, StoreError};
 use sha2::{Digest, Sha256};
 
@@ -310,6 +312,14 @@ pub struct EncryptedStore {
     key: MasterKey,
     key_id: KeyId,
     audit_key: [u8; 32],
+    // Latched true the first time a fenced write is rejected because a newer writer
+    // took the lease. This is PERMANENT for a store instance by construction: the
+    // fence epoch only ever rises, so a superseded writer can never win a later
+    // fenced write. It gives the health probe a precise "fenced out by a newer
+    // writer" signal that an unfenced read scan cannot detect on its own (a
+    // superseded daemon still reads its stale rows fine — it has only lost WRITE
+    // authority), distinguishing "find the other writer" from a generic read error.
+    fenced_out: AtomicBool,
 }
 
 impl EncryptedStore {
@@ -332,7 +342,32 @@ impl EncryptedStore {
             key,
             key_id,
             audit_key,
+            fenced_out: AtomicBool::new(false),
         })
+    }
+
+    /// Whether a fenced write has ever been rejected on this store instance because
+    /// a newer writer holds the lease. Once true it stays true (the fence epoch only
+    /// rises). The health probe reads it to report a precise fenced-out state.
+    pub fn is_fenced_out(&self) -> bool {
+        self.fenced_out.load(Ordering::Relaxed)
+    }
+
+    /// Run a fenced write, latching [`Self::is_fenced_out`] if it is rejected by a
+    /// newer lease holder. The single choke point every durable mutation routes
+    /// through, so the fenced-out signal is set exactly once, at the source, rather
+    /// than at each call site. Returns `Result<_, StoreError>` exactly like the
+    /// underlying `with_conn_fenced`, so it is a drop-in at every call site (the
+    /// existing `?`/`map_err` error tails are unchanged).
+    fn fenced_write<T>(
+        &self,
+        f: impl FnOnce(&rusqlite::Transaction) -> rusqlite::Result<T>,
+    ) -> Result<T, StoreError> {
+        let out = self.store.with_conn_fenced(f);
+        if matches!(out, Err(StoreError::Fenced { .. })) {
+            self.fenced_out.store(true, Ordering::Relaxed);
+        }
+        out
     }
 
     /// Apply the vault schema migrations to a freshly opened store and set the
@@ -476,7 +511,7 @@ impl EncryptedStore {
         // Create-only via INSERT ... ON CONFLICT DO NOTHING inside the fenced
         // transaction: an existing id leaves zero rows changed (atomic, no separate
         // existence query, no error-string matching). Zero changed => AlreadyExists.
-        let changed = self.store.with_conn_fenced(|tx| {
+        let changed = self.fenced_write(|tx| {
             let n = tx.execute(
                 "INSERT INTO credentials \
                  (credential_id, record_version, key_id, state, envelope, updated_at_ms) \
@@ -555,7 +590,7 @@ impl EncryptedStore {
         // The version in the WHERE makes the UPDATE itself a compare-and-set on the
         // version we read, so a concurrent writer that already bumped it leaves zero
         // rows changed (no error-string matching). Zero changed => CasMismatch.
-        let changed = self.store.with_conn_fenced(|tx| {
+        let changed = self.fenced_write(|tx| {
             let n = tx.execute(
                 "UPDATE credentials \
                  SET record_version = ?2, key_id = ?3, state = 'active', envelope = ?4, \
@@ -625,7 +660,7 @@ impl EncryptedStore {
         let audit_key = self.audit_key;
         let payload_hash_hex = hex32(&payload_hash(&record.payload));
 
-        let changed = self.store.with_conn_fenced(|tx| {
+        let changed = self.fenced_write(|tx| {
             let n = tx.execute(
                 "UPDATE credentials \
                  SET record_version = ?2, key_id = ?3, state = 'active', envelope = ?4, \
@@ -779,36 +814,35 @@ impl EncryptedStore {
     ) -> Result<(), StoreOpError> {
         let now = now_ms();
         let audit_key = self.audit_key;
-        self.store
-            .with_conn_fenced(|tx| {
-                let n = tx.execute(
-                    "UPDATE credentials SET state = ?2, updated_at_ms = ?3 \
-                     WHERE credential_id = ?1",
-                    rusqlite::params![credential_id, state.as_str(), now],
-                )?;
-                if clear_intent {
-                    clear_intent_tx(tx, credential_id)?;
+        self.fenced_write(|tx| {
+            let n = tx.execute(
+                "UPDATE credentials SET state = ?2, updated_at_ms = ?3 \
+                 WHERE credential_id = ?1",
+                rusqlite::params![credential_id, state.as_str(), now],
+            )?;
+            if clear_intent {
+                clear_intent_tx(tx, credential_id)?;
+            }
+            // Audit the state change only when it actually hit a row and a
+            // context was supplied (quarantine/retain are internal, unaudited).
+            if n > 0 {
+                if let Some(ctx) = ctx {
+                    append_audit_tx(
+                        tx,
+                        &audit_key,
+                        &AuditRecord {
+                            op: ctx.op,
+                            credential_id: Some(credential_id.to_string()),
+                            payload_hash: None,
+                            actor: ctx.actor.to_string(),
+                            alarm: ctx.alarm,
+                        },
+                    )?;
                 }
-                // Audit the state change only when it actually hit a row and a
-                // context was supplied (quarantine/retain are internal, unaudited).
-                if n > 0 {
-                    if let Some(ctx) = ctx {
-                        append_audit_tx(
-                            tx,
-                            &audit_key,
-                            &AuditRecord {
-                                op: ctx.op,
-                                credential_id: Some(credential_id.to_string()),
-                                payload_hash: None,
-                                actor: ctx.actor.to_string(),
-                                alarm: ctx.alarm,
-                            },
-                        )?;
-                    }
-                }
-                Ok(())
-            })
-            .map_err(StoreOpError::from)
+            }
+            Ok(())
+        })
+        .map_err(StoreOpError::from)
     }
 
     // ---- refresh intent log (crash-safe rotation) -----------------------
@@ -831,28 +865,27 @@ impl EncryptedStore {
     ) -> Result<(), StoreOpError> {
         let epoch = self.store.epoch();
         let now = now_ms();
-        self.store
-            .with_conn_fenced(|tx| {
-                tx.execute(
-                    "INSERT INTO refresh_intent \
-                     (credential_id, record_version, old_refresh_hash, lease_epoch, started_at_ms) \
-                     VALUES (?1, ?2, ?3, ?4, ?5) \
-                     ON CONFLICT(credential_id) DO UPDATE SET \
-                       record_version = excluded.record_version, \
-                       old_refresh_hash = excluded.old_refresh_hash, \
-                       lease_epoch = excluded.lease_epoch, \
-                       started_at_ms = excluded.started_at_ms",
-                    rusqlite::params![
-                        credential_id,
-                        record_version as i64,
-                        old_refresh_hash,
-                        epoch as i64,
-                        now
-                    ],
-                )?;
-                Ok(())
-            })
-            .map_err(StoreOpError::from)
+        self.fenced_write(|tx| {
+            tx.execute(
+                "INSERT INTO refresh_intent \
+                 (credential_id, record_version, old_refresh_hash, lease_epoch, started_at_ms) \
+                 VALUES (?1, ?2, ?3, ?4, ?5) \
+                 ON CONFLICT(credential_id) DO UPDATE SET \
+                   record_version = excluded.record_version, \
+                   old_refresh_hash = excluded.old_refresh_hash, \
+                   lease_epoch = excluded.lease_epoch, \
+                   started_at_ms = excluded.started_at_ms",
+                rusqlite::params![
+                    credential_id,
+                    record_version as i64,
+                    old_refresh_hash,
+                    epoch as i64,
+                    now
+                ],
+            )?;
+            Ok(())
+        })
+        .map_err(StoreOpError::from)
     }
 
     /// Commit a completed refresh (txn2): seal the new record at
@@ -881,7 +914,7 @@ impl EncryptedStore {
         let audit_key = self.audit_key;
         let payload_hash_hex = hex32(&payload_hash(&new_record.payload));
 
-        let changed = self.store.with_conn_fenced(|tx| {
+        let changed = self.fenced_write(|tx| {
             let n = tx.execute(
                 "UPDATE credentials \
                  SET record_version = ?2, key_id = ?3, state = 'active', envelope = ?4, \
@@ -957,8 +990,7 @@ impl EncryptedStore {
 
     /// Clear a dangling intent (reconciliation resolved it). Fenced.
     pub fn clear_intent(&self, credential_id: &str) -> Result<(), StoreOpError> {
-        self.store
-            .with_conn_fenced(|tx| clear_intent_tx(tx, credential_id).map(|_| ()))
+        self.fenced_write(|tx| clear_intent_tx(tx, credential_id).map(|_| ()))
             .map_err(StoreOpError::from)
     }
 
@@ -1014,27 +1046,26 @@ impl EncryptedStore {
     ) -> Result<(), StoreOpError> {
         let now = now_ms();
         let audit_key = self.audit_key;
-        self.store
-            .with_conn_fenced(|tx| {
-                tx.execute(
-                    "INSERT INTO handles (handle_hash, credential_id, created_at_ms, revoked) \
-                     VALUES (?1, ?2, ?3, 0)",
-                    rusqlite::params![handle_hash_hex, credential_id, now],
-                )?;
-                append_audit_tx(
-                    tx,
-                    &audit_key,
-                    &AuditRecord {
-                        op: AuditOp::MintHandle,
-                        credential_id: Some(credential_id.to_string()),
-                        payload_hash: None,
-                        actor: "offline-cli".to_string(),
-                        alarm: Some(AlarmReason::AdminWrite),
-                    },
-                )?;
-                Ok(())
-            })
-            .map_err(StoreOpError::from)
+        self.fenced_write(|tx| {
+            tx.execute(
+                "INSERT INTO handles (handle_hash, credential_id, created_at_ms, revoked) \
+                 VALUES (?1, ?2, ?3, 0)",
+                rusqlite::params![handle_hash_hex, credential_id, now],
+            )?;
+            append_audit_tx(
+                tx,
+                &audit_key,
+                &AuditRecord {
+                    op: AuditOp::MintHandle,
+                    credential_id: Some(credential_id.to_string()),
+                    payload_hash: None,
+                    actor: "offline-cli".to_string(),
+                    alarm: Some(AlarmReason::AdminWrite),
+                },
+            )?;
+            Ok(())
+        })
+        .map_err(StoreOpError::from)
     }
 
     /// Revoke a single handle by its raw value (idempotent — revoking an unknown or
@@ -1046,26 +1077,25 @@ impl EncryptedStore {
     pub fn revoke_handle(&self, raw_handle: &str) -> Result<(), StoreOpError> {
         let h = handle_hash(raw_handle);
         let audit_key = self.audit_key;
-        self.store
-            .with_conn_fenced(|tx| {
-                tx.execute(
-                    "UPDATE handles SET revoked = 1 WHERE handle_hash = ?1",
-                    rusqlite::params![h],
-                )?;
-                append_audit_tx(
-                    tx,
-                    &audit_key,
-                    &AuditRecord {
-                        op: AuditOp::RevokeHandle,
-                        credential_id: None,
-                        payload_hash: Some(h.clone()),
-                        actor: "offline-cli".to_string(),
-                        alarm: Some(AlarmReason::AdminWrite),
-                    },
-                )?;
-                Ok(())
-            })
-            .map_err(StoreOpError::from)
+        self.fenced_write(|tx| {
+            tx.execute(
+                "UPDATE handles SET revoked = 1 WHERE handle_hash = ?1",
+                rusqlite::params![h],
+            )?;
+            append_audit_tx(
+                tx,
+                &audit_key,
+                &AuditRecord {
+                    op: AuditOp::RevokeHandle,
+                    credential_id: None,
+                    payload_hash: Some(h.clone()),
+                    actor: "offline-cli".to_string(),
+                    alarm: Some(AlarmReason::AdminWrite),
+                },
+            )?;
+            Ok(())
+        })
+        .map_err(StoreOpError::from)
     }
 
     /// Revoke ALL handles for a credential (e.g. on invalidate / suspected leak).
@@ -1073,27 +1103,26 @@ impl EncryptedStore {
     /// the credential) commit in ONE fenced transaction.
     pub fn revoke_all_handles(&self, credential_id: &str) -> Result<usize, StoreOpError> {
         let audit_key = self.audit_key;
-        self.store
-            .with_conn_fenced(|tx| {
-                let n = tx.execute(
-                    "UPDATE handles SET revoked = 1 \
-                     WHERE credential_id = ?1 AND revoked = 0",
-                    rusqlite::params![credential_id],
-                )?;
-                append_audit_tx(
-                    tx,
-                    &audit_key,
-                    &AuditRecord {
-                        op: AuditOp::RevokeHandle,
-                        credential_id: Some(credential_id.to_string()),
-                        payload_hash: None,
-                        actor: "offline-cli".to_string(),
-                        alarm: Some(AlarmReason::AdminWrite),
-                    },
-                )?;
-                Ok(n)
-            })
-            .map_err(StoreOpError::from)
+        self.fenced_write(|tx| {
+            let n = tx.execute(
+                "UPDATE handles SET revoked = 1 \
+                 WHERE credential_id = ?1 AND revoked = 0",
+                rusqlite::params![credential_id],
+            )?;
+            append_audit_tx(
+                tx,
+                &audit_key,
+                &AuditRecord {
+                    op: AuditOp::RevokeHandle,
+                    credential_id: Some(credential_id.to_string()),
+                    payload_hash: None,
+                    actor: "offline-cli".to_string(),
+                    alarm: Some(AlarmReason::AdminWrite),
+                },
+            )?;
+            Ok(n)
+        })
+        .map_err(StoreOpError::from)
     }
 
     // ---- audit chain ----------------------------------------------------
@@ -1104,8 +1133,7 @@ impl EncryptedStore {
     /// transaction.
     pub fn append_audit(&self, record: &AuditRecord) -> Result<AuditEntry, StoreOpError> {
         let audit_key = self.audit_key;
-        self.store
-            .with_conn_fenced(|tx| append_audit_tx(tx, &audit_key, record))
+        self.fenced_write(|tx| append_audit_tx(tx, &audit_key, record))
             .map_err(StoreOpError::from)
     }
 
@@ -1170,66 +1198,64 @@ impl EncryptedStore {
         let new_audit_envelope =
             envelope::seal(&new_key, &audit_key, &audit_binding).map_err(StoreOpError::Decrypt)?;
 
-        self.store
-            .with_conn_fenced(|tx| {
-                // Snapshot every record id + version + current envelope.
-                let rows: Vec<(String, i64, Vec<u8>)> = {
-                    let mut stmt = tx.prepare(
-                        "SELECT credential_id, record_version, envelope FROM credentials",
-                    )?;
-                    let mapped = stmt.query_map([], |r| {
-                        Ok((
-                            r.get::<_, String>(0)?,
-                            r.get::<_, i64>(1)?,
-                            r.get::<_, Vec<u8>>(2)?,
-                        ))
-                    })?;
-                    mapped.collect::<rusqlite::Result<Vec<_>>>()?
+        self.fenced_write(|tx| {
+            // Snapshot every record id + version + current envelope.
+            let rows: Vec<(String, i64, Vec<u8>)> = {
+                let mut stmt =
+                    tx.prepare("SELECT credential_id, record_version, envelope FROM credentials")?;
+                let mapped = stmt.query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, Vec<u8>>(2)?,
+                    ))
+                })?;
+                mapped.collect::<rusqlite::Result<Vec<_>>>()?
+            };
+
+            for (id, version, old_blob) in rows {
+                let binding = RecordBinding {
+                    credential_id: &id,
+                    record_version: version as u64,
                 };
-
-                for (id, version, old_blob) in rows {
-                    let binding = RecordBinding {
-                        credential_id: &id,
-                        record_version: version as u64,
-                    };
-                    // Decrypt with the old key; a record that does not decrypt is
-                    // already corrupt — leave it untouched (per-record isolation).
-                    let plaintext = match envelope::open(old_key, &old_blob, &binding) {
-                        Ok(pt) => pt,
-                        Err(_) => continue,
-                    };
-                    // Re-seal under the new key (same id + version => same AAD).
-                    let new_blob = envelope::seal(&new_key, &plaintext, &binding)
-                        .map_err(|_| rusqlite_err("re-seal under new key failed"))?;
-                    tx.execute(
-                        "UPDATE credentials SET envelope = ?2, key_id = ?3 \
-                         WHERE credential_id = ?1",
-                        rusqlite::params![id, new_blob, new_key_id_hex],
-                    )?;
-                }
-
-                // Re-seal the audit-key secret row under the new key.
+                // Decrypt with the old key; a record that does not decrypt is
+                // already corrupt — leave it untouched (per-record isolation).
+                let plaintext = match envelope::open(old_key, &old_blob, &binding) {
+                    Ok(pt) => pt,
+                    Err(_) => continue,
+                };
+                // Re-seal under the new key (same id + version => same AAD).
+                let new_blob = envelope::seal(&new_key, &plaintext, &binding)
+                    .map_err(|_| rusqlite_err("re-seal under new key failed"))?;
                 tx.execute(
-                    "UPDATE vault_secrets SET envelope = ?2, key_id = ?3 WHERE name = ?1",
-                    rusqlite::params![AUDIT_KEY_SECRET_NAME, new_audit_envelope, new_key_id_hex],
+                    "UPDATE credentials SET envelope = ?2, key_id = ?3 \
+                     WHERE credential_id = ?1",
+                    rusqlite::params![id, new_blob, new_key_id_hex],
                 )?;
+            }
 
-                // Append the vault-global RotateMasterKey entry (no credential_id),
-                // MAC'd with the stable audit key so the chain stays continuous.
-                append_audit_tx(
-                    tx,
-                    &audit_key,
-                    &AuditRecord {
-                        op: AuditOp::RotateMasterKey,
-                        credential_id: None,
-                        payload_hash: None,
-                        actor: "offline-cli".to_string(),
-                        alarm: Some(AlarmReason::AdminWrite),
-                    },
-                )?;
-                Ok(())
-            })
-            .map_err(StoreOpError::from)?;
+            // Re-seal the audit-key secret row under the new key.
+            tx.execute(
+                "UPDATE vault_secrets SET envelope = ?2, key_id = ?3 WHERE name = ?1",
+                rusqlite::params![AUDIT_KEY_SECRET_NAME, new_audit_envelope, new_key_id_hex],
+            )?;
+
+            // Append the vault-global RotateMasterKey entry (no credential_id),
+            // MAC'd with the stable audit key so the chain stays continuous.
+            append_audit_tx(
+                tx,
+                &audit_key,
+                &AuditRecord {
+                    op: AuditOp::RotateMasterKey,
+                    credential_id: None,
+                    payload_hash: None,
+                    actor: "offline-cli".to_string(),
+                    alarm: Some(AlarmReason::AdminWrite),
+                },
+            )?;
+            Ok(())
+        })
+        .map_err(StoreOpError::from)?;
 
         // Commit succeeded: the new key now opens everything. Swap in-memory state.
         self.key_id = new_key.key_id();
@@ -1969,6 +1995,38 @@ mod tests {
             Some(2),
             "tampered entry detected"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_fenced_write_latches_fenced_out() {
+        let (root, store) = tmp_store(21);
+        store.create("id", &oauth_record()).expect("create");
+        // Not fenced out on a healthy store.
+        assert!(!store.is_fenced_out());
+
+        // Simulate a newer writer having claimed the database at a higher epoch, so
+        // the next fenced write is rejected — exactly the lease-handover race.
+        store
+            .with_raw_conn(|c| c.execute("UPDATE cortexkit_fence SET epoch = 999 WHERE id = 0", []))
+            .expect("bump fence epoch above the holder");
+
+        // A real durable mutation now: it must be Fenced AND latch the flag.
+        match store.invalidate("id") {
+            Err(StoreOpError::Fenced { .. }) => {}
+            other => panic!("expected Fenced, got {other:?}"),
+        }
+        assert!(
+            store.is_fenced_out(),
+            "a rejected fenced write must latch the fenced-out signal"
+        );
+
+        // The signal drives the health snapshot to Failing even though the stale
+        // read of the row still succeeds (Active).
+        let metas = store.list_meta().expect("list_meta still reads");
+        let health = crate::health::VaultHealth::summarize(&metas, 0, store.is_fenced_out());
+        assert_eq!(health.status, crate::health::VaultHealthStatus::Failing);
+        assert!(health.fenced_out);
         let _ = std::fs::remove_dir_all(&root);
     }
 }

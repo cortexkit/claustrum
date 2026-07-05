@@ -12,15 +12,18 @@
 //! path consumers use without paying to decrypt every record.
 //!
 //! Fail-closed status ladder (deliberately never restart-flaps a serving vault):
-//! - `Failing` — the store is unreadable: the daemon genuinely cannot serve any
-//!   credential. This is the ONLY failing trigger, and it is the "real serving
-//!   inability" case (a lost lease or a gone/corrupt store surfaces here as a
-//!   read error).
+//! - `Failing` — the daemon cannot correctly serve. Two triggers: the store is
+//!   unreadable (a gone/corrupt store surfaces as a read error), OR the store has
+//!   been fenced out (a newer writer took the single-writer lease, so this
+//!   superseded daemon has lost write authority — it can still return stale reads
+//!   but must not keep serving as the authority). The detail distinguishes them
+//!   because the operator action differs: unreadable ⇒ check disk/lease; fenced
+//!   ⇒ find the newer writer.
 //! - `Degraded` — the store serves, but ≥1 credential needs operator action
 //!   (`needs_reauth` or `corrupt`). An expired token is a degraded DETAIL, never
 //!   `failing`: we must not let one credential needing re-auth trigger a daemon
 //!   restart of an otherwise-healthy vault.
-//! - `Ok` — the store is readable and every record is Active.
+//! - `Ok` — the store is readable, not fenced out, and every record is Active.
 
 use crate::store::{RecordMeta, RecordState};
 
@@ -39,6 +42,9 @@ pub struct VaultHealth {
     pub status: VaultHealthStatus,
     /// Whether the no-decrypt metadata scan succeeded. `false` ⇒ `Failing`.
     pub store_readable: bool,
+    /// Whether a fenced write has ever been rejected because a newer writer took
+    /// the lease. `true` ⇒ `Failing` (this daemon has lost write authority).
+    pub fenced_out: bool,
     pub credentials_total: usize,
     pub active: usize,
     pub needs_reauth: usize,
@@ -57,6 +63,7 @@ impl VaultHealth {
         VaultHealth {
             status: VaultHealthStatus::Failing,
             store_readable: false,
+            fenced_out: false,
             credentials_total: 0,
             active: 0,
             needs_reauth: 0,
@@ -67,7 +74,15 @@ impl VaultHealth {
 
     /// Summarize the no-decrypt metadata histogram into the fail-closed ladder.
     /// Pure over the scan result so the ladder is unit-testable without a store.
-    pub fn summarize(metas: &[(String, RecordMeta)], open_intents: usize) -> Self {
+    /// `fenced_out` reflects whether this store instance has lost the lease to a
+    /// newer writer (a `Failing` trigger that outranks per-record state, since a
+    /// fenced-out daemon must not keep serving as the authority even if every row
+    /// it can still read looks Active).
+    pub fn summarize(
+        metas: &[(String, RecordMeta)],
+        open_intents: usize,
+        fenced_out: bool,
+    ) -> Self {
         let mut active = 0;
         let mut needs_reauth = 0;
         let mut corrupt = 0;
@@ -78,9 +93,13 @@ impl VaultHealth {
                 RecordState::Corrupt => corrupt += 1,
             }
         }
-        // Degraded on any credential needing operator action; never `failing`
-        // (the store IS readable here, so the vault is serving).
-        let status = if needs_reauth > 0 || corrupt > 0 {
+        // Fenced out outranks everything: this daemon lost write authority, so it
+        // is Failing even though its stale reads still succeed. Otherwise degraded
+        // on any credential needing operator action; else ok (the store is
+        // readable and this writer still holds the lease).
+        let status = if fenced_out {
+            VaultHealthStatus::Failing
+        } else if needs_reauth > 0 || corrupt > 0 {
             VaultHealthStatus::Degraded
         } else {
             VaultHealthStatus::Ok
@@ -88,6 +107,7 @@ impl VaultHealth {
         VaultHealth {
             status,
             store_readable: true,
+            fenced_out,
             credentials_total: metas.len(),
             active,
             needs_reauth,
@@ -114,7 +134,7 @@ mod tests {
 
     #[test]
     fn empty_vault_is_ok() {
-        let h = VaultHealth::summarize(&[], 0);
+        let h = VaultHealth::summarize(&[], 0, false);
         assert_eq!(h.status, VaultHealthStatus::Ok);
         assert_eq!(h.credentials_total, 0);
         assert!(h.store_readable);
@@ -123,7 +143,7 @@ mod tests {
     #[test]
     fn all_active_is_ok() {
         let metas = vec![meta(RecordState::Active), meta(RecordState::Active)];
-        let h = VaultHealth::summarize(&metas, 0);
+        let h = VaultHealth::summarize(&metas, 0, false);
         assert_eq!(h.status, VaultHealthStatus::Ok);
         assert_eq!(h.active, 2);
     }
@@ -131,7 +151,7 @@ mod tests {
     #[test]
     fn a_needs_reauth_credential_is_degraded_never_failing() {
         let metas = vec![meta(RecordState::Active), meta(RecordState::NeedsReauth)];
-        let h = VaultHealth::summarize(&metas, 0);
+        let h = VaultHealth::summarize(&metas, 0, false);
         // The load-bearing invariant: one credential needing re-auth must NOT
         // escalate to `failing` (which would restart-flap a serving vault).
         assert_eq!(h.status, VaultHealthStatus::Degraded);
@@ -142,7 +162,7 @@ mod tests {
     #[test]
     fn a_corrupt_record_is_degraded() {
         let metas = vec![meta(RecordState::Active), meta(RecordState::Corrupt)];
-        let h = VaultHealth::summarize(&metas, 0);
+        let h = VaultHealth::summarize(&metas, 0, false);
         assert_eq!(h.status, VaultHealthStatus::Degraded);
         assert_eq!(h.corrupt, 1);
     }
@@ -151,9 +171,21 @@ mod tests {
     fn open_intents_are_carried_but_do_not_change_status() {
         // An in-flight refresh holds an intent open; that alone is healthy.
         let metas = vec![meta(RecordState::Active)];
-        let h = VaultHealth::summarize(&metas, 3);
+        let h = VaultHealth::summarize(&metas, 3, false);
         assert_eq!(h.status, VaultHealthStatus::Ok);
         assert_eq!(h.open_intents, 3);
+    }
+
+    #[test]
+    fn fenced_out_is_failing_even_when_readable_rows_look_active() {
+        // A superseded daemon still reads its stale rows fine (all Active), but it
+        // lost the lease — it must report Failing, outranking the healthy-looking
+        // per-record state.
+        let metas = vec![meta(RecordState::Active), meta(RecordState::Active)];
+        let h = VaultHealth::summarize(&metas, 0, true);
+        assert_eq!(h.status, VaultHealthStatus::Failing);
+        assert!(h.fenced_out);
+        assert!(h.store_readable);
     }
 
     #[test]

@@ -26,6 +26,7 @@ use tokio::sync::Mutex;
 
 use credentials_core::audit::{AlarmReason, AuditCtx, AuditOp, AuditRecord};
 use credentials_core::engine::{EngineError, RefreshEngine};
+use credentials_core::health::VaultHealth;
 use credentials_core::refresh_adapters::RefreshError;
 use credentials_core::store::StoreOpError;
 
@@ -264,6 +265,25 @@ impl ReadSurface {
                 },
             },
         }
+    }
+
+    /// A cheap, no-decrypt domain health snapshot for the subc L3 probe. Reads
+    /// only plaintext metadata (`list_meta`) plus the open-intent count — no
+    /// decrypt, no network, no lease write — so it stays within the prober's
+    /// short deadline. A failed metadata scan means the store is unreadable
+    /// (lost lease / gone db), which is the vault's real serving-inability
+    /// signal and the only `Failing` trigger.
+    pub fn health_snapshot(&self) -> VaultHealth {
+        let store = self.engine.store();
+        let metas = match store.list_meta() {
+            Ok(metas) => metas,
+            Err(_) => return VaultHealth::unreadable(),
+        };
+        // Open intents are carried as an opaque metric only (a transient in-flight
+        // refresh holds one open), so a scan failure here must not flip serving
+        // health — default to 0 rather than masking a readable store as failing.
+        let open_intents = store.list_intents().map(|i| i.len()).unwrap_or(0);
+        VaultHealth::summarize(&metas, open_intents)
     }
 
     /// Run the per-connection limiter for one probe, keyed by `probe_key` (the

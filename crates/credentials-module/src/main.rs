@@ -42,7 +42,9 @@ use subc_protocol::{
         Bindings, IdentityBinding, ManagementOperation, ManagementOperationKind, ModuleManifest,
         ProviderRole, StorageBinding, StorageKind, StorageScope, TrustTier,
     },
-    session::{ModuleControlRequest, ModuleControlResponse},
+    session::{
+        HealthStatus, ModuleControlRequest, ModuleControlResponse, MODULE_CONTROL_OP_HEALTH_CHECK,
+    },
     ErrorBody, Flags, Frame, FrameType, ModuleHelloAckBody, ModuleHelloBody, Priority,
     PROTOCOL_VERSION, SUBC_LAUNCH_NONCE_ENV, SUBC_MODULE_ID_ENV,
 };
@@ -262,7 +264,11 @@ async fn send_hello(
     let body = serde_json::to_vec(&ModuleHelloBody {
         manifest: manifest(&config.module_id),
         protocol_ver: PROTOCOL_VERSION,
-        control_ops: None,
+        // Advertise health.check so the daemon actively probes us (capability-
+        // gated: unadvertised = health "unknown", never probed). We answer L2
+        // through the same channel-0 dispatch and report L3 domain health from a
+        // cheap no-decrypt metadata scan.
+        control_ops: Some(vec![MODULE_CONTROL_OP_HEALTH_CHECK.to_string()]),
         // Echo the supervisor's launch nonce so subc accepts our reserved id.
         launch_nonce: config.launch_nonce.clone(),
     })
@@ -323,7 +329,7 @@ async fn handle_frame(
             Ok(true)
         }
         FrameType::Request if frame.header.channel == 0 => {
-            handle_control_request(frame, writer).await?;
+            handle_control_request(frame, writer, surface).await?;
             Ok(true)
         }
         FrameType::Request => {
@@ -343,26 +349,72 @@ async fn handle_frame(
 async fn handle_control_request(
     frame: Frame,
     writer: &mpsc::Sender<Frame>,
+    surface: &Arc<ReadSurface>,
 ) -> Result<(), ModuleError> {
     let request =
         serde_json::from_slice::<ModuleControlRequest>(&frame.body).map_err(ModuleError::Json)?;
-    match request {
+    let response_body = match request {
         ModuleControlRequest::RouteBind { .. } => {
             // Anonymous, trusted-unscoped reads: accept every bind. Access is scoped
             // by capability handle at request time, not at bind.
-            let body = serde_json::to_vec(&ModuleControlResponse::RouteBindAck {})
-                .map_err(ModuleError::Json)?;
-            let response = Frame::build_with_version(
-                frame.header.ver,
-                FrameType::Response,
-                control_flags(),
-                0,
-                frame.header.corr,
-                body,
-            )
-            .map_err(|e| ModuleError::Message(e.to_string()))?;
-            send(writer, response).await
+            ModuleControlResponse::RouteBindAck {}
         }
+        ModuleControlRequest::HealthCheck {} => {
+            // L3 domain health: a cheap no-decrypt metadata scan. `Failing` only
+            // when the store is unreadable (real serving inability); a credential
+            // needing re-auth is `degraded` detail, never `failing`, so a healthy
+            // vault is never restart-flapped.
+            health_report(&surface.health_snapshot())
+        }
+    };
+    let body = serde_json::to_vec(&response_body).map_err(ModuleError::Json)?;
+    let response = Frame::build_with_version(
+        frame.header.ver,
+        FrameType::Response,
+        control_flags(),
+        0,
+        frame.header.corr,
+        body,
+    )
+    .map_err(|e| ModuleError::Message(e.to_string()))?;
+    send(writer, response).await
+}
+
+/// Map the wire-agnostic core [`VaultHealth`] onto the subc health-report wire
+/// shape. Status is the only field subc acts on; `detail`/`metrics` are opaque.
+fn health_report(health: &credentials_core::health::VaultHealth) -> ModuleControlResponse {
+    use credentials_core::health::VaultHealthStatus;
+    let status = match health.status {
+        VaultHealthStatus::Ok => HealthStatus::Ok,
+        VaultHealthStatus::Degraded => HealthStatus::Degraded,
+        VaultHealthStatus::Failing => HealthStatus::Failing,
+    };
+    let detail = if !health.store_readable {
+        Some("store unreadable: cannot serve any credential (lease lost or store gone)".to_string())
+    } else if health.needs_reauth > 0 || health.corrupt > 0 {
+        Some(format!(
+            "{} of {} credentials need operator action ({} needs_reauth, {} corrupt); {} serving",
+            health.needs_reauth + health.corrupt,
+            health.credentials_total,
+            health.needs_reauth,
+            health.corrupt,
+            health.active,
+        ))
+    } else {
+        None
+    };
+    let metrics = json!({
+        "credentialsTotal": health.credentials_total,
+        "active": health.active,
+        "needsReauth": health.needs_reauth,
+        "corrupt": health.corrupt,
+        "openIntents": health.open_intents,
+        "storeReadable": health.store_readable,
+    });
+    ModuleControlResponse::HealthCheck {
+        status,
+        detail,
+        metrics: Some(metrics),
     }
 }
 
@@ -624,3 +676,97 @@ impl std::fmt::Display for ModuleError {
 }
 
 impl std::error::Error for ModuleError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cortexkit_store::{Isolation, StorageBackend};
+    use credentials_core::key::{MasterKey, MASTER_KEY_LEN};
+    use credentials_core::record::{CredentialKind, VaultRecord};
+    use read_surface::ReadSurface;
+
+    fn tmp_surface(seed: u8) -> Arc<ReadSurface> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "ck-cred-health-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&root).expect("mkdir");
+        let descriptor = StorageDescriptor {
+            module_id: "cortexkit-credentials".into(),
+            storage_namespace: "default".into(),
+            isolation: Isolation::Module,
+            backend: StorageBackend::Sqlite {
+                path: root.join("store.db").to_string_lossy().into_owned(),
+            },
+        };
+        let store = open_sqlite(&descriptor).expect("open");
+        EncryptedStore::migrate(&store).expect("migrate");
+        let store = EncryptedStore::open(store, MasterKey::from_bytes([seed; MASTER_KEY_LEN]))
+            .expect("open vault");
+        // Seed one active + one needs_reauth so health is Degraded (never Failing).
+        store
+            .create(
+                "apikey:active",
+                &VaultRecord::new_static(CredentialKind::ApiKey, "test", b"k".to_vec(), None),
+            )
+            .expect("create active");
+        store
+            .create(
+                "apikey:dead",
+                &VaultRecord::new_static(CredentialKind::ApiKey, "test", b"k".to_vec(), None),
+            )
+            .expect("create dead");
+        store.invalidate("apikey:dead").expect("invalidate");
+
+        let http = Arc::new(ReqwestTransport::new().expect("http"));
+        let engine = Arc::new(RefreshEngine::new(Arc::new(store), Vec::new(), http));
+        Arc::new(ReadSurface::new(engine, FetchLimiter::new(Caps::default())))
+    }
+
+    /// Drive the REAL channel-0 control handler with a `health.check` Request and
+    /// assert it answers with a well-formed `HealthCheck` Response carrying the
+    /// domain metrics. Exercises the actual arm + surface + mapper, not a mock.
+    #[tokio::test]
+    async fn health_check_control_request_returns_domain_report() {
+        let surface = tmp_surface(7);
+        let (tx, mut rx) = mpsc::channel::<Frame>(4);
+
+        let request = ModuleControlRequest::HealthCheck {};
+        let frame = Frame::build_with_version(
+            PROTOCOL_VERSION,
+            FrameType::Request,
+            control_flags(),
+            0,
+            42,
+            serde_json::to_vec(&request).unwrap(),
+        )
+        .unwrap();
+
+        handle_control_request(frame, &tx, &surface).await.unwrap();
+
+        let response = rx.try_recv().expect("a response frame was sent");
+        assert_eq!(response.header.ty, FrameType::Response);
+        assert_eq!(response.header.channel, 0);
+        assert_eq!(response.header.corr, 42);
+
+        let body: ModuleControlResponse = serde_json::from_slice(&response.body).unwrap();
+        let ModuleControlResponse::HealthCheck {
+            status, metrics, ..
+        } = body
+        else {
+            panic!("expected a HealthCheck response");
+        };
+        // One active + one needs_reauth ⇒ Degraded, never Failing (the store is
+        // readable, so the vault is serving; a dead credential is detail only).
+        assert_eq!(status, HealthStatus::Degraded);
+        let metrics = metrics.expect("health report carries metrics");
+        let obj = metrics.as_object().expect("metrics is a JSON object");
+        assert_eq!(obj["credentialsTotal"], 2);
+        assert_eq!(obj["active"], 1);
+        assert_eq!(obj["needsReauth"], 1);
+        assert_eq!(obj["storeReadable"], true);
+    }
+}

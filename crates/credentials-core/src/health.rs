@@ -1,0 +1,165 @@
+//! Domain health snapshot for the subc continuous-health probe (L3).
+//!
+//! The daemon probes this on a cadence (default 30s) with a short deadline, so
+//! the report MUST be cheap: in-memory / no-decrypt state only, never a network
+//! call, an envelope decrypt, an audit-chain HMAC recompute, or a lease write.
+//!
+//! The vault keeps no decrypted state in memory (the daemon never caches
+//! payloads — every serve reads SQLite), so the honest cheap source of truth is
+//! a single no-decrypt metadata scan (`list_meta`): the same read every `get`
+//! does before decryption. That read IS the vault's real serving dependency
+//! (SQLite reachable under the resolved master key), so probing it proves the
+//! path consumers use without paying to decrypt every record.
+//!
+//! Fail-closed status ladder (deliberately never restart-flaps a serving vault):
+//! - `Failing` — the store is unreadable: the daemon genuinely cannot serve any
+//!   credential. This is the ONLY failing trigger, and it is the "real serving
+//!   inability" case (a lost lease or a gone/corrupt store surfaces here as a
+//!   read error).
+//! - `Degraded` — the store serves, but ≥1 credential needs operator action
+//!   (`needs_reauth` or `corrupt`). An expired token is a degraded DETAIL, never
+//!   `failing`: we must not let one credential needing re-auth trigger a daemon
+//!   restart of an otherwise-healthy vault.
+//! - `Ok` — the store is readable and every record is Active.
+
+use crate::store::{RecordMeta, RecordState};
+
+/// The wire-agnostic domain health status. The module maps this onto the subc
+/// protocol `HealthStatus`; core never depends on the protocol crate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VaultHealthStatus {
+    Ok,
+    Degraded,
+    Failing,
+}
+
+/// A cheap, no-decrypt health snapshot of the vault's serveable state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VaultHealth {
+    pub status: VaultHealthStatus,
+    /// Whether the no-decrypt metadata scan succeeded. `false` ⇒ `Failing`.
+    pub store_readable: bool,
+    pub credentials_total: usize,
+    pub active: usize,
+    pub needs_reauth: usize,
+    pub corrupt: usize,
+    /// Open refresh-intent rows at snapshot time. Carried as an opaque metric
+    /// only — a nonzero count is NOT a status input because a legitimately
+    /// in-flight refresh holds an intent open transiently (txn1 opens it, txn2
+    /// clears it), so it would false-positive a degraded state on every serve.
+    pub open_intents: usize,
+}
+
+impl VaultHealth {
+    /// The `Failing` snapshot for an unreadable store — the one cheap signal of
+    /// real serving inability.
+    pub fn unreadable() -> Self {
+        VaultHealth {
+            status: VaultHealthStatus::Failing,
+            store_readable: false,
+            credentials_total: 0,
+            active: 0,
+            needs_reauth: 0,
+            corrupt: 0,
+            open_intents: 0,
+        }
+    }
+
+    /// Summarize the no-decrypt metadata histogram into the fail-closed ladder.
+    /// Pure over the scan result so the ladder is unit-testable without a store.
+    pub fn summarize(metas: &[(String, RecordMeta)], open_intents: usize) -> Self {
+        let mut active = 0;
+        let mut needs_reauth = 0;
+        let mut corrupt = 0;
+        for (_, meta) in metas {
+            match meta.state {
+                RecordState::Active => active += 1,
+                RecordState::NeedsReauth => needs_reauth += 1,
+                RecordState::Corrupt => corrupt += 1,
+            }
+        }
+        // Degraded on any credential needing operator action; never `failing`
+        // (the store IS readable here, so the vault is serving).
+        let status = if needs_reauth > 0 || corrupt > 0 {
+            VaultHealthStatus::Degraded
+        } else {
+            VaultHealthStatus::Ok
+        };
+        VaultHealth {
+            status,
+            store_readable: true,
+            credentials_total: metas.len(),
+            active,
+            needs_reauth,
+            corrupt,
+            open_intents,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn meta(state: RecordState) -> (String, RecordMeta) {
+        (
+            "id".to_string(),
+            RecordMeta {
+                record_version: 1,
+                key_id_hex: "deadbeef".to_string(),
+                state,
+            },
+        )
+    }
+
+    #[test]
+    fn empty_vault_is_ok() {
+        let h = VaultHealth::summarize(&[], 0);
+        assert_eq!(h.status, VaultHealthStatus::Ok);
+        assert_eq!(h.credentials_total, 0);
+        assert!(h.store_readable);
+    }
+
+    #[test]
+    fn all_active_is_ok() {
+        let metas = vec![meta(RecordState::Active), meta(RecordState::Active)];
+        let h = VaultHealth::summarize(&metas, 0);
+        assert_eq!(h.status, VaultHealthStatus::Ok);
+        assert_eq!(h.active, 2);
+    }
+
+    #[test]
+    fn a_needs_reauth_credential_is_degraded_never_failing() {
+        let metas = vec![meta(RecordState::Active), meta(RecordState::NeedsReauth)];
+        let h = VaultHealth::summarize(&metas, 0);
+        // The load-bearing invariant: one credential needing re-auth must NOT
+        // escalate to `failing` (which would restart-flap a serving vault).
+        assert_eq!(h.status, VaultHealthStatus::Degraded);
+        assert_eq!(h.active, 1);
+        assert_eq!(h.needs_reauth, 1);
+    }
+
+    #[test]
+    fn a_corrupt_record_is_degraded() {
+        let metas = vec![meta(RecordState::Active), meta(RecordState::Corrupt)];
+        let h = VaultHealth::summarize(&metas, 0);
+        assert_eq!(h.status, VaultHealthStatus::Degraded);
+        assert_eq!(h.corrupt, 1);
+    }
+
+    #[test]
+    fn open_intents_are_carried_but_do_not_change_status() {
+        // An in-flight refresh holds an intent open; that alone is healthy.
+        let metas = vec![meta(RecordState::Active)];
+        let h = VaultHealth::summarize(&metas, 3);
+        assert_eq!(h.status, VaultHealthStatus::Ok);
+        assert_eq!(h.open_intents, 3);
+    }
+
+    #[test]
+    fn unreadable_store_is_failing() {
+        let h = VaultHealth::unreadable();
+        assert_eq!(h.status, VaultHealthStatus::Failing);
+        assert!(!h.store_readable);
+    }
+}

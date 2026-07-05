@@ -25,6 +25,7 @@ pub mod engine;
 #[cfg(test)]
 mod engine_tests;
 pub mod envelope;
+pub mod health;
 pub mod http;
 pub mod key;
 pub mod oauth;
@@ -40,6 +41,7 @@ pub use credential_id::{
 };
 pub use engine::{EngineError, ReauthReason, Reconciliation, RefreshEngine};
 pub use envelope::{open, seal, EnvelopeError, RecordBinding};
+pub use health::{VaultHealth, VaultHealthStatus};
 pub use http::ReqwestTransport;
 pub use key::{KeyId, MasterKey};
 pub use oauth::OAuthCredential;

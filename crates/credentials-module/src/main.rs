@@ -65,6 +65,11 @@ const DEFAULT_MODULE_ID: &str = credentials_core::contract::MODULE_ID;
 const HELLO_CORR: u64 = 1;
 const EGRESS_BUFFER: usize = 64;
 
+// How often the background refresher recomputes the cached health snapshot. Well
+// under the prober's cadence so the served snapshot is never more than one tick
+// stale, and each tick is a cheap no-decrypt scan that runs OFF the probe path.
+const HEALTH_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
 // Read-surface op names (the four anonymous route-channel operations).
 const OP_GET: &str = "credential.get";
 const OP_GET_MANY: &str = "credential.get_many";
@@ -159,6 +164,12 @@ where
     // dangling refresh intents BEFORE accepting any request.
     let surface = Arc::new(build_surface(&ack).await?);
 
+    // Keep the cached health snapshot current OFF the probe path. The health.check
+    // reply must be cheap/in-memory (spec §2), so the live store scan runs here on a
+    // cadence, never on the channel-0 dispatch. Aborted on loop exit via the guard.
+    let health_refresher = spawn_health_refresher(Arc::clone(&surface));
+    let _refresher_guard = AbortOnDrop(health_refresher);
+
     loop {
         let Some(frame) = read_frame(read_half)
             .await
@@ -169,6 +180,32 @@ where
         if !handle_frame(frame, &writer, &surface).await? {
             return Ok(());
         }
+    }
+}
+
+/// Spawn the background task that keeps the cached health snapshot current. It
+/// ticks on [`HEALTH_REFRESH_INTERVAL`] and recomputes off the probe path, so the
+/// channel-0 `health.check` reply is always a cheap in-memory read of the last
+/// computed snapshot (spec §2: the reply must not do live store work).
+fn spawn_health_refresher(surface: Arc<ReadSurface>) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(HEALTH_REFRESH_INTERVAL);
+        // Skip missed ticks rather than bursting to catch up if a scan ran long.
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            ticker.tick().await;
+            surface.refresh_health();
+        }
+    })
+}
+
+/// Aborts the wrapped task when dropped, so the health refresher stops when the
+/// serve loop returns (clean EOF or error) instead of outliving the connection.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 
@@ -702,6 +739,10 @@ mod tests {
     use read_surface::ReadSurface;
 
     fn tmp_surface(seed: u8) -> Arc<ReadSurface> {
+        tmp_surface_with_store(seed).0
+    }
+
+    fn tmp_surface_with_store(seed: u8) -> (Arc<ReadSurface>, Arc<EncryptedStore>) {
         use std::sync::atomic::{AtomicU64, Ordering};
         static SEQ: AtomicU64 = AtomicU64::new(0);
         let root = std::env::temp_dir().join(format!(
@@ -737,9 +778,11 @@ mod tests {
             .expect("create dead");
         store.invalidate("apikey:dead").expect("invalidate");
 
+        let store = Arc::new(store);
         let http = Arc::new(ReqwestTransport::new().expect("http"));
-        let engine = Arc::new(RefreshEngine::new(Arc::new(store), Vec::new(), http));
-        Arc::new(ReadSurface::new(engine, FetchLimiter::new(Caps::default())))
+        let engine = Arc::new(RefreshEngine::new(Arc::clone(&store), Vec::new(), http));
+        let surface = Arc::new(ReadSurface::new(engine, FetchLimiter::new(Caps::default())));
+        (surface, store)
     }
 
     /// Drive the REAL channel-0 control handler with a `health.check` Request and
@@ -786,5 +829,45 @@ mod tests {
         assert_eq!(obj["storeReadable"], true);
         // The report NAMES the credential needing action (the seeded dead id).
         assert_eq!(obj["needsReauthIds"], serde_json::json!(["apikey:dead"]));
+    }
+
+    /// The load-bearing property of the cached-snapshot fix: the probe reply is
+    /// served from the in-memory snapshot and does NOT do a live store read. Prove
+    /// it non-vacuously — mutate the store AFTER construction and assert the probe
+    /// still returns the pre-mutation snapshot until `refresh_health` runs (the
+    /// off-path recompute). A live-reading probe would reflect the mutation
+    /// immediately; the cached one must not.
+    #[tokio::test]
+    async fn health_probe_serves_cached_snapshot_not_a_live_read() {
+        let (surface, store) = tmp_surface_with_store(11);
+
+        // Initial snapshot (computed at construction): 1 active + 1 needs_reauth.
+        let before = surface.health_snapshot();
+        assert_eq!(before.credentials_total, 2);
+        assert_eq!(before.needs_reauth, 1);
+
+        // Mutate the store directly, off any refresh: add a third credential.
+        store
+            .create(
+                "apikey:new",
+                &VaultRecord::new_static(CredentialKind::ApiKey, "test", b"k".to_vec(), None),
+            )
+            .expect("create new");
+
+        // The probe MUST still see the cached (stale) snapshot — proving it did not
+        // read the store. A live read would already report 3.
+        let still_cached = surface.health_snapshot();
+        assert_eq!(
+            still_cached.credentials_total, 2,
+            "probe must serve the cached snapshot, not a live store scan"
+        );
+
+        // Only the off-path refresh picks up the mutation.
+        surface.refresh_health();
+        let after = surface.health_snapshot();
+        assert_eq!(
+            after.credentials_total, 3,
+            "refresh recomputes from the store"
+        );
     }
 }

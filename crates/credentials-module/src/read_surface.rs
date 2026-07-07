@@ -117,13 +117,27 @@ pub struct StatusResult {
 pub struct ReadSurface {
     engine: Arc<RefreshEngine>,
     limiter: Mutex<FetchLimiter>,
+    // A PRECOMPUTED health snapshot, refreshed off the probe path on a cadence (see
+    // the daemon's health refresher). The subc health.check reply MUST be cheap and
+    // in-memory (spec §2): a live store read on the probe path can queue behind a
+    // busy writer under load and miss the prober's deadline, which for the vault
+    // triggers a restart (lease churn + a fenced-out window). So the probe serves
+    // this cached snapshot, never a fresh store scan. std::sync::Mutex (not the
+    // tokio one) because every critical section here is a trivial clone/swap with
+    // no await held across the lock.
+    health: std::sync::Mutex<VaultHealth>,
 }
 
 impl ReadSurface {
     pub fn new(engine: Arc<RefreshEngine>, limiter: FetchLimiter) -> Self {
+        // Compute the initial snapshot once at construction (boot time, off any
+        // probe path) so the very first health.check has real data, not a
+        // placeholder. The background refresher keeps it fresh thereafter.
+        let initial = Self::compute_health(&engine);
         ReadSurface {
             engine,
             limiter: Mutex::new(limiter),
+            health: std::sync::Mutex::new(initial),
         }
     }
 
@@ -267,14 +281,34 @@ impl ReadSurface {
         }
     }
 
-    /// A cheap, no-decrypt domain health snapshot for the subc L3 probe. Reads
-    /// only plaintext metadata (`list_meta`) plus the open-intent count — no
-    /// decrypt, no network, no lease write — so it stays within the prober's
-    /// short deadline. A failed metadata scan means the store is unreadable
-    /// (lost lease / gone db), which is the vault's real serving-inability
-    /// signal and the only `Failing` trigger.
+    /// The subc L3 health reply: return the PRECOMPUTED snapshot. This is the
+    /// probe path, so it must be cheap and in-memory (spec §2) — it does NOT touch
+    /// the store, keychain, or lease. The snapshot is kept current by
+    /// [`Self::refresh_health`] on a background cadence off this path.
     pub fn health_snapshot(&self) -> VaultHealth {
-        let store = self.engine.store();
+        // The lock guards a trivial clone with no await held; poisoning can only
+        // happen if a refresher panicked mid-write, in which case the last-good
+        // snapshot under the guard is still a valid read.
+        self.health
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    /// Recompute the domain health from the store and store it as the new cached
+    /// snapshot. Called OFF the probe path — at boot and on the background cadence —
+    /// so the live store reads here never block a health.check reply.
+    pub fn refresh_health(&self) {
+        let fresh = Self::compute_health(&self.engine);
+        *self.health.lock().unwrap_or_else(|p| p.into_inner()) = fresh;
+    }
+
+    /// The actual domain-health computation: a no-decrypt `list_meta` scan plus the
+    /// open-intent count and the fenced-out latch. A failed scan means the store is
+    /// unreadable (lost lease / gone db) — the vault's real serving-inability signal
+    /// and the only read-derived `Failing` trigger. Runs off the probe path only.
+    fn compute_health(engine: &RefreshEngine) -> VaultHealth {
+        let store = engine.store();
         let metas = match store.list_meta() {
             Ok(metas) => metas,
             Err(_) => return VaultHealth::unreadable(),

@@ -31,6 +31,11 @@ pub enum AuditOp {
     Put,
     /// An import of a credential from a source format.
     Import,
+    /// A vault-native first-party OAuth login: the operator minted an INDEPENDENT
+    /// grant directly into the vault (distinct from `Import`, which ingests a token
+    /// another custodian minted). Kept separate so forensics can tell a native mint
+    /// from a foreign import without inference.
+    Login,
     /// An overwrite under a compare-and-set.
     Overwrite,
     /// An authoritative invalidate (revoke).
@@ -56,6 +61,7 @@ impl AuditOp {
         match self {
             AuditOp::Put => "put",
             AuditOp::Import => "import",
+            AuditOp::Login => "login",
             AuditOp::Overwrite => "overwrite",
             AuditOp::Invalidate => "invalidate",
             AuditOp::RotateMasterKey => "rotate_master_key",

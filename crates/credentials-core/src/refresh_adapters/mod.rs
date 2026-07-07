@@ -33,7 +33,7 @@ pub mod openai;
 pub mod xai;
 
 #[cfg(test)]
-mod fixture;
+pub(crate) mod fixture;
 
 /// The result of a successful token refresh: the new tokens to commit. The
 /// provider may or may not rotate the refresh token (RFC 9700 providers do); the

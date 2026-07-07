@@ -29,6 +29,7 @@ pub mod health;
 pub mod http;
 pub mod key;
 pub mod oauth;
+pub mod oauth_login;
 pub mod record;
 pub mod refresh_adapters;
 pub mod resolver;

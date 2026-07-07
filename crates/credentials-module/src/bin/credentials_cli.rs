@@ -133,6 +133,7 @@ fn run() -> Result<(), CliError> {
         "bootstrap" => cmd_bootstrap(&global),
         "put" => cmd_put(&global, &args),
         "import" => cmd_import(&global, &args),
+        "login" => cmd_login(&global, &args),
         "invalidate" => cmd_invalidate(&global, &args),
         "rotate-master-key" => cmd_rotate_master_key(&global),
         "mint-handle" => cmd_mint_handle(&global, &args),
@@ -167,6 +168,7 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
             "--expected-hash",
         ],
         "import" => &["--source", "--provider", "--id", "--json", "--adapter"],
+        "login" => &["--provider", "--id"],
         "invalidate" | "mint-handle" | "revoke-all-handles" => &["--id"],
         "revoke-handle" => &["--handle"],
         "audit" => &["--limit"],
@@ -176,6 +178,7 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
     // Boolean (valueless) flags accepted per command.
     let bool_flags: &[&str] = match command {
         "import" => &["--replace"],
+        "login" => &["--replace"],
         _ => &[],
     };
     let mut i = 0;
@@ -205,11 +208,16 @@ fn usage() -> String {
        --data-dir MUST be <data_home>/cortexkit/<module_id> where module_id is the\n\
        subc.jsonc module key (\"cortexkit-credentials\"), so the CLI and the\n\
        supervised daemon open the SAME store.\n\
-     Commands: bootstrap | put | import | invalidate | rotate-master-key |\n\
+     Commands: bootstrap | put | import | login | invalidate | rotate-master-key |\n\
                 mint-handle | revoke-handle | revoke-all-handles | list | audit |\n\
                 verify-audit\n\
       list: print each credential's id + lifecycle state + version (no secrets),\n\
             e.g. to find which credential a health probe flagged needs_reauth.\n\
+      login: --provider anthropic [--id <id>] [--replace]\n\
+            vault-native first-party OAuth login — mints an INDEPENDENT refresh token\n\
+            the vault solely custodies (no dual-custody rotation race). Opens a\n\
+            browser URL; paste the shown code#state back. --replace swaps an existing\n\
+            credential (keeps its handle). Default id: oauth:<provider>.\n\
      import: --source <opencode|pi|gemini-cli|antigravity> --id <id> --json <file>\n\
              [--provider <key>] [--adapter <name>] [--replace]\n\
        opencode/pi read auth.json (--provider selects one entry; an apikey:<p> id\n\
@@ -389,6 +397,119 @@ fn cmd_import(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     Ok(())
 }
 
+/// Vault-native first-party OAuth login: drive an interactive authorization-code +
+/// PKCE flow so the vault mints and SOLELY custodies an INDEPENDENT refresh token,
+/// eliminating the dual-custody rotation race by construction. The operator opens a
+/// printed URL, approves in the browser, and pastes the resulting `code#state` back;
+/// the vault exchanges it and stores the tokens as a normal oauth record (which the
+/// existing refresh adapter then refreshes with no per-record client override).
+///
+/// This is an admin write — same offline-CLI-while-daemon-stopped discipline as every
+/// other mutation. The daemon opens no browser and runs no listener; the manual
+/// code-paste redirect means there is no inbound network surface here at all.
+fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
+    use credentials_core::oauth_login::{
+        build_authorize_url, exchange_authorization_code, generate_pkce, generate_state,
+        parse_callback,
+    };
+    use credentials_core::refresh_adapters::anthropic;
+
+    let provider = required(args, "--provider")?;
+    // v1 is anthropic-only (ALF's actual need); each provider's auth-code wire gets
+    // its own grounded research before it is added here.
+    if provider != "anthropic" {
+        return Err(CliError::Usage(format!(
+            "login supports --provider anthropic only (got '{provider}')"
+        )));
+    }
+    // The stored credential id defaults to the method-scoped oauth:<provider>.
+    let id = optional(args, "--id").unwrap_or_else(|| format!("oauth:{provider}"));
+
+    // Generate the PKCE pair and the CSPRNG state (state is independent of the
+    // verifier), build the authorize URL, and present it to the operator.
+    let pkce = generate_pkce().map_err(|e| CliError::Io(format!("csprng: {e}")))?;
+    let state = generate_state().map_err(|e| CliError::Io(format!("csprng: {e}")))?;
+    let authorize_url = build_authorize_url(
+        anthropic::AUTHORIZE_URL,
+        anthropic::CLAUDE_CODE_CLIENT_ID,
+        anthropic::CODE_CALLBACK_URL,
+        anthropic::LOGIN_SCOPES,
+        &pkce.challenge,
+        &state,
+    )
+    .map_err(|e| CliError::Io(format!("building authorize url: {e}")))?;
+
+    println!("Open this URL in a browser signed into the Claude account to custody:");
+    println!();
+    println!("  {authorize_url}");
+    println!();
+    // Best-effort browser open; the printed URL is the source of truth if it fails.
+    let _ = open_in_browser(&authorize_url);
+    println!("After approving, paste the authorization code shown (code#state), then Enter:");
+
+    // Read the pasted code from STDIN (never from argv — it is a secret-grade value
+    // that must not land in shell history or `ps` output). It is never echoed back
+    // or logged.
+    let mut pasted = String::new();
+    std::io::stdin()
+        .read_line(&mut pasted)
+        .map_err(|e| CliError::Io(format!("reading pasted code: {e}")))?;
+    let callback = parse_callback(&pasted)
+        .ok_or_else(|| CliError::Usage("could not parse the pasted callback".to_string()))?;
+
+    // Exchange the code for tokens. State is validated inside (before any network
+    // call), so a forged/stale callback is refused up front.
+    let http =
+        credentials_core::http::ReqwestTransport::new().map_err(|e| CliError::Io(e.to_string()))?;
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let tokens = tokio_block_on(exchange_authorization_code(
+        &http,
+        anthropic::TOKEN_URL,
+        anthropic::CLAUDE_CODE_CLIENT_ID,
+        anthropic::CODE_CALLBACK_URL,
+        &callback,
+        &state,
+        &pkce.verifier,
+        now_ms,
+    ))
+    .map_err(|e| CliError::Io(e.to_string()))?;
+
+    // Build the canonical oauth credential + record. token_url and client_id are
+    // stored on the record so the refresh path uses the same endpoint/client that
+    // minted this token.
+    let oauth = credentials_core::oauth::OAuthCredential {
+        access_token: tokens.access_token.clone(),
+        refresh_token: tokens.refresh_token,
+        expires_at_ms: tokens.expires_at_ms,
+        token_url: anthropic::TOKEN_URL.to_string(),
+        client_id: Some(anthropic::CLAUDE_CODE_CLIENT_ID.to_string()),
+        scopes: anthropic::LOGIN_SCOPES
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+    };
+    let payload = tokens.access_token.into_bytes();
+    let record = VaultRecord::new_oauth("login", anthropic::ADAPTER_NAME, oauth, payload);
+
+    let store = open_for_admin(global)?;
+    // Login records a distinct `Login` audit op (not `Import`) so forensics can tell
+    // a native mint from a foreign import. `--replace` overwrites an existing id (the
+    // dual-custody migration: swap the imported token for the vault-minted one; the
+    // handle survives).
+    if has_flag(args, "--replace") {
+        store
+            .overwrite_unconditional_audited(&id, &record, AuditCtx::admin(AuditOp::Login))
+            .map_err(CliError::Store)?;
+        println!("logged in and replaced {id}");
+    } else {
+        store
+            .create_audited(&id, &record, AuditCtx::admin(AuditOp::Login))
+            .map_err(CliError::Store)?;
+        println!("logged in and stored {id}");
+    }
+    Ok(())
+}
+
 fn cmd_invalidate(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     let id = required(args, "--id")?;
     let store = open_for_admin(global)?;
@@ -557,6 +678,47 @@ fn optional(args: &[String], flag: &str) -> Option<String> {
 /// Whether a boolean (valueless) flag is present.
 fn has_flag(args: &[String], flag: &str) -> bool {
     args.iter().any(|a| a == flag)
+}
+
+/// Run one async future to completion on a temporary current-thread runtime. The CLI
+/// is otherwise synchronous; the only async work is the single login token exchange,
+/// so a full multi-thread runtime is unwarranted.
+fn tokio_block_on<F: std::future::Future>(fut: F) -> F::Output {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("building a current-thread runtime never fails")
+        .block_on(fut)
+}
+
+/// Best-effort open of a URL in the operator's default browser. A failure is ignored
+/// by the caller — the URL is also printed, so the login still works if this no-ops
+/// (e.g. a headless box). Never passes the URL through a shell (no injection surface).
+fn open_in_browser(url: &str) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("open");
+        c.arg(url);
+        c
+    };
+    #[cfg(target_os = "linux")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(url);
+        c
+    };
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        // `cmd /c start "" <url>` — the empty title arg avoids start treating the URL
+        // as a window title. The URL is a single arg, not shell-interpolated.
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/C", "start", "", url]);
+        c
+    };
+    cmd.stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|_| ())
 }
 
 fn decode_hash(hex: &str) -> Result<[u8; 32], CliError> {

@@ -15,6 +15,13 @@ description = "Credential custody logic for the cortexkit-credentials subc modul
 # surface for a security boundary).
 kill9-test-seam = []
 
+# Gates ONLY the vault-native-login crash-cut helper binary out of release builds.
+# Like rotate-test-seam this compiles NO code into the library: the login write is a
+# SINGLE atomic fenced transaction (no intent log, no txn1/txn2 window), so the helper
+# just brackets that one public store call with park points using public API — there is
+# no block-before-commit seam because there is no mid-operation durable state to catch.
+login-test-seam = []
+
 # Gates ONLY the master-key-rotation crash-cut helper binary out of release builds.
 # Unlike kill9-test-seam this compiles NO code into the library: the rotation
 # handover's cut points are the boundaries between discrete PUBLIC operations
@@ -38,6 +45,15 @@ required-features = ["kill9-test-seam"]
 name = "rotate_cut_helper"
 path = "src/bin/rotate_cut_helper.rs"
 required-features = ["rotate-test-seam"]
+
+# The vault-native-login crash-cut helper. Seeds an old oauth credential, then brackets
+# the single atomic login write (overwrite) with park points so the parent test can
+# SIGKILL before/after it and prove a crashed `login --replace` never strands the
+# credential it replaces. Test-only via the seam feature.
+[[bin]]
+name = "login_cut_helper"
+path = "src/bin/login_cut_helper.rs"
+required-features = ["login-test-seam"]
 
 [dependencies]
 serde = { workspace = true }

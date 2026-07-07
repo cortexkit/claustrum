@@ -22,6 +22,8 @@ cortexkit-store = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
+# The CLI's `login` command stamps the minted token's expiry from wall-clock time.
+chrono = { workspace = true }
 
 [dev-dependencies]
 subc-core = { workspace = true }

@@ -30,11 +30,36 @@ use crate::oauth::OAuthCredential;
 pub const TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
 
 /// The public Claude Code OAuth client id (the same id the Claude Code / opencode
-/// login flow uses; not a secret — it identifies the public client).
+/// login flow uses; not a secret — it identifies the public client). The SAME id is
+/// used for the authorization-code login flow, so a vault-native login mints tokens
+/// the existing refresh adapter can refresh with no per-record client override.
 pub const CLAUDE_CODE_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 
 /// The adapter name, matching `VaultRecord::refresh_adapter` for Anthropic records.
 pub const ADAPTER_NAME: &str = "anthropic";
+
+// ── First-party login (authorization-code) constants ──────────────────────────
+// Pinned against the first-party CortexKit `anthropic-auth` plugin (the working
+// Claude Pro/Max login), used by `credentials-cli login --provider anthropic`.
+
+/// The Claude Pro/Max authorization endpoint the operator's browser is opened to
+/// (distinct from the token endpoint). The subscription ("max") host.
+pub const AUTHORIZE_URL: &str = "https://claude.com/cai/oauth/authorize";
+
+/// The MANUAL code-paste redirect target: a provider-hosted page that DISPLAYS the
+/// authorization code for the operator to copy back. Using it means the login needs
+/// no inbound localhost listener (zero inbound network surface).
+pub const CODE_CALLBACK_URL: &str = "https://platform.claude.com/oauth/code/callback";
+
+/// The OAuth scopes requested at login (the Claude Pro/Max + Claude Code scope set).
+pub const LOGIN_SCOPES: &[&str] = &[
+    "org:create_api_key",
+    "user:profile",
+    "user:inference",
+    "user:sessions:claude_code",
+    "user:mcp_servers",
+    "user:file_upload",
+];
 
 /// The success response body shape of the refresh exchange. Anthropic returns the
 /// new access token and a relative `expires_in` (seconds). The rotated

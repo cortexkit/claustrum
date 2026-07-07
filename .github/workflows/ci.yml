@@ -98,7 +98,7 @@ jobs:
       # held to the same -D warnings bar even though it is compiled out of the
       # default build.
       - name: Clippy (conformance seams)
-        run: cargo clippy --workspace --all-targets --features kill9-test-seam,rotate-test-seam -- -D warnings
+        run: cargo clippy --workspace --all-targets --features kill9-test-seam,rotate-test-seam,login-test-seam -- -D warnings
 
       - name: Test
         run: cargo test --workspace --all-targets
@@ -109,7 +109,7 @@ jobs:
       # lease-lock release) and compile to nothing on Windows, so the step is harmless
       # there.
       - name: Security-conformance suite (crash-safety seams)
-        run: cargo test --workspace --all-targets --features kill9-test-seam,rotate-test-seam
+        run: cargo test --workspace --all-targets --features kill9-test-seam,rotate-test-seam,login-test-seam
 
       # Run the #[ignore]'d real-daemon e2e (incl. the on-the-wire malicious-client
       # harness) under a real supervised subc-core. This is the ONLY layer that

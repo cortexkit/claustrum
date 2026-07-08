@@ -34,6 +34,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use cortexkit_store::{Migration, SqliteStore, StoreError};
 use sha2::{Digest, Sha256};
+use zeroize::Zeroizing;
 
 use crate::audit::{self, AlarmReason, AuditCtx, AuditEntry, AuditOp, AuditRecord};
 use crate::envelope::{self, EnvelopeError, RecordBinding};
@@ -311,7 +312,12 @@ pub struct EncryptedStore {
     store: SqliteStore,
     key: MasterKey,
     key_id: KeyId,
-    audit_key: [u8; 32],
+    // The audit-chain HMAC key, held in a zeroizing buffer so it is scrubbed from memory
+    // on drop rather than lingering for the process lifetime like a plain `[u8; 32]`.
+    // Each per-op copy is also a `Zeroizing` clone (scrubbed when the op returns), so the
+    // key material never sits in an un-zeroized local either. Deref-coerces to `&[u8; 32]`
+    // at the HMAC call sites, so the callees are unchanged.
+    audit_key: Zeroizing<[u8; 32]>,
     // Latched true the first time a fenced write is rejected because a newer writer
     // took the lease. This is PERMANENT for a store instance by construction: the
     // fence epoch only ever rises, so a superseded writer can never win a later
@@ -404,7 +410,20 @@ impl EncryptedStore {
                 })
             })
             .map_err(|e| StoreError::Backend(e.to_string()))?;
-        Ok(hex.and_then(|h| KeyId::from_hex(&h)))
+        // Distinguish "no row" (a brand-new vault, resolve against `Current`) from "row
+        // present but its fingerprint is unparseable" (a corrupt anchor). The old code
+        // collapsed both to `None`, which would silently downgrade a corrupt anchor into
+        // the bootstrap path and could open a mismatched key. A present-but-invalid
+        // fingerprint fails closed as a corrupt store instead.
+        match hex {
+            None => Ok(None),
+            Some(h) => KeyId::from_hex(&h).map(Some).ok_or_else(|| {
+                StoreError::Backend(format!(
+                    "vault_secrets audit-key row has an invalid key_id fingerprint '{h}' \
+                     (corrupt anchor)"
+                ))
+            }),
+        }
     }
 
     pub fn migrate(store: &SqliteStore) -> Result<(), StoreError> {
@@ -505,7 +524,7 @@ impl EncryptedStore {
         let blob = self.seal_record(credential_id, &record)?;
         let key_id_hex = self.key_id.to_hex();
         let now = now_ms();
-        let audit_key = self.audit_key;
+        let audit_key = self.audit_key.clone();
         let payload_hash_hex = hex32(&payload_hash(&record.payload));
 
         // Create-only via INSERT ... ON CONFLICT DO NOTHING inside the fenced
@@ -584,7 +603,7 @@ impl EncryptedStore {
         let blob = self.seal_record(credential_id, &record)?;
         let key_id_hex = self.key_id.to_hex();
         let now = now_ms();
-        let audit_key = self.audit_key;
+        let audit_key = self.audit_key.clone();
         let payload_hash_hex = hex32(&payload_hash(&record.payload));
 
         // The version in the WHERE makes the UPDATE itself a compare-and-set on the
@@ -657,7 +676,7 @@ impl EncryptedStore {
         let blob = self.seal_record(credential_id, &record)?;
         let key_id_hex = self.key_id.to_hex();
         let now = now_ms();
-        let audit_key = self.audit_key;
+        let audit_key = self.audit_key.clone();
         let payload_hash_hex = hex32(&payload_hash(&record.payload));
 
         let changed = self.fenced_write(|tx| {
@@ -780,6 +799,65 @@ impl EncryptedStore {
         self.set_state(credential_id, RecordState::NeedsReauth, true, Some(ctx))
     }
 
+    /// Version-gated invalidate for a consumer-reported auth failure: mark the
+    /// credential `needs_reauth` (and clear any dangling intent) ONLY if its current
+    /// `record_version` still equals `expected_version` — the version the consumer was
+    /// actually served. Returns `true` if it invalidated, `false` (a silent, successful
+    /// no-op) if the version has since moved on.
+    ///
+    /// This closes a false-invalidation race: a consumer reports a 401 for the token it
+    /// held at version N, but the vault has meanwhile refreshed to N+1 (a fresh, working
+    /// token); the stale report must NOT kill the healthy N+1 credential. Because every
+    /// durable mutation is serialized through the store's single writer connection, this
+    /// CAS and a concurrent `commit_refresh` can never interleave: report-first flips
+    /// state at version N and the refresh's `WHERE record_version = N` still overwrites it
+    /// back to active N+1; refresh-first bumps to N+1 and this CAS matches 0 rows → no-op.
+    /// Either ordering converges on the fresh token. It also neuters malicious
+    /// invalidation: a consumer can only ever kill the exact version it was served.
+    ///
+    /// A no-op (Ok(false)) if the id is absent.
+    pub fn invalidate_if_version_audited(
+        &self,
+        credential_id: &str,
+        expected_version: u64,
+        ctx: AuditCtx<'_>,
+    ) -> Result<bool, StoreOpError> {
+        let now = now_ms();
+        let audit_key = self.audit_key.clone();
+        let changed = self
+            .fenced_write(|tx| {
+                let n = tx.execute(
+                    "UPDATE credentials SET state = ?2, updated_at_ms = ?3 \
+                 WHERE credential_id = ?1 AND record_version = ?4",
+                    rusqlite::params![
+                        credential_id,
+                        RecordState::NeedsReauth.as_str(),
+                        now,
+                        expected_version as i64
+                    ],
+                )?;
+                if n > 0 {
+                    // Same version still current: this is an authoritative revoke, so clear
+                    // any dangling intent and audit it, exactly like invalidate_audited.
+                    clear_intent_tx(tx, credential_id)?;
+                    append_audit_tx(
+                        tx,
+                        &audit_key,
+                        &AuditRecord {
+                            op: ctx.op,
+                            credential_id: Some(credential_id.to_string()),
+                            payload_hash: None,
+                            actor: ctx.actor.to_string(),
+                            alarm: ctx.alarm,
+                        },
+                    )?;
+                }
+                Ok(n)
+            })
+            .map_err(StoreOpError::from)?;
+        Ok(changed > 0)
+    }
+
     /// Invalidate, auditing as a vault-owned `Invalidate`. Convenience wrapper for
     /// callers/tests that do not specify an audit context.
     pub fn invalidate(&self, credential_id: &str) -> Result<(), StoreOpError> {
@@ -813,7 +891,7 @@ impl EncryptedStore {
         ctx: Option<AuditCtx<'_>>,
     ) -> Result<(), StoreOpError> {
         let now = now_ms();
-        let audit_key = self.audit_key;
+        let audit_key = self.audit_key.clone();
         self.fenced_write(|tx| {
             let n = tx.execute(
                 "UPDATE credentials SET state = ?2, updated_at_ms = ?3 \
@@ -911,7 +989,7 @@ impl EncryptedStore {
         let blob = self.seal_record(credential_id, &new_record)?;
         let key_id_hex = self.key_id.to_hex();
         let now = now_ms();
-        let audit_key = self.audit_key;
+        let audit_key = self.audit_key.clone();
         let payload_hash_hex = hex32(&payload_hash(&new_record.payload));
 
         let changed = self.fenced_write(|tx| {
@@ -1045,7 +1123,7 @@ impl EncryptedStore {
         credential_id: &str,
     ) -> Result<(), StoreOpError> {
         let now = now_ms();
-        let audit_key = self.audit_key;
+        let audit_key = self.audit_key.clone();
         self.fenced_write(|tx| {
             tx.execute(
                 "INSERT INTO handles (handle_hash, credential_id, created_at_ms, revoked) \
@@ -1076,7 +1154,7 @@ impl EncryptedStore {
     /// credential id, since revoke-by-handle does not name the credential.
     pub fn revoke_handle(&self, raw_handle: &str) -> Result<(), StoreOpError> {
         let h = handle_hash(raw_handle);
-        let audit_key = self.audit_key;
+        let audit_key = self.audit_key.clone();
         self.fenced_write(|tx| {
             tx.execute(
                 "UPDATE handles SET revoked = 1 WHERE handle_hash = ?1",
@@ -1102,7 +1180,7 @@ impl EncryptedStore {
     /// Returns the number revoked. The update AND a `RevokeHandle` audit entry (naming
     /// the credential) commit in ONE fenced transaction.
     pub fn revoke_all_handles(&self, credential_id: &str) -> Result<usize, StoreOpError> {
-        let audit_key = self.audit_key;
+        let audit_key = self.audit_key.clone();
         self.fenced_write(|tx| {
             let n = tx.execute(
                 "UPDATE handles SET revoked = 1 \
@@ -1132,7 +1210,7 @@ impl EncryptedStore {
     /// paths that must audit atomically use [`append_audit_tx`] inside their own
     /// transaction.
     pub fn append_audit(&self, record: &AuditRecord) -> Result<AuditEntry, StoreOpError> {
-        let audit_key = self.audit_key;
+        let audit_key = self.audit_key.clone();
         self.fenced_write(|tx| append_audit_tx(tx, &audit_key, record))
             .map_err(StoreOpError::from)
     }
@@ -1179,16 +1257,20 @@ impl EncryptedStore {
     /// continuously-verifiable sequence across the rotation; the `RotateMasterKey`
     /// entry is MAC'd with that stable audit key and chains cleanly.
     ///
-    /// A record that fails to decrypt under the OLD key is already corrupt; it is
-    /// left untouched (it cannot be re-wrapped) rather than failing the whole
-    /// rotation — per-record fault isolation. It was already unreadable, so dropping
-    /// the old key loses nothing further.
+    /// A record that fails to decrypt under the OLD key is already corrupt; it cannot be
+    /// re-wrapped under the new key, so it is QUARANTINED (state flipped to `corrupt`)
+    /// in the same transaction and its id is collected, rather than silently skipped
+    /// while the rotation still reports success. Dropping the old key loses nothing
+    /// further (the row was already unreadable), but marking it `corrupt` means the
+    /// post-rotation health scan and the returned id list SURFACE it instead of leaving a
+    /// still-old-key-sealed row behind a "success". The returned `Vec` is the quarantined
+    /// ids (empty on a clean rotation) so the CLI can warn the operator.
     ///
     /// On success the store's in-memory key + key_id are swapped to the new key.
-    pub fn rotate_master_key(&mut self, new_key: MasterKey) -> Result<(), StoreOpError> {
+    pub fn rotate_master_key(&mut self, new_key: MasterKey) -> Result<Vec<String>, StoreOpError> {
         let old_key = &self.key;
         let new_key_id_hex = new_key.key_id().to_hex();
-        let audit_key = self.audit_key;
+        let audit_key = self.audit_key.clone();
 
         // Re-seal the audit-key secret under the new key (value unchanged).
         let audit_binding = RecordBinding {
@@ -1196,71 +1278,83 @@ impl EncryptedStore {
             record_version: AUDIT_KEY_RECORD_VERSION,
         };
         let new_audit_envelope =
-            envelope::seal(&new_key, &audit_key, &audit_binding).map_err(StoreOpError::Decrypt)?;
+            envelope::seal(&new_key, &*audit_key, &audit_binding).map_err(StoreOpError::Decrypt)?;
 
-        self.fenced_write(|tx| {
-            // Snapshot every record id + version + current envelope.
-            let rows: Vec<(String, i64, Vec<u8>)> = {
-                let mut stmt =
-                    tx.prepare("SELECT credential_id, record_version, envelope FROM credentials")?;
-                let mapped = stmt.query_map([], |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, i64>(1)?,
-                        r.get::<_, Vec<u8>>(2)?,
-                    ))
-                })?;
-                mapped.collect::<rusqlite::Result<Vec<_>>>()?
-            };
+        let quarantined = self
+            .fenced_write(|tx| {
+                // Snapshot every record id + version + current envelope.
+                let rows: Vec<(String, i64, Vec<u8>)> = {
+                    let mut stmt = tx.prepare(
+                        "SELECT credential_id, record_version, envelope FROM credentials",
+                    )?;
+                    let mapped = stmt.query_map([], |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, i64>(1)?,
+                            r.get::<_, Vec<u8>>(2)?,
+                        ))
+                    })?;
+                    mapped.collect::<rusqlite::Result<Vec<_>>>()?
+                };
 
-            for (id, version, old_blob) in rows {
-                let binding = RecordBinding {
-                    credential_id: &id,
-                    record_version: version as u64,
-                };
-                // Decrypt with the old key; a record that does not decrypt is
-                // already corrupt — leave it untouched (per-record isolation).
-                let plaintext = match envelope::open(old_key, &old_blob, &binding) {
-                    Ok(pt) => pt,
-                    Err(_) => continue,
-                };
-                // Re-seal under the new key (same id + version => same AAD).
-                let new_blob = envelope::seal(&new_key, &plaintext, &binding)
-                    .map_err(|_| rusqlite_err("re-seal under new key failed"))?;
-                tx.execute(
-                    "UPDATE credentials SET envelope = ?2, key_id = ?3 \
+                let mut quarantined: Vec<String> = Vec::new();
+                for (id, version, old_blob) in rows {
+                    let binding = RecordBinding {
+                        credential_id: &id,
+                        record_version: version as u64,
+                    };
+                    // Decrypt with the old key; a record that does not decrypt is already
+                    // corrupt. It cannot be re-wrapped, so QUARANTINE it (flip to `corrupt`)
+                    // in this same transaction and record its id — never leave a still-old-
+                    // key row behind a reported success.
+                    let plaintext = match envelope::open(old_key, &old_blob, &binding) {
+                        Ok(pt) => pt,
+                        Err(_) => {
+                            tx.execute(
+                                "UPDATE credentials SET state = ?2 WHERE credential_id = ?1",
+                                rusqlite::params![id, RecordState::Corrupt.as_str()],
+                            )?;
+                            quarantined.push(id);
+                            continue;
+                        }
+                    };
+                    // Re-seal under the new key (same id + version => same AAD).
+                    let new_blob = envelope::seal(&new_key, &plaintext, &binding)
+                        .map_err(|_| rusqlite_err("re-seal under new key failed"))?;
+                    tx.execute(
+                        "UPDATE credentials SET envelope = ?2, key_id = ?3 \
                      WHERE credential_id = ?1",
-                    rusqlite::params![id, new_blob, new_key_id_hex],
+                        rusqlite::params![id, new_blob, new_key_id_hex],
+                    )?;
+                }
+
+                // Re-seal the audit-key secret row under the new key.
+                tx.execute(
+                    "UPDATE vault_secrets SET envelope = ?2, key_id = ?3 WHERE name = ?1",
+                    rusqlite::params![AUDIT_KEY_SECRET_NAME, new_audit_envelope, new_key_id_hex],
                 )?;
-            }
 
-            // Re-seal the audit-key secret row under the new key.
-            tx.execute(
-                "UPDATE vault_secrets SET envelope = ?2, key_id = ?3 WHERE name = ?1",
-                rusqlite::params![AUDIT_KEY_SECRET_NAME, new_audit_envelope, new_key_id_hex],
-            )?;
-
-            // Append the vault-global RotateMasterKey entry (no credential_id),
-            // MAC'd with the stable audit key so the chain stays continuous.
-            append_audit_tx(
-                tx,
-                &audit_key,
-                &AuditRecord {
-                    op: AuditOp::RotateMasterKey,
-                    credential_id: None,
-                    payload_hash: None,
-                    actor: "offline-cli".to_string(),
-                    alarm: Some(AlarmReason::AdminWrite),
-                },
-            )?;
-            Ok(())
-        })
-        .map_err(StoreOpError::from)?;
+                // Append the vault-global RotateMasterKey entry (no credential_id),
+                // MAC'd with the stable audit key so the chain stays continuous.
+                append_audit_tx(
+                    tx,
+                    &audit_key,
+                    &AuditRecord {
+                        op: AuditOp::RotateMasterKey,
+                        credential_id: None,
+                        payload_hash: None,
+                        actor: "offline-cli".to_string(),
+                        alarm: Some(AlarmReason::AdminWrite),
+                    },
+                )?;
+                Ok(quarantined)
+            })
+            .map_err(StoreOpError::from)?;
 
         // Commit succeeded: the new key now opens everything. Swap in-memory state.
         self.key_id = new_key.key_id();
         self.key = new_key;
-        Ok(())
+        Ok(quarantined)
     }
 
     /// Seal a record into a cipher envelope bound to its id + version.
@@ -1309,7 +1403,7 @@ fn clear_intent_tx(tx: &rusqlite::Transaction, credential_id: &str) -> rusqlite:
 fn load_or_create_audit_key(
     store: &SqliteStore,
     key: &MasterKey,
-) -> Result<[u8; 32], StoreOpError> {
+) -> Result<Zeroizing<[u8; 32]>, StoreOpError> {
     let binding = RecordBinding {
         credential_id: AUDIT_KEY_SECRET_NAME,
         record_version: AUDIT_KEY_RECORD_VERSION,
@@ -1339,7 +1433,7 @@ fn load_or_create_audit_key(
             .as_slice()
             .try_into()
             .map_err(|_| StoreOpError::CorruptVault("audit key is not 32 bytes".to_string()))?;
-        return Ok(bytes);
+        return Ok(Zeroizing::new(bytes));
     }
 
     // No audit-key row. Only a brand-new (empty) vault may create one.
@@ -1360,9 +1454,11 @@ fn load_or_create_audit_key(
     }
 
     // Brand-new vault: mint a fresh audit key and seal it under the master key.
-    let audit_key = crate::audit::generate_audit_key()
-        .map_err(|_| StoreOpError::Store("csprng".to_string()))?;
-    let blob = envelope::seal(key, &audit_key, &binding).map_err(StoreOpError::Decrypt)?;
+    let audit_key = Zeroizing::new(
+        crate::audit::generate_audit_key()
+            .map_err(|_| StoreOpError::Store("csprng".to_string()))?,
+    );
+    let blob = envelope::seal(key, &*audit_key, &binding).map_err(StoreOpError::Decrypt)?;
     let key_id_hex = key.key_id().to_hex();
     store
         .with_conn_fenced(|tx| {
@@ -1455,19 +1551,26 @@ pub(crate) fn append_audit_tx(
     audit_key: &[u8; 32],
     record: &AuditRecord,
 ) -> rusqlite::Result<AuditEntry> {
-    let prev_mac: String = tx
-        .query_row(
-            "SELECT entry_mac FROM audit_log ORDER BY seq DESC LIMIT 1",
-            [],
-            |r| r.get::<_, String>(0),
-        )
-        .unwrap_or_else(|_| audit::GENESIS_MAC.to_string());
+    // An EMPTY audit table is the only reason to start from genesis (QueryReturnedNoRows
+    // on the tip read). ANY OTHER query error (a broken/locked/damaged audit_log) must
+    // propagate and fail the whole mutation's transaction — silently substituting genesis
+    // would let a mutation commit against an unreadable chain, forking it. The
+    // COALESCE(MAX(seq),0)+1 query returns a row even on an empty table, so it never hits
+    // NoRows; only a real error surfaces there, and that too must propagate.
+    let prev_mac: String = match tx.query_row(
+        "SELECT entry_mac FROM audit_log ORDER BY seq DESC LIMIT 1",
+        [],
+        |r| r.get::<_, String>(0),
+    ) {
+        Ok(mac) => mac,
+        Err(rusqlite::Error::QueryReturnedNoRows) => audit::GENESIS_MAC.to_string(),
+        Err(e) => return Err(e),
+    };
 
-    let next_seq: i64 = tx
-        .query_row("SELECT COALESCE(MAX(seq), 0) + 1 FROM audit_log", [], |r| {
+    let next_seq: i64 =
+        tx.query_row("SELECT COALESCE(MAX(seq), 0) + 1 FROM audit_log", [], |r| {
             r.get(0)
-        })
-        .unwrap_or(1);
+        })?;
 
     let ts_ms = now_ms();
     let op = record.op.as_str();
@@ -2027,6 +2130,128 @@ mod tests {
         let health = crate::health::VaultHealth::summarize(&metas, 0, store.is_fenced_out());
         assert_eq!(health.status, crate::health::VaultHealthStatus::Failing);
         assert!(health.fenced_out);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn version_gated_invalidate_hits_on_matching_version() {
+        let (root, store) = tmp_store(30);
+        store.create("id", &oauth_record()).expect("create"); // record_version 1
+        let ctx = AuditCtx {
+            op: AuditOp::ReportAuthFailure,
+            actor: "conn-1",
+            alarm: None,
+        };
+        // Reporting the CURRENT version (1) invalidates and returns true.
+        let hit = store
+            .invalidate_if_version_audited("id", 1, ctx)
+            .expect("version-gated invalidate");
+        assert!(hit, "a report for the current version must invalidate");
+        assert_eq!(store.meta("id").unwrap().state, RecordState::NeedsReauth);
+        // And it audited exactly one ReportAuthFailure entry.
+        let reports = store
+            .read_audit(None)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.op == "report_auth_failure")
+            .count();
+        assert_eq!(reports, 1, "a hitting version-CAS audits the invalidation");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn version_gated_invalidate_is_a_silent_noop_on_stale_version() {
+        let (root, store) = tmp_store(31);
+        store.create("id", &oauth_record()).expect("create"); // record_version 1
+                                                              // Simulate the vault having refreshed to a newer version after the consumer was
+                                                              // served v1: overwrite unconditionally so the current version moves to 2.
+        store
+            .overwrite_unconditional_audited(
+                "id",
+                &oauth_record(),
+                AuditCtx::vault(AuditOp::Overwrite),
+            )
+            .expect("bump to version 2");
+        assert_eq!(store.meta("id").unwrap().record_version, 2);
+
+        let ctx = AuditCtx {
+            op: AuditOp::ReportAuthFailure,
+            actor: "conn-1",
+            alarm: None,
+        };
+        // A stale report for the SERVED version (1) must be a silent no-op: it does NOT
+        // invalidate the fresh v2 credential, returns false, and audits nothing.
+        let hit = store
+            .invalidate_if_version_audited("id", 1, ctx)
+            .expect("stale version-gated invalidate");
+        assert!(
+            !hit,
+            "a report for a superseded version must not invalidate"
+        );
+        assert_eq!(
+            store.meta("id").unwrap().state,
+            RecordState::Active,
+            "the fresh credential is untouched by a stale report"
+        );
+        let reports = store
+            .read_audit(None)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.op == "report_auth_failure")
+            .count();
+        assert_eq!(reports, 0, "a stale version-CAS no-op audits nothing");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rotate_quarantines_undecryptable_rows_and_reports_them() {
+        let (root, mut store) = tmp_store(40);
+        store.create("good", &oauth_record()).expect("create good");
+        store.create("bad", &oauth_record()).expect("create bad");
+        // Corrupt "bad"'s envelope directly (a key-less db edit): it will fail to decrypt
+        // under the OLD key during rotation, so it cannot be re-wrapped.
+        store
+            .with_raw_conn(|c| {
+                c.execute(
+                    "UPDATE credentials SET envelope = X'00010203' WHERE credential_id = 'bad'",
+                    [],
+                )
+            })
+            .expect("corrupt bad envelope");
+
+        let new_key = MasterKey::from_bytes([0x41; MASTER_KEY_LEN]);
+        let quarantined = store.rotate_master_key(new_key).expect("rotate");
+        // The undecryptable row is surfaced, not silently skipped behind a success.
+        assert_eq!(quarantined, vec!["bad".to_string()]);
+        assert_eq!(store.meta("bad").unwrap().state, RecordState::Corrupt);
+        // The good record re-wrapped under the new key and still reads.
+        assert_eq!(
+            store.get("good").expect("good readable").payload,
+            b"payload-bytes"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn read_db_key_id_fails_closed_on_a_corrupt_anchor() {
+        let (root, store) = tmp_store(50);
+        store.create("id", &oauth_record()).expect("create");
+        // Corrupt the sealed audit-key row's plaintext key_id fingerprint (the resolve
+        // anchor). This must be distinguished from an ABSENT row (a new vault) and fail
+        // closed, not silently downgrade to the bootstrap path.
+        store
+            .with_raw_conn(|c| {
+                c.execute(
+                    "UPDATE vault_secrets SET key_id = 'not-hex' WHERE name = ?1",
+                    rusqlite::params![AUDIT_KEY_SECRET_NAME],
+                )
+            })
+            .expect("corrupt anchor");
+        // The test module is inside store.rs, so it can reach the private inner store.
+        match EncryptedStore::read_db_key_id(&store.store) {
+            Err(StoreError::Backend(m)) => assert!(m.contains("corrupt anchor"), "got: {m}"),
+            other => panic!("a corrupt anchor must fail closed, got {other:?}"),
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 }

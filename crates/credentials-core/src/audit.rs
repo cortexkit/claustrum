@@ -84,6 +84,11 @@ pub enum AlarmReason {
     FetchRateAnomaly,
     /// An administrative write occurred (always flagged so admin activity is loud).
     AdminWrite,
+    /// Boot reconciliation found a stored refresh token whose hash did NOT match the
+    /// dangling intent's recorded hash — a write landed without clearing the intent
+    /// (an interrupted-rotation corruption / rogue-write guard). Alarmed so this tamper
+    /// signal is durable and loud in the chain, not a silent generic invalidate.
+    ReconcileHashMismatch,
 }
 
 impl AlarmReason {
@@ -92,6 +97,7 @@ impl AlarmReason {
             AlarmReason::OverwriteWithoutCas => "overwrite_without_cas",
             AlarmReason::FetchRateAnomaly => "fetch_rate_anomaly",
             AlarmReason::AdminWrite => "admin_write",
+            AlarmReason::ReconcileHashMismatch => "reconcile_hash_mismatch",
         }
     }
 }
@@ -217,6 +223,16 @@ pub fn compute_entry_mac(audit_key: &[u8; 32], prev_mac: &str, fields: &MacField
 /// fields, and `prev_mac` links to the prior entry's `entry_mac`. The first entry's
 /// `prev_mac` must be [`GENESIS_MAC`]. Returns the seq of the first broken entry, or
 /// `None` if the whole segment verifies.
+///
+/// GUARANTEE AND ITS LIMIT: this makes the chain TAMPER-EVIDENT — no one without the
+/// audit key can alter, reorder, or insert an interior entry without breaking a mac. It
+/// is NOT rollback/truncation-resistant on its own: an attacker with write access to the
+/// database (but not the key) can DELETE a suffix of the most recent entries, and the
+/// remaining prefix still verifies cleanly (a valid shorter chain), with the next
+/// legitimate append continuing from the truncated tip. Detecting suffix truncation
+/// requires an EXTERNAL monotonic anchor (e.g. periodically recording `(last_seq,
+/// tip_mac)` off-box); that is out of scope for the in-DB chain. Callers relying on the
+/// audit log for non-repudiation must pair it with such an anchor.
 pub fn verify_chain(audit_key: &[u8; 32], entries: &[AuditEntry]) -> Option<i64> {
     let mut expected_prev = GENESIS_MAC.to_string();
     for e in entries {

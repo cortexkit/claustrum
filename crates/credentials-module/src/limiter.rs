@@ -120,7 +120,16 @@ impl FetchLimiter {
             .or_insert_with(ConnState::new);
         state.prune(now, caps.window);
         state.fetches.push(now);
-        state.distinct.insert(credential_id.to_string());
+        // Cap the retained distinct-probe set: once it has already crossed the ceiling
+        // (i.e. this connection is anomalous), the EXACT set of probed keys past that
+        // point is irrelevant — we only need to know the ceiling was exceeded. Not
+        // inserting beyond a hard cap bounds the memory a long-lived sweeping connection
+        // can retain (raw probe strings), so an enumeration flood cannot grow this set
+        // without bound within a window. The cap is above the ceiling so the anomaly
+        // decision below is unaffected.
+        if state.distinct.len() <= caps.distinct_ceiling {
+            state.distinct.insert(credential_id.to_string());
+        }
 
         let over =
             state.distinct.len() > caps.distinct_ceiling || state.fetches.len() > caps.rate_ceiling;

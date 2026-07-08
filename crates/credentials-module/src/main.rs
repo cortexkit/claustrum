@@ -63,7 +63,17 @@ use read_surface::{GetManyParams, GetParams, ReadSurface, ReportAuthFailureParam
 // it at launch; this is the fallback for a dev run without a supervisor.
 const DEFAULT_MODULE_ID: &str = credentials_core::contract::MODULE_ID;
 const HELLO_CORR: u64 = 1;
+// The data-plane (route response) egress buffer. Route responses can burst, so this is
+// generous — but a hostile/slow consumer filling it must NOT be able to stall the health
+// reply, which is why control frames ride a SEPARATE lane below.
 const EGRESS_BUFFER: usize = 64;
+// The control-plane (channel-0) egress buffer: HELLO, pongs, route-bind-acks, and the
+// health.check reply. Kept on its own small channel, drained with priority, so a full
+// route-response queue can never block a control frame's `send().await` — the health
+// reply must reach the supervisor within the prober deadline regardless of data-plane
+// load (subc-health spec §2). Only rare, tiny control frames use it, so it stays near-
+// empty and a control send never waits behind route traffic.
+const CONTROL_EGRESS_BUFFER: usize = 16;
 
 // How often the background refresher recomputes the cached health snapshot. Well
 // under the prober's cadence so the served snapshot is never more than one tick
@@ -109,17 +119,33 @@ impl ModuleConfig {
     }
 }
 
+/// The two egress lanes to the supervisor. Control-plane frames (HELLO, pong, route-bind
+/// ack, and the health.check reply) ride `control`; data-plane route responses ride
+/// `route`. Two separate channels, drained control-first (see [`drain_writer`]), so a
+/// hostile or slow route consumer that fills the route lane can never delay the health
+/// reply past the prober deadline (subc-health spec §2). Cheap to clone (two `Sender`s).
+#[derive(Clone)]
+struct Egress {
+    control: mpsc::Sender<Frame>,
+    route: mpsc::Sender<Frame>,
+}
+
 async fn run(config: ModuleConfig) -> Result<(), ModuleError> {
     let stream = connect_to_subc(&config.connection_file_path).await?;
     let (mut read_half, write_half) = tokio::io::split(stream);
-    let (tx, rx) = mpsc::channel::<Frame>(EGRESS_BUFFER);
-    let writer = tokio::spawn(drain_writer(write_half, rx));
+    let (control_tx, control_rx) = mpsc::channel::<Frame>(CONTROL_EGRESS_BUFFER);
+    let (route_tx, route_rx) = mpsc::channel::<Frame>(EGRESS_BUFFER);
+    let writer = tokio::spawn(drain_writer(write_half, control_rx, route_rx));
+    let egress = Egress {
+        control: control_tx,
+        route: route_tx,
+    };
 
     // The HELLO_ACK carries the resolved storage descriptor; the surface is built
     // AFTER the handshake (it needs the descriptor) and the boot gate runs before
-    // any request is served.
-    let loop_result = module_loop(&mut read_half, tx.clone(), &config).await;
-    drop(tx);
+    // any request is served. module_loop owns `egress` and drops it on return, closing
+    // both lanes so the writer task finishes.
+    let loop_result = module_loop(&mut read_half, egress, &config).await;
 
     let writer_result = writer
         .await
@@ -151,13 +177,14 @@ async fn connect_to_subc(connection_file_path: &PathBuf) -> Result<TcpStream, Mo
 
 async fn module_loop<R>(
     read_half: &mut R,
-    writer: mpsc::Sender<Frame>,
+    egress: Egress,
     config: &ModuleConfig,
 ) -> Result<(), ModuleError>
 where
     R: AsyncRead + Unpin,
 {
-    send_hello(&writer, config).await?;
+    // HELLO is a channel-0 control frame — send it on the control lane.
+    send_hello(&egress.control, config).await?;
     let ack = expect_hello_ack(read_half).await?;
 
     // Boot gate: build the vault from the resolved descriptor, then reconcile any
@@ -177,7 +204,7 @@ where
         else {
             return Ok(()); // clean EOF: subc closed the connection.
         };
-        if !handle_frame(frame, &writer, &surface).await? {
+        if !handle_frame(frame, &egress, &surface).await? {
             return Ok(());
         }
     }
@@ -268,19 +295,59 @@ async fn build_surface(ack: &ModuleHelloAckBody) -> Result<ReadSurface, ModuleEr
     Ok(ReadSurface::new(engine, FetchLimiter::new(Caps::default())))
 }
 
-async fn drain_writer<W>(write_half: W, mut rx: mpsc::Receiver<Frame>) -> Result<(), ModuleError>
+/// Drain both egress lanes to the wire, CONTROL-FIRST. On every wakeup, all currently-
+/// queued control frames are flushed before any route frame, and `select!` biases toward
+/// the control lane — so a health.check reply can never sit behind a backlog of route
+/// responses (the liveness guarantee: control egress is not starvable by data traffic).
+/// Returns when BOTH lanes are closed (the serve loop dropped its `Egress`).
+async fn drain_writer<W>(
+    write_half: W,
+    mut control_rx: mpsc::Receiver<Frame>,
+    mut route_rx: mpsc::Receiver<Frame>,
+) -> Result<(), ModuleError>
 where
     W: AsyncWrite + Unpin,
 {
     let mut writer = BufWriter::new(write_half);
-    while let Some(frame) = rx.recv().await {
-        write_frame(&mut writer, &frame)
-            .await
-            .map_err(|e| ModuleError::Message(e.to_string()))?;
-        while let Ok(frame) = rx.try_recv() {
-            write_frame(&mut writer, &frame)
-                .await
-                .map_err(|e| ModuleError::Message(e.to_string()))?;
+    let mut control_open = true;
+    let mut route_open = true;
+
+    // Write every frame currently queued on a lane without awaiting new arrivals.
+    macro_rules! drain_ready {
+        ($rx:expr) => {
+            while let Ok(frame) = $rx.try_recv() {
+                write_frame(&mut writer, &frame)
+                    .await
+                    .map_err(|e| ModuleError::Message(e.to_string()))?;
+            }
+        };
+    }
+
+    while control_open || route_open {
+        // Bias to control: `select!`'s first-listed branch is polled first, and after any
+        // wakeup we flush ALL pending control frames before touching the route lane.
+        tokio::select! {
+            biased;
+            maybe = control_rx.recv(), if control_open => match maybe {
+                Some(frame) => {
+                    write_frame(&mut writer, &frame)
+                        .await
+                        .map_err(|e| ModuleError::Message(e.to_string()))?;
+                    drain_ready!(control_rx);
+                }
+                None => control_open = false,
+            },
+            maybe = route_rx.recv(), if route_open => match maybe {
+                Some(frame) => {
+                    // Control frames that arrived meanwhile jump ahead of this route frame.
+                    drain_ready!(control_rx);
+                    write_frame(&mut writer, &frame)
+                        .await
+                        .map_err(|e| ModuleError::Message(e.to_string()))?;
+                    drain_ready!(route_rx);
+                }
+                None => route_open = false,
+            },
         }
         writer
             .flush()
@@ -339,10 +406,13 @@ where
     }
 }
 
-/// Returns `Ok(false)` to stop the loop (graceful goodbye / EOF).
+/// Returns `Ok(false)` to stop the loop (graceful goodbye / EOF). Channel-0 control
+/// frames (ping/pong, route-bind, health.check) egress on the priority control lane;
+/// data-plane route responses egress on the route lane, so control liveness is never
+/// starved by route traffic.
 async fn handle_frame(
     frame: Frame,
-    writer: &mpsc::Sender<Frame>,
+    egress: &Egress,
     surface: &Arc<ReadSurface>,
 ) -> Result<bool, ModuleError> {
     match frame.header.ty {
@@ -356,7 +426,7 @@ async fn handle_frame(
                 Vec::new(),
             )
             .map_err(|e| ModuleError::Message(e.to_string()))?;
-            send(writer, pong).await?;
+            send(&egress.control, pong).await?;
             Ok(true)
         }
         FrameType::Goodbye if frame.header.channel == 0 => Ok(false),
@@ -366,16 +436,17 @@ async fn handle_frame(
             Ok(true)
         }
         FrameType::Request if frame.header.channel == 0 => {
-            handle_control_request(frame, writer, surface).await?;
+            handle_control_request(frame, &egress.control, surface).await?;
             Ok(true)
         }
         FrameType::Request => {
             // Data-plane read request on a route channel. Spawn so a slow refresh
-            // never head-of-line-blocks another route.
-            let writer = writer.clone();
+            // never head-of-line-blocks another route. Its response egresses on the
+            // route lane, never the control lane.
+            let route = egress.route.clone();
             let surface = Arc::clone(surface);
             tokio::spawn(async move {
-                let _ = handle_read_request(frame, &writer, &surface).await;
+                let _ = handle_read_request(frame, &route, &surface).await;
             });
             Ok(true)
         }
@@ -426,7 +497,13 @@ fn health_report(health: &credentials_core::health::VaultHealth) -> ModuleContro
         VaultHealthStatus::Degraded => HealthStatus::Degraded,
         VaultHealthStatus::Failing => HealthStatus::Failing,
     };
-    let detail = if health.fenced_out {
+    let detail = if health.refresher_stalled {
+        Some(
+            "health refresher stalled: the background snapshot task stopped updating \
+             (wedged or panicked); serving a possibly-stale snapshot, restart the daemon"
+                .to_string(),
+        )
+    } else if health.fenced_out {
         Some(
             "fenced out by a newer writer: this daemon lost the single-writer lease \
              (find the other writer)"
@@ -463,6 +540,7 @@ fn health_report(health: &credentials_core::health::VaultHealth) -> ModuleContro
         "openIntents": health.open_intents,
         "storeReadable": health.store_readable,
         "fencedOut": health.fenced_out,
+        "refresherStalled": health.refresher_stalled,
     });
     ModuleControlResponse::HealthCheck {
         status,
@@ -514,16 +592,22 @@ async fn handle_read_request(
             Err(e) => return invalid_params(writer, ver, channel, corr, &e.to_string()).await,
         },
         OP_STATUS => match serde_json::from_value::<StatusParams>(request.params) {
-            Ok(p) => json!({ "result": surface.status(&p) }),
+            Ok(p) => json!({ "result": surface.status(connection_id, &p).await }),
             Err(e) => return invalid_params(writer, ver, channel, corr, &e.to_string()).await,
         },
         OP_REPORT_AUTH_FAILURE => {
             match serde_json::from_value::<ReportAuthFailureParams>(request.params) {
                 Ok(p) => match surface.report_auth_failure(connection_id, &p).await {
                     Ok(()) => json!({ "result": { "accepted": true } }),
-                    Err(code) => {
-                        json!({ "result": { "accepted": false, "error": { "code": code } } })
-                    }
+                    // Carry the produced error CLASS alongside the code (error-class
+                    // contract), the same { code, class } shape get/get_many use, so a
+                    // consumer branches on the class here too rather than on the code.
+                    Err(code) => json!({
+                        "result": {
+                            "accepted": false,
+                            "error": read_surface::ErrorBody { code, class: code.class() }
+                        }
+                    }),
                 },
                 Err(e) => return invalid_params(writer, ver, channel, corr, &e.to_string()).await,
             }
@@ -742,7 +826,9 @@ mod tests {
         tmp_surface_with_store(seed).0
     }
 
-    fn tmp_surface_with_store(seed: u8) -> (Arc<ReadSurface>, Arc<EncryptedStore>) {
+    fn tmp_surface_with_store(
+        seed: u8,
+    ) -> (Arc<ReadSurface>, Arc<EncryptedStore>, std::path::PathBuf) {
         use std::sync::atomic::{AtomicU64, Ordering};
         static SEQ: AtomicU64 = AtomicU64::new(0);
         let root = std::env::temp_dir().join(format!(
@@ -751,12 +837,13 @@ mod tests {
             SEQ.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&root).expect("mkdir");
+        let db_path = root.join("store.db");
         let descriptor = StorageDescriptor {
             module_id: "cortexkit-credentials".into(),
             storage_namespace: "default".into(),
             isolation: Isolation::Module,
             backend: StorageBackend::Sqlite {
-                path: root.join("store.db").to_string_lossy().into_owned(),
+                path: db_path.to_string_lossy().into_owned(),
             },
         };
         let store = open_sqlite(&descriptor).expect("open");
@@ -782,7 +869,17 @@ mod tests {
         let http = Arc::new(ReqwestTransport::new().expect("http"));
         let engine = Arc::new(RefreshEngine::new(Arc::clone(&store), Vec::new(), http));
         let surface = Arc::new(ReadSurface::new(engine, FetchLimiter::new(Caps::default())));
-        (surface, store)
+        (surface, store, db_path)
+    }
+
+    /// Bump the fence epoch above the holder on a vault's db, via a fresh raw sqlite
+    /// connection (the module crate cannot reach core's test-only with_raw_conn). This
+    /// simulates a newer writer claiming the single-writer lease, so the store's next
+    /// fenced write is rejected and latches fenced_out — the lease-handover race.
+    fn bump_fence_epoch(db_path: &std::path::Path) {
+        let conn = rusqlite::Connection::open(db_path).expect("open raw db");
+        conn.execute("UPDATE cortexkit_fence SET epoch = 999 WHERE id = 0", [])
+            .expect("bump fence epoch");
     }
 
     /// Drive the REAL channel-0 control handler with a `health.check` Request and
@@ -839,7 +936,7 @@ mod tests {
     /// immediately; the cached one must not.
     #[tokio::test]
     async fn health_probe_serves_cached_snapshot_not_a_live_read() {
-        let (surface, store) = tmp_surface_with_store(11);
+        let (surface, store, _db) = tmp_surface_with_store(11);
 
         // Initial snapshot (computed at construction): 1 active + 1 needs_reauth.
         let before = surface.health_snapshot();
@@ -868,6 +965,111 @@ mod tests {
         assert_eq!(
             after.credentials_total, 3,
             "refresh recomputes from the store"
+        );
+    }
+
+    /// A wedged/dead refresher must fail the probe CLOSED: if no refresh has completed
+    /// within the stale limit, the probe reports Failing (refresher_stalled) instead of
+    /// serving the last snapshot as healthy — turning a silent refresher death into an
+    /// alert. Non-vacuous: the store is healthy (would be Ok/Degraded), so only the
+    /// staleness gate can drive it to Failing here.
+    #[tokio::test]
+    async fn a_stalled_refresher_fails_the_probe_closed() {
+        let surface = tmp_surface(13);
+        // Fresh snapshot: healthy store, refresher just ran → not Failing.
+        let fresh = surface.health_snapshot();
+        assert_ne!(
+            fresh.status,
+            credentials_core::health::VaultHealthStatus::Failing
+        );
+        assert!(!fresh.refresher_stalled);
+
+        // Backdate the last-refresh clock past the stale limit (refresher wedged/died).
+        surface.force_stale_refresher_for_test();
+
+        let stale = surface.health_snapshot();
+        assert!(
+            stale.refresher_stalled,
+            "the probe must flag a stalled refresher live at read time"
+        );
+        assert_eq!(
+            stale.status,
+            credentials_core::health::VaultHealthStatus::Failing,
+            "a stalled refresher fails the probe closed"
+        );
+        // And the control handler surfaces it as Failing on the wire.
+        let report = health_report(&stale);
+        let ModuleControlResponse::HealthCheck { status, .. } = report else {
+            panic!("expected HealthCheck");
+        };
+        assert_eq!(status, HealthStatus::Failing);
+    }
+
+    /// A fenced-out daemon reports `ready=false`/`lease_held=false` from status, agreeing
+    /// with the health probe instead of always claiming a healthy lease. Non-vacuous:
+    /// before fencing, an Active credential is ready with the lease held; after fencing,
+    /// the same probe flips both.
+    #[tokio::test]
+    async fn status_reflects_fenced_out_lease_loss() {
+        let (surface, store, db_path) = tmp_surface_with_store(14);
+        // Mint a handle for the active credential so a per-handle status has a target.
+        let handle = credentials_core::store::mint_handle().expect("mint handle");
+        store
+            .put_handle_hash(&handle.hash, "apikey:active")
+            .expect("put handle");
+
+        let params = StatusParams {
+            handle: Some(handle.raw.clone()),
+        };
+        let before = surface.status(1, &params).await;
+        assert!(before.ready, "an active credential is ready before fencing");
+        assert!(before.lease_held, "the lease is held before fencing");
+
+        // A newer writer claims the db at a higher fence epoch; the next fenced write on
+        // this store is rejected and latches fenced_out (the lease-handover race).
+        bump_fence_epoch(&db_path);
+        let _ = store.invalidate("apikey:active"); // trigger the fenced write to latch
+
+        let after = surface.status(1, &params).await;
+        assert!(
+            !after.lease_held,
+            "a fenced-out daemon does not hold the lease"
+        );
+        assert!(
+            !after.ready,
+            "a fenced-out daemon is not ready even for an Active row"
+        );
+
+        // The overall (no-handle) status also reflects the loss.
+        let overall = surface.status(1, &StatusParams { handle: None }).await;
+        assert!(!overall.ready);
+        assert!(!overall.lease_held);
+    }
+
+    /// A status handle-probe runs the per-connection limiter BEFORE resolution, so a
+    /// status-based enumeration sweep of unknown handles trips the same durable anomaly
+    /// alarm as a get sweep — not a bypass. Proven by reading the audit log for the alarm.
+    #[tokio::test]
+    async fn status_handle_probe_runs_the_limiter() {
+        let (surface, store, _db) = tmp_surface_with_store(15);
+        // Sweep more distinct unknown handles than the distinct ceiling (16) on ONE
+        // connection, all via status (not get). None resolve — the probe itself is the
+        // signal — so this must still trip the anomaly.
+        for i in 0..20 {
+            let params = StatusParams {
+                handle: Some(format!("ckh_unknown_{i}")),
+            };
+            let _ = surface.status(77, &params).await;
+        }
+        let alarms = store
+            .read_audit(None)
+            .expect("read audit")
+            .into_iter()
+            .filter(|e| e.op == "fetch_anomaly")
+            .count();
+        assert!(
+            alarms >= 1,
+            "a status sweep of unknown handles must raise a durable fetch-anomaly alarm"
         );
     }
 }

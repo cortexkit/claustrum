@@ -52,6 +52,14 @@ pub struct VaultHealth {
     /// Whether a fenced write has ever been rejected because a newer writer took
     /// the lease. `true` ⇒ `Failing` (this daemon has lost write authority).
     pub fenced_out: bool,
+    /// Whether the background health refresher has stopped updating this snapshot
+    /// (wedged on a blocking scan, or dead from a panic). Set LIVE by the probe path
+    /// when the last-refresh age exceeds the stale limit — it is NOT a stored age
+    /// (which would violate the cheap-in-memory / QTA rule by letting a frozen snapshot
+    /// mask its own staleness), it is a boolean the probe computes from a live clock at
+    /// read time. `true` ⇒ `Failing`: a snapshot no one is refreshing cannot be trusted
+    /// as current, so serving it as healthy would hide a real failure.
+    pub refresher_stalled: bool,
     pub credentials_total: usize,
     pub active: usize,
     pub needs_reauth: usize,
@@ -79,6 +87,7 @@ impl VaultHealth {
             status: VaultHealthStatus::Failing,
             store_readable: false,
             fenced_out: false,
+            refresher_stalled: false,
             credentials_total: 0,
             active: 0,
             needs_reauth: 0,
@@ -87,6 +96,15 @@ impl VaultHealth {
             corrupt_ids: Vec::new(),
             open_intents: 0,
         }
+    }
+
+    /// Force the snapshot to `Failing` because the background refresher has stalled
+    /// (last successful refresh is older than the daemon's stale limit). Called live on
+    /// the probe path over a clone, never on the stored snapshot, so it reflects the
+    /// refresher's liveness AT PROBE TIME rather than freezing an age into the content.
+    pub fn mark_refresher_stalled(&mut self) {
+        self.refresher_stalled = true;
+        self.status = VaultHealthStatus::Failing;
     }
 
     /// Summarize the no-decrypt metadata histogram into the fail-closed ladder.
@@ -137,6 +155,7 @@ impl VaultHealth {
             status,
             store_readable: true,
             fenced_out,
+            refresher_stalled: false,
             credentials_total: metas.len(),
             active,
             needs_reauth,

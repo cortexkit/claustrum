@@ -63,9 +63,13 @@ pub const KEYCHAIN_ACCOUNT_CURRENT: &str = "master-key";
 pub fn keychain_service_for(data_dir: &Path) -> Option<String> {
     let id = ProjectRootId::from_path(data_dir).ok()?;
     let mut hasher = Sha256::new();
-    // Hash the canonical path's bytes. On unix that is the OsStr bytes; the value is
-    // stable for a given canonical path, which is all the scoping requires.
-    hasher.update(id.as_path().to_string_lossy().as_bytes());
+    // Hash the canonical path's raw OS bytes LOSSLESSLY, so two distinct paths can never
+    // alias into the same scope by first passing through a lossy UTF-8 conversion (a
+    // `to_string_lossy` would map any non-UTF-8 byte to U+FFFD, collapsing distinct
+    // non-UTF-8 paths together). For a normal UTF-8 path the bytes are identical to the
+    // UTF-8 encoding, so this does NOT change the derived service for any real vault — it
+    // only removes the aliasing edge for exotic byte paths.
+    hasher.update(canonical_path_bytes(id.as_path()));
     let digest = hasher.finalize();
     // 8 bytes (32 bits) of scope is ample: a machine holds a handful of vaults, not
     // billions, so a distinct-data_dir collision is astronomically unlikely. And even
@@ -76,6 +80,23 @@ pub fn keychain_service_for(data_dir: &Path) -> Option<String> {
     // the other vault. The truncation can only ever degrade to a clean fail-closed.
     let scope: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
     Some(format!("{KEYCHAIN_SERVICE_PREFIX}:{scope}"))
+}
+
+/// The canonical path's raw bytes for hashing, losslessly. On unix the `OsStr` bytes are
+/// taken directly (`OsStrExt::as_bytes`), so a non-UTF-8 path hashes to its true bytes
+/// rather than a U+FFFD-collapsed approximation. On non-unix (Windows), the OS string is
+/// UTF-16-based; `to_string_lossy` there is lossless for real paths (valid UTF-16 → UTF-8)
+/// and the whole path family differs anyway, so the string form is used.
+fn canonical_path_bytes(path: &Path) -> Vec<u8> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        path.as_os_str().as_bytes().to_vec()
+    }
+    #[cfg(not(unix))]
+    {
+        path.to_string_lossy().as_bytes().to_vec()
+    }
 }
 
 #[cfg(test)]
@@ -128,6 +149,24 @@ mod tests {
             "a trailing separator must not change the service"
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn lossless_path_hashing_matches_utf8_for_a_normal_path() {
+        // The lossless-byte switch (crypto audit #10) must NOT change the service for any
+        // real (UTF-8) data dir — the prod vault's item must stay stable. For a UTF-8
+        // path, the raw OS bytes ARE the UTF-8 bytes, so canonical_path_bytes equals
+        // to_string_lossy().as_bytes(); this pins that so the change is provably a no-op
+        // for real paths while still removing the aliasing edge for non-UTF-8 byte paths.
+        let dir = tmp_dir("lossless");
+        let id = ProjectRootId::from_path(&dir).expect("canonicalize");
+        let lossless = canonical_path_bytes(id.as_path());
+        let lossy = id.as_path().to_string_lossy().as_bytes().to_vec();
+        assert_eq!(
+            lossless, lossy,
+            "for a UTF-8 path the lossless bytes equal the UTF-8 bytes (service unchanged)"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

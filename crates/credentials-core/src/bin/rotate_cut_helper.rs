@@ -85,7 +85,32 @@ fn main() {
         park(&marker);
     }
 
-    // Step 3: promote `next` to `current`, clear `next`.
+    // The `double-heal-staged` cut models the SCHEME'S ONE HAZARD WINDOW under a real
+    // crash: a SECOND rotation that begins while a FIRST rotation is still crashed
+    // post-rewrap/pre-promote. We are exactly in that first-crashed state right now for
+    // this cut (we did stage k2 + rewrap k2 above and did NOT promote), so:
+    //   current = k1, next = k2, database under k2.
+    // The CLI's second rotation heals first (promoting k2 -> current, freeing next), then
+    // stages k3, then rewraps. We park RIGHT AFTER heal+stage, BEFORE the second rewrap —
+    // the precise point where, WITHOUT the heal, staging k3 would have overwritten next=k2
+    // (the key the database depends on) and a crash would brick (db=k2 matches neither
+    // current=k1 nor next=k3). With the heal, current=k2 matches the database, so a crash
+    // here resolves cleanly. SIGKILL at this park proves the resumed rotation never bricks.
+    if cut == "double-heal-staged" {
+        // `store` was rewrapped to k2 above, so its in-memory key_id IS the database's
+        // current fingerprint (k2) — the heal anchor, with no second store open (which
+        // would contend on the single-writer lease this process already holds).
+        let db_key_id = store.key_id();
+        // Heal promotes next=k2 -> current (matching the db) and frees next.
+        resolver::heal_pending_rotation(&config, db_key_id).expect("heal before 2nd stage");
+        // Stage the second rotation's new key into the freed next slot.
+        let k3 = MasterKey::generate().expect("csprng k3");
+        resolver::stage_next(&config, &k3).expect("stage k3");
+        // Parked at: db under k2 = current (healed), next = k3, second rewrap NOT done.
+        park(&marker);
+    }
+
+    // Step 3 (single rotation): promote `next` to `current`, clear `next`.
     resolver::promote_next(&config).expect("promote");
     if cut == "promote" {
         park(&marker);

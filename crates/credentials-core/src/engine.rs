@@ -37,6 +37,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use crate::audit::{AlarmReason, AuditCtx, AuditOp};
 use crate::oauth::OAuthCredential;
 use crate::record::VaultRecord;
 use crate::refresh_adapters::{HttpTransport, RefreshAdapter, RefreshError, ValidityOutcome};
@@ -357,7 +358,19 @@ impl RefreshEngine {
         if let Some(oauth) = record.oauth.as_ref() {
             let stored_hash = refresh_token_hash(&oauth.refresh_token);
             if stored_hash != intent.old_refresh_hash {
-                self.store.invalidate(id)?; // needs_reauth + clear intent
+                // A write landed without clearing the intent — the rogue-write /
+                // interrupted-rotation corruption guard. Invalidate AND record a loud,
+                // durable alarm entry (ReconcileHashMismatch) atomically, so this tamper
+                // signal survives in the audit chain rather than reading as a silent
+                // generic invalidate.
+                self.store.invalidate_audited(
+                    id,
+                    AuditCtx {
+                        op: AuditOp::Invalidate,
+                        actor: "vault-reconcile",
+                        alarm: Some(AlarmReason::ReconcileHashMismatch),
+                    },
+                )?;
                 return Ok(Reconciliation::NeedsReauth {
                     credential_id: id.to_string(),
                     reason: ReauthReason::HashMismatch,

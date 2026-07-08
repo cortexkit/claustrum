@@ -626,6 +626,12 @@ fn cmd_rotate_master_key(global: &GlobalArgs) -> Result<(), CliError> {
     // Crash-safe two-slot handover. The key store holds two slots (current/next);
     // the database's plaintext key_id is the authority for which key it is sealed
     // under. Order — brick-free at every crash point:
+    //   0. HEAL any prior crashed-mid-rotation state (a `next` the database is already
+    //      sealed under, from a rotation that crashed before promotion): promote it to
+    //      `current` and clear `next`, so staging below cannot overwrite a key the
+    //      database depends on. Without this, a second rotation staging into `next`
+    //      followed by a crash before its own rewrap would leave the database matching
+    //      NEITHER slot — the scheme's one bricking window.
     //   1. open under the current key (proves possession + takes the lease),
     //   2. STAGE the new key into `next` (current still opens the vault),
     //   3. DB rewrap under the new key in ONE atomic fenced txn (now the db's key_id
@@ -638,12 +644,29 @@ fn cmd_rotate_master_key(global: &GlobalArgs) -> Result<(), CliError> {
     let new_key_id = new_key.key_id();
     let config = resolver_config(global);
 
+    // Heal before staging: `store.key_id()` is the fingerprint the database is sealed
+    // under (open_for_admin resolved the matching slot and opened under it), so a pending
+    // un-promoted `next` from a crashed prior rotation is promoted to `current` and
+    // `next` freed before we stage the new key into it.
+    resolver::heal_pending_rotation(&config, store.key_id()).map_err(CliError::MasterKey)?;
+
     resolver::stage_next(&config, &new_key).map_err(CliError::MasterKey)?;
-    store.rotate_master_key(new_key).map_err(CliError::Store)?;
+    let quarantined = store.rotate_master_key(new_key).map_err(CliError::Store)?;
     // Promote copies `next` to `current` and clears `next` within the key store, so
     // it needs no key handle (the new key was consumed by the rewrap above).
     resolver::promote_next(&config).map_err(CliError::MasterKey)?;
     println!("rotated master key to key_id {}", new_key_id.to_hex());
+    if !quarantined.is_empty() {
+        // Records that could not decrypt under the OLD key were already corrupt; the
+        // rotation quarantined them (state = corrupt) rather than leaving stale-key rows.
+        // Surface them so the operator re-imports/re-logs them in.
+        eprintln!(
+            "warning: {} record(s) could not be re-wrapped and were quarantined as corrupt \
+             (re-import or re-login these): {}",
+            quarantined.len(),
+            quarantined.join(", ")
+        );
+    }
     Ok(())
 }
 

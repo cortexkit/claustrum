@@ -60,6 +60,12 @@ pub struct StatusParams {
 pub struct ReportAuthFailureParams {
     pub handle: String,
     pub provider_status: u16,
+    /// The `record_version` the consumer was SERVED for this handle (from the `get`
+    /// result it acted on). Required: the vault invalidates only if this still matches
+    /// the current version, so a stale report for a since-refreshed credential is a
+    /// no-op instead of falsely killing the fresh token. A consumer that omits it is
+    /// rejected (`invalid_params`) rather than silently invalidating whatever is current.
+    pub record_version: u64,
 }
 
 /// A successful `get` result. `payload` is opaque to the consumer.
@@ -180,6 +186,27 @@ pub struct ReadSurface {
     // tokio one) because every critical section here is a trivial clone/swap with
     // no await held across the lock.
     health: std::sync::Mutex<VaultHealth>,
+    // Wall-clock ms of the last SUCCESSFUL health refresh. Read LIVE on the probe path
+    // (never frozen into the snapshot — the QTA rule: an age baked into the cached
+    // content would let a wedged refresher keep reporting a healthy-but-stale snapshot
+    // and mask its own death). If the refresher task wedges (a scan that blocks) OR dies
+    // (a panic), this stops advancing; the probe computes the age live and fails closed.
+    // One atomic covers both failure modes uniformly, so no separate task-watch is needed.
+    last_refresh_ms: std::sync::atomic::AtomicI64,
+}
+
+/// If the cached health snapshot has not been refreshed within this window, the probe
+/// treats the refresher as wedged/dead and reports `Failing` (fail-closed) instead of
+/// serving a stale snapshot as healthy. A small multiple of `HEALTH_REFRESH_INTERVAL`
+/// (5s) so a single slow scan does not false-trigger, but a genuinely stuck refresher is
+/// caught within a few probe cycles.
+const HEALTH_STALE_LIMIT_MS: i64 = 20_000;
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 impl ReadSurface {
@@ -192,6 +219,7 @@ impl ReadSurface {
             engine,
             limiter: Mutex::new(limiter),
             health: std::sync::Mutex::new(initial),
+            last_refresh_ms: std::sync::atomic::AtomicI64::new(now_ms()),
         }
     }
 
@@ -277,14 +305,19 @@ impl ReadSurface {
         };
 
         // Only an authentication failure (401/403) invalidates; a 5xx/429 is a
-        // provider hiccup, not a dead credential. The invalidate audits the
-        // revocation feedback in the chain atomically (actor = the connection).
+        // provider hiccup, not a dead credential. The invalidate is VERSION-GATED: it
+        // fires only if the credential is still at the record_version the consumer was
+        // served, so a stale report for a since-refreshed credential is a silent no-op
+        // (and a consumer can only ever kill the exact version it saw, not whatever is
+        // current). The invalidate audits the revocation feedback in the chain atomically
+        // (actor = the connection).
         if params.provider_status == 401 || params.provider_status == 403 {
             let actor = format!("conn-{connection_id}");
             self.engine
                 .store()
-                .invalidate_audited(
+                .invalidate_if_version_audited(
                     &credential_id,
+                    params.record_version,
                     AuditCtx {
                         op: AuditOp::ReportAuthFailure,
                         actor: &actor,
@@ -297,40 +330,58 @@ impl ReadSurface {
     }
 
     /// Non-secret status: per-handle health, or overall readiness when no handle.
-    pub fn status(&self, params: &StatusParams) -> StatusResult {
-        let lease_held = true; // the daemon holds the lease for its lifetime
-        match &params.handle {
-            None => StatusResult {
-                ready: true,
-                last_error_code: None,
-                lease_held,
-            },
-            Some(handle) => match self.engine.store().resolve_handle(handle) {
-                Ok(credential_id) => match self.engine.store().meta(&credential_id) {
-                    Ok(meta) => StatusResult {
-                        ready: matches!(meta.state, credentials_core::store::RecordState::Active),
-                        last_error_code: match meta.state {
-                            credentials_core::store::RecordState::NeedsReauth => {
-                                Some(ReadError::NeedsReauth)
-                            }
-                            credentials_core::store::RecordState::Corrupt => {
-                                Some(ReadError::Corrupt)
-                            }
-                            credentials_core::store::RecordState::Active => None,
-                        },
-                        lease_held,
+    ///
+    /// `lease_held`/`ready` reflect the fenced-out latch: a daemon that has lost the
+    /// single-writer lease to a newer instance (`is_fenced_out`) reports `lease_held =
+    /// false` and is never `ready`, so this status agrees with the health probe instead
+    /// of always claiming a healthy lease. A handle probe runs the per-connection limiter
+    /// FIRST (keyed by the presented handle, like `get`), so a status-based enumeration
+    /// sweep of unknown handles trips the same anomaly alarm rather than slipping past it.
+    pub async fn status(&self, connection_id: u64, params: &StatusParams) -> StatusResult {
+        let fenced_out = self.engine.store().is_fenced_out();
+        let lease_held = !fenced_out;
+
+        let handle = match &params.handle {
+            // Overall readiness: ready iff we still hold write authority. No handle to
+            // key the limiter on, and nothing to enumerate, so no limiter run here.
+            None => {
+                return StatusResult {
+                    ready: !fenced_out,
+                    last_error_code: None,
+                    lease_held,
+                };
+            }
+            Some(h) => h,
+        };
+
+        // Rate-limit the handle probe before resolution (enumeration-sweep guard).
+        self.check_limiter(connection_id, handle).await;
+
+        match self.engine.store().resolve_handle(handle) {
+            Ok(credential_id) => match self.engine.store().meta(&credential_id) {
+                Ok(meta) => StatusResult {
+                    // A fenced-out daemon is not ready even for an Active credential.
+                    ready: !fenced_out
+                        && matches!(meta.state, credentials_core::store::RecordState::Active),
+                    last_error_code: match meta.state {
+                        credentials_core::store::RecordState::NeedsReauth => {
+                            Some(ReadError::NeedsReauth)
+                        }
+                        credentials_core::store::RecordState::Corrupt => Some(ReadError::Corrupt),
+                        credentials_core::store::RecordState::Active => None,
                     },
-                    Err(_) => StatusResult {
-                        ready: false,
-                        last_error_code: Some(ReadError::NotFound),
-                        lease_held,
-                    },
+                    lease_held,
                 },
                 Err(_) => StatusResult {
                     ready: false,
                     last_error_code: Some(ReadError::NotFound),
                     lease_held,
                 },
+            },
+            Err(_) => StatusResult {
+                ready: false,
+                last_error_code: Some(ReadError::NotFound),
+                lease_held,
             },
         }
     }
@@ -343,18 +394,46 @@ impl ReadSurface {
         // The lock guards a trivial clone with no await held; poisoning can only
         // happen if a refresher panicked mid-write, in which case the last-good
         // snapshot under the guard is still a valid read.
-        self.health
+        let mut snapshot = self
+            .health
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .clone()
+            .clone();
+        // Liveness gate, computed LIVE here (never stored in the snapshot): if the
+        // refresher has not completed a scan within the stale limit, it has wedged or
+        // died, and the cached snapshot is no longer trustworthy — fail closed to
+        // `Failing` rather than keep reporting a possibly-healthy frozen snapshot. This
+        // is what turns a silent refresher death into an alert instead of a mask.
+        let age = now_ms().saturating_sub(
+            self.last_refresh_ms
+                .load(std::sync::atomic::Ordering::Relaxed),
+        );
+        if age > HEALTH_STALE_LIMIT_MS {
+            snapshot.mark_refresher_stalled();
+        }
+        snapshot
+    }
+
+    /// Test seam: backdate the last-refresh clock so the probe's liveness gate treats
+    /// the refresher as stalled, without a real 20s wait. Mirrors the `with_raw_conn`
+    /// test-only discipline — not part of the production surface.
+    #[cfg(test)]
+    pub(crate) fn force_stale_refresher_for_test(&self) {
+        self.last_refresh_ms.store(
+            now_ms() - (HEALTH_STALE_LIMIT_MS * 2),
+            std::sync::atomic::Ordering::Relaxed,
+        );
     }
 
     /// Recompute the domain health from the store and store it as the new cached
     /// snapshot. Called OFF the probe path — at boot and on the background cadence —
-    /// so the live store reads here never block a health.check reply.
+    /// so the live store reads here never block a health.check reply. Stamps the
+    /// last-refresh clock on success so the probe can detect a wedged/dead refresher.
     pub fn refresh_health(&self) {
         let fresh = Self::compute_health(&self.engine);
         *self.health.lock().unwrap_or_else(|p| p.into_inner()) = fresh;
+        self.last_refresh_ms
+            .store(now_ms(), std::sync::atomic::Ordering::Relaxed);
     }
 
     /// The actual domain-health computation: a no-decrypt `list_meta` scan plus the

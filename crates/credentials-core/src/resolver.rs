@@ -41,7 +41,7 @@
 
 use std::path::{Path, PathBuf};
 
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::key::{KeyId, MasterKey, MASTER_KEY_LEN};
 
@@ -320,7 +320,14 @@ impl MasterKeyStore for OperatorPathStore {
         let path = self.path_for(slot);
         ensure_outside_data_dir(&path, data_dir)?;
         match std::fs::remove_file(&path) {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                // Make the removal durable: promotion clears `Next` after copying it to
+                // `Current`, and a power loss that lost this unlink would resurrect a
+                // stale `Next`. Harmless there (it matches nothing), but fsyncing keeps
+                // the slot state honest.
+                fsync_parent_dir(&path);
+                Ok(())
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(MasterKeyError::Io(e)),
         }
@@ -383,15 +390,78 @@ pub fn resolve_for_db(
 ) -> Result<MasterKey, MasterKeyError> {
     ensure_vault_dir(&config.data_dir)?;
     let backend = config.source.backend();
+    // A slot-local load error (a corrupt/unparseable `Current`) must NOT abort the search
+    // before the OTHER slot is tried — a mid-handover vault whose matching key lives in
+    // `Next` must still recover even if `Current` is damaged. Remember the first load
+    // error and keep going; only surface it if NO slot matches (so a genuinely locked
+    // store still fails closed as locked, not as a misleading wrong-key).
+    let mut load_err: Option<MasterKeyError> = None;
     for slot in [KeySlot::Current, KeySlot::Next] {
-        if let Some(key) = backend.load_slot(&config.data_dir, slot)? {
-            if key.key_id() == db_key_id {
-                return Ok(key);
+        match backend.load_slot(&config.data_dir, slot) {
+            Ok(Some(key)) if key.key_id() == db_key_id => return Ok(key),
+            Ok(_) => {}
+            Err(e) => {
+                load_err.get_or_insert(e);
             }
         }
     }
-    // No slot's key matches the database's recorded fingerprint: a real wrong-key /
-    // corrupt state, distinct from a recoverable mid-rotation handover.
+    // No slot's key matches the database's recorded fingerprint. If a slot could not be
+    // read at all, surface that (e.g. `VaultLocked` stays a clean back-off signal);
+    // otherwise this is a real wrong-key / corrupt state, distinct from a recoverable
+    // mid-rotation handover.
+    Err(load_err.unwrap_or(MasterKeyError::KeyMismatch {
+        loaded: db_key_id,
+        expected: db_key_id,
+    }))
+}
+
+/// Tidy a crashed-mid-rotation key store BEFORE a new rotation stages into `Next`.
+///
+/// The two-slot handover is brick-free for a SINGLE rotation, but a rotation that
+/// crashed after the database rewrap and before promotion leaves `Current` = the old
+/// key and `Next` = the key the database is now sealed under. If a LATER rotation then
+/// staged its new key straight into `Next`, it would overwrite the un-promoted key the
+/// database depends on, and a crash before that rotation's own rewrap would leave the
+/// database matching NEITHER slot — the one bricking window in the scheme.
+///
+/// This closes it: if the database is sealed under `Next` (rewrapped-not-promoted),
+/// promote `Next` to `Current` and clear `Next`, so the store is back to a clean
+/// single-key state and the next `stage_next` writes a fresh `Next`. A no-op when the
+/// database already matches `Current` (the normal case, or a stale non-matching `Next`
+/// that the coming `stage_next` overwrites harmlessly).
+///
+/// Admin-CLI only: it writes the key store, and only the offline CLI rotates. The
+/// daemon's read path never stages a rotation, so it never needs to (and must not)
+/// promote slots. Callers invoke this only AFTER a successful `resolve_for_db`, so a
+/// matching slot is known to exist; a slot-local read error here is treated as
+/// "not this slot" and falls through rather than aborting a recoverable promote.
+pub fn heal_pending_rotation(
+    config: &ResolverConfig,
+    db_key_id: KeyId,
+) -> Result<(), MasterKeyError> {
+    ensure_vault_dir(&config.data_dir)?;
+    let backend = config.source.backend();
+    let dir = &config.data_dir;
+
+    // Already clean: the database is sealed under `Current`.
+    if let Ok(Some(cur)) = backend.load_slot(dir, KeySlot::Current) {
+        if cur.key_id() == db_key_id {
+            return Ok(());
+        }
+    }
+    // The database is sealed under `Next` (rewrapped-not-promoted): promote it so
+    // `Current` matches the database and `Next` is free for the new rotation. Promoting
+    // is only ever done for a `Next` that MATCHES the database key — never a stale
+    // never-used `Next` (that would set `Current` to a key the database is not under).
+    if let Ok(Some(next)) = backend.load_slot(dir, KeySlot::Next) {
+        if next.key_id() == db_key_id {
+            backend.store_slot(dir, KeySlot::Current, &next)?;
+            backend.clear_slot(dir, KeySlot::Next)?;
+            return Ok(());
+        }
+    }
+    // Neither slot holds the database's key: a genuine wrong-key / corrupt-anchor state.
+    // Fail closed rather than promote a key the database is not sealed under.
     Err(MasterKeyError::KeyMismatch {
         loaded: db_key_id,
         expected: db_key_id,
@@ -532,7 +602,11 @@ fn write_key_file(path: &Path, bytes: &[u8]) -> Result<(), MasterKeyError> {
         .map_err(|e| map_create_new_err(path, e))?;
     f.write_all(bytes)
         .map_err(|e| MasterKeyError::KeyStoreUnwritable(e.to_string()))?;
-    f.flush().map_err(MasterKeyError::Io)?;
+    // sync_all (fsync), not flush: `File` has no userspace buffer, so `flush` is a no-op
+    // and the bytes could still be lost on power loss before the OS writes them back. The
+    // key store is the authority for which key opens the vault, so a staged/promoted slot
+    // must be durable before the rename that publishes it.
+    f.sync_all().map_err(MasterKeyError::Io)?;
     Ok(())
 }
 
@@ -546,7 +620,7 @@ fn write_key_file(path: &Path, bytes: &[u8]) -> Result<(), MasterKeyError> {
         .map_err(|e| map_create_new_err(path, e))?;
     f.write_all(bytes)
         .map_err(|e| MasterKeyError::KeyStoreUnwritable(e.to_string()))?;
-    f.flush().map_err(MasterKeyError::Io)?;
+    f.sync_all().map_err(MasterKeyError::Io)?;
     Ok(())
 }
 
@@ -616,17 +690,32 @@ fn load_from_keychain(service: &str, account: &str) -> Result<MasterKey, MasterK
 
 /// Replace (create-or-update) a keychain slot's key, via `add-generic-password -U`.
 ///
-/// Unlike [`store_in_keychain`] (first-run-only, no `-U`), a SLOT write must REPLACE
-/// whatever is there: a rotation overwrites the `Next` slot's stale key, and the
-/// first-run clobber-safety is enforced above the backend in [`bootstrap`]. So `-U`
-/// is correct here. (Same argv-exposure residual as the bootstrap write.)
+/// A SLOT write must REPLACE whatever is there (a rotation overwrites the `Next` slot's
+/// stale key); first-run clobber-safety is enforced above the backend in [`bootstrap`],
+/// so `-U` is correct here.
+///
+/// The key is passed via STDIN, not on argv. `-w` with no inline value makes `security`
+/// read the password (twice: value + confirmation) from stdin, so the 32-byte key hex
+/// never appears in the process argument list where any local process could read it
+/// (`ps`, `/proc/<pid>/cmdline`). The write buffer is zeroized after the child consumes it.
 fn replace_in_keychain(
     service: &str,
     account: &str,
     key: &MasterKey,
 ) -> Result<(), MasterKeyError> {
-    let hex = encode_hex_key(key);
-    let output = std::process::Command::new("security")
+    use std::io::Write;
+    let mut hex = encode_hex_key(key);
+    // `security -w` (no value) prompts for the password AND a confirmation; feed the hex
+    // twice, newline-terminated. Held in a Zeroizing buffer so the plaintext key hex is
+    // scrubbed from our memory once written.
+    let mut stdin_bytes = Zeroizing::new(Vec::with_capacity(hex.len() * 2 + 2));
+    stdin_bytes.extend_from_slice(hex.as_bytes());
+    stdin_bytes.push(b'\n');
+    stdin_bytes.extend_from_slice(hex.as_bytes());
+    stdin_bytes.push(b'\n');
+    hex.zeroize();
+
+    let mut child = std::process::Command::new("security")
         .args([
             "add-generic-password",
             "-U",
@@ -635,9 +724,20 @@ fn replace_in_keychain(
             "-a",
             account,
             "-w",
-            hex.as_str(),
         ])
-        .output()
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| MasterKeyError::KeychainExec(e.to_string()))?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| MasterKeyError::KeychainExec("no stdin pipe to security".to_string()))?
+        .write_all(&stdin_bytes)
+        .map_err(|e| MasterKeyError::KeychainExec(e.to_string()))?;
+    let output = child
+        .wait_with_output()
         .map_err(|e| MasterKeyError::KeychainExec(e.to_string()))?;
     if output.status.success() {
         Ok(())
@@ -683,7 +783,28 @@ fn replace_at_operator_path(path: &Path, key: &MasterKey) -> Result<(), MasterKe
         let _ = std::fs::remove_file(&tmp);
         MasterKeyError::KeyStoreUnwritable(e.to_string())
     })?;
+    // fsync the parent directory so the rename itself is durable: without it, a power
+    // loss after the rename returns can still lose the directory entry, leaving the slot
+    // pointing at the pre-rename state (or nothing). The file bytes were already synced in
+    // write_key_file; this makes the atomic publish of those bytes durable too.
+    fsync_parent_dir(path);
     Ok(())
+}
+
+/// Best-effort fsync of a path's parent directory to make a rename/remove durable.
+/// Errors are ignored: not every filesystem supports directory fsync, and a slot write
+/// that got this far already synced the file bytes — a missing dir-fsync degrades
+/// durability, it does not corrupt. On non-unix this is a no-op (Windows has no
+/// equivalent directory-handle fsync with the same semantics).
+fn fsync_parent_dir(path: &Path) {
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        if let Ok(dir) = std::fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
 }
 
 // ---- hex helpers ---------------------------------------------------------
@@ -1026,6 +1147,136 @@ mod tests {
             Err(MasterKeyError::KeyMismatch { .. }) => {}
             other => panic!("expected KeyMismatch on no-matching-slot, got {other:?}"),
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // The double-rotation brick window and the heal that closes it. The two-slot
+    // handover is brick-free for ONE rotation, but a rotation that crashed after the db
+    // rewrap and before promotion leaves current=old, next=the-key-the-db-is-under. A
+    // LATER rotation staging its new key into `next` would overwrite the key the db
+    // depends on. These prove the window exists (negative control) and that
+    // heal_pending_rotation closes it (positive control).
+
+    #[test]
+    fn without_heal_a_second_rotation_bricks_the_vault() {
+        // NEGATIVE CONTROL — reproduce the exact window. A first rotation crashed
+        // post-rewrap/pre-promote (current=k1, next=k2, db under k2). A second rotation
+        // stages k3 into `next` WITHOUT healing first → current=k1, next=k3, db=k2, and
+        // k2 matches NEITHER slot: a brick. This is why cmd_rotate_master_key heals
+        // before staging; if this ever stops reproducing, that heal is doing the work.
+        let root = tmp_dir("no-heal-brick");
+        let config = op_config(&root);
+        let _k1 = bootstrap(&config).expect("bootstrap");
+        let k2 = MasterKey::generate().unwrap();
+        stage_next(&config, &k2).expect("stage k2"); // crashed-first-rotation state
+        let k3 = MasterKey::generate().unwrap();
+        stage_next(&config, &k3).expect("stage k3 without healing"); // overwrites next=k2
+                                                                     // db is under k2, but current=k1 and next=k3: neither matches → brick (fail closed).
+        match resolve_for_db(&config, k2.key_id()) {
+            Err(MasterKeyError::KeyMismatch { .. }) => {}
+            other => panic!("expected the un-healed double-rotation to brick, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn heal_before_stage_closes_the_double_rotation_brick_window() {
+        // POSITIVE CONTROL — the same setup, but heal first. After healing, current is
+        // the key the db is sealed under and next is free, so staging the next rotation's
+        // key cannot clobber it and a crash resolves cleanly.
+        let root = tmp_dir("heal-closes");
+        let config = op_config(&root);
+        let _k1 = bootstrap(&config).expect("bootstrap");
+        let k2 = MasterKey::generate().unwrap();
+        stage_next(&config, &k2).expect("stage k2"); // current=k1, next=k2, db under k2
+
+        heal_pending_rotation(&config, k2.key_id()).expect("heal a pending rotation");
+        let backend = config.source.backend();
+        assert_eq!(
+            backend
+                .load_slot(&config.data_dir, KeySlot::Current)
+                .unwrap()
+                .unwrap()
+                .key_id(),
+            k2.key_id(),
+            "heal promoted next(k2) to current (the key the db is under)"
+        );
+        assert!(
+            backend
+                .load_slot(&config.data_dir, KeySlot::Next)
+                .unwrap()
+                .is_none(),
+            "heal freed the next slot for the coming rotation"
+        );
+
+        // The second rotation now stages k3 into the FREED next; db still under k2 =
+        // current, so a crash here resolves to current (k2). No brick.
+        let k3 = MasterKey::generate().unwrap();
+        stage_next(&config, &k3).expect("stage k3 after heal");
+        assert_eq!(
+            resolve_for_db(&config, k2.key_id()).unwrap().key_id(),
+            k2.key_id(),
+            "db still resolves to current (k2) with k3 staged in next"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn heal_is_noop_when_db_already_matches_current() {
+        let root = tmp_dir("heal-noop");
+        let config = op_config(&root);
+        let k1 = bootstrap(&config).expect("bootstrap");
+        // No pending rotation: db under current (k1), no next. Heal must be a clean no-op.
+        heal_pending_rotation(&config, k1.key_id()).expect("heal no-op");
+        let backend = config.source.backend();
+        assert_eq!(
+            backend
+                .load_slot(&config.data_dir, KeySlot::Current)
+                .unwrap()
+                .unwrap()
+                .key_id(),
+            k1.key_id()
+        );
+        assert!(backend
+            .load_slot(&config.data_dir, KeySlot::Next)
+            .unwrap()
+            .is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn heal_fails_closed_when_neither_slot_matches() {
+        // A db key_id matching neither slot is a genuine wrong-key/corrupt state; heal
+        // must refuse rather than promote a key the db is not sealed under.
+        let root = tmp_dir("heal-nomatch");
+        let config = op_config(&root);
+        let _k1 = bootstrap(&config).expect("bootstrap");
+        let stranger = MasterKey::generate().unwrap();
+        match heal_pending_rotation(&config, stranger.key_id()) {
+            Err(MasterKeyError::KeyMismatch { .. }) => {}
+            other => panic!("heal must fail closed when neither slot matches, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn resolve_for_db_continues_past_a_corrupt_current_slot() {
+        // A corrupt/unparseable current slot must NOT abort the search before next is
+        // tried: a mid-handover vault whose matching key is in next must still recover.
+        let root = tmp_dir("slot-corrupt-current");
+        let config = op_config(&root);
+        let _k1 = bootstrap(&config).expect("bootstrap");
+        let k2 = MasterKey::generate().unwrap();
+        stage_next(&config, &k2).expect("stage k2"); // next=k2
+                                                     // Corrupt the current slot file (unparseable hex) — load_slot(Current) now errors.
+        let current_path = match &config.source {
+            KeySource::OperatorPath { path } => path.clone(),
+            _ => unreachable!(),
+        };
+        std::fs::write(&current_path, b"not-a-valid-hex-key").unwrap();
+        // db is under k2 = next: resolve must skip the corrupt current and find next.
+        let got = resolve_for_db(&config, k2.key_id()).expect("resolve past corrupt current");
+        assert_eq!(got.key_id(), k2.key_id());
         let _ = std::fs::remove_dir_all(&root);
     }
 

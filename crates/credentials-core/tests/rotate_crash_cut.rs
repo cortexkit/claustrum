@@ -196,3 +196,17 @@ fn crash_after_promote_resolves_to_current_and_never_bricks() {
     assert_wrong_key_fails_closed(&root);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn crash_during_a_resumed_second_rotation_never_bricks() {
+    // The scheme's one hazard window: a second rotation that begins while a first is
+    // still crashed post-rewrap/pre-promote. The helper reaches current=k1, next=k2,
+    // db-under-k2, then runs the CLI's heal-before-stage (promoting k2->current, freeing
+    // next) and stages k3, parking before the second rewrap. Without the heal, staging k3
+    // would have clobbered next=k2 and this crash would brick (db=k2 matches neither
+    // slot); with the heal, current=k2 matches the db and resolve is clean.
+    let root = kill_at_cut("double-heal-staged");
+    assert_reopens_clean(&root);
+    assert_wrong_key_fails_closed(&root);
+    let _ = std::fs::remove_dir_all(&root);
+}

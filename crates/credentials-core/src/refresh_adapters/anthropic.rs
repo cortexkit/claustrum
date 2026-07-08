@@ -46,6 +46,10 @@ pub const ADAPTER_NAME: &str = "anthropic";
 /// (distinct from the token endpoint). The subscription ("max") host.
 pub const AUTHORIZE_URL: &str = "https://claude.com/cai/oauth/authorize";
 
+/// Anthropic's non-standard extra authorize params: `code=true` selects the manual
+/// code-display callback page variant.
+pub const LOGIN_EXTRA_AUTHORIZE_PARAMS: &[(&str, &str)] = &[("code", "true")];
+
 /// The MANUAL code-paste redirect target: a provider-hosted page that DISPLAYS the
 /// authorization code for the operator to copy back. Using it means the login needs
 /// no inbound localhost listener (zero inbound network surface).

@@ -69,10 +69,12 @@ pub fn generate_state() -> Result<String, getrandom::Error> {
     Ok(base64url(&bytes))
 }
 
-/// Build the provider authorize URL the operator opens in a browser. Mirrors the
-/// first-party plugin's param set exactly: `code=true`, `client_id`,
-/// `response_type=code`, `redirect_uri`, space-joined `scope`, `code_challenge`,
-/// `code_challenge_method=S256`, `state`.
+/// Build the provider authorize URL the operator opens in a browser: the RFC param
+/// set (`client_id`, `response_type=code`, `redirect_uri`, space-joined `scope`,
+/// `code_challenge`, `code_challenge_method=S256`, `state`) plus whatever
+/// provider-specific `extra_params` the provider's wire requires (Anthropic's
+/// non-standard `code=true`; OpenAI's `id_token_add_organizations` etc. — each
+/// pinned in that provider's adapter constants).
 pub fn build_authorize_url(
     authorize_url: &str,
     client_id: &str,
@@ -80,17 +82,23 @@ pub fn build_authorize_url(
     scopes: &[&str],
     challenge: &str,
     state: &str,
+    extra_params: &[(&str, &str)],
 ) -> Result<String, url::ParseError> {
     let mut url = url::Url::parse(authorize_url)?;
-    url.query_pairs_mut()
-        .append_pair("code", "true")
-        .append_pair("client_id", client_id)
-        .append_pair("response_type", "code")
-        .append_pair("redirect_uri", redirect_uri)
-        .append_pair("scope", &scopes.join(" "))
-        .append_pair("code_challenge", challenge)
-        .append_pair("code_challenge_method", CODE_CHALLENGE_METHOD)
-        .append_pair("state", state);
+    {
+        let mut pairs = url.query_pairs_mut();
+        for (k, v) in extra_params {
+            pairs.append_pair(k, v);
+        }
+        pairs
+            .append_pair("client_id", client_id)
+            .append_pair("response_type", "code")
+            .append_pair("redirect_uri", redirect_uri)
+            .append_pair("scope", &scopes.join(" "))
+            .append_pair("code_challenge", challenge)
+            .append_pair("code_challenge_method", CODE_CHALLENGE_METHOD)
+            .append_pair("state", state);
+    }
     Ok(url.to_string())
 }
 
@@ -160,6 +168,10 @@ pub struct LoginTokens {
     pub access_token: String,
     pub refresh_token: String,
     pub expires_at_ms: Option<i64>,
+    /// The OIDC id_token, when the provider issues one (OpenAI does; Anthropic does
+    /// not). Carried so the caller can read identity claims (e.g. the ChatGPT account
+    /// id) — never stored in the credential record.
+    pub id_token: Option<String>,
 }
 
 /// A login failure.
@@ -213,6 +225,19 @@ struct ExchangeResponseBody {
     expires_in: i64,
 }
 
+/// The success response body of the STANDARD (RFC 6749/7636) form-encoded exchange
+/// (OpenAI Codex). `id_token` is present for OIDC providers; `expires_in` is not
+/// guaranteed by the official Codex browser flow, so it is optional.
+#[derive(Debug, Deserialize)]
+struct FormExchangeResponseBody {
+    access_token: String,
+    refresh_token: String,
+    #[serde(default)]
+    expires_in: Option<i64>,
+    #[serde(default)]
+    id_token: Option<String>,
+}
+
 /// Validate the callback's state against the expected state, then exchange the code
 /// for tokens at the provider's token endpoint. State is checked BEFORE the network
 /// call so a mismatched callback never reaches the provider.
@@ -262,7 +287,135 @@ pub async fn exchange_authorization_code(
         access_token: parsed.access_token,
         refresh_token: parsed.refresh_token,
         expires_at_ms: Some(now_ms + parsed.expires_in.saturating_mul(1000)),
+        // Anthropic's exchange issues no id_token (identity is not part of that wire).
+        id_token: None,
     })
+}
+
+/// The STANDARD authorization-code exchange (RFC 6749 + 7636): form-encoded body
+/// `grant_type=authorization_code&code&redirect_uri&client_id&code_verifier`, NO
+/// non-standard `state` field in the body (state is still validated here, before the
+/// network call). This is the wire the official OpenAI Codex CLI uses; providers that
+/// deviate (Anthropic's JSON body with an embedded `state`) use
+/// [`exchange_authorization_code`] instead.
+#[allow(clippy::too_many_arguments)]
+pub async fn exchange_authorization_code_form(
+    http: &dyn HttpTransport,
+    token_url: &str,
+    client_id: &str,
+    redirect_uri: &str,
+    callback: &Callback,
+    expected_state: &str,
+    verifier: &str,
+    now_ms: i64,
+) -> Result<LoginTokens, LoginError> {
+    if callback.state != expected_state {
+        return Err(LoginError::StateMismatch);
+    }
+
+    let body = crate::refresh_adapters::form_urlencode(&[
+        ("grant_type", "authorization_code"),
+        ("code", &callback.code),
+        ("redirect_uri", redirect_uri),
+        ("client_id", client_id),
+        ("code_verifier", verifier),
+    ]);
+
+    let resp = http
+        .post(
+            token_url,
+            &[],
+            "application/x-www-form-urlencoded",
+            body.into_bytes(),
+        )
+        .await?;
+
+    if resp.status != 200 {
+        return Err(LoginError::Status(
+            resp.status,
+            String::from_utf8_lossy(&resp.body).into_owned(),
+        ));
+    }
+
+    let parsed: FormExchangeResponseBody =
+        serde_json::from_slice(&resp.body).map_err(|e| LoginError::Decode(e.to_string()))?;
+
+    Ok(LoginTokens {
+        access_token: parsed.access_token,
+        refresh_token: parsed.refresh_token,
+        expires_at_ms: parsed.expires_in.map(|s| now_ms + s.saturating_mul(1000)),
+        id_token: parsed.id_token,
+    })
+}
+
+/// Decode the payload claims of a JWT WITHOUT signature verification. Used only to
+/// read non-secret identity metadata (the ChatGPT account id) out of a token that was
+/// just received directly from the provider's token endpoint over TLS — the transport
+/// is the trust anchor, exactly as the official Codex CLI treats it. Never used to
+/// make an authorization decision.
+pub fn decode_jwt_claims(token: &str) -> Option<serde_json::Value> {
+    let payload_b64 = token.split('.').nth(1)?;
+    let bytes = base64url_decode(payload_b64)?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// Extract the ChatGPT account id from an OpenAI token's claims: the claim path is
+/// `"https://api.openai.com/auth"."chatgpt_account_id"` (verified against the
+/// official Codex CLI's token_data.rs). Tries the id_token first (the official
+/// browser-flow source), then the access token — the same fallback order the
+/// ecosystem uses.
+pub fn extract_chatgpt_account_id(tokens: &LoginTokens) -> Option<String> {
+    let from = |jwt: &str| -> Option<String> {
+        let claims = decode_jwt_claims(jwt)?;
+        claims
+            .get("https://api.openai.com/auth")?
+            .get("chatgpt_account_id")?
+            .as_str()
+            .map(str::to_string)
+    };
+    tokens
+        .id_token
+        .as_deref()
+        .and_then(from)
+        .or_else(|| from(&tokens.access_token))
+}
+
+/// Base64url-decode (no padding) — JWT segments use the unpadded alphabet.
+fn base64url_decode(s: &str) -> Option<Vec<u8>> {
+    // Reverse of `base64url`: restore padding, translate the URL-safe alphabet, and
+    // decode manually (no external base64 dependency in this crate).
+    let translated: String = s
+        .chars()
+        .map(|c| match c {
+            '-' => '+',
+            '_' => '/',
+            other => other,
+        })
+        .collect();
+    let padded = match translated.len() % 4 {
+        0 => translated,
+        2 => format!("{translated}=="),
+        3 => format!("{translated}="),
+        _ => return None,
+    };
+    // Minimal base64 decoder over the standard alphabet.
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = Vec::with_capacity(padded.len() / 4 * 3);
+    let mut buf = 0u32;
+    let mut bits = 0u8;
+    for ch in padded.bytes() {
+        if ch == b'=' {
+            break;
+        }
+        let val = ALPHABET.iter().position(|&a| a == ch)? as u32;
+        buf = (buf << 6) | val;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buf >> bits) as u8);
+        }
+    }
+    Some(out)
 }
 
 #[cfg(test)]
@@ -319,6 +472,7 @@ mod tests {
             SCOPES,
             "CHALLENGE",
             "STATE123",
+            &[("code", "true")],
         )
         .unwrap();
         let parsed = url::Url::parse(&url).unwrap();
@@ -454,5 +608,144 @@ mod tests {
         .await
         .unwrap_err();
         assert!(matches!(err, LoginError::Status(400, _)));
+    }
+
+    // ── The STANDARD form-encoded exchange (OpenAI Codex wire) ────────────────
+
+    // The OpenAI Codex login constants, pinned against the first-party openai-auth
+    // plugin (same wire as the official codex CLI browser flow).
+    const OPENAI_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
+    const OPENAI_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+    const OPENAI_REDIRECT: &str = "http://localhost:1455/auth/callback";
+
+    /// Build an unsigned JWT with the given JSON payload (alg is irrelevant — claims
+    /// decoding never validates the signature; transport is the trust anchor).
+    fn fake_jwt(payload: &serde_json::Value) -> String {
+        let header = base64url(br#"{"alg":"none","typ":"JWT"}"#);
+        let body = base64url(payload.to_string().as_bytes());
+        format!("{header}.{body}.sig")
+    }
+
+    #[tokio::test]
+    async fn form_exchange_sends_the_rfc_body_and_parses_id_token() {
+        let id_token = fake_jwt(&serde_json::json!({
+            "https://api.openai.com/auth": { "chatgpt_account_id": "acct-uuid-1" },
+            "email": "u@example.com",
+        }));
+        let body = serde_json::json!({
+            "access_token": "acc-OAI",
+            "refresh_token": "ref-OAI",
+            "id_token": id_token,
+        });
+        let http = FixtureTransport::ok(200, serde_json::to_vec(&body).unwrap());
+        let cb = Callback {
+            code: "the-code".into(),
+            state: "STATE".into(),
+        };
+        let tokens = exchange_authorization_code_form(
+            &http,
+            OPENAI_TOKEN_URL,
+            OPENAI_CLIENT_ID,
+            OPENAI_REDIRECT,
+            &cb,
+            "STATE",
+            "the-verifier",
+            1_000_000,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(tokens.access_token, "acc-OAI");
+        assert_eq!(tokens.refresh_token, "ref-OAI");
+        // No expires_in in the official browser-flow response: no stored expiry
+        // (the refresh path treats an empty/absent expiry as refresh-on-first-use).
+        assert_eq!(tokens.expires_at_ms, None);
+
+        // The EXACT bytes sent: FORM-encoded RFC body, NO non-standard state field.
+        let reqs = http.requests();
+        assert_eq!(reqs.len(), 1);
+        assert_eq!(reqs[0].url, OPENAI_TOKEN_URL);
+        assert_eq!(reqs[0].content_type, "application/x-www-form-urlencoded");
+        let sent = String::from_utf8(reqs[0].body.clone()).unwrap();
+        assert!(sent.contains("grant_type=authorization_code"));
+        assert!(sent.contains("code=the-code"));
+        assert!(sent.contains("client_id=app_EMoamEEZ73f0CkXaXp7hrann"));
+        assert!(sent.contains("code_verifier=the-verifier"));
+        assert!(sent.contains("redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback"));
+        assert!(
+            !sent.contains("state="),
+            "RFC body must not carry state: {sent}"
+        );
+
+        // The account id extracts from the id_token's nested claim path.
+        assert_eq!(
+            extract_chatgpt_account_id(&tokens).as_deref(),
+            Some("acct-uuid-1")
+        );
+    }
+
+    #[tokio::test]
+    async fn form_exchange_rejects_state_mismatch_before_network() {
+        let http = FixtureTransport::new(vec![]);
+        let cb = Callback {
+            code: "code".into(),
+            state: "FORGED".into(),
+        };
+        let err = exchange_authorization_code_form(
+            &http,
+            OPENAI_TOKEN_URL,
+            OPENAI_CLIENT_ID,
+            OPENAI_REDIRECT,
+            &cb,
+            "EXPECTED",
+            "verifier",
+            0,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, LoginError::StateMismatch));
+        assert_eq!(http.requests().len(), 0);
+    }
+
+    #[test]
+    fn account_id_falls_back_to_the_access_token_claims() {
+        // No id_token: the nested claim on the ACCESS token is used (the ecosystem
+        // fallback order; llm-runner's transport reads the same access-token claim).
+        let access = fake_jwt(&serde_json::json!({
+            "https://api.openai.com/auth": { "chatgpt_account_id": "acct-from-access" },
+        }));
+        let tokens = LoginTokens {
+            access_token: access,
+            refresh_token: "r".into(),
+            expires_at_ms: None,
+            id_token: None,
+        };
+        assert_eq!(
+            extract_chatgpt_account_id(&tokens).as_deref(),
+            Some("acct-from-access")
+        );
+
+        // No claim anywhere: None (the CLI warns; the consumer fails loud on read).
+        let bare = LoginTokens {
+            access_token: fake_jwt(&serde_json::json!({"email":"x@y.z"})),
+            refresh_token: "r".into(),
+            expires_at_ms: None,
+            id_token: None,
+        };
+        assert_eq!(extract_chatgpt_account_id(&bare), None);
+    }
+
+    #[test]
+    fn jwt_claims_decode_handles_base64url_payloads() {
+        // A payload whose base64url form contains '-'/'_' and needs padding
+        // restoration — exercises the manual decoder.
+        let payload = serde_json::json!({"k": "value~with?special>chars", "n": 7});
+        let jwt = fake_jwt(&payload);
+        let decoded = decode_jwt_claims(&jwt).unwrap();
+        assert_eq!(decoded["k"], "value~with?special>chars");
+        assert_eq!(decoded["n"], 7);
+        // Garbage is None, never a panic.
+        assert!(decode_jwt_claims("not-a-jwt").is_none());
+        assert!(decode_jwt_claims("a.!!!.c").is_none());
     }
 }

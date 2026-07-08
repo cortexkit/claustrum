@@ -213,11 +213,14 @@ fn usage() -> String {
                 verify-audit\n\
       list: print each credential's id + lifecycle state + version (no secrets),\n\
             e.g. to find which credential a health probe flagged needs_reauth.\n\
-      login: --provider anthropic [--id <id>] [--replace]\n\
+      login: --provider <anthropic|openai> [--id <id>] [--replace]\n\
             vault-native first-party OAuth login — mints an INDEPENDENT refresh token\n\
             the vault solely custodies (no dual-custody rotation race). Opens a\n\
-            browser URL; paste the shown code#state back. --replace swaps an existing\n\
-            credential (keeps its handle). Default id: oauth:<provider>.\n\
+            browser URL; paste back what the flow presents (anthropic: the shown\n\
+            code#state; openai: the full localhost:1455 URL from the address bar —\n\
+            the connection-refused page is expected, nothing listens there).\n\
+            --replace swaps an existing credential (keeps its handle).\n\
+            Default id: oauth:anthropic / chatgpt:openai.\n\
      import: --source <opencode|pi|gemini-cli|antigravity> --id <id> --json <file>\n\
              [--provider <key>] [--adapter <name>] [--replace]\n\
        opencode/pi read auth.json (--provider selects one entry; an apikey:<p> id\n\
@@ -407,45 +410,108 @@ fn cmd_import(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
 /// This is an admin write — same offline-CLI-while-daemon-stopped discipline as every
 /// other mutation. The daemon opens no browser and runs no listener; the manual
 /// code-paste redirect means there is no inbound network surface here at all.
+/// The per-provider login wire: everything `cmd_login` needs to drive one provider's
+/// authorization-code flow. Each provider's values are pinned in its adapter module;
+/// adding a login provider = adding one row to `login_provider()`.
+struct LoginProvider {
+    authorize_url: &'static str,
+    token_url: &'static str,
+    client_id: &'static str,
+    redirect_uri: &'static str,
+    scopes: &'static [&'static str],
+    extra_authorize_params: &'static [(&'static str, &'static str)],
+    adapter_name: &'static str,
+    /// The default credential id (the method-scoped id consumers key on).
+    default_id: &'static str,
+    /// Which token-exchange wire the provider speaks: Anthropic's JSON body with an
+    /// embedded state, or the standard RFC form-encoded body (OpenAI).
+    exchange: ExchangeWire,
+    /// The operator instruction for capturing the callback (the two flows present
+    /// the code differently).
+    paste_prompt: &'static str,
+}
+
+enum ExchangeWire {
+    AnthropicJson,
+    RfcForm,
+}
+
+fn login_provider(provider: &str) -> Option<LoginProvider> {
+    use credentials_core::refresh_adapters::{anthropic, openai};
+    match provider {
+        "anthropic" => Some(LoginProvider {
+            authorize_url: anthropic::AUTHORIZE_URL,
+            token_url: anthropic::TOKEN_URL,
+            client_id: anthropic::CLAUDE_CODE_CLIENT_ID,
+            redirect_uri: anthropic::CODE_CALLBACK_URL,
+            scopes: anthropic::LOGIN_SCOPES,
+            extra_authorize_params: anthropic::LOGIN_EXTRA_AUTHORIZE_PARAMS,
+            adapter_name: anthropic::ADAPTER_NAME,
+            default_id: "oauth:anthropic",
+            exchange: ExchangeWire::AnthropicJson,
+            paste_prompt: "After approving, paste the authorization code shown (code#state), then Enter:",
+        }),
+        "openai" => Some(LoginProvider {
+            authorize_url: openai::AUTHORIZE_URL,
+            token_url: openai::TOKEN_URL,
+            client_id: openai::CODEX_CLIENT_ID,
+            redirect_uri: openai::LOGIN_REDIRECT_URI,
+            scopes: openai::LOGIN_SCOPES,
+            extra_authorize_params: openai::LOGIN_EXTRA_AUTHORIZE_PARAMS,
+            adapter_name: openai::ADAPTER_NAME,
+            // The ChatGPT-subscription credential: method `chatgpt` (the id the
+            // llm-runner chatgpt wire family consumes; the prod handle points here).
+            default_id: "chatgpt:openai",
+            exchange: ExchangeWire::RfcForm,
+            // No listener runs on the registered localhost redirect, so the browser
+            // lands on a connection-refused page whose ADDRESS BAR carries the code.
+            paste_prompt: "After approving, the browser will fail to connect to localhost:1455 \
+                           — that is expected (nothing listens there).\n\
+                           Copy the FULL URL from the browser's address bar and paste it here, then Enter:",
+        }),
+        _ => None,
+    }
+}
+
 fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     use credentials_core::oauth_login::{
-        build_authorize_url, exchange_authorization_code, generate_pkce, generate_state,
-        parse_callback,
+        build_authorize_url, decode_jwt_claims, exchange_authorization_code,
+        exchange_authorization_code_form, extract_chatgpt_account_id, generate_pkce,
+        generate_state, parse_callback,
     };
-    use credentials_core::refresh_adapters::anthropic;
 
     let provider = required(args, "--provider")?;
-    // v1 is anthropic-only (ALF's actual need); each provider's auth-code wire gets
-    // its own grounded research before it is added here.
-    if provider != "anthropic" {
+    // Each provider's auth-code wire gets its own grounded research before it is
+    // added to login_provider().
+    let Some(wire) = login_provider(&provider) else {
         return Err(CliError::Usage(format!(
-            "login supports --provider anthropic only (got '{provider}')"
+            "login supports --provider anthropic|openai (got '{provider}')"
         )));
-    }
-    // The stored credential id defaults to the method-scoped oauth:<provider>.
-    let id = optional(args, "--id").unwrap_or_else(|| format!("oauth:{provider}"));
+    };
+    let id = optional(args, "--id").unwrap_or_else(|| wire.default_id.to_string());
 
     // Generate the PKCE pair and the CSPRNG state (state is independent of the
     // verifier), build the authorize URL, and present it to the operator.
     let pkce = generate_pkce().map_err(|e| CliError::Io(format!("csprng: {e}")))?;
     let state = generate_state().map_err(|e| CliError::Io(format!("csprng: {e}")))?;
     let authorize_url = build_authorize_url(
-        anthropic::AUTHORIZE_URL,
-        anthropic::CLAUDE_CODE_CLIENT_ID,
-        anthropic::CODE_CALLBACK_URL,
-        anthropic::LOGIN_SCOPES,
+        wire.authorize_url,
+        wire.client_id,
+        wire.redirect_uri,
+        wire.scopes,
         &pkce.challenge,
         &state,
+        wire.extra_authorize_params,
     )
     .map_err(|e| CliError::Io(format!("building authorize url: {e}")))?;
 
-    println!("Open this URL in a browser signed into the Claude account to custody:");
+    println!("Open this URL in a browser signed into the account to custody:");
     println!();
     println!("  {authorize_url}");
     println!();
     // Best-effort browser open; the printed URL is the source of truth if it fails.
     let _ = open_in_browser(&authorize_url);
-    println!("After approving, paste the authorization code shown (code#state), then Enter:");
+    println!("{}", wire.paste_prompt);
 
     // Read the pasted code from STDIN (never from argv — it is a secret-grade value
     // that must not land in shell history or `ps` output). It is never echoed back
@@ -457,39 +523,72 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     let callback = parse_callback(&pasted)
         .ok_or_else(|| CliError::Usage("could not parse the pasted callback".to_string()))?;
 
-    // Exchange the code for tokens. State is validated inside (before any network
-    // call), so a forged/stale callback is refused up front.
+    // Exchange the code for tokens over the provider's wire. State is validated
+    // inside (before any network call), so a forged/stale callback is refused up
+    // front.
     let http =
         credentials_core::http::ReqwestTransport::new().map_err(|e| CliError::Io(e.to_string()))?;
     let now_ms = chrono::Utc::now().timestamp_millis();
-    let tokens = tokio_block_on(exchange_authorization_code(
-        &http,
-        anthropic::TOKEN_URL,
-        anthropic::CLAUDE_CODE_CLIENT_ID,
-        anthropic::CODE_CALLBACK_URL,
-        &callback,
-        &state,
-        &pkce.verifier,
-        now_ms,
-    ))
+    let tokens = match wire.exchange {
+        ExchangeWire::AnthropicJson => tokio_block_on(exchange_authorization_code(
+            &http,
+            wire.token_url,
+            wire.client_id,
+            wire.redirect_uri,
+            &callback,
+            &state,
+            &pkce.verifier,
+            now_ms,
+        )),
+        ExchangeWire::RfcForm => tokio_block_on(exchange_authorization_code_form(
+            &http,
+            wire.token_url,
+            wire.client_id,
+            wire.redirect_uri,
+            &callback,
+            &state,
+            &pkce.verifier,
+            now_ms,
+        )),
+    }
     .map_err(|e| CliError::Io(e.to_string()))?;
+
+    // The OpenAI browser-flow exchange returns no expires_in; the access token is a
+    // JWT carrying its own `exp` (seconds). Fall back to it so the refresh engine
+    // sees the real expiry instead of never-expires (the official codex CLI reads
+    // the same claim).
+    let expires_at_ms = tokens.expires_at_ms.or_else(|| {
+        decode_jwt_claims(&tokens.access_token)
+            .and_then(|c| c.get("exp")?.as_i64())
+            .map(|exp_s| exp_s.saturating_mul(1000))
+    });
+
+    // Non-secret identity sanity check for the ChatGPT wire: llm-runner derives the
+    // ChatGPT-Account-Id header from the access token's claims and fails loud when
+    // absent — surface that at mint time rather than at first read.
+    if provider == "openai" {
+        match extract_chatgpt_account_id(&tokens) {
+            Some(account) => println!("chatgpt account id: {account}"),
+            None => println!(
+                "WARNING: the minted token carries no chatgpt_account_id claim; \
+                 the ChatGPT wire family will refuse it — is this a ChatGPT-subscription account?"
+            ),
+        }
+    }
 
     // Build the canonical oauth credential + record. token_url and client_id are
     // stored on the record so the refresh path uses the same endpoint/client that
     // minted this token.
     let oauth = credentials_core::oauth::OAuthCredential {
         access_token: tokens.access_token.clone(),
-        refresh_token: tokens.refresh_token,
-        expires_at_ms: tokens.expires_at_ms,
-        token_url: anthropic::TOKEN_URL.to_string(),
-        client_id: Some(anthropic::CLAUDE_CODE_CLIENT_ID.to_string()),
-        scopes: anthropic::LOGIN_SCOPES
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
+        refresh_token: tokens.refresh_token.clone(),
+        expires_at_ms,
+        token_url: wire.token_url.to_string(),
+        client_id: Some(wire.client_id.to_string()),
+        scopes: wire.scopes.iter().map(|s| s.to_string()).collect(),
     };
-    let payload = tokens.access_token.into_bytes();
-    let record = VaultRecord::new_oauth("login", anthropic::ADAPTER_NAME, oauth, payload);
+    let payload = tokens.access_token.clone().into_bytes();
+    let record = VaultRecord::new_oauth("login", wire.adapter_name, oauth, payload);
 
     let store = open_for_admin(global)?;
     // Login records a distinct `Login` audit op (not `Import`) so forensics can tell

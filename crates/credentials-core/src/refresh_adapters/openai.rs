@@ -35,6 +35,39 @@ pub const CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 /// The adapter name, matching `VaultRecord::refresh_adapter` for OpenAI records.
 pub const ADAPTER_NAME: &str = "openai";
 
+// ── First-party login (authorization-code) constants ──────────────────────────
+// Pinned against the first-party CortexKit `openai-auth` plugin (the proven working
+// ChatGPT-subscription login; same wire as the official Codex CLI's browser flow),
+// used by `credentials-cli login --provider openai`.
+
+/// OpenAI's OAuth authorization endpoint (the Codex browser-flow authorize URL).
+pub const AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
+
+/// The redirect target registered for the Codex client. OpenAI matches this string
+/// EXACTLY against the client's registered redirect URI, so it MUST be `localhost`
+/// (not `127.0.0.1`) and MUST use port 1455 — a mismatch fails authorize with
+/// `authorize_hydra_invalid_request`. The vault CLI runs NO listener on this port:
+/// the browser's navigation to it fails (connection refused) and the operator pastes
+/// the full URL from the address bar back into the CLI. The code in that URL is
+/// useless to any local interceptor without the PKCE verifier, which never leaves
+/// the CLI process.
+pub const LOGIN_REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
+
+/// The OAuth scopes requested at login (the first-party plugin's proven set —
+/// identity + offline_access for the rotating refresh token; the official CLI's
+/// extra `api.connectors.*` scopes are for features the vault does not consume).
+pub const LOGIN_SCOPES: &[&str] = &["openid", "profile", "email", "offline_access"];
+
+/// Extra authorize-URL parameters the Codex flow expects beyond the RFC set,
+/// mirrored from the first-party plugin: organizations embedded into the id_token
+/// (account-id extraction), the simplified confirmation flow, and the client
+/// originator label.
+pub const LOGIN_EXTRA_AUTHORIZE_PARAMS: &[(&str, &str)] = &[
+    ("id_token_add_organizations", "true"),
+    ("codex_cli_simplified_flow", "true"),
+    ("originator", "opencode"),
+];
+
 /// The success response of the refresh exchange. Only `access_token` is reliably
 /// present; `refresh_token` is rotated (optional — reuse the old when absent), and
 /// `expires_in` is not part of the official refresh contract (optional).

@@ -90,6 +90,57 @@ pub enum ReadError {
     TooManyItems,
 }
 
+/// The fleet-wide error-class vocabulary (error-class contract, ratified 2026-07-08;
+/// normative doc: llm-runner/docs/error-class-contract.md). Classification is PRODUCED
+/// here at the source —
+/// a consumer branches on this tag, never on which `ReadError` code it happens to know
+/// is permanent. The wire set is closed and pinned: see `ERROR_CLASS_WIRE_SET`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorClass {
+    /// Retry may succeed (upstream may recover, lock may release).
+    Transient,
+    /// Retrying this credential with this request is futile until out-of-band action.
+    Permanent,
+    /// A human/admin must re-establish the credential (`login --replace`); consumers
+    /// should surface an actionable auth prompt, not retry.
+    AuthRequired,
+    /// The request exceeds a bound (`get_many` cap); remedy is to reduce the request
+    /// and retry — retrying the same request is futile.
+    ContextOverflow,
+}
+
+/// The pinned wire strings of the closed class set. Golden-tested below so this
+/// producer cannot drift from the contract's canonical block. Referenced only by the
+/// golden test (this is a bin target, so that reads as dead code to rustc).
+#[allow(dead_code)]
+pub const ERROR_CLASS_WIRE_SET: [&str; 4] = [
+    "transient",
+    "permanent",
+    "auth_required",
+    "context_overflow",
+];
+
+impl ReadError {
+    /// The produced classification for each fail-closed category.
+    pub fn class(self) -> ErrorClass {
+        match self {
+            // Handle revoked/unknown, record quarantined, or a static credential with
+            // no refresh path: nothing a retry can change.
+            ReadError::NotFound | ReadError::Corrupt | ReadError::RefreshUnsupported => {
+                ErrorClass::Permanent
+            }
+            // The refresh token is dead; a human must run a fresh login.
+            ReadError::NeedsReauth => ErrorClass::AuthRequired,
+            // A refresh attempt failed (provider may recover) or the master key is
+            // unresolvable right now (keychain/lease may recover).
+            ReadError::RefreshFailed | ReadError::VaultLocked => ErrorClass::Transient,
+            // Over the `get_many` cap: reduce the batch and retry.
+            ReadError::TooManyItems => ErrorClass::ContextOverflow,
+        }
+    }
+}
+
 /// One item's outcome in a `get`/`get_many`: the payload or a non-secret code.
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
@@ -101,6 +152,9 @@ pub enum GetOutcome {
 #[derive(Debug, Serialize)]
 pub struct ErrorBody {
     pub code: ReadError,
+    /// The produced error class (error-class contract). Always consistent with
+    /// `code.class()`; consumers branch on this, `code` is the producer detail.
+    pub class: ErrorClass,
 }
 
 /// Non-secret per-credential health.
@@ -350,7 +404,10 @@ impl ReadSurface {
 
 fn err(code: ReadError) -> GetOutcome {
     GetOutcome::Err {
-        error: ErrorBody { code },
+        error: ErrorBody {
+            code,
+            class: code.class(),
+        },
     }
 }
 
@@ -387,5 +444,69 @@ fn map_engine_error(e: &EngineError) -> ReadError {
         // Every other refresh failure (transport, decode, unexpected status,
         // entitlement) is transient/ambiguous and the record is left active ⇒ retry.
         EngineError::RefreshFailed(_) => ReadError::RefreshFailed,
+    }
+}
+
+#[cfg(test)]
+mod error_class_tests {
+    use super::*;
+
+    /// Golden conformance: this producer's serde wire strings for `ErrorClass` match
+    /// the pinned contract set exactly (order-independent, no extras, no misses). If a
+    /// contract change ever alters the set, this fails loudly instead of drifting.
+    #[test]
+    fn error_class_wire_strings_match_pinned_set() {
+        let all = [
+            ErrorClass::Transient,
+            ErrorClass::Permanent,
+            ErrorClass::AuthRequired,
+            ErrorClass::ContextOverflow,
+        ];
+        let mut emitted: Vec<String> = all
+            .iter()
+            .map(|c| {
+                let s = serde_json::to_string(c).expect("serialize class");
+                s.trim_matches('"').to_string()
+            })
+            .collect();
+        emitted.sort_unstable();
+        let mut pinned: Vec<String> = ERROR_CLASS_WIRE_SET.iter().map(|s| s.to_string()).collect();
+        pinned.sort_unstable();
+        assert_eq!(
+            emitted, pinned,
+            "ErrorClass wire strings drifted from the pinned contract set"
+        );
+    }
+
+    /// Every ReadError code maps to the contract class the vault produced it as.
+    /// This is the vault-side classification table, asserted so a new ReadError arm
+    /// cannot ship without a deliberate class decision (match is exhaustive) and an
+    /// existing arm cannot silently change class.
+    #[test]
+    fn read_error_classification_table() {
+        assert_eq!(ReadError::NotFound.class(), ErrorClass::Permanent);
+        assert_eq!(ReadError::Corrupt.class(), ErrorClass::Permanent);
+        assert_eq!(ReadError::RefreshUnsupported.class(), ErrorClass::Permanent);
+        assert_eq!(ReadError::NeedsReauth.class(), ErrorClass::AuthRequired);
+        assert_eq!(ReadError::RefreshFailed.class(), ErrorClass::Transient);
+        assert_eq!(ReadError::VaultLocked.class(), ErrorClass::Transient);
+        assert_eq!(ReadError::TooManyItems.class(), ErrorClass::ContextOverflow);
+    }
+
+    /// The wire body carries BOTH the producer detail (`code`) and the produced class,
+    /// and they are consistent — a consumer branching on `class` alone gets the same
+    /// decision the vault would make.
+    #[test]
+    fn error_body_carries_consistent_class() {
+        let out = err(ReadError::NeedsReauth);
+        let json = serde_json::to_string(&out).expect("serialize outcome");
+        assert!(
+            json.contains("\"code\":\"needs_reauth\""),
+            "detail code missing: {json}"
+        );
+        assert!(
+            json.contains("\"class\":\"auth_required\""),
+            "class tag missing: {json}"
+        );
     }
 }

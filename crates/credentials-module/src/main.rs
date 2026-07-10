@@ -1072,4 +1072,87 @@ mod tests {
             "a status sweep of unknown handles must raise a durable fetch-anomaly alarm"
         );
     }
+
+    /// End-to-end: `get` surfaces the provider account identity for a chatgpt:openai
+    /// record, parsed LIVE from the served access token's claim, and returns None for a
+    /// record whose provider has no account claim (here an api-key with no adapter). This
+    /// is the vault leg of account-scoped routing: the consumer joins (handle,
+    /// record_version) -> account_id on this field. Non-vacuous — a real seeded oauth
+    /// record flows through the real ReadSurface::get path, and the negative arm proves
+    /// the field is not unconditionally populated.
+    #[tokio::test]
+    async fn get_surfaces_account_id_for_chatgpt_openai_and_none_otherwise() {
+        use credentials_core::oauth::OAuthCredential;
+
+        let (surface, store, _db) = tmp_surface_with_store(21);
+
+        // A faithful OpenAI access-token JWT carrying the nested claim path
+        // "https://api.openai.com/auth"."chatgpt_account_id" = "acct-e2e-7". Unsigned
+        // (claims decoding never verifies the signature; transport is the trust anchor).
+        let access_jwt = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.\
+             eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdC1lMmUtNyJ9fQ.\
+             sig";
+        let oauth = OAuthCredential {
+            access_token: access_jwt.to_string(),
+            refresh_token: "ref".to_string(),
+            // Far-future expiry so the record is not stale and `get` serves it as-is
+            // (no refresh, no network) — isolating the account_id surfacing.
+            expires_at_ms: Some(4_102_444_800_000),
+            token_url: "https://auth.openai.com/oauth/token".to_string(),
+            client_id: Some("app_x".to_string()),
+            scopes: Vec::new(),
+        };
+        let record =
+            VaultRecord::new_oauth("login", "openai", oauth, access_jwt.as_bytes().to_vec());
+        store
+            .create("chatgpt:openai", &record)
+            .expect("create chatgpt record");
+        let oauth_handle = credentials_core::store::mint_handle().expect("mint");
+        store
+            .put_handle_hash(&oauth_handle.hash, "chatgpt:openai")
+            .expect("put oauth handle");
+
+        // A handle for the seeded api-key record (no adapter → no account claim).
+        let apikey_handle = credentials_core::store::mint_handle().expect("mint");
+        store
+            .put_handle_hash(&apikey_handle.hash, "apikey:active")
+            .expect("put apikey handle");
+
+        let got = surface
+            .get(
+                1,
+                &read_surface::GetParams {
+                    handle: oauth_handle.raw.clone(),
+                    min_ttl_ms: None,
+                    force_refresh: false,
+                },
+            )
+            .await;
+        let read_surface::GetOutcome::Ok(result) = got else {
+            panic!("expected an Ok get for the chatgpt:openai handle");
+        };
+        assert_eq!(
+            result.account_id.as_deref(),
+            Some("acct-e2e-7"),
+            "get must surface the ChatGPT account id parsed from the served access token"
+        );
+
+        let got_apikey = surface
+            .get(
+                1,
+                &read_surface::GetParams {
+                    handle: apikey_handle.raw.clone(),
+                    min_ttl_ms: None,
+                    force_refresh: false,
+                },
+            )
+            .await;
+        let read_surface::GetOutcome::Ok(apikey_result) = got_apikey else {
+            panic!("expected an Ok get for the api-key handle");
+        };
+        assert_eq!(
+            apikey_result.account_id, None,
+            "a record with no account-claim provider must not carry an account_id"
+        );
+    }
 }

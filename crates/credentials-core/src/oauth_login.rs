@@ -359,25 +359,48 @@ pub fn decode_jwt_claims(token: &str) -> Option<serde_json::Value> {
     serde_json::from_slice(&bytes).ok()
 }
 
-/// Extract the ChatGPT account id from an OpenAI token's claims: the claim path is
-/// `"https://api.openai.com/auth"."chatgpt_account_id"` (verified against the
-/// official Codex CLI's token_data.rs). Tries the id_token first (the official
-/// browser-flow source), then the access token — the same fallback order the
-/// ecosystem uses.
+/// Read the ChatGPT account id out of one JWT's claims: the claim path is
+/// `"https://api.openai.com/auth"."chatgpt_account_id"` (verified against the official
+/// Codex CLI's token_data.rs). `None` when the token does not carry it.
+fn chatgpt_account_id_from_jwt(jwt: &str) -> Option<String> {
+    decode_jwt_claims(jwt)?
+        .get("https://api.openai.com/auth")?
+        .get("chatgpt_account_id")?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// Extract the ChatGPT account id from a freshly-minted OpenAI token set. Tries the
+/// id_token first (the official browser-flow source), then the access token — the same
+/// fallback order the ecosystem uses. Used at login time to sanity-warn the operator.
 pub fn extract_chatgpt_account_id(tokens: &LoginTokens) -> Option<String> {
-    let from = |jwt: &str| -> Option<String> {
-        let claims = decode_jwt_claims(jwt)?;
-        claims
-            .get("https://api.openai.com/auth")?
-            .get("chatgpt_account_id")?
-            .as_str()
-            .map(str::to_string)
-    };
     tokens
         .id_token
         .as_deref()
-        .and_then(from)
-        .or_else(|| from(&tokens.access_token))
+        .and_then(chatgpt_account_id_from_jwt)
+        .or_else(|| chatgpt_account_id_from_jwt(&tokens.access_token))
+}
+
+/// The per-provider account-identity claim table: given a credential's stored refresh
+/// adapter and the access token being served, return the NON-SECRET provider account id
+/// (the identity the token executes under), or `None` when the adapter has no known
+/// account claim or the token does not carry one.
+///
+/// This is the single home for provider claim-path knowledge, so a consumer never
+/// re-implements JWT extraction. Parse-live (from the exact token being served) rather
+/// than persisted, so the returned id always matches the served token with no migration
+/// or drift between a stored column and a refreshed token. Like [`decode_jwt_claims`] it
+/// only reads non-secret metadata from a TLS-delivered token; never an authz decision.
+///
+/// Providers are keyed by the adapter name [`crate::credential_id::default_refresh_adapter`]
+/// stores on the record. `openai` covers both `chatgpt:openai` and `oauth:openai` (a
+/// plain oauth:openai token simply carries no chatgpt_account_id claim → `None`). Add a
+/// provider row here when a consumer needs its account id.
+pub fn account_id_for_adapter(adapter: &str, access_token: &str) -> Option<String> {
+    match adapter {
+        "openai" => chatgpt_account_id_from_jwt(access_token),
+        _ => None,
+    }
 }
 
 /// Base64url-decode (no padding) — JWT segments use the unpadded alphabet.
@@ -682,6 +705,51 @@ mod tests {
             extract_chatgpt_account_id(&tokens).as_deref(),
             Some("acct-uuid-1")
         );
+    }
+
+    #[test]
+    fn account_id_for_adapter_reads_openai_claim_from_the_served_access_token() {
+        // The vault serves the ACCESS token (it persists no id_token), so the account
+        // id must resolve from the access token itself — not only the login-time id_token.
+        let access = fake_jwt(&serde_json::json!({
+            "https://api.openai.com/auth": { "chatgpt_account_id": "acct-served-42" },
+            "exp": 4_102_444_800i64,
+        }));
+        assert_eq!(
+            account_id_for_adapter("openai", &access).as_deref(),
+            Some("acct-served-42")
+        );
+    }
+
+    #[test]
+    fn account_id_for_adapter_is_none_when_the_openai_token_lacks_the_claim() {
+        // A plain oauth:openai token (or any OpenAI token without the ChatGPT claim)
+        // yields None rather than a fabricated id.
+        let access = fake_jwt(&serde_json::json!({ "sub": "user-1", "exp": 4_102_444_800i64 }));
+        assert_eq!(account_id_for_adapter("openai", &access), None);
+    }
+
+    #[test]
+    fn account_id_for_adapter_gates_by_provider_and_does_not_leak_across_adapters() {
+        // The per-provider table is the guard: a token that DOES carry the OpenAI claim
+        // must NOT surface an account id under a different adapter — the claim path is
+        // openai-specific, and another provider's account identity lives elsewhere. This
+        // proves the match arm is load-bearing, not incidental.
+        let access = fake_jwt(&serde_json::json!({
+            "https://api.openai.com/auth": { "chatgpt_account_id": "acct-openai-only" },
+        }));
+        assert_eq!(account_id_for_adapter("anthropic", &access), None);
+        assert_eq!(account_id_for_adapter("xai", &access), None);
+        assert_eq!(account_id_for_adapter("antigravity", &access), None);
+    }
+
+    #[test]
+    fn account_id_for_adapter_returns_none_on_a_malformed_token_without_panicking() {
+        // A non-JWT / truncated payload must fail closed to None, never panic on the
+        // serve path.
+        assert_eq!(account_id_for_adapter("openai", "not-a-jwt"), None);
+        assert_eq!(account_id_for_adapter("openai", "only.two"), None);
+        assert_eq!(account_id_for_adapter("openai", ""), None);
     }
 
     #[tokio::test]

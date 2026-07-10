@@ -79,6 +79,16 @@ pub struct GetResult {
     /// Absent for every non-antigravity credential. Never the refresh token.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project_id: Option<String>,
+    /// The provider account identity the served token executes under (e.g. the OpenAI
+    /// ChatGPT-Account-Id), a NON-secret value parsed live from the served access token
+    /// via the per-provider claim table. It answers "which account would a send through
+    /// this handle execute under" — the binding key an account-scoped router joins on,
+    /// paired with `record_version` (which bumps on every replace, so the router
+    /// re-resolves when a handle is re-pointed at a different account). Absent when the
+    /// provider has no known account claim or the token does not carry one. Never a
+    /// secret and never the credential id / handle (handles survive replace by design).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
 }
 
 /// A non-secret error code returned to a consumer (never leaks why beyond the
@@ -260,11 +270,26 @@ impl ReadSurface {
                 } else {
                     None
                 };
+                // The non-secret provider account identity the served token executes
+                // under, parsed live from the served access token via the per-provider
+                // claim table (keyed by the record's stored refresh adapter). Absent for
+                // a static api-key record (no adapter) or a provider with no account
+                // claim. This is the binding key an account-scoped router joins on.
+                let account_id = match (&record.refresh_adapter, &record.oauth) {
+                    (Some(adapter), Some(o)) => {
+                        credentials_core::oauth_login::account_id_for_adapter(
+                            adapter,
+                            &o.access_token,
+                        )
+                    }
+                    _ => None,
+                };
                 GetOutcome::Ok(GetResult {
                     payload: record.payload,
                     expires_at_ms: record.expires_at_ms,
                     record_version: record.record_version,
                     project_id,
+                    account_id,
                 })
             }
             Err(e) => err(map_engine_error(&e)),

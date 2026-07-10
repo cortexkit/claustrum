@@ -6,9 +6,10 @@ end-to-end flow from an empty machine to a consumer reading a credential.
 
 There are two programs:
 
-- **`credentials-module`** — the daemon. subc supervises it; it serves the
+- **`ck-credentials`** — the daemon. subc supervises it; it serves the
   read surface (`credential.get` / `get_many` / `status` / `report_auth_failure`)
-  over the route channel. It never writes credentials on the wire.
+  over the route channel. It never writes credentials on the wire. (Built from the
+  `credentials-module` crate; the module id remains `cortexkit-credentials`.)
 - **`credentials-cli`** — the offline admin tool. The **only** write surface
   (provision, import, invalidate, rotate, mint/revoke handles, audit). It runs
   **only while the daemon is stopped** (see "The single-writer rule" below).

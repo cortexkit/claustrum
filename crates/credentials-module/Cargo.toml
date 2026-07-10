@@ -5,8 +5,12 @@ edition = "2021"
 publish = false
 description = "The cortexkit-credentials subc module: registers a reserved ManagementSurface, serves the anonymous read surface (credential.get/status/report_auth_failure) over the subc wire, and runs the master-key-gated admin surface (put/import/invalidate/rotate_master_key) off the runtime channel."
 
+# The supervised daemon exe. Named with the fleet-wide `ck-*` prefix (Activity
+# Monitor grouping); the package stays `credentials-module` and the module_id
+# stays `cortexkit-credentials`, so the keychain scope, lease, and storage are
+# untouched — only the built executable's filename changes.
 [[bin]]
-name = "credentials-module"
+name = "ck-credentials"
 path = "src/main.rs"
 
 # The offline admin CLI — the ONLY write surface, run while the daemon is stopped.

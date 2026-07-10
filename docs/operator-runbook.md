@@ -138,6 +138,28 @@ credentials-cli put \
 `put` is create-only; an existing id is refused. To replace an existing
 credential, pass `--expected-hash <hex>` (a compare-and-set guard).
 
+**Vault-native OAuth login** (preferred over import for the providers that support
+it). `login --provider <anthropic|openai|xai>` mints a NEW, independent refresh token
+that the vault solely custodies — so there is no dual-custody rotation race with
+another tool that also holds the same login. It drives an interactive
+authorization-code + PKCE flow: the CLI prints (and opens) an authorize URL, you
+approve in the browser, and paste the result back. There is no inbound listener — for
+`openai`/`xai` the browser lands on a connection-refused page and you copy the full
+URL from the address bar; for `anthropic` you copy the displayed `code#state`.
+
+```sh
+credentials-cli login \
+  --provider xai \
+  --replace \
+  --data-dir "$DATA_DIR" --key-path /etc/cortexkit/master.key
+```
+
+The default id is `oauth:anthropic` / `chatgpt:openai` / `oauth:xai` (override with
+`--id`). `--replace` swaps the token on an existing id and keeps the handle (the usual
+recovery for a `needs_reauth` credential); without it, `login` is create-only. The
+pasted code is read from stdin only — never argv, never logged. A native login records
+a distinct `Login` audit entry (not `Import`).
+
 ---
 
 ## 3. Mint a handle and give it to the consumer

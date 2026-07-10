@@ -38,6 +38,40 @@ pub const GROK_CLI_CLIENT_ID: &str = "b1a00492-073a-47ea-816f-4c329264a828";
 /// The adapter name, matching `VaultRecord::refresh_adapter` for xAI records.
 pub const ADAPTER_NAME: &str = "xai";
 
+// --- Vault-native login (authorization-code + PKCE) constants ---
+//
+// Pinned against the `opencode-grok-auth` plugin, which explicitly mirrors Hermes
+// Agent's live xAI loopback flow for this same public client id. The refresh half
+// (endpoint, client id, bare-refresh-token shape) is unchanged, so a vault-minted
+// token refreshes through this adapter with no per-record override.
+
+/// xAI's authorization endpoint (the interactive half). Distinct from [`TOKEN_URL`].
+pub const AUTHORIZE_URL: &str = "https://auth.x.ai/oauth2/authorize";
+
+/// The registered loopback redirect. The vault runs NO listener (zero inbound
+/// surface): the browser lands on a connection-refused page whose address bar carries
+/// `?code=..&state=..`, which the operator pastes back — the same posture as the
+/// OpenAI login. The plugin's local listener is a convenience we deliberately omit.
+pub const LOGIN_REDIRECT_URI: &str = "http://127.0.0.1:56121/callback";
+
+/// The login scope set. `offline_access` is what grants the refresh token; `openid`
+/// (with a per-flow nonce) and `profile`/`email` are the OIDC identity scopes;
+/// `grok-cli:access`/`api:access` are the API entitlements. Matches the plugin.
+pub const LOGIN_SCOPES: &[&str] = &[
+    "openid",
+    "profile",
+    "email",
+    "offline_access",
+    "grok-cli:access",
+    "api:access",
+];
+
+/// Non-standard authorize params `auth.x.ai` expects for this public client (the
+/// plugin comment marks `referrer` as load-bearing). A fresh per-flow `nonce` is
+/// appended by the login driver, not here (it must be CSPRNG per request).
+pub const LOGIN_EXTRA_AUTHORIZE_PARAMS: &[(&str, &str)] =
+    &[("plan", "generic"), ("referrer", "hermes-agent")];
+
 /// The success response of the refresh exchange. Only `access_token` is reliably
 /// present; `refresh_token` is rotated optionally (reuse the old when absent) and
 /// `expires_in` is optional.

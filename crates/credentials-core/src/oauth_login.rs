@@ -298,6 +298,11 @@ pub async fn exchange_authorization_code(
 /// network call). This is the wire the official OpenAI Codex CLI uses; providers that
 /// deviate (Anthropic's JSON body with an embedded `state`) use
 /// [`exchange_authorization_code`] instead.
+///
+/// `extra_body` appends provider-specific form fields after the standard set. OpenAI
+/// passes none (byte-identical to the RFC body); xAI passes `code_challenge` +
+/// `code_challenge_method` because its public-client token endpoint expects the
+/// challenge echoed alongside the verifier (matching the Grok CLI / Hermes flow).
 #[allow(clippy::too_many_arguments)]
 pub async fn exchange_authorization_code_form(
     http: &dyn HttpTransport,
@@ -307,19 +312,22 @@ pub async fn exchange_authorization_code_form(
     callback: &Callback,
     expected_state: &str,
     verifier: &str,
+    extra_body: &[(&str, &str)],
     now_ms: i64,
 ) -> Result<LoginTokens, LoginError> {
     if callback.state != expected_state {
         return Err(LoginError::StateMismatch);
     }
 
-    let body = crate::refresh_adapters::form_urlencode(&[
+    let mut fields: Vec<(&str, &str)> = vec![
         ("grant_type", "authorization_code"),
-        ("code", &callback.code),
+        ("code", callback.code.as_str()),
         ("redirect_uri", redirect_uri),
         ("client_id", client_id),
         ("code_verifier", verifier),
-    ]);
+    ];
+    fields.extend_from_slice(extra_body);
+    let body = crate::refresh_adapters::form_urlencode(&fields);
 
     let resp = http
         .post(
@@ -515,6 +523,41 @@ mod tests {
     }
 
     #[test]
+    fn xai_authorize_url_carries_the_grok_flow_params_and_nonce() {
+        use crate::refresh_adapters::xai;
+        // Reproduce how the login driver composes xAI's authorize params: the pinned
+        // extras (plan + referrer) plus a per-flow nonce appended for the openid scope.
+        let mut params: Vec<(&str, &str)> = xai::LOGIN_EXTRA_AUTHORIZE_PARAMS.to_vec();
+        params.push(("nonce", "NONCE-xyz"));
+        let url = build_authorize_url(
+            xai::AUTHORIZE_URL,
+            xai::GROK_CLI_CLIENT_ID,
+            xai::LOGIN_REDIRECT_URI,
+            xai::LOGIN_SCOPES,
+            "CHALLENGE",
+            "STATE123",
+            &params,
+        )
+        .unwrap();
+        let parsed = url::Url::parse(&url).unwrap();
+        let pairs: std::collections::HashMap<_, _> = parsed.query_pairs().into_owned().collect();
+        assert_eq!(parsed.host_str().unwrap(), "auth.x.ai");
+        assert_eq!(pairs["client_id"], xai::GROK_CLI_CLIENT_ID);
+        assert_eq!(pairs["response_type"], "code");
+        assert_eq!(pairs["redirect_uri"], "http://127.0.0.1:56121/callback");
+        assert_eq!(pairs["code_challenge_method"], "S256");
+        // Load-bearing xAI-specific params for this public client.
+        assert_eq!(pairs["plan"], "generic");
+        assert_eq!(pairs["referrer"], "hermes-agent");
+        assert_eq!(pairs["nonce"], "NONCE-xyz");
+        // offline_access is what grants the refresh token; openid drives the nonce.
+        let scope = &pairs["scope"];
+        assert!(scope.contains("offline_access"), "scope: {scope}");
+        assert!(scope.contains("openid"), "scope: {scope}");
+        assert!(scope.contains("api:access"), "scope: {scope}");
+    }
+
+    #[test]
     fn parse_callback_accepts_hash_form() {
         let cb = parse_callback("  abc123#STATE456  ").unwrap();
         assert_eq!(cb.code, "abc123");
@@ -673,6 +716,7 @@ mod tests {
             &cb,
             "STATE",
             "the-verifier",
+            &[],
             1_000_000,
         )
         .await
@@ -705,6 +749,101 @@ mod tests {
             extract_chatgpt_account_id(&tokens).as_deref(),
             Some("acct-uuid-1")
         );
+    }
+
+    const XAI_TOKEN_URL: &str = "https://auth.x.ai/oauth2/token";
+    const XAI_CLIENT_ID: &str = "b1a00492-073a-47ea-816f-4c329264a828";
+    const XAI_REDIRECT: &str = "http://127.0.0.1:56121/callback";
+
+    #[tokio::test]
+    async fn xai_form_exchange_echoes_the_pkce_challenge_and_parses_the_bare_refresh() {
+        // xAI's public-client token endpoint expects the PKCE challenge echoed in the
+        // exchange body (verified against the opencode-grok-auth plugin, which mirrors
+        // Hermes Agent's live flow). The refresh token comes back BARE (no packing) and
+        // is stored verbatim — the same shape the xAI refresh adapter already sends.
+        let body = serde_json::json!({
+            "access_token": "acc-XAI",
+            "refresh_token": "ref-XAI-bare",
+            "expires_in": 3600,
+            "token_type": "Bearer",
+        });
+        let http = FixtureTransport::ok(200, serde_json::to_vec(&body).unwrap());
+        let cb = Callback {
+            code: "xai-code".into(),
+            state: "XSTATE".into(),
+        };
+        let tokens = exchange_authorization_code_form(
+            &http,
+            XAI_TOKEN_URL,
+            XAI_CLIENT_ID,
+            XAI_REDIRECT,
+            &cb,
+            "XSTATE",
+            "xai-verifier",
+            &[
+                ("code_challenge", "xai-challenge"),
+                ("code_challenge_method", "S256"),
+            ],
+            2_000_000,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(tokens.access_token, "acc-XAI");
+        assert_eq!(tokens.refresh_token, "ref-XAI-bare");
+        assert_eq!(tokens.expires_at_ms, Some(2_000_000 + 3600 * 1000));
+
+        // The EXACT bytes: the standard fields PLUS the echoed challenge, form-encoded,
+        // and no non-standard state field.
+        let reqs = http.requests();
+        assert_eq!(reqs.len(), 1);
+        assert_eq!(reqs[0].url, XAI_TOKEN_URL);
+        assert_eq!(reqs[0].content_type, "application/x-www-form-urlencoded");
+        let sent = String::from_utf8(reqs[0].body.clone()).unwrap();
+        assert!(sent.contains("grant_type=authorization_code"));
+        assert!(sent.contains("code=xai-code"));
+        assert!(sent.contains("client_id=b1a00492-073a-47ea-816f-4c329264a828"));
+        assert!(sent.contains("code_verifier=xai-verifier"));
+        assert!(
+            sent.contains("code_challenge=xai-challenge"),
+            "xAI exchange must echo the PKCE challenge: {sent}"
+        );
+        assert!(
+            sent.contains("code_challenge_method=S256"),
+            "xAI exchange must echo the challenge method: {sent}"
+        );
+        assert!(
+            sent.contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A56121%2Fcallback"),
+            "redirect must be the loopback callback: {sent}"
+        );
+        assert!(
+            !sent.contains("state="),
+            "RFC body must not carry state: {sent}"
+        );
+    }
+
+    #[tokio::test]
+    async fn xai_form_exchange_rejects_state_mismatch_before_network() {
+        let http = FixtureTransport::new(vec![]);
+        let cb = Callback {
+            code: "code".into(),
+            state: "FORGED".into(),
+        };
+        let err = exchange_authorization_code_form(
+            &http,
+            XAI_TOKEN_URL,
+            XAI_CLIENT_ID,
+            XAI_REDIRECT,
+            &cb,
+            "EXPECTED",
+            "verifier",
+            &[("code_challenge", "c"), ("code_challenge_method", "S256")],
+            0,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, LoginError::StateMismatch));
+        assert_eq!(http.requests().len(), 0);
     }
 
     #[test]
@@ -767,6 +906,7 @@ mod tests {
             &cb,
             "EXPECTED",
             "verifier",
+            &[],
             0,
         )
         .await

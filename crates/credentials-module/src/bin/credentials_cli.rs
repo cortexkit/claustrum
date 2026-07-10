@@ -424,10 +424,19 @@ struct LoginProvider {
     /// The default credential id (the method-scoped id consumers key on).
     default_id: &'static str,
     /// Which token-exchange wire the provider speaks: Anthropic's JSON body with an
-    /// embedded state, or the standard RFC form-encoded body (OpenAI).
+    /// embedded state, or the standard RFC form-encoded body (OpenAI / xAI).
     exchange: ExchangeWire,
-    /// The operator instruction for capturing the callback (the two flows present
-    /// the code differently).
+    /// Whether to append a fresh per-flow OIDC `nonce` to the authorize URL. Required
+    /// by providers whose scope set includes `openid` (xAI); the nonce is CSPRNG per
+    /// request. We do not verify it (the vault does not consume the id_token) — it is
+    /// sent only to satisfy the provider's OIDC authorize contract.
+    needs_oidc_nonce: bool,
+    /// Whether the RFC form token exchange must echo `code_challenge` +
+    /// `code_challenge_method` alongside `code_verifier`. xAI's public-client token
+    /// endpoint expects it (matching the Grok CLI / Hermes flow); OpenAI does not.
+    exchange_echoes_challenge: bool,
+    /// The operator instruction for capturing the callback (the flows present the code
+    /// differently).
     paste_prompt: &'static str,
 }
 
@@ -437,7 +446,7 @@ enum ExchangeWire {
 }
 
 fn login_provider(provider: &str) -> Option<LoginProvider> {
-    use credentials_core::refresh_adapters::{anthropic, openai};
+    use credentials_core::refresh_adapters::{anthropic, openai, xai};
     match provider {
         "anthropic" => Some(LoginProvider {
             authorize_url: anthropic::AUTHORIZE_URL,
@@ -449,6 +458,8 @@ fn login_provider(provider: &str) -> Option<LoginProvider> {
             adapter_name: anthropic::ADAPTER_NAME,
             default_id: "oauth:anthropic",
             exchange: ExchangeWire::AnthropicJson,
+            needs_oidc_nonce: false,
+            exchange_echoes_challenge: false,
             paste_prompt: "After approving, paste the authorization code shown (code#state), then Enter:",
         }),
         "openai" => Some(LoginProvider {
@@ -463,9 +474,32 @@ fn login_provider(provider: &str) -> Option<LoginProvider> {
             // llm-runner chatgpt wire family consumes; the prod handle points here).
             default_id: "chatgpt:openai",
             exchange: ExchangeWire::RfcForm,
+            needs_oidc_nonce: false,
+            exchange_echoes_challenge: false,
             // No listener runs on the registered localhost redirect, so the browser
             // lands on a connection-refused page whose ADDRESS BAR carries the code.
             paste_prompt: "After approving, the browser will fail to connect to localhost:1455 \
+                           — that is expected (nothing listens there).\n\
+                           Copy the FULL URL from the browser's address bar and paste it here, then Enter:",
+        }),
+        "xai" => Some(LoginProvider {
+            authorize_url: xai::AUTHORIZE_URL,
+            token_url: xai::TOKEN_URL,
+            client_id: xai::GROK_CLI_CLIENT_ID,
+            redirect_uri: xai::LOGIN_REDIRECT_URI,
+            scopes: xai::LOGIN_SCOPES,
+            extra_authorize_params: xai::LOGIN_EXTRA_AUTHORIZE_PARAMS,
+            adapter_name: xai::ADAPTER_NAME,
+            default_id: "oauth:xai",
+            exchange: ExchangeWire::RfcForm,
+            // xAI's scope set includes `openid`, so its authorize contract wants a
+            // per-flow nonce, and its public-client token endpoint echoes the PKCE
+            // challenge in the exchange (matching the Grok CLI / Hermes flow).
+            needs_oidc_nonce: true,
+            exchange_echoes_challenge: true,
+            // Same zero-listener posture as OpenAI: the loopback redirect refuses the
+            // connection and the address bar carries the code.
+            paste_prompt: "After approving, the browser will fail to connect to 127.0.0.1:56121 \
                            — that is expected (nothing listens there).\n\
                            Copy the FULL URL from the browser's address bar and paste it here, then Enter:",
         }),
@@ -485,7 +519,7 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     // added to login_provider().
     let Some(wire) = login_provider(&provider) else {
         return Err(CliError::Usage(format!(
-            "login supports --provider anthropic|openai (got '{provider}')"
+            "login supports --provider anthropic|openai|xai (got '{provider}')"
         )));
     };
     let id = optional(args, "--id").unwrap_or_else(|| wire.default_id.to_string());
@@ -494,6 +528,19 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     // verifier), build the authorize URL, and present it to the operator.
     let pkce = generate_pkce().map_err(|e| CliError::Io(format!("csprng: {e}")))?;
     let state = generate_state().map_err(|e| CliError::Io(format!("csprng: {e}")))?;
+    // An OIDC provider (xAI) requires a fresh per-flow nonce in the authorize request;
+    // it is CSPRNG per login and appended as an extra authorize param. The vault does
+    // not consume the id_token, so the nonce is not verified — it only satisfies the
+    // provider's authorize contract.
+    let nonce = if wire.needs_oidc_nonce {
+        Some(generate_state().map_err(|e| CliError::Io(format!("csprng: {e}")))?)
+    } else {
+        None
+    };
+    let mut authorize_params: Vec<(&str, &str)> = wire.extra_authorize_params.to_vec();
+    if let Some(nonce) = nonce.as_deref() {
+        authorize_params.push(("nonce", nonce));
+    }
     let authorize_url = build_authorize_url(
         wire.authorize_url,
         wire.client_id,
@@ -501,7 +548,7 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
         wire.scopes,
         &pkce.challenge,
         &state,
-        wire.extra_authorize_params,
+        &authorize_params,
     )
     .map_err(|e| CliError::Io(format!("building authorize url: {e}")))?;
 
@@ -540,16 +587,29 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             &pkce.verifier,
             now_ms,
         )),
-        ExchangeWire::RfcForm => tokio_block_on(exchange_authorization_code_form(
-            &http,
-            wire.token_url,
-            wire.client_id,
-            wire.redirect_uri,
-            &callback,
-            &state,
-            &pkce.verifier,
-            now_ms,
-        )),
+        ExchangeWire::RfcForm => {
+            // xAI's public-client token endpoint echoes the PKCE challenge in the
+            // exchange body (alongside the verifier); OpenAI sends none.
+            let extra_body: &[(&str, &str)] = if wire.exchange_echoes_challenge {
+                &[
+                    ("code_challenge", &pkce.challenge),
+                    ("code_challenge_method", "S256"),
+                ]
+            } else {
+                &[]
+            };
+            tokio_block_on(exchange_authorization_code_form(
+                &http,
+                wire.token_url,
+                wire.client_id,
+                wire.redirect_uri,
+                &callback,
+                &state,
+                &pkce.verifier,
+                extra_body,
+                now_ms,
+            ))
+        }
     }
     .map_err(|e| CliError::Io(e.to_string()))?;
 

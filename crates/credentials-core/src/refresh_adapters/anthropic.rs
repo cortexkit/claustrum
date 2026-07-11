@@ -40,7 +40,7 @@ pub const ADAPTER_NAME: &str = "anthropic";
 
 // ── First-party login (authorization-code) constants ──────────────────────────
 // Pinned against the first-party CortexKit `anthropic-auth` plugin (the working
-// Claude Pro/Max login), used by `ck-creds login --provider anthropic`.
+// Claude Pro/Max login), used by `ck-auth login --provider anthropic`.
 
 /// The Claude Pro/Max authorization endpoint the operator's browser is opened to
 /// (distinct from the token endpoint). The subscription ("max") host.

@@ -1,6 +1,6 @@
 //! End-to-end tests of the offline admin CLI binary.
 //!
-//! Drives the real `ck-creds` process against a temp vault dir with an
+//! Drives the real `ck-auth` process against a temp vault dir with an
 //! operator key path (so no keychain is touched), exercising the structural
 //! master-key proof and the audit chain end-to-end: bootstrap a key, put a
 //! credential, mint a handle, list + verify the audit chain. Also proves the
@@ -12,7 +12,7 @@ use std::process::Command;
 use cortexkit_store::{open_sqlite, Isolation, StorageBackend, StorageDescriptor};
 
 fn cli() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_ck-creds"))
+    Command::new(env!("CARGO_BIN_EXE_ck-auth"))
 }
 
 fn tmp_root(tag: &str) -> PathBuf {

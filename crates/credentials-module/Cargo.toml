@@ -13,13 +13,13 @@ description = "The cortexkit-credentials subc module: registers a reserved Manag
 name = "ck-credentials"
 path = "src/main.rs"
 
-# The admin CLI — the `ck creds` dispatcher target (`ck <domain>` execs `ck-<domain>`).
-# Writes commit through the RUNNING module with --subc, or through the offline
-# single-writer lease when the daemon is stopped. Deliberately near-but-distinct from
-# the daemon exe name `ck-credentials`: visually distinct in a process list, and the
-# dispatcher can never exec the daemon by domain name.
+# The admin CLI — the `ck auth` dispatcher target (`ck <domain>` execs `ck-<domain>`).
+# Writes commit through the RUNNING module automatically (auto-discovered subc
+# connection file), or through the offline single-writer lease when the daemon is
+# stopped. Distinct from the daemon exe name `ck-credentials`: the operator surface is
+# `ck auth`, the supervised daemon stays `ck-credentials`.
 [[bin]]
-name = "ck-creds"
+name = "ck-auth"
 path = "src/bin/credentials_cli.rs"
 
 [dependencies]

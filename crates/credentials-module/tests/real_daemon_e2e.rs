@@ -9,7 +9,7 @@
 //! and the one-time `SUBC_LAUNCH_NONCE` the reserved module echoes), and we drive
 //! `credential.get` end-to-end against a credential the admin CLI seeded.
 //!
-//! Setup uses the real `ck-creds` binary to bootstrap a master key (an
+//! Setup uses the real `ck-auth` binary to bootstrap a master key (an
 //! operator key path OUTSIDE the data tree), put a credential, and mint a handle —
 //! exactly the operator flow — then the daemon serves a read for that handle. This
 //! proves the whole stack: reserved-module launch-nonce registration, the boot
@@ -111,7 +111,7 @@ fn run_cli(args: &[&str]) -> String {
     let out = run_cli_raw(args);
     assert!(
         out.status.success(),
-        "ck-creds {args:?} failed: {}",
+        "ck-auth {args:?} failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
     String::from_utf8_lossy(&out.stdout).trim().to_string()
@@ -120,11 +120,11 @@ fn run_cli(args: &[&str]) -> String {
 /// Run the admin CLI without asserting success — for tests that need to inspect the
 /// exit code / stderr (e.g. the offline path refusing while the daemon is up).
 fn run_cli_raw(args: &[&str]) -> std::process::Output {
-    let bin = PathBuf::from(env!("CARGO_BIN_EXE_ck-creds"));
+    let bin = PathBuf::from(env!("CARGO_BIN_EXE_ck-auth"));
     std::process::Command::new(&bin)
         .args(args)
         .output()
-        .expect("run ck-creds")
+        .expect("run ck-auth")
 }
 
 /// The seeded credential's handle and the rig, returned so the test can drive a get.
@@ -355,8 +355,15 @@ async fn real_daemon_admin_op_over_route_while_offline_refused() {
     let seeded = seeded_or_skip!();
     let conn = seeded.daemon.connection_file.to_string_lossy().to_string();
 
-    // 1) The offline path is structurally refused while the daemon is up: it cannot
-    //    take the single-writer lease. Exit code 3 (DaemonRunning).
+    // Wait until the vault module is catalog-live BEFORE asserting the offline
+    // refusal: the single-writer lease is taken during the module's boot (after the
+    // daemon publishes its connection file), so a check that races boot could catch
+    // the lease still free. Catalog-live proves the module booted and holds it.
+    let mut consumer = connect_consumer(&seeded.daemon.connection_file).await;
+    wait_for_catalog(&mut consumer, MODULE_ID, SETUP_TIMEOUT).await;
+
+    // 1) The offline path is structurally refused while the daemon holds the lease:
+    //    it cannot take the single-writer lease. Exit code 3 (DaemonRunning).
     let offline = run_cli_raw(&[
         "mint-handle",
         "--id",
@@ -394,9 +401,8 @@ async fn real_daemon_admin_op_over_route_while_offline_refused() {
     );
 
     // 3) The route-minted handle is REAL: a live credential.get resolves it to the
-    //    seeded payload, proving the write landed in the daemon's own store.
-    let mut consumer = connect_consumer(&seeded.daemon.connection_file).await;
-    wait_for_catalog(&mut consumer, MODULE_ID, SETUP_TIMEOUT).await;
+    //    seeded payload, proving the write landed in the daemon's own store. Reuse
+    //    the consumer connection opened above (already catalog-confirmed).
     let project_root = unique_temp_dir("cred-real-daemon-admin");
     std::fs::create_dir_all(&project_root).unwrap();
     let route_channel = route_open(&mut consumer, &project_root, 1).await;
@@ -546,7 +552,7 @@ async fn real_daemon_malformed_request_is_typed_error_not_crash() {
 
 /// Operator dogfood on a DISPOSABLE FIXTURE — the exact real operator flow, but on a
 /// fake auth.json (no real credential, throwaway operator-path key, never the
-/// keychain). Proves the import path end-to-end: `ck-creds import --source
+/// keychain). Proves the import path end-to-end: `ck-auth import --source
 /// opencode` of an auth.json-shaped fixture, mint a handle, then drive
 /// `credential.get` through the REAL supervised daemon and assert the IMPORTED
 /// access token round-trips, plus `verify-audit` reports the chain intact. It
@@ -635,7 +641,7 @@ async fn fixture_dogfood_import_opencode_round_trips_through_real_daemon() {
         .join("secrets/master.key")
         .to_string_lossy()
         .to_string();
-    let verify = std::process::Command::new(env!("CARGO_BIN_EXE_ck-creds"))
+    let verify = std::process::Command::new(env!("CARGO_BIN_EXE_ck-auth"))
         .args([
             "verify-audit",
             "--data-dir",

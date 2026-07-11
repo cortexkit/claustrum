@@ -1057,8 +1057,18 @@ fn cmd_verify_audit(global: &GlobalArgs) -> Result<(), CliError> {
 // ---- arg parsing helpers -------------------------------------------------
 
 fn parse_global(args: &mut Vec<String>) -> Result<GlobalArgs, CliError> {
-    let data_dir = take_flag(args, "--data-dir")
-        .ok_or_else(|| CliError::Usage("--data-dir <dir> is required".to_string()))?;
+    // ZERO-FLAG default: on a standard install every flag below is derivable, so a
+    // top-level command (`ck auth login --provider xai --replace`, `ck auth status`)
+    // works with no path arguments at all. Flags are OVERRIDES for non-standard
+    // installs, never requirements.
+    let (data_dir, data_dir_explicit) = match take_flag(args, "--data-dir") {
+        Some(dir) => (PathBuf::from(dir), true),
+        // The daemon's storage path is fixed by convention to
+        // <data_home>/cortexkit/<module_id> (subc daemon_config); module_id is a
+        // known constant, and data_home follows the same platform default subc
+        // uses. So the default IS the directory the supervised vault serves.
+        None => (default_data_home().join("cortexkit").join(MODULE_ID), false),
+    };
     let key_source = match take_flag(args, "--key-path") {
         Some(path) => KeySource::OperatorPath {
             path: PathBuf::from(path),
@@ -1068,12 +1078,84 @@ fn parse_global(args: &mut Vec<String>) -> Result<GlobalArgs, CliError> {
         // here for the CLI and daemon to set differently.
         None => KeySource::Keychain,
     };
-    let subc_conn = take_flag(args, "--subc").map(PathBuf::from);
+    // --subc resolution:
+    // - explicit --subc: use it verbatim (the operator named a specific daemon).
+    // - no --subc AND default data-dir: DISCOVER the connection file the way `ck`
+    //   does, so the standard-install zero-flag path routes through the running
+    //   daemon automatically.
+    // - no --subc AND EXPLICIT --data-dir: do NOT auto-discover. An explicit vault
+    //   dir means "this specific vault"; the discovered daemon may serve a
+    //   DIFFERENT vault, so silently routing there would be wrong. Use the offline
+    //   lease path (or the operator adds --subc to route deliberately). This keeps
+    //   auto-routing scoped to exactly the vault the default derivation targets.
+    let subc_conn = match take_flag(args, "--subc") {
+        Some(path) => Some(PathBuf::from(path)),
+        None if data_dir_explicit => None,
+        None => discover_subc_connection_file(),
+    };
     Ok(GlobalArgs {
-        data_dir: PathBuf::from(data_dir),
+        data_dir,
         key_source,
         subc_conn,
     })
+}
+
+/// Platform data home, matching subc's `default_data_home` byte-for-byte so the
+/// derived vault directory is exactly the one the supervised daemon serves:
+/// `$XDG_DATA_HOME`, else the Windows roaming profile, else `~/.local/share`.
+fn default_data_home() -> PathBuf {
+    if let Some(v) = non_empty_env("XDG_DATA_HOME") {
+        return PathBuf::from(v);
+    }
+    #[cfg(windows)]
+    {
+        if let Some(v) = non_empty_env("APPDATA") {
+            return PathBuf::from(v);
+        }
+        if let Some(v) = non_empty_env("USERPROFILE") {
+            return PathBuf::from(v).join("AppData").join("Roaming");
+        }
+    }
+    if let Some(v) = non_empty_env("HOME") {
+        return PathBuf::from(v).join(".local").join("share");
+    }
+    PathBuf::from(".local").join("share")
+}
+
+/// Discover the subc connection file the way the `ck` dispatcher does:
+/// `$XDG_RUNTIME_DIR/subc-connection.json`, else the production location
+/// `~/.local/share/cortexkit/run/subc-connection.json`. Only an EXISTING file is
+/// returned — no daemon means the offline lease path, which is the correct
+/// fallback, not an error.
+fn discover_subc_connection_file() -> Option<PathBuf> {
+    const CONNECTION_FILE_NAME: &str = "subc-connection.json";
+    if let Some(runtime_dir) = non_empty_env("XDG_RUNTIME_DIR") {
+        let p = PathBuf::from(runtime_dir).join(CONNECTION_FILE_NAME);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    if let Some(home) = non_empty_env("HOME") {
+        let p = PathBuf::from(home)
+            .join(".local")
+            .join("share")
+            .join("cortexkit")
+            .join("run")
+            .join(CONNECTION_FILE_NAME);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    None
+}
+
+fn non_empty_env(key: &str) -> Option<std::ffi::OsString> {
+    let v = std::env::var_os(key)?;
+    if v.is_empty() {
+        None
+    } else {
+        Some(v)
+    }
 }
 
 /// Remove `--flag <value>` from the arg list and return the value (a global flag

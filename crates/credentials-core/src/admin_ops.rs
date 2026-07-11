@@ -45,6 +45,13 @@ pub enum AdminOpBody {
     RevokeHandle { v: u32, handle: String },
     #[serde(rename = "admin.revoke_all_handles")]
     RevokeAllHandles { v: u32, id: String },
+    /// An authenticated READ: the no-decrypt credential inventory + health summary.
+    /// A read, but master-key-gated like every other admin op, because the full
+    /// per-credential id/state list is not an anonymous enumeration surface (the
+    /// anonymous read plane is capability-handle-scoped by design). Serves `ck creds
+    /// status` against a RUNNING daemon.
+    #[serde(rename = "admin.status")]
+    Status { v: u32 },
 }
 
 impl AdminOpBody {
@@ -55,7 +62,8 @@ impl AdminOpBody {
             | AdminOpBody::Invalidate { v, .. }
             | AdminOpBody::MintHandle { v, .. }
             | AdminOpBody::RevokeHandle { v, .. }
-            | AdminOpBody::RevokeAllHandles { v, .. } => *v,
+            | AdminOpBody::RevokeAllHandles { v, .. }
+            | AdminOpBody::Status { v } => *v,
         }
     }
 
@@ -68,7 +76,7 @@ impl AdminOpBody {
             | AdminOpBody::Invalidate { id, .. }
             | AdminOpBody::MintHandle { id, .. }
             | AdminOpBody::RevokeAllHandles { id, .. } => Some(id),
-            AdminOpBody::RevokeHandle { .. } => None,
+            AdminOpBody::RevokeHandle { .. } | AdminOpBody::Status { .. } => None,
         }
     }
 
@@ -164,6 +172,37 @@ pub fn apply(
             let ctx = AuditCtx::route_admin(AuditOp::RevokeHandle, actor);
             let n = store.revoke_all_handles(&id, ctx)?;
             Ok(serde_json::json!({ "handles_revoked": n }))
+        }
+        AdminOpBody::Status { .. } => {
+            // A no-decrypt inventory + the same fail-closed health ladder the L3
+            // probe computes, so `ck creds status` answers "why does the health
+            // table say degraded" from one authenticated read. No mutation, no audit.
+            let metas = store.list_meta()?;
+            let open_intents = store.list_intents()?.len();
+            let health =
+                crate::health::VaultHealth::summarize(&metas, open_intents, store.is_fenced_out());
+            let credentials: Vec<serde_json::Value> = metas
+                .iter()
+                .map(|(id, m)| {
+                    serde_json::json!({
+                        "id": id,
+                        "state": m.state.as_str(),
+                        "record_version": m.record_version,
+                    })
+                })
+                .collect();
+            Ok(serde_json::json!({
+                "status": health.status.as_str(),
+                "credentials_total": health.credentials_total,
+                "active": health.active,
+                "needs_reauth": health.needs_reauth,
+                "corrupt": health.corrupt,
+                "needs_reauth_ids": health.needs_reauth_ids,
+                "corrupt_ids": health.corrupt_ids,
+                "open_intents": health.open_intents,
+                "fenced_out": health.fenced_out,
+                "credentials": credentials,
+            }))
         }
     }
 }

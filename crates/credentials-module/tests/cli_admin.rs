@@ -1,6 +1,6 @@
 //! End-to-end tests of the offline admin CLI binary.
 //!
-//! Drives the real `credentials-cli` process against a temp vault dir with an
+//! Drives the real `ck-creds` process against a temp vault dir with an
 //! operator key path (so no keychain is touched), exercising the structural
 //! master-key proof and the audit chain end-to-end: bootstrap a key, put a
 //! credential, mint a handle, list + verify the audit chain. Also proves the
@@ -12,7 +12,7 @@ use std::process::Command;
 use cortexkit_store::{open_sqlite, Isolation, StorageBackend, StorageDescriptor};
 
 fn cli() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_credentials-cli"))
+    Command::new(env!("CARGO_BIN_EXE_ck-creds"))
 }
 
 fn tmp_root(tag: &str) -> PathBuf {
@@ -125,6 +125,97 @@ fn bootstrap_put_mint_audit_end_to_end() {
         !rows.contains("sk-secret"),
         "list must never print the payload: {rows}"
     );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// `logout` stops serving reversibly (invalidate + revoke handles, row + audit
+/// kept), and `status` reports the resulting degraded state with the affected id.
+#[test]
+fn logout_is_reversible_stop_serving_and_status_reports_it() {
+    let root = tmp_root("logout");
+    let data_dir = root.join("data");
+    let key_dir = root.join("secrets");
+    std::fs::create_dir_all(&key_dir).unwrap();
+    let key_path = key_dir.join("master.key");
+    std::fs::create_dir_all(&data_dir).unwrap();
+
+    let global = |c: &mut Command| {
+        c.arg("--data-dir")
+            .arg(&data_dir)
+            .arg("--key-path")
+            .arg(&key_path);
+    };
+
+    // bootstrap + put + mint a handle.
+    let mut c = cli();
+    c.arg("bootstrap");
+    global(&mut c);
+    assert!(c.output().unwrap().status.success());
+    let mut c = cli();
+    c.arg("put")
+        .arg("--id")
+        .arg("apikey:x")
+        .arg("--payload")
+        .arg("sk-x");
+    global(&mut c);
+    assert!(c.output().unwrap().status.success());
+    let mut c = cli();
+    c.arg("mint-handle").arg("--id").arg("apikey:x");
+    global(&mut c);
+    assert!(c.output().unwrap().status.success());
+
+    // status before: ok, 1/1 serving.
+    let mut c = cli();
+    c.arg("status");
+    global(&mut c);
+    let out = c.output().expect("run status");
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("vault: ok (1/1 serving)"), "pre-logout: {s}");
+
+    // logout by --id (apikey:x is not a login provider).
+    let mut c = cli();
+    c.arg("logout").arg("--id").arg("apikey:x");
+    global(&mut c);
+    let out = c.output().expect("run logout");
+    assert!(
+        out.status.success(),
+        "logout: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        s.contains("revoked 1 handle(s)"),
+        "logout revokes the handle: {s}"
+    );
+
+    // status after: degraded, the id is named as needing re-login, and the ROW
+    // SURVIVES (needs_reauth, not deleted) — logout is reversible by design.
+    let mut c = cli();
+    c.arg("status");
+    global(&mut c);
+    let out = c.output().expect("run status after");
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        s.contains("vault: degraded (0/1 serving)"),
+        "post-logout: {s}"
+    );
+    assert!(
+        s.contains("needs_reauth") && s.contains("apikey:x"),
+        "the logged-out row survives as needs_reauth: {s}"
+    );
+    assert!(
+        s.contains("needs re-login: apikey:x"),
+        "status names the actionable id: {s}"
+    );
+
+    // The audit chain survives and stays intact (logout appended, destroyed nothing).
+    let mut c = cli();
+    c.arg("verify-audit");
+    global(&mut c);
+    let out = c.output().expect("run verify-audit");
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("intact"));
 
     let _ = std::fs::remove_dir_all(&root);
 }

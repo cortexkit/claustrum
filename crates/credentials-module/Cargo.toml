@@ -13,9 +13,13 @@ description = "The cortexkit-credentials subc module: registers a reserved Manag
 name = "ck-credentials"
 path = "src/main.rs"
 
-# The offline admin CLI — the ONLY write surface, run while the daemon is stopped.
+# The admin CLI — the `ck creds` dispatcher target (`ck <domain>` execs `ck-<domain>`).
+# Writes commit through the RUNNING module with --subc, or through the offline
+# single-writer lease when the daemon is stopped. Deliberately near-but-distinct from
+# the daemon exe name `ck-credentials`: visually distinct in a process list, and the
+# dispatcher can never exec the daemon by domain name.
 [[bin]]
-name = "credentials-cli"
+name = "ck-creds"
 path = "src/bin/credentials_cli.rs"
 
 [dependencies]

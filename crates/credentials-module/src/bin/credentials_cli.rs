@@ -155,6 +155,8 @@ fn run() -> Result<(), CliError> {
         "import" => cmd_import(&global, &args),
         "login" => cmd_login(&global, &args),
         "invalidate" => cmd_invalidate(&global, &args),
+        "logout" => cmd_logout(&global, &args),
+        "status" => cmd_status(&global),
         "rotate-master-key" => cmd_rotate_master_key(&global),
         "mint-handle" => cmd_mint_handle(&global, &args),
         "revoke-handle" => cmd_revoke_handle(&global, &args),
@@ -190,6 +192,7 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
         "import" => &["--source", "--provider", "--id", "--json", "--adapter"],
         "login" => &["--provider", "--id"],
         "invalidate" | "mint-handle" | "revoke-all-handles" => &["--id"],
+        "logout" => &["--provider", "--id"],
         "revoke-handle" => &["--handle"],
         "audit" => &["--limit"],
         // bootstrap / rotate-master-key / verify-audit take no per-command flags.
@@ -233,9 +236,15 @@ fn usage() -> String {
        challenge-response). WITHOUT --subc, writes take the offline single-writer\n\
        lease and the daemon must be STOPPED. rotate-master-key and bootstrap are\n\
        always offline (they ignore --subc).\n\
-     Commands: bootstrap | put | import | login | invalidate | rotate-master-key |\n\
-                mint-handle | revoke-handle | revoke-all-handles | list | audit |\n\
-                verify-audit\n\
+     Commands: bootstrap | put | import | login | logout | status | invalidate |\n\
+                rotate-master-key | mint-handle | revoke-handle | revoke-all-handles |\n\
+                list | audit | verify-audit\n\
+     status: vault health + per-credential inventory (no secrets) — run this when\n\
+            the health table says degraded. With --subc it reads the RUNNING daemon;\n\
+            offline it takes the lease like list.\n\
+     logout: --provider <p> | --id <id> — stop serving a credential REVERSIBLY\n\
+            (invalidate + revoke its handles; keeps the record and audit chain;\n\
+            `login --provider <p> --replace` restores it). Never a delete.\n\
       list: print each credential's id + lifecycle state + version (no secrets),\n\
             e.g. to find which credential a health probe flagged needs_reauth.\n\
       login: --provider <anthropic|openai|xai> [--id <id>] [--replace] [--no-listener]\n\
@@ -809,6 +818,93 @@ fn cmd_invalidate(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> 
     )?;
     let revoked = result["handles_revoked"].as_u64().unwrap_or(0);
     println!("invalidated {id}; revoked {revoked} handle(s)");
+    Ok(())
+}
+
+/// `logout` = stop serving a credential, reversibly: invalidate + revoke all its
+/// handles (the compound atomic op), keeping the row and its audit chain. Re-login
+/// restores it (`login --provider <p> --replace`). Deliberately NOT a delete — a
+/// logout must never destroy an audit trail. `--provider <p>` resolves to the same
+/// default id `login --provider <p>` writes; `--id` names any credential directly.
+fn cmd_logout(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
+    let id = match (optional(args, "--id"), optional(args, "--provider")) {
+        (Some(_), Some(_)) => {
+            return Err(CliError::Usage(
+                "pass only one of --id or --provider".to_string(),
+            ))
+        }
+        (Some(id), None) => id,
+        (None, Some(provider)) => login_provider(&provider)
+            .map(|wire| wire.default_id.to_string())
+            .ok_or_else(|| {
+                CliError::Usage(format!(
+                    "unknown login provider '{provider}'; pass --id <id> for other credentials"
+                ))
+            })?,
+        (None, None) => {
+            return Err(CliError::Usage(
+                "--provider <p> or --id <id> is required".to_string(),
+            ))
+        }
+    };
+    let result = commit_admin(
+        global,
+        AdminOpBody::Invalidate {
+            v: ADMIN_OP_SCHEMA_V1,
+            id: id.clone(),
+        },
+    )?;
+    let revoked = result["handles_revoked"].as_u64().unwrap_or(0);
+    println!("logged out {id}: stopped serving, revoked {revoked} handle(s)");
+    println!("(reversible: `login --provider <p> --replace` restores it; the record and audit chain are kept)");
+    Ok(())
+}
+
+/// `status` = the one command for "why does the health table say degraded": the
+/// no-decrypt credential inventory + the same fail-closed health ladder the live
+/// probe computes. An authenticated admin READ — with --subc it reads the RUNNING
+/// module (master-key challenge-response, works exactly when the probe shows
+/// degraded); offline it takes the lease like `list`.
+fn cmd_status(global: &GlobalArgs) -> Result<(), CliError> {
+    let result = commit_admin(
+        global,
+        AdminOpBody::Status {
+            v: ADMIN_OP_SCHEMA_V1,
+        },
+    )?;
+
+    let status = result["status"].as_str().unwrap_or("unknown");
+    let total = result["credentials_total"].as_u64().unwrap_or(0);
+    let active = result["active"].as_u64().unwrap_or(0);
+    println!("vault: {status} ({active}/{total} serving)");
+    if result["fenced_out"].as_bool() == Some(true) {
+        println!("FENCED OUT: this writer lost the single-writer lease to a newer instance");
+    }
+    let open_intents = result["open_intents"].as_u64().unwrap_or(0);
+    if open_intents > 0 {
+        println!("open refresh intents: {open_intents}");
+    }
+    println!();
+    if let Some(rows) = result["credentials"].as_array() {
+        for row in rows {
+            let state = row["state"].as_str().unwrap_or("?");
+            let version = row["record_version"].as_u64().unwrap_or(0);
+            let id = row["id"].as_str().unwrap_or("?");
+            println!("{state:<14} v{version:<4} {id}");
+        }
+    }
+    // Actionable tail: name what needs the operator, like the health probe does.
+    let needs: Vec<&str> = result["needs_reauth_ids"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+    if !needs.is_empty() {
+        println!();
+        println!(
+            "needs re-login: {} (fix: `login --provider <p> --replace`, or `import --replace`)",
+            needs.join(", ")
+        );
+    }
     Ok(())
 }
 

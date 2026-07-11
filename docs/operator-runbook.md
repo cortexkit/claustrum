@@ -10,7 +10,7 @@ There are two programs:
   read surface (`credential.get` / `get_many` / `status` / `report_auth_failure`)
   over the route channel. It never writes credentials on the wire. (Built from the
   `credentials-module` crate; the module id remains `cortexkit-credentials`.)
-- **`credentials-cli`** — the offline admin tool. The **only** write surface
+- **`ck-creds`** — the offline admin tool. The **only** write surface
   (provision, import, invalidate, rotate, mint/revoke handles, audit). It runs
   **only while the daemon is stopped** (see "The single-writer rule" below).
 
@@ -58,7 +58,7 @@ the existing key (which would brick the vault).
 **Keychain (desktop default, macOS):**
 
 ```sh
-credentials-cli bootstrap --data-dir "$DATA_DIR"
+ck-creds bootstrap --data-dir "$DATA_DIR"
 ```
 
 **Operator-path (headless / server):** the key file **must live outside the data
@@ -66,7 +66,7 @@ directory** (co-locating the key with the ciphertext defeats at-rest encryption)
 the CLI refuses a key path inside `--data-dir`.
 
 ```sh
-credentials-cli bootstrap --data-dir "$DATA_DIR" --key-path /etc/cortexkit/master.key
+ck-creds bootstrap --data-dir "$DATA_DIR" --key-path /etc/cortexkit/master.key
 ```
 
 `$DATA_DIR` is the vault's data directory. Under subc supervision the daemon
@@ -81,7 +81,7 @@ point `--data-dir` at that **same** directory so both operate on one vault.
 `{ refresh, access, expires }` shape):
 
 ```sh
-credentials-cli import \
+ck-creds import \
   --source opencode \
   --id opencode:anthropic \
   --json /path/to/auth.json \
@@ -128,7 +128,7 @@ for a secret so it never appears in the process list or shell history; `--payloa
 is read with trailing whitespace stripped:
 
 ```sh
-credentials-cli put \
+ck-creds put \
   --id apikey:openai \
   --payload-file ~/.config/openai.key \
   --kind api_key \
@@ -148,7 +148,7 @@ approve in the browser, and paste the result back. There is no inbound listener 
 URL from the address bar; for `anthropic` you copy the displayed `code#state`.
 
 ```sh
-credentials-cli login \
+ck-creds login \
   --provider xai \
   --replace \
   --data-dir "$DATA_DIR" --key-path /etc/cortexkit/master.key
@@ -168,7 +168,7 @@ A consumer never names a credential directly; it presents a **capability handle*
 Mint one per consumer:
 
 ```sh
-credentials-cli mint-handle \
+ck-creds mint-handle \
   --id opencode:anthropic \
   --data-dir "$DATA_DIR" --key-path /etc/cortexkit/master.key
 ```
@@ -205,7 +205,7 @@ vault marks the credential `needs_reauth` rather than serving a dead token.
 To see what the vault holds without decrypting anything (daemon stopped):
 
 ```sh
-credentials-cli list --data-dir "$DATA_DIR" --key-path /etc/cortexkit/master.key
+ck-creds list --data-dir "$DATA_DIR" --key-path /etc/cortexkit/master.key
 ```
 
 Each row is `<state> v<version> <credential_id>` — no secrets. Use it to find
@@ -219,8 +219,8 @@ Every durable mutation is recorded in a tamper-evident, HMAC-keyed audit chain.
 Check it (daemon stopped):
 
 ```sh
-credentials-cli verify-audit --data-dir "$DATA_DIR" --key-path /etc/cortexkit/master.key
-credentials-cli audit        --data-dir "$DATA_DIR" --key-path /etc/cortexkit/master.key
+ck-creds verify-audit --data-dir "$DATA_DIR" --key-path /etc/cortexkit/master.key
+ck-creds audit        --data-dir "$DATA_DIR" --key-path /etc/cortexkit/master.key
 ```
 
 `verify-audit` reports the chain intact or names the first broken entry.
@@ -232,7 +232,7 @@ not a live notification.
 
 ## Rotating the master key
 
-`credentials-cli rotate-master-key` performs a crash-safe two-slot handover: it
+`ck-creds rotate-master-key` performs a crash-safe two-slot handover: it
 stages a new key, re-wraps every record and the sealed audit key under it in one
 atomic transaction, then promotes the new key. A crash at any point reopens cleanly
 under whichever key matches the database — the vault never bricks. Run it with the

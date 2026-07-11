@@ -145,7 +145,8 @@ pub enum RecordState {
 }
 
 impl RecordState {
-    fn as_str(self) -> &'static str {
+    /// The stable lowercase wire/display form (also what the `state` column stores).
+    pub fn as_str(self) -> &'static str {
         match self {
             RecordState::Active => "active",
             RecordState::NeedsReauth => "needs_reauth",

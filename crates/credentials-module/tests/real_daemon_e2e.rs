@@ -9,7 +9,7 @@
 //! and the one-time `SUBC_LAUNCH_NONCE` the reserved module echoes), and we drive
 //! `credential.get` end-to-end against a credential the admin CLI seeded.
 //!
-//! Setup uses the real `credentials-cli` binary to bootstrap a master key (an
+//! Setup uses the real `ck-creds` binary to bootstrap a master key (an
 //! operator key path OUTSIDE the data tree), put a credential, and mint a handle —
 //! exactly the operator flow — then the daemon serves a read for that handle. This
 //! proves the whole stack: reserved-module launch-nonce registration, the boot
@@ -111,7 +111,7 @@ fn run_cli(args: &[&str]) -> String {
     let out = run_cli_raw(args);
     assert!(
         out.status.success(),
-        "credentials-cli {args:?} failed: {}",
+        "ck-creds {args:?} failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
     String::from_utf8_lossy(&out.stdout).trim().to_string()
@@ -120,11 +120,11 @@ fn run_cli(args: &[&str]) -> String {
 /// Run the admin CLI without asserting success — for tests that need to inspect the
 /// exit code / stderr (e.g. the offline path refusing while the daemon is up).
 fn run_cli_raw(args: &[&str]) -> std::process::Output {
-    let bin = PathBuf::from(env!("CARGO_BIN_EXE_credentials-cli"));
+    let bin = PathBuf::from(env!("CARGO_BIN_EXE_ck-creds"));
     std::process::Command::new(&bin)
         .args(args)
         .output()
-        .expect("run credentials-cli")
+        .expect("run ck-creds")
 }
 
 /// The seeded credential's handle and the rig, returned so the test can drive a get.
@@ -546,7 +546,7 @@ async fn real_daemon_malformed_request_is_typed_error_not_crash() {
 
 /// Operator dogfood on a DISPOSABLE FIXTURE — the exact real operator flow, but on a
 /// fake auth.json (no real credential, throwaway operator-path key, never the
-/// keychain). Proves the import path end-to-end: `credentials-cli import --source
+/// keychain). Proves the import path end-to-end: `ck-creds import --source
 /// opencode` of an auth.json-shaped fixture, mint a handle, then drive
 /// `credential.get` through the REAL supervised daemon and assert the IMPORTED
 /// access token round-trips, plus `verify-audit` reports the chain intact. It
@@ -635,7 +635,7 @@ async fn fixture_dogfood_import_opencode_round_trips_through_real_daemon() {
         .join("secrets/master.key")
         .to_string_lossy()
         .to_string();
-    let verify = std::process::Command::new(env!("CARGO_BIN_EXE_credentials-cli"))
+    let verify = std::process::Command::new(env!("CARGO_BIN_EXE_ck-creds"))
         .args([
             "verify-audit",
             "--data-dir",

@@ -38,7 +38,7 @@ pub const ADAPTER_NAME: &str = "openai";
 // ── First-party login (authorization-code) constants ──────────────────────────
 // Pinned against the first-party CortexKit `openai-auth` plugin (the proven working
 // ChatGPT-subscription login; same wire as the official Codex CLI's browser flow),
-// used by `credentials-cli login --provider openai`.
+// used by `ck-creds login --provider openai`.
 
 /// OpenAI's OAuth authorization endpoint (the Codex browser-flow authorize URL).
 pub const AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";

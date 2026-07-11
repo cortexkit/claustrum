@@ -1,7 +1,7 @@
 //! Cross-binary contract values — the single definition site.
 //!
 //! Every value here is part of a contract BETWEEN the daemon (`credentials-module`)
-//! and the offline admin CLI (`credentials-cli`): both binaries must agree on it
+//! and the admin CLI (`ck-creds`): both binaries must agree on it
 //! exactly, or they operate on different vaults / locks / key-store items without
 //! noticing. The class of bug this module exists to kill is a cross-binary contract
 //! value copy-pasted as a literal into each binary, free to drift — which has bitten

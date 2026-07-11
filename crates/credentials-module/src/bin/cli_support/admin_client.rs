@@ -265,7 +265,7 @@ async fn route_open(stream: &mut TcpStream, root: &std::path::Path) -> Result<u1
     };
     let identity = BindIdentity {
         project_root: root.to_path_buf(),
-        harness: "credentials-cli".to_string(),
+        harness: "ck-creds".to_string(),
         session: "admin".to_string(),
     };
     let frame = control_request(

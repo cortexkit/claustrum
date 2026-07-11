@@ -43,6 +43,17 @@ pub enum VaultHealthStatus {
     Failing,
 }
 
+impl VaultHealthStatus {
+    /// The stable lowercase display form (matches the subc health table's wording).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            VaultHealthStatus::Ok => "ok",
+            VaultHealthStatus::Degraded => "degraded",
+            VaultHealthStatus::Failing => "failing",
+        }
+    }
+}
+
 /// A cheap, no-decrypt health snapshot of the vault's serveable state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VaultHealth {

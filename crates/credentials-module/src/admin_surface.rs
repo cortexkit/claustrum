@@ -26,14 +26,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use serde::Deserialize;
-
 use credentials_core::admin_auth::{AdminMacKey, TranscriptParts, ADMIN_NONCE_LEN, VAULT_ID_LEN};
-use credentials_core::audit::{AuditCtx, AuditOp};
+use credentials_core::admin_ops::{AdminOpBody, ADMIN_OP_SCHEMA_V1};
 use credentials_core::engine::RefreshEngine;
 use credentials_core::key::KeyId;
-use credentials_core::record::VaultRecord;
-use credentials_core::store::{mint_handle, StoreOpError};
+use credentials_core::store::StoreOpError;
 use subc_protocol::Principal;
 
 /// Challenge TTL. Long enough for a CLI to resolve the keychain key and MAC the op;
@@ -96,82 +93,6 @@ pub struct AdminSurface {
     /// channel) gets a fresh generation, so a stale in-flight op is detectable.
     next_generation: AtomicU64,
     outstanding_nonces: AtomicU64,
-}
-
-/// The admin-op schema version this module speaks. Bumped only on a breaking op
-/// body change; a mismatch is refused, never partially parsed.
-const ADMIN_OP_SCHEMA_V1: u32 = 1;
-
-/// The wire discriminator for admin ops. The `op` field of the authenticated body
-/// selects the mutation; the module dispatches ONLY from this parsed-after-verify
-/// value, never from an outer envelope. The record is boxed to keep the variant
-/// sizes comparable (a VaultRecord carries token strings).
-#[derive(Debug, Deserialize)]
-#[serde(tag = "op")]
-enum AdminOp {
-    #[serde(rename = "admin.store")]
-    Store {
-        v: u32,
-        id: String,
-        record: Box<VaultRecord>,
-        audit_op: AdminAuditOp,
-        mode: StoreMode,
-    },
-    #[serde(rename = "admin.invalidate")]
-    Invalidate { v: u32, id: String },
-    #[serde(rename = "admin.mint_handle")]
-    MintHandle { v: u32, id: String },
-    #[serde(rename = "admin.revoke_handle")]
-    RevokeHandle { v: u32, handle: String },
-    #[serde(rename = "admin.revoke_all_handles")]
-    RevokeAllHandles { v: u32, id: String },
-}
-
-/// The audit op an `admin.store` records: login, import, or put/overwrite. A closed
-/// set so a caller cannot inject an arbitrary audit label (Oracle finding 11).
-#[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum AdminAuditOp {
-    Login,
-    Import,
-    Put,
-    Overwrite,
-}
-
-impl AdminOp {
-    fn schema_version(&self) -> u32 {
-        match self {
-            AdminOp::Store { v, .. }
-            | AdminOp::Invalidate { v, .. }
-            | AdminOp::MintHandle { v, .. }
-            | AdminOp::RevokeHandle { v, .. }
-            | AdminOp::RevokeAllHandles { v, .. } => *v,
-        }
-    }
-}
-
-impl AdminAuditOp {
-    fn to_audit_op(self) -> AuditOp {
-        match self {
-            AdminAuditOp::Login => AuditOp::Login,
-            AdminAuditOp::Import => AuditOp::Import,
-            AdminAuditOp::Put => AuditOp::Put,
-            AdminAuditOp::Overwrite => AuditOp::Overwrite,
-        }
-    }
-}
-
-/// The write mode for `admin.store`.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-enum StoreMode {
-    /// Create-only: fails if the id already exists.
-    Create,
-    /// Unconditional overwrite (version-guarded internally): the re-login / re-import
-    /// replace that keeps the handle.
-    ReplaceUnconditional,
-    /// CAS overwrite gated on the current payload hash.
-    ReplaceCas { expected_hash_hex: String },
 }
 
 /// The actor recorded in the audit trail for a route-driven admin write.
@@ -347,14 +268,14 @@ impl AdminSurface {
         let _ = claimed_nonce; // (kept for clarity; the claim is the side effect above)
 
         // Parse-AFTER-verify: the body is opaque until the MAC proves possession.
-        let op: AdminOp = match serde_json::from_slice(op_body) {
+        let op: AdminOpBody = match serde_json::from_slice(op_body) {
             Ok(op) => op,
             Err(e) => return AdminOutcome::Refused(format!("admin op body not decodable: {e}")),
         };
         self.dispatch(op).await
     }
 
-    async fn dispatch(&self, op: AdminOp) -> AdminOutcome {
+    async fn dispatch(&self, op: AdminOpBody) -> AdminOutcome {
         // Every op carries a schema version `v`; this module speaks exactly v1. An
         // unknown version is refused (never best-effort-parsed) so a future field
         // addition can't be silently dropped by an old module — the caller learns
@@ -366,105 +287,24 @@ impl AdminSurface {
                 ADMIN_OP_SCHEMA_V1
             ));
         }
-        match op {
-            AdminOp::Store {
-                id,
-                record,
-                audit_op,
-                mode,
-                ..
-            } => self.do_store(id, record, audit_op, mode).await,
-            AdminOp::Invalidate { id, .. } => self.do_invalidate(id).await,
-            AdminOp::MintHandle { id, .. } => self.do_mint_handle(id).await,
-            AdminOp::RevokeHandle { handle, .. } => self.do_revoke_handle(handle).await,
-            AdminOp::RevokeAllHandles { id, .. } => self.do_revoke_all_handles(id).await,
-        }
-    }
-
-    async fn do_store(
-        &self,
-        id: String,
-        record: Box<VaultRecord>,
-        audit_op: AdminAuditOp,
-        mode: StoreMode,
-    ) -> AdminOutcome {
-        let ctx = AuditCtx::route_admin(audit_op.to_audit_op(), ROUTE_ADMIN_ACTOR);
-        let lock_id = id.clone();
-        let result = self
-            .engine
-            .with_admin_lock(&lock_id, move |store| match mode {
-                StoreMode::Create => store.create_audited(&id, &record, ctx),
-                StoreMode::ReplaceUnconditional => {
-                    store.overwrite_unconditional_audited(&id, &record, ctx)
-                }
-                StoreMode::ReplaceCas { expected_hash_hex } => {
-                    let expected = decode_hash32(&expected_hash_hex)
-                        .ok_or(StoreOpError::Encode("bad expected hash hex".into()))?;
-                    store.overwrite_cas_audited(&id, &record, &expected, ctx)
-                }
-            })
-            .await;
-        match result {
-            Ok(()) => AdminOutcome::Ok(serde_json::json!({ "stored": true })),
-            Err(e) => store_err(e),
-        }
-    }
-
-    async fn do_invalidate(&self, id: String) -> AdminOutcome {
-        let ctx = AuditCtx::route_admin(AuditOp::Invalidate, ROUTE_ADMIN_ACTOR);
-        let lock_id = id.clone();
-        let result = self
-            .engine
-            .with_admin_lock(&lock_id, move |store| {
-                store.invalidate_and_revoke_all_audited(&id, ctx)
-            })
-            .await;
-        match result {
-            Ok(revoked) => AdminOutcome::Ok(serde_json::json!({ "handles_revoked": revoked })),
-            Err(e) => store_err(e),
-        }
-    }
-
-    async fn do_mint_handle(&self, id: String) -> AdminOutcome {
-        let handle = match mint_handle() {
-            Ok(h) => h,
-            Err(e) => return AdminOutcome::Refused(format!("csprng: {e}")),
+        // Apply through the SHARED core applier so the online and offline admin paths
+        // can never diverge in what an op does. A credential-scoped op runs under the
+        // engine's per-credential single-flight lock (same lock a refresh holds), so
+        // an admin write and a refresh for one credential are strictly serialized;
+        // revoke-by-handle names no credential, so it commits directly.
+        let result = match op.lock_id() {
+            Some(_) => {
+                let lock_id = op.lock_id().expect("Some checked").to_string();
+                self.engine
+                    .with_admin_lock(&lock_id, move |store| {
+                        credentials_core::admin_ops::apply(store, op, ROUTE_ADMIN_ACTOR)
+                    })
+                    .await
+            }
+            None => credentials_core::admin_ops::apply(self.engine.store(), op, ROUTE_ADMIN_ACTOR),
         };
-        let ctx = AuditCtx::route_admin(AuditOp::MintHandle, ROUTE_ADMIN_ACTOR);
-        let hash = handle.hash.clone();
-        let lock_id = id.clone();
-        let result = self
-            .engine
-            .with_admin_lock(&lock_id, move |store| {
-                store.put_handle_hash(&hash, &id, ctx)
-            })
-            .await;
         match result {
-            // The raw handle is returned ONCE, here; only its hash is persisted.
-            Ok(()) => AdminOutcome::Ok(serde_json::json!({ "handle": handle.raw })),
-            Err(e) => store_err(e),
-        }
-    }
-
-    async fn do_revoke_handle(&self, raw_handle: String) -> AdminOutcome {
-        let ctx = AuditCtx::route_admin(AuditOp::RevokeHandle, ROUTE_ADMIN_ACTOR);
-        // revoke-by-handle does not name a credential id, so there is no per-id lock
-        // to take; it commits through the store's fenced path directly.
-        match self.engine.store().revoke_handle(&raw_handle, ctx) {
-            Ok(()) => AdminOutcome::Ok(serde_json::json!({ "revoked": true })),
-            Err(e) => store_err(e),
-        }
-    }
-
-    async fn do_revoke_all_handles(&self, id: String) -> AdminOutcome {
-        let ctx = AuditCtx::route_admin(AuditOp::RevokeHandle, ROUTE_ADMIN_ACTOR);
-        let lock_id = id.clone();
-        let result = self
-            .engine
-            .with_admin_lock(&lock_id, move |store| store.revoke_all_handles(&id, ctx))
-            .await;
-        match result {
-            Ok(n) => AdminOutcome::Ok(serde_json::json!({ "handles_revoked": n })),
+            Ok(v) => AdminOutcome::Ok(v),
             Err(e) => store_err(e),
         }
     }
@@ -503,19 +343,15 @@ fn decode_hex(s: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
-fn decode_hash32(s: &str) -> Option<[u8; 32]> {
-    let v = decode_hex(s)?;
-    <[u8; 32]>::try_from(v.as_slice()).ok()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use cortexkit_store::{open_sqlite, Isolation, StorageBackend, StorageDescriptor};
+    use credentials_core::audit::{AuditCtx, AuditOp};
     use credentials_core::http::ReqwestTransport;
     use credentials_core::key::{MasterKey, MASTER_KEY_LEN};
     use credentials_core::record::{CredentialKind, VaultRecord};
-    use credentials_core::store::EncryptedStore;
+    use credentials_core::store::{mint_handle, EncryptedStore};
     use credentials_core::vault_id_for;
 
     /// A test rig: the AdminSurface plus everything a caller-side signer needs

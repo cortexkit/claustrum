@@ -19,6 +19,7 @@
 // store.
 
 pub mod admin_auth;
+pub mod admin_ops;
 pub mod audit;
 pub mod contract;
 pub mod credential_id;
@@ -40,6 +41,7 @@ pub use admin_auth::{
     generate_admin_nonce, vault_id_for_canonical_dir, AdminMacKey, TranscriptParts,
     ADMIN_NONCE_LEN, ADMIN_TAG_LEN, VAULT_ID_LEN,
 };
+pub use admin_ops::{AdminAuditOp, AdminOpBody, StoreMode, ADMIN_OP_SCHEMA_V1};
 pub use audit::{AlarmReason, AuditEntry, AuditOp, AuditRecord};
 pub use contract::{keychain_service_for, vault_id_for, MODULE_ID, STORAGE_NAMESPACE};
 pub use credential_id::{

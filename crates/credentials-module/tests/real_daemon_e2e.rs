@@ -108,17 +108,23 @@ fn build_subc_core() -> Option<PathBuf> {
 /// Run the admin CLI with the given args; panics with stderr on failure. Returns
 /// stdout.
 fn run_cli(args: &[&str]) -> String {
-    let bin = PathBuf::from(env!("CARGO_BIN_EXE_credentials-cli"));
-    let out = std::process::Command::new(&bin)
-        .args(args)
-        .output()
-        .expect("run credentials-cli");
+    let out = run_cli_raw(args);
     assert!(
         out.status.success(),
         "credentials-cli {args:?} failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
     String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// Run the admin CLI without asserting success — for tests that need to inspect the
+/// exit code / stderr (e.g. the offline path refusing while the daemon is up).
+fn run_cli_raw(args: &[&str]) -> std::process::Output {
+    let bin = PathBuf::from(env!("CARGO_BIN_EXE_credentials-cli"));
+    std::process::Command::new(&bin)
+        .args(args)
+        .output()
+        .expect("run credentials-cli")
 }
 
 /// The seeded credential's handle and the rig, returned so the test can drive a get.
@@ -129,6 +135,12 @@ struct SeededVault {
     /// The vault's sqlite path, for reading durable audit/alarm rows AFTER the
     /// daemon is stopped (it holds the single-writer lease while alive).
     db_path: PathBuf,
+    /// The seeded credential id, for admin-path ops that name it.
+    credential_id: String,
+    /// The data dir + operator key path, so a test can run admin CLI ops (offline or
+    /// via `--subc`) against the same vault the daemon supervises.
+    data_dir: String,
+    key_path: String,
 }
 
 impl SeededVault {
@@ -283,6 +295,9 @@ where
         handle,
         payload,
         db_path: data_dir.join("store.db"),
+        credential_id,
+        data_dir: data_dir_s,
+        key_path: key_path_s,
     })
 }
 
@@ -325,6 +340,74 @@ async fn real_subc_core_supervises_vault_and_serves_credential_get() {
     assert_eq!(
         bytes, seeded.payload,
         "served the seeded credential payload"
+    );
+
+    let _ = std::fs::remove_dir_all(&project_root);
+}
+
+/// The module-driven admin path end-to-end: while the daemon holds the lease, the
+/// OFFLINE CLI write is refused (DaemonRunning, exit 3), but the SAME op committed
+/// with `--subc` succeeds through the running module (master-key challenge-response
+/// over the route plane) — and the result is observable via a live `credential.get`.
+#[tokio::test]
+#[ignore = "builds subc-core in ../subconscious and binds loopback ports"]
+async fn real_daemon_admin_op_over_route_while_offline_refused() {
+    let seeded = seeded_or_skip!();
+    let conn = seeded.daemon.connection_file.to_string_lossy().to_string();
+
+    // 1) The offline path is structurally refused while the daemon is up: it cannot
+    //    take the single-writer lease. Exit code 3 (DaemonRunning).
+    let offline = run_cli_raw(&[
+        "mint-handle",
+        "--id",
+        &seeded.credential_id,
+        "--data-dir",
+        &seeded.data_dir,
+        "--key-path",
+        &seeded.key_path,
+    ]);
+    assert_eq!(
+        offline.status.code(),
+        Some(3),
+        "offline admin write must be refused (DaemonRunning) while the daemon holds the lease; stderr: {}",
+        String::from_utf8_lossy(&offline.stderr)
+    );
+
+    // 2) The SAME op with --subc commits through the running module. This exercises
+    //    the whole authenticated admin path: direct-principal bind, admin.challenge,
+    //    keychain/operator-key resolution by the returned key_id, the op-body MAC,
+    //    admin.op, and the fenced+audited store write — with zero downtime.
+    let minted = run_cli(&[
+        "mint-handle",
+        "--id",
+        &seeded.credential_id,
+        "--data-dir",
+        &seeded.data_dir,
+        "--key-path",
+        &seeded.key_path,
+        "--subc",
+        &conn,
+    ]);
+    assert!(
+        minted.starts_with("ckh_"),
+        "route-committed mint-handle returns a fresh handle, got: {minted}"
+    );
+
+    // 3) The route-minted handle is REAL: a live credential.get resolves it to the
+    //    seeded payload, proving the write landed in the daemon's own store.
+    let mut consumer = connect_consumer(&seeded.daemon.connection_file).await;
+    wait_for_catalog(&mut consumer, MODULE_ID, SETUP_TIMEOUT).await;
+    let project_root = unique_temp_dir("cred-real-daemon-admin");
+    std::fs::create_dir_all(&project_root).unwrap();
+    let route_channel = route_open(&mut consumer, &project_root, 1).await;
+    let response = credential_get(&mut consumer, route_channel, 2, &minted).await;
+    let payload = response["result"]["payload"]
+        .as_array()
+        .expect("the route-minted handle resolves to a payload");
+    let bytes: Vec<u8> = payload.iter().map(|v| v.as_u64().unwrap() as u8).collect();
+    assert_eq!(
+        bytes, seeded.payload,
+        "the route-minted handle serves the seeded credential"
     );
 
     let _ = std::fs::remove_dir_all(&project_root);

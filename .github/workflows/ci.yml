@@ -80,9 +80,9 @@ jobs:
         with:
           components: clippy, rustfmt
 
-      # The real-daemon e2e rig spawns the subc-core daemon as a subprocess; it's a
-      # bin in the sibling subc-core crate. Build it from the sibling checkout so the
-      # rig finds it under ../subconscious/target/debug.
+      # The real-daemon e2e rig spawns the subc daemon (exe `ck-subc`; the PACKAGE
+      # is still subc-core) as a subprocess. Build it from the sibling checkout so
+      # the rig finds it under ../subconscious/target/debug.
       - name: Build subc binaries (real-daemon e2e)
         working-directory: subconscious
         run: cargo build -p subc-core --bins

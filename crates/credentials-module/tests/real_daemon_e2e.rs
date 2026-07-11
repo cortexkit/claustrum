@@ -3,7 +3,7 @@
 //! Real-daemon supervision proof for the credential vault (part of the §13 ship
 //! gate).
 //!
-//! The STANDALONE `subc-core` binary reads a `subc.jsonc` that marks the vault
+//! The STANDALONE `ck-subc` daemon binary (package subc-core) reads a `subc.jsonc` that marks the vault
 //! module `reserved: true` and configures a sqlite storage section, spawns +
 //! supervises `credentials-module` as a child it owns (injecting `SUBC_MODULE_ID`
 //! and the one-time `SUBC_LAUNCH_NONCE` the reserved module echoes), and we drive
@@ -16,7 +16,7 @@
 //! gate (resolve key → migrate → reconcile → serve), handle resolution, and the
 //! read surface, through a real supervising daemon.
 //!
-//! `#[ignore]` by default: it builds `subc-core` in the sibling repo and binds
+//! `#[ignore]` by default: it builds the `ck-subc` daemon in the sibling repo and binds
 //! loopback ports. Run with
 //! `cargo test -p credentials-module --test real_daemon_e2e -- --ignored --nocapture`.
 
@@ -37,7 +37,7 @@ use common::{
 
 const SUBCONSCIOUS_REL: &str = "../../../subconscious";
 
-/// A real `subc-core` daemon process plus its isolated rig dir; killed on drop.
+/// A real `ck-subc` daemon process plus its isolated rig dir; killed on drop.
 struct RealDaemon {
     child: Child,
     rig: PathBuf,
@@ -81,27 +81,26 @@ fn subconscious_root() -> Option<PathBuf> {
     }
 }
 
-/// Build subc-core in the sibling and return its binary path, or `None` to skip.
-/// A build failure with `REQUIRE_DAEMON_ENV` set is a hard panic (no silent skip).
+/// Build the subc daemon in the sibling and return its binary path, or `None` to
+/// skip. A build failure with `REQUIRE_DAEMON_ENV` set is a hard panic (no silent
+/// skip). The daemon EXE is `ck-subc` (fleet ck-* naming; the PACKAGE stays
+/// subc-core) — building by explicit bin name also guards against silently running
+/// a stale binary left under the old name in the sibling's target dir.
 fn build_subc_core() -> Option<PathBuf> {
     let root = subconscious_root()?;
     let status = std::process::Command::new(env!("CARGO"))
         .current_dir(&root)
-        .args(["build", "--bin", "subc-core"])
+        .args(["build", "--bin", "ck-subc"])
         .status()
-        .expect("run cargo build for subc-core");
+        .expect("run cargo build for ck-subc");
     if !status.success() {
         if require_daemon() {
-            panic!("{REQUIRE_DAEMON_ENV} is set but building subc-core failed");
+            panic!("{REQUIRE_DAEMON_ENV} is set but building ck-subc failed");
         }
         return None;
     }
-    let bin = root.join("target/debug/subc-core");
-    assert!(
-        bin.exists(),
-        "subc-core binary missing at {}",
-        bin.display()
-    );
+    let bin = root.join("target/debug/ck-subc");
+    assert!(bin.exists(), "ck-subc binary missing at {}", bin.display());
     Some(bin)
 }
 

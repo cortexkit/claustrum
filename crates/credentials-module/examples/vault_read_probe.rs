@@ -36,6 +36,7 @@ async fn main() {
     let mut root = std::env::temp_dir();
     let mut force_refresh = false;
     let mut min_ttl_ms: Option<i64> = None;
+    let mut show_account_id = false;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -57,6 +58,11 @@ async fn main() {
             "--min-ttl-ms" => {
                 min_ttl_ms = args.next().and_then(|v| v.parse().ok());
             }
+            // Decode the served payload AS a JWT client-side and print ONLY the
+            // non-secret ChatGPT account-id claim. Useful when the daemon predates
+            // the GetResult.account_id field: the payload already carries the claim,
+            // so the probe can surface it without printing the token.
+            "--show-account-id" => show_account_id = true,
             other => {
                 eprintln!("vault_read_probe: unexpected arg '{other}'");
                 std::process::exit(2);
@@ -103,7 +109,7 @@ async fn main() {
         min_ttl_ms,
     )
     .await;
-    report(&body);
+    report(&body, show_account_id);
 }
 
 async fn control_rpc(stream: &mut TcpStream, corr: u64, body: Value) -> Frame {
@@ -215,6 +221,56 @@ async fn credential_get(
     }
 }
 
+/// Decode a JWT access-token payload client-side and pull the non-secret ChatGPT
+/// account-id claim (`"https://api.openai.com/auth".chatgpt_account_id`). This is
+/// the same claim path the vault's own `account_id_for_adapter` uses; duplicated
+/// here because the example must work against a daemon predating that field.
+fn chatgpt_account_id_from_payload(payload: &[u8]) -> Option<String> {
+    let token = std::str::from_utf8(payload).ok()?;
+    let claims_b64 = token.split('.').nth(1)?;
+    let claims_json = base64url_decode(claims_b64)?;
+    let claims: Value = serde_json::from_slice(&claims_json).ok()?;
+    claims
+        .get("https://api.openai.com/auth")?
+        .get("chatgpt_account_id")?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// Minimal unpadded base64url decoder (RFC 4648 §5) — dependency-free so the
+/// example stays a pure consumer of the wire.
+fn base64url_decode(s: &str) -> Option<Vec<u8>> {
+    fn val(b: u8) -> Option<u32> {
+        match b {
+            b'A'..=b'Z' => Some((b - b'A') as u32),
+            b'a'..=b'z' => Some((b - b'a') as u32 + 26),
+            b'0'..=b'9' => Some((b - b'0') as u32 + 52),
+            b'-' => Some(62),
+            b'_' => Some(63),
+            _ => None,
+        }
+    }
+    let bytes = s.trim_end_matches('=').as_bytes();
+    let mut out = Vec::with_capacity(bytes.len() * 3 / 4);
+    for chunk in bytes.chunks(4) {
+        let mut acc: u32 = 0;
+        for (i, &b) in chunk.iter().enumerate() {
+            acc |= val(b)? << (18 - 6 * i);
+        }
+        let n = chunk.len();
+        if n >= 2 {
+            out.push((acc >> 16) as u8);
+        }
+        if n >= 3 {
+            out.push((acc >> 8) as u8);
+        }
+        if n == 4 {
+            out.push(acc as u8);
+        }
+    }
+    Some(out)
+}
+
 /// FNV-1a-64: a stable, dependency-free fingerprint used only to compare two byte
 /// strings for equality without revealing either. NOT a cryptographic hash.
 fn fnv1a64(bytes: &[u8]) -> u64 {
@@ -228,7 +284,7 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 
 /// Print whether the read succeeded WITHOUT exposing the secret: only the payload
 /// length and a one-way fingerprint are shown.
-fn report(frame: &Frame) {
+fn report(frame: &Frame, show_account_id: bool) {
     match frame.header.ty {
         FrameType::Response => {
             let value: Value = serde_json::from_slice(&frame.body).unwrap_or(Value::Null);
@@ -253,6 +309,23 @@ fn report(frame: &Frame) {
                         bytes.len(),
                         fnv1a64(&bytes)
                     );
+                    // Non-secret metadata, printed verbatim: the record revision, the
+                    // provider account the token executes under (chatgpt wire), and the
+                    // Code-Assist project id (antigravity). These are exactly the fields
+                    // a consumer keys routing on, so the probe surfaces them for
+                    // operator diagnosis.
+                    let result = value.get("result");
+                    for key in ["record_version", "account_id", "project_id"] {
+                        if let Some(v) = result.and_then(|r| r.get(key)) {
+                            println!("   {key}: {v}");
+                        }
+                    }
+                    if show_account_id {
+                        match chatgpt_account_id_from_payload(&bytes) {
+                            Some(account) => println!("   chatgpt account id (client-side decode): {account}"),
+                            None => println!("   chatgpt account id: none (payload is not a JWT carrying the claim)"),
+                        }
+                    }
                 }
                 None => {
                     println!("OK Response, but no result.payload array found.");

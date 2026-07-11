@@ -82,6 +82,23 @@ pub fn keychain_service_for(data_dir: &Path) -> Option<String> {
     Some(format!("{KEYCHAIN_SERVICE_PREFIX}:{scope}"))
 }
 
+/// Derive the vault's admin-transcript identity from its data directory: the FULL
+/// (untruncated) SHA-256 over the canonical path bytes, domain-separated. Both
+/// binaries (module and CLI/app) must derive this from the same canonical form —
+/// [`cortexkit_paths::ProjectRootId`], the same identity the keychain scope uses —
+/// so the challenge-response transcript binds to the same 32 bytes on both sides.
+///
+/// Unlike the keychain service (8-byte truncation, cosmetic namespacing), this is
+/// full-width because the binding is adversarial: it is what stops an admin-op MAC
+/// minted for one vault being spliced onto another. Fails closed (`None`) when the
+/// directory cannot be canonicalized.
+pub fn vault_id_for(data_dir: &Path) -> Option<[u8; crate::admin_auth::VAULT_ID_LEN]> {
+    let id = ProjectRootId::from_path(data_dir).ok()?;
+    Some(crate::admin_auth::vault_id_for_canonical_dir(
+        &canonical_path_bytes(id.as_path()),
+    ))
+}
+
 /// The canonical path's raw bytes for hashing, losslessly. On unix the `OsStr` bytes are
 /// taken directly (`OsStrExt::as_bytes`), so a non-UTF-8 path hashes to its true bytes
 /// rather than a U+FFFD-collapsed approximation. On non-unix (Windows), the OS string is

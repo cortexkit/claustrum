@@ -41,7 +41,7 @@ pub use admin_auth::{
     ADMIN_NONCE_LEN, ADMIN_TAG_LEN, VAULT_ID_LEN,
 };
 pub use audit::{AlarmReason, AuditEntry, AuditOp, AuditRecord};
-pub use contract::{keychain_service_for, MODULE_ID, STORAGE_NAMESPACE};
+pub use contract::{keychain_service_for, vault_id_for, MODULE_ID, STORAGE_NAMESPACE};
 pub use credential_id::{
     default_refresh_adapter, parse_credential_id, AuthMethod, ParsedCredentialId,
 };

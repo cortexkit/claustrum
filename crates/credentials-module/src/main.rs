@@ -20,6 +20,7 @@
 //! store → reconcile any dangling refresh intents → ONLY THEN accept reads. A `get`
 //! is never served while a crash-left refresh intent is unresolved.
 
+mod admin_surface;
 mod limiter;
 mod read_surface;
 
@@ -85,6 +86,11 @@ const OP_GET: &str = "credential.get";
 const OP_GET_MANY: &str = "credential.get_many";
 const OP_STATUS: &str = "credential.status";
 const OP_REPORT_AUTH_FAILURE: &str = "credential.report_auth_failure";
+/// Admin ops on the running module (authenticated: direct principal + master-key
+/// challenge-response). `admin.challenge` issues a nonce; `admin.op` carries the
+/// authenticated op body + tag.
+const OP_ADMIN_CHALLENGE: &str = "admin.challenge";
+const OP_ADMIN_OP: &str = "admin.op";
 
 #[tokio::main]
 async fn main() -> Result<(), ModuleError> {
@@ -189,7 +195,9 @@ where
 
     // Boot gate: build the vault from the resolved descriptor, then reconcile any
     // dangling refresh intents BEFORE accepting any request.
-    let surface = Arc::new(build_surface(&ack).await?);
+    let (surface, admin) = build_surface(&ack).await?;
+    let surface = Arc::new(surface);
+    let admin = Arc::new(admin);
 
     // Keep the cached health snapshot current OFF the probe path. The health.check
     // reply must be cheap/in-memory (spec §2), so the live store scan runs here on a
@@ -204,7 +212,7 @@ where
         else {
             return Ok(()); // clean EOF: subc closed the connection.
         };
-        if !handle_frame(frame, &egress, &surface).await? {
+        if !handle_frame(frame, &egress, &surface, &admin).await? {
             return Ok(());
         }
     }
@@ -239,7 +247,9 @@ impl Drop for AbortOnDrop {
 /// Build the read surface from the HELLO_ACK's storage descriptor: resolve the
 /// master key, open + migrate the encrypted store, build the refresh engine with
 /// the four adapters, and run boot reconciliation (the gate).
-async fn build_surface(ack: &ModuleHelloAckBody) -> Result<ReadSurface, ModuleError> {
+async fn build_surface(
+    ack: &ModuleHelloAckBody,
+) -> Result<(ReadSurface, admin_surface::AdminSurface), ModuleError> {
     let descriptor_value = ack
         .storage
         .as_ref()
@@ -248,6 +258,10 @@ async fn build_surface(ack: &ModuleHelloAckBody) -> Result<ReadSurface, ModuleEr
         .map_err(|e| ModuleError::Message(format!("decoding storage descriptor: {e}")))?;
 
     let data_dir = sqlite_data_dir(&descriptor)?;
+    // Derive the vault identity before the data_dir is moved into the resolver config;
+    // it binds the admin-op transcript to THIS vault.
+    let vault_id = credentials_core::vault_id_for(&data_dir)
+        .ok_or_else(|| ModuleError::Message("cannot derive vault id from data dir".into()))?;
     let resolver_config = resolver_config_from_env(data_dir);
 
     // Open + migrate the store first, then read the database's plaintext key
@@ -265,6 +279,13 @@ async fn build_surface(ack: &ModuleHelloAckBody) -> Result<ReadSurface, ModuleEr
         None => resolver::resolve(&resolver_config, None),
     }
     .map_err(|e| ModuleError::Message(format!("master key: {e}")))?;
+
+    // Derive the admin-op authority material from the master key BEFORE it is moved
+    // into the store: the MAC key (Gate 2's authority root) and this key's non-secret
+    // fingerprint (returned in a challenge so the CLI resolves the same key without
+    // opening the DB).
+    let admin_mac_key = credentials_core::admin_auth::AdminMacKey::derive(&key);
+    let admin_key_id = key.key_id();
 
     let store = EncryptedStore::open(store, key)
         .map_err(|e| ModuleError::Message(format!("open vault: {e}")))?;
@@ -292,7 +313,19 @@ async fn build_surface(ack: &ModuleHelloAckBody) -> Result<ReadSurface, ModuleEr
         .await
         .map_err(|e| ModuleError::Message(format!("boot reconciliation: {e}")))?;
 
-    Ok(ReadSurface::new(engine, FetchLimiter::new(Caps::default())))
+    // The admin surface shares the engine (same store + per-credential single-flight
+    // locks), so a route-driven admin write and a refresh for one credential are
+    // serialized by the same lock.
+    let admin = admin_surface::AdminSurface::new(
+        Arc::clone(&engine),
+        admin_mac_key,
+        vault_id,
+        admin_key_id,
+    );
+    Ok((
+        ReadSurface::new(engine, FetchLimiter::new(Caps::default())),
+        admin,
+    ))
 }
 
 /// Drain both egress lanes to the wire, CONTROL-FIRST. On every wakeup, all currently-
@@ -419,6 +452,7 @@ async fn handle_frame(
     frame: Frame,
     egress: &Egress,
     surface: &Arc<ReadSurface>,
+    admin: &Arc<admin_surface::AdminSurface>,
 ) -> Result<bool, ModuleError> {
     match frame.header.ty {
         FrameType::Ping if frame.header.channel == 0 => {
@@ -436,22 +470,25 @@ async fn handle_frame(
         }
         FrameType::Goodbye if frame.header.channel == 0 => Ok(false),
         FrameType::Goodbye => {
-            // A route goodbye: forget that connection's limiter state.
+            // A route goodbye: forget that connection's limiter state AND its admin
+            // bind state (principal + any outstanding challenge nonce).
             surface.drop_connection(frame.header.channel as u64).await;
+            admin.drop_bind(frame.header.channel);
             Ok(true)
         }
         FrameType::Request if frame.header.channel == 0 => {
-            handle_control_request(frame, &egress.control, surface).await?;
+            handle_control_request(frame, &egress.control, surface, admin).await?;
             Ok(true)
         }
         FrameType::Request => {
-            // Data-plane read request on a route channel. Spawn so a slow refresh
-            // never head-of-line-blocks another route. Its response egresses on the
-            // route lane, never the control lane.
+            // Data-plane request on a route channel: a read op or an admin op. Spawn
+            // so a slow refresh/commit never head-of-line-blocks another route. Its
+            // response egresses on the route lane, never the control lane.
             let route = egress.route.clone();
             let surface = Arc::clone(surface);
+            let admin = Arc::clone(admin);
             tokio::spawn(async move {
-                let _ = handle_read_request(frame, &route, &surface).await;
+                let _ = handle_read_request(frame, &route, &surface, &admin).await;
             });
             Ok(true)
         }
@@ -463,13 +500,22 @@ async fn handle_control_request(
     frame: Frame,
     writer: &mpsc::Sender<Frame>,
     surface: &Arc<ReadSurface>,
+    admin: &Arc<admin_surface::AdminSurface>,
 ) -> Result<(), ModuleError> {
     let request =
         serde_json::from_slice::<ModuleControlRequest>(&frame.body).map_err(ModuleError::Json)?;
     let response_body = match request {
-        ModuleControlRequest::RouteBind { .. } => {
-            // Anonymous, trusted-unscoped reads: accept every bind. Access is scoped
-            // by capability handle at request time, not at bind.
+        ModuleControlRequest::RouteBind {
+            route_channel,
+            principal,
+            ..
+        } => {
+            // Record the bind's daemon-stamped principal (Gate 1 provenance) against
+            // the route channel, with a fresh generation. An absent principal stamp
+            // records as `Unverified` — never `direct` — so admin ops fail closed on
+            // an older daemon. Reads remain anonymous/handle-scoped regardless.
+            let principal = principal.unwrap_or(subc_protocol::Principal::Unverified);
+            admin.record_bind(route_channel, principal);
             ModuleControlResponse::RouteBindAck {}
         }
         ModuleControlRequest::HealthCheck {} => {
@@ -562,10 +608,22 @@ struct ReadRequest {
     params: serde_json::Value,
 }
 
+/// The `admin.op` request params: the EXACT authenticated op-body bytes (as a JSON
+/// string, so the byte string the caller MAC'd survives the outer envelope verbatim)
+/// plus the caller's transcript MAC.
+#[derive(Debug, Deserialize)]
+struct AdminOpParams {
+    /// The op body EXACTLY as MAC'd, carried as a string so no JSON re-encoding on
+    /// the outer envelope can perturb the authenticated bytes.
+    op_body: String,
+    tag_hex: String,
+}
+
 async fn handle_read_request(
     frame: Frame,
     writer: &mpsc::Sender<Frame>,
     surface: &Arc<ReadSurface>,
+    admin: &Arc<admin_surface::AdminSurface>,
 ) -> Result<(), ModuleError> {
     let channel = frame.header.channel;
     let corr = frame.header.corr;
@@ -617,6 +675,39 @@ async fn handle_read_request(
                 Err(e) => return invalid_params(writer, ver, channel, corr, &e.to_string()).await,
             }
         }
+        OP_ADMIN_CHALLENGE => match admin.challenge(channel) {
+            admin_surface::AdminOutcome::Challenge {
+                nonce_hex,
+                vault_id_hex,
+                key_id_hex,
+            } => json!({ "result": {
+                "nonce_hex": nonce_hex,
+                "vault_id_hex": vault_id_hex,
+                "key_id_hex": key_id_hex,
+            }}),
+            admin_surface::AdminOutcome::Refused(reason) => {
+                return send_route_error(writer, ver, channel, corr, "admin_refused", &reason)
+                    .await;
+            }
+            // challenge() only ever returns Challenge or Refused.
+            admin_surface::AdminOutcome::Ok(_) => unreachable!("challenge returns Challenge"),
+        },
+        OP_ADMIN_OP => match serde_json::from_value::<AdminOpParams>(request.params) {
+            Ok(p) => match admin
+                .execute(channel, p.op_body.as_bytes(), &p.tag_hex)
+                .await
+            {
+                admin_surface::AdminOutcome::Ok(v) => json!({ "result": v }),
+                admin_surface::AdminOutcome::Refused(reason) => {
+                    return send_route_error(writer, ver, channel, corr, "admin_refused", &reason)
+                        .await;
+                }
+                admin_surface::AdminOutcome::Challenge { .. } => {
+                    unreachable!("execute never returns Challenge")
+                }
+            },
+            Err(e) => return invalid_params(writer, ver, channel, corr, &e.to_string()).await,
+        },
         other => {
             return send_route_error(
                 writer,
@@ -832,6 +923,25 @@ mod tests {
         tmp_surface_with_store(seed).0
     }
 
+    /// A test AdminSurface over the same engine/store shape as tmp_surface, with a
+    /// known master key (seed) so tests can derive the same MAC key caller-side.
+    fn tmp_admin(seed: u8) -> (Arc<admin_surface::AdminSurface>, Arc<EncryptedStore>) {
+        let (_, store, db_path) = tmp_surface_with_store(seed);
+        let http = Arc::new(ReqwestTransport::new().expect("http"));
+        let engine = Arc::new(RefreshEngine::new(Arc::clone(&store), Vec::new(), http));
+        let key = MasterKey::from_bytes([seed; MASTER_KEY_LEN]);
+        let mac_key = credentials_core::admin_auth::AdminMacKey::derive(&key);
+        let vault_id =
+            credentials_core::vault_id_for(db_path.parent().expect("db dir")).expect("vault id");
+        let admin = Arc::new(admin_surface::AdminSurface::new(
+            engine,
+            mac_key,
+            vault_id,
+            key.key_id(),
+        ));
+        (admin, store)
+    }
+
     fn tmp_surface_with_store(
         seed: u8,
     ) -> (Arc<ReadSurface>, Arc<EncryptedStore>, std::path::PathBuf) {
@@ -980,7 +1090,10 @@ mod tests {
         )
         .unwrap();
 
-        handle_control_request(frame, &tx, &surface).await.unwrap();
+        let (admin, _admin_store) = tmp_admin(7);
+        handle_control_request(frame, &tx, &surface, &admin)
+            .await
+            .unwrap();
 
         let response = rx.try_recv().expect("a response frame was sent");
         assert_eq!(response.header.ty, FrameType::Response);

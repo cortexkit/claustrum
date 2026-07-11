@@ -434,6 +434,32 @@ impl RefreshEngine {
         }
     }
 
+    /// Run an admin mutation for one credential UNDER that credential's single-flight
+    /// lock — the same lock a refresh holds across its network call and commit.
+    ///
+    /// This is the load-bearing serializer for module-driven admin ops. The store's
+    /// connection mutex only serializes individual transactions, not the
+    /// read-modify-write sequence an admin op and a refresh each perform; taking the
+    /// per-id lock makes admin-write and refresh-for-the-same-credential strictly
+    /// mutually exclusive end-to-end, so an admin replace can never interleave with a
+    /// refresh's commit (Oracle finding 5), and a get arriving during a live refresh
+    /// that also needs to write waits for the intent to resolve rather than acting on
+    /// a mid-refresh view (Oracle finding 6). Reads (`get`) that only SERVE are
+    /// unaffected — they still take the lock only when they themselves refresh.
+    ///
+    /// The closure receives the store; it must perform exactly one credential-scoped
+    /// admin mutation. Different credential ids use different locks, so admin ops for
+    /// distinct credentials still run concurrently.
+    pub async fn with_admin_lock<T>(
+        &self,
+        credential_id: &str,
+        f: impl FnOnce(&EncryptedStore) -> Result<T, StoreOpError>,
+    ) -> Result<T, StoreOpError> {
+        let lock = self.inflight_lock(credential_id);
+        let _guard = lock.lock().await;
+        f(&self.store)
+    }
+
     /// Look up or create the single-flight lock for a credential.
     fn inflight_lock(&self, credential_id: &str) -> Arc<tokio::sync::Mutex<()>> {
         let mut map = self.inflight.lock().unwrap_or_else(|p| p.into_inner());

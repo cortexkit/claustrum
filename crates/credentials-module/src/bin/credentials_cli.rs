@@ -34,14 +34,17 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+#[path = "cli_support/admin_client.rs"]
+mod admin_client;
+
 use cortexkit_store::{open_sqlite, Isolation, StorageBackend, StorageDescriptor, StoreError};
-use credentials_core::audit::{AuditCtx, AuditOp};
+use credentials_core::admin_ops::{AdminAuditOp, AdminOpBody, StoreMode, ADMIN_OP_SCHEMA_V1};
 use credentials_core::contract::{MODULE_ID, STORAGE_NAMESPACE};
 use credentials_core::credential_id::{default_refresh_adapter, parse_credential_id, AuthMethod};
 use credentials_core::key::MasterKey;
 use credentials_core::record::{CredentialKind, VaultRecord};
 use credentials_core::resolver::{self, KeySource, MasterKeyError, ResolverConfig};
-use credentials_core::store::{mint_handle, EncryptedStore, RecordState, StoreOpError};
+use credentials_core::store::{EncryptedStore, RecordState, StoreOpError};
 
 fn main() -> ExitCode {
     match run() {
@@ -65,6 +68,11 @@ enum CliError {
     Store(StoreOpError),
     StoreOpen(StoreError),
     Io(String),
+    /// The running module refused an admin op (auth/gate/store error). Terminal.
+    RouteRefused(String),
+    /// An admin op was dispatched to the running module but its outcome is unknown
+    /// (connection dropped after send). The op may have committed.
+    RouteIndeterminate(String),
 }
 
 impl CliError {
@@ -72,6 +80,9 @@ impl CliError {
         match self {
             CliError::DaemonRunning => ExitCode::from(3),
             CliError::MasterKey(_) => ExitCode::from(4),
+            // A dispatched-but-unknown outcome gets its own code so a script does not
+            // treat it as a clean failure and blindly retry a possibly-committed op.
+            CliError::RouteIndeterminate(_) => ExitCode::from(5),
             _ => ExitCode::FAILURE,
         }
     }
@@ -89,6 +100,8 @@ impl std::fmt::Display for CliError {
             CliError::Store(e) => write!(f, "{e}"),
             CliError::StoreOpen(e) => write!(f, "{e}"),
             CliError::Io(m) => write!(f, "{m}"),
+            CliError::RouteRefused(m) => write!(f, "the running module refused the op: {m}"),
+            CliError::RouteIndeterminate(m) => write!(f, "{m}"),
         }
     }
 }
@@ -98,6 +111,11 @@ impl std::error::Error for CliError {}
 struct GlobalArgs {
     data_dir: PathBuf,
     key_source: KeySource,
+    /// The subc connection file, from `--subc`. When present, an admin WRITE is
+    /// committed through the RUNNING module over the route plane (zero-downtime,
+    /// master-key challenge-response); when absent, writes take the offline lease
+    /// path (daemon must be stopped). Read commands ignore it.
+    subc_conn: Option<PathBuf>,
 }
 
 fn run() -> Result<(), CliError> {
@@ -202,12 +220,17 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
 }
 
 fn usage() -> String {
-    "cortexkit-credentials admin CLI (run while the daemon is STOPPED)\n\
+    "cortexkit-credentials admin CLI\n\
      \n\
      Global: --data-dir <dir> (required) [--key-path <file> | keychain default]\n\
+             [--subc <connection-file>]\n\
        --data-dir MUST be <data_home>/cortexkit/<module_id> where module_id is the\n\
        subc.jsonc module key (\"cortexkit-credentials\"), so the CLI and the\n\
        supervised daemon open the SAME store.\n\
+       --subc commits WRITES through the RUNNING module (zero downtime, master-key\n\
+       challenge-response). WITHOUT --subc, writes take the offline single-writer\n\
+       lease and the daemon must be STOPPED. rotate-master-key and bootstrap are\n\
+       always offline (they ignore --subc).\n\
      Commands: bootstrap | put | import | login | invalidate | rotate-master-key |\n\
                 mint-handle | revoke-handle | revoke-all-handles | list | audit |\n\
                 verify-audit\n\
@@ -231,6 +254,39 @@ fn usage() -> String {
        --adapter overrides the method-derived refresh adapter;\n\
        --replace overwrites an existing id (fix a wrong-source import; keeps handles)."
         .to_string()
+}
+
+/// Commit one admin op, choosing the backend by `--subc`:
+///
+/// - `--subc <connection-file>` present: commit through the RUNNING module over the
+///   route plane (admin.challenge → master-key MAC → admin.op). Zero downtime; the
+///   module is the single writer, serializing the op against live refreshes. If no
+///   live module is reachable, fall back to the offline lease path (nothing was
+///   dispatched, so the fallback cannot double-execute).
+/// - absent: the offline lease path exactly as before (daemon must be stopped).
+///
+/// A REFUSAL from a live module is terminal (never falls back — the module is alive
+/// and said no); a DISPATCHED op with a lost response is indeterminate (never falls
+/// back or retries — it may have committed; the operator verifies first).
+fn commit_admin(
+    global: &GlobalArgs,
+    op: credentials_core::admin_ops::AdminOpBody,
+) -> Result<serde_json::Value, CliError> {
+    if let Some(conn_path) = &global.subc_conn {
+        match admin_client::commit(&global.data_dir, &resolver_config(global), conn_path, &op) {
+            admin_client::RouteCommit::Committed(v) => return Ok(v),
+            admin_client::RouteCommit::Refused(m) => return Err(CliError::RouteRefused(m)),
+            admin_client::RouteCommit::Indeterminate(m) => {
+                return Err(CliError::RouteIndeterminate(m))
+            }
+            admin_client::RouteCommit::NoLiveModule(m) => {
+                // Nothing was dispatched; the offline path below is safe.
+                eprintln!("(no live module: {m}; using the offline lease path)");
+            }
+        }
+    }
+    let store = open_for_admin(global)?;
+    credentials_core::admin_ops::apply(&store, op, "offline-cli").map_err(CliError::Store)
 }
 
 /// Open the vault for an admin write: resolve the master key (proof of possession)
@@ -310,25 +366,53 @@ fn cmd_put(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
         .transpose()
         .map_err(|e| CliError::Usage(format!("--expires-ms not an integer: {e}")))?;
 
-    let store = open_for_admin(global)?;
     let record = VaultRecord::new_static(kind, "operator", payload, expires_at_ms);
     // CREATE-ONLY by default. An overwrite requires an explicit --expected-hash CAS.
     match optional(args, "--expected-hash") {
         Some(hex) => {
             let expected = decode_hash(&hex)?;
-            store
-                .overwrite_cas_audited(&id, &record, &expected, AuditCtx::admin(AuditOp::Overwrite))
-                .map_err(CliError::Store)?;
+            commit_admin(
+                global,
+                store_op(
+                    &id,
+                    record,
+                    AdminAuditOp::Overwrite,
+                    StoreMode::ReplaceCas {
+                        expected_hash_hex: hex_lower(&expected),
+                    },
+                ),
+            )?;
             println!("overwrote {id} (CAS ok)");
         }
         None => {
-            store
-                .create_audited(&id, &record, AuditCtx::admin(AuditOp::Put))
-                .map_err(CliError::Store)?;
+            commit_admin(
+                global,
+                store_op(&id, record, AdminAuditOp::Put, StoreMode::Create),
+            )?;
             println!("created {id}");
         }
     }
     Ok(())
+}
+
+/// Build an `admin.store` op body.
+fn store_op(id: &str, record: VaultRecord, audit_op: AdminAuditOp, mode: StoreMode) -> AdminOpBody {
+    AdminOpBody::Store {
+        v: ADMIN_OP_SCHEMA_V1,
+        id: id.to_string(),
+        record: Box::new(record),
+        audit_op,
+        mode,
+    }
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        let _ = write!(s, "{b:02x}");
+    }
+    s
 }
 
 fn cmd_import(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
@@ -381,20 +465,26 @@ fn cmd_import(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
         VaultRecord::new_oauth(source, adapter, oauth, payload)
     };
 
-    let store = open_for_admin(global)?;
     // `--replace` overwrites an existing credential UNCONDITIONALLY (re-seal at
     // version+1, reset to active, keep the handle), for fixing a credential imported
     // from the wrong source. Without it, import is CREATE-ONLY (an existing id is an
     // error), so a fresh credential can never be silently clobbered.
     if has_flag(args, "--replace") {
-        store
-            .overwrite_unconditional_audited(&id, &record, AuditCtx::admin(AuditOp::Import))
-            .map_err(CliError::Store)?;
+        commit_admin(
+            global,
+            store_op(
+                &id,
+                record,
+                AdminAuditOp::Import,
+                StoreMode::ReplaceUnconditional,
+            ),
+        )?;
         println!("replaced {id}");
     } else {
-        store
-            .create_audited(&id, &record, AuditCtx::admin(AuditOp::Import))
-            .map_err(CliError::Store)?;
+        commit_admin(
+            global,
+            store_op(&id, record, AdminAuditOp::Import, StoreMode::Create),
+        )?;
         println!("imported {id}");
     }
     Ok(())
@@ -650,20 +740,27 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     let payload = tokens.access_token.clone().into_bytes();
     let record = VaultRecord::new_oauth("login", wire.adapter_name, oauth, payload);
 
-    let store = open_for_admin(global)?;
     // Login records a distinct `Login` audit op (not `Import`) so forensics can tell
     // a native mint from a foreign import. `--replace` overwrites an existing id (the
     // dual-custody migration: swap the imported token for the vault-minted one; the
-    // handle survives).
+    // handle survives). With `--subc` the commit rides the RUNNING module, so a
+    // re-login needs no daemon stop at all (the zero-downtime path).
     if has_flag(args, "--replace") {
-        store
-            .overwrite_unconditional_audited(&id, &record, AuditCtx::admin(AuditOp::Login))
-            .map_err(CliError::Store)?;
+        commit_admin(
+            global,
+            store_op(
+                &id,
+                record,
+                AdminAuditOp::Login,
+                StoreMode::ReplaceUnconditional,
+            ),
+        )?;
         println!("logged in and replaced {id}");
     } else {
-        store
-            .create_audited(&id, &record, AuditCtx::admin(AuditOp::Login))
-            .map_err(CliError::Store)?;
+        commit_admin(
+            global,
+            store_op(&id, record, AdminAuditOp::Login, StoreMode::Create),
+        )?;
         println!("logged in and stored {id}");
     }
     Ok(())
@@ -671,15 +768,16 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
 
 fn cmd_invalidate(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     let id = required(args, "--id")?;
-    let store = open_for_admin(global)?;
-    store
-        .invalidate_audited(&id, AuditCtx::admin(AuditOp::Invalidate))
-        .map_err(CliError::Store)?;
-    // Revoke the credential's handles too: an invalidated credential's handles must
-    // not keep resolving.
-    let revoked = store
-        .revoke_all_handles(&id, AuditCtx::admin(AuditOp::RevokeHandle))
-        .map_err(CliError::Store)?;
+    // The compound invalidate is atomic: needs_reauth + clear intent + revoke all
+    // handles in one fenced transaction (so a live relay can't split the halves).
+    let result = commit_admin(
+        global,
+        AdminOpBody::Invalidate {
+            v: ADMIN_OP_SCHEMA_V1,
+            id: id.clone(),
+        },
+    )?;
+    let revoked = result["handles_revoked"].as_u64().unwrap_or(0);
     println!("invalidated {id}; revoked {revoked} handle(s)");
     Ok(())
 }
@@ -734,37 +832,45 @@ fn cmd_rotate_master_key(global: &GlobalArgs) -> Result<(), CliError> {
 
 fn cmd_mint_handle(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     let id = required(args, "--id")?;
-    let store = open_for_admin(global)?;
-    // The credential must exist before a handle is minted for it.
-    store.meta(&id).map_err(CliError::Store)?;
-    let handle = mint_handle().map_err(|e| CliError::Io(format!("csprng: {e}")))?;
-    // put_handle_hash folds the MintHandle audit entry into the same fenced txn, so
-    // the mint and its audit record commit atomically (no error-swallowed append).
-    store
-        .put_handle_hash(&handle.hash, &id, AuditCtx::admin(AuditOp::MintHandle))
-        .map_err(CliError::Store)?;
+    let result = commit_admin(
+        global,
+        AdminOpBody::MintHandle {
+            v: ADMIN_OP_SCHEMA_V1,
+            id: id.clone(),
+        },
+    )?;
+    let handle = result["handle"]
+        .as_str()
+        .ok_or_else(|| CliError::Io("mint did not return a handle".into()))?;
     // The raw handle is printed ONCE; write it into the consumer's 0600 config.
-    println!("{}", handle.raw);
+    println!("{handle}");
     eprintln!("(minted handle for {id}; store it now — it is not recoverable)");
     Ok(())
 }
 
 fn cmd_revoke_handle(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     let handle = required(args, "--handle")?;
-    let store = open_for_admin(global)?;
-    store
-        .revoke_handle(&handle, AuditCtx::admin(AuditOp::RevokeHandle))
-        .map_err(CliError::Store)?;
+    commit_admin(
+        global,
+        AdminOpBody::RevokeHandle {
+            v: ADMIN_OP_SCHEMA_V1,
+            handle,
+        },
+    )?;
     println!("revoked handle");
     Ok(())
 }
 
 fn cmd_revoke_all_handles(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     let id = required(args, "--id")?;
-    let store = open_for_admin(global)?;
-    let n = store
-        .revoke_all_handles(&id, AuditCtx::admin(AuditOp::RevokeHandle))
-        .map_err(CliError::Store)?;
+    let result = commit_admin(
+        global,
+        AdminOpBody::RevokeAllHandles {
+            v: ADMIN_OP_SCHEMA_V1,
+            id: id.clone(),
+        },
+    )?;
+    let n = result["handles_revoked"].as_u64().unwrap_or(0);
     println!("revoked {n} handle(s) for {id}");
     Ok(())
 }
@@ -836,9 +942,11 @@ fn parse_global(args: &mut Vec<String>) -> Result<GlobalArgs, CliError> {
         // here for the CLI and daemon to set differently.
         None => KeySource::Keychain,
     };
+    let subc_conn = take_flag(args, "--subc").map(PathBuf::from);
     Ok(GlobalArgs {
         data_dir: PathBuf::from(data_dir),
         key_source,
+        subc_conn,
     })
 }
 

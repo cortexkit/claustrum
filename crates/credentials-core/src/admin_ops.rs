@@ -145,6 +145,10 @@ pub fn apply(
             Ok(serde_json::json!({ "handles_revoked": revoked }))
         }
         AdminOpBody::MintHandle { id, .. } => {
+            // The credential must exist before a handle is minted for it (the handles
+            // table has no FK, so this guard is the check). meta() is a no-decrypt
+            // plaintext read, so it works on any lifecycle state.
+            store.meta(&id)?;
             let handle = mint_handle().map_err(|e| StoreOpError::Encode(format!("csprng: {e}")))?;
             let ctx = AuditCtx::route_admin(AuditOp::MintHandle, actor);
             store.put_handle_hash(&handle.hash, &id, ctx)?;

@@ -37,6 +37,7 @@ async fn main() {
     let mut force_refresh = false;
     let mut min_ttl_ms: Option<i64> = None;
     let mut show_account_id = false;
+    let mut show_claims = false;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -63,6 +64,12 @@ async fn main() {
             // the GetResult.account_id field: the payload already carries the claim,
             // so the probe can surface it without printing the token.
             "--show-account-id" => show_account_id = true,
+            // Decode the served payload AS a JWT and print its full claims object
+            // (pretty JSON). The claims are the token's non-secret self-description
+            // (issuer, audience, scopes, account bindings, expiry); the token itself
+            // — header+signature, the actual bearer secret — is never printed. For
+            // diffing two grants' claim sets during entitlement forensics.
+            "--show-claims" => show_claims = true,
             other => {
                 eprintln!("vault_read_probe: unexpected arg '{other}'");
                 std::process::exit(2);
@@ -109,7 +116,7 @@ async fn main() {
         min_ttl_ms,
     )
     .await;
-    report(&body, show_account_id);
+    report(&body, show_account_id, show_claims);
 }
 
 async fn control_rpc(stream: &mut TcpStream, corr: u64, body: Value) -> Frame {
@@ -226,15 +233,20 @@ async fn credential_get(
 /// the same claim path the vault's own `account_id_for_adapter` uses; duplicated
 /// here because the example must work against a daemon predating that field.
 fn chatgpt_account_id_from_payload(payload: &[u8]) -> Option<String> {
-    let token = std::str::from_utf8(payload).ok()?;
-    let claims_b64 = token.split('.').nth(1)?;
-    let claims_json = base64url_decode(claims_b64)?;
-    let claims: Value = serde_json::from_slice(&claims_json).ok()?;
+    let claims = jwt_claims_from_payload(payload)?;
     claims
         .get("https://api.openai.com/auth")?
         .get("chatgpt_account_id")?
         .as_str()
         .map(str::to_string)
+}
+
+/// Decode a JWT's claims segment (payload part only — never the signature).
+fn jwt_claims_from_payload(payload: &[u8]) -> Option<Value> {
+    let token = std::str::from_utf8(payload).ok()?;
+    let claims_b64 = token.split('.').nth(1)?;
+    let claims_json = base64url_decode(claims_b64)?;
+    serde_json::from_slice(&claims_json).ok()
 }
 
 /// Minimal unpadded base64url decoder (RFC 4648 §5) — dependency-free so the
@@ -284,7 +296,7 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 
 /// Print whether the read succeeded WITHOUT exposing the secret: only the payload
 /// length and a one-way fingerprint are shown.
-fn report(frame: &Frame, show_account_id: bool) {
+fn report(frame: &Frame, show_account_id: bool, show_claims: bool) {
     match frame.header.ty {
         FrameType::Response => {
             let value: Value = serde_json::from_slice(&frame.body).unwrap_or(Value::Null);
@@ -324,6 +336,15 @@ fn report(frame: &Frame, show_account_id: bool) {
                         match chatgpt_account_id_from_payload(&bytes) {
                             Some(account) => println!("   chatgpt account id (client-side decode): {account}"),
                             None => println!("   chatgpt account id: none (payload is not a JWT carrying the claim)"),
+                        }
+                    }
+                    if show_claims {
+                        match jwt_claims_from_payload(&bytes) {
+                            Some(claims) => println!(
+                                "   claims:\n{}",
+                                serde_json::to_string_pretty(&claims).unwrap_or_default()
+                            ),
+                            None => println!("   claims: payload is not a decodable JWT"),
                         }
                     }
                 }

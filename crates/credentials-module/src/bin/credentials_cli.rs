@@ -225,28 +225,18 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
 }
 
 fn usage() -> String {
-    "cortexkit-credentials admin CLI\n\
+    "ck auth — CortexKit provider-credential vault\n\
      \n\
-     Global: --data-dir <dir> (required) [--key-path <file> | keychain default]\n\
-             [--subc <connection-file>]\n\
-       --data-dir MUST be <data_home>/cortexkit/<module_id> where module_id is the\n\
-       subc.jsonc module key (\"cortexkit-credentials\"), so the CLI and the\n\
-       supervised daemon open the SAME store.\n\
-       --subc commits WRITES through the RUNNING module (zero downtime, master-key\n\
-       challenge-response). WITHOUT --subc, writes take the offline single-writer\n\
-       lease and the daemon must be STOPPED. rotate-master-key and bootstrap are\n\
-       always offline (they ignore --subc).\n\
-     Commands: bootstrap | put | import | login | logout | status | invalidate |\n\
-                rotate-master-key | mint-handle | revoke-handle | revoke-all-handles |\n\
-                list | audit | verify-audit\n\
-     status: vault health + per-credential inventory (no secrets) — run this when\n\
-            the health table says degraded. With --subc it reads the RUNNING daemon;\n\
-            offline it takes the lease like list.\n\
-     logout: --provider <p> | --id <id> — stop serving a credential REVERSIBLY\n\
-            (invalidate + revoke its handles; keeps the record and audit chain;\n\
-            `login --provider <p> --replace` restores it). Never a delete.\n\
-      list: print each credential's id + lifecycle state + version (no secrets),\n\
-            e.g. to find which credential a health probe flagged needs_reauth.\n\
+     On a standard install, commands need NO flags: the vault location and the\n\
+     running daemon are auto-discovered. Just:\n\
+       ck auth status                              show vault health + inventory\n\
+       ck auth login --provider xai --replace      (re-)login a provider\n\
+       ck auth logout --provider xai               stop serving a provider\n\
+     \n\
+     Commands: login | logout | status | list | import | put | audit | verify-audit\n\
+               mint-handle | revoke-handle | revoke-all-handles | invalidate\n\
+               rotate-master-key | bootstrap\n\
+     \n\
       login: --provider <anthropic|openai|xai> [--id <id>] [--replace] [--no-listener]\n\
             vault-native first-party OAuth login — mints an INDEPENDENT refresh token\n\
             the vault solely custodies (no dual-custody rotation race). Opens a\n\
@@ -256,6 +246,14 @@ fn usage() -> String {
             the shown code#state (its callback page is remote, no listener).\n\
             --replace swaps an existing credential (keeps its handle).\n\
             Default id: oauth:anthropic / chatgpt:openai / oauth:xai.\n\
+     logout: --provider <p> | --id <id> — stop serving a credential REVERSIBLY\n\
+            (invalidate + revoke its handles; keeps the record and audit chain;\n\
+            `login --provider <p> --replace` restores it). Never a delete.\n\
+     status: vault health + per-credential inventory (no secrets) — run this when\n\
+            the health table says degraded. Reads the RUNNING daemon when one is up,\n\
+            else the offline store.\n\
+      list: print each credential's id + lifecycle state + version (no secrets),\n\
+            e.g. to find which credential a health probe flagged needs_reauth.\n\
      import: --source <opencode|pi|gemini-cli|antigravity> --id <id> --json <file>\n\
              [--provider <key>] [--adapter <name>] [--replace]\n\
        opencode/pi read auth.json (--provider selects one entry; an apikey:<p> id\n\
@@ -264,7 +262,19 @@ fn usage() -> String {
        antigravity reads ~/.config/opencode/antigravity-accounts.json (accounts array;\n\
          --provider selects an account by email/index, default activeIndex);\n\
        --adapter overrides the method-derived refresh adapter;\n\
-       --replace overwrites an existing id (fix a wrong-source import; keeps handles)."
+       --replace overwrites an existing id (fix a wrong-source import; keeps handles).\n\
+     \n\
+     Overrides (rarely needed):\n\
+       [--data-dir <dir>]  vault location; defaults to the standard per-user path\n\
+                           (<data_home>/cortexkit/cortexkit-credentials). An explicit\n\
+                           dir targets THAT vault and stays offline unless --subc is\n\
+                           also given.\n\
+       [--subc <file>]     subc connection file; auto-discovered on a standard\n\
+                           install. Present ⇒ writes commit through the running module\n\
+                           (zero downtime); absent/no daemon ⇒ offline single-writer\n\
+                           lease (daemon must be stopped). rotate-master-key and\n\
+                           bootstrap are always offline.\n\
+       [--key-path <file>] operator key file instead of the OS keychain."
         .to_string()
 }
 

@@ -33,6 +33,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use cortexkit_store::{Migration, SqliteStore, StoreError};
+use rusqlite::OptionalExtension;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
@@ -667,25 +668,55 @@ impl EncryptedStore {
         record: &VaultRecord,
         ctx: AuditCtx<'_>,
     ) -> Result<(), StoreOpError> {
-        // meta() reads plaintext columns only (no decrypt), so a needs_reauth or
-        // quarantined current record does not block the replacement.
-        let current = self.meta(credential_id)?;
-        let next_version = current.record_version.saturating_add(1);
-        let mut record = record.clone();
-        record.record_version = next_version;
-        let blob = self.seal_record(credential_id, &record)?;
         let key_id_hex = self.key_id.to_hex();
         let now = now_ms();
         let audit_key = self.audit_key.clone();
         let payload_hash_hex = hex32(&payload_hash(&record.payload));
 
-        let changed = self.fenced_write(|tx| {
+        // Read the current version, seal at version+1, and update — ALL inside the
+        // one fenced transaction, gated on `WHERE record_version = <the version we
+        // just read>`. On the single writer connection this is atomic: nothing can
+        // move the version between the read and the guarded update, so the "+1" can
+        // never alias a concurrent refresh's own +1 (the lost-update bug a
+        // read-outside-the-txn version + unguarded update would allow). "State-
+        // unconditional" (works on needs_reauth/quarantined via the plaintext
+        // version read, no decrypt) is preserved; only lost-update tolerance is
+        // removed. A CasMismatch here would mean the row vanished mid-txn (a
+        // concurrent delete), which cannot happen under the single writer, so the
+        // guard is belt-and-suspenders that also documents the invariant.
+        let outcome = self.fenced_write(|tx| {
+            let current_version: Option<i64> = tx
+                .query_row(
+                    "SELECT record_version FROM credentials WHERE credential_id = ?1",
+                    rusqlite::params![credential_id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let Some(current_version) = current_version else {
+                return Ok(None); // NotFound: signalled to the caller below.
+            };
+            let next_version = (current_version as u64).saturating_add(1);
+
+            let mut sealed = record.clone();
+            sealed.record_version = next_version;
+            // seal_record is pure crypto (no DB), safe to call inside the txn.
+            let blob = self
+                .seal_record(credential_id, &sealed)
+                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+
             let n = tx.execute(
                 "UPDATE credentials \
                  SET record_version = ?2, key_id = ?3, state = 'active', envelope = ?4, \
                      updated_at_ms = ?5 \
-                 WHERE credential_id = ?1",
-                rusqlite::params![credential_id, next_version as i64, key_id_hex, blob, now],
+                 WHERE credential_id = ?1 AND record_version = ?6",
+                rusqlite::params![
+                    credential_id,
+                    next_version as i64,
+                    key_id_hex,
+                    blob,
+                    now,
+                    current_version
+                ],
             )?;
             if n > 0 {
                 clear_intent_tx(tx, credential_id)?;
@@ -701,12 +732,13 @@ impl EncryptedStore {
                     },
                 )?;
             }
-            Ok(n)
+            Ok(Some(n))
         })?;
-        if changed == 0 {
-            return Err(StoreOpError::NotFound);
+        match outcome {
+            None => Err(StoreOpError::NotFound),
+            Some(0) => Err(StoreOpError::CasMismatch),
+            Some(_) => Ok(()),
         }
-        Ok(())
     }
 
     /// Overwrite under CAS, auditing as a vault-owned `Overwrite`. Convenience
@@ -862,6 +894,64 @@ impl EncryptedStore {
     /// callers/tests that do not specify an audit context.
     pub fn invalidate(&self, credential_id: &str) -> Result<(), StoreOpError> {
         self.invalidate_audited(credential_id, AuditCtx::vault(AuditOp::Invalidate))
+    }
+
+    /// The COMPOUND authoritative invalidate: mark `needs_reauth`, clear any
+    /// dangling refresh intent, AND revoke every live handle for the credential —
+    /// all in ONE fenced transaction, with both audit entries (`Invalidate` and,
+    /// when any handles were live, `RevokeHandle`) inside it.
+    ///
+    /// This exists because invalidate-then-revoke as two calls is crash-partial: a
+    /// crash between them leaves a dead credential still resolvable by handle. The
+    /// offline CLI performs the same pair; the online admin surface additionally
+    /// must not let a relay reorder or split the two halves, so the compound op is
+    /// the only online shape. Returns the number of handles revoked.
+    pub fn invalidate_and_revoke_all_audited(
+        &self,
+        credential_id: &str,
+        ctx: AuditCtx<'_>,
+    ) -> Result<usize, StoreOpError> {
+        let now = now_ms();
+        let audit_key = self.audit_key.clone();
+        self.fenced_write(|tx| {
+            tx.execute(
+                "UPDATE credentials SET state = ?2, updated_at_ms = ?3 \
+                 WHERE credential_id = ?1",
+                rusqlite::params![credential_id, RecordState::NeedsReauth.as_str(), now],
+            )?;
+            clear_intent_tx(tx, credential_id)?;
+            let revoked = tx.execute(
+                "UPDATE handles SET revoked = 1 \
+                 WHERE credential_id = ?1 AND revoked = 0",
+                rusqlite::params![credential_id],
+            )?;
+            append_audit_tx(
+                tx,
+                &audit_key,
+                &AuditRecord {
+                    op: ctx.op,
+                    credential_id: Some(credential_id.to_string()),
+                    payload_hash: None,
+                    actor: ctx.actor.to_string(),
+                    alarm: ctx.alarm,
+                },
+            )?;
+            if revoked > 0 {
+                append_audit_tx(
+                    tx,
+                    &audit_key,
+                    &AuditRecord {
+                        op: AuditOp::RevokeHandle,
+                        credential_id: Some(credential_id.to_string()),
+                        payload_hash: None,
+                        actor: ctx.actor.to_string(),
+                        alarm: ctx.alarm,
+                    },
+                )?;
+            }
+            Ok(revoked)
+        })
+        .map_err(StoreOpError::from)
     }
 
     /// Quarantine a record (`corrupt`). Used by the read path on a decrypt/parse
@@ -1115,12 +1205,14 @@ impl EncryptedStore {
     /// Record a freshly minted handle for a credential, storing only its hash, AND
     /// append a `MintHandle` audit entry — both in ONE fenced transaction, so a handle
     /// can never be minted without a tamper-evident audit record (the same atomicity
-    /// every other durable mutation uses). Mint is admin-only (there is no non-audited
-    /// path), so the actor is fixed and the entry is marked as an admin write.
+    /// every other durable mutation uses). Mint is admin-only; the caller's audit
+    /// context records WHICH admin origin performed it (offline CLI vs the module's
+    /// authenticated route admin surface) so the trail is truthful provenance.
     pub fn put_handle_hash(
         &self,
         handle_hash_hex: &str,
         credential_id: &str,
+        ctx: AuditCtx<'_>,
     ) -> Result<(), StoreOpError> {
         let now = now_ms();
         let audit_key = self.audit_key.clone();
@@ -1137,8 +1229,8 @@ impl EncryptedStore {
                     op: AuditOp::MintHandle,
                     credential_id: Some(credential_id.to_string()),
                     payload_hash: None,
-                    actor: "offline-cli".to_string(),
-                    alarm: Some(AlarmReason::AdminWrite),
+                    actor: ctx.actor.to_string(),
+                    alarm: ctx.alarm,
                 },
             )?;
             Ok(())
@@ -1152,7 +1244,7 @@ impl EncryptedStore {
     /// security-relevant handle action — is always tamper-evidently recorded. The
     /// audit entry is keyed by the handle hash (the raw handle is never stored), not a
     /// credential id, since revoke-by-handle does not name the credential.
-    pub fn revoke_handle(&self, raw_handle: &str) -> Result<(), StoreOpError> {
+    pub fn revoke_handle(&self, raw_handle: &str, ctx: AuditCtx<'_>) -> Result<(), StoreOpError> {
         let h = handle_hash(raw_handle);
         let audit_key = self.audit_key.clone();
         self.fenced_write(|tx| {
@@ -1167,8 +1259,8 @@ impl EncryptedStore {
                     op: AuditOp::RevokeHandle,
                     credential_id: None,
                     payload_hash: Some(h.clone()),
-                    actor: "offline-cli".to_string(),
-                    alarm: Some(AlarmReason::AdminWrite),
+                    actor: ctx.actor.to_string(),
+                    alarm: ctx.alarm,
                 },
             )?;
             Ok(())
@@ -1179,7 +1271,11 @@ impl EncryptedStore {
     /// Revoke ALL handles for a credential (e.g. on invalidate / suspected leak).
     /// Returns the number revoked. The update AND a `RevokeHandle` audit entry (naming
     /// the credential) commit in ONE fenced transaction.
-    pub fn revoke_all_handles(&self, credential_id: &str) -> Result<usize, StoreOpError> {
+    pub fn revoke_all_handles(
+        &self,
+        credential_id: &str,
+        ctx: AuditCtx<'_>,
+    ) -> Result<usize, StoreOpError> {
         let audit_key = self.audit_key.clone();
         self.fenced_write(|tx| {
             let n = tx.execute(
@@ -1194,8 +1290,8 @@ impl EncryptedStore {
                     op: AuditOp::RevokeHandle,
                     credential_id: Some(credential_id.to_string()),
                     payload_hash: None,
-                    actor: "offline-cli".to_string(),
-                    alarm: Some(AlarmReason::AdminWrite),
+                    actor: ctx.actor.to_string(),
+                    alarm: ctx.alarm,
                 },
             )?;
             Ok(n)
@@ -1726,7 +1822,13 @@ mod tests {
         // mark it needs_reauth (as a failed refresh would), and mint a handle for it.
         store.create("opencode:google", &oauth_record()).unwrap();
         let h = mint_handle().unwrap();
-        store.put_handle_hash(&h.hash, "opencode:google").unwrap();
+        store
+            .put_handle_hash(
+                &h.hash,
+                "opencode:google",
+                AuditCtx::admin(AuditOp::MintHandle),
+            )
+            .unwrap();
         store.invalidate("opencode:google").unwrap();
         // A CAS overwrite cannot even read it (get on a needs_reauth row fails closed).
         assert!(matches!(
@@ -1907,12 +2009,18 @@ mod tests {
         assert!(h.raw.starts_with("ckh_"));
         assert_eq!(h.hash, handle_hash(&h.raw));
         store
-            .put_handle_hash(&h.hash, "opencode:anthropic")
+            .put_handle_hash(
+                &h.hash,
+                "opencode:anthropic",
+                AuditCtx::admin(AuditOp::MintHandle),
+            )
             .unwrap();
         // Resolve maps the raw handle to its credential id.
         assert_eq!(store.resolve_handle(&h.raw).unwrap(), "opencode:anthropic");
         // Revoke makes it resolve to NotFound (uniform with an unknown handle).
-        store.revoke_handle(&h.raw).unwrap();
+        store
+            .revoke_handle(&h.raw, AuditCtx::admin(AuditOp::RevokeHandle))
+            .unwrap();
         assert!(matches!(
             store.resolve_handle(&h.raw),
             Err(StoreOpError::NotFound)
@@ -1942,9 +2050,15 @@ mod tests {
         store.create("id", &oauth_record()).unwrap();
         let h1 = mint_handle().unwrap();
         let h2 = mint_handle().unwrap();
-        store.put_handle_hash(&h1.hash, "id").unwrap();
-        store.put_handle_hash(&h2.hash, "id").unwrap();
-        let n = store.revoke_all_handles("id").unwrap();
+        store
+            .put_handle_hash(&h1.hash, "id", AuditCtx::admin(AuditOp::MintHandle))
+            .unwrap();
+        store
+            .put_handle_hash(&h2.hash, "id", AuditCtx::admin(AuditOp::MintHandle))
+            .unwrap();
+        let n = store
+            .revoke_all_handles("id", AuditCtx::admin(AuditOp::RevokeHandle))
+            .unwrap();
         assert_eq!(n, 2, "both handles revoked");
         assert!(matches!(
             store.resolve_handle(&h1.raw),

@@ -677,7 +677,9 @@ fn cmd_invalidate(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> 
         .map_err(CliError::Store)?;
     // Revoke the credential's handles too: an invalidated credential's handles must
     // not keep resolving.
-    let revoked = store.revoke_all_handles(&id).map_err(CliError::Store)?;
+    let revoked = store
+        .revoke_all_handles(&id, AuditCtx::admin(AuditOp::RevokeHandle))
+        .map_err(CliError::Store)?;
     println!("invalidated {id}; revoked {revoked} handle(s)");
     Ok(())
 }
@@ -739,7 +741,7 @@ fn cmd_mint_handle(global: &GlobalArgs, args: &[String]) -> Result<(), CliError>
     // put_handle_hash folds the MintHandle audit entry into the same fenced txn, so
     // the mint and its audit record commit atomically (no error-swallowed append).
     store
-        .put_handle_hash(&handle.hash, &id)
+        .put_handle_hash(&handle.hash, &id, AuditCtx::admin(AuditOp::MintHandle))
         .map_err(CliError::Store)?;
     // The raw handle is printed ONCE; write it into the consumer's 0600 config.
     println!("{}", handle.raw);
@@ -750,7 +752,9 @@ fn cmd_mint_handle(global: &GlobalArgs, args: &[String]) -> Result<(), CliError>
 fn cmd_revoke_handle(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     let handle = required(args, "--handle")?;
     let store = open_for_admin(global)?;
-    store.revoke_handle(&handle).map_err(CliError::Store)?;
+    store
+        .revoke_handle(&handle, AuditCtx::admin(AuditOp::RevokeHandle))
+        .map_err(CliError::Store)?;
     println!("revoked handle");
     Ok(())
 }
@@ -758,7 +762,9 @@ fn cmd_revoke_handle(global: &GlobalArgs, args: &[String]) -> Result<(), CliErro
 fn cmd_revoke_all_handles(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     let id = required(args, "--id")?;
     let store = open_for_admin(global)?;
-    let n = store.revoke_all_handles(&id).map_err(CliError::Store)?;
+    let n = store
+        .revoke_all_handles(&id, AuditCtx::admin(AuditOp::RevokeHandle))
+        .map_err(CliError::Store)?;
     println!("revoked {n} handle(s) for {id}");
     Ok(())
 }

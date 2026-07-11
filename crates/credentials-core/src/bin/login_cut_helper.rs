@@ -97,7 +97,11 @@ fn main() {
         .expect("seed old credential");
     let handle = mint_handle().expect("mint handle");
     store
-        .put_handle_hash(&handle.hash, "oauth:anthropic")
+        .put_handle_hash(
+            &handle.hash,
+            "oauth:anthropic",
+            AuditCtx::admin(AuditOp::MintHandle),
+        )
         .expect("mint handle for old cred");
     // Persist the raw handle next to the rig so the parent test can prove it still
     // RESOLVES (via the real public resolve_handle API) after the crash — a genuine

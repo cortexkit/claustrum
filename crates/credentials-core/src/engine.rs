@@ -302,9 +302,18 @@ impl RefreshEngine {
                 }
             }
             // A definitively dead refresh token: mark needs_reauth and clear the
-            // intent (no rotation can recover it).
+            // intent (no rotation can recover it). VERSION-GATED on the version this
+            // refresh actually observed: if an admin replaced the credential while
+            // the provider call was in flight (bumping the version), the invalid_grant
+            // verdict is about the OLD record's token, and invalidating the fresh
+            // replacement would kill a healthy credential the verdict never saw. The
+            // stale invalidation then no-ops silently; the replacement stands.
             Err(e @ RefreshError::InvalidGrant(_)) => {
-                self.store.invalidate(credential_id)?;
+                self.store.invalidate_if_version_audited(
+                    credential_id,
+                    record.record_version,
+                    AuditCtx::vault(AuditOp::Invalidate),
+                )?;
                 Err(EngineError::RefreshFailed(e))
             }
             // A transient/ambiguous failure (transport, decode, unexpected status):

@@ -823,6 +823,7 @@ impl std::error::Error for ModuleError {}
 mod tests {
     use super::*;
     use cortexkit_store::{Isolation, StorageBackend};
+    use credentials_core::audit::{AuditCtx, AuditOp};
     use credentials_core::key::{MasterKey, MASTER_KEY_LEN};
     use credentials_core::record::{CredentialKind, VaultRecord};
     use read_surface::ReadSurface;
@@ -1093,7 +1094,11 @@ mod tests {
         // Mint a handle for the active credential so a per-handle status has a target.
         let handle = credentials_core::store::mint_handle().expect("mint handle");
         store
-            .put_handle_hash(&handle.hash, "apikey:active")
+            .put_handle_hash(
+                &handle.hash,
+                "apikey:active",
+                AuditCtx::admin(AuditOp::MintHandle),
+            )
             .expect("put handle");
 
         let params = StatusParams {
@@ -1187,13 +1192,21 @@ mod tests {
             .expect("create chatgpt record");
         let oauth_handle = credentials_core::store::mint_handle().expect("mint");
         store
-            .put_handle_hash(&oauth_handle.hash, "chatgpt:openai")
+            .put_handle_hash(
+                &oauth_handle.hash,
+                "chatgpt:openai",
+                AuditCtx::admin(AuditOp::MintHandle),
+            )
             .expect("put oauth handle");
 
         // A handle for the seeded api-key record (no adapter → no account claim).
         let apikey_handle = credentials_core::store::mint_handle().expect("mint");
         store
-            .put_handle_hash(&apikey_handle.hash, "apikey:active")
+            .put_handle_hash(
+                &apikey_handle.hash,
+                "apikey:active",
+                AuditCtx::admin(AuditOp::MintHandle),
+            )
             .expect("put apikey handle");
 
         let got = surface

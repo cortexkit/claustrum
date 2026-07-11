@@ -138,6 +138,21 @@ impl AuditCtx<'_> {
             alarm: Some(AlarmReason::AdminWrite),
         }
     }
+
+    /// An admin write that arrived over the running module's authenticated route
+    /// admin surface (master-key challenge-response), rather than the offline CLI
+    /// taking the lease. Always alarmed like any admin write; the actor names the
+    /// authenticated origin so the audit trail distinguishes a live module-driven
+    /// admin op from an offline-CLI one. The caller passes a stable actor string
+    /// (e.g. "route-admin" or "route-admin/gen-N"); it is truthful provenance, not
+    /// a caller-chosen free-form label — the module derives it, not the client.
+    pub fn route_admin(op: AuditOp, actor: &str) -> AuditCtx<'_> {
+        AuditCtx {
+            op,
+            actor,
+            alarm: Some(AlarmReason::AdminWrite),
+        }
+    }
 }
 
 /// The data of one audit entry, BEFORE it is sequenced and chained. The store

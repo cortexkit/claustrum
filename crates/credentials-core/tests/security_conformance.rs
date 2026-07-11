@@ -201,12 +201,16 @@ fn invalidate_then_get_is_needs_reauth_and_revokes_handles() {
     let store = open(&root, 1);
     store.create("id", &api_key_record(b"secret")).unwrap();
     let h = credentials_core::store::mint_handle().unwrap();
-    store.put_handle_hash(&h.hash, "id").unwrap();
+    store
+        .put_handle_hash(&h.hash, "id", AuditCtx::admin(AuditOp::MintHandle))
+        .unwrap();
     assert_eq!(store.resolve_handle(&h.raw).unwrap(), "id");
 
     // Authoritative invalidate, then revoke its handles (the admin invalidate flow).
     store.invalidate("id").unwrap();
-    store.revoke_all_handles("id").unwrap();
+    store
+        .revoke_all_handles("id", AuditCtx::admin(AuditOp::RevokeHandle))
+        .unwrap();
 
     // get fails closed; the handle no longer resolves.
     assert!(matches!(store.get("id"), Err(StoreOpError::NeedsReauth)));

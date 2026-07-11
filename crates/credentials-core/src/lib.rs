@@ -18,6 +18,7 @@
 // refresh adapters, the crash-safe refresh state machine, and the encrypted
 // store.
 
+pub mod admin_auth;
 pub mod audit;
 pub mod contract;
 pub mod credential_id;
@@ -35,6 +36,10 @@ pub mod refresh_adapters;
 pub mod resolver;
 pub mod store;
 
+pub use admin_auth::{
+    generate_admin_nonce, vault_id_for_canonical_dir, AdminMacKey, TranscriptParts,
+    ADMIN_NONCE_LEN, ADMIN_TAG_LEN, VAULT_ID_LEN,
+};
 pub use audit::{AlarmReason, AuditEntry, AuditOp, AuditRecord};
 pub use contract::{keychain_service_for, MODULE_ID, STORAGE_NAMESPACE};
 pub use credential_id::{

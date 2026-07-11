@@ -1,10 +1,20 @@
 # Module-Driven Admin Ops — Design Note
 
-Status: AMENDED after Oracle adversarial review (verdict: GO-WITH-CHANGES; all 13
-findings resolved below). Transport settled with SUBCONSCIOUS (route-plane Option
-A-plus). One item pending the daemon owner: the Gate-1 provenance guarantee (§Gate 1).
-Finding 8 (control-lane starvation) was a live bug in shipped code and is already
-fixed and regression-tested (commit a1d2904), independent of this design.
+Status: IMPLEMENTED (all commits below, full local gate green incl. the real-daemon
+e2e admin-path proof). Design AMENDED after Oracle adversarial review (verdict:
+GO-WITH-CHANGES; all 13 findings resolved). Transport settled with SUBCONSCIOUS
+(route-plane Option A-plus). One item still open with the daemon owner: the Gate-1
+provenance HARDENING (§Gate 1) — the vault ships correct without it (Gate 2 is the
+authority), the ask is a fleet-wide upgrade. Finding 8 (control-lane starvation) was
+a live bug in shipped code, fixed and regression-tested (a1d2904), independent of
+this design.
+
+As-built commits: a1d2904 (drain fix) · bc2de08 (core MAC transcript) · 4ab5e1c
+(store/engine hardening: version-guarded replace, compound invalidate+revoke,
+version-gated invalid_grant, per-id admin lock) · 463b789 (shared AdminOpBody
+contract + applier) · 66bf388 (module route admin surface + 12 security tests) ·
+2abddfa (CLI route backend + offline fallback) · 40430b6 (real-daemon e2e admin-path
+proof) · 729dcda (one-shot localhost login listener).
 
 ## Problem
 
@@ -309,15 +319,32 @@ granularity beyond `direct`, deliberately: subc attests provenance, it does not
 authorize module-domain mutations. Their recommendation (route-plane + in-band
 master-key proof) is adopted above; the earlier private-socket draft is retired.
 
-## Rollout
+## Rollout — DONE
 
-1. Design gate: this note → Oracle adversarial review → build.
-2. Module: record principal per bind; `admin.challenge` + `admin.store`/`invalidate`/
-   handle ops on the read surface, dual-gated; fenced+audited commits exactly as the
-   offline path today.
-3. CLI: thin front (route backend when module up, offline lease fallback when down).
-4. One-shot localhost callback into the CLI login flow (approved envelope; built
-   directly into this shape, per the sequencing hint).
-5. Then: `login --provider google` (clean next provider), and the antigravity
-   project-resolution boundary question (separate design decision).
-6. CK app path composes for free: the Swift client is already a direct consumer.
+1. ✅ Design gate: this note → Oracle adversarial review → build.
+2. ✅ Module: records principal per bind (fresh generation, drop on Goodbye);
+   `admin.challenge` + `admin.op` on the route surface, dual-gated; the shared core
+   applier runs each credential-scoped op under the engine's per-id single-flight
+   lock; fenced+audited commits exactly as the offline path.
+3. ✅ CLI: thin front — `--subc` routes writes through the running module (challenge
+   → keychain key resolve by returned key_id → op-body MAC → admin.op), with the
+   offline lease path as the no-live-module fallback and a distinct indeterminate
+   outcome (exit 5) after dispatch.
+4. ✅ One-shot localhost callback listener into the login flow (openai/xai), paste
+   fallback retained, daemon stays zero-inbound.
+
+### Deploy
+
+The as-built binaries need a prod drain-restart to land (the currently-deployed
+`ck-credentials` also still carries the finding-8 drain-starvation hole fixed in
+a1d2904). Fold into the next drain window; not an emergency (exploiting the drain
+hole needs a hostile route consumer, and today's only consumer is trusted broca).
+After deploy, a re-login is `login --provider <p> --replace --subc <conn>` with ZERO
+downtime — the operator dance that motivated this is gone.
+
+### Remaining (separate, not part of this feature)
+
+- `login --provider google` (clean next provider — a short wire-research pass).
+- The antigravity project-resolution boundary (a design decision, not a quick build).
+- The CK-app path composes for free: the Swift client is already a `direct` consumer,
+  so it can drive `admin.challenge`/`admin.op` with the same master-key proof.

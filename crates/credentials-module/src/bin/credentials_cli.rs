@@ -687,11 +687,20 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     // value never touches argv — it is a secret-grade code read from stdin only.
     let captured = match listener {
         Some(l) => {
+            println!("Approve in the browser — the login completes here automatically.");
             println!(
-                "Waiting for the browser redirect on {} (or paste the URL if it does not complete)...",
-                wire.redirect_uri
+                "(The provider's page may show a code or tell you to paste something: \
+                 IGNORE that, it is the no-listener fallback. Paste only if this \
+                 command asks you to.)"
             );
-            l.wait()
+            let got = l.wait();
+            if got.is_some() {
+                // Say the capture happened, so the operator is never left matching
+                // the browser's "paste this code" instruction against a CLI that
+                // (correctly) shows no paste prompt.
+                println!("Browser redirect received — completing the login, nothing to paste.");
+            }
+            got
         }
         None => None,
     };

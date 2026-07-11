@@ -36,6 +36,8 @@ use std::process::ExitCode;
 
 #[path = "cli_support/admin_client.rs"]
 mod admin_client;
+#[path = "cli_support/login_listener.rs"]
+mod login_listener;
 
 use cortexkit_store::{open_sqlite, Isolation, StorageBackend, StorageDescriptor, StoreError};
 use credentials_core::admin_ops::{AdminAuditOp, AdminOpBody, StoreMode, ADMIN_OP_SCHEMA_V1};
@@ -196,7 +198,7 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
     // Boolean (valueless) flags accepted per command.
     let bool_flags: &[&str] = match command {
         "import" => &["--replace"],
-        "login" => &["--replace"],
+        "login" => &["--replace", "--no-listener"],
         _ => &[],
     };
     let mut i = 0;
@@ -236,14 +238,15 @@ fn usage() -> String {
                 verify-audit\n\
       list: print each credential's id + lifecycle state + version (no secrets),\n\
             e.g. to find which credential a health probe flagged needs_reauth.\n\
-      login: --provider <anthropic|openai> [--id <id>] [--replace]\n\
+      login: --provider <anthropic|openai|xai> [--id <id>] [--replace] [--no-listener]\n\
             vault-native first-party OAuth login — mints an INDEPENDENT refresh token\n\
             the vault solely custodies (no dual-custody rotation race). Opens a\n\
-            browser URL; paste back what the flow presents (anthropic: the shown\n\
-            code#state; openai: the full localhost:1455 URL from the address bar —\n\
-            the connection-refused page is expected, nothing listens there).\n\
+            browser URL. openai/xai: a one-shot CLI-local listener on the loopback\n\
+            redirect completes the flow automatically (--no-listener, a busy port, or\n\
+            a timeout falls back to pasting the address-bar URL). anthropic: paste\n\
+            the shown code#state (its callback page is remote, no listener).\n\
             --replace swaps an existing credential (keeps its handle).\n\
-            Default id: oauth:anthropic / chatgpt:openai.\n\
+            Default id: oauth:anthropic / chatgpt:openai / oauth:xai.\n\
      import: --source <opencode|pi|gemini-cli|antigravity> --id <id> --json <file>\n\
              [--provider <key>] [--adapter <name>] [--replace]\n\
        opencode/pi read auth.json (--provider selects one entry; an apikey:<p> id\n\
@@ -642,23 +645,50 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     )
     .map_err(|e| CliError::Io(format!("building authorize url: {e}")))?;
 
+    // For a loopback-redirect provider (openai/xai), bind a one-shot CLI-local
+    // listener on the EXACT redirect address BEFORE opening the browser, so the
+    // redirect can't race an unbound socket. `--no-listener` forces the paste path.
+    // The listener is a pure convenience over paste; the daemon never listens.
+    let listener = if has_flag(args, "--no-listener") {
+        None
+    } else {
+        login_listener::loopback_bind_addr(wire.redirect_uri)
+            .and_then(|addr| login_listener::capture_callback(&addr))
+    };
+
     println!("Open this URL in a browser signed into the account to custody:");
     println!();
     println!("  {authorize_url}");
     println!();
     // Best-effort browser open; the printed URL is the source of truth if it fails.
     let _ = open_in_browser(&authorize_url);
-    println!("{}", wire.paste_prompt);
 
-    // Read the pasted code from STDIN (never from argv — it is a secret-grade value
-    // that must not land in shell history or `ps` output). It is never echoed back
-    // or logged.
-    let mut pasted = String::new();
-    std::io::stdin()
-        .read_line(&mut pasted)
-        .map_err(|e| CliError::Io(format!("reading pasted code: {e}")))?;
-    let callback = parse_callback(&pasted)
-        .ok_or_else(|| CliError::Usage("could not parse the pasted callback".to_string()))?;
+    // Prefer the listener: if it captured the redirect, use it; otherwise (bind
+    // failed, timed out, or a non-loopback redirect) fall back to paste. The pasted
+    // value never touches argv — it is a secret-grade code read from stdin only.
+    let captured = match listener {
+        Some(l) => {
+            println!(
+                "Waiting for the browser redirect on {} (or paste the URL if it does not complete)...",
+                wire.redirect_uri
+            );
+            l.wait()
+        }
+        None => None,
+    };
+    let raw_callback = match captured {
+        Some(query) => query,
+        None => {
+            println!("{}", wire.paste_prompt);
+            let mut pasted = String::new();
+            std::io::stdin()
+                .read_line(&mut pasted)
+                .map_err(|e| CliError::Io(format!("reading pasted code: {e}")))?;
+            pasted
+        }
+    };
+    let callback = parse_callback(&raw_callback)
+        .ok_or_else(|| CliError::Usage("could not parse the login callback".to_string()))?;
 
     // Exchange the code for tokens over the provider's wire. State is validated
     // inside (before any network call), so a forged/stale callback is refused up

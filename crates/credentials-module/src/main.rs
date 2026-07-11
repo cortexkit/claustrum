@@ -344,7 +344,12 @@ where
                     write_frame(&mut writer, &frame)
                         .await
                         .map_err(|e| ModuleError::Message(e.to_string()))?;
-                    drain_ready!(route_rx);
+                    // Deliberately NO route-lane drain here: emit ONE route frame per
+                    // iteration, then fall back to the biased select so the control
+                    // lane is re-polled between every route frame. Draining all ready
+                    // route frames in a loop would let a producer that keeps the route
+                    // queue non-empty starve control indefinitely — the exact
+                    // liveness hole the two-lane split exists to close.
                 }
                 None => route_open = false,
             },
@@ -880,6 +885,79 @@ mod tests {
         let conn = rusqlite::Connection::open(db_path).expect("open raw db");
         conn.execute("UPDATE cortexkit_fence SET epoch = 999 WHERE id = 0", [])
             .expect("bump fence epoch");
+    }
+
+    /// A route producer that keeps the route lane non-empty must NOT starve the
+    /// control lane. This drives the REAL `drain_writer` with a saturating route
+    /// producer, then sends one control frame and asserts it reaches the wire
+    /// within a small bounded number of frames. With an unbounded route drain
+    /// (a `drain_ready!(route_rx)` loop after each route write), the producer
+    /// refills the queue during every write await and the control frame never
+    /// gets scheduled — this test fails against that implementation (verified),
+    /// so it discriminates the exact starvation hole, not just the bias.
+    #[tokio::test]
+    async fn control_frame_is_not_starved_by_a_saturating_route_producer() {
+        let (control_tx, control_rx) = mpsc::channel::<Frame>(CONTROL_EGRESS_BUFFER);
+        let (route_tx, route_rx) = mpsc::channel::<Frame>(EGRESS_BUFFER);
+        // A SMALL duplex buffer so only a handful of frames fit in flight: frames
+        // already written before the control send are not starvation evidence, so
+        // the wire window must be tight for the frames-until-control count to
+        // measure the writer's scheduling rather than buffered backlog.
+        let (client, mut server) = tokio::io::duplex(256);
+
+        let writer_task = tokio::spawn(async move {
+            let _ = drain_writer(client, control_rx, route_rx).await;
+        });
+
+        fn frame(channel: u16, corr: u64) -> Frame {
+            Frame::build_with_version(
+                PROTOCOL_VERSION,
+                FrameType::Response,
+                Flags::new(false, Priority::Interactive, false),
+                channel,
+                corr,
+                vec![0u8; 32],
+            )
+            .unwrap()
+        }
+
+        // Saturating producer: keeps the route lane non-empty for the whole test.
+        let producer = tokio::spawn(async move {
+            loop {
+                if route_tx.send(frame(5, 1)).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        // Let the producer fill the queue and the writer start draining.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        control_tx.send(frame(0, 99)).await.expect("control send");
+
+        // The control frame must appear within a small bounded number of frames.
+        let mut frames_until_control = 0usize;
+        loop {
+            let got = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                subc_core::read_frame(&mut server),
+            )
+            .await
+            .expect("wire stalled: control frame never arrived (starved)")
+            .expect("read frame")
+            .expect("stream closed before the control frame arrived");
+            if got.header.channel == 0 && got.header.corr == 99 {
+                break;
+            }
+            frames_until_control += 1;
+            assert!(
+                frames_until_control < 64,
+                "control frame starved behind {frames_until_control}+ route frames"
+            );
+        }
+
+        producer.abort();
+        drop(control_tx);
+        writer_task.abort();
     }
 
     /// Drive the REAL channel-0 control handler with a `health.check` Request and

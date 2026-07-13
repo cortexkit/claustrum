@@ -105,12 +105,13 @@ async fn main() {
     wait_for_catalog(&mut stream).await;
     eprintln!("[probe] vault module '{MODULE_ID}' is catalog-live");
 
-    let route_channel = route_open(&mut stream, &root).await;
-    eprintln!("[probe] route.open -> route_channel={route_channel}");
+    let (route_channel, route_epoch) = route_open(&mut stream, &root).await;
+    eprintln!("[probe] route.open -> route_channel={route_channel} route_epoch={route_epoch}");
 
     let body = credential_get(
         &mut stream,
         route_channel,
+        route_epoch,
         &handle,
         force_refresh,
         min_ttl_ms,
@@ -120,9 +121,11 @@ async fn main() {
 }
 
 async fn control_rpc(stream: &mut TcpStream, corr: u64, body: Value) -> Frame {
+    // Channel-0 control frames carry the reserved epoch 0 (wire v2 §3.1).
     let frame = Frame::build(
         FrameType::Request,
         Flags::new(false, Priority::Passive, false),
+        0,
         0,
         corr,
         serde_json::to_vec(&body).unwrap(),
@@ -173,7 +176,7 @@ async fn wait_for_catalog(stream: &mut TcpStream) {
     }
 }
 
-async fn route_open(stream: &mut TcpStream, root: &std::path::Path) -> u16 {
+async fn route_open(stream: &mut TcpStream, root: &std::path::Path) -> (u16, u32) {
     let target = RouteTarget::ManagementSurface {
         module_id: MODULE_ID.to_string(),
     };
@@ -195,12 +198,17 @@ async fn route_open(stream: &mut TcpStream, root: &std::path::Path) -> u16 {
         String::from_utf8_lossy(&frame.body)
     );
     let value: Value = serde_json::from_slice(&frame.body).unwrap();
-    value["route_channel"].as_u64().unwrap() as u16
+    // Wire v2: route identity is (channel, epoch); both are stamped on every frame.
+    (
+        value["route_channel"].as_u64().unwrap() as u16,
+        value["route_epoch"].as_u64().unwrap() as u32,
+    )
 }
 
 async fn credential_get(
     stream: &mut TcpStream,
     route_channel: u16,
+    route_epoch: u32,
     handle: &str,
     force_refresh: bool,
     min_ttl_ms: Option<i64>,
@@ -213,6 +221,7 @@ async fn credential_get(
         FrameType::Request,
         Flags::new(false, Priority::Interactive, false),
         route_channel,
+        route_epoch,
         7,
         serde_json::to_vec(&json!({ "method": "credential.get", "params": params })).unwrap(),
     )

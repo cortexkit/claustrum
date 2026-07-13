@@ -48,11 +48,21 @@ pub async fn connect_consumer(connection_file_path: &Path) -> TcpStream {
     stream
 }
 
+/// A live route binding: wire v2 route identity is `(channel, epoch)` and every
+/// route-scoped frame must carry both (the daemon's relay drops mismatches).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Route {
+    pub channel: u16,
+    pub epoch: u32,
+}
+
 /// Send a channel-0 control request and read until its channel-0 reply for `corr`.
 pub async fn control_rpc(stream: &mut TcpStream, corr: u64, body: Value) -> Frame {
+    // Channel-0 control frames carry the reserved epoch 0 (wire v2 §3.1).
     let frame = Frame::build(
         FrameType::Request,
         Flags::new(false, Priority::Passive, false),
+        0,
         0,
         corr,
         serde_json::to_vec(&body).unwrap(),
@@ -128,8 +138,8 @@ fn json_route_open(project_root: &Path) -> Value {
     })
 }
 
-/// `route.open` the management surface; returns the route channel.
-pub async fn route_open(stream: &mut TcpStream, project_root: &Path, corr: u64) -> u16 {
+/// `route.open` the management surface; returns the route binding.
+pub async fn route_open(stream: &mut TcpStream, project_root: &Path, corr: u64) -> Route {
     let frame = control_rpc(stream, corr, json_route_open(project_root)).await;
     assert_eq!(
         frame.header.ty,
@@ -138,18 +148,21 @@ pub async fn route_open(stream: &mut TcpStream, project_root: &Path, corr: u64) 
         String::from_utf8_lossy(&frame.body)
     );
     let value: Value = serde_json::from_slice(&frame.body).unwrap();
-    value["route_channel"].as_u64().unwrap() as u16
+    Route {
+        channel: value["route_channel"].as_u64().unwrap() as u16,
+        epoch: value["route_epoch"].as_u64().unwrap() as u32,
+    }
 }
 
 /// Send a raw data-plane request on the route channel; returns the decoded body of
 /// the terminal Response (panics on Error).
 pub async fn raw_route_request(
     stream: &mut TcpStream,
-    route_channel: u16,
+    route: Route,
     corr: u64,
     body: Value,
 ) -> Value {
-    let frame = raw_route_frame(stream, route_channel, corr, body).await;
+    let frame = raw_route_frame(stream, route, corr, body).await;
     match frame.header.ty {
         FrameType::Response => serde_json::from_slice(&frame.body).unwrap(),
         FrameType::Error => panic!(
@@ -164,14 +177,15 @@ pub async fn raw_route_request(
 /// Error) for callers asserting the error contract.
 pub async fn raw_route_frame(
     stream: &mut TcpStream,
-    route_channel: u16,
+    route: Route,
     corr: u64,
     body: Value,
 ) -> Frame {
     let frame = Frame::build(
         FrameType::Request,
         Flags::new(false, Priority::Interactive, false),
-        route_channel,
+        route.channel,
+        route.epoch,
         corr,
         serde_json::to_vec(&body).unwrap(),
     )
@@ -190,13 +204,13 @@ pub async fn raw_route_frame(
 /// `credential.get { handle }` on the route channel; returns the decoded body.
 pub async fn credential_get(
     stream: &mut TcpStream,
-    route_channel: u16,
+    route: Route,
     corr: u64,
     handle: &str,
 ) -> Value {
     raw_route_request(
         stream,
-        route_channel,
+        route,
         corr,
         serde_json::json!({ "method": "credential.get", "params": { "handle": handle } }),
     )
@@ -206,7 +220,7 @@ pub async fn credential_get(
 /// `credential.get_many { items: [{handle}, ...] }` on the route channel.
 pub async fn credential_get_many(
     stream: &mut TcpStream,
-    route_channel: u16,
+    route: Route,
     corr: u64,
     handles: &[&str],
 ) -> Value {
@@ -216,7 +230,7 @@ pub async fn credential_get_many(
         .collect();
     raw_route_request(
         stream,
-        route_channel,
+        route,
         corr,
         serde_json::json!({ "method": "credential.get_many", "params": { "items": items } }),
     )

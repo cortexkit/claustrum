@@ -136,6 +136,36 @@ struct Egress {
     route: mpsc::Sender<Frame>,
 }
 
+/// Module-side route map: channel → binding epoch (wire v2, spec §3.3 layer 2).
+///
+/// The daemon's relay validation alone is insufficient (forwarding is not atomic
+/// with its table lookup), so every endpoint keeps its own `channel → epoch` map:
+/// installed when a `route.bind` is accepted, removed on an epoch-valid Goodbye,
+/// and checked against every nonzero-channel ingress frame BEFORE dispatch or any
+/// lifecycle effect. A mismatched or unknown slot is a silent drop — never an
+/// Error frame (only the daemon's relay emits `unknown_channel`), because erroring
+/// would inject into the slot's NEW binding's corr space.
+#[derive(Default)]
+struct RouteEpochs(std::sync::Mutex<std::collections::HashMap<u16, u32>>);
+
+impl RouteEpochs {
+    fn install(&self, channel: u16, epoch: u32) {
+        let mut map = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        map.insert(channel, epoch);
+    }
+
+    /// Whether `channel` is a live binding at exactly `epoch`.
+    fn matches(&self, channel: u16, epoch: u32) -> bool {
+        let map = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        map.get(&channel) == Some(&epoch)
+    }
+
+    fn remove(&self, channel: u16) {
+        let mut map = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        map.remove(&channel);
+    }
+}
+
 async fn run(config: ModuleConfig) -> Result<(), ModuleError> {
     let stream = connect_to_subc(&config.connection_file_path).await?;
     let (mut read_half, write_half) = tokio::io::split(stream);
@@ -198,6 +228,8 @@ where
     let (surface, admin) = build_surface(&ack).await?;
     let surface = Arc::new(surface);
     let admin = Arc::new(admin);
+    // Wire v2: the module-side channel → epoch map (spec §3.3 layer 2).
+    let routes = Arc::new(RouteEpochs::default());
 
     // Keep the cached health snapshot current OFF the probe path. The health.check
     // reply must be cheap/in-memory (spec §2), so the live store scan runs here on a
@@ -212,7 +244,7 @@ where
         else {
             return Ok(()); // clean EOF: subc closed the connection.
         };
-        if !handle_frame(frame, &egress, &surface, &admin).await? {
+        if !handle_frame(frame, &egress, &surface, &admin, &routes).await? {
             return Ok(());
         }
     }
@@ -415,7 +447,8 @@ async fn send_hello(
         launch_nonce: config.launch_nonce.clone(),
     })
     .map_err(ModuleError::Json)?;
-    let frame = Frame::build(FrameType::Hello, control_flags(), 0, HELLO_CORR, body)
+    // Channel-0 control frames carry the reserved epoch 0 (wire v2 §3.1).
+    let frame = Frame::build(FrameType::Hello, control_flags(), 0, 0, HELLO_CORR, body)
         .map_err(|e| ModuleError::Message(e.to_string()))?;
     send(writer, frame).await
 }
@@ -453,13 +486,24 @@ async fn handle_frame(
     egress: &Egress,
     surface: &Arc<ReadSurface>,
     admin: &Arc<admin_surface::AdminSurface>,
+    routes: &Arc<RouteEpochs>,
 ) -> Result<bool, ModuleError> {
+    // Wire v2 layer-2 validation (spec §3.3): every nonzero-channel ingress frame
+    // is checked against the local route map BEFORE dispatch or any lifecycle
+    // effect — Request, Cancel, and Goodbye alike. Epoch mismatch or unknown slot
+    // is a SILENT drop (never an Error frame: only the daemon's relay emits
+    // unknown_channel; a module-emitted Error would inject into the corr space of
+    // the slot's next tenant, the exact confusion the epoch exists to prevent).
+    if frame.header.channel != 0 && !routes.matches(frame.header.channel, frame.header.epoch) {
+        return Ok(true);
+    }
     match frame.header.ty {
         FrameType::Ping if frame.header.channel == 0 => {
             let pong = Frame::build_with_version(
                 frame.header.ver,
                 FrameType::Pong,
                 frame.header.flags,
+                0,
                 0,
                 frame.header.corr,
                 Vec::new(),
@@ -470,14 +514,15 @@ async fn handle_frame(
         }
         FrameType::Goodbye if frame.header.channel == 0 => Ok(false),
         FrameType::Goodbye => {
-            // A route goodbye: forget that connection's limiter state AND its admin
-            // bind state (principal + any outstanding challenge nonce).
+            // An epoch-valid route goodbye: forget the binding, that connection's
+            // limiter state, AND its admin bind state (principal + nonce).
+            routes.remove(frame.header.channel);
             surface.drop_connection(frame.header.channel as u64).await;
             admin.drop_bind(frame.header.channel);
             Ok(true)
         }
         FrameType::Request if frame.header.channel == 0 => {
-            handle_control_request(frame, &egress.control, surface, admin).await?;
+            handle_control_request(frame, &egress.control, surface, admin, routes).await?;
             Ok(true)
         }
         FrameType::Request => {
@@ -501,15 +546,22 @@ async fn handle_control_request(
     writer: &mpsc::Sender<Frame>,
     surface: &Arc<ReadSurface>,
     admin: &Arc<admin_surface::AdminSurface>,
+    routes: &Arc<RouteEpochs>,
 ) -> Result<(), ModuleError> {
     let request =
         serde_json::from_slice::<ModuleControlRequest>(&frame.body).map_err(ModuleError::Json)?;
     let response_body = match request {
         ModuleControlRequest::RouteBind {
             route_channel,
+            epoch,
             principal,
             ..
         } => {
+            // Wire v2: install the (channel → epoch) binding in the local route map.
+            // Installed here — when the accepted ack is being queued — so no route
+            // traffic can pass layer-2 validation before the bind is acknowledged
+            // (§3.2: module traffic legally begins only after the RouteBind ack).
+            routes.install(route_channel, epoch);
             // Record the bind's daemon-stamped principal (Gate 1 provenance) against
             // the route channel, with a fresh generation. An absent principal stamp
             // records as `Unverified` — never `direct` — so admin ops fail closed on
@@ -531,6 +583,7 @@ async fn handle_control_request(
         frame.header.ver,
         FrameType::Response,
         control_flags(),
+        0,
         0,
         frame.header.corr,
         body,
@@ -626,6 +679,9 @@ async fn handle_read_request(
     admin: &Arc<admin_surface::AdminSurface>,
 ) -> Result<(), ModuleError> {
     let channel = frame.header.channel;
+    // Echo the validated ingress epoch on every frame of this route (wire v2:
+    // a response must carry the epoch of the binding it answers for).
+    let epoch = frame.header.epoch;
     let corr = frame.header.corr;
     let ver = frame.header.ver;
     let connection_id = channel as u64;
@@ -637,6 +693,7 @@ async fn handle_read_request(
                 writer,
                 ver,
                 channel,
+                epoch,
                 corr,
                 "invalid_request",
                 &format!("request body not decodable: {e}"),
@@ -648,15 +705,21 @@ async fn handle_read_request(
     let result = match request.method.as_str() {
         OP_GET => match serde_json::from_value::<GetParams>(request.params) {
             Ok(p) => json!({ "result": surface.get(connection_id, &p).await }),
-            Err(e) => return invalid_params(writer, ver, channel, corr, &e.to_string()).await,
+            Err(e) => {
+                return invalid_params(writer, ver, channel, epoch, corr, &e.to_string()).await
+            }
         },
         OP_GET_MANY => match serde_json::from_value::<GetManyParams>(request.params) {
             Ok(p) => json!({ "results": surface.get_many(connection_id, &p).await }),
-            Err(e) => return invalid_params(writer, ver, channel, corr, &e.to_string()).await,
+            Err(e) => {
+                return invalid_params(writer, ver, channel, epoch, corr, &e.to_string()).await
+            }
         },
         OP_STATUS => match serde_json::from_value::<StatusParams>(request.params) {
             Ok(p) => json!({ "result": surface.status(connection_id, &p).await }),
-            Err(e) => return invalid_params(writer, ver, channel, corr, &e.to_string()).await,
+            Err(e) => {
+                return invalid_params(writer, ver, channel, epoch, corr, &e.to_string()).await
+            }
         },
         OP_REPORT_AUTH_FAILURE => {
             match serde_json::from_value::<ReportAuthFailureParams>(request.params) {
@@ -672,7 +735,9 @@ async fn handle_read_request(
                         }
                     }),
                 },
-                Err(e) => return invalid_params(writer, ver, channel, corr, &e.to_string()).await,
+                Err(e) => {
+                    return invalid_params(writer, ver, channel, epoch, corr, &e.to_string()).await
+                }
             }
         }
         OP_ADMIN_CHALLENGE => match admin.challenge(channel) {
@@ -686,8 +751,16 @@ async fn handle_read_request(
                 "key_id_hex": key_id_hex,
             }}),
             admin_surface::AdminOutcome::Refused(reason) => {
-                return send_route_error(writer, ver, channel, corr, "admin_refused", &reason)
-                    .await;
+                return send_route_error(
+                    writer,
+                    ver,
+                    channel,
+                    epoch,
+                    corr,
+                    "admin_refused",
+                    &reason,
+                )
+                .await;
             }
             // challenge() only ever returns Challenge or Refused.
             admin_surface::AdminOutcome::Ok(_) => unreachable!("challenge returns Challenge"),
@@ -699,20 +772,31 @@ async fn handle_read_request(
             {
                 admin_surface::AdminOutcome::Ok(v) => json!({ "result": v }),
                 admin_surface::AdminOutcome::Refused(reason) => {
-                    return send_route_error(writer, ver, channel, corr, "admin_refused", &reason)
-                        .await;
+                    return send_route_error(
+                        writer,
+                        ver,
+                        channel,
+                        epoch,
+                        corr,
+                        "admin_refused",
+                        &reason,
+                    )
+                    .await;
                 }
                 admin_surface::AdminOutcome::Challenge { .. } => {
                     unreachable!("execute never returns Challenge")
                 }
             },
-            Err(e) => return invalid_params(writer, ver, channel, corr, &e.to_string()).await,
+            Err(e) => {
+                return invalid_params(writer, ver, channel, epoch, corr, &e.to_string()).await
+            }
         },
         other => {
             return send_route_error(
                 writer,
                 ver,
                 channel,
+                epoch,
                 corr,
                 "unknown_method",
                 &format!("unknown method '{other}'"),
@@ -727,6 +811,7 @@ async fn handle_read_request(
         FrameType::Response,
         Flags::new(false, Priority::Interactive, false),
         channel,
+        epoch,
         corr,
         body,
     )
@@ -738,6 +823,7 @@ async fn invalid_params(
     writer: &mpsc::Sender<Frame>,
     ver: u8,
     channel: u16,
+    epoch: u32,
     corr: u64,
     detail: &str,
 ) -> Result<(), ModuleError> {
@@ -745,6 +831,7 @@ async fn invalid_params(
         writer,
         ver,
         channel,
+        epoch,
         corr,
         "invalid_params",
         &format!("params not decodable: {detail}"),
@@ -756,6 +843,7 @@ async fn send_route_error(
     writer: &mpsc::Sender<Frame>,
     ver: u8,
     channel: u16,
+    epoch: u32,
     corr: u64,
     code: &str,
     message: &str,
@@ -770,6 +858,7 @@ async fn send_route_error(
         FrameType::Error,
         Flags::new(false, Priority::Interactive, false),
         channel,
+        epoch,
         corr,
         body,
     )
@@ -1026,6 +1115,7 @@ mod tests {
                 FrameType::Response,
                 Flags::new(false, Priority::Interactive, false),
                 channel,
+                0,
                 corr,
                 vec![0u8; 32],
             )
@@ -1085,13 +1175,15 @@ mod tests {
             FrameType::Request,
             control_flags(),
             0,
+            0,
             42,
             serde_json::to_vec(&request).unwrap(),
         )
         .unwrap();
 
         let (admin, _admin_store) = tmp_admin(7);
-        handle_control_request(frame, &tx, &surface, &admin)
+        let routes = Arc::new(RouteEpochs::default());
+        handle_control_request(frame, &tx, &surface, &admin, &routes)
             .await
             .unwrap();
 
@@ -1267,6 +1359,104 @@ mod tests {
             alarms >= 1,
             "a status sweep of unknown handles must raise a durable fetch-anomaly alarm"
         );
+    }
+
+    /// Wire v2 layer-2 validation (spec §3.3): a route frame whose epoch does not
+    /// match the locally-installed binding — or whose slot is unknown — is dropped
+    /// silently BEFORE dispatch: no Response, no Error (an Error would inject into
+    /// the corr space of the slot's next tenant), and no lifecycle effect (a stale
+    /// Goodbye must not tear down the new binding's admin state). Non-vacuous: the
+    /// same frame at the CORRECT epoch is answered, so the drop discriminates the
+    /// epoch check, not a broken dispatch path.
+    #[tokio::test]
+    async fn stale_epoch_route_frames_are_dropped_before_dispatch() {
+        let surface = tmp_surface(21);
+        let (admin, _admin_store) = tmp_admin(21);
+        let (control_tx, _control_rx) = mpsc::channel::<Frame>(8);
+        let (route_tx, mut route_rx) = mpsc::channel::<Frame>(8);
+        let egress = Egress {
+            control: control_tx,
+            route: route_tx,
+        };
+        let routes = Arc::new(RouteEpochs::default());
+        // The binding for channel 9 is at epoch 2 (a rebind after epoch 1 released).
+        routes.install(9, 2);
+
+        fn status_request(channel: u16, epoch: u32, corr: u64) -> Frame {
+            Frame::build_with_version(
+                PROTOCOL_VERSION,
+                FrameType::Request,
+                Flags::new(false, Priority::Interactive, false),
+                channel,
+                epoch,
+                corr,
+                serde_json::to_vec(&json!({ "method": "credential.status", "params": {} }))
+                    .unwrap(),
+            )
+            .unwrap()
+        }
+
+        // (a) Stale epoch (1) on a live slot: dropped, no frame egresses.
+        assert!(
+            handle_frame(status_request(9, 1, 50), &egress, &surface, &admin, &routes)
+                .await
+                .unwrap()
+        );
+        // (b) Unknown slot entirely: dropped too.
+        assert!(handle_frame(
+            status_request(10, 1, 51),
+            &egress,
+            &surface,
+            &admin,
+            &routes
+        )
+        .await
+        .unwrap());
+        // (c) A stale-epoch Goodbye must NOT remove the live binding.
+        let stale_goodbye = Frame::build_with_version(
+            PROTOCOL_VERSION,
+            FrameType::Goodbye,
+            Flags::new(false, Priority::Interactive, false),
+            9,
+            1,
+            0,
+            Vec::new(),
+        )
+        .unwrap();
+        assert!(
+            handle_frame(stale_goodbye, &egress, &surface, &admin, &routes)
+                .await
+                .unwrap()
+        );
+        assert!(
+            routes.matches(9, 2),
+            "a stale-epoch goodbye must not tear down the live binding"
+        );
+
+        // Nothing was dispatched for any of the three stale frames.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            route_rx.try_recv().is_err(),
+            "stale frames must produce no response and no error"
+        );
+
+        // (d) The SAME request at the correct epoch is answered — the drops above
+        // discriminate the epoch check, not a broken dispatch path.
+        assert!(
+            handle_frame(status_request(9, 2, 52), &egress, &surface, &admin, &routes)
+                .await
+                .unwrap()
+        );
+        let answered = tokio::time::timeout(std::time::Duration::from_secs(2), route_rx.recv())
+            .await
+            .expect("the valid-epoch request must be answered")
+            .expect("route lane open");
+        assert_eq!(answered.header.channel, 9);
+        assert_eq!(
+            answered.header.epoch, 2,
+            "the response echoes the binding epoch"
+        );
+        assert_eq!(answered.header.corr, 52);
     }
 
     /// End-to-end: `get` surfaces the provider account identity for a chatgpt:openai

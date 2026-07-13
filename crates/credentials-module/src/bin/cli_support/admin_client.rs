@@ -114,19 +114,21 @@ async fn commit_async(
         Err(e) => return RouteCommit::NoLiveModule(format!("catalog.list: {e}")),
     }
 
-    let route_channel = match route_open(&mut stream, &config.data_dir).await {
-        Ok(ch) => ch,
+    // Wire v2: route identity is (channel, epoch); every route frame must carry
+    // the epoch the route was opened under, or the daemon's relay drops it.
+    let (route_channel, route_epoch) = match route_open(&mut stream, &config.data_dir).await {
+        Ok(pair) => pair,
         Err(e) => return RouteCommit::NoLiveModule(format!("route.open: {e}")),
     };
 
     // admin.challenge: fetch a nonce + the module's key_id (so we resolve the SAME
     // key) + its vault_id (so we confirm we are talking to the intended vault).
-    let (nonce, key_id_hex, module_vault_id_hex) = match challenge(&mut stream, route_channel).await
-    {
-        Ok(v) => v,
-        Err(RpcFail::Refused(m)) => return RouteCommit::Refused(m),
-        Err(RpcFail::Transport(m)) => return RouteCommit::NoLiveModule(m),
-    };
+    let (nonce, key_id_hex, module_vault_id_hex) =
+        match challenge(&mut stream, route_channel, route_epoch).await {
+            Ok(v) => v,
+            Err(RpcFail::Refused(m)) => return RouteCommit::Refused(m),
+            Err(RpcFail::Transport(m)) => return RouteCommit::NoLiveModule(m),
+        };
 
     // Confirm the module's vault identity matches the vault we were pointed at. A
     // mismatch means the connection file points at a DIFFERENT vault's module — do
@@ -162,7 +164,14 @@ async fn commit_async(
 
     // admin.op: send the exact op bytes + tag. After THIS send, a lost response is
     // indeterminate (the op may have committed).
-    admin_op(&mut stream, route_channel, op_bytes, &hex(&tag)).await
+    admin_op(
+        &mut stream,
+        route_channel,
+        route_epoch,
+        op_bytes,
+        &hex(&tag),
+    )
+    .await
 }
 
 enum RpcFail {
@@ -173,8 +182,14 @@ enum RpcFail {
 async fn challenge(
     stream: &mut TcpStream,
     route_channel: u16,
+    route_epoch: u32,
 ) -> Result<([u8; ADMIN_NONCE_LEN], String, String), RpcFail> {
-    let frame = route_request(route_channel, 100, json!({ "method": "admin.challenge" }));
+    let frame = route_request(
+        route_channel,
+        route_epoch,
+        100,
+        json!({ "method": "admin.challenge" }),
+    );
     if let Err(e) = write_frame(stream, &frame).await {
         return Err(RpcFail::Transport(format!("write admin.challenge: {e}")));
     }
@@ -208,6 +223,7 @@ async fn challenge(
 async fn admin_op(
     stream: &mut TcpStream,
     route_channel: u16,
+    route_epoch: u32,
     op_bytes: &[u8],
     tag_hex: &str,
 ) -> RouteCommit {
@@ -219,6 +235,7 @@ async fn admin_op(
     };
     let frame = route_request(
         route_channel,
+        route_epoch,
         101,
         json!({
             "method": "admin.op",
@@ -259,7 +276,7 @@ async fn catalog_has_vault(stream: &mut TcpStream) -> Result<bool, String> {
         .unwrap_or(false))
 }
 
-async fn route_open(stream: &mut TcpStream, root: &std::path::Path) -> Result<u16, String> {
+async fn route_open(stream: &mut TcpStream, root: &std::path::Path) -> Result<(u16, u32), String> {
     let target = RouteTarget::ManagementSurface {
         module_id: MODULE_ID.to_string(),
     };
@@ -280,16 +297,24 @@ async fn route_open(stream: &mut TcpStream, root: &std::path::Path) -> Result<u1
         return Err(error_reason(&resp.body));
     }
     let value: Value = serde_json::from_slice(&resp.body).map_err(|e| e.to_string())?;
-    value["route_channel"]
+    let channel = value["route_channel"]
         .as_u64()
         .map(|c| c as u16)
-        .ok_or_else(|| "route.open returned no route_channel".to_string())
+        .ok_or_else(|| "route.open returned no route_channel".to_string())?;
+    // Wire v2: the daemon names the binding's epoch alongside the channel.
+    let epoch = value["route_epoch"]
+        .as_u64()
+        .map(|e| e as u32)
+        .ok_or_else(|| "route.open returned no route_epoch".to_string())?;
+    Ok((channel, epoch))
 }
 
 fn control_request(corr: u64, body: Value) -> Frame {
+    // Channel-0 control frames carry the reserved epoch 0 (wire v2 §3.1).
     Frame::build(
         FrameType::Request,
         Flags::new(false, Priority::Passive, false),
+        0,
         0,
         corr,
         serde_json::to_vec(&body).unwrap(),
@@ -297,11 +322,12 @@ fn control_request(corr: u64, body: Value) -> Frame {
     .unwrap()
 }
 
-fn route_request(channel: u16, corr: u64, body: Value) -> Frame {
+fn route_request(channel: u16, epoch: u32, corr: u64, body: Value) -> Frame {
     Frame::build(
         FrameType::Request,
         Flags::new(false, Priority::Interactive, false),
         channel,
+        epoch,
         corr,
         serde_json::to_vec(&body).unwrap(),
     )

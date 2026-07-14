@@ -19,7 +19,7 @@
 //!
 //! Commands:
 //!   bootstrap                                  provision a new master key
-//!   put       --id <id> --payload <bytes> [--kind api_key|dsn|opaque] [--expires-ms N]
+//!   put       --id <id> --payload <bytes> [--kind api_key|dsn|opaque] [--expires-ms N] [--replace]
 //!   import    --source opencode|pi|antigravity --id <id> --json <file>
 //!   invalidate --id <id>
 //!   rotate-master-key
@@ -200,6 +200,7 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
     };
     // Boolean (valueless) flags accepted per command.
     let bool_flags: &[&str] = match command {
+        "put" => &["--replace"],
         "import" => &["--replace"],
         "login" => &["--replace", "--no-listener"],
         _ => &[],
@@ -252,8 +253,14 @@ fn usage() -> String {
      status: vault health + per-credential inventory (no secrets) — run this when\n\
             the health table says degraded. Reads the RUNNING daemon when one is up,\n\
             else the offline store.\n\
-      list: print each credential's id + lifecycle state + version (no secrets),\n\
+       list: print each credential's id + lifecycle state + version (no secrets),\n\
             e.g. to find which credential a health probe flagged needs_reauth.\n\
+        put: --id <id> --payload <v> | --payload-file <path> [--kind api_key|dsn|opaque]\n\
+             [--expires-ms N] [--replace | --expected-hash <hex>]\n\
+             ingest a non-OAuth secret (an api_key, dsn, or opaque blob). Create-only\n\
+             by default; --replace rotates it unconditionally (bumps record_version so\n\
+             consumers re-fetch; keeps handles), --expected-hash is a concurrency-safe\n\
+             CAS overwrite. --payload-file keeps the secret out of argv.\n\
      import: --source <opencode|pi|gemini-cli|antigravity> --id <id> --json <file>\n\
              [--provider <key>] [--adapter <name>] [--replace]\n\
        opencode/pi read auth.json (--provider selects one entry; an apikey:<p> id\n\
@@ -389,9 +396,21 @@ fn cmd_put(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
         .map_err(|e| CliError::Usage(format!("--expires-ms not an integer: {e}")))?;
 
     let record = VaultRecord::new_static(kind, "operator", payload, expires_at_ms);
-    // CREATE-ONLY by default. An overwrite requires an explicit --expected-hash CAS.
-    match optional(args, "--expected-hash") {
-        Some(hex) => {
+    // CREATE-ONLY by default. An overwrite is either an explicit --expected-hash CAS
+    // (concurrency-safe: fails if the record changed under you) or --replace
+    // (unconditional: bumps record_version, keeps existing handles). --replace is the
+    // routine rotation path for a static key — the operator pastes the new key from
+    // the provider console and the record_version bump invalidates every consumer's
+    // cache. The two are mutually exclusive: a CAS is a targeted overwrite, --replace
+    // is a deliberate blind one.
+    let replace = has_flag(args, "--replace");
+    match (optional(args, "--expected-hash"), replace) {
+        (Some(_), true) => {
+            return Err(CliError::Usage(
+                "pass only one of --expected-hash (CAS) or --replace (unconditional)".to_string(),
+            ));
+        }
+        (Some(hex), false) => {
             let expected = decode_hash(&hex)?;
             commit_admin(
                 global,
@@ -406,7 +425,19 @@ fn cmd_put(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             )?;
             println!("overwrote {id} (CAS ok)");
         }
-        None => {
+        (None, true) => {
+            commit_admin(
+                global,
+                store_op(
+                    &id,
+                    record,
+                    AdminAuditOp::Overwrite,
+                    StoreMode::ReplaceUnconditional,
+                ),
+            )?;
+            println!("replaced {id} (unconditional)");
+        }
+        (None, false) => {
             commit_admin(
                 global,
                 store_op(&id, record, AdminAuditOp::Put, StoreMode::Create),

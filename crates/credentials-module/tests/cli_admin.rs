@@ -220,6 +220,127 @@ fn logout_is_reversible_stop_serving_and_status_reports_it() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// `put --replace` is the routine static-key rotation path: it bumps
+/// `record_version` (the consumer cache-invalidation signal) and keeps the
+/// existing handle, exactly like `login --replace` does for an OAuth record.
+#[test]
+fn put_replace_rotates_a_static_key_bumping_version_and_keeping_the_handle() {
+    let root = tmp_root("put-replace");
+    let data_dir = root.join("data");
+    let key_dir = root.join("secrets");
+    std::fs::create_dir_all(&key_dir).unwrap();
+    let key_path = key_dir.join("master.key");
+    std::fs::create_dir_all(&data_dir).unwrap();
+
+    let global = |c: &mut Command| {
+        c.arg("--data-dir")
+            .arg(&data_dir)
+            .arg("--key-path")
+            .arg(&key_path);
+    };
+
+    // bootstrap + create the key + mint a handle for it.
+    let mut c = cli();
+    c.arg("bootstrap");
+    global(&mut c);
+    assert!(c.output().unwrap().status.success());
+    let mut c = cli();
+    c.arg("put")
+        .arg("--id")
+        .arg("apikey:vast")
+        .arg("--payload")
+        .arg("old-key");
+    global(&mut c);
+    assert!(c.output().unwrap().status.success());
+    let mut c = cli();
+    c.arg("mint-handle").arg("--id").arg("apikey:vast");
+    global(&mut c);
+    let handle = String::from_utf8_lossy(&c.output().unwrap().stdout)
+        .trim()
+        .to_string();
+    assert!(handle.starts_with("ckh_"));
+
+    // The created record is at v1.
+    let mut c = cli();
+    c.arg("list");
+    global(&mut c);
+    let rows = String::from_utf8_lossy(&c.output().unwrap().stdout).into_owned();
+    assert!(
+        rows.contains("v1") && rows.contains("apikey:vast"),
+        "created at v1: {rows}"
+    );
+
+    // A create-mode put on the SAME id must be refused (create-only default) — this
+    // is why a dedicated rotation verb is needed at all.
+    let mut c = cli();
+    c.arg("put")
+        .arg("--id")
+        .arg("apikey:vast")
+        .arg("--payload")
+        .arg("new-key");
+    global(&mut c);
+    assert!(
+        !c.output().unwrap().status.success(),
+        "a plain put on an existing id must fail (create-only)"
+    );
+
+    // put --replace rotates it: new payload, version bumps to v2, id stays active.
+    let mut c = cli();
+    c.arg("put")
+        .arg("--id")
+        .arg("apikey:vast")
+        .arg("--payload")
+        .arg("new-key")
+        .arg("--replace");
+    global(&mut c);
+    let out = c.output().expect("run put --replace");
+    assert!(
+        out.status.success(),
+        "put --replace: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let mut c = cli();
+    c.arg("list");
+    global(&mut c);
+    let rows = String::from_utf8_lossy(&c.output().unwrap().stdout).into_owned();
+    assert!(
+        rows.contains("active         v2    apikey:vast"),
+        "replace bumped the version and kept it active: {rows}"
+    );
+
+    // The handle SURVIVES the rotation: revoking that exact handle string still finds
+    // it (proving the replace kept the handles table row, not orphaned it). A revoke
+    // of an unknown handle reports 0 revoked; this must report the live one.
+    let mut c = cli();
+    c.arg("revoke-handle").arg("--handle").arg(&handle);
+    global(&mut c);
+    let out = c.output().expect("run revoke-handle");
+    assert!(
+        out.status.success(),
+        "the pre-rotation handle still resolves post-replace: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // --replace and --expected-hash are mutually exclusive.
+    let mut c = cli();
+    c.arg("put")
+        .arg("--id")
+        .arg("apikey:vast")
+        .arg("--payload")
+        .arg("z")
+        .arg("--replace")
+        .arg("--expected-hash")
+        .arg("00");
+    global(&mut c);
+    assert!(
+        !c.output().unwrap().status.success(),
+        "--replace and --expected-hash cannot be combined"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[test]
 fn admin_write_refused_while_lease_held() {
     // The structural "while stopped" proof: hold the single-writer lease (as the

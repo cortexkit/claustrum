@@ -394,3 +394,93 @@ fn admin_write_refused_while_lease_held() {
     drop(_held);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn api_key_login_flow_integration() {
+    let root = tmp_root("api-key-login");
+    let data_dir = root.join("data");
+    let key_dir = root.join("secrets");
+    std::fs::create_dir_all(&key_dir).unwrap();
+    let key_path = key_dir.join("master.key");
+    std::fs::create_dir_all(&data_dir).unwrap();
+
+    let global = |c: &mut Command| {
+        c.arg("--data-dir")
+            .arg(&data_dir)
+            .arg("--key-path")
+            .arg(&key_path)
+            .env("CORTEXKIT_TEST_BYPASS_VALIDATION", "1");
+    };
+
+    // bootstrap first.
+    let mut c = cli();
+    c.arg("bootstrap");
+    global(&mut c);
+    assert!(c.output().unwrap().status.success());
+
+    // Create a temp file with a dummy key.
+    let key_file = root.join("dummy.key");
+    std::fs::write(&key_file, "sk-dummy-key\n").unwrap();
+
+    // Run login --provider zai --payload-file <key_file>
+    let mut c = cli();
+    c.arg("login")
+        .arg("--provider")
+        .arg("zai")
+        .arg("--payload-file")
+        .arg(&key_file);
+    global(&mut c);
+    let out = c.output().expect("run login");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "login failed: stdout: {}, stderr: {}",
+        stdout,
+        stderr
+    );
+    assert!(stdout.contains("logged in and stored apikey:zai"));
+
+    // Verify it is stored by listing.
+    let mut c = cli();
+    c.arg("list");
+    global(&mut c);
+    let out = c.output().expect("run list");
+    let rows = String::from_utf8_lossy(&out.stdout);
+    assert!(rows.contains("apikey:zai"));
+
+    // Test that login --id apikey:zai:work passes the id rail
+    let key_file2 = root.join("dummy2.key");
+    std::fs::write(&key_file2, "sk-dummy-key-2\n").unwrap();
+    let mut c = cli();
+    c.arg("login")
+        .arg("--provider")
+        .arg("zai")
+        .arg("--id")
+        .arg("apikey:zai:work")
+        .arg("--payload-file")
+        .arg(&key_file2);
+    global(&mut c);
+    let out = c.output().expect("run login with labeled id");
+    assert!(
+        out.status.success(),
+        "labeled id login failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Test that login --id zai fails the id rail
+    let mut c = cli();
+    c.arg("login")
+        .arg("--provider")
+        .arg("zai")
+        .arg("--id")
+        .arg("zai")
+        .arg("--payload-file")
+        .arg(&key_file2);
+    global(&mut c);
+    let out = c.output().expect("run login with invalid id");
+    assert!(!out.status.success(), "invalid id login should have failed");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("login --id must be"));
+
+    let _ = std::fs::remove_dir_all(&root);
+}

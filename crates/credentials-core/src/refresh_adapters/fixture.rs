@@ -74,4 +74,21 @@ impl HttpTransport for FixtureTransport {
             .pop_front()
             .expect("FixtureTransport: no queued response for request")
     }
+
+    async fn get(&self, url: &str, headers: &[(&str, &str)]) -> Result<HttpResponse, RefreshError> {
+        self.requests.lock().unwrap().push(RecordedRequest {
+            url: url.to_string(),
+            headers: headers
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            content_type: "".to_string(),
+            body: Vec::new(),
+        });
+        self.responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("FixtureTransport: no queued response for request")
+    }
 }

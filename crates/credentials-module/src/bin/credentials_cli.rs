@@ -36,6 +36,8 @@ use std::process::ExitCode;
 
 #[path = "cli_support/admin_client.rs"]
 mod admin_client;
+#[path = "cli_support/api_key_login.rs"]
+mod api_key_login;
 #[path = "cli_support/login_listener.rs"]
 mod login_listener;
 
@@ -191,7 +193,7 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
             "--expected-hash",
         ],
         "import" => &["--source", "--provider", "--id", "--json", "--adapter"],
-        "login" => &["--provider", "--id"],
+        "login" => &["--provider", "--id", "--payload-file"],
         "invalidate" | "mint-handle" | "revoke-all-handles" | "remove" => &["--id"],
         "logout" => &["--provider", "--id"],
         "revoke-handle" => &["--handle"],
@@ -726,19 +728,31 @@ fn provider_ids<'a>(inventory: &'a [(String, String)], default_id: &str) -> Vec<
         .collect()
 }
 
-/// Interactive provider picker for a bare `ck auth login`: arrow-key/fuzzy selection
-/// with logged-in indicators, then (when the account already exists) an explicit
-/// add-another / replace choice so multi-account is discoverable instead of a flag
-/// incantation. Interactive-only UX; scripts keep passing --provider/--id/--replace.
 fn pick_login_interactively(global: &GlobalArgs) -> Result<InteractiveChoice, CliError> {
     use dialoguer::{theme::ColorfulTheme, FuzzySelect, Input, Select};
 
     let inventory = inventory_for_picker(global).unwrap_or_default();
-    let items: Vec<String> = LOGIN_PICKER_ROWS
+    let mut combined_rows = Vec::new();
+    for &(key, name) in LOGIN_PICKER_ROWS {
+        let wire = login_provider(key).expect("picker rows are valid providers");
+        combined_rows.push((
+            key.to_string(),
+            name.to_string(),
+            wire.default_id.to_string(),
+        ));
+    }
+    for provider in api_key_login::API_KEY_PROVIDERS {
+        combined_rows.push((
+            provider.key.to_string(),
+            provider.display_name.to_string(),
+            provider.default_id.to_string(),
+        ));
+    }
+
+    let items: Vec<String> = combined_rows
         .iter()
-        .map(|(key, name)| {
-            let wire = login_provider(key).expect("picker rows are valid providers");
-            let ids = provider_ids(&inventory, wire.default_id);
+        .map(|(_key, name, default_id)| {
+            let ids = provider_ids(&inventory, default_id);
             match ids.len() {
                 0 => name.to_string(),
                 1 => format!("{name}  ● logged in"),
@@ -758,13 +772,12 @@ fn pick_login_interactively(global: &GlobalArgs) -> Result<InteractiveChoice, Cl
                 "interactive login needs a terminal ({e}); pass --provider <anthropic|openai|xai>"
             ))
         })?;
-    let provider = LOGIN_PICKER_ROWS[pick].0.to_string();
-    let wire = login_provider(&provider).expect("picked provider is valid");
-    let existing = provider_ids(&inventory, wire.default_id);
+    let (provider, _, default_id) = &combined_rows[pick];
+    let existing = provider_ids(&inventory, default_id);
 
     if existing.is_empty() {
         return Ok(InteractiveChoice {
-            provider,
+            provider: provider.clone(),
             id_override: None,
             replace: false,
         });
@@ -773,7 +786,7 @@ fn pick_login_interactively(global: &GlobalArgs) -> Result<InteractiveChoice, Cl
     // The account already exists: make the multi-account path a menu, not a flag.
     let mut actions = vec![format!(
         "Add another account (a new labeled id like {}:work)",
-        wire.default_id
+        default_id
     )];
     for id in &existing {
         actions.push(format!("Replace {id} (re-login; keeps its handles)"));
@@ -798,14 +811,14 @@ fn pick_login_interactively(global: &GlobalArgs) -> Result<InteractiveChoice, Cl
             .interact_text()
             .map_err(|e| CliError::Usage(format!("interactive login cancelled: {e}")))?;
         Ok(InteractiveChoice {
-            id_override: Some(format!("{}:{label}", wire.default_id)),
-            provider,
+            id_override: Some(format!("{}:{label}", default_id)),
+            provider: provider.clone(),
             replace: false,
         })
     } else {
         Ok(InteractiveChoice {
             id_override: Some(existing[action - 1].to_string()),
-            provider,
+            provider: provider.clone(),
             replace: true,
         })
     }
@@ -829,11 +842,103 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
         None => pick_login_interactively(global)?,
     };
     let provider = interactive.provider.clone();
+
+    if let Some(p) = api_key_login::API_KEY_PROVIDERS
+        .iter()
+        .find(|p| p.key == provider)
+    {
+        let id = optional(args, "--id")
+            .or(interactive.id_override)
+            .unwrap_or_else(|| p.default_id.to_string());
+        if !login_id_is_valid(p.default_id, &id) {
+            return Err(CliError::Usage(format!(
+                "login --id must be '{d}' or '{d}:<label>' (a labeled account of the same \
+                 provider, e.g. '{d}:work') — got '{id}'",
+                d = p.default_id
+            )));
+        }
+
+        let key = if let Some(path) = optional(args, "--payload-file") {
+            let raw = std::fs::read_to_string(&path)
+                .map_err(|e| CliError::Io(format!("reading {path}: {e}")))?;
+            raw.trim().to_string()
+        } else {
+            use dialoguer::Password;
+            let prompt = format!(
+                "Enter API key for {} (dashboard: {})",
+                p.display_name, p.dashboard_url
+            );
+            Password::new()
+                .with_prompt(prompt)
+                .interact()
+                .map_err(|e| CliError::Io(format!("reading API key: {e}")))?
+                .trim()
+                .to_string()
+        };
+
+        println!("Validating API key...");
+        let http = credentials_core::http::ReqwestTransport::new()
+            .map_err(|e| CliError::Io(e.to_string()))?;
+        let outcome = tokio_block_on(api_key_login::validate_key(&http, &p.validation, &key));
+        match outcome {
+            api_key_login::ValidationOutcome::Valid => {
+                println!("API key is valid.");
+            }
+            api_key_login::ValidationOutcome::Invalid(err) => {
+                return Err(CliError::Usage(format!("API key validation failed: {err}")));
+            }
+            api_key_login::ValidationOutcome::Warning(warn) => {
+                println!("WARNING: API key validation could not be completed: {warn}. Storing the key anyway.");
+            }
+        }
+
+        let record =
+            VaultRecord::new_static(CredentialKind::ApiKey, "login", key.into_bytes(), None);
+
+        let replace = has_flag(args, "--replace") || interactive.replace;
+        let (audit_op, store_mode) = if replace {
+            (AdminAuditOp::Overwrite, StoreMode::ReplaceUnconditional)
+        } else {
+            (AdminAuditOp::Put, StoreMode::Create)
+        };
+
+        if replace {
+            commit_admin(global, store_op(&id, record, audit_op, store_mode))?;
+            println!("logged in and replaced {id}");
+        } else {
+            let result = commit_admin(global, store_op(&id, record, audit_op, store_mode));
+            let already_exists = match &result {
+                Err(CliError::Store(StoreOpError::AlreadyExists)) => true,
+                Err(CliError::RouteRefused(m)) => m.contains("already exists"),
+                _ => false,
+            };
+            if already_exists {
+                return Err(CliError::Usage(format!(
+                    "'{id}' already holds a credential.\n\
+                     To add ANOTHER account for this provider:  login --provider {p} --id {d}:<label>\n\
+                     (e.g. --id {d}:work — each labeled id is an independent credential)\n\
+                     To REPLACE the existing credential:        login --provider {p} --replace\n\
+                     (keeps the id, its handles, and bumps record_version)",
+                    p = provider,
+                    d = p.default_id
+                )));
+            }
+            result?;
+            println!("logged in and stored {id}");
+        }
+
+        println!(
+            "To mint a capability handle for this credential, run: ck-auth mint-handle --id {}",
+            id
+        );
+        return Ok(());
+    }
+
     // Each provider's auth-code wire gets its own grounded research before it is
     // added to login_provider().
     let Some(wire) = login_provider(&provider) else {
         return Err(CliError::Usage(format!(
-            "login supports --provider anthropic|openai|xai (got '{provider}')"
+            "login supports --provider <provider> (got '{provider}')"
         )));
     };
     let id = optional(args, "--id")
@@ -1123,13 +1228,22 @@ fn cmd_logout(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             ))
         }
         (Some(id), None) => id,
-        (None, Some(provider)) => login_provider(&provider)
-            .map(|wire| wire.default_id.to_string())
-            .ok_or_else(|| {
-                CliError::Usage(format!(
-                    "unknown login provider '{provider}'; pass --id <id> for other credentials"
-                ))
-            })?,
+        (None, Some(provider)) => {
+            if let Some(p) = api_key_login::API_KEY_PROVIDERS
+                .iter()
+                .find(|p| p.key == provider)
+            {
+                p.default_id.to_string()
+            } else {
+                login_provider(&provider)
+                    .map(|wire| wire.default_id.to_string())
+                    .ok_or_else(|| {
+                        CliError::Usage(format!(
+                            "unknown login provider '{provider}'; pass --id <id> for other credentials"
+                        ))
+                    })?
+            }
+        }
         (None, None) => {
             return Err(CliError::Usage(
                 "--provider <p> or --id <id> is required".to_string(),
@@ -1637,5 +1751,21 @@ mod tests {
     fn remove_flags_are_validated() {
         assert!(reject_unknown_args("remove", &v(&["--id", "oauth:anthropic:old"])).is_ok());
         assert!(reject_unknown_args("remove", &v(&["--provider", "anthropic"])).is_err());
+    }
+
+    #[test]
+    fn test_api_key_registration_and_id_rail() {
+        // apikey:zai:work passes the id rail for zai (default_id = apikey:zai)
+        assert!(login_id_is_valid("apikey:zai", "apikey:zai:work"));
+        // --id zai fails it
+        assert!(!login_id_is_valid("apikey:zai", "zai"));
+
+        // Check that zai is in API_KEY_PROVIDERS
+        let zai_provider = api_key_login::API_KEY_PROVIDERS
+            .iter()
+            .find(|p| p.key == "zai");
+        assert!(zai_provider.is_some());
+        let zai = zai_provider.unwrap();
+        assert_eq!(zai.default_id, "apikey:zai");
     }
 }

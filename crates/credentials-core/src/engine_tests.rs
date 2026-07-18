@@ -90,6 +90,14 @@ impl HttpTransport for NoHttp {
     ) -> Result<crate::refresh_adapters::HttpResponse, RefreshError> {
         Err(RefreshError::Transport("no http in this test".into()))
     }
+
+    async fn get(
+        &self,
+        _url: &str,
+        _headers: &[(&str, &str)],
+    ) -> Result<crate::refresh_adapters::HttpResponse, RefreshError> {
+        Err(RefreshError::Transport("no http in this test".into()))
+    }
 }
 
 fn now_ms() -> i64 {

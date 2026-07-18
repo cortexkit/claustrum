@@ -104,6 +104,10 @@ pub trait HttpTransport: Send + Sync {
         content_type: &str,
         body: Vec<u8>,
     ) -> Result<HttpResponse, RefreshError>;
+
+    /// GET `url` with `headers`, returning the response status and body bytes.
+    /// A transport-level failure is `Err`.
+    async fn get(&self, url: &str, headers: &[(&str, &str)]) -> Result<HttpResponse, RefreshError>;
 }
 
 /// A minimal HTTP response: status + body bytes (all an adapter needs to parse a

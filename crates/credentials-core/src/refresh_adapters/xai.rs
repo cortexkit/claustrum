@@ -28,6 +28,12 @@ use crate::oauth::OAuthCredential;
 
 /// xAI's OAuth2 token endpoint for the refresh-token grant.
 pub const TOKEN_URL: &str = "https://auth.x.ai/oauth2/token";
+/// xAI's headless device authorization endpoint.
+pub const DEVICE_CODE_URL: &str = "https://auth.x.ai/oauth2/device/code";
+/// xAI's headless device token endpoint (the same endpoint serves refresh grants).
+pub const DEVICE_TOKEN_URL: &str = "https://auth.x.ai/oauth2/token";
+/// The scope set accepted by xAI's device grant.
+pub const DEVICE_SCOPE: &str = "openid profile email offline_access grok-cli:access api:access";
 
 /// The public Grok CLI OAuth client id. NOTE: this is reverse-engineered — it is
 /// consistent across multiple independent open-source clients (Hermes, OpenClaw,

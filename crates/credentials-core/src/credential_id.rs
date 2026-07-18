@@ -31,6 +31,8 @@ pub enum AuthMethod {
     /// token endpoint); the distinct ChatGPT *wire family* is a consumer concern, not
     /// a separate refresh adapter.
     Chatgpt,
+    /// GitHub Copilot OAuth backed by a durable GitHub grant.
+    Copilot,
 }
 
 impl AuthMethod {
@@ -42,6 +44,7 @@ impl AuthMethod {
             "apikey" => Some(AuthMethod::ApiKey),
             "antigravity" => Some(AuthMethod::Antigravity),
             "chatgpt" => Some(AuthMethod::Chatgpt),
+            "copilot" => Some(AuthMethod::Copilot),
             _ => None,
         }
     }
@@ -53,6 +56,7 @@ impl AuthMethod {
             AuthMethod::ApiKey => "apikey",
             AuthMethod::Antigravity => "antigravity",
             AuthMethod::Chatgpt => "chatgpt",
+            AuthMethod::Copilot => "copilot",
         }
     }
 
@@ -105,6 +109,7 @@ pub fn default_refresh_adapter(method: Option<AuthMethod>, provider: &str) -> Op
         None | Some(AuthMethod::Oauth) => Some(provider.to_string()),
         Some(AuthMethod::Antigravity) => Some("antigravity".to_string()),
         Some(AuthMethod::Chatgpt) => Some("openai".to_string()),
+        Some(AuthMethod::Copilot) => Some("github-copilot".to_string()),
         Some(AuthMethod::ApiKey) => None,
     }
 }
@@ -123,6 +128,10 @@ mod tests {
         let a = parse_credential_id("antigravity:google");
         assert_eq!(a.method, Some(AuthMethod::Antigravity));
         assert_eq!(a.provider, "google");
+
+        let c = parse_credential_id("copilot:github");
+        assert_eq!(c.method, Some(AuthMethod::Copilot));
+        assert_eq!(c.provider, "github");
 
         let k = parse_credential_id("apikey:openai:work");
         assert_eq!(k.method, Some(AuthMethod::ApiKey));
@@ -161,6 +170,11 @@ mod tests {
             default_refresh_adapter(Some(AuthMethod::Chatgpt), "openai"),
             Some("openai".to_string()),
             "chatgpt refreshes via the openai adapter"
+        );
+        assert_eq!(
+            default_refresh_adapter(Some(AuthMethod::Copilot), "github"),
+            Some("github-copilot".to_string()),
+            "copilot → GitHub Copilot bearer exchange"
         );
         assert_eq!(
             default_refresh_adapter(Some(AuthMethod::ApiKey), "deepseek"),

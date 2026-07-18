@@ -28,7 +28,9 @@ use crate::oauth::OAuthCredential;
 
 pub mod anthropic;
 pub mod antigravity;
+pub mod github_copilot;
 pub mod google;
+pub mod kimi;
 pub mod openai;
 pub mod xai;
 
@@ -104,6 +106,18 @@ pub trait HttpTransport: Send + Sync {
         content_type: &str,
         body: Vec<u8>,
     ) -> Result<HttpResponse, RefreshError>;
+
+    /// GET an endpoint with caller-supplied headers. The default keeps existing
+    /// transports source-compatible; adapters that need GET override it.
+    async fn get(
+        &self,
+        _url: &str,
+        _headers: &[(&str, &str)],
+    ) -> Result<HttpResponse, RefreshError> {
+        Err(RefreshError::Transport(
+            "HTTP GET is unsupported by this transport".into(),
+        ))
+    }
 }
 
 /// A minimal HTTP response: status + body bytes (all an adapter needs to parse a

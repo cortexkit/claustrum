@@ -203,7 +203,7 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
     let bool_flags: &[&str] = match command {
         "put" => &["--replace"],
         "import" => &["--replace"],
-        "login" => &["--replace", "--no-listener"],
+        "login" => &["--replace", "--no-listener", "--device"],
         _ => &[],
     };
     let mut i = 0;
@@ -239,14 +239,16 @@ fn usage() -> String {
                verify-audit | mint-handle | revoke-handle | revoke-all-handles\n\
                invalidate | rotate-master-key | bootstrap\n\
      \n\
-      login: --provider <anthropic|openai|xai> [--id <id>] [--replace] [--no-listener]\n\
+      login: --provider <anthropic|openai|xai|github-copilot|kimi> [--id <id>] [--replace] [--no-listener] [--device]\n\
             vault-native first-party OAuth login — mints an INDEPENDENT refresh token\n\
             the vault solely custodies (no dual-custody rotation race). Opens a\n\
             browser URL; a one-shot CLI-local listener on the loopback redirect\n\
             completes the flow automatically (--no-listener, a busy port, or a\n\
             timeout falls back to pasting the address-bar URL).\n\
+            --device selects headless device authorization for openai/xai;\n\
+            github-copilot and kimi always use device authorization.\n\
             --replace swaps an existing credential (keeps its handle).\n\
-            Default id: oauth:anthropic / chatgpt:openai / oauth:xai.\n\
+            Default id: oauth:anthropic / chatgpt:openai / oauth:xai / copilot:github / oauth:kimi.\n\
             MULTIPLE ACCOUNTS per provider: give each its own labeled id —\n\
               login --provider anthropic --id oauth:anthropic:work\n\
             (label freely chosen; each labeled id is an independent credential\n\
@@ -561,8 +563,16 @@ fn cmd_import(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
 /// other mutation. The daemon opens no browser and runs no listener; the manual
 /// code-paste redirect means there is no inbound network surface here at all.
 /// The per-provider login wire: everything `cmd_login` needs to drive one provider's
-/// authorization-code flow. Each provider's values are pinned in its adapter module;
-/// adding a login provider = adding one row to `login_provider()`.
+/// authorization-code or device flow. Each provider's values are pinned in its adapter
+/// module; adding a login provider = adding one row to `login_provider()`.
+#[derive(Debug, Clone, Copy)]
+enum DeviceKind {
+    Xai,
+    OpenAi,
+    GithubCopilot,
+    Kimi,
+}
+
 struct LoginProvider {
     authorize_url: &'static str,
     token_url: &'static str,
@@ -588,6 +598,8 @@ struct LoginProvider {
     /// The operator instruction for capturing the callback (the flows present the code
     /// differently).
     paste_prompt: &'static str,
+    /// Device wire, when the provider supports headless authorization.
+    device: Option<DeviceKind>,
 }
 
 enum ExchangeWire {
@@ -596,7 +608,7 @@ enum ExchangeWire {
 }
 
 fn login_provider(provider: &str) -> Option<LoginProvider> {
-    use credentials_core::refresh_adapters::{anthropic, openai, xai};
+    use credentials_core::refresh_adapters::{anthropic, github_copilot, kimi, openai, xai};
     match provider {
         "anthropic" => Some(LoginProvider {
             authorize_url: anthropic::AUTHORIZE_URL,
@@ -614,9 +626,10 @@ fn login_provider(provider: &str) -> Option<LoginProvider> {
             needs_oidc_nonce: false,
             exchange_echoes_challenge: false,
             paste_prompt: "After approving, the browser will fail to connect to localhost:54545 \
-                           — that is expected (nothing listens there).\n\
-                           Copy the FULL URL from the browser's address bar (or the code#state if \
-                           shown) and paste it here, then Enter:",
+                            — that is expected (nothing listens there).\n\
+                            Copy the FULL URL from the browser's address bar (or the code#state if \
+                            shown) and paste it here, then Enter:",
+            device: None,
         }),
         "openai" => Some(LoginProvider {
             authorize_url: openai::AUTHORIZE_URL,
@@ -635,8 +648,9 @@ fn login_provider(provider: &str) -> Option<LoginProvider> {
             // No listener runs on the registered localhost redirect, so the browser
             // lands on a connection-refused page whose ADDRESS BAR carries the code.
             paste_prompt: "After approving, the browser will fail to connect to localhost:1455 \
-                           — that is expected (nothing listens there).\n\
-                           Copy the FULL URL from the browser's address bar and paste it here, then Enter:",
+                            — that is expected (nothing listens there).\n\
+                            Copy the FULL URL from the browser's address bar and paste it here, then Enter:",
+            device: Some(DeviceKind::OpenAi),
         }),
         "xai" => Some(LoginProvider {
             authorize_url: xai::AUTHORIZE_URL,
@@ -656,8 +670,39 @@ fn login_provider(provider: &str) -> Option<LoginProvider> {
             // Same zero-listener posture as OpenAI: the loopback redirect refuses the
             // connection and the address bar carries the code.
             paste_prompt: "After approving, the browser will fail to connect to 127.0.0.1:56121 \
-                           — that is expected (nothing listens there).\n\
-                           Copy the FULL URL from the browser's address bar and paste it here, then Enter:",
+                            — that is expected (nothing listens there).\n\
+                            Copy the FULL URL from the browser's address bar and paste it here, then Enter:",
+            device: Some(DeviceKind::Xai),
+        }),
+        "github-copilot" => Some(LoginProvider {
+            authorize_url: "",
+            token_url: github_copilot::DEVICE_TOKEN_URL,
+            client_id: github_copilot::CLIENT_ID,
+            redirect_uri: "",
+            scopes: &["read:user"],
+            extra_authorize_params: &[],
+            adapter_name: github_copilot::ADAPTER_NAME,
+            default_id: "copilot:github",
+            exchange: ExchangeWire::RfcForm,
+            needs_oidc_nonce: false,
+            exchange_echoes_challenge: false,
+            paste_prompt: "",
+            device: Some(DeviceKind::GithubCopilot),
+        }),
+        "kimi" => Some(LoginProvider {
+            authorize_url: "",
+            token_url: kimi::TOKEN_URL,
+            client_id: kimi::CLIENT_ID,
+            redirect_uri: "",
+            scopes: &[],
+            extra_authorize_params: &[],
+            adapter_name: kimi::ADAPTER_NAME,
+            default_id: "oauth:kimi",
+            exchange: ExchangeWire::RfcForm,
+            needs_oidc_nonce: false,
+            exchange_echoes_challenge: false,
+            paste_prompt: "",
+            device: Some(DeviceKind::Kimi),
         }),
         _ => None,
     }
@@ -681,6 +726,8 @@ const LOGIN_PICKER_ROWS: &[(&str, &str)] = &[
     ("anthropic", "Anthropic (Claude Pro/Max)"),
     ("openai", "ChatGPT (Codex subscription)"),
     ("xai", "xAI (Grok)"),
+    ("github-copilot", "GitHub Copilot"),
+    ("kimi", "Kimi Code"),
 ];
 
 /// What the interactive flow decided beyond the provider: an id override (labeled
@@ -755,7 +802,7 @@ fn pick_login_interactively(global: &GlobalArgs) -> Result<InteractiveChoice, Cl
         .interact()
         .map_err(|e| {
             CliError::Usage(format!(
-                "interactive login needs a terminal ({e}); pass --provider <anthropic|openai|xai>"
+                "interactive login needs a terminal ({e}); pass --provider <anthropic|openai|xai|github-copilot|kimi>"
             ))
         })?;
     let provider = LOGIN_PICKER_ROWS[pick].0.to_string();
@@ -811,6 +858,157 @@ fn pick_login_interactively(global: &GlobalArgs) -> Result<InteractiveChoice, Cl
     }
 }
 
+fn cmd_device_login(
+    global: &GlobalArgs,
+    args: &[String],
+    provider: &str,
+    id: &str,
+    wire: &LoginProvider,
+) -> Result<(), CliError> {
+    use credentials_core::device_flow::{
+        run_device_flow, run_openai_device_flow, DeviceBodyEncoding, DeviceFlowConfig,
+    };
+    use credentials_core::refresh_adapters::{github_copilot, kimi, xai, RefreshAdapter};
+
+    let http =
+        credentials_core::http::ReqwestTransport::new().map_err(|e| CliError::Io(e.to_string()))?;
+    let print_device_instructions = |auth: &credentials_core::DeviceAuthorization| {
+        println!("Enter this code: {}", auth.user_code);
+        println!("Verification URL: {}", auth.verification_uri);
+        if let Some(complete) = auth.verification_uri_complete.as_deref() {
+            println!("Direct verification URL: {complete}");
+        }
+    };
+
+    let tokens = match wire.device {
+        Some(DeviceKind::GithubCopilot) => {
+            let mut cfg = DeviceFlowConfig::new(
+                github_copilot::DEVICE_CODE_URL,
+                github_copilot::DEVICE_TOKEN_URL,
+                github_copilot::CLIENT_ID,
+                DeviceBodyEncoding::Json,
+            );
+            cfg.scope = Some("read:user".into());
+            cfg.extra_headers = vec![("Accept".into(), "application/json".into())];
+            tokio_block_on(run_device_flow(&http, &cfg, print_device_instructions))
+                .map_err(|e| CliError::Io(e.to_string()))?
+        }
+        Some(DeviceKind::Kimi) => {
+            let path = kimi::device_id_path(&global.data_dir);
+            let device_id = kimi::ensure_device_id(&path)
+                .map_err(|e| CliError::Io(format!("Kimi device id: {e}")))?;
+            let mut cfg = DeviceFlowConfig::new(
+                kimi::DEVICE_AUTH_URL,
+                kimi::TOKEN_URL,
+                kimi::CLIENT_ID,
+                DeviceBodyEncoding::Form,
+            );
+            cfg.extra_headers = vec![
+                ("Accept".into(), "application/json".into()),
+                ("User-Agent".into(), kimi::USER_AGENT.into()),
+                ("X-Msh-Platform".into(), kimi::PLATFORM.into()),
+                ("X-Msh-Device-Id".into(), device_id),
+            ];
+            tokio_block_on(run_device_flow(&http, &cfg, print_device_instructions))
+                .map_err(|e| CliError::Io(e.to_string()))?
+        }
+        Some(DeviceKind::Xai) => {
+            let mut cfg = DeviceFlowConfig::new(
+                xai::DEVICE_CODE_URL,
+                xai::DEVICE_TOKEN_URL,
+                xai::GROK_CLI_CLIENT_ID,
+                DeviceBodyEncoding::Form,
+            );
+            cfg.scope = Some(xai::DEVICE_SCOPE.into());
+            cfg.extra_headers = vec![("Accept".into(), "application/json".into())];
+            tokio_block_on(run_device_flow(&http, &cfg, print_device_instructions))
+                .map_err(|e| CliError::Io(e.to_string()))?
+        }
+        Some(DeviceKind::OpenAi) => tokio_block_on(run_openai_device_flow(
+            &http,
+            credentials_core::refresh_adapters::openai::CODEX_CLIENT_ID,
+            print_device_instructions,
+        ))
+        .map_err(|e| CliError::Io(e.to_string()))?,
+        None => {
+            return Err(CliError::Usage(format!(
+                "provider '{provider}' does not support device login"
+            )))
+        }
+    };
+
+    let (oauth, payload) = if matches!(wire.device, Some(DeviceKind::GithubCopilot)) {
+        let github_credential = credentials_core::oauth::OAuthCredential {
+            access_token: String::new(),
+            refresh_token: tokens.access_token,
+            expires_at_ms: None,
+            token_url: github_copilot::TOKEN_URL.into(),
+            client_id: Some(github_copilot::CLIENT_ID.into()),
+            scopes: vec!["read:user".into()],
+        };
+        let exchanged = tokio_block_on(
+            github_copilot::GithubCopilotAdapter::new().refresh(&github_credential, &http),
+        )
+        .map_err(|e| CliError::Io(e.to_string()))?;
+        let oauth = credentials_core::oauth::OAuthCredential {
+            access_token: exchanged.access_token.clone(),
+            refresh_token: exchanged.refresh_token,
+            expires_at_ms: exchanged.expires_at_ms,
+            token_url: github_copilot::TOKEN_URL.into(),
+            client_id: Some(github_copilot::CLIENT_ID.into()),
+            scopes: vec!["read:user".into()],
+        };
+        let payload = oauth.access_token.clone().into_bytes();
+        (oauth, payload)
+    } else {
+        let refresh_token = tokens.refresh_token.ok_or_else(|| {
+            CliError::Io(format!("{provider} device flow returned no refresh token"))
+        })?;
+        let oauth = credentials_core::oauth::OAuthCredential {
+            access_token: tokens.access_token.clone(),
+            refresh_token,
+            expires_at_ms: tokens.expires_at_ms,
+            token_url: wire.token_url.to_string(),
+            client_id: Some(wire.client_id.to_string()),
+            scopes: wire.scopes.iter().map(|scope| scope.to_string()).collect(),
+        };
+        let payload = oauth.access_token.clone().into_bytes();
+        (oauth, payload)
+    };
+
+    // Device-flow providers do not disclose an account identity in the response, so
+    // leave RecordIdentity empty rather than making an extra account lookup.
+    let record = VaultRecord::new_oauth("login", wire.adapter_name, oauth, payload);
+    let replace = has_flag(args, "--replace");
+    if replace {
+        commit_admin(
+            global,
+            store_op(
+                id,
+                record,
+                AdminAuditOp::Login,
+                StoreMode::ReplaceUnconditional,
+            ),
+        )?;
+        println!("logged in and replaced {id}");
+    } else {
+        let result = commit_admin(
+            global,
+            store_op(id, record, AdminAuditOp::Login, StoreMode::Create),
+        );
+        if matches!(&result, Err(CliError::Store(StoreOpError::AlreadyExists)))
+            || matches!(&result, Err(CliError::RouteRefused(message)) if message.contains("already exists"))
+        {
+            return Err(CliError::Usage(format!(
+                "'{id}' already holds a credential; use --replace or a labeled id"
+            )));
+        }
+        result?;
+        println!("logged in and stored {id}");
+    }
+    Ok(())
+}
+
 fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     use credentials_core::oauth_login::{
         build_authorize_url, decode_jwt_claims, exchange_authorization_code,
@@ -833,7 +1031,7 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     // added to login_provider().
     let Some(wire) = login_provider(&provider) else {
         return Err(CliError::Usage(format!(
-            "login supports --provider anthropic|openai|xai (got '{provider}')"
+            "login supports --provider anthropic|openai|xai|github-copilot|kimi (got '{provider}')"
         )));
     };
     let id = optional(args, "--id")
@@ -849,6 +1047,21 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
              provider, e.g. '{d}:work') — got '{id}'",
             d = wire.default_id
         )));
+    }
+
+    let requested_device = has_flag(args, "--device");
+    if requested_device && wire.device.is_none() {
+        return Err(CliError::Usage(format!(
+            "provider '{provider}' has no device login; omit --device"
+        )));
+    }
+    if requested_device
+        || matches!(
+            wire.device,
+            Some(DeviceKind::GithubCopilot | DeviceKind::Kimi)
+        )
+    {
+        return cmd_device_login(global, args, &provider, &id, &wire);
     }
 
     // Generate the PKCE pair and the CSPRNG state (state is independent of the
@@ -1597,6 +1810,7 @@ mod tests {
         // Commands that take no per-command flags accept an empty arg slice.
         assert!(reject_unknown_args("bootstrap", &v(&[])).is_ok());
         assert!(reject_unknown_args("verify-audit", &v(&[])).is_ok());
+        assert!(reject_unknown_args("login", &v(&["--provider", "xai", "--device"])).is_ok());
     }
 
     #[test]
@@ -1621,6 +1835,8 @@ mod tests {
         assert!(login_id_is_valid("oauth:anthropic", "oauth:anthropic"));
         assert!(login_id_is_valid("oauth:anthropic", "oauth:anthropic:work"));
         assert!(login_id_is_valid("chatgpt:openai", "chatgpt:openai:gmail"));
+        assert!(login_id_is_valid("copilot:github", "copilot:github:work"));
+        assert!(login_id_is_valid("oauth:kimi", "oauth:kimi:personal"));
         // Free-form ids are refused (a bare label is not a credential id).
         assert!(!login_id_is_valid("oauth:anthropic", "wwaxpoetic"));
         assert!(!login_id_is_valid("oauth:anthropic", "oauth:xai"));

@@ -31,7 +31,8 @@ use cortexkit_store::{open_sqlite, StorageDescriptor};
 use credentials_core::engine::RefreshEngine;
 use credentials_core::http::ReqwestTransport;
 use credentials_core::refresh_adapters::{
-    anthropic::AnthropicAdapter, antigravity::AntigravityAdapter, google::GoogleAdapter,
+    anthropic::AnthropicAdapter, antigravity::AntigravityAdapter,
+    github_copilot::GithubCopilotAdapter, google::GoogleAdapter, kimi::KimiAdapter,
     openai::OpenAiAdapter, xai::XaiAdapter, RefreshAdapter,
 };
 use credentials_core::resolver::{self, KeySource, ResolverConfig};
@@ -294,6 +295,9 @@ async fn build_surface(
     // it binds the admin-op transcript to THIS vault.
     let vault_id = credentials_core::vault_id_for(&data_dir)
         .ok_or_else(|| ModuleError::Message("cannot derive vault id from data dir".into()))?;
+    let kimi_device_id = credentials_core::refresh_adapters::kimi::read_device_id_or_unknown(
+        &data_dir.join("kimi-device-id"),
+    );
     let resolver_config = resolver_config_from_env(data_dir);
 
     // Open + migrate the store first, then read the database's plaintext key
@@ -333,6 +337,8 @@ async fn build_surface(
         // is required for the common case.
         Arc::new(GoogleAdapter::new()),
         Arc::new(XaiAdapter::new()),
+        Arc::new(GithubCopilotAdapter::new()),
+        Arc::new(KimiAdapter::new(kimi_device_id)),
         // Antigravity (Google Code-Assist OAuth) — its own public client, distinct
         // from the gemini-cli client the google adapter uses.
         Arc::new(AntigravityAdapter::new()),

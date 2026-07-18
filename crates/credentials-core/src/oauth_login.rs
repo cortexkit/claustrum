@@ -214,6 +214,8 @@ pub enum LoginError {
     Status(u16, String),
     /// A success status with an undecodable body.
     Decode(String),
+    /// A terminal device-flow error that is safe to show without echoing a response body.
+    Device(String),
 }
 
 impl std::fmt::Display for LoginError {
@@ -228,6 +230,7 @@ impl std::fmt::Display for LoginError {
             LoginError::Transport(m) => write!(f, "login transport error: {m}"),
             LoginError::Status(code, m) => write!(f, "login token exchange failed ({code}): {m}"),
             LoginError::Decode(m) => write!(f, "login response decode error: {m}"),
+            LoginError::Device(m) => write!(f, "device login failed: {m}"),
         }
     }
 }

@@ -28,8 +28,12 @@ use crate::oauth::OAuthCredential;
 
 pub mod anthropic;
 pub mod antigravity;
+pub mod cursor;
+pub mod devin;
+pub mod digitalocean;
 pub mod google;
 pub mod openai;
+pub mod snowflake;
 pub mod xai;
 
 #[cfg(test)]

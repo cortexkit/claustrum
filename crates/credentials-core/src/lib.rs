@@ -56,8 +56,12 @@ pub use oauth::OAuthCredential;
 pub use record::{CredentialKind, VaultRecord, RECORD_SCHEMA_VERSION};
 pub use refresh_adapters::anthropic::AnthropicAdapter;
 pub use refresh_adapters::antigravity::AntigravityAdapter;
+pub use refresh_adapters::cursor::CursorAdapter;
+pub use refresh_adapters::devin::DevinAdapter;
+pub use refresh_adapters::digitalocean::DigitalOceanAdapter;
 pub use refresh_adapters::google::GoogleAdapter;
 pub use refresh_adapters::openai::OpenAiAdapter;
+pub use refresh_adapters::snowflake::SnowflakeAdapter;
 pub use refresh_adapters::xai::XaiAdapter;
 pub use refresh_adapters::{
     HttpResponse, HttpTransport, RefreshAdapter, RefreshError, RefreshedTokens, ValidityOutcome,

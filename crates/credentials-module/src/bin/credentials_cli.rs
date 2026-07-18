@@ -38,6 +38,8 @@ use std::process::ExitCode;
 mod admin_client;
 #[path = "cli_support/login_listener.rs"]
 mod login_listener;
+#[path = "cli_support/provider_login.rs"]
+mod provider_login;
 
 use cortexkit_store::{open_sqlite, Isolation, StorageBackend, StorageDescriptor, StoreError};
 use credentials_core::admin_ops::{AdminAuditOp, AdminOpBody, StoreMode, ADMIN_OP_SCHEMA_V1};
@@ -191,7 +193,7 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
             "--expected-hash",
         ],
         "import" => &["--source", "--provider", "--id", "--json", "--adapter"],
-        "login" => &["--provider", "--id"],
+        "login" => &["--provider", "--id", "--account"],
         "invalidate" | "mint-handle" | "revoke-all-handles" | "remove" => &["--id"],
         "logout" => &["--provider", "--id"],
         "revoke-handle" => &["--handle"],
@@ -239,18 +241,21 @@ fn usage() -> String {
                verify-audit | mint-handle | revoke-handle | revoke-all-handles\n\
                invalidate | rotate-master-key | bootstrap\n\
      \n\
-      login: --provider <anthropic|openai|xai> [--id <id>] [--replace] [--no-listener]\n\
-            vault-native first-party OAuth login — mints an INDEPENDENT refresh token\n\
-            the vault solely custodies (no dual-custody rotation race). Opens a\n\
-            browser URL; a one-shot CLI-local listener on the loopback redirect\n\
-            completes the flow automatically (--no-listener, a busy port, or a\n\
-            timeout falls back to pasting the address-bar URL).\n\
-            --replace swaps an existing credential (keeps its handle).\n\
-            Default id: oauth:anthropic / chatgpt:openai / oauth:xai.\n\
-            MULTIPLE ACCOUNTS per provider: give each its own labeled id —\n\
-              login --provider anthropic --id oauth:anthropic:work\n\
-            (label freely chosen; each labeled id is an independent credential\n\
-            with its own refresh chain and handles).\n\
+       login: --provider <anthropic|openai|xai|cursor|devin|snowflake|digitalocean> [--id <id>] [--account <id>] [--replace] [--no-listener]\n\
+             vault-native first-party OAuth login — mints an INDEPENDENT refresh token\n\
+             the vault solely custodies (no dual-custody rotation race). Opens a\n\
+             browser URL; a one-shot CLI-local listener on the loopback redirect\n\
+             completes the flow automatically (--no-listener, a busy port, or a\n\
+             timeout falls back to pasting the address-bar URL).\n\
+             --replace swaps an existing credential (keeps its handle).\n\
+             Default id: oauth:anthropic / chatgpt:openai / oauth:xai / oauth:cursor /\n\
+             oauth:devin / oauth:digitalocean. Snowflake requires --account and uses\n\
+             oauth:snowflake:<account>. Cursor polls its browser challenge; Devin uses\n\
+             a long-lived token; DigitalOcean captures its URL fragment in the browser.\n\
+             MULTIPLE ACCOUNTS per provider: give each its own labeled id —\n\
+               login --provider anthropic --id oauth:anthropic:work\n\
+             (label freely chosen; each labeled id is an independent credential\n\
+             with its own refresh chain and handles).
      logout: --provider <p> | --id <id> — stop serving a credential REVERSIBLY\n\
             (invalidate + revoke its handles; keeps the record and audit chain;\n\
             `login --provider <p> --replace` restores it). Never a delete.\n\
@@ -596,7 +601,9 @@ enum ExchangeWire {
 }
 
 fn login_provider(provider: &str) -> Option<LoginProvider> {
-    use credentials_core::refresh_adapters::{anthropic, openai, xai};
+    use credentials_core::refresh_adapters::{
+        anthropic, cursor, devin, digitalocean, openai, snowflake, xai,
+    };
     match provider {
         "anthropic" => Some(LoginProvider {
             authorize_url: anthropic::AUTHORIZE_URL,
@@ -659,6 +666,62 @@ fn login_provider(provider: &str) -> Option<LoginProvider> {
                            — that is expected (nothing listens there).\n\
                            Copy the FULL URL from the browser's address bar and paste it here, then Enter:",
         }),
+        "cursor" => Some(LoginProvider {
+            authorize_url: cursor::LOGIN_URL,
+            token_url: cursor::TOKEN_URL,
+            client_id: "",
+            redirect_uri: "",
+            scopes: &[],
+            extra_authorize_params: &[],
+            adapter_name: cursor::ADAPTER_NAME,
+            default_id: cursor::DEFAULT_ID,
+            exchange: ExchangeWire::RfcForm,
+            needs_oidc_nonce: false,
+            exchange_echoes_challenge: false,
+            paste_prompt: "Cursor login is completed by browser polling.",
+        }),
+        "devin" => Some(LoginProvider {
+            authorize_url: devin::AUTHORIZE_URL,
+            token_url: devin::TOKEN_URL,
+            client_id: "",
+            redirect_uri: devin::LOGIN_REDIRECT_URI,
+            scopes: &[],
+            extra_authorize_params: &[],
+            adapter_name: devin::ADAPTER_NAME,
+            default_id: devin::DEFAULT_ID,
+            exchange: ExchangeWire::RfcForm,
+            needs_oidc_nonce: false,
+            exchange_echoes_challenge: false,
+            paste_prompt: "After approving Devin, paste the callback URL.",
+        }),
+        "snowflake" => Some(LoginProvider {
+            authorize_url: snowflake::TOKEN_URL_BASE,
+            token_url: snowflake::TOKEN_URL_BASE,
+            client_id: snowflake::CLIENT_ID,
+            redirect_uri: "http://127.0.0.1:0/",
+            scopes: &[],
+            extra_authorize_params: &[],
+            adapter_name: snowflake::ADAPTER_NAME,
+            default_id: "oauth:snowflake",
+            exchange: ExchangeWire::RfcForm,
+            needs_oidc_nonce: false,
+            exchange_echoes_challenge: false,
+            paste_prompt: "After approving Snowflake, paste the callback URL.",
+        }),
+        "digitalocean" => Some(LoginProvider {
+            authorize_url: digitalocean::AUTHORIZE_URL,
+            token_url: digitalocean::AUTHORIZE_URL,
+            client_id: digitalocean::CLIENT_ID,
+            redirect_uri: digitalocean::REDIRECT_URI,
+            scopes: digitalocean::SCOPES,
+            extra_authorize_params: &[],
+            adapter_name: digitalocean::ADAPTER_NAME,
+            default_id: digitalocean::DEFAULT_ID,
+            exchange: ExchangeWire::RfcForm,
+            needs_oidc_nonce: false,
+            exchange_echoes_challenge: false,
+            paste_prompt: "After approving DigitalOcean, paste the full callback URL including its fragment.",
+        }),
         _ => None,
     }
 }
@@ -681,6 +744,10 @@ const LOGIN_PICKER_ROWS: &[(&str, &str)] = &[
     ("anthropic", "Anthropic (Claude Pro/Max)"),
     ("openai", "ChatGPT (Codex subscription)"),
     ("xai", "xAI (Grok)"),
+    ("cursor", "Cursor"),
+    ("devin", "Devin"),
+    ("snowflake", "Snowflake Cortex"),
+    ("digitalocean", "DigitalOcean GenAI"),
 ];
 
 /// What the interactive flow decided beyond the provider: an id override (labeled
@@ -829,11 +896,31 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
         None => pick_login_interactively(global)?,
     };
     let provider = interactive.provider.clone();
+    if let Some(special) = provider_login::run(
+        &provider,
+        args,
+        interactive.id_override.as_deref(),
+        interactive.replace,
+    )
+    .map_err(CliError::Io)?
+    {
+        let mode = if special.replace {
+            StoreMode::ReplaceUnconditional
+        } else {
+            StoreMode::Create
+        };
+        commit_admin(
+            global,
+            store_op(&special.id, special.record, AdminAuditOp::Login, mode),
+        )?;
+        println!("logged in and stored {}", special.id);
+        return Ok(());
+    }
     // Each provider's auth-code wire gets its own grounded research before it is
     // added to login_provider().
     let Some(wire) = login_provider(&provider) else {
         return Err(CliError::Usage(format!(
-            "login supports --provider anthropic|openai|xai (got '{provider}')"
+            "login supports --provider anthropic|openai|xai|cursor|devin|snowflake|digitalocean (got '{provider}')"
         )));
     };
     let id = optional(args, "--id")

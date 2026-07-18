@@ -31,9 +31,10 @@ use cortexkit_store::{open_sqlite, StorageDescriptor};
 use credentials_core::engine::RefreshEngine;
 use credentials_core::http::ReqwestTransport;
 use credentials_core::refresh_adapters::{
-    anthropic::AnthropicAdapter, antigravity::AntigravityAdapter,
-    github_copilot::GithubCopilotAdapter, google::GoogleAdapter, kimi::KimiAdapter,
-    openai::OpenAiAdapter, xai::XaiAdapter, RefreshAdapter,
+    anthropic::AnthropicAdapter, antigravity::AntigravityAdapter, cursor::CursorAdapter,
+    devin::DevinAdapter, digitalocean::DigitalOceanAdapter, github_copilot::GithubCopilotAdapter,
+    google::GoogleAdapter, kimi::KimiAdapter, openai::OpenAiAdapter, snowflake::SnowflakeAdapter,
+    xai::XaiAdapter, RefreshAdapter,
 };
 use credentials_core::resolver::{self, KeySource, ResolverConfig};
 use credentials_core::store::EncryptedStore;
@@ -331,11 +332,15 @@ async fn build_surface(
         Arc::new(ReqwestTransport::new().map_err(|e| ModuleError::Message(format!("http: {e}")))?);
     let adapters: Vec<Arc<dyn RefreshAdapter>> = vec![
         Arc::new(AnthropicAdapter::new()),
+        Arc::new(CursorAdapter::new()),
+        Arc::new(DevinAdapter::new()),
+        Arc::new(DigitalOceanAdapter::new()),
         Arc::new(OpenAiAdapter::new()),
         // Google defaults to the public gemini-cli client (id + secret) that opencode
         // mints against; CK_GOOGLE_OAUTH_CLIENT_ID / _SECRET override it. No prod env
         // is required for the common case.
         Arc::new(GoogleAdapter::new()),
+        Arc::new(SnowflakeAdapter::new()),
         Arc::new(XaiAdapter::new()),
         Arc::new(GithubCopilotAdapter::new()),
         Arc::new(KimiAdapter::new(kimi_device_id)),

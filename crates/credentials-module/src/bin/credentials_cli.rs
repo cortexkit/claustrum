@@ -42,6 +42,8 @@ mod api_key_login;
 mod google_login;
 #[path = "cli_support/login_listener.rs"]
 mod login_listener;
+#[path = "cli_support/provider_login.rs"]
+mod provider_login;
 
 use cortexkit_store::{open_sqlite, Isolation, StorageBackend, StorageDescriptor, StoreError};
 use credentials_core::admin_ops::{AdminAuditOp, AdminOpBody, StoreMode, ADMIN_OP_SCHEMA_V1};
@@ -195,7 +197,7 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
             "--expected-hash",
         ],
         "import" => &["--source", "--provider", "--id", "--json", "--adapter"],
-        "login" => &["--provider", "--id", "--payload-file"],
+        "login" => &["--provider", "--id", "--payload-file", "--account"],
         "invalidate" | "mint-handle" | "revoke-all-handles" | "remove" => &["--id"],
         "logout" => &["--provider", "--id"],
         "revoke-handle" => &["--handle"],
@@ -243,7 +245,7 @@ fn usage() -> String {
                verify-audit | mint-handle | revoke-handle | revoke-all-handles\n\
                invalidate | rotate-master-key | bootstrap\n\
      \n\
-      login: --provider <name> [--id <id>] [--replace] [--no-listener] [--device]\n\
+      login: --provider <name> [--id <id>] [--account <id>] [--replace] [--no-listener] [--device]\n\
             (run with no --provider for the interactive picker of every provider)\n\
             vault-native first-party OAuth login — mints an INDEPENDENT refresh token\n\
             the vault solely custodies (no dual-custody rotation race). Opens a\n\
@@ -254,7 +256,9 @@ fn usage() -> String {
             github-copilot and kimi always use device authorization.\n\
             --replace swaps an existing credential (keeps its handle).\n\
             Providers include anthropic, openai, xai, google, antigravity,\n\
-            github-copilot, kimi, plus api-key providers (zai, openrouter, ...).\n\
+            github-copilot, kimi, cursor, devin, snowflake, digitalocean, plus\n\
+            api-key providers (zai, openrouter, ...). Snowflake requires --account\n\
+            (oauth:snowflake:<account>).\n\
             MULTIPLE ACCOUNTS per provider: give each its own labeled id —\n\
               login --provider anthropic --id oauth:anthropic:work\n\
             (label freely chosen; each labeled id is an independent credential\n\
@@ -615,7 +619,9 @@ enum ExchangeWire {
 
 fn login_provider(provider: &str) -> Option<LoginProvider> {
     use credentials_core::google_login as google;
-    use credentials_core::refresh_adapters::{anthropic, github_copilot, kimi, openai, xai};
+    use credentials_core::refresh_adapters::{
+        anthropic, cursor, devin, digitalocean, github_copilot, kimi, openai, snowflake, xai,
+    };
     match provider {
         "anthropic" => Some(LoginProvider {
             authorize_url: anthropic::AUTHORIZE_URL,
@@ -744,6 +750,66 @@ fn login_provider(provider: &str) -> Option<LoginProvider> {
             paste_prompt: "After approving, the browser may fail to connect to 127.0.0.1:51121 — that is expected. Copy the FULL URL from the address bar and paste it here, then Enter:",
             device: None,
         }),
+        "cursor" => Some(LoginProvider {
+            authorize_url: cursor::LOGIN_URL,
+            token_url: cursor::TOKEN_URL,
+            client_id: "",
+            redirect_uri: "",
+            scopes: &[],
+            extra_authorize_params: &[],
+            adapter_name: cursor::ADAPTER_NAME,
+            default_id: cursor::DEFAULT_ID,
+            exchange: ExchangeWire::RfcForm,
+            needs_oidc_nonce: false,
+            exchange_echoes_challenge: false,
+            paste_prompt: "Cursor login is completed by browser polling.",
+            device: None,
+        }),
+        "devin" => Some(LoginProvider {
+            authorize_url: devin::AUTHORIZE_URL,
+            token_url: devin::TOKEN_URL,
+            client_id: "",
+            redirect_uri: devin::LOGIN_REDIRECT_URI,
+            scopes: &[],
+            extra_authorize_params: &[],
+            adapter_name: devin::ADAPTER_NAME,
+            default_id: devin::DEFAULT_ID,
+            exchange: ExchangeWire::RfcForm,
+            needs_oidc_nonce: false,
+            exchange_echoes_challenge: false,
+            paste_prompt: "After approving Devin, paste the callback URL.",
+            device: None,
+        }),
+        "snowflake" => Some(LoginProvider {
+            authorize_url: snowflake::TOKEN_URL_BASE,
+            token_url: snowflake::TOKEN_URL_BASE,
+            client_id: snowflake::CLIENT_ID,
+            redirect_uri: "http://127.0.0.1:0/",
+            scopes: &[],
+            extra_authorize_params: &[],
+            adapter_name: snowflake::ADAPTER_NAME,
+            default_id: "oauth:snowflake",
+            exchange: ExchangeWire::RfcForm,
+            needs_oidc_nonce: false,
+            exchange_echoes_challenge: false,
+            paste_prompt: "After approving Snowflake, paste the callback URL.",
+            device: None,
+        }),
+        "digitalocean" => Some(LoginProvider {
+            authorize_url: digitalocean::AUTHORIZE_URL,
+            token_url: digitalocean::AUTHORIZE_URL,
+            client_id: digitalocean::CLIENT_ID,
+            redirect_uri: digitalocean::REDIRECT_URI,
+            scopes: digitalocean::SCOPES,
+            extra_authorize_params: &[],
+            adapter_name: digitalocean::ADAPTER_NAME,
+            default_id: digitalocean::DEFAULT_ID,
+            exchange: ExchangeWire::RfcForm,
+            needs_oidc_nonce: false,
+            exchange_echoes_challenge: false,
+            paste_prompt: "After approving DigitalOcean, paste the full callback URL including its fragment.",
+            device: None,
+        }),
         _ => None,
     }
 }
@@ -770,6 +836,10 @@ const LOGIN_PICKER_ROWS: &[(&str, &str)] = &[
     ("kimi", "Kimi Code"),
     ("google", "Google Gemini CLI (Code Assist)"),
     ("antigravity", "Antigravity (Gemini 3)"),
+    ("cursor", "Cursor"),
+    ("devin", "Devin"),
+    ("snowflake", "Snowflake Cortex"),
+    ("digitalocean", "DigitalOcean GenAI"),
 ];
 
 /// What the interactive flow decided beyond the provider: an id override (labeled
@@ -1181,6 +1251,29 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             "To mint a capability handle for this credential, run: ck-auth mint-handle --id {}",
             id
         );
+        return Ok(());
+    }
+
+    // The proprietary browser-poll / callback flows (Cursor, Devin, Snowflake,
+    // DigitalOcean) run their own driver, which returns None for any other provider.
+    if let Some(special) = provider_login::run(
+        &provider,
+        args,
+        interactive.id_override.as_deref(),
+        interactive.replace,
+    )
+    .map_err(CliError::Io)?
+    {
+        let mode = if special.replace {
+            StoreMode::ReplaceUnconditional
+        } else {
+            StoreMode::Create
+        };
+        commit_admin(
+            global,
+            store_op(&special.id, special.record, AdminAuditOp::Login, mode),
+        )?;
+        println!("logged in and stored {}", special.id);
         return Ok(());
     }
 

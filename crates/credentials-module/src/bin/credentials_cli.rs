@@ -128,22 +128,31 @@ struct GlobalArgs {
 
 fn run() -> Result<(), CliError> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
+    // Bare `ck auth` prints the short verb table to stdout and exits 0 — showing
+    // usage is not an error (no `error:` prefix, no stderr).
     if args.is_empty() {
-        return Err(CliError::Usage(usage()));
+        println!("{}", usage_short());
+        return Ok(());
     }
     let command = args.remove(0);
 
-    // A `--help`/`-h` ANYWHERE prints usage and exits WITHOUT running the command.
+    // A `--help`/`-h` ANYWHERE prints help and exits WITHOUT running the command.
     // This is load-bearing safety, not a convenience: the arg parser pulls the flags
     // it knows and (before this) silently ignored the rest, so `bootstrap --help`
     // ignored `--help` and RAN bootstrap — provisioning stray key material on a typo.
     // Intercepting here, before parse_global / any open-for-admin, makes help a no-op.
-    if command == "help"
-        || command == "--help"
-        || command == "-h"
-        || args.iter().any(|a| a == "--help" || a == "-h")
-    {
-        println!("{}", usage());
+    // `ck auth help [<verb>]` and `ck auth <verb> --help` both land here: with a verb
+    // we print that verb's detail page, otherwise the short table.
+    if command == "help" || command == "--help" || command == "-h" {
+        // `help <verb>` → the verb's page; bare `help` → the short table.
+        match args.first() {
+            Some(verb) => println!("{}", help_verb(verb)),
+            None => println!("{}", usage_short()),
+        }
+        return Ok(());
+    }
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!("{}", help_verb(&command));
         return Ok(());
     }
 
@@ -172,8 +181,8 @@ fn run() -> Result<(), CliError> {
         "audit" => cmd_audit(&global, &args),
         "verify-audit" => cmd_verify_audit(&global),
         other => Err(CliError::Usage(format!(
-            "unknown command '{other}'\n{}",
-            usage()
+            "unknown verb '{other}'\n\n{}",
+            usage_short()
         ))),
     }
 }
@@ -225,83 +234,196 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
             continue;
         }
         return Err(CliError::Usage(format!(
-            "unexpected argument '{arg}' for '{command}'\n{}",
-            usage()
+            "unexpected argument '{arg}' for '{command}'\n\n{}",
+            help_verb(command)
         )));
     }
     Ok(())
 }
 
-fn usage() -> String {
+/// The short verb table shown for bare `ck auth`, `ck auth help`, and an unknown
+/// verb. Matches the `ck` dispatcher house style (compact verb + one-line
+/// description); per-verb flags and semantics live in `help_verb`, reached via
+/// `ck auth help <verb>`, so a bare invocation never dumps the full man page.
+fn usage_short() -> String {
     "ck auth — CortexKit provider-credential vault\n\
      \n\
-     On a standard install, commands need NO flags: the vault location and the\n\
-     running daemon are auto-discovered. Just:\n\
-       ck auth status                              show vault health + inventory\n\
-       ck auth login --provider xai --replace      (re-)login a provider\n\
-       ck auth logout --provider xai               stop serving a provider\n\
+     usage: ck auth <verb> [flags]\n\
      \n\
-     Commands: login | logout | remove | status | list | import | put | audit\n\
-               verify-audit | mint-handle | revoke-handle | revoke-all-handles\n\
-               invalidate | rotate-master-key | bootstrap\n\
+     verbs:\n\
+       login               OAuth/device/api-key login (interactive with no flags)\n\
+       logout              stop serving a credential (reversible)\n\
+       remove              permanently delete a credential\n\
+       status              vault health + credential inventory (no secrets)\n\
+       list                credential ids + lifecycle state (no secrets)\n\
+       put                 ingest an api key / opaque secret\n\
+       import              import from opencode/pi/gemini-cli/antigravity\n\
+       mint-handle         mint a capability handle for a credential\n\
+       revoke-handle       revoke one capability handle\n\
+       revoke-all-handles  revoke every handle for a credential\n\
+       invalidate          mark a credential needs-reauth\n\
+       audit               print the audit chain\n\
+       verify-audit        verify the audit-chain integrity\n\
+       rotate-master-key   rotate the vault master key (offline)\n\
+       bootstrap           initialize a new vault (offline)\n\
      \n\
-      login: --provider <name> [--id <id>] [--account <id>] [--replace] [--no-listener] [--device]\n\
-            (run with no --provider for the interactive picker of every provider)\n\
-            vault-native first-party OAuth login — mints an INDEPENDENT refresh token\n\
-            the vault solely custodies (no dual-custody rotation race). Opens a\n\
-            browser URL; a one-shot CLI-local listener on the loopback redirect\n\
-            completes the flow automatically (--no-listener, a busy port, or a\n\
-            timeout falls back to pasting the address-bar URL).\n\
-            --device selects headless device authorization for openai/xai;\n\
-            github-copilot and kimi always use device authorization.\n\
-            --replace swaps an existing credential (keeps its handle).\n\
-            Providers include anthropic, openai, xai, google, antigravity,\n\
-            github-copilot, kimi, cursor, devin, snowflake, digitalocean, plus\n\
-            api-key providers (zai, openrouter, ...). Snowflake requires --account\n\
-            (oauth:snowflake:<account>).\n\
-            MULTIPLE ACCOUNTS per provider: give each its own labeled id —\n\
-              login --provider anthropic --id oauth:anthropic:work\n\
-            (label freely chosen; each labeled id is an independent credential\n\
-            with its own refresh chain and handles).\n\
-     logout: --provider <p> | --id <id> — stop serving a credential REVERSIBLY\n\
-            (invalidate + revoke its handles; keeps the record and audit chain;\n\
-            `login --provider <p> --replace` restores it). Never a delete.\n\
-     remove: --id <id> — permanently delete a credential row and revoke its\n\
-            handles (audited; the audit chain keeps the history). For retiring an\n\
-            account or cleaning up a mistaken id — for a temporary stop use logout.\n\
-     status: vault health + per-credential inventory (no secrets) — run this when\n\
-            the health table says degraded. Reads the RUNNING daemon when one is up,\n\
-            else the offline store.\n\
-       list: print each credential's id + lifecycle state + version (no secrets),\n\
-            e.g. to find which credential a health probe flagged needs_reauth.\n\
-        put: --id <id> --payload <v> | --payload-file <path> [--kind api_key|dsn|opaque]\n\
-             [--expires-ms N] [--replace | --expected-hash <hex>]\n\
-             ingest a non-OAuth secret (an api_key, dsn, or opaque blob). Create-only\n\
-             by default; --replace rotates it unconditionally (bumps record_version so\n\
-             consumers re-fetch; keeps handles), --expected-hash is a concurrency-safe\n\
-             CAS overwrite. --payload-file keeps the secret out of argv.\n\
-     import: --source <opencode|pi|gemini-cli|antigravity> --id <id> --json <file>\n\
-             [--provider <key>] [--adapter <name>] [--replace]\n\
-       opencode/pi read auth.json (--provider selects one entry; an apikey:<p> id\n\
-         imports a {type:api,key} entry as a static key, an oauth id imports tokens);\n\
-       gemini-cli reads ~/.gemini/oauth_creds.json (single credential, no --provider);\n\
-       antigravity reads ~/.config/opencode/antigravity-accounts.json (accounts array;\n\
-         --provider selects an account by email/index, default activeIndex);\n\
-       --adapter overrides the method-derived refresh adapter;\n\
-       --replace overwrites an existing id (fix a wrong-source import; keeps handles).\n\
-     \n\
-     Overrides (rarely needed):\n\
-       [--data-dir <dir>]  vault location; defaults to the standard per-user path\n\
-                           (<data_home>/cortexkit/cortexkit-credentials). An explicit\n\
-                           dir targets THAT vault and stays offline unless --subc is\n\
-                           also given.\n\
-       [--subc <file>]     subc connection file; auto-discovered on a standard\n\
-                           install. Present ⇒ writes commit through the running module\n\
-                           (zero downtime); absent/no daemon ⇒ offline single-writer\n\
-                           lease (daemon must be stopped). rotate-master-key and\n\
-                           bootstrap are always offline.\n\
-       [--key-path <file>] operator key file instead of the OS keychain."
+     On a standard install commands need no flags — the vault location and the\n\
+     running daemon auto-discover. Run 'ck auth help <verb>' for flags and details."
         .to_string()
+}
+
+/// Per-verb detail page for `ck auth help <verb>` (and `ck auth <verb> --help`).
+/// This is where the long-form semantics live — login listener fallback,
+/// multi-account labeled ids, logout-vs-remove, import sources, offline-lease
+/// overrides — so they stay discoverable without dumping on every invocation.
+/// An unknown verb falls back to the short table.
+fn help_verb(verb: &str) -> String {
+    let body = match verb {
+        "login" => {
+            "ck auth login [--provider <name>] [--id <id>] [--account <id>] \
+             [--replace] [--no-listener] [--device]\n\
+             \n\
+             Vault-native first-party login — mints an INDEPENDENT credential the vault\n\
+             solely custodies (no dual-custody rotation race). Run with NO --provider for\n\
+             an interactive picker of every provider.\n\
+             \n\
+             OAuth providers open a browser URL; a one-shot CLI-local listener on the\n\
+             loopback redirect completes the flow automatically (--no-listener, a busy\n\
+             port, or a timeout falls back to pasting the address-bar URL). --device\n\
+             selects headless device authorization for openai/xai; github-copilot and\n\
+             kimi always use device authorization. api-key providers prompt for a key\n\
+             (validated before storing).\n\
+             \n\
+             --replace swaps an existing credential (keeps its handle).\n\
+             \n\
+             Providers: anthropic, openai, xai, google, antigravity, github-copilot,\n\
+             kimi, cursor, devin, snowflake, digitalocean, plus api-key providers\n\
+             (zai, openrouter, deepseek, groq, ...). Snowflake requires --account\n\
+             (id oauth:snowflake:<account>).\n\
+             \n\
+             MULTIPLE ACCOUNTS per provider — give each its own labeled id:\n\
+               ck auth login --provider anthropic --id oauth:anthropic:work\n\
+             (label freely chosen; each labeled id is an independent credential with\n\
+             its own refresh chain and handles)."
+        }
+        "logout" => {
+            "ck auth logout --provider <p> | --id <id>\n\
+             \n\
+             Stop serving a credential REVERSIBLY: invalidate it and revoke its handles,\n\
+             keeping the record and audit chain. `ck auth login --provider <p> --replace`\n\
+             restores it. Never a delete — use `remove` for that."
+        }
+        "remove" => {
+            "ck auth remove --id <id>\n\
+             \n\
+             PERMANENTLY delete a credential row and revoke its handles (audited; the\n\
+             audit chain keeps the history). For retiring an account or cleaning up a\n\
+             mistaken id. For a temporary stop use `logout` instead."
+        }
+        "status" => {
+            "ck auth status\n\
+             \n\
+             Vault health + per-credential inventory (no secrets) — run this when the\n\
+             health table says degraded. Reads the RUNNING daemon when one is up, else\n\
+             the offline store."
+        }
+        "list" => {
+            "ck auth list\n\
+             \n\
+             Print each credential's id + lifecycle state + version (no secrets), e.g.\n\
+             to find which credential a health probe flagged needs_reauth."
+        }
+        "put" => {
+            "ck auth put --id <id> --payload <v> | --payload-file <path>\n\
+             \x20            [--kind api_key|dsn|opaque] [--expires-ms N]\n\
+             \x20            [--replace | --expected-hash <hex>]\n\
+             \n\
+             Ingest a non-OAuth secret (an api_key, dsn, or opaque blob). Create-only by\n\
+             default; --replace rotates it unconditionally (bumps record_version so\n\
+             consumers re-fetch; keeps handles); --expected-hash is a concurrency-safe\n\
+             CAS overwrite. --payload-file keeps the secret out of argv."
+        }
+        "import" => {
+            "ck auth import --source <opencode|pi|gemini-cli|antigravity> --id <id> \
+             --json <file>\n\
+             \x20             [--provider <key>] [--adapter <name>] [--replace]\n\
+             \n\
+             opencode/pi read auth.json (--provider selects one entry; an apikey:<p> id\n\
+               imports a {type:api,key} entry as a static key, an oauth id imports tokens);\n\
+             gemini-cli reads ~/.gemini/oauth_creds.json (single credential, no --provider);\n\
+             antigravity reads ~/.config/opencode/antigravity-accounts.json (accounts array;\n\
+               --provider selects an account by email/index, default activeIndex);\n\
+             --adapter overrides the method-derived refresh adapter;\n\
+             --replace overwrites an existing id (fix a wrong-source import; keeps handles)."
+        }
+        "mint-handle" => {
+            "ck auth mint-handle --id <id>\n\
+             \n\
+             Mint an unguessable capability handle for a credential — the token a\n\
+             consumer presents to `credential.get`. A credential can have many handles."
+        }
+        "revoke-handle" => {
+            "ck auth revoke-handle --handle <raw>\n\
+             \n\
+             Revoke one capability handle (audited). The credential and its other\n\
+             handles keep serving."
+        }
+        "revoke-all-handles" => {
+            "ck auth revoke-all-handles --id <id>\n\
+             \n\
+             Revoke every capability handle for a credential in one audited step. The\n\
+             record itself is untouched (still refreshable; mint new handles later)."
+        }
+        "invalidate" => {
+            "ck auth invalidate --id <id>\n\
+             \n\
+             Mark a credential needs-reauth (stops serving until re-login) without\n\
+             revoking handles. `logout` is the usual operator verb; this is the lower-\n\
+             level primitive."
+        }
+        "audit" => {
+            "ck auth audit [--limit N]\n\
+             \n\
+             Print the tamper-evident HMAC audit chain (offline-only; stop the daemon\n\
+             to release the lease first)."
+        }
+        "verify-audit" => {
+            "ck auth verify-audit\n\
+             \n\
+             Verify the audit-chain integrity end to end (offline-only). Fails if any\n\
+             entry was edited, reordered, or inserted."
+        }
+        "rotate-master-key" => {
+            "ck auth rotate-master-key\n\
+             \n\
+             Crash-safe two-slot rotation of the vault master key (ALWAYS offline; stop\n\
+             the daemon first). Re-seals every record under the new key."
+        }
+        "bootstrap" => {
+            "ck auth bootstrap\n\
+             \n\
+             Initialize a new vault: provision the master key and seal the audit key\n\
+             (ALWAYS offline). Refuses if the vault already exists."
+        }
+        "overrides" => {
+            "Global flags (rarely needed; apply to any verb):\n\
+             \n\
+             \x20 --data-dir <dir>   vault location; defaults to the standard per-user path\n\
+             \x20                    (<data_home>/cortexkit/cortexkit-credentials). An\n\
+             \x20                    explicit dir targets THAT vault and stays offline\n\
+             \x20                    unless --subc is also given.\n\
+             \x20 --subc <file>      subc connection file; auto-discovered on a standard\n\
+             \x20                    install. Present => writes commit through the running\n\
+             \x20                    module (zero downtime); absent/no daemon => offline\n\
+             \x20                    single-writer lease (daemon must be stopped).\n\
+             \x20                    rotate-master-key and bootstrap are always offline.\n\
+             \x20 --key-path <file>  operator key file instead of the OS keychain."
+        }
+        _ => return format!("no help for '{verb}'\n\n{}", usage_short()),
+    };
+    format!(
+        "{body}\n\nGlobal flags: --data-dir / --subc / --key-path — run 'ck auth help overrides'."
+    )
 }
 
 /// Commit one admin op, choosing the backend by `--subc`:

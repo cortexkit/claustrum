@@ -156,6 +156,7 @@ fn run() -> Result<(), CliError> {
         "login" => cmd_login(&global, &args),
         "invalidate" => cmd_invalidate(&global, &args),
         "logout" => cmd_logout(&global, &args),
+        "remove" => cmd_remove(&global, &args),
         "status" => cmd_status(&global),
         "rotate-master-key" => cmd_rotate_master_key(&global),
         "mint-handle" => cmd_mint_handle(&global, &args),
@@ -191,7 +192,7 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
         ],
         "import" => &["--source", "--provider", "--id", "--json", "--adapter"],
         "login" => &["--provider", "--id"],
-        "invalidate" | "mint-handle" | "revoke-all-handles" => &["--id"],
+        "invalidate" | "mint-handle" | "revoke-all-handles" | "remove" => &["--id"],
         "logout" => &["--provider", "--id"],
         "revoke-handle" => &["--handle"],
         "audit" => &["--limit"],
@@ -234,22 +235,28 @@ fn usage() -> String {
        ck auth login --provider xai --replace      (re-)login a provider\n\
        ck auth logout --provider xai               stop serving a provider\n\
      \n\
-     Commands: login | logout | status | list | import | put | audit | verify-audit\n\
-               mint-handle | revoke-handle | revoke-all-handles | invalidate\n\
-               rotate-master-key | bootstrap\n\
+     Commands: login | logout | remove | status | list | import | put | audit\n\
+               verify-audit | mint-handle | revoke-handle | revoke-all-handles\n\
+               invalidate | rotate-master-key | bootstrap\n\
      \n\
       login: --provider <anthropic|openai|xai> [--id <id>] [--replace] [--no-listener]\n\
             vault-native first-party OAuth login — mints an INDEPENDENT refresh token\n\
             the vault solely custodies (no dual-custody rotation race). Opens a\n\
-            browser URL. openai/xai: a one-shot CLI-local listener on the loopback\n\
-            redirect completes the flow automatically (--no-listener, a busy port, or\n\
-            a timeout falls back to pasting the address-bar URL). anthropic: paste\n\
-            the shown code#state (its callback page is remote, no listener).\n\
+            browser URL; a one-shot CLI-local listener on the loopback redirect\n\
+            completes the flow automatically (--no-listener, a busy port, or a\n\
+            timeout falls back to pasting the address-bar URL).\n\
             --replace swaps an existing credential (keeps its handle).\n\
             Default id: oauth:anthropic / chatgpt:openai / oauth:xai.\n\
+            MULTIPLE ACCOUNTS per provider: give each its own labeled id —\n\
+              login --provider anthropic --id oauth:anthropic:work\n\
+            (label freely chosen; each labeled id is an independent credential\n\
+            with its own refresh chain and handles).\n\
      logout: --provider <p> | --id <id> — stop serving a credential REVERSIBLY\n\
             (invalidate + revoke its handles; keeps the record and audit chain;\n\
             `login --provider <p> --replace` restores it). Never a delete.\n\
+     remove: --id <id> — permanently delete a credential row and revoke its\n\
+            handles (audited; the audit chain keeps the history). For retiring an\n\
+            account or cleaning up a mistaken id — for a temporary stop use logout.\n\
      status: vault health + per-credential inventory (no secrets) — run this when\n\
             the health table says degraded. Reads the RUNNING daemon when one is up,\n\
             else the offline store.\n\
@@ -593,9 +600,12 @@ fn login_provider(provider: &str) -> Option<LoginProvider> {
     match provider {
         "anthropic" => Some(LoginProvider {
             authorize_url: anthropic::AUTHORIZE_URL,
-            token_url: anthropic::TOKEN_URL,
+            token_url: anthropic::LOGIN_TOKEN_URL,
             client_id: anthropic::CLAUDE_CODE_CLIENT_ID,
-            redirect_uri: anthropic::CODE_CALLBACK_URL,
+            // The Claude Code loopback redirect: the CLI's one-shot listener captures
+            // the code automatically (same flow as openai/xai). Paste stays the
+            // fallback when the port is busy.
+            redirect_uri: anthropic::LOGIN_REDIRECT_URI,
             scopes: anthropic::LOGIN_SCOPES,
             extra_authorize_params: anthropic::LOGIN_EXTRA_AUTHORIZE_PARAMS,
             adapter_name: anthropic::ADAPTER_NAME,
@@ -603,7 +613,10 @@ fn login_provider(provider: &str) -> Option<LoginProvider> {
             exchange: ExchangeWire::AnthropicJson,
             needs_oidc_nonce: false,
             exchange_echoes_challenge: false,
-            paste_prompt: "After approving, paste the authorization code shown (code#state), then Enter:",
+            paste_prompt: "After approving, the browser will fail to connect to localhost:54545 \
+                           — that is expected (nothing listens there).\n\
+                           Copy the FULL URL from the browser's address bar (or the code#state if \
+                           shown) and paste it here, then Enter:",
         }),
         "openai" => Some(LoginProvider {
             authorize_url: openai::AUTHORIZE_URL,
@@ -650,6 +663,154 @@ fn login_provider(provider: &str) -> Option<LoginProvider> {
     }
 }
 
+/// Whether a login `--id` is the provider's default id or a labeled sub-account of
+/// it (`<default_id>:<label>`, one non-empty label segment). Anything else would
+/// mint a mis-keyed credential.
+fn login_id_is_valid(default_id: &str, id: &str) -> bool {
+    id == default_id
+        || id
+            .strip_prefix(default_id)
+            .and_then(|rest| rest.strip_prefix(':'))
+            .is_some_and(|label| !label.is_empty() && !label.contains(':'))
+}
+
+/// The login providers offered by the interactive picker, in display order. The
+/// display name is the subscription the operator recognizes; the key is what
+/// `login_provider()` resolves.
+const LOGIN_PICKER_ROWS: &[(&str, &str)] = &[
+    ("anthropic", "Anthropic (Claude Pro/Max)"),
+    ("openai", "ChatGPT (Codex subscription)"),
+    ("xai", "xAI (Grok)"),
+];
+
+/// What the interactive flow decided beyond the provider: an id override (labeled
+/// account) and/or replace mode.
+struct InteractiveChoice {
+    provider: String,
+    id_override: Option<String>,
+    replace: bool,
+}
+
+/// Best-effort credential inventory for the picker's "logged in" indicators and the
+/// add-vs-replace prompt: the authenticated `admin.status` read (running daemon or
+/// offline lease). `None` when unavailable (unbootstrapped vault, locked keychain) —
+/// the picker then simply shows no indicators; login itself will surface real errors.
+fn inventory_for_picker(global: &GlobalArgs) -> Option<Vec<(String, String)>> {
+    let result = commit_admin(
+        global,
+        AdminOpBody::Status {
+            v: ADMIN_OP_SCHEMA_V1,
+        },
+    )
+    .ok()?;
+    Some(
+        result["credentials"]
+            .as_array()?
+            .iter()
+            .filter_map(|row| {
+                Some((
+                    row["id"].as_str()?.to_string(),
+                    row["state"].as_str()?.to_string(),
+                ))
+            })
+            .collect(),
+    )
+}
+
+/// The ids belonging to one login provider: the default id and its labeled accounts.
+fn provider_ids<'a>(inventory: &'a [(String, String)], default_id: &str) -> Vec<&'a str> {
+    inventory
+        .iter()
+        .map(|(id, _)| id.as_str())
+        .filter(|id| *id == default_id || id.starts_with(&format!("{default_id}:")))
+        .collect()
+}
+
+/// Interactive provider picker for a bare `ck auth login`: arrow-key/fuzzy selection
+/// with logged-in indicators, then (when the account already exists) an explicit
+/// add-another / replace choice so multi-account is discoverable instead of a flag
+/// incantation. Interactive-only UX; scripts keep passing --provider/--id/--replace.
+fn pick_login_interactively(global: &GlobalArgs) -> Result<InteractiveChoice, CliError> {
+    use dialoguer::{theme::ColorfulTheme, FuzzySelect, Input, Select};
+
+    let inventory = inventory_for_picker(global).unwrap_or_default();
+    let items: Vec<String> = LOGIN_PICKER_ROWS
+        .iter()
+        .map(|(key, name)| {
+            let wire = login_provider(key).expect("picker rows are valid providers");
+            let ids = provider_ids(&inventory, wire.default_id);
+            match ids.len() {
+                0 => name.to_string(),
+                1 => format!("{name}  ● logged in"),
+                n => format!("{name}  ● {n} accounts"),
+            }
+        })
+        .collect();
+
+    let theme = ColorfulTheme::default();
+    let pick = FuzzySelect::with_theme(&theme)
+        .with_prompt("Select provider to login (type to search)")
+        .items(&items)
+        .default(0)
+        .interact()
+        .map_err(|e| {
+            CliError::Usage(format!(
+                "interactive login needs a terminal ({e}); pass --provider <anthropic|openai|xai>"
+            ))
+        })?;
+    let provider = LOGIN_PICKER_ROWS[pick].0.to_string();
+    let wire = login_provider(&provider).expect("picked provider is valid");
+    let existing = provider_ids(&inventory, wire.default_id);
+
+    if existing.is_empty() {
+        return Ok(InteractiveChoice {
+            provider,
+            id_override: None,
+            replace: false,
+        });
+    }
+
+    // The account already exists: make the multi-account path a menu, not a flag.
+    let mut actions = vec![format!(
+        "Add another account (a new labeled id like {}:work)",
+        wire.default_id
+    )];
+    for id in &existing {
+        actions.push(format!("Replace {id} (re-login; keeps its handles)"));
+    }
+    let action = Select::with_theme(&theme)
+        .with_prompt("This provider already has a credential")
+        .items(&actions)
+        .default(0)
+        .interact()
+        .map_err(|e| CliError::Usage(format!("interactive login cancelled: {e}")))?;
+
+    if action == 0 {
+        let label: String = Input::with_theme(&theme)
+            .with_prompt("Label for the new account (e.g. work, personal, gmail)")
+            .validate_with(|s: &String| {
+                if s.is_empty() || s.contains(':') || s.contains(char::is_whitespace) {
+                    Err("label must be non-empty, without ':' or spaces")
+                } else {
+                    Ok(())
+                }
+            })
+            .interact_text()
+            .map_err(|e| CliError::Usage(format!("interactive login cancelled: {e}")))?;
+        Ok(InteractiveChoice {
+            id_override: Some(format!("{}:{label}", wire.default_id)),
+            provider,
+            replace: false,
+        })
+    } else {
+        Ok(InteractiveChoice {
+            id_override: Some(existing[action - 1].to_string()),
+            provider,
+            replace: true,
+        })
+    }
+}
+
 fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     use credentials_core::oauth_login::{
         build_authorize_url, decode_jwt_claims, exchange_authorization_code,
@@ -657,7 +818,17 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
         generate_state, parse_callback,
     };
 
-    let provider = required(args, "--provider")?;
+    // With --provider the flow is fully flag-driven (scriptable); without it, the
+    // interactive picker owns provider + id + replace selection.
+    let interactive = match optional(args, "--provider") {
+        Some(provider) => InteractiveChoice {
+            provider,
+            id_override: None,
+            replace: false,
+        },
+        None => pick_login_interactively(global)?,
+    };
+    let provider = interactive.provider.clone();
     // Each provider's auth-code wire gets its own grounded research before it is
     // added to login_provider().
     let Some(wire) = login_provider(&provider) else {
@@ -665,7 +836,20 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             "login supports --provider anthropic|openai|xai (got '{provider}')"
         )));
     };
-    let id = optional(args, "--id").unwrap_or_else(|| wire.default_id.to_string());
+    let id = optional(args, "--id")
+        .or(interactive.id_override)
+        .unwrap_or_else(|| wire.default_id.to_string());
+    // Multi-account rail: --id must be the provider's default id or a labeled
+    // sub-account of it (`<default_id>:<label>`). A free-form id here would silently
+    // create a mis-keyed credential (wrong method segment ⇒ wrong adapter routing,
+    // ugly inventory) — the exact footgun this validation exists to close.
+    if !login_id_is_valid(wire.default_id, &id) {
+        return Err(CliError::Usage(format!(
+            "login --id must be '{d}' or '{d}:<label>' (a labeled account of the same \
+             provider, e.g. '{d}:work') — got '{id}'",
+            d = wire.default_id
+        )));
+    }
 
     // Generate the PKCE pair and the CSPRNG state (state is independent of the
     // verifier), build the authorize URL, and present it to the operator.
@@ -695,10 +879,10 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     )
     .map_err(|e| CliError::Io(format!("building authorize url: {e}")))?;
 
-    // For a loopback-redirect provider (openai/xai), bind a one-shot CLI-local
-    // listener on the EXACT redirect address BEFORE opening the browser, so the
-    // redirect can't race an unbound socket. `--no-listener` forces the paste path.
-    // The listener is a pure convenience over paste; the daemon never listens.
+    // Every login provider registers a loopback redirect, so bind a one-shot
+    // CLI-local listener on the EXACT redirect address BEFORE opening the browser
+    // (the redirect can't race an unbound socket). `--no-listener` forces the paste
+    // path. The listener is a pure convenience over paste; the daemon never listens.
     let listener = if has_flag(args, "--no-listener") {
         None
     } else {
@@ -815,6 +999,38 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
         }
     }
 
+    // Capture NON-secret account identity while we have the login artifacts in hand:
+    // Anthropic inlines account/organization blocks in the exchange response (its
+    // access tokens are opaque, so login is the only capture point); OIDC providers
+    // carry email in id_token claims. Stored on the record as display/routing
+    // metadata (ck-quota's per-account usage labels), never used for authorization.
+    let identity = credentials_core::record::RecordIdentity {
+        account_id: tokens
+            .account
+            .as_ref()
+            .and_then(|a| a.uuid.clone())
+            .or_else(|| extract_chatgpt_account_id(&tokens)),
+        email: tokens
+            .account
+            .as_ref()
+            .and_then(|a| a.email_address.clone())
+            .or_else(|| {
+                tokens.id_token.as_deref().and_then(|t| {
+                    decode_jwt_claims(t)?
+                        .get("email")?
+                        .as_str()
+                        .map(str::to_string)
+                })
+            }),
+        org_name: tokens.organization.as_ref().and_then(|o| o.name.clone()),
+    };
+    if let Some(email) = identity.email.as_deref() {
+        match identity.org_name.as_deref() {
+            Some(org) => println!("account: {email} · {org}"),
+            None => println!("account: {email}"),
+        }
+    }
+
     // Build the canonical oauth credential + record. token_url and client_id are
     // stored on the record so the refresh path uses the same endpoint/client that
     // minted this token.
@@ -827,14 +1043,15 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
         scopes: wire.scopes.iter().map(|s| s.to_string()).collect(),
     };
     let payload = tokens.access_token.clone().into_bytes();
-    let record = VaultRecord::new_oauth("login", wire.adapter_name, oauth, payload);
+    let record =
+        VaultRecord::new_oauth("login", wire.adapter_name, oauth, payload).with_identity(identity);
 
     // Login records a distinct `Login` audit op (not `Import`) so forensics can tell
     // a native mint from a foreign import. `--replace` overwrites an existing id (the
     // dual-custody migration: swap the imported token for the vault-minted one; the
     // handle survives). With `--subc` the commit rides the RUNNING module, so a
     // re-login needs no daemon stop at all (the zero-downtime path).
-    if has_flag(args, "--replace") {
+    if has_flag(args, "--replace") || interactive.replace {
         commit_admin(
             global,
             store_op(
@@ -846,10 +1063,32 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
         )?;
         println!("logged in and replaced {id}");
     } else {
-        commit_admin(
+        let result = commit_admin(
             global,
             store_op(&id, record, AdminAuditOp::Login, StoreMode::Create),
-        )?;
+        );
+        // The create-only refusal must not be a dead end: name both ways forward
+        // (another account under a label, or swapping this credential). The route
+        // path surfaces the same refusal as a RouteRefused string, so match both.
+        let already_exists = match &result {
+            Err(CliError::Store(StoreOpError::AlreadyExists)) => true,
+            // The route path's refusal string for StoreOpError::AlreadyExists
+            // (admin_surface::store_err).
+            Err(CliError::RouteRefused(m)) => m.contains("already exists"),
+            _ => false,
+        };
+        if already_exists {
+            return Err(CliError::Usage(format!(
+                "'{id}' already holds a credential.\n\
+                 To add ANOTHER account for this provider:  login --provider {p} --id {d}:<label>\n\
+                 (e.g. --id {d}:work — each labeled id is an independent credential)\n\
+                 To REPLACE the existing credential:        login --provider {p} --replace\n\
+                 (keeps the id, its handles, and bumps record_version)",
+                p = provider,
+                d = wire.default_id
+            )));
+        }
+        result?;
         println!("logged in and stored {id}");
     }
     Ok(())
@@ -907,6 +1146,24 @@ fn cmd_logout(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     let revoked = result["handles_revoked"].as_u64().unwrap_or(0);
     println!("logged out {id}: stopped serving, revoked {revoked} handle(s)");
     println!("(reversible: `login --provider <p> --replace` restores it; the record and audit chain are kept)");
+    Ok(())
+}
+
+/// `remove` = PERMANENTLY delete a credential row (+ its intent and handle rows) in
+/// one audited fenced transaction. The audit chain keeps the full history — removal
+/// deletes serving state, never forensics. The permanent sibling of `logout`: use it
+/// to retire an account or clean up a mistakenly created id. Takes `--id` only (no
+/// `--provider` shorthand: a permanent delete should name its exact target).
+fn cmd_remove(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
+    let id = required(args, "--id")?;
+    commit_admin(
+        global,
+        AdminOpBody::Remove {
+            v: ADMIN_OP_SCHEMA_V1,
+            id: id.clone(),
+        },
+    )?;
+    println!("removed {id}: row, refresh intent, and handles deleted (audit history kept)");
     Ok(())
 }
 
@@ -1353,5 +1610,32 @@ mod tests {
         // is the `bootstrap somearg` / `bootstrap --help` class that previously RAN.
         assert!(reject_unknown_args("bootstrap", &v(&["--help"])).is_err());
         assert!(reject_unknown_args("bootstrap", &v(&["stray"])).is_err());
+    }
+
+    /// The multi-account rail: a login id is the provider default or one labeled
+    /// sub-account — any free-form id (e.g. a bare account name) would create a
+    /// mis-keyed credential, so it is refused before any browser or network work.
+    #[test]
+    fn login_id_validation_accepts_default_and_labels_only() {
+        // The default id and labeled accounts pass.
+        assert!(login_id_is_valid("oauth:anthropic", "oauth:anthropic"));
+        assert!(login_id_is_valid("oauth:anthropic", "oauth:anthropic:work"));
+        assert!(login_id_is_valid("chatgpt:openai", "chatgpt:openai:gmail"));
+        // Free-form ids are refused (a bare label is not a credential id).
+        assert!(!login_id_is_valid("oauth:anthropic", "wwaxpoetic"));
+        assert!(!login_id_is_valid("oauth:anthropic", "oauth:xai"));
+        // Empty or nested labels are refused.
+        assert!(!login_id_is_valid("oauth:anthropic", "oauth:anthropic:"));
+        assert!(!login_id_is_valid("oauth:anthropic", "oauth:anthropic:a:b"));
+        // A prefix without the separator is refused (not a label).
+        assert!(!login_id_is_valid("oauth:anthropic", "oauth:anthropicx"));
+    }
+
+    /// `remove` takes --id and is registered in the arg-rejection table (a typo'd
+    /// flag cannot silently target the wrong credential for a PERMANENT delete).
+    #[test]
+    fn remove_flags_are_validated() {
+        assert!(reject_unknown_args("remove", &v(&["--id", "oauth:anthropic:old"])).is_ok());
+        assert!(reject_unknown_args("remove", &v(&["--provider", "anthropic"])).is_err());
     }
 }

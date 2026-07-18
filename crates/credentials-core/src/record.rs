@@ -44,6 +44,32 @@ pub enum CredentialKind {
     Opaque,
 }
 
+/// NON-SECRET provider account identity, captured once at login from the token
+/// exchange response (Anthropic returns it inline; OpenAI carries it in id_token
+/// claims). Stored because some providers' access tokens are opaque (Anthropic), so
+/// identity cannot be parsed live at serve time the way the OpenAI claim table does.
+/// Display/routing metadata only — never part of an authorization decision.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RecordIdentity {
+    /// The provider's stable account id (Anthropic account uuid, ChatGPT account id).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
+    /// The account email, when the provider disclosed it at login.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    /// Human-readable organization/workspace name (the subscription the token draws
+    /// limits from), when disclosed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_name: Option<String>,
+}
+
+impl RecordIdentity {
+    /// Whether every field is absent (nothing worth storing).
+    pub fn is_empty(&self) -> bool {
+        self.account_id.is_none() && self.email.is_none() && self.org_name.is_none()
+    }
+}
+
 /// The vault's typed, at-rest view of one credential. Encrypted as one unit; only
 /// `payload` is ever returned to a consumer.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -70,6 +96,11 @@ pub struct VaultRecord {
     /// credential this is typically the serialized form the consumer expects (e.g.
     /// the access token / an auth header value); the vault does not interpret it.
     pub payload: Vec<u8>,
+    /// Non-secret account identity captured at login. `default` so records sealed
+    /// before this field existed decode with an empty identity (additive schema
+    /// evolution under the same `schema_version`, like any other optional field).
+    #[serde(default, skip_serializing_if = "RecordIdentity::is_empty")]
+    pub identity: RecordIdentity,
 }
 
 impl VaultRecord {
@@ -92,7 +123,15 @@ impl VaultRecord {
             refresh_adapter: Some(refresh_adapter.into()),
             oauth: Some(oauth),
             payload,
+            identity: RecordIdentity::default(),
         }
+    }
+
+    /// Attach non-secret account identity (builder-style, used by login flows that
+    /// capture identity from the exchange response).
+    pub fn with_identity(mut self, identity: RecordIdentity) -> Self {
+        self.identity = identity;
+        self
     }
 
     /// Construct a static (non-refreshable) record at version 1: an API key, DSN,
@@ -116,6 +155,7 @@ impl VaultRecord {
             refresh_adapter: None,
             oauth: None,
             payload,
+            identity: RecordIdentity::default(),
         }
     }
 

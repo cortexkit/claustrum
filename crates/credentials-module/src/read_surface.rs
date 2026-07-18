@@ -89,6 +89,16 @@ pub struct GetResult {
     /// secret and never the credential id / handle (handles survive replace by design).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub account_id: Option<String>,
+    /// The account email, when captured at login (Anthropic discloses it in the token
+    /// exchange; opaque-token providers have no live-parse path, so this is stored
+    /// identity). NON-secret display metadata for account-labeled consumers (ck-quota
+    /// usage panels). Absent for records minted before identity capture existed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    /// Human-readable organization/workspace name (the subscription the token draws
+    /// limits from), when captured at login. NON-secret display metadata.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub org_name: Option<String>,
 }
 
 /// A non-secret error code returned to a consumer (never leaks why beyond the
@@ -275,6 +285,11 @@ impl ReadSurface {
                 // claim table (keyed by the record's stored refresh adapter). Absent for
                 // a static api-key record (no adapter) or a provider with no account
                 // claim. This is the binding key an account-scoped router joins on.
+                // Live claim parse first (self-correcting across refreshes for JWT
+                // providers), stored login-time identity as the fallback for opaque-token
+                // providers (Anthropic). QTA invariant: email never ships without
+                // account_id — both come from the same stored identity when the live
+                // parse has nothing.
                 let account_id = match (&record.refresh_adapter, &record.oauth) {
                     (Some(adapter), Some(o)) => {
                         credentials_core::oauth_login::account_id_for_adapter(
@@ -283,13 +298,16 @@ impl ReadSurface {
                         )
                     }
                     _ => None,
-                };
+                }
+                .or_else(|| record.identity.account_id.clone());
                 GetOutcome::Ok(GetResult {
                     payload: record.payload,
                     expires_at_ms: record.expires_at_ms,
                     record_version: record.record_version,
                     project_id,
                     account_id,
+                    email: record.identity.email.clone(),
+                    org_name: record.identity.org_name.clone(),
                 })
             }
             Err(e) => err(map_engine_error(&e)),

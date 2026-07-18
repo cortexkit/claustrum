@@ -32,6 +32,9 @@ serde_json = { workspace = true }
 tokio = { workspace = true }
 # The CLI's `login` command stamps the minted token's expiry from wall-clock time.
 chrono = { workspace = true }
+# Interactive login UX: the provider picker (arrow keys + fuzzy filter) and the
+# add-vs-replace account prompt. CLI-only; the daemon never prompts.
+dialoguer = { version = "0.12", features = ["fuzzy-select"] }
 
 [dev-dependencies]
 subc-core = { workspace = true }

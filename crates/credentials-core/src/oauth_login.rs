@@ -172,6 +172,31 @@ pub struct LoginTokens {
     /// not). Carried so the caller can read identity claims (e.g. the ChatGPT account
     /// id) — never stored in the credential record.
     pub id_token: Option<String>,
+    /// Non-secret account identity disclosed by the exchange response itself
+    /// (Anthropic inlines `account`/`organization` blocks; form-wire providers leave
+    /// this empty and identity comes from id_token claims instead).
+    pub account: Option<ExchangeAccount>,
+    pub organization: Option<ExchangeOrganization>,
+}
+
+/// The `account` block of Anthropic's token exchange response: the provider-stable
+/// account uuid and the login email. Non-secret display/routing metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ExchangeAccount {
+    #[serde(default)]
+    pub uuid: Option<String>,
+    #[serde(default)]
+    pub email_address: Option<String>,
+}
+
+/// The `organization` block of Anthropic's token exchange response: the workspace
+/// the token draws subscription limits from.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ExchangeOrganization {
+    #[serde(default)]
+    pub uuid: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 /// A login failure.
@@ -217,12 +242,18 @@ impl From<RefreshError> for LoginError {
 
 /// The success response body of the authorization-code exchange. `refresh_token` is
 /// REQUIRED here (unlike a refresh response, where it is optional) — a login that
-/// returns no refresh token cannot become a custodied credential.
+/// returns no refresh token cannot become a custodied credential. The optional
+/// `account`/`organization` identity blocks are Anthropic's (uuid + email, org name);
+/// they ride the same response and are captured as non-secret metadata.
 #[derive(Debug, Deserialize)]
 struct ExchangeResponseBody {
     access_token: String,
     refresh_token: String,
     expires_in: i64,
+    #[serde(default)]
+    account: Option<ExchangeAccount>,
+    #[serde(default)]
+    organization: Option<ExchangeOrganization>,
 }
 
 /// The success response body of the STANDARD (RFC 6749/7636) form-encoded exchange
@@ -287,8 +318,11 @@ pub async fn exchange_authorization_code(
         access_token: parsed.access_token,
         refresh_token: parsed.refresh_token,
         expires_at_ms: Some(now_ms + parsed.expires_in.saturating_mul(1000)),
-        // Anthropic's exchange issues no id_token (identity is not part of that wire).
+        // Anthropic's exchange issues no id_token; its identity rides the response's
+        // account/organization blocks instead.
         id_token: None,
+        account: parsed.account,
+        organization: parsed.organization,
     })
 }
 
@@ -353,6 +387,8 @@ pub async fn exchange_authorization_code_form(
         refresh_token: parsed.refresh_token,
         expires_at_ms: parsed.expires_in.map(|s| now_ms + s.saturating_mul(1000)),
         id_token: parsed.id_token,
+        account: None,
+        organization: None,
     })
 }
 
@@ -638,6 +674,9 @@ mod tests {
         assert_eq!(tokens.access_token, "acc-NEW");
         assert_eq!(tokens.refresh_token, "ref-NEW");
         assert_eq!(tokens.expires_at_ms, Some(1_000_000 + 28_800 * 1000));
+        // No identity blocks in the response ⇒ none captured (no fabrication).
+        assert!(tokens.account.is_none());
+        assert!(tokens.organization.is_none());
 
         // Assert the EXACT bytes sent: JSON to the token endpoint with the pinned
         // field set (incl. the non-standard `state` field the provider expects).
@@ -652,6 +691,38 @@ mod tests {
         assert_eq!(sent["client_id"], CLIENT_ID);
         assert_eq!(sent["redirect_uri"], CALLBACK_URL);
         assert_eq!(sent["code_verifier"], "the-verifier");
+    }
+
+    #[tokio::test]
+    async fn exchange_captures_account_and_organization_identity() {
+        // The recorded-shape response WITH Anthropic's inline identity blocks (the
+        // shape the claude.ai exchange returns; field names verified against the
+        // oh-my-pi reference client). Unknown sub-fields are ignored.
+        let body = br#"{"access_token":"acc","refresh_token":"ref","expires_in":3600,
+            "account":{"uuid":"acct-uuid-1","email_address":"op@example.com"},
+            "organization":{"uuid":"org-uuid-1","name":"op@example.com's Organization"}}"#;
+        let http = FixtureTransport::ok(200, body.to_vec());
+        let cb = Callback {
+            code: "c".into(),
+            state: "STATE".into(),
+        };
+        let tokens = exchange_authorization_code(
+            &http,
+            TOKEN_URL,
+            CLIENT_ID,
+            CALLBACK_URL,
+            &cb,
+            "STATE",
+            "v",
+            0,
+        )
+        .await
+        .unwrap();
+        let account = tokens.account.expect("account captured");
+        assert_eq!(account.uuid.as_deref(), Some("acct-uuid-1"));
+        assert_eq!(account.email_address.as_deref(), Some("op@example.com"));
+        let org = tokens.organization.expect("organization captured");
+        assert_eq!(org.name.as_deref(), Some("op@example.com's Organization"));
     }
 
     #[tokio::test]
@@ -927,6 +998,8 @@ mod tests {
             refresh_token: "r".into(),
             expires_at_ms: None,
             id_token: None,
+            account: None,
+            organization: None,
         };
         assert_eq!(
             extract_chatgpt_account_id(&tokens).as_deref(),
@@ -939,6 +1012,8 @@ mod tests {
             refresh_token: "r".into(),
             expires_at_ms: None,
             id_token: None,
+            account: None,
+            organization: None,
         };
         assert_eq!(extract_chatgpt_account_id(&bare), None);
     }

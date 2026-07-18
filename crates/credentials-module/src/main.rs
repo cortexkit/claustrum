@@ -1549,4 +1549,107 @@ mod tests {
             "a record with no account-claim provider must not carry an account_id"
         );
     }
+
+    /// End-to-end: `get` serves stored login-time identity (email + org_name +
+    /// account_id fallback) for an opaque-token provider (anthropic), and serves NO
+    /// identity fields for a pre-identity record (the additive-schema arm: old
+    /// records decode with an empty identity and the wire omits the fields). This is
+    /// the QTA display-label leg: email must ride WITH account_id, both from the
+    /// stored identity, because an opaque access token has no live-parse path.
+    #[tokio::test]
+    async fn get_serves_stored_identity_for_anthropic_and_none_for_legacy_records() {
+        use credentials_core::oauth::OAuthCredential;
+        use credentials_core::record::RecordIdentity;
+
+        let (surface, store, _db) = tmp_surface_with_store(22);
+
+        let oauth = OAuthCredential {
+            // Opaque (non-JWT) access token — the live claim parse yields nothing,
+            // so any served identity provably comes from the stored RecordIdentity.
+            access_token: "sk-ant-oat01-opaque".to_string(),
+            refresh_token: "ref".to_string(),
+            expires_at_ms: Some(4_102_444_800_000),
+            token_url: "https://api.anthropic.com/v1/oauth/token".to_string(),
+            client_id: Some("client".to_string()),
+            scopes: Vec::new(),
+        };
+        let record = VaultRecord::new_oauth(
+            "login",
+            "anthropic",
+            oauth.clone(),
+            b"sk-ant-oat01-opaque".to_vec(),
+        )
+        .with_identity(RecordIdentity {
+            account_id: Some("anthropic-acct-uuid".to_string()),
+            email: Some("op@example.com".to_string()),
+            org_name: Some("op@example.com's Organization".to_string()),
+        });
+        store
+            .create("oauth:anthropic:work", &record)
+            .expect("create labeled anthropic record");
+        let handle = credentials_core::store::mint_handle().expect("mint");
+        store
+            .put_handle_hash(
+                &handle.hash,
+                "oauth:anthropic:work",
+                AuditCtx::admin(AuditOp::MintHandle),
+            )
+            .expect("put handle");
+
+        // A legacy-shaped record with NO identity (pre-identity mint).
+        let legacy = VaultRecord::new_oauth("login", "anthropic", oauth, b"tok".to_vec());
+        store
+            .create("oauth:anthropic", &legacy)
+            .expect("create legacy record");
+        let legacy_handle = credentials_core::store::mint_handle().expect("mint");
+        store
+            .put_handle_hash(
+                &legacy_handle.hash,
+                "oauth:anthropic",
+                AuditCtx::admin(AuditOp::MintHandle),
+            )
+            .expect("put legacy handle");
+
+        let got = surface
+            .get(
+                1,
+                &read_surface::GetParams {
+                    handle: handle.raw.clone(),
+                    min_ttl_ms: None,
+                    force_refresh: false,
+                },
+            )
+            .await;
+        let read_surface::GetOutcome::Ok(result) = got else {
+            panic!("expected an Ok get for the labeled anthropic handle");
+        };
+        assert_eq!(result.email.as_deref(), Some("op@example.com"));
+        assert_eq!(
+            result.org_name.as_deref(),
+            Some("op@example.com's Organization")
+        );
+        assert_eq!(
+            result.account_id.as_deref(),
+            Some("anthropic-acct-uuid"),
+            "account_id must fall back to stored identity for opaque tokens \
+             (QTA invariant: email never ships without account_id)"
+        );
+
+        let got_legacy = surface
+            .get(
+                1,
+                &read_surface::GetParams {
+                    handle: legacy_handle.raw.clone(),
+                    min_ttl_ms: None,
+                    force_refresh: false,
+                },
+            )
+            .await;
+        let read_surface::GetOutcome::Ok(legacy_result) = got_legacy else {
+            panic!("expected an Ok get for the legacy handle");
+        };
+        assert_eq!(legacy_result.email, None);
+        assert_eq!(legacy_result.org_name, None);
+        assert_eq!(legacy_result.account_id, None);
+    }
 }

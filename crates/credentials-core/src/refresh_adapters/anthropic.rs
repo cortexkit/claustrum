@@ -39,21 +39,30 @@ pub const CLAUDE_CODE_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 pub const ADAPTER_NAME: &str = "anthropic";
 
 // ── First-party login (authorization-code) constants ──────────────────────────
-// Pinned against the first-party CortexKit `anthropic-auth` plugin (the working
-// Claude Pro/Max login), used by `ck-auth login --provider anthropic`.
+// Pinned against the Claude Code loopback flow (verified in the oh-my-pi reference
+// implementation and live on-box): authorize at claude.ai, redirect to the fixed
+// loopback callback the CLI listens on, exchange at api.anthropic.com. Used by
+// `ck-auth login --provider anthropic`.
 
 /// The Claude Pro/Max authorization endpoint the operator's browser is opened to
-/// (distinct from the token endpoint). The subscription ("max") host.
-pub const AUTHORIZE_URL: &str = "https://claude.com/cai/oauth/authorize";
+/// (distinct from the token endpoint).
+pub const AUTHORIZE_URL: &str = "https://claude.ai/oauth/authorize";
 
-/// Anthropic's non-standard extra authorize params: `code=true` selects the manual
-/// code-display callback page variant.
+/// The token endpoint the LOGIN exchange posts to, and the `token_url` stored on
+/// records minted by login (refresh follows it; the same endpoint serves the
+/// refresh grant). Distinct from the legacy [`TOKEN_URL`] default that pre-login
+/// imported records carry.
+pub const LOGIN_TOKEN_URL: &str = "https://api.anthropic.com/v1/oauth/token";
+
+/// Anthropic's non-standard extra authorize param, sent on this flow by the
+/// first-party clients.
 pub const LOGIN_EXTRA_AUTHORIZE_PARAMS: &[(&str, &str)] = &[("code", "true")];
 
-/// The MANUAL code-paste redirect target: a provider-hosted page that DISPLAYS the
-/// authorization code for the operator to copy back. Using it means the login needs
-/// no inbound localhost listener (zero inbound network surface).
-pub const CODE_CALLBACK_URL: &str = "https://platform.claude.com/oauth/code/callback";
+/// The registered loopback redirect for the Claude Code authorization flow. The CLI
+/// binds it one-shot to capture the code redirect; if the bind fails the browser
+/// lands on connection-refused and the operator pastes the address-bar URL instead
+/// (same posture as the OpenAI/xAI loopback redirects).
+pub const LOGIN_REDIRECT_URI: &str = "http://localhost:54545/callback";
 
 /// The OAuth scopes requested at login (the Claude Pro/Max + Claude Code scope set).
 pub const LOGIN_SCOPES: &[&str] = &[

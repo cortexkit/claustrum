@@ -955,6 +955,53 @@ impl EncryptedStore {
         .map_err(StoreOpError::from)
     }
 
+    /// PERMANENTLY remove a credential: delete the row, its refresh intent, and its
+    /// handle rows, appending a `Remove` audit entry — all in ONE fenced transaction.
+    /// The audit chain keeps the credential's full history (append-only; removal is
+    /// itself an entry), so this deletes serving state, never forensics. For retiring
+    /// an account or cleaning up a mistaken id; a temporary stop is `logout`
+    /// (invalidate + revoke, reversible). Returns [`StoreOpError::NotFound`] when the
+    /// id has no row, so a typo'd remove is loud instead of a silent no-op.
+    pub fn remove_audited(
+        &self,
+        credential_id: &str,
+        ctx: AuditCtx<'_>,
+    ) -> Result<(), StoreOpError> {
+        let audit_key = self.audit_key.clone();
+        let removed = self.fenced_write(|tx| {
+            let n = tx.execute(
+                "DELETE FROM credentials WHERE credential_id = ?1",
+                rusqlite::params![credential_id],
+            )?;
+            if n > 0 {
+                clear_intent_tx(tx, credential_id)?;
+                // Handle rows are deleted outright (not just revoked): the credential
+                // is gone, so retaining hash rows would only grow an unusable table.
+                // The mint/revoke history stays in the audit chain.
+                tx.execute(
+                    "DELETE FROM handles WHERE credential_id = ?1",
+                    rusqlite::params![credential_id],
+                )?;
+                append_audit_tx(
+                    tx,
+                    &audit_key,
+                    &AuditRecord {
+                        op: ctx.op,
+                        credential_id: Some(credential_id.to_string()),
+                        payload_hash: None,
+                        actor: ctx.actor.to_string(),
+                        alarm: ctx.alarm,
+                    },
+                )?;
+            }
+            Ok(n)
+        })?;
+        if removed == 0 {
+            return Err(StoreOpError::NotFound);
+        }
+        Ok(())
+    }
+
     /// Quarantine a record (`corrupt`). Used by the read path on a decrypt/parse
     /// failure; idempotent. Does NOT clear a refresh intent or audit — quarantine is
     /// an internal integrity flip, not a recorded mutation, and a corrupt record's
@@ -1813,6 +1860,47 @@ mod tests {
             Err(StoreOpError::AlreadyExists) => {}
             other => panic!("expected AlreadyExists, got {other:?}"),
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `remove_audited` permanently deletes the row + intent + handle rows in one
+    /// fenced transaction, appends a `remove` audit entry, and frees the id for a
+    /// future create. A missing id is a loud NotFound, and removal must not disturb
+    /// other credentials.
+    #[test]
+    fn remove_deletes_row_handles_and_intent_and_frees_the_id() {
+        let (root, store) = tmp_store(2);
+        store.create("keep", &oauth_record()).expect("create keep");
+        store.create("gone", &oauth_record()).expect("create gone");
+        store
+            .put_handle_hash("deadbeef", "gone", AuditCtx::vault(AuditOp::MintHandle))
+            .expect("mint handle");
+        store.open_intent("gone", 1, "rhash").expect("open intent");
+
+        // Unknown id: loud NotFound, nothing audited for it.
+        match store.remove_audited("nope", AuditCtx::vault(AuditOp::Remove)) {
+            Err(StoreOpError::NotFound) => {}
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+
+        store
+            .remove_audited("gone", AuditCtx::vault(AuditOp::Remove))
+            .expect("remove");
+
+        // Row gone, intent gone, handle unresolvable; sibling untouched.
+        assert!(matches!(store.meta("gone"), Err(StoreOpError::NotFound)));
+        assert!(store.read_intent("gone").expect("read intent").is_none());
+        assert!(store.meta("keep").is_ok());
+        // The audit chain records the removal and still verifies end-to-end.
+        let entries = store.read_audit(None).expect("read audit");
+        let last = entries.last().expect("has entries");
+        assert_eq!(last.op, "remove");
+        assert_eq!(last.credential_id.as_deref(), Some("gone"));
+        store
+            .verify_audit_chain()
+            .expect("chain verifies after remove");
+        // The id is free for a NEW credential (fresh v1 chain).
+        store.create("gone", &oauth_record()).expect("recreate");
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -144,16 +144,34 @@ fn read_callback_query(stream: &mut TcpStream) -> Option<String> {
     }
 }
 
-/// Write a minimal HTML page so the browser shows a clean result instead of a raw
-/// connection or a hanging request.
+/// Write a small self-contained success/failure page so the browser shows a clean
+/// result instead of a raw connection or a hanging request. Styled (dark, centered
+/// card) because this page is the visible end of every login; no external loads.
 fn write_browser_response(stream: &mut TcpStream, ok: bool) {
-    let body = if ok {
-        "<html><body style=\"font-family:sans-serif\"><h3>Login received.</h3>\
-         <p>You can close this tab and return to the terminal.</p></body></html>"
+    let (title, detail, mark) = if ok {
+        (
+            "Authentication successful",
+            "You are logged in. You can close this tab and return to the terminal.",
+            "\u{2713}",
+        )
     } else {
-        "<html><body style=\"font-family:sans-serif\"><h3>Could not read the login response.</h3>\
-         <p>Return to the terminal and paste the URL from the address bar instead.</p></body></html>"
+        (
+            "Could not read the login response",
+            "Return to the terminal and paste the URL from the address bar instead.",
+            "!",
+        )
     };
+    let body = format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\"><title>CortexKit \u{b7} login</title>\
+         <style>body{{margin:0;display:flex;align-items:center;justify-content:center;\
+         min-height:100vh;background:#101014;color:#e8e8ea;font-family:-apple-system,system-ui,sans-serif}}\
+         .card{{text-align:center;padding:48px 56px;border:1px solid #2a2a31;border-radius:12px;background:#17171c}}\
+         .mark{{width:64px;height:64px;line-height:64px;margin:0 auto 24px;border-radius:50%;\
+         background:#1e2b1e;color:#7fbf7f;font-size:32px}}h1{{font-size:22px;font-weight:600;margin:0 0 12px}}\
+         p{{margin:0;color:#9a9aa2;font-size:15px}}</style></head><body>\
+         <div class=\"card\"><div class=\"mark\">{mark}</div><h1>{title}</h1><p>{detail}</p></div>\
+         </body></html>"
+    );
     let response = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\
          Content-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n{}",
@@ -218,7 +236,7 @@ mod tests {
         assert_eq!(query, "code=abc123&state=xyz789");
         let resp = client.join().unwrap();
         assert!(resp.contains("200 OK"), "browser got a page: {resp}");
-        assert!(resp.contains("Login received"));
+        assert!(resp.contains("Authentication successful"));
     }
 
     #[test]

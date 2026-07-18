@@ -46,6 +46,9 @@ pub enum AuditOp {
     RefreshCommit,
     /// A consumer-reported auth failure that marked the credential needs_reauth.
     ReportAuthFailure,
+    /// A credential row was permanently removed (its audit history is retained —
+    /// removal deletes the row, never the chain).
+    Remove,
     /// A capability handle was minted.
     MintHandle,
     /// A capability handle (or all for a credential) was revoked.
@@ -67,6 +70,7 @@ impl AuditOp {
             AuditOp::RotateMasterKey => "rotate_master_key",
             AuditOp::RefreshCommit => "refresh_commit",
             AuditOp::ReportAuthFailure => "report_auth_failure",
+            AuditOp::Remove => "remove",
             AuditOp::MintHandle => "mint_handle",
             AuditOp::RevokeHandle => "revoke_handle",
             AuditOp::FetchAnomaly => "fetch_anomaly",

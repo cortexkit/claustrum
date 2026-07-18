@@ -39,6 +39,12 @@ pub enum AdminOpBody {
     },
     #[serde(rename = "admin.invalidate")]
     Invalidate { v: u32, id: String },
+    /// PERMANENT removal: delete the credential row, its intent, and its handles
+    /// (audited; the chain keeps the history). `logout` (invalidate) is the
+    /// reversible sibling — remove is for retiring an account or cleaning up a
+    /// mistaken id.
+    #[serde(rename = "admin.remove")]
+    Remove { v: u32, id: String },
     #[serde(rename = "admin.mint_handle")]
     MintHandle { v: u32, id: String },
     #[serde(rename = "admin.revoke_handle")]
@@ -60,6 +66,7 @@ impl AdminOpBody {
         match self {
             AdminOpBody::Store { v, .. }
             | AdminOpBody::Invalidate { v, .. }
+            | AdminOpBody::Remove { v, .. }
             | AdminOpBody::MintHandle { v, .. }
             | AdminOpBody::RevokeHandle { v, .. }
             | AdminOpBody::RevokeAllHandles { v, .. }
@@ -74,6 +81,7 @@ impl AdminOpBody {
         match self {
             AdminOpBody::Store { id, .. }
             | AdminOpBody::Invalidate { id, .. }
+            | AdminOpBody::Remove { id, .. }
             | AdminOpBody::MintHandle { id, .. }
             | AdminOpBody::RevokeAllHandles { id, .. } => Some(id),
             AdminOpBody::RevokeHandle { .. } | AdminOpBody::Status { .. } => None,
@@ -151,6 +159,11 @@ pub fn apply(
             let ctx = AuditCtx::route_admin(AuditOp::Invalidate, actor);
             let revoked = store.invalidate_and_revoke_all_audited(&id, ctx)?;
             Ok(serde_json::json!({ "handles_revoked": revoked }))
+        }
+        AdminOpBody::Remove { id, .. } => {
+            let ctx = AuditCtx::route_admin(AuditOp::Remove, actor);
+            store.remove_audited(&id, ctx)?;
+            Ok(serde_json::json!({ "removed": true }))
         }
         AdminOpBody::MintHandle { id, .. } => {
             // The credential must exist before a handle is minted for it (the handles

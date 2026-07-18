@@ -936,6 +936,29 @@ fn login_provider(provider: &str) -> Option<LoginProvider> {
     }
 }
 
+/// The default credential id for a bare `--provider <name>` login (no `--id`, no
+/// interactive pick). OAuth/subscription logins WIN for the three names that also
+/// have an api-key row (openai → chatgpt:openai, xai → oauth:xai, google →
+/// oauth:google): a bare `login --provider <name>` means the subscription login,
+/// and that name's api-key credential is reached with an explicit `--id apikey:<name>`.
+fn default_login_id(provider: &str) -> String {
+    if let Some(wire) = login_provider(provider) {
+        return wire.default_id.to_string();
+    }
+    if let Some(id) = google_login::default_id(provider) {
+        return id.to_string();
+    }
+    if let Some(p) = api_key_login::API_KEY_PROVIDERS
+        .iter()
+        .find(|p| p.key == provider)
+    {
+        return p.default_id.to_string();
+    }
+    // Unknown provider: return it unchanged so the dispatch's final login_provider
+    // lookup produces the proper "unknown provider" error.
+    provider.to_string()
+}
+
 /// Whether a login `--id` is the provider's default id or a labeled sub-account of
 /// it (`<default_id>:<label>`, one non-empty label segment). Anything else would
 /// mint a mis-keyed credential.
@@ -1057,9 +1080,14 @@ fn pick_login_interactively(global: &GlobalArgs) -> Result<InteractiveChoice, Cl
     let existing = provider_ids(&inventory, default_id);
 
     if existing.is_empty() {
+        // Carry the picked row's default id so the dispatch keys on the credential
+        // METHOD, not the provider name: openai/xai/google each name BOTH an OAuth
+        // login (chatgpt:openai / oauth:xai / oauth:google) and an api-key row
+        // (apikey:*), so the provider string alone cannot say which the operator
+        // picked — the resolved id can.
         return Ok(InteractiveChoice {
             provider: provider.clone(),
-            id_override: None,
+            id_override: Some(default_id.to_string()),
             replace: false,
         });
     }
@@ -1275,7 +1303,27 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     };
     let provider = interactive.provider.clone();
 
-    if google_login::is_provider(&provider) {
+    // Resolve the target credential id BEFORE routing so the dispatch can key on the
+    // credential METHOD, not the bare provider name. openai/xai/google each name both
+    // an OAuth login (chatgpt:openai / oauth:xai / oauth:google) and an api-key row
+    // (apikey:*). Precedence: explicit --id > the interactive picker's chosen id > the
+    // provider's default. Route to the api-key branch when the provider has ONLY an
+    // api-key login, OR it has both AND the resolved id is explicitly an `apikey:` id.
+    // (Gating purely on the id's method would send a malformed `--id zai` for an
+    // api-key-only provider to the "unknown provider" path instead of the helpful
+    // id-rail error.)
+    let target_id = optional(args, "--id")
+        .or_else(|| interactive.id_override.clone())
+        .unwrap_or_else(|| default_login_id(&provider));
+    let has_oauth_login =
+        login_provider(&provider).is_some() || google_login::is_provider(&provider);
+    let apikey_row = api_key_login::API_KEY_PROVIDERS
+        .iter()
+        .find(|p| p.key == provider);
+    let route_api_key =
+        apikey_row.is_some() && (!has_oauth_login || target_id.starts_with("apikey:"));
+
+    if !route_api_key && google_login::is_provider(&provider) {
         return google_login::cmd_login(
             global,
             args,
@@ -1285,13 +1333,9 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
         );
     }
 
-    if let Some(p) = api_key_login::API_KEY_PROVIDERS
-        .iter()
-        .find(|p| p.key == provider)
-    {
-        let id = optional(args, "--id")
-            .or(interactive.id_override)
-            .unwrap_or_else(|| p.default_id.to_string());
+    if route_api_key {
+        let p = apikey_row.expect("route_api_key implies an api-key row");
+        let id = target_id.clone();
         if !login_id_is_valid(p.default_id, &id) {
             return Err(CliError::Usage(format!(
                 "login --id must be '{d}' or '{d}:<label>' (a labeled account of the same \
@@ -1407,9 +1451,8 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
              to pick from the full provider list"
         )));
     };
-    let id = optional(args, "--id")
-        .or(interactive.id_override)
-        .unwrap_or_else(|| wire.default_id.to_string());
+    // The method-resolved target id (same precedence as the api-key branch).
+    let id = target_id;
     // Multi-account rail: --id must be the provider's default id or a labeled
     // sub-account of it (`<default_id>:<label>`). A free-form id here would silently
     // create a mis-keyed credential (wrong method segment ⇒ wrong adapter routing,
@@ -1709,17 +1752,19 @@ fn cmd_logout(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             ))
         }
         (Some(id), None) => id,
-        (None, Some(provider)) => api_key_login::API_KEY_PROVIDERS
-            .iter()
-            .find(|p| p.key == provider)
-            .map(|p| p.default_id.to_string())
-            .or_else(|| google_login::default_id(&provider).map(str::to_string))
-            .or_else(|| login_provider(&provider).map(|wire| wire.default_id.to_string()))
-            .ok_or_else(|| {
-                CliError::Usage(format!(
+        // Resolve the same way `login` does (OAuth/subscription wins for openai/
+        // xai/google, which each also have an api-key row): `logout --provider openai`
+        // targets the ChatGPT subscription credential, and the api-key one is reached
+        // with `logout --id apikey:openai`. A provider with no known login is rejected.
+        (None, Some(provider)) => {
+            let id = default_login_id(&provider);
+            if id == provider {
+                return Err(CliError::Usage(format!(
                     "unknown login provider '{provider}'; pass --id <id> for other credentials"
-                ))
-            })?,
+                )));
+            }
+            id
+        }
         (None, None) => {
             return Err(CliError::Usage(
                 "--provider <p> or --id <id> is required".to_string(),
@@ -2262,5 +2307,31 @@ mod tests {
         assert!(zai_provider.is_some());
         let zai = zai_provider.unwrap();
         assert_eq!(zai.default_id, "apikey:zai");
+    }
+
+    #[test]
+    fn collision_provider_names_default_to_the_oauth_login() {
+        // openai / xai / google each name BOTH an OAuth login and an api-key row.
+        // A bare `--provider <name>` login must resolve to the OAuth/subscription
+        // credential (the "login" semantic), NOT the api-key row — the regression
+        // that shadowed the ChatGPT login behind apikey:openai.
+        assert_eq!(default_login_id("openai"), "chatgpt:openai");
+        assert_eq!(default_login_id("xai"), "oauth:xai");
+        assert_eq!(default_login_id("google"), "oauth:google");
+        assert_eq!(default_login_id("antigravity"), "antigravity:google");
+        // api-key-only providers resolve to their apikey: id.
+        assert_eq!(default_login_id("zai"), "apikey:zai");
+        assert_eq!(default_login_id("openrouter"), "apikey:openrouter");
+        // The routing discriminator: the OAuth defaults are NOT api-key ids, so the
+        // dispatch sends them to the OAuth path; the api-key-only ones ARE.
+        assert!(!default_login_id("openai").starts_with("apikey:"));
+        assert!(!default_login_id("xai").starts_with("apikey:"));
+        assert!(default_login_id("zai").starts_with("apikey:"));
+        // An unknown provider returns itself unchanged (so the dispatch surfaces the
+        // proper "unknown provider" error rather than mis-routing).
+        assert_eq!(
+            default_login_id("nope-not-a-provider"),
+            "nope-not-a-provider"
+        );
     }
 }

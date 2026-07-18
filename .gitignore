@@ -28,3 +28,4 @@ _bmad-output
 store.db
 *.vault
 /secrets
+gate-evidence/

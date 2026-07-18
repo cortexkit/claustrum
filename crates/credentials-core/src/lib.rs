@@ -23,6 +23,7 @@ pub mod admin_ops;
 pub mod audit;
 pub mod contract;
 pub mod credential_id;
+pub mod device_flow;
 pub mod engine;
 #[cfg(test)]
 mod engine_tests;
@@ -47,6 +48,10 @@ pub use contract::{keychain_service_for, vault_id_for, MODULE_ID, STORAGE_NAMESP
 pub use credential_id::{
     default_refresh_adapter, parse_credential_id, AuthMethod, ParsedCredentialId,
 };
+pub use device_flow::{
+    run_device_flow, run_openai_device_flow, DeviceAuthorization, DeviceBodyEncoding,
+    DeviceFlowConfig, DeviceTokens,
+};
 pub use engine::{EngineError, ReauthReason, Reconciliation, RefreshEngine};
 pub use envelope::{open, seal, EnvelopeError, RecordBinding};
 pub use health::{VaultHealth, VaultHealthStatus};
@@ -56,7 +61,9 @@ pub use oauth::OAuthCredential;
 pub use record::{CredentialKind, VaultRecord, RECORD_SCHEMA_VERSION};
 pub use refresh_adapters::anthropic::AnthropicAdapter;
 pub use refresh_adapters::antigravity::AntigravityAdapter;
+pub use refresh_adapters::github_copilot::GithubCopilotAdapter;
 pub use refresh_adapters::google::GoogleAdapter;
+pub use refresh_adapters::kimi::KimiAdapter;
 pub use refresh_adapters::openai::OpenAiAdapter;
 pub use refresh_adapters::xai::XaiAdapter;
 pub use refresh_adapters::{

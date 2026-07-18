@@ -29,7 +29,7 @@ pub struct OAuthCredential {
     /// Access-token expiry as a Unix timestamp in milliseconds, if the source
     /// provides one. Used to decide when a `get` must trigger a refresh.
     pub expires_at_ms: Option<i64>,
-    /// The provider's token endpoint — where a refresh exchange is POSTed. Stored
+    /// The provider's token endpoint — where a refresh exchange is sent. Stored
     /// per-credential (canonicalized at import) so the refresh path never hardcodes
     /// or re-derives provider URLs.
     pub token_url: String,

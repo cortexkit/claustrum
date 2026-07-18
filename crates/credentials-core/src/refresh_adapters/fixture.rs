@@ -14,6 +14,7 @@ use super::{HttpResponse, HttpTransport, RefreshError};
 /// A request an adapter made, captured for assertions.
 #[derive(Debug, Clone)]
 pub struct RecordedRequest {
+    pub method: String,
     pub url: String,
     pub headers: Vec<(String, String)>,
     pub content_type: String,
@@ -60,6 +61,7 @@ impl HttpTransport for FixtureTransport {
         body: Vec<u8>,
     ) -> Result<HttpResponse, RefreshError> {
         self.requests.lock().unwrap().push(RecordedRequest {
+            method: "POST".to_string(),
             url: url.to_string(),
             headers: headers
                 .iter()
@@ -77,12 +79,13 @@ impl HttpTransport for FixtureTransport {
 
     async fn get(&self, url: &str, headers: &[(&str, &str)]) -> Result<HttpResponse, RefreshError> {
         self.requests.lock().unwrap().push(RecordedRequest {
+            method: "GET".to_string(),
             url: url.to_string(),
             headers: headers
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
-            content_type: "".to_string(),
+            content_type: String::new(),
             body: Vec::new(),
         });
         self.responses

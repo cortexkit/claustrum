@@ -59,7 +59,7 @@ fn unmask(masked: &[u8]) -> String {
 
 /// The Google OAuth client id for refresh: the operator override when set, else the
 /// public gemini-cli client that opencode mints against.
-fn default_client_id() -> String {
+pub fn oauth_client_id() -> String {
     std::env::var(CLIENT_ID_ENV)
         .ok()
         .filter(|s| !s.is_empty())
@@ -68,7 +68,7 @@ fn default_client_id() -> String {
 
 /// The Google OAuth client secret for refresh: the operator override when set, else
 /// the public gemini-cli secret that opencode mints against.
-fn default_client_secret() -> String {
+pub fn oauth_client_secret() -> String {
     std::env::var(CLIENT_SECRET_ENV)
         .ok()
         .filter(|s| !s.is_empty())
@@ -108,8 +108,8 @@ impl GoogleAdapter {
     /// client id/secret, so the adapter must supply the minting client itself.
     pub fn new() -> Self {
         GoogleAdapter {
-            client_id: default_client_id(),
-            client_secret: default_client_secret(),
+            client_id: oauth_client_id(),
+            client_secret: oauth_client_secret(),
         }
     }
 
@@ -290,13 +290,10 @@ mod tests {
     #[test]
     fn default_client_unmasks_to_the_public_gemini_client() {
         assert_eq!(
-            default_client_id(),
+            oauth_client_id(),
             "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com"
         );
-        assert_eq!(
-            default_client_secret(),
-            "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"
-        );
+        assert_eq!(oauth_client_secret(), "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");
     }
 
     /// An imported google credential carries NO client_id (auth.json omits it), so the

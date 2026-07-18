@@ -38,6 +38,8 @@ use std::process::ExitCode;
 mod admin_client;
 #[path = "cli_support/api_key_login.rs"]
 mod api_key_login;
+#[path = "cli_support/google_login.rs"]
+mod google_login;
 #[path = "cli_support/login_listener.rs"]
 mod login_listener;
 
@@ -241,7 +243,8 @@ fn usage() -> String {
                verify-audit | mint-handle | revoke-handle | revoke-all-handles\n\
                invalidate | rotate-master-key | bootstrap\n\
      \n\
-      login: --provider <anthropic|openai|xai|github-copilot|kimi> [--id <id>] [--replace] [--no-listener] [--device]\n\
+      login: --provider <name> [--id <id>] [--replace] [--no-listener] [--device]\n\
+            (run with no --provider for the interactive picker of every provider)\n\
             vault-native first-party OAuth login — mints an INDEPENDENT refresh token\n\
             the vault solely custodies (no dual-custody rotation race). Opens a\n\
             browser URL; a one-shot CLI-local listener on the loopback redirect\n\
@@ -250,7 +253,8 @@ fn usage() -> String {
             --device selects headless device authorization for openai/xai;\n\
             github-copilot and kimi always use device authorization.\n\
             --replace swaps an existing credential (keeps its handle).\n\
-            Default id: oauth:anthropic / chatgpt:openai / oauth:xai / copilot:github / oauth:kimi.\n\
+            Providers include anthropic, openai, xai, google, antigravity,\n\
+            github-copilot, kimi, plus api-key providers (zai, openrouter, ...).\n\
             MULTIPLE ACCOUNTS per provider: give each its own labeled id —\n\
               login --provider anthropic --id oauth:anthropic:work\n\
             (label freely chosen; each labeled id is an independent credential\n\
@@ -610,6 +614,7 @@ enum ExchangeWire {
 }
 
 fn login_provider(provider: &str) -> Option<LoginProvider> {
+    use credentials_core::google_login as google;
     use credentials_core::refresh_adapters::{anthropic, github_copilot, kimi, openai, xai};
     match provider {
         "anthropic" => Some(LoginProvider {
@@ -706,6 +711,39 @@ fn login_provider(provider: &str) -> Option<LoginProvider> {
             paste_prompt: "",
             device: Some(DeviceKind::Kimi),
         }),
+        // The Google-family driver handles these entries before the generic PKCE
+        // path, but keeping their metadata in the provider table makes picker,
+        // logout, and direct provider lookups describe the same credential ids.
+        "google" => Some(LoginProvider {
+            authorize_url: google::AUTHORIZE_URL,
+            token_url: google::TOKEN_URL,
+            client_id: "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com",
+            redirect_uri: google::GEMINI_REDIRECT_URI,
+            scopes: google::SCOPES,
+            extra_authorize_params: google::AUTHORIZE_EXTRA_PARAMS,
+            adapter_name: "google",
+            default_id: "oauth:google",
+            exchange: ExchangeWire::RfcForm,
+            needs_oidc_nonce: false,
+            exchange_echoes_challenge: false,
+            paste_prompt: "After approving, the browser may fail to connect to 127.0.0.1:8085 — that is expected. Copy the FULL URL from the address bar and paste it here, then Enter:",
+            device: None,
+        }),
+        "antigravity" => Some(LoginProvider {
+            authorize_url: google::AUTHORIZE_URL,
+            token_url: google::TOKEN_URL,
+            client_id: "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com",
+            redirect_uri: google::ANTIGRAVITY_REDIRECT_URI,
+            scopes: google::SCOPES,
+            extra_authorize_params: google::AUTHORIZE_EXTRA_PARAMS,
+            adapter_name: "antigravity",
+            default_id: "antigravity:google",
+            exchange: ExchangeWire::RfcForm,
+            needs_oidc_nonce: false,
+            exchange_echoes_challenge: false,
+            paste_prompt: "After approving, the browser may fail to connect to 127.0.0.1:51121 — that is expected. Copy the FULL URL from the address bar and paste it here, then Enter:",
+            device: None,
+        }),
         _ => None,
     }
 }
@@ -730,6 +768,8 @@ const LOGIN_PICKER_ROWS: &[(&str, &str)] = &[
     ("xai", "xAI (Grok)"),
     ("github-copilot", "GitHub Copilot"),
     ("kimi", "Kimi Code"),
+    ("google", "Google Gemini CLI (Code Assist)"),
+    ("antigravity", "Antigravity (Gemini 3)"),
 ];
 
 /// What the interactive flow decided beyond the provider: an id override (labeled
@@ -816,10 +856,12 @@ fn pick_login_interactively(global: &GlobalArgs) -> Result<InteractiveChoice, Cl
         .interact()
         .map_err(|e| {
             CliError::Usage(format!(
-                "interactive login needs a terminal ({e}); pass --provider <anthropic|openai|xai|github-copilot|kimi>"
+                "interactive login needs a terminal ({e}); run `ck auth login` with a TTY, \
+                 or pass --provider <name>"
             ))
         })?;
     let (provider, _, default_id) = &combined_rows[pick];
+    let default_id = default_id.as_str();
     let existing = provider_ids(&inventory, default_id);
 
     if existing.is_empty() {
@@ -858,7 +900,7 @@ fn pick_login_interactively(global: &GlobalArgs) -> Result<InteractiveChoice, Cl
             .interact_text()
             .map_err(|e| CliError::Usage(format!("interactive login cancelled: {e}")))?;
         Ok(InteractiveChoice {
-            id_override: Some(format!("{}:{label}", default_id)),
+            id_override: Some(format!("{default_id}:{label}")),
             provider: provider.clone(),
             replace: false,
         })
@@ -1040,6 +1082,16 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
         None => pick_login_interactively(global)?,
     };
     let provider = interactive.provider.clone();
+
+    if google_login::is_provider(&provider) {
+        return google_login::cmd_login(
+            global,
+            args,
+            &provider,
+            interactive.id_override,
+            interactive.replace,
+        );
+    }
 
     if let Some(p) = api_key_login::API_KEY_PROVIDERS
         .iter()
@@ -1442,22 +1494,17 @@ fn cmd_logout(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             ))
         }
         (Some(id), None) => id,
-        (None, Some(provider)) => {
-            if let Some(p) = api_key_login::API_KEY_PROVIDERS
-                .iter()
-                .find(|p| p.key == provider)
-            {
-                p.default_id.to_string()
-            } else {
-                login_provider(&provider)
-                    .map(|wire| wire.default_id.to_string())
-                    .ok_or_else(|| {
-                        CliError::Usage(format!(
-                            "unknown login provider '{provider}'; pass --id <id> for other credentials"
-                        ))
-                    })?
-            }
-        }
+        (None, Some(provider)) => api_key_login::API_KEY_PROVIDERS
+            .iter()
+            .find(|p| p.key == provider)
+            .map(|p| p.default_id.to_string())
+            .or_else(|| google_login::default_id(&provider).map(str::to_string))
+            .or_else(|| login_provider(&provider).map(|wire| wire.default_id.to_string()))
+            .ok_or_else(|| {
+                CliError::Usage(format!(
+                    "unknown login provider '{provider}'; pass --id <id> for other credentials"
+                ))
+            })?,
         (None, None) => {
             return Err(CliError::Usage(
                 "--provider <p> or --id <id> is required".to_string(),
@@ -1960,6 +2007,22 @@ mod tests {
         assert!(!login_id_is_valid("oauth:anthropic", "oauth:anthropic:a:b"));
         // A prefix without the separator is refused (not a label).
         assert!(!login_id_is_valid("oauth:anthropic", "oauth:anthropicx"));
+    }
+
+    #[test]
+    fn google_login_provider_rows_pin_ids_redirects_and_fallback_ports() {
+        let gemini = login_provider("google").expect("Gemini CLI row");
+        assert_eq!(gemini.default_id, "oauth:google");
+        assert_eq!(gemini.redirect_uri, "http://127.0.0.1:8085/oauth2callback");
+        assert!(gemini.paste_prompt.contains("8085"));
+        assert_eq!(gemini.scopes, credentials_core::google_login::SCOPES);
+
+        let antigravity = login_provider("antigravity").expect("Antigravity row");
+        assert_eq!(antigravity.default_id, "antigravity:google");
+        assert_eq!(antigravity.redirect_uri, "http://127.0.0.1:51121/callback");
+        assert!(antigravity.paste_prompt.contains("51121"));
+        assert!(LOGIN_PICKER_ROWS.contains(&("google", "Google Gemini CLI (Code Assist)")));
+        assert!(LOGIN_PICKER_ROWS.contains(&("antigravity", "Antigravity (Gemini 3)")));
     }
 
     /// `remove` takes --id and is registered in the arg-rejection table (a typo'd

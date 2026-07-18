@@ -3,7 +3,8 @@
 //! The refresh adapters ([`crate::refresh_adapters`]) own the `grant_type=refresh_token`
 //! exchange for a credential the vault ALREADY holds. This module owns the OTHER
 //! half: minting a brand-new credential by driving an interactive authorization-code
-//! login with PKCE, so the vault becomes the SOLE custodian of an INDEPENDENT refresh
+//! login with provider-appropriate authorization-code protection (PKCE for public
+//! clients and Google's standard client-secret exchange), so the vault becomes the SOLE custodian of an INDEPENDENT refresh
 //! token (its own rotation chain) rather than sharing a chain imported from another
 //! custodian. That independence is what structurally eliminates the dual-custody
 //! refresh-rotation race: two independently-minted grants for the same account are
@@ -12,7 +13,7 @@
 //! ## The custody boundary
 //!
 //! This is PURE MECHANISM: PKCE generation, authorize-URL construction, callback
-//! parsing, and the code-for-token exchange over the shared [`HttpTransport`]. It
+//! parsing, and the code-for-token exchanges over the shared [`HttpTransport`]. It
 //! opens NO browser and runs NO inbound redirect listener — the interactive half
 //! (opening the URL, capturing the pasted code) belongs to the offline CLI driver,
 //! and later the CK app. The vault daemon stays headless. The chosen redirect shape
@@ -102,6 +103,33 @@ pub fn build_authorize_url(
     Ok(url.to_string())
 }
 
+/// Build Google's authorization URL for its installed-app flow. Google uses a
+/// client secret at the token endpoint but does not use PKCE; state is still
+/// generated independently and validated before the code exchange.
+pub fn build_authorize_url_google(
+    authorize_url: &str,
+    client_id: &str,
+    redirect_uri: &str,
+    scopes: &[&str],
+    state: &str,
+    extra_params: &[(&str, &str)],
+) -> Result<String, url::ParseError> {
+    let mut url = url::Url::parse(authorize_url)?;
+    {
+        let mut pairs = url.query_pairs_mut();
+        for (key, value) in extra_params {
+            pairs.append_pair(key, value);
+        }
+        pairs
+            .append_pair("client_id", client_id)
+            .append_pair("response_type", "code")
+            .append_pair("redirect_uri", redirect_uri)
+            .append_pair("scope", &scopes.join(" "))
+            .append_pair("state", state);
+    }
+    Ok(url.to_string())
+}
+
 /// A parsed authorization callback: the code and the returned state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Callback {
@@ -143,16 +171,16 @@ pub fn parse_callback(input: &str) -> Option<Callback> {
         }
     }
 
-    // 3. A bare querystring `code=..&state=..`.
+    // 3. A bare querystring `code=..&state=..`. Decode percent escapes here too:
+    // the loopback listener forwards the raw HTTP request target rather than a
+    // parsed URL object.
     let mut code = None;
     let mut state = None;
-    for pair in trimmed.split('&') {
-        if let Some((k, v)) = pair.split_once('=') {
-            match k {
-                "code" => code = Some(v.to_string()),
-                "state" => state = Some(v.to_string()),
-                _ => {}
-            }
+    for (key, value) in url::form_urlencoded::parse(trimmed.as_bytes()) {
+        match key.as_ref() {
+            "code" => code = Some(value.into_owned()),
+            "state" => state = Some(value.into_owned()),
+            _ => {}
         }
     }
     match (code, state) {
@@ -395,6 +423,63 @@ pub async fn exchange_authorization_code_form(
     })
 }
 
+/// Google's non-PKCE authorization-code exchange. Google requires the public
+/// installed-app `client_secret` in this form body; unlike the generic form
+/// helper, this wire deliberately carries no `code_verifier`, `state`, or extra
+/// fields. State is checked before the first network call.
+#[allow(clippy::too_many_arguments)]
+pub async fn exchange_authorization_code_google(
+    http: &dyn HttpTransport,
+    token_url: &str,
+    client_id: &str,
+    client_secret: &str,
+    redirect_uri: &str,
+    callback: &Callback,
+    expected_state: &str,
+    now_ms: i64,
+) -> Result<LoginTokens, LoginError> {
+    if callback.state != expected_state {
+        return Err(LoginError::StateMismatch);
+    }
+
+    let body = crate::refresh_adapters::form_urlencode(&[
+        ("client_id", client_id),
+        ("client_secret", client_secret),
+        ("code", callback.code.as_str()),
+        ("grant_type", "authorization_code"),
+        ("redirect_uri", redirect_uri),
+    ]);
+    let resp = http
+        .post(
+            token_url,
+            &[],
+            "application/x-www-form-urlencoded",
+            body.into_bytes(),
+        )
+        .await?;
+
+    if resp.status != 200 {
+        return Err(LoginError::Status(
+            resp.status,
+            "Google token endpoint rejected the authorization code".into(),
+        ));
+    }
+
+    let parsed: FormExchangeResponseBody =
+        serde_json::from_slice(&resp.body).map_err(|e| LoginError::Decode(e.to_string()))?;
+    let expires_in = parsed
+        .expires_in
+        .ok_or_else(|| LoginError::Decode("Google token response omitted expires_in".into()))?;
+    Ok(LoginTokens {
+        access_token: parsed.access_token,
+        refresh_token: parsed.refresh_token,
+        expires_at_ms: Some(now_ms + expires_in.saturating_mul(1000)),
+        id_token: parsed.id_token,
+        account: None,
+        organization: None,
+    })
+}
+
 /// Decode the payload claims of a JWT WITHOUT signature verification. Used only to
 /// read non-secret identity metadata (the ChatGPT account id) out of a token that was
 /// just received directly from the provider's token endpoint over TLS — the transport
@@ -618,6 +703,9 @@ mod tests {
         let cb = parse_callback("code=abc123&state=STATE456").unwrap();
         assert_eq!(cb.code, "abc123");
         assert_eq!(cb.state, "STATE456");
+        let encoded = parse_callback("code=abc%2F123%2Bxyz&state=STATE%20456").unwrap();
+        assert_eq!(encoded.code, "abc/123+xyz");
+        assert_eq!(encoded.state, "STATE 456");
     }
 
     #[test]
@@ -963,6 +1051,127 @@ mod tests {
         assert_eq!(account_id_for_adapter("openai", "not-a-jwt"), None);
         assert_eq!(account_id_for_adapter("openai", "only.two"), None);
         assert_eq!(account_id_for_adapter("openai", ""), None);
+    }
+
+    #[test]
+    fn google_authorize_url_is_pkce_less_and_carries_offline_consent() {
+        let url = build_authorize_url_google(
+            "https://accounts.google.com/o/oauth2/v2/auth",
+            "google-client",
+            "http://127.0.0.1:8085/oauth2callback",
+            &[
+                "https://www.googleapis.com/auth/cloud-platform",
+                "https://www.googleapis.com/auth/userinfo.email",
+                "https://www.googleapis.com/auth/userinfo.profile",
+            ],
+            "STATE",
+            &[("access_type", "offline"), ("prompt", "consent")],
+        )
+        .unwrap();
+        let parsed = url::Url::parse(&url).unwrap();
+        let pairs: std::collections::HashMap<_, _> = parsed.query_pairs().into_owned().collect();
+        assert_eq!(pairs["client_id"], "google-client");
+        assert_eq!(pairs["response_type"], "code");
+        assert_eq!(
+            pairs["redirect_uri"],
+            "http://127.0.0.1:8085/oauth2callback"
+        );
+        assert_eq!(
+            pairs["scope"],
+            "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile"
+        );
+        assert_eq!(pairs["access_type"], "offline");
+        assert_eq!(pairs["prompt"], "consent");
+        assert_eq!(pairs["state"], "STATE");
+        assert!(!parsed.query().unwrap().contains("code_challenge"));
+        assert!(!parsed.query().unwrap().contains("code_verifier"));
+    }
+
+    #[tokio::test]
+    async fn google_exchange_sends_exact_form_without_pkce() {
+        let http = FixtureTransport::ok(
+            200,
+            br#"{"access_token":"acc-google","refresh_token":"ref-google","expires_in":3600}"#
+                .to_vec(),
+        );
+        let callback = Callback {
+            code: "code/with+symbols".into(),
+            state: "STATE".into(),
+        };
+        let tokens = exchange_authorization_code_google(
+            &http,
+            "https://oauth2.googleapis.com/token",
+            "google-client",
+            "google-secret",
+            "http://127.0.0.1:8085/oauth2callback",
+            &callback,
+            "STATE",
+            1_000_000,
+        )
+        .await
+        .unwrap();
+        assert_eq!(tokens.access_token, "acc-google");
+        assert_eq!(tokens.refresh_token, "ref-google");
+        assert_eq!(tokens.expires_at_ms, Some(1_000_000 + 3_600_000));
+        let request = &http.requests()[0];
+        assert_eq!(request.method, "POST");
+        assert_eq!(request.url, "https://oauth2.googleapis.com/token");
+        assert_eq!(request.content_type, "application/x-www-form-urlencoded");
+        assert_eq!(
+            String::from_utf8(request.body.clone()).unwrap(),
+            "client_id=google-client&client_secret=google-secret&code=code%2Fwith%2Bsymbols&grant_type=authorization_code&redirect_uri=http%3A%2F%2F127.0.0.1%3A8085%2Foauth2callback"
+        );
+        assert!(!String::from_utf8(request.body.clone())
+            .unwrap()
+            .contains("code_verifier"));
+    }
+
+    #[tokio::test]
+    async fn google_exchange_surfaces_error_status_without_response_body() {
+        let http = FixtureTransport::ok(400, br#"{\"error\":\"invalid_grant\"}"#.to_vec());
+        let callback = Callback {
+            code: "code".into(),
+            state: "STATE".into(),
+        };
+        let error = exchange_authorization_code_google(
+            &http,
+            "https://oauth2.googleapis.com/token",
+            "client",
+            "secret",
+            "http://127.0.0.1:8085/oauth2callback",
+            &callback,
+            "STATE",
+            0,
+        )
+        .await
+        .unwrap_err();
+        match error {
+            LoginError::Status(400, message) => assert!(!message.contains("invalid_grant")),
+            other => panic!("expected status error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn google_exchange_rejects_state_mismatch_before_network() {
+        let http = FixtureTransport::new(vec![]);
+        let callback = Callback {
+            code: "code".into(),
+            state: "FORGED".into(),
+        };
+        let error = exchange_authorization_code_google(
+            &http,
+            "https://oauth2.googleapis.com/token",
+            "client",
+            "secret",
+            "http://127.0.0.1:8085/oauth2callback",
+            &callback,
+            "EXPECTED",
+            0,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, LoginError::StateMismatch));
+        assert!(http.requests().is_empty());
     }
 
     #[tokio::test]

@@ -62,14 +62,16 @@ fn unmask(masked: &[u8]) -> String {
         .collect()
 }
 
-fn default_client_id() -> String {
+/// The public Google OAuth client id used by the Antigravity login and refresh flow.
+pub fn oauth_client_id() -> String {
     std::env::var(CLIENT_ID_ENV)
         .ok()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| unmask(CLIENT_ID_MASKED))
 }
 
-fn default_client_secret() -> String {
+/// The public Google OAuth client secret used by the Antigravity login and refresh flow.
+pub fn oauth_client_secret() -> String {
     std::env::var(CLIENT_SECRET_ENV)
         .ok()
         .filter(|s| !s.is_empty())
@@ -136,8 +138,8 @@ impl AntigravityAdapter {
     /// `CK_ANTIGRAVITY_OAUTH_CLIENT_ID` / `CK_ANTIGRAVITY_OAUTH_CLIENT_SECRET`).
     pub fn new() -> Self {
         AntigravityAdapter {
-            client_id: default_client_id(),
-            client_secret: default_client_secret(),
+            client_id: oauth_client_id(),
+            client_secret: oauth_client_secret(),
         }
     }
 
@@ -265,13 +267,10 @@ mod tests {
     #[test]
     fn default_client_unmasks_to_the_public_antigravity_client() {
         assert_eq!(
-            default_client_id(),
+            oauth_client_id(),
             "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
         );
-        assert_eq!(
-            default_client_secret(),
-            "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"
-        );
+        assert_eq!(oauth_client_secret(), "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");
     }
 
     #[tokio::test]

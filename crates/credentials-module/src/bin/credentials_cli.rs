@@ -36,6 +36,8 @@ use std::process::ExitCode;
 
 #[path = "cli_support/admin_client.rs"]
 mod admin_client;
+#[path = "cli_support/google_login.rs"]
+mod google_login;
 #[path = "cli_support/login_listener.rs"]
 mod login_listener;
 
@@ -239,14 +241,14 @@ fn usage() -> String {
                verify-audit | mint-handle | revoke-handle | revoke-all-handles\n\
                invalidate | rotate-master-key | bootstrap\n\
      \n\
-      login: --provider <anthropic|openai|xai> [--id <id>] [--replace] [--no-listener]\n\
+       login: --provider <anthropic|openai|xai|google|antigravity> [--id <id>] [--replace] [--no-listener]\n\
             vault-native first-party OAuth login — mints an INDEPENDENT refresh token\n\
             the vault solely custodies (no dual-custody rotation race). Opens a\n\
             browser URL; a one-shot CLI-local listener on the loopback redirect\n\
             completes the flow automatically (--no-listener, a busy port, or a\n\
             timeout falls back to pasting the address-bar URL).\n\
             --replace swaps an existing credential (keeps its handle).\n\
-            Default id: oauth:anthropic / chatgpt:openai / oauth:xai.\n\
+             Default id: oauth:anthropic / chatgpt:openai / oauth:xai / oauth:google / antigravity:google.\n\
             MULTIPLE ACCOUNTS per provider: give each its own labeled id —\n\
               login --provider anthropic --id oauth:anthropic:work\n\
             (label freely chosen; each labeled id is an independent credential\n\
@@ -596,6 +598,7 @@ enum ExchangeWire {
 }
 
 fn login_provider(provider: &str) -> Option<LoginProvider> {
+    use credentials_core::google_login as google;
     use credentials_core::refresh_adapters::{anthropic, openai, xai};
     match provider {
         "anthropic" => Some(LoginProvider {
@@ -659,6 +662,37 @@ fn login_provider(provider: &str) -> Option<LoginProvider> {
                            — that is expected (nothing listens there).\n\
                            Copy the FULL URL from the browser's address bar and paste it here, then Enter:",
         }),
+        // The Google-family driver handles these entries before the generic PKCE
+        // path, but keeping their metadata in the provider table makes picker,
+        // logout, and direct provider lookups describe the same credential ids.
+        "google" => Some(LoginProvider {
+            authorize_url: google::AUTHORIZE_URL,
+            token_url: google::TOKEN_URL,
+            client_id: "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com",
+            redirect_uri: google::GEMINI_REDIRECT_URI,
+            scopes: google::SCOPES,
+            extra_authorize_params: google::AUTHORIZE_EXTRA_PARAMS,
+            adapter_name: "google",
+            default_id: "oauth:google",
+            exchange: ExchangeWire::RfcForm,
+            needs_oidc_nonce: false,
+            exchange_echoes_challenge: false,
+            paste_prompt: "After approving, the browser may fail to connect to 127.0.0.1:8085 — that is expected. Copy the FULL URL from the address bar and paste it here, then Enter:",
+        }),
+        "antigravity" => Some(LoginProvider {
+            authorize_url: google::AUTHORIZE_URL,
+            token_url: google::TOKEN_URL,
+            client_id: "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com",
+            redirect_uri: google::ANTIGRAVITY_REDIRECT_URI,
+            scopes: google::SCOPES,
+            extra_authorize_params: google::AUTHORIZE_EXTRA_PARAMS,
+            adapter_name: "antigravity",
+            default_id: "antigravity:google",
+            exchange: ExchangeWire::RfcForm,
+            needs_oidc_nonce: false,
+            exchange_echoes_challenge: false,
+            paste_prompt: "After approving, the browser may fail to connect to 127.0.0.1:51121 — that is expected. Copy the FULL URL from the address bar and paste it here, then Enter:",
+        }),
         _ => None,
     }
 }
@@ -681,6 +715,8 @@ const LOGIN_PICKER_ROWS: &[(&str, &str)] = &[
     ("anthropic", "Anthropic (Claude Pro/Max)"),
     ("openai", "ChatGPT (Codex subscription)"),
     ("xai", "xAI (Grok)"),
+    ("google", "Google Gemini CLI (Code Assist)"),
+    ("antigravity", "Antigravity (Gemini 3)"),
 ];
 
 /// What the interactive flow decided beyond the provider: an id override (labeled
@@ -737,8 +773,11 @@ fn pick_login_interactively(global: &GlobalArgs) -> Result<InteractiveChoice, Cl
     let items: Vec<String> = LOGIN_PICKER_ROWS
         .iter()
         .map(|(key, name)| {
-            let wire = login_provider(key).expect("picker rows are valid providers");
-            let ids = provider_ids(&inventory, wire.default_id);
+            let default_id = login_provider(key)
+                .map(|wire| wire.default_id)
+                .or_else(|| google_login::default_id(key))
+                .expect("picker rows are valid providers");
+            let ids = provider_ids(&inventory, default_id);
             match ids.len() {
                 0 => name.to_string(),
                 1 => format!("{name}  ● logged in"),
@@ -755,12 +794,15 @@ fn pick_login_interactively(global: &GlobalArgs) -> Result<InteractiveChoice, Cl
         .interact()
         .map_err(|e| {
             CliError::Usage(format!(
-                "interactive login needs a terminal ({e}); pass --provider <anthropic|openai|xai>"
+                "interactive login needs a terminal ({e}); pass --provider <anthropic|openai|xai|google|antigravity>"
             ))
         })?;
     let provider = LOGIN_PICKER_ROWS[pick].0.to_string();
-    let wire = login_provider(&provider).expect("picked provider is valid");
-    let existing = provider_ids(&inventory, wire.default_id);
+    let default_id = login_provider(&provider)
+        .map(|wire| wire.default_id)
+        .or_else(|| google_login::default_id(&provider))
+        .expect("picked provider is valid");
+    let existing = provider_ids(&inventory, default_id);
 
     if existing.is_empty() {
         return Ok(InteractiveChoice {
@@ -773,7 +815,7 @@ fn pick_login_interactively(global: &GlobalArgs) -> Result<InteractiveChoice, Cl
     // The account already exists: make the multi-account path a menu, not a flag.
     let mut actions = vec![format!(
         "Add another account (a new labeled id like {}:work)",
-        wire.default_id
+        default_id
     )];
     for id in &existing {
         actions.push(format!("Replace {id} (re-login; keeps its handles)"));
@@ -798,7 +840,7 @@ fn pick_login_interactively(global: &GlobalArgs) -> Result<InteractiveChoice, Cl
             .interact_text()
             .map_err(|e| CliError::Usage(format!("interactive login cancelled: {e}")))?;
         Ok(InteractiveChoice {
-            id_override: Some(format!("{}:{label}", wire.default_id)),
+            id_override: Some(format!("{default_id}:{label}")),
             provider,
             replace: false,
         })
@@ -829,11 +871,20 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
         None => pick_login_interactively(global)?,
     };
     let provider = interactive.provider.clone();
+    if google_login::is_provider(&provider) {
+        return google_login::cmd_login(
+            global,
+            args,
+            &provider,
+            interactive.id_override,
+            interactive.replace,
+        );
+    }
     // Each provider's auth-code wire gets its own grounded research before it is
     // added to login_provider().
     let Some(wire) = login_provider(&provider) else {
         return Err(CliError::Usage(format!(
-            "login supports --provider anthropic|openai|xai (got '{provider}')"
+            "login supports --provider anthropic|openai|xai|google|antigravity (got '{provider}')"
         )));
     };
     let id = optional(args, "--id")
@@ -1123,8 +1174,9 @@ fn cmd_logout(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             ))
         }
         (Some(id), None) => id,
-        (None, Some(provider)) => login_provider(&provider)
-            .map(|wire| wire.default_id.to_string())
+        (None, Some(provider)) => google_login::default_id(&provider)
+            .map(str::to_string)
+            .or_else(|| login_provider(&provider).map(|wire| wire.default_id.to_string()))
             .ok_or_else(|| {
                 CliError::Usage(format!(
                     "unknown login provider '{provider}'; pass --id <id> for other credentials"
@@ -1629,6 +1681,22 @@ mod tests {
         assert!(!login_id_is_valid("oauth:anthropic", "oauth:anthropic:a:b"));
         // A prefix without the separator is refused (not a label).
         assert!(!login_id_is_valid("oauth:anthropic", "oauth:anthropicx"));
+    }
+
+    #[test]
+    fn google_login_provider_rows_pin_ids_redirects_and_fallback_ports() {
+        let gemini = login_provider("google").expect("Gemini CLI row");
+        assert_eq!(gemini.default_id, "oauth:google");
+        assert_eq!(gemini.redirect_uri, "http://127.0.0.1:8085/oauth2callback");
+        assert!(gemini.paste_prompt.contains("8085"));
+        assert_eq!(gemini.scopes, credentials_core::google_login::SCOPES);
+
+        let antigravity = login_provider("antigravity").expect("Antigravity row");
+        assert_eq!(antigravity.default_id, "antigravity:google");
+        assert_eq!(antigravity.redirect_uri, "http://127.0.0.1:51121/callback");
+        assert!(antigravity.paste_prompt.contains("51121"));
+        assert!(LOGIN_PICKER_ROWS.contains(&("google", "Google Gemini CLI (Code Assist)")));
+        assert!(LOGIN_PICKER_ROWS.contains(&("antigravity", "Antigravity (Gemini 3)")));
     }
 
     /// `remove` takes --id and is registered in the arg-rejection table (a typo'd

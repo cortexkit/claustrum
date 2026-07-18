@@ -27,6 +27,7 @@ pub mod engine;
 #[cfg(test)]
 mod engine_tests;
 pub mod envelope;
+pub mod google_login;
 pub mod health;
 pub mod http;
 pub mod key;

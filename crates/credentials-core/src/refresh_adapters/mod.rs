@@ -104,6 +104,18 @@ pub trait HttpTransport: Send + Sync {
         content_type: &str,
         body: Vec<u8>,
     ) -> Result<HttpResponse, RefreshError>;
+
+    /// Issue a GET request for login-time identity or discovery probes. Refresh
+    /// adapters only need `post`, so the default keeps existing adapters minimal.
+    async fn get(
+        &self,
+        _url: &str,
+        _headers: &[(&str, &str)],
+    ) -> Result<HttpResponse, RefreshError> {
+        Err(RefreshError::Transport(
+            "HTTP GET is not supported by this transport".into(),
+        ))
+    }
 }
 
 /// A minimal HTTP response: status + body bytes (all an adapter needs to parse a

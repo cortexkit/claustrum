@@ -54,4 +54,22 @@ impl HttpTransport for ReqwestTransport {
             .to_vec();
         Ok(HttpResponse { status, body })
     }
+
+    async fn get(&self, url: &str, headers: &[(&str, &str)]) -> Result<HttpResponse, RefreshError> {
+        let mut req = self.client.get(url);
+        for (k, v) in headers {
+            req = req.header(*k, *v);
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| RefreshError::Transport(e.to_string()))?;
+        let status = resp.status().as_u16();
+        let body = resp
+            .bytes()
+            .await
+            .map_err(|e| RefreshError::Transport(e.to_string()))?
+            .to_vec();
+        Ok(HttpResponse { status, body })
+    }
 }

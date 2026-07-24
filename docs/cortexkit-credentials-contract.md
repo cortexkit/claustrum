@@ -119,16 +119,31 @@ would then use the attacker's token as its auth header (credential substitution 
 exfil proxy / DoS / bricking). Fix = **split the surfaces**:
 
 ### Read surface (runtime, over the route channel — anonymous, trusted-unscoped)
+
+Consumers must open the provider as `RouteTarget::ManagementSurface`. The vault does
+not register as a `ToolProvider`; targeting that role is refused during route negotiation
+before the request body is sent and can surface to clients as an opaque `NotSent` error.
+Route request bodies use the envelope `{ "method": "...", "params": { ... } }`.
+
 ```
 credential.get { handle, min_ttl_ms?, force_refresh? }
-    →  { payload, expires_at, record_version }        (payload opaque to consumer)
-    |  { error: { code } }   code ∈ { not_found, needs_reauth, refresh_unsupported,
-                                       refresh_failed, vault_locked, corrupt }
+    →  { result: { payload, expires_at_ms, record_version,
+                   project_id?, account_id?, email?, org_name? } }
+    |  { result: { error: { code, class } } }
 credential.get_many { items: [{ handle, ... }] }       (CAPPED — see §6)
 credential.status { handle? }
-    →  { ready, last_error_code?, lease_held }          (non-secret health, never bytes)
-credential.report_auth_failure { handle, provider_status }   (revocation feedback — §7)
+    →  { result: { ready, last_error_code?, lease_held } }  (non-secret health, never bytes)
+credential.report_auth_failure { handle, provider_status, record_version }
+    →  { result: { accepted: true } }                   (version-CAS feedback — §7)
 ```
+
+`payload` is serialized as a JSON array of byte integers and remains opaque to the
+consumer. Every error is nested under `result.error` and carries its source-produced fleet
+`class`; consumers branch on the class, never infer behavior from `code` or message text. Authentication-failure feedback
+must repeat the exact `record_version` returned by the get that supplied the rejected
+credential. A stale report is an accepted silent no-op, so it cannot invalidate a newer
+refresh or replacement.
+
 Reads take a **capability handle**, not a public alias (§6). Reads are READ-ONLY —
 no write op exists on this channel.
 
@@ -224,11 +239,15 @@ v1 mechanisms, all buildable now:
 
 ## 7. Revocation propagation (HIGH)
 
-The vault must not serve a dead token until `expires_at`:
-- **`credential.report_auth_failure { handle, provider_status }`** (read-surface,
-  rate-limited): a consumer that gets a provider 401/403 reports it; the vault marks
-  the record `needs_reauth` (or forces a refresh) so the next `get` doesn't hand out
-  the dead token. Rate-limited to prevent malicious-invalidation DoS.
+The vault must not serve a dead token until `expires_at_ms`:
+- **`credential.report_auth_failure { handle, provider_status, record_version }`**
+  (read-surface, rate-limited): a consumer that gets a provider 401/403 reports the
+  exact version it used. The vault marks the record `needs_reauth` and clears any
+  dangling refresh intent only when that version still matches. If refresh or replace
+  already advanced the record, the stale report is an accepted silent no-op. This CAS
+  prevents a delayed 401 for version N from killing healthy version N+1. Consumers must
+  never report a guessed or separately re-read version. Rate limiting and handle-first
+  admission still bound malicious invalidation attempts.
 - **`credential.invalidate { credential_id }`** (admin): authoritative revoke (user
   logout / incident).
 

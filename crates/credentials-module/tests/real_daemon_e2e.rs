@@ -345,9 +345,10 @@ async fn real_subc_core_supervises_vault_and_serves_credential_get() {
 }
 
 /// The module-driven admin path end-to-end: while the daemon holds the lease, the
-/// OFFLINE CLI write is refused (DaemonRunning, exit 3), but the SAME op committed
-/// with `--subc` succeeds through the running module (master-key challenge-response
-/// over the route plane) — and the result is observable via a live `credential.get`.
+/// OFFLINE CLI access is refused (DaemonRunning, exit 3), while `list --subc` and
+/// the same write with `--subc` succeed through the running module (master-key
+/// challenge-response over the route plane). The write is then observable via a live
+/// `credential.get`.
 #[tokio::test]
 #[ignore = "builds subc-core in ../subconscious and binds loopback ports"]
 async fn real_daemon_admin_op_over_route_while_offline_refused() {
@@ -361,7 +362,28 @@ async fn real_daemon_admin_op_over_route_while_offline_refused() {
     let mut consumer = connect_consumer(&seeded.daemon.connection_file).await;
     wait_for_catalog(&mut consumer, MODULE_ID, SETUP_TIMEOUT).await;
 
-    // 1) The offline path is structurally refused while the daemon holds the lease:
+    // 1) The online list uses authenticated admin.status rather than trying to open
+    //    the database itself. If cmd_list regresses to open_for_admin this command exits
+    //    3 while the daemon owns the lease, so this is a non-vacuous route-path proof.
+    let listed = run_cli(&[
+        "list",
+        "--data-dir",
+        &seeded.data_dir,
+        "--key-path",
+        &seeded.key_path,
+        "--subc",
+        &conn,
+    ]);
+    assert!(
+        listed.contains("active") && listed.contains(&seeded.credential_id),
+        "online list must print the seeded inventory row, got: {listed}"
+    );
+    assert!(
+        !listed.contains("vault:"),
+        "list must retain compact inventory-only output, got: {listed}"
+    );
+
+    // 2) The offline path is structurally refused while the daemon holds the lease:
     //    it cannot take the single-writer lease. Exit code 3 (DaemonRunning).
     let offline = run_cli_raw(&[
         "mint-handle",
@@ -379,7 +401,7 @@ async fn real_daemon_admin_op_over_route_while_offline_refused() {
         String::from_utf8_lossy(&offline.stderr)
     );
 
-    // 2) The SAME op with --subc commits through the running module. This exercises
+    // 3) The SAME op with --subc commits through the running module. This exercises
     //    the whole authenticated admin path: direct-principal bind, admin.challenge,
     //    keychain/operator-key resolution by the returned key_id, the op-body MAC,
     //    admin.op, and the fenced+audited store write — with zero downtime.
@@ -399,7 +421,7 @@ async fn real_daemon_admin_op_over_route_while_offline_refused() {
         "route-committed mint-handle returns a fresh handle, got: {minted}"
     );
 
-    // 3) The route-minted handle is REAL: a live credential.get resolves it to the
+    // 4) The route-minted handle is REAL: a live credential.get resolves it to the
     //    seeded payload, proving the write landed in the daemon's own store. Reuse
     //    the consumer connection opened above (already catalog-confirmed).
     let project_root = unique_temp_dir("cred-real-daemon-admin");

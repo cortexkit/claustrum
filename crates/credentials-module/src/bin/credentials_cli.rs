@@ -52,7 +52,7 @@ use credentials_core::credential_id::{default_refresh_adapter, parse_credential_
 use credentials_core::key::MasterKey;
 use credentials_core::record::{CredentialKind, VaultRecord};
 use credentials_core::resolver::{self, KeySource, MasterKeyError, ResolverConfig};
-use credentials_core::store::{EncryptedStore, RecordState, StoreOpError};
+use credentials_core::store::{EncryptedStore, StoreOpError};
 
 fn main() -> ExitCode {
     match run() {
@@ -1807,13 +1807,66 @@ fn cmd_remove(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
 /// probe computes. An authenticated admin READ — with --subc it reads the RUNNING
 /// module (master-key challenge-response, works exactly when the probe shows
 /// degraded); offline it takes the lease like `list`.
-fn cmd_status(global: &GlobalArgs) -> Result<(), CliError> {
-    let result = commit_admin(
+fn request_admin_status(global: &GlobalArgs) -> Result<serde_json::Value, CliError> {
+    commit_admin(
         global,
         AdminOpBody::Status {
             v: ADMIN_OP_SCHEMA_V1,
         },
-    )?;
+    )
+}
+
+fn parse_inventory(result: &serde_json::Value) -> Result<Vec<(String, u64, String)>, CliError> {
+    let rows = result
+        .get("credentials")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            CliError::RouteRefused("admin.status omitted credential inventory".into())
+        })?;
+    rows.iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let state = row
+                .get("state")
+                .and_then(serde_json::Value::as_str)
+                .filter(|state| matches!(*state, "active" | "needs_reauth" | "corrupt"))
+                .ok_or_else(|| {
+                    CliError::RouteRefused(format!(
+                        "admin.status returned an invalid state at credential row {index}"
+                    ))
+                })?;
+            let version = row
+                .get("record_version")
+                .and_then(serde_json::Value::as_u64)
+                .filter(|version| *version > 0)
+                .ok_or_else(|| {
+                    CliError::RouteRefused(format!(
+                        "admin.status returned an invalid version at credential row {index}"
+                    ))
+                })?;
+            let id = row
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| {
+                    CliError::RouteRefused(format!(
+                        "admin.status returned an invalid id at credential row {index}"
+                    ))
+                })?;
+            Ok((state.to_string(), version, id.to_string()))
+        })
+        .collect()
+}
+
+fn print_inventory(rows: &[(String, u64, String)]) {
+    for (state, version, id) in rows {
+        println!("{state:<14} v{version:<4} {id}");
+    }
+}
+
+fn cmd_status(global: &GlobalArgs) -> Result<(), CliError> {
+    let result = request_admin_status(global)?;
+    let inventory = parse_inventory(&result)?;
 
     let status = result["status"].as_str().unwrap_or("unknown");
     let total = result["credentials_total"].as_u64().unwrap_or(0);
@@ -1827,14 +1880,7 @@ fn cmd_status(global: &GlobalArgs) -> Result<(), CliError> {
         println!("open refresh intents: {open_intents}");
     }
     println!();
-    if let Some(rows) = result["credentials"].as_array() {
-        for row in rows {
-            let state = row["state"].as_str().unwrap_or("?");
-            let version = row["record_version"].as_u64().unwrap_or(0);
-            let id = row["id"].as_str().unwrap_or("?");
-            println!("{state:<14} v{version:<4} {id}");
-        }
-    }
+    print_inventory(&inventory);
     // Actionable tail: name what needs the operator, like the health probe does.
     let needs: Vec<&str> = result["needs_reauth_ids"]
         .as_array()
@@ -1965,21 +2011,12 @@ fn cmd_audit(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
 }
 
 fn cmd_list(global: &GlobalArgs) -> Result<(), CliError> {
-    // Read-only: id + lifecycle state + version, WITHOUT decrypting any record
-    // (list_meta reads only plaintext columns). This is the operator's offline
-    // "which credential needs action?" view — the counterpart to the live health
-    // probe's needs_reauth ids — so re-importing a stale credential does not
-    // require reading the audit log and inferring.
-    let store = open_for_admin(global)?;
-    let rows = store.list_meta().map_err(CliError::Store)?;
-    for (id, meta) in rows {
-        let state = match meta.state {
-            RecordState::Active => "active",
-            RecordState::NeedsReauth => "needs_reauth",
-            RecordState::Corrupt => "corrupt",
-        };
-        println!("{:<14} v{:<4} {}", state, meta.record_version, id);
-    }
+    // `admin.status` builds this no-decrypt inventory from plaintext metadata. Using
+    // the shared admin path keeps `list --subc` available while the daemon owns the
+    // lease; without a live module `commit_admin` retains the offline lease fallback.
+    let result = request_admin_status(global)?;
+    let rows = parse_inventory(&result)?;
+    print_inventory(&rows);
     Ok(())
 }
 
@@ -2307,6 +2344,31 @@ mod tests {
         assert!(zai_provider.is_some());
         let zai = zai_provider.unwrap();
         assert_eq!(zai.default_id, "apikey:zai");
+    }
+
+    #[test]
+    fn inventory_parser_accepts_exact_rows_and_rejects_malformed_status() {
+        let valid = serde_json::json!({
+            "credentials": [
+                {"id": "apikey:test", "state": "active", "record_version": 7}
+            ]
+        });
+        assert_eq!(
+            parse_inventory(&valid).expect("valid inventory"),
+            vec![("active".to_string(), 7, "apikey:test".to_string())]
+        );
+
+        for malformed in [
+            serde_json::json!({}),
+            serde_json::json!({"credentials": [{"id": "apikey:test", "state": "unknown", "record_version": 7}]}),
+            serde_json::json!({"credentials": [{"id": "apikey:test", "state": "active", "record_version": 0}]}),
+            serde_json::json!({"credentials": [{"id": "", "state": "active", "record_version": 7}]}),
+        ] {
+            assert!(
+                parse_inventory(&malformed).is_err(),
+                "malformed admin status must fail closed: {malformed}"
+            );
+        }
     }
 
     #[test]

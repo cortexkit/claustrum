@@ -1470,6 +1470,64 @@ mod tests {
         assert_eq!(answered.header.corr, 52);
     }
 
+    /// A legacy malformed row must never become a successful zero-byte credential.
+    /// The fixture uses an OAuth-kind record with no refresh state so the current store
+    /// can represent the historical bad row without bypassing the new static-write
+    /// invariant; removing the read guard makes this test return `Ok([])`.
+    #[tokio::test]
+    async fn get_quarantines_an_empty_nonrefreshable_record() {
+        use credentials_core::store::RecordState;
+
+        let (surface, store, _db) = tmp_surface_with_store(20);
+        let mut legacy = VaultRecord::new_oauth(
+            "legacy-import",
+            "legacy",
+            credentials_core::oauth::OAuthCredential {
+                access_token: String::new(),
+                refresh_token: String::new(),
+                expires_at_ms: None,
+                token_url: String::new(),
+                client_id: None,
+                scopes: Vec::new(),
+            },
+            Vec::new(),
+        );
+        legacy.refresh_adapter = None;
+        legacy.oauth = None;
+        store
+            .create("oauth:legacy-empty", &legacy)
+            .expect("seed representable legacy record");
+        let handle = credentials_core::store::mint_handle().expect("mint");
+        store
+            .put_handle_hash(
+                &handle.hash,
+                "oauth:legacy-empty",
+                AuditCtx::admin(AuditOp::MintHandle),
+            )
+            .expect("put handle");
+
+        let got = surface
+            .get(
+                77,
+                &read_surface::GetParams {
+                    handle: handle.raw,
+                    min_ttl_ms: None,
+                    force_refresh: false,
+                },
+            )
+            .await;
+        let read_surface::GetOutcome::Err { error } = got else {
+            panic!("empty legacy payload must not be returned as success");
+        };
+        assert_eq!(error.code, read_surface::ReadError::Corrupt);
+        assert_eq!(error.class, read_surface::ErrorClass::Permanent);
+        assert_eq!(
+            store.meta("oauth:legacy-empty").expect("meta").state,
+            RecordState::Corrupt,
+            "the exact inspected version must be quarantined"
+        );
+    }
+
     /// End-to-end: `get` surfaces the provider account identity for a chatgpt:openai
     /// record, parsed LIVE from the served access token's claim, and returns None for a
     /// record whose provider has no account claim (here an api-key with no adapter). This

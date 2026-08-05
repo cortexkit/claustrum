@@ -266,6 +266,23 @@ impl ReadSurface {
             .await
         {
             Ok(record) => {
+                if record.payload.is_empty() {
+                    // A successful zero-byte credential is a corrupt producer state, not
+                    // an authentication token. Quarantine only the version we inspected:
+                    // a concurrent refresh/login may already have repaired the record.
+                    match self
+                        .engine
+                        .store()
+                        .quarantine_if_version(&credential_id, record.record_version)
+                    {
+                        Ok(true) => return err(ReadError::Corrupt),
+                        // The record changed under us. Do not poison the fresh version or
+                        // misclassify it as corrupt; a retry will read the replacement.
+                        Ok(false) => return err(ReadError::RefreshFailed),
+                        Err(e) => return err(map_store_error(&e)),
+                    }
+                }
+
                 // For an antigravity credential, surface the non-secret Code-Assist
                 // project id (split from the packed refresh token) so the consumer can
                 // freeze it into its render config. Never exposes the refresh token.

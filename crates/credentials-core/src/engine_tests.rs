@@ -10,7 +10,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::engine::{ReauthReason, Reconciliation, RefreshEngine};
+use crate::audit::AuditOp;
+use crate::engine::{EngineError, ReauthReason, Reconciliation, RefreshEngine};
 use crate::key::{MasterKey, MASTER_KEY_LEN};
 use crate::oauth::OAuthCredential;
 use crate::record::VaultRecord;
@@ -27,6 +28,7 @@ struct StubAdapter {
     calls: Arc<AtomicUsize>,
     check: Option<Result<ValidityOutcome, ()>>,
     fail: Option<&'static str>,
+    access_token: &'static str,
 }
 
 impl StubAdapter {
@@ -36,6 +38,7 @@ impl StubAdapter {
             calls: Arc::new(AtomicUsize::new(0)),
             check: None,
             fail: None,
+            access_token: "refreshed-access",
         }
     }
 }
@@ -61,7 +64,7 @@ impl RefreshAdapter for StubAdapter {
             };
         }
         Ok(RefreshedTokens {
-            access_token: "refreshed-access".into(),
+            access_token: self.access_token.into(),
             refresh_token: "rotated-refresh".into(),
             expires_at_ms: Some(now_ms() + 3_600_000),
         })
@@ -190,6 +193,55 @@ async fn refresh_on_stale_commits_new_tokens_and_bumps_version() {
     assert_eq!(calls.load(Ordering::SeqCst), 1, "exactly one upstream call");
     // The intent is cleared post-commit.
     assert!(eng.store().read_intent("id").unwrap().is_none());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn empty_refresh_success_clears_intent_without_committing() {
+    let (root, d) = tmp_descriptor();
+    let store = open_store(&d, 41);
+    store.create("id", &stale_oauth_record()).unwrap();
+    let before = store.get("id").expect("record before refresh");
+    let adapter = StubAdapter {
+        access_token: "",
+        ..StubAdapter::new("stub")
+    };
+    let (eng, calls) = engine(store, adapter);
+
+    let error = eng
+        .get("id", None, false)
+        .await
+        .expect_err("empty provider token must fail closed");
+    assert!(matches!(
+        error,
+        EngineError::RefreshFailed(RefreshError::Decode(ref message))
+            if message == "provider returned an empty access token"
+    ));
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "provider path was exercised"
+    );
+    assert!(
+        eng.store().read_intent("id").unwrap().is_none(),
+        "txn1 must be cleared after the invalid provider success"
+    );
+
+    let after = eng.store().get("id").expect("record retained");
+    assert_eq!(after.record_version, before.record_version);
+    assert_eq!(after.payload, before.payload);
+    assert_eq!(
+        after.oauth.as_ref().map(|oauth| &oauth.refresh_token),
+        before.oauth.as_ref().map(|oauth| &oauth.refresh_token)
+    );
+    assert!(
+        eng.store()
+            .read_audit(None)
+            .expect("read audit")
+            .iter()
+            .all(|entry| entry.op != AuditOp::RefreshCommit.as_str()),
+        "no refresh-commit audit may describe a rejected empty token"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 

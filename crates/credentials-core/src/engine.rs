@@ -226,7 +226,8 @@ impl RefreshEngine {
         // falls through both checks below (is_access_expired treats no-expiry as
         // not-expired; the min_ttl branch needs Some(expires_at_ms)) and the empty
         // token is served as-is. `get` still gates the actual refresh on
-        // `is_refreshable()`, so a non-refreshable empty record is just served as-is.
+        // `is_refreshable()`. The read surface quarantines a legacy non-refreshable
+        // empty record rather than returning a successful zero-byte credential.
         if oauth.access_token.is_empty() {
             return true;
         }
@@ -267,6 +268,15 @@ impl RefreshEngine {
 
         // The provider call (rotating). Tokens are staged in memory only.
         match adapter.refresh(oauth, &*self.http).await {
+            Ok(tokens) if tokens.access_token.is_empty() => {
+                // A successful provider response with no access token is not a valid
+                // rotation. Clear txn1 while preserving the old record/version; otherwise
+                // the sealed record would later decrypt to a successful zero-byte read.
+                self.store.clear_intent(credential_id)?;
+                Err(EngineError::RefreshFailed(RefreshError::Decode(
+                    "provider returned an empty access token".into(),
+                )))
+            }
             Ok(tokens) => {
                 let new_record = apply_refreshed(record, oauth, tokens);
 

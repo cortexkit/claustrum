@@ -40,7 +40,7 @@ use zeroize::Zeroizing;
 use crate::audit::{self, AlarmReason, AuditCtx, AuditEntry, AuditOp, AuditRecord};
 use crate::envelope::{self, EnvelopeError, RecordBinding};
 use crate::key::{KeyId, MasterKey};
-use crate::record::VaultRecord;
+use crate::record::{CredentialKind, VaultRecord};
 
 /// The schema namespace for the credential vault's migrations (independent of any
 /// other domain chain in the same database).
@@ -1010,6 +1010,25 @@ impl EncryptedStore {
         self.set_state(credential_id, RecordState::Corrupt, false, None)
     }
 
+    /// Quarantine only the exact record version the reader inspected. A concurrent
+    /// refresh or admin replacement must not let a stale integrity decision poison the
+    /// newly-written credential.
+    pub fn quarantine_if_version(
+        &self,
+        credential_id: &str,
+        expected_version: u64,
+    ) -> Result<bool, StoreOpError> {
+        let now = now_ms();
+        let changed = self.fenced_write(|tx| {
+            tx.execute(
+                "UPDATE credentials SET state = 'corrupt', updated_at_ms = ?1
+                 WHERE credential_id = ?2 AND record_version = ?3",
+                rusqlite::params![now, credential_id, expected_version],
+            )
+        })?;
+        Ok(changed == 1)
+    }
+
     /// Mark a record `needs_reauth` but RETAIN its refresh intent. Used by
     /// reconciliation when a non-mutating validity check could not be run (transient
     /// network): the record fails closed now, but the surviving intent lets a later
@@ -1507,6 +1526,15 @@ impl EncryptedStore {
         credential_id: &str,
         record: &VaultRecord,
     ) -> Result<Vec<u8>, StoreOpError> {
+        // An OAuth record may intentionally contain no access token while retaining a
+        // refresh token; first use then refreshes it. Every non-OAuth credential is the
+        // served payload itself, so sealing zero bytes would create a successful read
+        // that downstreams can misdiagnose as an authentication failure.
+        if record.kind != CredentialKind::Oauth && record.payload.is_empty() {
+            return Err(StoreOpError::Encode(
+                "non-OAuth credential payload must not be empty".into(),
+            ));
+        }
         let body = record
             .encode()
             .map_err(|e| StoreOpError::Encode(e.to_string()))?;
@@ -1951,6 +1979,125 @@ mod tests {
             Err(StoreOpError::NotFound)
         ));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn empty_static_payload_is_rejected_before_any_write_or_audit() {
+        let (_root, store) = tmp_store(42);
+        let empty = VaultRecord::new_static(CredentialKind::ApiKey, "test", Vec::new(), None);
+
+        let audit_before = store.read_audit(None).expect("audit before").len();
+        assert!(store.create("apikey:empty", &empty).is_err());
+        assert!(matches!(
+            store.meta("apikey:empty"),
+            Err(StoreOpError::NotFound)
+        ));
+        assert_eq!(
+            store.read_audit(None).expect("audit after create").len(),
+            audit_before
+        );
+
+        let valid =
+            VaultRecord::new_static(CredentialKind::ApiKey, "test", b"non-empty".to_vec(), None);
+        store.create("apikey:kept", &valid).expect("seed valid");
+        let before = store.get("apikey:kept").expect("read seed");
+        let audit_before_overwrites = store.read_audit(None).expect("audit seeded").len();
+
+        assert!(store
+            .overwrite_cas("apikey:kept", &empty, &payload_hash(&before.payload),)
+            .is_err());
+        let after_cas = store.get("apikey:kept").expect("read after CAS refusal");
+        assert_eq!(after_cas.record_version, before.record_version);
+        assert_eq!(after_cas.payload, before.payload);
+        assert_eq!(
+            store.read_audit(None).expect("audit after CAS").len(),
+            audit_before_overwrites
+        );
+
+        assert!(store
+            .overwrite_unconditional_audited("apikey:kept", &empty, AuditCtx::admin(AuditOp::Put),)
+            .is_err());
+        let after_unconditional = store
+            .get("apikey:kept")
+            .expect("read after unconditional refusal");
+        assert_eq!(after_unconditional.record_version, before.record_version);
+        assert_eq!(after_unconditional.payload, before.payload);
+        assert_eq!(
+            store
+                .read_audit(None)
+                .expect("audit after unconditional")
+                .len(),
+            audit_before_overwrites
+        );
+    }
+
+    #[test]
+    fn refresh_only_oauth_record_may_be_stored_empty() {
+        let (_root, store) = tmp_store(43);
+        let record = VaultRecord::new_oauth(
+            "import",
+            "anthropic",
+            OAuthCredential {
+                access_token: String::new(),
+                refresh_token: "refresh-only".into(),
+                expires_at_ms: None,
+                token_url: "https://t.test/token".into(),
+                client_id: Some("c".into()),
+                scopes: vec![],
+            },
+            Vec::new(),
+        );
+        assert!(record.payload.is_empty());
+        assert!(!record
+            .oauth
+            .as_ref()
+            .expect("oauth")
+            .refresh_token
+            .is_empty());
+
+        store
+            .create("oauth:refresh-only", &record)
+            .expect("refresh-only OAuth must remain storable");
+        assert!(store
+            .get("oauth:refresh-only")
+            .expect("read refresh-only")
+            .payload
+            .is_empty());
+    }
+
+    #[test]
+    fn version_gated_quarantine_cannot_poison_a_replacement() {
+        let (_root, store) = tmp_store(44);
+        let original =
+            VaultRecord::new_static(CredentialKind::ApiKey, "test", b"original".to_vec(), None);
+        store.create("apikey:race", &original).expect("seed");
+        let replacement = VaultRecord::new_static(
+            CredentialKind::ApiKey,
+            "test",
+            b"replacement".to_vec(),
+            None,
+        );
+        store
+            .overwrite_unconditional_audited(
+                "apikey:race",
+                &replacement,
+                AuditCtx::admin(AuditOp::Put),
+            )
+            .expect("replace");
+
+        assert!(!store
+            .quarantine_if_version("apikey:race", 1)
+            .expect("stale quarantine CAS"));
+        let kept = store.get("apikey:race").expect("replacement stays active");
+        assert_eq!(kept.record_version, 2);
+        assert_eq!(kept.payload, b"replacement");
+        assert!(store
+            .quarantine_if_version("apikey:race", 2)
+            .expect("current quarantine CAS"));
+        assert_eq!(
+            store.meta("apikey:race").expect("meta").state,
+            RecordState::Corrupt
+        );
     }
 
     #[test]

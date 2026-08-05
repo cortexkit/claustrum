@@ -134,6 +134,10 @@ fn run() -> Result<(), CliError> {
         println!("{}", usage_short());
         return Ok(());
     }
+    if args.as_slice() == ["--version"] || args.as_slice() == ["-V"] {
+        println!("ck-auth {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     let command = args.remove(0);
 
     // A `--help`/`-h` ANYWHERE prints help and exits WITHOUT running the command.

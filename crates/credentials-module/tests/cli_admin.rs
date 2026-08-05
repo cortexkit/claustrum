@@ -129,6 +129,23 @@ fn bootstrap_put_mint_audit_end_to_end() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+#[test]
+fn version_reports_the_built_cli_without_configuration() {
+    let out = cli()
+        .arg("--version")
+        .output()
+        .expect("run ck-auth --version");
+    assert!(
+        out.status.success(),
+        "version: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        format!("ck-auth {}", env!("CARGO_PKG_VERSION"))
+    );
+}
+
 /// `logout` stops serving reversibly (invalidate + revoke handles, row + audit
 /// kept), and `status` reports the resulting degraded state with the affected id.
 #[test]

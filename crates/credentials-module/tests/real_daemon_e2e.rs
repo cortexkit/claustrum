@@ -507,6 +507,23 @@ async fn real_daemon_fetch_sweep_raises_durable_alarm() {
     std::fs::create_dir_all(&project_root).unwrap();
     let route_channel = route_open(&mut consumer, &project_root, 1).await;
 
+    // NEGATIVE CONTROL, on a SEPARATE CONNECTION: a handful of probes is under the
+    // distinct ceiling and must raise nothing. The limiter is connection-scoped and
+    // alarms once per flagged connection, so this only discriminates from its own
+    // connection — probing here on the sweeping one would be masked by that single
+    // alarm. Without it, `alarms >= 1` below is equally satisfied by a limiter that
+    // flags EVERY probe, which is a permanently-firing detector rather than a working
+    // one and looks identical from the sweep alone.
+    let mut quiet = connect_consumer(&seeded.daemon.connection_file).await;
+    wait_for_catalog(&mut quiet, MODULE_ID, SETUP_TIMEOUT).await;
+    let quiet_root = unique_temp_dir("cred-real-daemon-sweep-quiet");
+    std::fs::create_dir_all(&quiet_root).unwrap();
+    let quiet_channel = route_open(&mut quiet, &quiet_root, 1).await;
+    for i in 0..4u32 {
+        let handle = format!("ckh_quiet_{i}");
+        let _ = credential_get(&mut quiet, quiet_channel, 900 + i as u64, &handle).await;
+    }
+
     // Sweep many DISTINCT handles fast (the default distinct ceiling is 16). Each is
     // unknown (resolves not_found), but the fetch-rate detector keys on the spread of
     // distinct credential probes on this connection, so > ceiling distinct probes
@@ -523,8 +540,16 @@ async fn real_daemon_fetch_sweep_raises_durable_alarm() {
         alarms >= 1,
         "a fetch sweep over the ceiling must raise at least one durable fetch_rate_anomaly alarm row, got {alarms}"
     );
+    // The detector is connection-scoped and fires ONCE per flagged connection, so the
+    // under-ceiling connection contributed nothing: exactly one alarm, from the sweep.
+    // A flag-everything limiter would have produced one for the quiet connection too.
+    assert_eq!(
+        alarms, 1,
+        "only the sweeping connection may raise an alarm; the under-ceiling one must stay silent"
+    );
 
     let _ = std::fs::remove_dir_all(&project_root);
+    let _ = std::fs::remove_dir_all(&quiet_root);
 }
 
 /// Malicious-local-client, on the wire: a malformed route request (not a valid

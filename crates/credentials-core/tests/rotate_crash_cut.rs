@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use cortexkit_store::{open_sqlite, Isolation, StorageBackend, StorageDescriptor};
 use credentials_core::key::MasterKey;
-use credentials_core::resolver::{self, KeySource, MasterKeyError, ResolverConfig};
+use credentials_core::resolver::{self, KeySlot, KeySource, MasterKeyError, ResolverConfig};
 use credentials_core::store::{EncryptedStore, StoreOpError};
 
 /// Spawn the helper at one cut point, wait for it to park, SIGKILL it, and return
@@ -170,11 +170,54 @@ fn assert_wrong_key_fails_closed(root: &Path) {
     }
 }
 
+/// Read the fingerprints the helper published for this rig.
+///
+/// Every rig generates fresh random keys, so "it reopened cleanly" is true of a
+/// vault that was never rotated at all. Naming the expected key per cut is what
+/// makes each test about the ROTATION rather than about opening a vault.
+fn rig_keys(root: &Path) -> std::collections::HashMap<String, String> {
+    let text = std::fs::read_to_string(root.join("data").join("keys.txt"))
+        .expect("helper published its key fingerprints");
+    text.lines()
+        .filter_map(|line| line.split_once('='))
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect()
+}
+
+/// Read one key-store slot's fingerprint, or `None` when the slot is empty.
+fn slot_fingerprint(root: &Path, slot: KeySlot) -> Option<String> {
+    let source = KeySource::OperatorPath {
+        path: root.join("secrets").join("master.key"),
+    };
+    source
+        .backend()
+        .load_slot(&root.join("data"), slot)
+        .expect("read key slot")
+        .map(|key| key.key_id().to_hex())
+}
+
 #[test]
 fn crash_after_stage_resolves_to_current_and_never_bricks() {
     let root = kill_at_cut("stage");
     // database still under the OLD key (k1): resolve must pick `current`.
-    assert_reopens_clean(&root);
+    let resolved = assert_reopens_clean(&root);
+    let keys = rig_keys(&root);
+    assert_eq!(
+        resolved, keys["k1"],
+        "a crash after staging leaves the database under the OLD key, so resolve must \
+         pick current=k1 — not merely open something"
+    );
+    assert_ne!(
+        resolved, keys["k2"],
+        "the staged key is not yet the database's"
+    );
+    // Resolving to k1 is also what a vault that was NEVER rotated would do, so assert
+    // the on-disk fact that distinguishes them: the staged key really is in `next`.
+    assert_eq!(
+        slot_fingerprint(&root, KeySlot::Next).as_deref(),
+        Some(keys["k2"].as_str()),
+        "the crash happened AFTER staging, so k2 must be sitting in the next slot"
+    );
     assert_wrong_key_fails_closed(&root);
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -183,7 +226,30 @@ fn crash_after_stage_resolves_to_current_and_never_bricks() {
 fn crash_after_rewrap_resolves_to_next_and_never_bricks() {
     let root = kill_at_cut("rewrap");
     // database rewrapped under the NEW key (k2), not promoted: resolve picks `next`.
-    assert_reopens_clean(&root);
+    let resolved = assert_reopens_clean(&root);
+    let keys = rig_keys(&root);
+    assert_eq!(
+        resolved, keys["k2"],
+        "after the rewrap commits, the database is under the NEW key and resolve must \
+         reach it through the unpromoted `next` slot — this is the cut that proves the \
+         two-slot layout earns its existence"
+    );
+    assert_ne!(
+        resolved, keys["k1"],
+        "resolving to the old key here would mean the rewrap never happened"
+    );
+    // The slots say "rewrapped, not yet promoted": the database's key is still only
+    // reachable through `next`, which is exactly the state promotion exists to end.
+    assert_eq!(
+        slot_fingerprint(&root, KeySlot::Current).as_deref(),
+        Some(keys["k1"].as_str()),
+        "current still holds the old key before promotion"
+    );
+    assert_eq!(
+        slot_fingerprint(&root, KeySlot::Next).as_deref(),
+        Some(keys["k2"].as_str()),
+        "the database's key is reachable only via next at this cut"
+    );
     assert_wrong_key_fails_closed(&root);
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -192,7 +258,30 @@ fn crash_after_rewrap_resolves_to_next_and_never_bricks() {
 fn crash_after_promote_resolves_to_current_and_never_bricks() {
     let root = kill_at_cut("promote");
     // promoted: current = new key, next cleared. resolve picks `current`.
-    assert_reopens_clean(&root);
+    let resolved = assert_reopens_clean(&root);
+    let keys = rig_keys(&root);
+    assert_eq!(
+        resolved, keys["k2"],
+        "promotion completed, so the resolved key is the NEW one"
+    );
+    assert_ne!(
+        resolved, keys["k1"],
+        "the old key is no longer the database's"
+    );
+    // Resolving to k2 is true after the rewrap alone, so it cannot show promotion
+    // happened. The slot layout can: promotion moves k2 into current and CLEARS next,
+    // which is what stops the following rotation from overwriting the key the
+    // database depends on.
+    assert_eq!(
+        slot_fingerprint(&root, KeySlot::Current).as_deref(),
+        Some(keys["k2"].as_str()),
+        "promotion moves the new key into current"
+    );
+    assert_eq!(
+        slot_fingerprint(&root, KeySlot::Next),
+        None,
+        "promotion clears next, freeing it for the next rotation"
+    );
     assert_wrong_key_fails_closed(&root);
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -206,7 +295,34 @@ fn crash_during_a_resumed_second_rotation_never_bricks() {
     // would have clobbered next=k2 and this crash would brick (db=k2 matches neither
     // slot); with the heal, current=k2 matches the db and resolve is clean.
     let root = kill_at_cut("double-heal-staged");
-    assert_reopens_clean(&root);
+    let resolved = assert_reopens_clean(&root);
+    let keys = rig_keys(&root);
+    assert_eq!(
+        resolved, keys["k2"],
+        "the heal promoted k2 to current before staging k3, so the database's key is \
+         reachable; resolving to anything else means the heal did not run"
+    );
+    assert_ne!(
+        resolved, keys["k3"],
+        "k3 is merely staged — the database was never rewrapped under it"
+    );
+    assert_ne!(
+        resolved, keys["k1"],
+        "k1 was superseded by the first rotation"
+    );
+    // The heal is visible in the slots: k2 (the database's key) was promoted to
+    // current, which is what freed next for k3. Without it, next would still hold k2
+    // and staging k3 would have destroyed the only copy of the database's key.
+    assert_eq!(
+        slot_fingerprint(&root, KeySlot::Current).as_deref(),
+        Some(keys["k2"].as_str()),
+        "the heal promoted the database's key to current before the second stage"
+    );
+    assert_eq!(
+        slot_fingerprint(&root, KeySlot::Next).as_deref(),
+        Some(keys["k3"].as_str()),
+        "the second rotation's key occupies next"
+    );
     assert_wrong_key_fails_closed(&root);
     let _ = std::fs::remove_dir_all(&root);
 }

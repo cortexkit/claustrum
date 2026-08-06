@@ -34,6 +34,22 @@ fn park(marker: &PathBuf) -> ! {
     }
 }
 
+/// Record a key's fingerprint under a name the parent test can look up.
+///
+/// Each rig bootstraps its own random keys, so "the vault reopened" alone cannot
+/// tell the parent WHICH key it reopened under — and a rotation that silently did
+/// nothing reopens just as cleanly as one that worked. Publishing the fingerprints
+/// lets each cut assert the specific slot its on-disk state implies.
+fn record_key(keys_file: &PathBuf, name: &str, key: &MasterKey) {
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(keys_file)
+        .expect("open keys manifest");
+    writeln!(f, "{name}={}", key.key_id().to_hex()).expect("write key fingerprint");
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let db_path = args.next().expect("usage: <db> <key_dir> <marker> <cut>");
@@ -54,7 +70,9 @@ fn main() {
 
     // Bootstrap the current key (k1) and seed a credential so the rewrap has real
     // work to do (and the parent can prove the credential is still readable after).
+    let keys_file = data_dir.join("keys.txt");
     let k1 = resolver::bootstrap(&config).expect("bootstrap");
+    record_key(&keys_file, "k1", &k1);
     let descriptor = StorageDescriptor {
         module_id: "cortexkit-credentials".into(),
         storage_namespace: "vault".into(),
@@ -72,6 +90,7 @@ fn main() {
 
     // The new key.
     let k2 = MasterKey::generate().expect("csprng");
+    record_key(&keys_file, "k2", &k2);
 
     // Step 1: stage k2 into `next` (database still under k1).
     resolver::stage_next(&config, &k2).expect("stage next");
@@ -105,6 +124,7 @@ fn main() {
         resolver::heal_pending_rotation(&config, db_key_id).expect("heal before 2nd stage");
         // Stage the second rotation's new key into the freed next slot.
         let k3 = MasterKey::generate().expect("csprng k3");
+        record_key(&keys_file, "k3", &k3);
         resolver::stage_next(&config, &k3).expect("stage k3");
         // Parked at: db under k2 = current (healed), next = k3, second rewrap NOT done.
         park(&marker);

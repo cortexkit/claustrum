@@ -453,6 +453,12 @@ mod tests {
         let r = rig(2);
         let body = store_op_body("apikey:x");
 
+        // Each arm asserts the refusal REASON, not merely that a refusal happened: a
+        // non-direct caller has no outstanding challenge either, so a wildcard match is
+        // satisfied by the missing-nonce refusal and would still pass with Gate 1
+        // deleted. Naming the reason is what makes these tests about Gate 1.
+        const GATE_1: &str = "require a direct bind";
+
         // Reserved bind: challenge refused.
         r.admin.record_bind(
             3,
@@ -460,15 +466,18 @@ mod tests {
                 module_id: "llm-runner".into(),
             },
         );
-        assert!(matches!(r.admin.challenge(3), AdminOutcome::Refused(_)));
+        assert!(matches!(r.admin.challenge(3), AdminOutcome::Refused(ref m) if m.contains(GATE_1)));
         // Unverified bind (absent stamp records as this): refused.
         r.admin.record_bind(4, Principal::Unverified);
-        assert!(matches!(r.admin.challenge(4), AdminOutcome::Refused(_)));
+        assert!(matches!(r.admin.challenge(4), AdminOutcome::Refused(ref m) if m.contains(GATE_1)));
         // Never-bound channel: refused.
-        assert!(matches!(r.admin.challenge(9), AdminOutcome::Refused(_)));
+        assert!(matches!(r.admin.challenge(9), AdminOutcome::Refused(ref m) if m.contains(GATE_1)));
         // Execute without a direct bind is refused even with a (meaningless) tag.
         let out = r.admin.execute(3, body.as_bytes(), "00").await;
-        assert!(matches!(out, AdminOutcome::Refused(_)));
+        assert!(
+            matches!(out, AdminOutcome::Refused(ref m) if m.contains(GATE_1)),
+            "execute must refuse on Gate 1, not on the absent challenge behind it"
+        );
         // Nothing was written.
         assert!(r.store.get("apikey:x").is_err());
     }

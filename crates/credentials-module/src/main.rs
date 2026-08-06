@@ -1528,6 +1528,71 @@ mod tests {
         );
     }
 
+    /// `get_many` serves a batch at the cap and refuses one item past it, WHOLE rather
+    /// than truncated. The at-cap arm is what gives the over-cap arm its meaning: a
+    /// `get_many` that refused unconditionally would satisfy every over-cap assertion in
+    /// this repo, since nothing else calls it with an accepted batch.
+    #[tokio::test]
+    async fn get_many_serves_at_the_cap_and_refuses_whole_past_it() {
+        use crate::limiter::GET_MANY_MAX;
+
+        let (surface, store, _db) = tmp_surface_with_store(24);
+        let mut handles = Vec::new();
+        for i in 0..GET_MANY_MAX {
+            let id = format!("apikey:batch-{i}");
+            let payload = format!("secret-{i}").into_bytes();
+            store
+                .create(
+                    &id,
+                    &VaultRecord::new_static(
+                        credentials_core::record::CredentialKind::ApiKey,
+                        "test",
+                        payload,
+                        None,
+                    ),
+                )
+                .expect("seed batch record");
+            let handle = credentials_core::store::mint_handle().expect("mint");
+            store
+                .put_handle_hash(&handle.hash, &id, AuditCtx::admin(AuditOp::MintHandle))
+                .expect("put handle");
+            handles.push(handle.raw);
+        }
+        let params = |raws: &[String]| read_surface::GetManyParams {
+            items: raws
+                .iter()
+                .map(|raw| read_surface::GetParams {
+                    handle: raw.clone(),
+                    min_ttl_ms: None,
+                    force_refresh: false,
+                })
+                .collect(),
+        };
+
+        // AT the cap: every item is served, with its own payload — so the batch path
+        // works and the refusal below is about the bound, not about get_many at all.
+        let served = surface.get_many(81, &params(&handles)).await;
+        assert_eq!(served.len(), GET_MANY_MAX, "a batch at the cap is served");
+        for (i, outcome) in served.iter().enumerate() {
+            let read_surface::GetOutcome::Ok(result) = outcome else {
+                panic!("item {i} must serve at the cap, got {outcome:?}");
+            };
+            assert_eq!(result.payload, format!("secret-{i}").into_bytes());
+        }
+
+        // ONE past the cap: a single refusal for the whole call. A truncating
+        // implementation would return GET_MANY_MAX outcomes here instead.
+        let mut over = handles.clone();
+        over.push(handles[0].clone());
+        let refused = surface.get_many(81, &params(&over)).await;
+        assert_eq!(refused.len(), 1, "over-cap is refused whole, not truncated");
+        let read_surface::GetOutcome::Err { error } = &refused[0] else {
+            panic!("over-cap must refuse");
+        };
+        assert_eq!(error.code, read_surface::ReadError::TooManyItems);
+        assert_eq!(error.class, read_surface::ErrorClass::ContextOverflow);
+    }
+
     /// End-to-end: `get` surfaces the provider account identity for a chatgpt:openai
     /// record, parsed LIVE from the served access token's claim, and returns None for a
     /// record whose provider has no account claim (here an api-key with no adapter). This

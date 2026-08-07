@@ -1,14 +1,22 @@
-//! Report which credentials are USABLE, not merely present.
+//! Report whether each credential holds material the engine can actually work with.
 //!
-//! The health gauge counts records that exist and decrypt. That is a weaker property than
-//! "a consumer asking for this right now would get a working token": an OAuth record whose
-//! access token has expired is still `active` and still counted, and only becomes visibly
-//! broken when its refresh is attempted. Tonight one credential sat in exactly that state
-//! and read as serving until nine runs asked for it at once.
+//! The health gauge counts records that exist and decrypt, which cannot see inside the
+//! sealed envelope. This opens each one and reports the property the gauge structurally
+//! cannot: whether a record is STRANDED -- holding neither a usable access token nor any
+//! refresh material, so it can never serve again without an operator login.
 //!
-//! This prints, per credential, whether it holds refresh material and how its access token
-//! stands against the clock — so the present-versus-usable gap is measurable without
-//! waiting for a consumer to trip over it.
+//! # Expiry is reported but never scored
+//!
+//! An expired access token is not a fault: `RefreshEngine::is_stale` treats it as the
+//! trigger to refresh on the next get, so expired-with-refresh-material is the routine
+//! state of a perfectly healthy credential and counting it as degraded would report
+//! normal operation as a problem.
+//!
+//! Nor is remaining TTL evidence of the opposite. Expiry and provider acceptance are
+//! independent: a provider can reject a token that was minted an hour ago and still has
+//! days of TTL left, and no amount of local inspection can see that coming. The
+//! authoritative signal for a rejected credential is the `needs_reauth` state, which a
+//! consumer sets through `report_auth_failure` and the health gauge already counts.
 //!
 //! # Acquires nothing exclusive
 //!
@@ -16,13 +24,9 @@
 //! running daemon out of its own store. So the envelope is read through a plain read-only
 //! SQLite connection and decrypted in memory here. Read-only rather than `immutable=1`:
 //! immutable skips the write-ahead log and would answer about a live store's past.
-//!
-//! What this CANNOT tell you: whether a refresh token is still honoured by the provider.
-//! Only spending it answers that, and for rotating providers spending it invalidates the
-//! copy we hold. A token that refreshed successfully today is the strongest non-destructive
-//! evidence available.
 
 use credentials_core::envelope::{open as envelope_open, RecordBinding};
+use credentials_core::oauth::OAuthCredential;
 use credentials_core::record::VaultRecord;
 use credentials_core::resolver::{KeySlot, KeySource};
 use rusqlite::{Connection, OpenFlags};
@@ -33,6 +37,25 @@ fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+/// Whether the engine can still do something with this record, or whether it is stranded
+/// and needs an operator login. `None` is a static key.
+///
+/// Split out of the reporting loop so the stranded arm is reachable by a test: against a
+/// healthy vault every record is serviceable, so a run over real data exercises one arm
+/// only, and an all-serviceable report is equally consistent with a function that has no
+/// stranded arm at all.
+fn is_serviceable(oauth: Option<&OAuthCredential>) -> bool {
+    match oauth {
+        // A static key carries no expiry and no refresh path. Nothing readable here can
+        // distinguish a live key from one the provider revoked an hour ago.
+        None => true,
+        // An OAuth record with neither a usable access token nor refresh material cannot
+        // serve and cannot recover on its own. Everything else the engine can handle:
+        // with refresh material it mints a new access token on the next get.
+        Some(oauth) => !oauth.refresh_token.is_empty() || !oauth.access_token.is_empty(),
+    }
 }
 
 fn main() {
@@ -69,7 +92,7 @@ fn main() {
         .expect("query");
 
     let now = now_ms();
-    let (mut usable, mut expiring, mut stale, mut unreadable) = (0, 0, 0, 0);
+    let (mut serviceable, mut stranded, mut unreadable) = (0, 0, 0);
 
     for row in rows {
         let (id, version, state, blob) = row.expect("row");
@@ -94,40 +117,82 @@ fn main() {
             }
         };
 
-        match record.oauth.as_ref() {
-            // A static key has no expiry and no refresh path: present IS usable, as far as
-            // the vault can tell. Only the provider knows if it has been revoked.
+        let oauth = record.oauth.as_ref();
+        if !is_serviceable(oauth) {
+            println!("  {id:34} oauth   {state}  STRANDED: no access token and no refresh token");
+            stranded += 1;
+            continue;
+        }
+
+        match oauth {
             None => {
-                println!("  {id:34} static      {state}");
-                usable += 1;
+                println!("  {id:34} static  {state}");
             }
             Some(oauth) => {
-                let has_refresh = !oauth.refresh_token.is_empty();
-                match oauth.expires_at_ms {
-                    None => {
-                        println!("  {id:34} oauth       {state}  no expiry recorded  refresh={has_refresh}");
-                        usable += 1;
-                    }
+                // Expiry is printed as context and never scored. An expired access token
+                // is the ROUTINE state of a healthy credential -- RefreshEngine::is_stale
+                // treats it as the trigger to refresh on the next get, not as a fault --
+                // so counting it as degraded would report normal operation as a problem.
+                let ttl = match oauth.expires_at_ms {
                     Some(exp) => {
                         let mins = (exp - now) / 60_000;
                         if mins < 0 {
-                            // Expired: the NEXT get must refresh. Usable only if the
-                            // refresh token is still honoured, which cannot be known here.
-                            println!("  {id:34} oauth       {state}  EXPIRED {} min ago  refresh={has_refresh}", -mins);
-                            stale += 1;
-                        } else if mins < 15 {
-                            println!("  {id:34} oauth       {state}  expires in {mins} min  refresh={has_refresh}");
-                            expiring += 1;
+                            format!("access expired {}m ago, refreshes on next get", -mins)
                         } else {
-                            println!("  {id:34} oauth       {state}  expires in {mins} min  refresh={has_refresh}");
-                            usable += 1;
+                            format!("access good for {mins}m")
                         }
                     }
-                }
+                    None => "no expiry recorded".to_string(),
+                };
+                println!("  {id:34} oauth   {state}  {ttl}");
             }
         }
+        serviceable += 1;
     }
 
     println!();
-    println!("  usable now: {usable}   expiring<15m: {expiring}   expired-needs-refresh: {stale}   unreadable: {unreadable}");
+    println!("  serviceable: {serviceable}   stranded: {stranded}   unreadable: {unreadable}");
+    println!();
+    println!("  Serviceable means the record decrypts under the current master key and");
+    println!("  holds material the engine can either serve or refresh from. It is NOT a");
+    println!("  claim that the provider will still honour it: only spending a token");
+    println!("  answers that, and for rotating providers spending it invalidates the copy");
+    println!("  we hold, so no dry run exists even in principle. The authoritative signal");
+    println!("  for a provider-rejected credential is the `needs_reauth` state, which a");
+    println!("  consumer sets via report_auth_failure and the health gauge already counts.");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_serviceable;
+    use credentials_core::oauth::OAuthCredential;
+
+    fn creds(access: &str, refresh: &str) -> OAuthCredential {
+        OAuthCredential {
+            access_token: access.to_string(),
+            refresh_token: refresh.to_string(),
+            expires_at_ms: None,
+            token_url: "https://example.invalid/token".to_string(),
+            client_id: None,
+            scopes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn only_a_record_with_neither_token_is_stranded() {
+        // The arm a healthy vault never reaches, which is the whole reason it is asserted
+        // here rather than left to a live run.
+        assert!(!is_serviceable(Some(&creds("", ""))));
+
+        // All three recoverable shapes, so the check cannot collapse into a constant in
+        // either direction without failing this test.
+        assert!(is_serviceable(Some(&creds("live-access", ""))));
+        assert!(is_serviceable(Some(&creds("", "live-refresh"))));
+        assert!(is_serviceable(Some(&creds("live-access", "live-refresh"))));
+    }
+
+    #[test]
+    fn a_static_key_is_serviceable_because_nothing_local_can_falsify_it() {
+        assert!(is_serviceable(None));
+    }
 }

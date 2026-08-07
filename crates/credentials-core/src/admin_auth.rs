@@ -29,6 +29,11 @@ type HmacSha256 = Hmac<Sha256>;
 
 /// Domain-separation label for deriving the admin MAC key from the master key.
 /// Versioned: a transcript change bumps the label, never reuses it.
+// The domain strings below keep the pre-rename spelling on purpose. They are
+// cryptographic domain separators, not names: both sides of the challenge-response
+// derive from them independently, so changing one would silently stop every admin
+// operation from authenticating. Same reasoning as the envelope AAD and key-id
+// domains -- a rename is cosmetic, these are inputs to a MAC.
 const ADMIN_MAC_KEY_DOMAIN: &[u8] = b"cortexkit-credentials/admin-mac-key/v1";
 
 /// Domain-separation prefix for the authenticated transcript itself.

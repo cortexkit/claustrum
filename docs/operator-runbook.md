@@ -1,4 +1,4 @@
-# Operator runbook — cortexkit-credentials
+# Operator runbook — claustrum (the credential vault)
 
 How an operator provisions the credential vault and wires a consumer to it. The
 vault is a subc-supervised daemon plus an admin CLI; this is the end-to-end flow
@@ -10,7 +10,7 @@ There are two programs:
   read surface (`credential.get` / `get_many` / `status` / `report_auth_failure`)
   over the route channel, and the authenticated admin surface described below.
   (Built from the `credentials-module` crate; the module id remains
-  `cortexkit-credentials`.)
+  `claustrum`.)
 - **`ck-auth`** — the admin tool, invoked as `ck auth <verb>`. The **only** write
   surface (login, import, invalidate, rotate, mint/revoke handles, audit). Most
   verbs commit through the **running** daemon with no downtime; a few are
@@ -26,13 +26,13 @@ There are two programs:
 > nothing for the macOS keychain default.
 >
 > **`--data-dir` must be `<data_home>/cortexkit/<module_id>`**, where `<module_id>`
-> is the subc.jsonc module key — **`cortexkit-credentials`**, NOT a shortened
+> is the subc.jsonc module key — **`claustrum`**, NOT a shortened
 > `credentials`. The supervised daemon derives its store path from the module id
 > verbatim, so the CLI must use the same full id or it opens a *different*
 > (empty) vault under a different keychain scope. On a default desktop:
 >
 > ```sh
-> DATA_DIR=~/.local/share/cortexkit/cortexkit-credentials
+> DATA_DIR=~/.local/share/cortexkit/claustrum
 > ```
 
 ---
@@ -117,7 +117,7 @@ ck auth bootstrap --data-dir "$DATA_DIR" --key-path /etc/cortexkit/master.key
 ```
 
 `$DATA_DIR` is the vault's data directory. Under subc supervision the daemon
-resolves it to `<data_home>/cortexkit/cortexkit-credentials/` — the admin CLI must
+resolves it to `<data_home>/cortexkit/claustrum/` — the admin CLI must
 point `--data-dir` at that **same** directory so both operate on one vault.
 
 ---
@@ -258,7 +258,7 @@ a credential over the route channel:
 
 ```
 catalog.list
-  → route.open(ManagementSurface, module_id = "cortexkit-credentials")
+  → route.open(ManagementSurface, module_id = "claustrum")
   → credential.get { handle: "ckh_..." }   // returns the opaque payload
 ```
 

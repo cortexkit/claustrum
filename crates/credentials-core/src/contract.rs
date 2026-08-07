@@ -35,6 +35,11 @@ pub const STORAGE_NAMESPACE: &str = "default";
 
 /// The keychain service prefix. The full service string is this, scoped per-vault by
 /// the canonical data directory (see [`keychain_service_for`]).
+///
+/// This deliberately keeps the pre-rename spelling. It is not a label but half of a
+/// lookup key: the live keychain item was stored under it, and changing the string
+/// would derive a service nothing has ever written to, so the vault would resolve no
+/// master key and fail closed as `vault_locked` on a store that is perfectly intact.
 const KEYCHAIN_SERVICE_PREFIX: &str = "cortexkit-credentials";
 
 /// The keychain account for the `Current` master-key slot. The `Next` rotation slot

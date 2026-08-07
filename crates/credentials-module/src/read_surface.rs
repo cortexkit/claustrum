@@ -10,8 +10,15 @@
 //!   refreshed first if stale (single-flight, vault-owned).
 //! - `credential.get_many { items: [...] }` → capped at [`limiter::GET_MANY_MAX`].
 //! - `credential.status { handle? }` → non-secret health, never bytes.
-//! - `credential.report_auth_failure { handle, provider_status }` → marks the
-//!   credential needs_reauth so the next get does not serve a dead token.
+//! - `credential.report_auth_failure { handle, provider_status, record_version }` →
+//!   marks the credential needs_reauth so the next get does not serve a dead token.
+//!   `record_version` is the version the consumer was SERVED, and the mark only lands
+//!   if the store still holds it: a report about a version the vault has already
+//!   replaced is a silent no-op, so a slow consumer's stale 401 cannot invalidate a
+//!   credential that has since been repaired.
+//!
+//!   For a STATIC api-key record this call is not an accelerator, it is the only
+//!   automatic path to `needs_reauth` — see [`credentials_core::credential_id`].
 //!
 //! Every fetch passes through the per-connection [`FetchLimiter`]; an anomaly raises
 //! a durable audit alarm (the first crossing per connection). Refresh-triggering

@@ -99,6 +99,32 @@ pub fn parse_credential_id(id: &str) -> ParsedCredentialId {
 /// The refresh-adapter name to STORE for a credential, given its method and provider,
 /// or `None` for a static api-key record (no adapter, no refresh).
 ///
+/// # Retirement consequence of returning `None`
+///
+/// A refreshable record retires itself: when the provider rejects its refresh token the
+/// exchange returns `invalid_grant`, and the engine flips the record to `needs_reauth`
+/// on the spot. No consumer cooperation is involved.
+///
+/// A static record never enters that machinery, and the effect is wider than "no refresh":
+/// EVERY automatic path to `needs_reauth` hangs off the refresh/reconciliation machinery,
+/// so a static record cannot reach any of them. A revoked-at-the-provider api key stays
+/// `active` in the vault and continues to be served.
+///
+/// What DOES still apply, and what does not:
+/// - The read path quarantines a static record as `corrupt` if it fails to decrypt/decode,
+///   or if it decodes to a zero-byte payload. That is integrity, not authentication — it
+///   catches a mangled record, never a well-formed key the provider has revoked.
+/// - The only automatic path to `needs_reauth` is a consumer calling
+///   `credential.report_auth_failure` after the provider rejects the key. Consumers send it
+///   fire-and-forget, so a consumer that never sends it leaves a dead key served until a
+///   human runs `ck auth logout` or `login --replace`.
+///
+/// This is accepted rather than overlooked: detecting a revoked static key without a
+/// consumer signal would mean the vault periodically spending the credential against the
+/// provider to see if it still works, which is a worse property than serving a key whose
+/// holder has not yet complained. Any future credential class without a refresh adapter
+/// inherits this shape by construction.
+///
 /// This is the method → adapter table that replaces id-suffix parsing:
 /// - oauth (or legacy) → the provider-named adapter (`anthropic`/`openai`/`xai`/`google`)
 /// - antigravity → `antigravity`

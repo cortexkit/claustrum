@@ -325,7 +325,7 @@ impl MasterKeyStore for OperatorPathStore {
                 // `Current`, and a power loss that lost this unlink would resurrect a
                 // stale `Next`. Harmless there (it matches nothing), but fsyncing keeps
                 // the slot state honest.
-                fsync_parent_dir(&path);
+                fsync_parent_dir(&path).map_err(MasterKeyError::Io)?;
                 Ok(())
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -787,24 +787,60 @@ fn replace_at_operator_path(path: &Path, key: &MasterKey) -> Result<(), MasterKe
     // loss after the rename returns can still lose the directory entry, leaving the slot
     // pointing at the pre-rename state (or nothing). The file bytes were already synced in
     // write_key_file; this makes the atomic publish of those bytes durable too.
-    fsync_parent_dir(path);
+    //
+    // A failure here is REPORTED rather than swallowed: this is a master-key slot write,
+    // so "the bytes are published but the publish may not survive a power cut" is exactly
+    // the thing a caller must not be told is a clean success.
+    fsync_parent_dir(path).map_err(|e| MasterKeyError::KeyStoreUnwritable(e.to_string()))?;
     Ok(())
 }
 
-/// Best-effort fsync of a path's parent directory to make a rename/remove durable.
-/// Errors are ignored: not every filesystem supports directory fsync, and a slot write
-/// that got this far already synced the file bytes — a missing dir-fsync degrades
-/// durability, it does not corrupt. On non-unix this is a no-op (Windows has no
-/// equivalent directory-handle fsync with the same semantics).
-fn fsync_parent_dir(path: &Path) {
+/// Fsync a path's parent directory to make a rename/remove durable.
+///
+/// Directory fsync is genuinely optional on some filesystems, so a "this platform does
+/// not do that" refusal is swallowed: the file bytes were already synced by the caller,
+/// so losing the directory fsync degrades durability without threatening integrity.
+///
+/// A REAL I/O FAILURE IS RETURNED, and the distinction is the point. If every error were
+/// swallowed, the write path would report success while silently providing a weaker
+/// guarantee than it claims, and no caller could tell an unsupported filesystem from a
+/// failing disk — the two would be identical at every call site. On non-unix this is a
+/// no-op: Windows has no directory-handle fsync with these semantics.
+fn fsync_parent_dir(path: &Path) -> Result<(), std::io::Error> {
     #[cfg(unix)]
-    if let Some(parent) = path.parent() {
-        if let Ok(dir) = std::fs::File::open(parent) {
-            let _ = dir.sync_all();
+    {
+        let Some(parent) = path.parent() else {
+            return Ok(());
+        };
+        let dir = match std::fs::File::open(parent) {
+            Ok(dir) => dir,
+            // A directory we cannot open for sync is not itself a durability failure of
+            // this write; the bytes are synced and the rename already returned.
+            Err(e) if is_unsupported(&e) => return Ok(()),
+            Err(e) => return Err(e),
+        };
+        match dir.sync_all() {
+            Ok(()) => Ok(()),
+            Err(e) if is_unsupported(&e) => Ok(()),
+            Err(e) => Err(e),
         }
     }
     #[cfg(not(unix))]
-    let _ = path;
+    {
+        let _ = path;
+        Ok(())
+    }
+}
+
+/// Does this error mean "the platform/filesystem does not support directory fsync"
+/// rather than "the write failed"? EINVAL is what a filesystem without directory-sync
+/// support returns, and it arrives as `InvalidInput`.
+#[cfg(unix)]
+fn is_unsupported(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::Unsupported | std::io::ErrorKind::InvalidInput
+    )
 }
 
 // ---- hex helpers ---------------------------------------------------------
@@ -876,6 +912,58 @@ mod tests {
         ));
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    /// A directory fsync that fails for a REAL I/O reason must surface, while a platform
+    /// that simply does not support the call must not.
+    ///
+    /// The distinction is the whole point of the function: if both were swallowed, a
+    /// master-key slot write would report clean success while providing a weaker
+    /// durability guarantee than it claims, and no caller could tell an unsupported
+    /// filesystem from a failing disk.
+    #[test]
+    #[cfg(unix)]
+    fn dir_fsync_reports_real_failures_but_tolerates_unsupported() {
+        // POSITIVE ARM. Without it, a function returning Err unconditionally would
+        // satisfy every negative assertion below.
+        let root = tmp_dir("fsync-ok");
+        let file = root.join("slot.key");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(
+            fsync_parent_dir(&file).is_ok(),
+            "a real directory must sync cleanly"
+        );
+
+        // REAL I/O FAILURE: the parent does not exist, so opening it genuinely fails.
+        // This is the case that must NOT be swallowed.
+        let missing = root.join("gone").join("slot.key");
+        let err = fsync_parent_dir(&missing)
+            .expect_err("a parent that cannot be opened is a real failure, not a no-op");
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::NotFound,
+            "the underlying error must reach the caller intact, not be flattened"
+        );
+
+        // UNSUPPORTED is classified separately from failure. Pinning the mapping rather
+        // than a syscall: EINVAL is what a filesystem without directory-sync support
+        // returns, and it must read as tolerable.
+        assert!(is_unsupported(&std::io::Error::from(
+            std::io::ErrorKind::Unsupported
+        )));
+        assert!(is_unsupported(&std::io::Error::from(
+            std::io::ErrorKind::InvalidInput
+        )));
+        assert!(
+            !is_unsupported(&std::io::Error::from(std::io::ErrorKind::NotFound)),
+            "a missing path is a failure, not an unsupported platform"
+        );
+        assert!(
+            !is_unsupported(&std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+            "a permissions failure must surface"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

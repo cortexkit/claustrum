@@ -93,12 +93,13 @@ jobs:
       - name: Clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
-      # Lint the feature-gated security-conformance code (the kill-9 pre-commit seam
-      # and the rotation crash-cut helper, plus their helper binaries) too, so it is
-      # held to the same -D warnings bar even though it is compiled out of the
-      # default build.
+      # Lint the feature-gated code (the kill-9 pre-commit seam, the rotation and login
+      # crash-cut helpers, and the rename-ceremony one-shots) too, so it is held to the
+      # same -D warnings bar even though it is compiled out of the default build.
+      # Without this the gated binaries would rot unnoticed until the next rename, which
+      # is the worst moment to discover they no longer compile.
       - name: Clippy (conformance seams)
-        run: cargo clippy --locked --workspace --all-targets --features kill9-test-seam,rotate-test-seam,login-test-seam -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets --features kill9-test-seam,rotate-test-seam,login-test-seam,migration-tools -- -D warnings
 
       - name: Test
         run: cargo test --locked --workspace --all-targets

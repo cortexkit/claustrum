@@ -30,6 +30,34 @@ login-test-seam = []
 # vault. The feature exists solely to keep the test binary out of a normal build.
 rotate-test-seam = []
 
+# Gates the module-rename ceremony one-shots (ck_key_move, ck_key_verify) out of
+# normal builds. Compiles NO code into the library — both drive the shipped resolver
+# API only.
+#
+# The keychain is the real capability here, not the binary: every one of these tools
+# fails closed for anyone who cannot already resolve the master key as the vault
+# owner. So this is defence in depth rather than a security boundary. It earns its
+# place on ACCIDENT rather than attack: ck_key_move WRITES master-key material, it is
+# run roughly once per rename against two directory arguments, and a normal build
+# putting it on PATH is how a wrong-argument run becomes reachable years after anyone
+# remembers what it does.
+migration-tools = []
+
+# The two rename-ceremony one-shots. Gated together because they are used at the same
+# moment and never afterwards. Deliberately NOT sharing a gate with ck_usable_audit,
+# which stays default-built: that one is an ongoing operator diagnostic, run against a
+# healthy live vault whenever the question comes up, and gating a routine check behind
+# a feature flag is how it stops being run.
+[[bin]]
+name = "ck_key_move"
+path = "src/bin/ck_key_move.rs"
+required-features = ["migration-tools"]
+
+[[bin]]
+name = "ck_key_verify"
+path = "src/bin/ck_key_verify.rs"
+required-features = ["migration-tools"]
+
 # The kill-9 helper process. Only buildable with the seam feature, so it never
 # ships in a normal build. The conformance integration test spawns it via
 # CARGO_BIN_EXE_kill9_refresh_helper.

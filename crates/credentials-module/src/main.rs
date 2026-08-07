@@ -1,10 +1,10 @@
 #![forbid(unsafe_code)]
 
-//! The cortexkit-credentials subc module daemon.
+//! The claustrum subc module daemon (the credential vault).
 //!
 //! Connects out to the subc daemon, authenticates over loopback TCP, and registers
 //! a reserved `ManagementSurface` — echoing the `SUBC_LAUNCH_NONCE` the supervisor
-//! injected so only the spawned process can claim the `cortexkit-credentials` id
+//! injected so only the spawned process can claim the `claustrum` id
 //! (closing the vault-impersonation hole). It serves the ANONYMOUS READ surface
 //! over the route channel only: `credential.get` / `get_many` / `status` /
 //! `report_auth_failure`. There is deliberately NO write op on this channel — writes

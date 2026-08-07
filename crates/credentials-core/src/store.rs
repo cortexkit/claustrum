@@ -128,7 +128,7 @@ const MIGRATIONS: &[Migration] = &[
 /// unforgeable without the master key), re-sealed on master-key rotation but never
 /// regenerated — keeping one continuously-verifiable chain across rotations. Its
 /// envelope uses this fixed pseudo-id and version 0 as the AAD binding.
-const AUDIT_KEY_SECRET_NAME: &str = "__vault_audit_key__";
+pub const AUDIT_KEY_SECRET_NAME: &str = "__vault_audit_key__";
 const AUDIT_KEY_RECORD_VERSION: u64 = 0;
 
 /// The non-secret lifecycle state of a stored record.

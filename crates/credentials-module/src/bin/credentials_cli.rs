@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-//! The cortexkit-credentials offline admin CLI.
+//! The claustrum admin CLI (`ck auth`).
 //!
 //! This is the ONLY write surface. It is master-key-gated by STRUCTURE, not a
 //! separate handshake, via two stacked gates. FIRST, it must RESOLVE the master key
@@ -413,7 +413,7 @@ fn help_verb(verb: &str) -> String {
             "Global flags (rarely needed; apply to any verb):\n\
              \n\
              \x20 --data-dir <dir>   vault location; defaults to the standard per-user path\n\
-             \x20                    (<data_home>/cortexkit/cortexkit-credentials). An\n\
+             \x20                    (<data_home>/cortexkit/claustrum). An\n\
              \x20                    explicit dir targets THAT vault and stays offline\n\
              \x20                    unless --subc is also given.\n\
              \x20 --subc <file>      subc connection file; auto-discovered on a standard\n\

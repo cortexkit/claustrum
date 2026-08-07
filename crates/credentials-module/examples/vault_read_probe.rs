@@ -25,7 +25,7 @@ use subc_protocol::{BindIdentity, Flags, FrameType, Priority, RouteTarget};
 use subc_transport::{authenticate_client, connection_file};
 use tokio::{net::TcpStream, time::Instant};
 
-const MODULE_ID: &str = "cortexkit-credentials";
+const MODULE_ID: &str = "claustrum";
 const SETUP_TIMEOUT: Duration = Duration::from_secs(15);
 const READ_TIMEOUT: Duration = Duration::from_secs(15);
 

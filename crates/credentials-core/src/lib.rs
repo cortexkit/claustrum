@@ -1,4 +1,4 @@
-//! Credential custody logic for the cortexkit-credentials subc module.
+//! Credential custody logic for the claustrum subc module (the credential vault).
 //!
 //! This crate holds the format/provider-specific weight of the credential vault
 //! (the "Acquisition + Custody" side of the thin-core boundary): the typed

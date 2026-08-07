@@ -22,7 +22,7 @@ use sha2::{Digest, Sha256};
 
 /// The vault's module id under subc supervision. The daemon registers under it and
 /// the CLI builds the storage descriptor with it; they MUST match.
-pub const MODULE_ID: &str = "cortexkit-credentials";
+pub const MODULE_ID: &str = "claustrum";
 
 /// The storage namespace the vault is resolved under. subc delivers this to the
 /// daemon in `HELLO_ACK.storage`; the CLI must build its descriptor with the SAME

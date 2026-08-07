@@ -22,7 +22,7 @@ use tokio::{
     time::{timeout, Instant},
 };
 
-pub const MODULE_ID: &str = "cortexkit-credentials";
+pub const MODULE_ID: &str = "claustrum";
 pub const SETUP_TIMEOUT: Duration = Duration::from_secs(15);
 pub const READ_TIMEOUT: Duration = Duration::from_secs(15);
 

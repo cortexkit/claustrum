@@ -1891,6 +1891,100 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// `invalidate_and_revoke_all_audited` is the compound behind `ck auth logout`:
+    /// mark `needs_reauth`, clear any dangling intent, and revoke EVERY live handle,
+    /// all in one fenced transaction with both audit entries inside it.
+    ///
+    /// The compound exists because doing it as two calls is crash-partial: a crash
+    /// between them leaves a dead credential still resolvable by handle — a token the
+    /// operator believes is withdrawn but which still serves. So the assertions below
+    /// pin all four effects TOGETHER, plus the reversibility that distinguishes logout
+    /// from `remove`: the row and its audit history survive.
+    #[test]
+    fn logout_invalidates_clears_intent_and_revokes_every_handle_atomically() {
+        let (root, store) = tmp_store(2);
+        store.create("out", &oauth_record()).expect("create out");
+        store.create("keep", &oauth_record()).expect("create keep");
+        // TWO live handles: "revoke all" is only meaningful past the first, and a loop
+        // that stopped after one would otherwise pass.
+        let live: Vec<_> = (0..2)
+            .map(|_| {
+                let h = mint_handle().expect("mint");
+                store
+                    .put_handle_hash(&h.hash, "out", AuditCtx::vault(AuditOp::MintHandle))
+                    .expect("store handle");
+                h.raw
+            })
+            .collect();
+        let sibling = mint_handle().expect("mint");
+        store
+            .put_handle_hash(&sibling.hash, "keep", AuditCtx::vault(AuditOp::MintHandle))
+            .expect("store sibling handle");
+        store.open_intent("out", 1, "rhash").expect("open intent");
+
+        let revoked = store
+            .invalidate_and_revoke_all_audited("out", AuditCtx::admin(AuditOp::Invalidate))
+            .expect("logout");
+        assert_eq!(
+            revoked, 2,
+            "every live handle must be revoked, not just one"
+        );
+
+        // All four effects, together.
+        assert_eq!(
+            store.meta("out").expect("meta").state,
+            RecordState::NeedsReauth,
+            "the credential must stop serving"
+        );
+        assert!(
+            store.read_intent("out").expect("read intent").is_none(),
+            "a dangling refresh intent must be cleared in the same transaction"
+        );
+        for (i, raw) in live.iter().enumerate() {
+            assert!(
+                matches!(store.resolve_handle(raw), Err(StoreOpError::NotFound)),
+                "handle {i} must no longer resolve"
+            );
+        }
+        // The sibling is untouched: logout is scoped to one credential.
+        assert_eq!(store.meta("keep").expect("meta").state, RecordState::Active);
+        assert_eq!(
+            store
+                .resolve_handle(&sibling.raw)
+                .expect("sibling resolves"),
+            "keep"
+        );
+
+        // REVERSIBILITY \u2014 what makes this `logout` and not `remove`: the row and its
+        // history are still there, so a later replace restores service.
+        let entries = store.read_audit(None).expect("read audit");
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.op == "invalidate" && e.credential_id.as_deref() == Some("out")),
+            "the invalidate must be audited"
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.op == "revoke_handle" && e.credential_id.as_deref() == Some("out")),
+            "the handle revocation must be audited in the same transaction"
+        );
+        store
+            .verify_audit_chain()
+            .expect("chain verifies after logout");
+        store
+            .overwrite_unconditional_audited("out", &oauth_record(), AuditCtx::admin(AuditOp::Put))
+            .expect("a logged-out credential can be restored");
+        assert_eq!(
+            store.meta("out").expect("meta").state,
+            RecordState::Active,
+            "logout must be reversible"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// `remove_audited` permanently deletes the row + intent + handle rows in one
     /// fenced transaction, appends a `remove` audit entry, and frees the id for a
     /// future create. A missing id is a loud NotFound, and removal must not disturb

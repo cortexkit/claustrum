@@ -1348,6 +1348,99 @@ mod tests {
     /// A status handle-probe runs the per-connection limiter BEFORE resolution, so a
     /// status-based enumeration sweep of unknown handles trips the same durable anomaly
     /// alarm as a get sweep — not a bypass. Proven by reading the audit log for the alarm.
+    /// `status` must report each record state DISTINCTLY: a needs_reauth credential is
+    /// not ready and names NeedsReauth, a corrupt one names Corrupt, and an active one
+    /// names nothing.
+    ///
+    /// Both sibling status tests probe the ACTIVE row only — one for the fenced-out
+    /// latch, one for the limiter — so neither can tell this mapping apart from a status
+    /// that always answers `last_error_code: None`. Consumers branch on that field to
+    /// decide whether a re-login is needed, so a collapsed mapping would present a dead
+    /// credential as healthy.
+    #[tokio::test]
+    async fn status_names_the_state_of_each_credential() {
+        let (surface, store, _db) = tmp_surface_with_store(16);
+
+        // The rig seeds apikey:active (Active) and apikey:dead (NeedsReauth). Add a
+        // corrupt row so all three arms of the mapping are exercised in one run.
+        store
+            .create(
+                "apikey:broken",
+                &VaultRecord::new_static(CredentialKind::ApiKey, "test", b"k".to_vec(), None),
+            )
+            .expect("create broken");
+        store.quarantine("apikey:broken").expect("quarantine");
+
+        let mint_for = |id: &str| {
+            let handle = credentials_core::store::mint_handle().expect("mint handle");
+            store
+                .put_handle_hash(&handle.hash, id, AuditCtx::admin(AuditOp::MintHandle))
+                .expect("put handle");
+            handle.raw
+        };
+        let active = mint_for("apikey:active");
+        let dead = mint_for("apikey:dead");
+        let broken = mint_for("apikey:broken");
+
+        // POSITIVE ARM: without it, a status reporting every credential as broken would
+        // satisfy both negative assertions below.
+        let ok = surface
+            .status(
+                2,
+                &StatusParams {
+                    handle: Some(active),
+                },
+            )
+            .await;
+        assert!(ok.ready, "an active credential is ready");
+        assert_eq!(
+            ok.last_error_code, None,
+            "an active credential names no error"
+        );
+
+        let reauth = surface
+            .status(2, &StatusParams { handle: Some(dead) })
+            .await;
+        assert!(!reauth.ready, "a needs_reauth credential is not ready");
+        assert_eq!(
+            reauth.last_error_code,
+            Some(read_surface::ReadError::NeedsReauth),
+            "needs_reauth must be named, not collapsed into a generic failure"
+        );
+
+        let corrupt = surface
+            .status(
+                2,
+                &StatusParams {
+                    handle: Some(broken),
+                },
+            )
+            .await;
+        assert!(!corrupt.ready, "a corrupt credential is not ready");
+        assert_eq!(
+            corrupt.last_error_code,
+            Some(read_surface::ReadError::Corrupt),
+            "corrupt is a DIFFERENT state from needs_reauth: one needs a re-login, the \
+             other needs the record replaced"
+        );
+
+        // An unresolvable handle is uniformly not_found, so a probe cannot distinguish
+        // a revoked handle from one that never existed.
+        let unknown = surface
+            .status(
+                2,
+                &StatusParams {
+                    handle: Some("ckh_not_a_real_handle".to_string()),
+                },
+            )
+            .await;
+        assert!(!unknown.ready);
+        assert_eq!(
+            unknown.last_error_code,
+            Some(read_surface::ReadError::NotFound)
+        );
+    }
+
     #[tokio::test]
     async fn status_handle_probe_runs_the_limiter() {
         let (surface, store, _db) = tmp_surface_with_store(15);

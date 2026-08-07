@@ -328,6 +328,44 @@ ck auth audit
 (e.g. `fetch_rate_anomaly`) is a durable detection signal surfaced here on demand,
 not a live notification.
 
+### Reading the chain directly
+
+The verbs above need the daemon stopped. To inspect a **running** vault — or to answer
+"did that write actually commit?" from outside — read the store read-only. This takes no
+lease and cannot disturb the daemon:
+
+```sh
+DB="$HOME/.local/share/cortexkit/claustrum/store.db"
+
+# Recent events. `actor` distinguishes who caused them: `vault` is the refresh engine
+# acting on its own, `route-admin` an operator through the running daemon, `offline-cli`
+# an operator holding the lease directly.
+sqlite3 "file:$DB?mode=ro" "SELECT seq, op, credential_id, actor,
+  datetime(ts_ms/1000,'unixepoch','localtime') FROM audit_log ORDER BY seq DESC LIMIT 20;"
+
+# When each credential last completed a real provider token exchange.
+sqlite3 "file:$DB?mode=ro" "SELECT credential_id, MAX(datetime(ts_ms/1000,'unixepoch','localtime'))
+  FROM audit_log WHERE op='refresh_commit' GROUP BY credential_id;"
+
+# Write authority: the store's fence epoch against the daemon's lease.
+sqlite3 "file:$DB?mode=ro" "SELECT epoch FROM cortexkit_fence WHERE id = 0;"
+cat "$HOME/.local/share/cortexkit/claustrum"/*.lease
+```
+
+Three things that make these read wrong:
+
+- **Use `mode=ro`, never `immutable=1`.** An immutable open tells SQLite the file cannot
+  change, so it skips the write-ahead log — on a live vault that silently returns a
+  pre-WAL snapshot, answering confidently about the past. `immutable=1` is for a store
+  nobody is writing, such as a copy kept as a rollback target.
+- **The table is `audit_log`, and its timestamp column is `ts_ms`.** A misspelled table
+  errors, but a wrong *column* in a `WHERE` clause returns zero rows — indistinguishable
+  from "nothing happened". Check the schema before believing an empty result.
+- **The audit chain answers "what happened"; the fence epoch only answers "what is true
+  now".** The fence row is rewritten only when a writer's epoch *exceeds* it, so an
+  unchanged row is equally consistent with a rejected write and with a healthy writer that
+  had nothing to claim. To ask whether a write committed, read the chain.
+
 One honest limit: the chain is **tamper-evident, not truncation-proof**. No interior
 edit, reorder or insertion survives verification without the audit key — but an
 attacker with write access to the database file can delete a suffix of recent

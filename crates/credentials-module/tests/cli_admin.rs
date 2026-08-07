@@ -388,7 +388,12 @@ fn admin_write_refused_while_lease_held() {
     // (module_id, backend, namespace), so a mismatched namespace would take a
     // DIFFERENT lock and the admin write would (wrongly) not be refused.
     let descriptor = StorageDescriptor {
-        module_id: "cortexkit-credentials".into(),
+        // Imported rather than spelled: this store must take the SAME lease lock the
+        // CLI takes, and the lease key is (module_id, backend, namespace). A literal
+        // here drifts silently on a module rename — the two sides then take DIFFERENT
+        // locks, the admin write is no longer refused, and this test stops proving
+        // mutual exclusion while still passing on its other assertions.
+        module_id: credentials_core::contract::MODULE_ID.into(),
         storage_namespace: "default".into(),
         isolation: Isolation::Module,
         backend: StorageBackend::Sqlite {

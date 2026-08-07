@@ -1528,6 +1528,109 @@ mod tests {
         );
     }
 
+    /// `report_auth_failure` invalidates ONLY on 401/403, and ONLY at the record version
+    /// the reporting consumer was actually served.
+    ///
+    /// This is the one read-surface op that MUTATES, and each arm is load-bearing.
+    /// Without the accepted arm, an implementation ignoring every report would pass;
+    /// without the non-auth-status arm, one invalidating on any status would pass;
+    /// without the stale-version arm, one ignoring the version and killing whatever is
+    /// current would pass. The three wrong shapes are, respectively: a dead token served
+    /// forever, a provider 500 nuking a healthy credential, and a slow consumer's stale
+    /// 401 destroying a credential the vault has already repaired.
+    #[tokio::test]
+    async fn report_auth_failure_invalidates_only_on_auth_status_at_the_served_version() {
+        use credentials_core::store::RecordState;
+
+        let (surface, store, _db) = tmp_surface_with_store(31);
+        let raw = credentials_core::store::mint_handle().expect("mint");
+        store
+            .put_handle_hash(
+                &raw.hash,
+                "apikey:active",
+                AuditCtx::admin(AuditOp::MintHandle),
+            )
+            .expect("put handle");
+        let handle = raw.raw;
+
+        let state_of = |store: &EncryptedStore| {
+            store
+                .list_meta()
+                .expect("list meta")
+                .into_iter()
+                .find(|(id, _)| id == "apikey:active")
+                .expect("seeded credential is present")
+                .1
+                .state
+        };
+        let params = |status: u16, version: u64| read_surface::ReportAuthFailureParams {
+            handle: handle.clone(),
+            provider_status: status,
+            record_version: version,
+        };
+
+        // A NON-AUTH status must not invalidate: a provider 500 is a hiccup, not a dead
+        // credential.
+        surface
+            .report_auth_failure(7, &params(500, 1))
+            .await
+            .expect("a non-auth status is accepted");
+        assert_eq!(
+            state_of(&store),
+            RecordState::Active,
+            "a 500 must leave the credential serving"
+        );
+
+        // A STALE version must be a silent no-op. Bump the record past what our reporter
+        // holds, exactly as a refresh would, then report the OLD version.
+        store
+            .overwrite_unconditional_audited(
+                "apikey:active",
+                &VaultRecord::new_static(CredentialKind::ApiKey, "test", b"k2".to_vec(), None),
+                AuditCtx::admin(AuditOp::Put),
+            )
+            .expect("bump the record version");
+        surface
+            .report_auth_failure(7, &params(401, 1))
+            .await
+            .expect("a stale report is accepted, not errored");
+        assert_eq!(
+            state_of(&store),
+            RecordState::Active,
+            "a 401 for a version the vault has moved past must NOT invalidate: that \
+             credential was already repaired"
+        );
+
+        // THE ACCEPTED ARM. Without it, an implementation that ignored every report
+        // satisfies both assertions above.
+        surface
+            .report_auth_failure(7, &params(401, 2))
+            .await
+            .expect("a current-version 401 is accepted");
+        assert_eq!(
+            state_of(&store),
+            RecordState::NeedsReauth,
+            "a 401 at the served version must stop the vault serving that token"
+        );
+
+        // An unknown handle gets the same refusal as a revoked one, so a caller cannot
+        // use this endpoint to discover which handles exist.
+        let unknown = surface
+            .report_auth_failure(
+                7,
+                &read_surface::ReportAuthFailureParams {
+                    handle: "ckh_not_a_handle".to_string(),
+                    provider_status: 401,
+                    record_version: 1,
+                },
+            )
+            .await;
+        assert!(
+            matches!(unknown, Err(read_surface::ReadError::NotFound)),
+            "an unknown handle must be a uniform not_found, got {unknown:?}"
+        );
+    }
+
     /// `get_many` serves a batch at the cap and refuses one item past it, WHOLE rather
     /// than truncated. The at-cap arm is what gives the over-cap arm its meaning: a
     /// `get_many` that refused unconditionally would satisfy every over-cap assertion in

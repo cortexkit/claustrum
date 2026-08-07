@@ -115,9 +115,13 @@ pub fn parse_credential_id(id: &str) -> ParsedCredentialId {
 ///   or if it decodes to a zero-byte payload. That is integrity, not authentication — it
 ///   catches a mangled record, never a well-formed key the provider has revoked.
 /// - The only automatic path to `needs_reauth` is a consumer calling
-///   `credential.report_auth_failure` after the provider rejects the key. Consumers send it
-///   fire-and-forget, so a consumer that never sends it leaves a dead key served until a
-///   human runs `ck auth logout` or `login --replace`.
+///   `credential.report_auth_failure` after the provider rejects the key. The vault cannot
+///   observe or enforce that call, so retirement of a static record depends entirely on
+///   consumer behaviour: a consumer that never reports, or whose report fails for a
+///   PERSISTENT reason, leaves a dead key served until a human runs `ck auth logout` or
+///   `login --replace`. A consumer that retries on its own schedule recovers from a
+///   transient delivery failure without help from here — but that is the consumer's
+///   property, not a guarantee this side provides.
 ///
 /// This is accepted rather than overlooked: detecting a revoked static key without a
 /// consumer signal would mean the vault periodically spending the credential against the

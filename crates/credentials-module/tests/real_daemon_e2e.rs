@@ -197,7 +197,7 @@ where
     F: FnOnce(&SeedCtx) -> (String, Vec<u8>),
 {
     let subc_core = build_subc_core()?;
-    let credentials_module = PathBuf::from(env!("CARGO_BIN_EXE_ck-credentials"));
+    let credentials_module = PathBuf::from(env!("CARGO_BIN_EXE_ck-claustrum"));
     assert!(credentials_module.exists());
 
     let rig = unique_temp_dir("cred-real-daemon");

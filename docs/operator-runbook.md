@@ -6,7 +6,7 @@ from an empty machine to a consumer reading a credential.
 
 There are two programs:
 
-- **`ck-credentials`** — the daemon. subc supervises it; it serves the
+- **`ck-claustrum`** — the daemon. subc supervises it; it serves the
   read surface (`credential.get` / `get_many` / `status` / `report_auth_failure`)
   over the route channel, and the authenticated admin surface described below.
   (Built from the `credentials-module` crate; the module id remains
@@ -356,7 +356,7 @@ also symlinked into `~/.local/bin/` for the `ck` dispatcher.
 **Sign with a pinned identifier at build time, then place with a plain copy:**
 
 ```sh
-codesign --force --sign - --identifier ck-credentials target/release/ck-credentials
+codesign --force --sign - --identifier ck-claustrum   target/release/ck-claustrum
 codesign --force --sign - --identifier ck-auth        target/release/ck-auth
 ```
 

@@ -10,14 +10,15 @@ description = "The cortexkit-credentials subc module: registers a reserved Manag
 # stays `cortexkit-credentials`, so the keychain scope, lease, and storage are
 # untouched — only the built executable's filename changes.
 [[bin]]
-name = "ck-credentials"
+name = "ck-claustrum"
 path = "src/main.rs"
 
 # The admin CLI — the `ck auth` dispatcher target (`ck <domain>` execs `ck-<domain>`).
 # Writes commit through the RUNNING module automatically (auto-discovered subc
 # connection file), or through the offline single-writer lease when the daemon is
-# stopped. Distinct from the daemon exe name `ck-credentials`: the operator surface is
-# `ck auth`, the supervised daemon stays `ck-credentials`.
+# stopped. Distinct from the daemon exe name `ck-claustrum`: the operator surface is
+# `ck auth`, and the `ck` dispatcher resolves it by that name, so the CLI keeps it
+# while the daemon follows the module id.
 [[bin]]
 name = "ck-auth"
 path = "src/bin/credentials_cli.rs"

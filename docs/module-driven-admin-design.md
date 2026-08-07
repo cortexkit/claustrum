@@ -336,7 +336,7 @@ master-key proof) is adopted above; the earlier private-socket draft is retired.
 ### Deploy
 
 The as-built binaries need a prod drain-restart to land (the currently-deployed
-`ck-credentials` also still carries the finding-8 drain-starvation hole fixed in
+`ck-claustrum` also still carries the finding-8 drain-starvation hole fixed in
 a1d2904). Fold into the next drain window; not an emergency (exploiting the drain
 hole needs a hostile route consumer, and today's only consumer is trusted broca).
 After deploy, a re-login is `login --provider <p> --replace --subc <conn>` with ZERO

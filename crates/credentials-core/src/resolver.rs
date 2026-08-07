@@ -806,6 +806,16 @@ fn replace_at_operator_path(path: &Path, key: &MasterKey) -> Result<(), MasterKe
 /// guarantee than it claims, and no caller could tell an unsupported filesystem from a
 /// failing disk — the two would be identical at every call site. On non-unix this is a
 /// no-op: Windows has no directory-handle fsync with these semantics.
+///
+/// THE READ-ONLY OPEN BELOW IS PART OF THE CONTRACT, NOT AN ARBITRARY CHOICE. A directory
+/// must be opened read-only to yield a syncable handle; `OpenOptions::write(true)` on a
+/// directory fails with `IsADirectory` (EISDIR), which is NOT in the tolerated set and
+/// would therefore propagate — breaking every write. The trap is what comes next: someone
+/// hitting that failure widens the tolerated set to silence it, and then the function
+/// returns Ok while never syncing anything, which is indistinguishable from this version
+/// at every call site. Measured on macOS/APFS 2026-08-07: read-only open + `sync_all`
+/// returns Ok (directory fsync is genuinely supported here, so this is a real guarantee
+/// rather than a no-op), while write-mode open returns EISDIR 21.
 fn fsync_parent_dir(path: &Path) -> Result<(), std::io::Error> {
     #[cfg(unix)]
     {
@@ -961,6 +971,31 @@ mod tests {
         assert!(
             !is_unsupported(&std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
             "a permissions failure must surface"
+        );
+        // EISDIR is what a WRITE-mode open of a directory returns. It must stay OUT of the
+        // tolerated set: admitting it is how a widened swallow list turns this function
+        // into one that never syncs and always reports success.
+        assert!(
+            !is_unsupported(&std::io::Error::from(std::io::ErrorKind::IsADirectory)),
+            "EISDIR means the handle was opened wrongly, not that the platform lacks dir-sync"
+        );
+
+        // The open mode is part of the contract: a read-only handle must be syncable on
+        // this platform, and the write-mode open that tempts a copier must fail.
+        assert!(
+            std::fs::File::open(&root)
+                .and_then(|d| d.sync_all())
+                .is_ok(),
+            "a read-only directory handle must be syncable"
+        );
+        assert_eq!(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&root)
+                .expect_err("write-mode open of a directory must fail")
+                .kind(),
+            std::io::ErrorKind::IsADirectory,
+            "pinning the failure a copier would hit if they opened the directory for writing"
         );
 
         let _ = std::fs::remove_dir_all(&root);

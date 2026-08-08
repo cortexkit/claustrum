@@ -417,6 +417,68 @@ fn admin_write_refused_while_lease_held() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// The validation bypass must not exist in a shipped binary.
+///
+/// `validate_key` has a test-only short circuit so this file's `login --provider zai`
+/// test can run without a provider to talk to. On the operator's path an `Invalid`
+/// result is the ONLY thing that stops a bad key being stored, so an env var that
+/// turns that refusal into a store -- while printing "API key is valid." -- must be
+/// compiled out. It is gated on `debug_assertions`.
+///
+/// Asserted against a real release build rather than by reading the `#[cfg]`, because
+/// the claim is about the artifact: a later edit could move the gate, widen it, or add
+/// a second read of the same var, and every one of those still reads correctly at the
+/// source while shipping the hole.
+///
+/// The positive control is what makes the absence a measurement: a string known to be
+/// present must be found by the identical pipeline, so a scan that silently finds
+/// nothing (wrong path, unreadable file, broken pipe) fails here rather than passing as
+/// a clean result.
+#[test]
+#[ignore = "builds the release profile; run explicitly or in the release gate"]
+fn validation_bypass_is_absent_from_a_release_build() {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let built = Command::new(env!("CARGO"))
+        .args([
+            "build",
+            "--locked",
+            "--release",
+            "-p",
+            "credentials-module",
+            "--bin",
+            "ck-auth",
+        ])
+        .current_dir(&manifest)
+        .output()
+        .expect("run cargo build");
+    assert!(
+        built.status.success(),
+        "release build failed: {}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+
+    let exe = manifest
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("workspace root")
+        .join("target/release/ck-auth");
+    let bytes = std::fs::read(&exe).expect("read the release ck-auth");
+
+    let find = |needle: &str| bytes.windows(needle.len()).any(|w| w == needle.as_bytes());
+
+    // Positive control first: if this fails the scan is broken, not the binary clean.
+    assert!(
+        find("API key validation failed"),
+        "positive control absent -- the scan cannot see strings it should find, so the \
+         bypass check below would pass vacuously"
+    );
+
+    assert!(
+        !find("CORTEXKIT_TEST_BYPASS_VALIDATION"),
+        "the validation bypass env var is present in the release ck-auth binary"
+    );
+}
+
 #[test]
 fn api_key_login_flow_integration() {
     let root = tmp_root("api-key-login");

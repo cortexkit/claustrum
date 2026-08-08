@@ -214,6 +214,21 @@ pub async fn validate_key(
     validation: &KeyValidation,
     key: &str,
 ) -> ValidationOutcome {
+    // Test-only escape hatch, compiled OUT of release builds.
+    //
+    // The CLI integration test drives a real `login --provider zai` end to end and has
+    // no provider to talk to, so it needs validation to return without a network call.
+    // But an env var that turns a REFUSAL into a stored credential must not exist in an
+    // operator's binary: on the shipped path an Invalid result is the only outcome that
+    // stops a bad key being stored, and this would skip it while printing "API key is
+    // valid." -- a validation claim for a check that never ran.
+    //
+    // Gated on debug_assertions rather than a cargo feature deliberately. The property
+    // wanted is exactly "absent from the release binary", and release builds are the
+    // thing shipped and signed; a feature gate would instead have to be remembered at
+    // every build site, and forgetting it is silent. Verified by asserting the env-var
+    // string is absent from `cargo build --release` output.
+    #[cfg(debug_assertions)]
     if std::env::var("CORTEXKIT_TEST_BYPASS_VALIDATION").is_ok() {
         return ValidationOutcome::Valid;
     }

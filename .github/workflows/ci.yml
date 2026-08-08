@@ -127,3 +127,12 @@ jobs:
         env:
           CRED_REQUIRE_DAEMON: "1"
         run: cargo test --locked -p credentials-module --test real_daemon_e2e -- --ignored --test-threads=1
+
+      # Assert the api-key validation bypass is absent from a REAL release binary. It
+      # is #[ignore]'d because it builds the release profile, so without this step it
+      # would never run and the guarantee would be nominal. Ubuntu-only: the property
+      # is about the source gate, which is platform-independent, and the release build
+      # is the expensive part.
+      - name: Release-artifact assertions (ship gate)
+        if: matrix.os == 'ubuntu'
+        run: cargo test --locked -p credentials-module --test cli_admin validation_bypass_is_absent -- --ignored

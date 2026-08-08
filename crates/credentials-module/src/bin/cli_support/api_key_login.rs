@@ -232,6 +232,20 @@ pub async fn validate_key(
     if std::env::var("CORTEXKIT_TEST_BYPASS_VALIDATION").is_ok() {
         return ValidationOutcome::Valid;
     }
+    // On why the POST arms below accept 4xx as Valid and the GET arm does not.
+    //
+    // A chat-completions POST carries a request BODY, so a 4xx that is not 401/403 means
+    // the server rejected the body (unknown model, bad parameter) AFTER accepting the
+    // key -- it got far enough to parse what we sent. Auth refusal has its own codes, so
+    // reaching a body complaint is positive evidence the key works, and we must not
+    // refuse a good key because the probe model name went stale.
+    //
+    // A GET has no body to be wrong about. A 4xx there is unexplained, carries no such
+    // implication, and is reported as Warning rather than read as success.
+    //
+    // The three arms are near-identical apart from this, which makes unifying them look
+    // like tidying. It is not: collapsing them silently changes what a 400 means for
+    // GET-validated providers. Each arm's 4xx handling is pinned by a test.
     match validation {
         KeyValidation::OpenAiChat { base_url, model } => {
             let url = format!("{}/chat/completions", base_url);
@@ -569,5 +583,59 @@ mod tests {
         let transport = FixtureTransport::ok(500, "{}");
         let outcome = validate_key(&transport, &validation_bearer, "test-key").await;
         assert!(matches!(outcome, ValidationOutcome::Warning(_)));
+    }
+
+    /// A non-auth 4xx means opposite things to a GET probe and a POST probe, and only
+    /// the POST side was pinned.
+    ///
+    /// A POST carries a body, so a 400 means the key was accepted and the body was not;
+    /// that is evidence the key works. A GET has no body to be wrong about, so the same
+    /// status is unexplained and must not be read as success.
+    ///
+    /// Asserted together in one test because the two halves only mean something as a
+    /// pair: either alone is satisfied by an implementation that treats every arm the
+    /// same, which is exactly the change this guards against. The three match arms are
+    /// near-identical apart from this line, so unifying them reads as removing
+    /// duplication -- and would silently reclassify 400 for every GET-validated
+    /// provider, storing an unverified key while reporting "API key is valid."
+    #[tokio::test]
+    async fn a_non_auth_4xx_is_valid_for_post_probes_and_not_for_get_probes() {
+        let post = KeyValidation::OpenAiChat {
+            base_url: "https://api.example.com/v1",
+            model: "gpt-4",
+        };
+        let get = KeyValidation::GetEndpoint {
+            url: "https://api.example.com/models",
+            auth_header: AuthHeaderScheme::XGoogApiKey,
+        };
+
+        let transport = FixtureTransport::ok(400, "{}");
+        assert_eq!(
+            validate_key(&transport, &post, "test-key").await,
+            ValidationOutcome::Valid,
+            "a body complaint means the key was accepted first"
+        );
+
+        let transport = FixtureTransport::ok(400, "{}");
+        assert!(
+            matches!(
+                validate_key(&transport, &get, "test-key").await,
+                ValidationOutcome::Warning(_)
+            ),
+            "a GET has no body to reject, so a 400 is unexplained and not success"
+        );
+
+        // 401 stays Invalid on both, so the divergence above is specifically about
+        // non-auth 4xx and not a general loosening of either arm.
+        let transport = FixtureTransport::ok(401, "{}");
+        assert!(matches!(
+            validate_key(&transport, &post, "test-key").await,
+            ValidationOutcome::Invalid(_)
+        ));
+        let transport = FixtureTransport::ok(401, "{}");
+        assert!(matches!(
+            validate_key(&transport, &get, "test-key").await,
+            ValidationOutcome::Invalid(_)
+        ));
     }
 }

@@ -85,6 +85,15 @@ pub enum MasterKeyError {
     /// The loaded key's fingerprint does not match the vault's recorded key_id —
     /// the wrong or a rotated key. Maps to the wire `vault_locked`.
     KeyMismatch { loaded: KeyId, expected: KeyId },
+    /// NEITHER key slot holds the key the database is sealed under.
+    ///
+    /// Distinct from [`MasterKeyError::KeyMismatch`], which reports one loaded key
+    /// disagreeing with an expectation. Here every slot was searched and none matched,
+    /// so there is no "loaded" key to name — only the fingerprint the database needs.
+    /// Reported separately because the operator actions differ: a mismatch means the
+    /// wrong key was supplied, while this means the right key is absent from the store
+    /// (restore it from backup, or recover the vault). Maps to the wire `vault_locked`.
+    NoSlotMatchesDb { expected: KeyId },
     /// The operator key path resolves to a directory under the data tree, which
     /// is forbidden (a single backup would leak both ciphertext and key).
     KeyPathUnderDataDir { key_dir: PathBuf, data_dir: PathBuf },
@@ -116,7 +125,9 @@ impl MasterKeyError {
     pub fn is_vault_locked(&self) -> bool {
         matches!(
             self,
-            MasterKeyError::VaultLocked | MasterKeyError::KeyMismatch { .. }
+            MasterKeyError::VaultLocked
+                | MasterKeyError::KeyMismatch { .. }
+                | MasterKeyError::NoSlotMatchesDb { .. }
         )
     }
 }
@@ -130,6 +141,11 @@ impl std::fmt::Display for MasterKeyError {
                 f,
                 "loaded master key {} does not match the vault's key {}",
                 loaded.to_hex(),
+                expected.to_hex()
+            ),
+            MasterKeyError::NoSlotMatchesDb { expected } => write!(
+                f,
+                "no master key slot holds the key this vault is sealed under ({})",
                 expected.to_hex()
             ),
             MasterKeyError::KeyPathUnderDataDir { key_dir, data_dir } => write!(
@@ -409,8 +425,7 @@ pub fn resolve_for_db(
     // read at all, surface that (e.g. `VaultLocked` stays a clean back-off signal);
     // otherwise this is a real wrong-key / corrupt state, distinct from a recoverable
     // mid-rotation handover.
-    Err(load_err.unwrap_or(MasterKeyError::KeyMismatch {
-        loaded: db_key_id,
+    Err(load_err.unwrap_or(MasterKeyError::NoSlotMatchesDb {
         expected: db_key_id,
     }))
 }
@@ -462,8 +477,7 @@ pub fn heal_pending_rotation(
     }
     // Neither slot holds the database's key: a genuine wrong-key / corrupt-anchor state.
     // Fail closed rather than promote a key the database is not sealed under.
-    Err(MasterKeyError::KeyMismatch {
-        loaded: db_key_id,
+    Err(MasterKeyError::NoSlotMatchesDb {
         expected: db_key_id,
     })
 }
@@ -1267,8 +1281,49 @@ mod tests {
         let _k1 = bootstrap(&config).expect("bootstrap");
         let stranger = MasterKey::generate().unwrap();
         match resolve_for_db(&config, stranger.key_id()) {
-            Err(MasterKeyError::KeyMismatch { .. }) => {}
-            other => panic!("expected KeyMismatch on no-matching-slot, got {other:?}"),
+            Err(e @ MasterKeyError::NoSlotMatchesDb { expected }) => {
+                assert_eq!(
+                    expected,
+                    stranger.key_id(),
+                    "must name the key the db needs"
+                );
+                // The whole point of the separate variant: this path has no loaded key to
+                // report, so the message must not claim one. The old shape reported the
+                // SAME fingerprint on both sides of "does not match", which is what an
+                // operator reads mid-rotation with the vault refusing to open.
+                let msg = e.to_string();
+                assert!(
+                    !msg.contains("does not match"),
+                    "must not phrase an absent key as a mismatch: {msg}"
+                );
+                assert_eq!(
+                    msg.matches(&stranger.key_id().to_hex()).count(),
+                    1,
+                    "the db fingerprint must appear once, not on both sides: {msg}"
+                );
+                assert!(e.is_vault_locked(), "still a clean back-off signal");
+            }
+            other => panic!("expected NoSlotMatchesDb on no-matching-slot, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_real_mismatch_still_names_both_keys() {
+        // The negative control for the test above: when there IS a loaded key that
+        // disagrees, both fingerprints must be reported and they must differ. Without
+        // this, collapsing every failure into the single-key variant would pass.
+        let root = tmp_dir("slot-realmismatch");
+        let config = op_config(&root);
+        let real = bootstrap(&config).expect("bootstrap");
+        let stranger = MasterKey::generate().unwrap();
+        match resolve(&config, Some(stranger.key_id())) {
+            Err(MasterKeyError::KeyMismatch { loaded, expected }) => {
+                assert_eq!(loaded, real.key_id());
+                assert_eq!(expected, stranger.key_id());
+                assert_ne!(loaded, expected, "a mismatch names two DIFFERENT keys");
+            }
+            other => panic!("expected KeyMismatch, got {other:?}"),
         }
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1296,7 +1351,13 @@ mod tests {
         stage_next(&config, &k3).expect("stage k3 without healing"); // overwrites next=k2
                                                                      // db is under k2, but current=k1 and next=k3: neither matches → brick (fail closed).
         match resolve_for_db(&config, k2.key_id()) {
-            Err(MasterKeyError::KeyMismatch { .. }) => {}
+            Err(MasterKeyError::NoSlotMatchesDb { expected }) => {
+                assert_eq!(
+                    expected,
+                    k2.key_id(),
+                    "names the key the db is sealed under"
+                );
+            }
             other => panic!("expected the un-healed double-rotation to brick, got {other:?}"),
         }
         let _ = std::fs::remove_dir_all(&root);
@@ -1376,7 +1437,9 @@ mod tests {
         let _k1 = bootstrap(&config).expect("bootstrap");
         let stranger = MasterKey::generate().unwrap();
         match heal_pending_rotation(&config, stranger.key_id()) {
-            Err(MasterKeyError::KeyMismatch { .. }) => {}
+            Err(MasterKeyError::NoSlotMatchesDb { expected }) => {
+                assert_eq!(expected, stranger.key_id());
+            }
             other => panic!("heal must fail closed when neither slot matches, got {other:?}"),
         }
         let _ = std::fs::remove_dir_all(&root);

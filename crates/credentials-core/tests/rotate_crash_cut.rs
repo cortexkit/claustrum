@@ -152,7 +152,7 @@ fn assert_wrong_key_fails_closed(root: &Path) {
     // Use a stranger key_id (not the database's): no slot matches -> fail closed.
     let stranger = MasterKey::generate().unwrap().key_id();
     match resolver::resolve_for_db(&config, stranger) {
-        Err(MasterKeyError::KeyMismatch { .. }) => {}
+        Err(MasterKeyError::NoSlotMatchesDb { expected }) => assert_eq!(expected, stranger),
         other => panic!("a wrong key_id must fail closed, got {other:?}"),
     }
     // And the store's own open under a wrong key still fails closed (audit-key

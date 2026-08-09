@@ -103,6 +103,8 @@ getrandom = { workspace = true }
 zeroize = { workspace = true }
 sha2 = { workspace = true }
 hmac = { workspace = true }
+p256 = { workspace = true }
+base64 = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

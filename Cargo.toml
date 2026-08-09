@@ -53,7 +53,16 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-uti
 async-trait = "0.1"
 
 # HTTP for OAuth refresh adapters (rustls, no native-tls).
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+#
+# `http2` is NOT an optimization here: APNs speaks HTTP/2 only, and a client built
+# without it negotiates HTTP/1.1 and is refused at the transport before any request
+# is seen. Every OAuth adapter works fine over 1.1, so nothing else in this
+# workspace would notice if the feature were dropped.
+reqwest = { version = "0.12", default-features = false, features = [
+  "rustls-tls",
+  "json",
+  "http2",
+] }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 url = "2"
 
@@ -69,3 +78,10 @@ getrandom = "0.2"
 zeroize = { version = "1", features = ["zeroize_derive"] }
 sha2 = "0.10"
 hmac = "0.12"
+
+# ES256 (ECDSA P-256 + SHA-256) for APNs provider tokens. APNs accepts NO other
+# algorithm for token auth, and it wants the raw 64-byte r||s signature rather
+# than the ASN.1 DER encoding `to_der()` produces -- a DER signature is a valid
+# ECDSA signature that APNs rejects, so the encoding is part of the contract.
+p256 = { version = "0.13", features = ["ecdsa", "pem"] }
+base64 = "0.22"

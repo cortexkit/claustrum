@@ -41,6 +41,35 @@ fn arg(name: &str) -> Option<String> {
         .cloned()
 }
 
+/// Standard base64 WITH padding, which is what `Data(base64Encoded:)` on the device
+/// accepts. Not base64url: the sealed blob rides as a JSON string value, so the
+/// URL-safe alphabet buys nothing and the device's decoder would reject it.
+fn b64_standard(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | (b[2] as u32);
+        out.push(ALPHABET[(n >> 18) as usize & 63] as char);
+        out.push(ALPHABET[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 {
+            ALPHABET[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHABET[n as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
 fn flag(name: &str) -> bool {
     std::env::args().any(|a| a == name)
 }
@@ -82,7 +111,8 @@ async fn main() {
     let team_id = require("--team-id");
     let topic = require("--topic");
     let device_token = require("--device-token");
-    let payload_hex = require("--payload-hex");
+    let sealed_hex = arg("--sealed-hex");
+    let payload_hex = arg("--payload-hex");
 
     let environment = if flag("--sandbox") {
         ApnsEnvironment::Sandbox
@@ -114,7 +144,62 @@ async fn main() {
         }
     };
 
-    let body = decode_hex(&payload_hex, "--payload-hex");
+    // Two ways to supply the body, and the default is the one that works.
+    //
+    // `--sealed-hex` takes the sealed blob alone and wraps it in the APNs payload
+    // the device requires. `--payload-hex` takes a complete JSON body verbatim, for
+    // sending something this tool does not model.
+    //
+    // The wrapping is not a convenience. A sealed blob sent as the whole body is a
+    // valid APNs request that APNs ACCEPTS and the device DISCARDS: without an `aps`
+    // dictionary it is not a displayable notification, and without `mutable-content`
+    // iOS never runs the service extension that would decrypt it. Both failures are
+    // silent and land on the device, which is the one place none of the senders can
+    // observe -- so the tool composes the envelope rather than trusting each operator
+    // to remember it.
+    let body = match (sealed_hex.as_deref(), payload_hex.as_deref()) {
+        (Some(sealed), None) => {
+            // Validate as hex before wrapping, so a malformed blob is refused here
+            // rather than delivered as a payload the device silently fails to open.
+            let raw = decode_hex(sealed, "--sealed-hex");
+            let encoded = b64_standard(&raw);
+            let envelope = format!(
+                concat!(
+                    r#"{{"aps":{{"alert":{{"title":"Alfonso","body":"needs you"}},"#,
+                    r#""mutable-content":1,"sound":"default"}},"cks":"{}"}}"#
+                ),
+                encoded
+            );
+            eprintln!(
+                "[apns] wrapped {} sealed byte(s) as base64 under \"cks\", with \
+                 mutable-content:1",
+                raw.len()
+            );
+            envelope.into_bytes()
+        }
+        (None, Some(payload)) => {
+            eprintln!("[apns] sending --payload-hex verbatim; nothing is added to it");
+            decode_hex(payload, "--payload-hex")
+        }
+        (Some(_), Some(_)) => {
+            eprintln!("error: pass --sealed-hex OR --payload-hex, not both");
+            std::process::exit(2);
+        }
+        (None, None) => {
+            eprintln!("error: one of --sealed-hex or --payload-hex is required");
+            std::process::exit(2);
+        }
+    };
+
+    // Print the exact bytes before sending. A sealed payload is opaque to everyone
+    // between here and the device, so this is the last point at which a human can
+    // see what is actually going out -- and the envelope's two silent failure modes
+    // (no `aps` dictionary, no `mutable-content`) are visible here and nowhere else.
+    if flag("--dry-run") {
+        println!("{}", String::from_utf8_lossy(&body));
+        eprintln!("[apns] --dry-run: nothing was sent");
+        return;
+    }
 
     // http2 is not optional here: APNs speaks nothing else, and without it the
     // client negotiates 1.1 and is refused at the transport with no APNs reason.

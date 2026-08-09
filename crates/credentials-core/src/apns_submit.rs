@@ -138,6 +138,81 @@ pub struct SubmitRequest<'a> {
     pub collapse_id: Option<&'a str>,
 }
 
+/// The APNs payload key the sealed blob rides under.
+///
+/// One of two independent transcriptions of the same wire fact: the iOS client
+/// declares its own copy, in another repository and another language, and no
+/// compiler spans them. A mismatch is SILENT on the device — the notification
+/// arrives and the value is simply absent — so the only thing keeping them equal
+/// is that someone changing one side knows the other exists.
+pub const SEALED_BLOB_KEY: &str = "cks";
+
+/// The `aps` member that decides whether a sealed payload is ever decrypted.
+///
+/// iOS runs the notification service extension only when the payload carries this
+/// with a value of 1 AND an alert dictionary with a title or body. Without it the
+/// notification is delivered and displayed, the extension never runs, and the blob
+/// is ignored — which reads as a rendering choice rather than a broken pipe.
+///
+/// It is a SENDER-side key, so it correctly appears nowhere in the client. That is
+/// exactly why it is easy to omit: no consumer's code mentions it, so nothing on
+/// the receiving side is missing when it is absent.
+pub const MUTABLE_CONTENT_KEY: &str = "mutable-content";
+
+/// Standard base64 WITH padding — what the client's decoder accepts.
+///
+/// Not base64url: the blob rides as a JSON string value, so the URL-safe alphabet
+/// buys nothing and would be rejected by a strict standard-alphabet decoder.
+fn base64_standard(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | (b[2] as u32);
+        out.push(ALPHABET[(n >> 18) as usize & 63] as char);
+        out.push(ALPHABET[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 {
+            ALPHABET[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHABET[n as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+/// Compose the APNs JSON body carrying a sealed blob.
+///
+/// The sealed payload is a bare byte string, and a device only decrypts it when the
+/// notification is both displayable and marked mutable. Two omissions therefore
+/// fail on the DEVICE while APNs answers 200 to each: without an `aps` dictionary
+/// iOS discards the notification, and without `mutable-content` the extension that
+/// would decrypt it never runs.
+///
+/// This lives in the library rather than at a call site because those two failures
+/// are unobservable from every process that could check them — the sender sees a
+/// success, the transport sees opaque bytes, and only the phone sees the defect.
+/// A composer each caller writes for itself would be correct in the caller that was
+/// written while the reason was fresh and wrong in the next one.
+///
+/// Additional `aps` members are permitted; the three elements above are the
+/// requirement, not the whole shape.
+pub fn compose_envelope(sealed_blob: &[u8], title: &str, body: &str) -> Vec<u8> {
+    let encoded = base64_standard(sealed_blob);
+    format!(
+        r#"{{"aps":{{"alert":{{"title":"{title}","body":"{body}"}},"{MUTABLE_CONTENT_KEY}":1,"sound":"default"}},"{SEALED_BLOB_KEY}":"{encoded}"}}"#
+    )
+    .into_bytes()
+}
+
 /// The URL for a submission. Split out so the host/path composition is testable
 /// without a network.
 pub fn submit_url(request: &SubmitRequest<'_>) -> String {
@@ -322,6 +397,44 @@ mod tests {
                 detail: RefusalKind::Unclassified,
             },
             "a body this code cannot parse must not resolve to a remedy"
+        );
+    }
+
+    /// The base64 is checked against the RFC 4648 vectors, including both padding
+    /// cases, because an encoder that is subtly wrong produces a blob that reaches
+    /// the device and fails to open THERE — indistinguishable from a seal/open
+    /// disagreement, on the one hop nobody here can observe.
+    #[test]
+    fn base64_matches_the_published_vectors() {
+        assert_eq!(base64_standard(b"Man"), "TWFu", "no padding");
+        assert_eq!(base64_standard(b"Ma"), "TWE=", "one pad byte");
+        assert_eq!(base64_standard(b"M"), "TQ==", "two pad bytes");
+        assert_eq!(base64_standard(b""), "", "empty input encodes to empty");
+    }
+
+    /// The envelope carries the three elements a device needs, and carries them in
+    /// the shapes iOS checks for rather than merely by name.
+    ///
+    /// `mutable-content` must be the NUMBER 1: the string "1" is valid JSON, reads
+    /// correctly to a human, and does not enable the extension. That distinction is
+    /// invisible in any rendering of the payload that quotes values, which is most
+    /// of them, so it is asserted on the parsed type rather than on the text.
+    #[test]
+    fn the_envelope_carries_what_the_device_requires() {
+        let body = compose_envelope(&[0x01, 0xde, 0xad], "Alfonso", "needs you");
+        let text = String::from_utf8(body).expect("envelope is utf-8");
+        let parsed: serde_json::Value = serde_json::from_str(&text).expect("envelope is json");
+
+        assert_eq!(
+            parsed["aps"][MUTABLE_CONTENT_KEY],
+            serde_json::json!(1),
+            "mutable-content must be the number 1; a string does not run the extension"
+        );
+        assert_eq!(parsed["aps"]["alert"]["title"], "Alfonso");
+        assert_eq!(parsed["aps"]["alert"]["body"], "needs you");
+        assert_eq!(
+            parsed[SEALED_BLOB_KEY], "Ad6t",
+            "the blob rides base64 under the key the client reads"
         );
     }
 

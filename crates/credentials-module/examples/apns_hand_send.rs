@@ -31,7 +31,10 @@
 //! ```
 
 use credentials_core::apns::{mint_provider_token, ApnsEnvironment, ApnsKeyIdentity};
-use credentials_core::apns_submit::{submit, RefusalKind, SubmitOutcome, SubmitRequest};
+use credentials_core::apns_submit::{
+    compose_envelope, submit, RefusalKind, SubmitOutcome, SubmitRequest, MUTABLE_CONTENT_KEY,
+    SEALED_BLOB_KEY,
+};
 
 fn arg(name: &str) -> Option<String> {
     let args: Vec<String> = std::env::args().collect();
@@ -39,57 +42,6 @@ fn arg(name: &str) -> Option<String> {
         .position(|a| a == name)
         .and_then(|i| args.get(i + 1))
         .cloned()
-}
-
-/// Standard base64 WITH padding, which is what `Data(base64Encoded:)` on the device
-/// accepts. Not base64url: the sealed blob rides as a JSON string value, so the
-/// URL-safe alphabet buys nothing and the device's decoder would reject it.
-/// The APNs payload key the sealed blob rides under.
-///
-/// This is one of two independent transcriptions of the same wire fact: the iOS
-/// app declares its own copy, in another repository and another language, and no
-/// compiler can check that they agree. A mismatch is SILENT on the device — the
-/// notification arrives and the value is simply absent — so the agreement holds
-/// only as long as someone changing one side knows the other exists.
-///
-/// It is named here rather than inlined so that the fact has a place to be found,
-/// and so a future change to it is a change to a declared constant rather than to
-/// a character inside a format string.
-const SEALED_BLOB_KEY: &str = "cks";
-
-/// The `aps` member that decides whether the payload is ever decrypted.
-///
-/// iOS runs the notification service extension only when the payload carries this
-/// with a value of 1 AND an alert dictionary with a title or body. Without it the
-/// notification is delivered and displayed, the extension never runs, and the
-/// sealed blob is ignored — which reads as a rendering choice rather than as a
-/// broken pipe, and points suspicion at the seal instead of at a missing integer.
-const MUTABLE_CONTENT_KEY: &str = "mutable-content";
-
-fn b64_standard(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::new();
-    for chunk in bytes.chunks(3) {
-        let b = [
-            chunk[0],
-            *chunk.get(1).unwrap_or(&0),
-            *chunk.get(2).unwrap_or(&0),
-        ];
-        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | (b[2] as u32);
-        out.push(ALPHABET[(n >> 18) as usize & 63] as char);
-        out.push(ALPHABET[(n >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 {
-            ALPHABET[(n >> 6) as usize & 63] as char
-        } else {
-            '='
-        });
-        out.push(if chunk.len() > 2 {
-            ALPHABET[n as usize & 63] as char
-        } else {
-            '='
-        });
-    }
-    out
 }
 
 fn flag(name: &str) -> bool {
@@ -184,11 +136,6 @@ async fn main() {
             // Validate as hex before wrapping, so a malformed blob is refused here
             // rather than delivered as a payload the device silently fails to open.
             let raw = decode_hex(sealed, "--sealed-hex");
-            let encoded = b64_standard(&raw);
-            let envelope = format!(
-                r#"{{"aps":{{"alert":{{"title":"Alfonso","body":"needs you"}},"{}":1,"sound":"default"}},"{}":"{}"}}"#,
-                MUTABLE_CONTENT_KEY, SEALED_BLOB_KEY, encoded
-            );
             eprintln!(
                 "[apns] wrapped {} sealed byte(s) as base64 under \"{}\", with \
                  {}:1",
@@ -196,7 +143,7 @@ async fn main() {
                 SEALED_BLOB_KEY,
                 MUTABLE_CONTENT_KEY
             );
-            envelope.into_bytes()
+            compose_envelope(&raw, "Alfonso", "needs you")
         }
         (None, Some(payload)) => {
             eprintln!("[apns] sending --payload-hex verbatim; nothing is added to it");

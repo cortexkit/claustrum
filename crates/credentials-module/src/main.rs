@@ -1300,6 +1300,93 @@ mod tests {
         assert_eq!(status, HealthStatus::Failing);
     }
 
+    /// A non-Ok health report ALWAYS names a reason. A degraded or failing status with an
+    /// empty detail forces every observer to open an investigation just to discover whether
+    /// one is needed, which is the most expensive possible way to say "something is wrong".
+    ///
+    /// The arms in `health_report` happen to cover today's status inputs one-for-one, so
+    /// this holds by coincidence maintained by hand rather than by construction: a new
+    /// input added to the ladder in `health.rs` without a matching arm here would flip the
+    /// status while leaving the reason empty, and every existing test would still pass.
+    /// This drives every non-Ok snapshot the ladder can produce through the wire mapping
+    /// and requires a non-empty reason from each, so that omission fails here instead of
+    /// arriving as an unexplained degraded state on a supervisor dashboard.
+    #[test]
+    fn every_non_ok_health_report_carries_a_reason() {
+        use credentials_core::health::{VaultHealth, VaultHealthStatus};
+        use credentials_core::store::{RecordMeta, RecordState};
+
+        fn scan_row(id: &str, state: RecordState) -> (String, RecordMeta) {
+            (
+                id.to_string(),
+                RecordMeta {
+                    record_version: 1,
+                    key_id_hex: "00".repeat(8),
+                    state,
+                },
+            )
+        }
+
+        // One snapshot per way the ladder can leave Ok, built through the same
+        // constructors the daemon uses rather than by hand-setting `status` -- a
+        // hand-built struct would prove the mapping handles values that cannot occur.
+        let mut stalled = VaultHealth::summarize(&[], 0, false);
+        stalled.mark_refresher_stalled();
+
+        let fenced = VaultHealth::summarize(&[], 0, true);
+
+        let unreadable = VaultHealth::unreadable();
+
+        let needs_reauth = VaultHealth::summarize(
+            &[scan_row("oauth:anthropic", RecordState::NeedsReauth)],
+            0,
+            false,
+        );
+        let corrupt =
+            VaultHealth::summarize(&[scan_row("apikey:exa", RecordState::Corrupt)], 0, false);
+
+        for (name, health) in [
+            ("refresher_stalled", stalled),
+            ("fenced_out", fenced),
+            ("store_unreadable", unreadable),
+            ("needs_reauth", needs_reauth),
+            ("corrupt", corrupt),
+        ] {
+            assert_ne!(
+                health.status,
+                VaultHealthStatus::Ok,
+                "{name}: this case must leave Ok, or it is not testing what it claims"
+            );
+            let ModuleControlResponse::HealthCheck { status, detail, .. } = health_report(&health)
+            else {
+                panic!("expected HealthCheck");
+            };
+            assert_ne!(
+                status,
+                HealthStatus::Ok,
+                "{name}: wire status must be non-Ok"
+            );
+            let reason = detail.unwrap_or_default();
+            assert!(
+                !reason.trim().is_empty(),
+                "{name}: a non-Ok report must name its reason, got an empty detail"
+            );
+        }
+
+        // The positive control: a healthy vault needs no reason, so this proves the
+        // assertion above is about non-Ok reports rather than about detail being
+        // unconditionally present.
+        let healthy =
+            VaultHealth::summarize(&[scan_row("apikey:exa", RecordState::Active)], 0, false);
+        assert_eq!(healthy.status, VaultHealthStatus::Ok);
+        let ModuleControlResponse::HealthCheck { status, detail, .. } = health_report(&healthy)
+        else {
+            panic!("expected HealthCheck");
+        };
+        assert_eq!(status, HealthStatus::Ok);
+        assert!(detail.is_none(), "a healthy report carries no reason");
+    }
+
     /// A fenced-out daemon reports `ready=false`/`lease_held=false` from status, agreeing
     /// with the health probe instead of always claiming a healthy lease. Non-vacuous:
     /// before fencing, an Active credential is ready with the lease held; after fencing,

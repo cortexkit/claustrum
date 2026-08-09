@@ -232,6 +232,19 @@ async fn main() {
             println!();
             println!("This means APNs accepted the request, NOT that a device received it.");
             println!("There is no delivery callback; the device is the only observer.");
+            // The observations are listed here rather than left to be recalled because
+            // this is the moment someone needs them, and because the middle row is the
+            // trap: it has three causes and reads like one. Someone who takes it for a
+            // decrypt failure investigates the sealing and opening code, which is the
+            // part with tests, while the actual fault is a payload field or a routing
+            // hop that fails by doing nothing.
+            println!();
+            println!("What each observation on the device proves:");
+            println!("  opens to the ask         the payload decrypted AND the tap routed");
+            println!("  opens, stays put         the id was absent OR routing is broken");
+            println!("                           (this does NOT mean the decrypt failed)");
+            println!("  generic line, untapped   proves delivery only, nothing about decryption");
+            println!("  nothing at all           delivery failed; APNs already said it accepted");
         }
         Ok(SubmitOutcome::Refused {
             status,

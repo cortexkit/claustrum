@@ -205,7 +205,34 @@ fn base64_standard(bytes: &[u8]) -> String {
 ///
 /// Additional `aps` members are permitted; the three elements above are the
 /// requirement, not the whole shape.
-pub fn compose_envelope(sealed_blob: &[u8], title: &str, body: &str) -> Vec<u8> {
+///
+/// Refuses a blob too short to be a sealed payload. The envelope is a 1-byte
+/// version, a 32-byte encapsulated key, and a ciphertext carrying a 16-byte
+/// authentication tag, so nothing under 49 bytes can decrypt — and an empty blob is
+/// the specific case worth catching, because it is what a caller passes when the
+/// key it sealed to did not exist. Sending it produces a notification that arrives,
+/// displays, and never opens: a symptom with several causes that reads like a
+/// decryption failure, which sends the investigation at the sealing code rather
+/// than at the missing key. Refusing here is the only point on the path where the
+/// distinction is still visible.
+pub fn compose_envelope(sealed_blob: &[u8], title: &str, body: &str) -> Result<Vec<u8>, String> {
+    if sealed_blob.len() < MIN_SEALED_LEN {
+        return Err(format!(
+            "sealed blob is {} byte(s); a sealed payload is at least {MIN_SEALED_LEN} \
+             (1 version + 32 encapsulated key + 16 tag). An empty blob usually means \
+             the recipient key was absent when it was sealed — check that the device \
+             actually reported a sealing key before sealing again.",
+            sealed_blob.len()
+        ));
+    }
+    Ok(compose_envelope_unchecked(sealed_blob, title, body))
+}
+
+/// The smallest byte count that could be a sealed payload: version + encapsulated
+/// key + authentication tag, with an empty ciphertext body.
+pub const MIN_SEALED_LEN: usize = 1 + 32 + 16;
+
+fn compose_envelope_unchecked(sealed_blob: &[u8], title: &str, body: &str) -> Vec<u8> {
     let encoded = base64_standard(sealed_blob);
     format!(
         r#"{{"aps":{{"alert":{{"title":"{title}","body":"{body}"}},"{MUTABLE_CONTENT_KEY}":1,"sound":"default"}},"{SEALED_BLOB_KEY}":"{encoded}"}}"#
@@ -421,7 +448,12 @@ mod tests {
     /// of them, so it is asserted on the parsed type rather than on the text.
     #[test]
     fn the_envelope_carries_what_the_device_requires() {
-        let body = compose_envelope(&[0x01, 0xde, 0xad], "Alfonso", "needs you");
+        // A blob at the minimum length, so this test is about the envelope rather
+        // than about the length guard the next test covers.
+        let mut blob = vec![0x01u8];
+        blob.extend_from_slice(&[0xde; 32]);
+        blob.extend_from_slice(&[0xad; 16]);
+        let body = compose_envelope(&blob, "Alfonso", "needs you").expect("a full-length blob");
         let text = String::from_utf8(body).expect("envelope is utf-8");
         let parsed: serde_json::Value = serde_json::from_str(&text).expect("envelope is json");
 
@@ -432,9 +464,42 @@ mod tests {
         );
         assert_eq!(parsed["aps"]["alert"]["title"], "Alfonso");
         assert_eq!(parsed["aps"]["alert"]["body"], "needs you");
-        assert_eq!(
-            parsed[SEALED_BLOB_KEY], "Ad6t",
+        assert!(
+            parsed[SEALED_BLOB_KEY]
+                .as_str()
+                .is_some_and(|s| s.starts_with("Ad7e")),
             "the blob rides base64 under the key the client reads"
+        );
+    }
+
+    /// A blob too short to be a sealed payload is refused rather than wrapped.
+    ///
+    /// The empty case is the one this exists for: it is what a caller passes when
+    /// the recipient key was absent at sealing time, and wrapping it produces a
+    /// notification that arrives and never opens — a symptom that reads as a
+    /// decryption failure and sends the investigation at the sealing code.
+    ///
+    /// The at-minimum arm is the disambiguator: a guard that refused everything
+    /// would satisfy every assertion below on its own.
+    #[test]
+    fn a_blob_too_short_to_decrypt_is_refused() {
+        let err = compose_envelope(&[], "t", "b").expect_err("an empty blob cannot decrypt");
+        assert!(
+            err.contains("0 byte") && err.contains("recipient key was absent"),
+            "the refusal must name the observed size and the likely cause: {err}"
+        );
+
+        let one_short = vec![0u8; MIN_SEALED_LEN - 1];
+        assert!(
+            compose_envelope(&one_short, "t", "b").is_err(),
+            "one byte under the minimum cannot carry a version, a key and a tag"
+        );
+
+        let at_minimum = vec![0u8; MIN_SEALED_LEN];
+        assert!(
+            compose_envelope(&at_minimum, "t", "b").is_ok(),
+            "a blob at the minimum length must be accepted, or the guard is refusing \
+             everything and proves nothing"
         );
     }
 

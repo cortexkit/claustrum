@@ -136,6 +136,17 @@ async fn main() {
             // Validate as hex before wrapping, so a malformed blob is refused here
             // rather than delivered as a payload the device silently fails to open.
             let raw = decode_hex(sealed, "--sealed-hex");
+            // Compose BEFORE reporting. Announcing the wrap first would print a
+            // success line for a blob about to be refused, and the reader who scans
+            // for the last line would see the error while the reader who scans for
+            // the first would see a confirmation of something that did not happen.
+            let envelope = match compose_envelope(&raw, "Alfonso", "needs you") {
+                Ok(envelope) => envelope,
+                Err(why) => {
+                    eprintln!("error: {why}");
+                    std::process::exit(2);
+                }
+            };
             eprintln!(
                 "[apns] wrapped {} sealed byte(s) as base64 under \"{}\", with \
                  {}:1",
@@ -143,7 +154,7 @@ async fn main() {
                 SEALED_BLOB_KEY,
                 MUTABLE_CONTENT_KEY
             );
-            compose_envelope(&raw, "Alfonso", "needs you")
+            envelope
         }
         (None, Some(payload)) => {
             eprintln!("[apns] sending --payload-hex verbatim; nothing is added to it");

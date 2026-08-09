@@ -87,6 +87,19 @@ jobs:
         working-directory: subconscious
         run: cargo build -p subc-core --bins
 
+      # Compare the wire facts this repo transcribes against the document that owns
+      # them. Runs here rather than as a test because it reads a sibling checkout,
+      # which `cargo test` has no business depending on -- and because a drift is a
+      # contract question for a human rather than a failing assertion to fix locally.
+      - name: Inbound contract check
+        # Pinned to bash because this job also runs on Windows, where the default
+        # shell is pwsh and the script would not execute at all. Pinning runs it on
+        # both legs; restricting it to one leg with an `if` would mean the check
+        # silently stops running the day that leg is renamed or removed, which is
+        # the failure mode this script exists to catch in a different form.
+        shell: bash
+        run: ./scripts/check-inbound-contracts.sh ../subconscious/docs/specs/push-sealed-payload.md
+
       - name: Format check
         run: cargo fmt --all -- --check
 

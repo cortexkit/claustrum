@@ -327,6 +327,15 @@ pub struct EncryptedStore {
     // writer" signal that an unfenced read scan cannot detect on its own (a
     // superseded daemon still reads its stale rows fine — it has only lost WRITE
     // authority), distinguishing "find the other writer" from a generic read error.
+    //
+    // THE PERMANENCE IS INHERITED, NOT LOCAL. Nothing here keeps the latch set; it
+    // stays set only because the lease epoch underneath it is monotonic and never
+    // reused or reset. If `cortexkit-lease` ever permitted an epoch to be reused, a
+    // superseded writer could win a later fenced write, this latch would be
+    // clearable, and two writers would hold the same store without either observing
+    // the other. Epoch monotonicity is therefore load-bearing for write custody here
+    // and is not enforced by this crate, so it must be preserved by any change to
+    // the lease — which will not be apparent from that crate's own tests.
     fenced_out: AtomicBool,
 }
 

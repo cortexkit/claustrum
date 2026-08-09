@@ -44,6 +44,28 @@ fn arg(name: &str) -> Option<String> {
 /// Standard base64 WITH padding, which is what `Data(base64Encoded:)` on the device
 /// accepts. Not base64url: the sealed blob rides as a JSON string value, so the
 /// URL-safe alphabet buys nothing and the device's decoder would reject it.
+/// The APNs payload key the sealed blob rides under.
+///
+/// This is one of two independent transcriptions of the same wire fact: the iOS
+/// app declares its own copy, in another repository and another language, and no
+/// compiler can check that they agree. A mismatch is SILENT on the device — the
+/// notification arrives and the value is simply absent — so the agreement holds
+/// only as long as someone changing one side knows the other exists.
+///
+/// It is named here rather than inlined so that the fact has a place to be found,
+/// and so a future change to it is a change to a declared constant rather than to
+/// a character inside a format string.
+const SEALED_BLOB_KEY: &str = "cks";
+
+/// The `aps` member that decides whether the payload is ever decrypted.
+///
+/// iOS runs the notification service extension only when the payload carries this
+/// with a value of 1 AND an alert dictionary with a title or body. Without it the
+/// notification is delivered and displayed, the extension never runs, and the
+/// sealed blob is ignored — which reads as a rendering choice rather than as a
+/// broken pipe, and points suspicion at the seal instead of at a missing integer.
+const MUTABLE_CONTENT_KEY: &str = "mutable-content";
+
 fn b64_standard(bytes: &[u8]) -> String {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::new();
@@ -164,22 +186,46 @@ async fn main() {
             let raw = decode_hex(sealed, "--sealed-hex");
             let encoded = b64_standard(&raw);
             let envelope = format!(
-                concat!(
-                    r#"{{"aps":{{"alert":{{"title":"Alfonso","body":"needs you"}},"#,
-                    r#""mutable-content":1,"sound":"default"}},"cks":"{}"}}"#
-                ),
-                encoded
+                r#"{{"aps":{{"alert":{{"title":"Alfonso","body":"needs you"}},"{}":1,"sound":"default"}},"{}":"{}"}}"#,
+                MUTABLE_CONTENT_KEY, SEALED_BLOB_KEY, encoded
             );
             eprintln!(
-                "[apns] wrapped {} sealed byte(s) as base64 under \"cks\", with \
-                 mutable-content:1",
-                raw.len()
+                "[apns] wrapped {} sealed byte(s) as base64 under \"{}\", with \
+                 {}:1",
+                raw.len(),
+                SEALED_BLOB_KEY,
+                MUTABLE_CONTENT_KEY
             );
             envelope.into_bytes()
         }
         (None, Some(payload)) => {
             eprintln!("[apns] sending --payload-hex verbatim; nothing is added to it");
-            decode_hex(payload, "--payload-hex")
+            let raw = decode_hex(payload, "--payload-hex");
+            // Verbatim mode sends the caller's body unchanged rather than composing
+            // the envelope, so two omissions can reach the device: a body without
+            // `mutable-content` is displayed with the service extension never running
+            // (the sealed blob is never decrypted), and a body without an `aps`
+            // dictionary is discarded entirely. APNs answers 200 to both, so this
+            // process is the last one that can observe either.
+            //
+            // Warn rather than refuse: sending a deliberately odd body is the whole
+            // reason this mode exists, and a tool that refuses its own escape hatch
+            // gets worked around with curl, which warns about nothing at all.
+            let text = String::from_utf8_lossy(&raw);
+            if !text.contains(MUTABLE_CONTENT_KEY) {
+                eprintln!(
+                    "[apns] WARNING: no \"{MUTABLE_CONTENT_KEY}\" in this body. iOS will \
+                     display the notification and never run the extension, so a sealed \
+                     blob inside it is never decrypted. APNs will still answer 200."
+                );
+            }
+            if !text.contains("\"aps\"") {
+                eprintln!(
+                    "[apns] WARNING: no \"aps\" dictionary in this body. iOS discards a \
+                     notification without one. APNs will still answer 200."
+                );
+            }
+            raw
         }
         (Some(_), Some(_)) => {
             eprintln!("error: pass --sealed-hex OR --payload-hex, not both");

@@ -61,6 +61,16 @@ pub const KEYCHAIN_ACCOUNT_CURRENT: &str = "master-key";
 /// `store.db` path already have. Two vaults on one machine no longer collide on a
 /// single fixed keychain item.
 ///
+/// CONSEQUENCE FOR UPGRADES, stated here because it is invisible from the call site:
+/// this scope is a pure function of how `ProjectRootId` canonicalizes, so ANY change
+/// to that canonicalization derives a different service name for the same directory.
+/// The vault then looks up a keychain item that does not exist and reports
+/// `vault_locked` against a perfectly intact store — correct fail-closed behaviour,
+/// and it does not read as a version problem to whoever is holding it. The same
+/// applies with more force to `vault_id_for` below, where a divergence between two
+/// binaries fails every admin MAC. Treat a canonicalization change as breaking here
+/// even when the dependency's own version says otherwise.
+///
 /// Fails closed: if the data directory cannot be canonicalized (it does not exist,
 /// or the OS rejects it), this returns `None`. Callers treat that as "no key
 /// resolvable" rather than falling back to an unscoped item — every resolve path

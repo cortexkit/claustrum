@@ -367,6 +367,20 @@ impl EncryptedStore {
     /// than at each call site. Returns `Result<_, StoreError>` exactly like the
     /// underlying `with_conn_fenced`, so it is a drop-in at every call site (the
     /// existing `?`/`map_err` error tails are unchanged).
+    ///
+    /// THE LATCH IS ONE-WAY ON PURPOSE, AND NOTHING CLEARS IT SHORT OF A RESTART.
+    /// That is normally the signature of a broken gauge — a status that cannot return
+    /// to ok is a boot-scoped incident log rather than a health signal, and every
+    /// other field of [`crate::health::VaultHealth`] is recomputed from a fresh scan
+    /// for exactly that reason. This one is different because THE CONDITION ITSELF
+    /// IS IRREVERSIBLE: losing the epoch fence means another writer holds the lease,
+    /// and this process cannot take it back. A later write appearing to succeed would
+    /// mean the OTHER holder had gone, not that this instance regained authority.
+    /// Clearing the latch on such a write would resume serving as the authority on
+    /// the strength of a race.
+    /// So the honest recovery sequence is: this process exits, and a new one acquires
+    /// the lease from scratch. Fail-closed until then. Do not "fix" this by clearing
+    /// the flag on a subsequent successful write.
     fn fenced_write<T>(
         &self,
         f: impl FnOnce(&rusqlite::Transaction) -> rusqlite::Result<T>,
@@ -2574,6 +2588,65 @@ mod tests {
         let health = crate::health::VaultHealth::summarize(&metas, 0, store.is_fenced_out());
         assert_eq!(health.status, crate::health::VaultHealthStatus::Failing);
         assert!(health.fenced_out);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn fenced_out_never_clears_on_a_later_successful_write() {
+        // The latch is one-way, and this is the arm that pins it. Every OTHER field of
+        // the health snapshot is recomputed from a fresh scan, so a reader could
+        // reasonably assume this one recovers too, and "clear the flag when writes work
+        // again" is a natural-looking change. It would be wrong: regaining the fence
+        // means the OTHER lease holder went away, not that this instance recovered
+        // authority, so clearing on a later success resumes serving as the authority on
+        // the strength of a race. Recovery is a restart. Without this assertion the
+        // one-way property is only a comment.
+        let (root, store) = tmp_store(21);
+        store.create("id", &oauth_record()).expect("create");
+
+        let held: i64 = store
+            .with_raw_conn(|c| {
+                c.query_row("SELECT epoch FROM cortexkit_fence WHERE id = 0", [], |r| {
+                    r.get(0)
+                })
+            })
+            .expect("read the epoch this store holds");
+
+        // Simulate a competing writer taking the lease: raising the stored fence epoch
+        // above the one this store holds makes its next durable write be rejected.
+        store
+            .with_raw_conn(|c| c.execute("UPDATE cortexkit_fence SET epoch = 999 WHERE id = 0", []))
+            .expect("bump fence epoch above the holder");
+        assert!(matches!(
+            store.invalidate("id"),
+            Err(StoreOpError::Fenced { .. })
+        ));
+        assert!(store.is_fenced_out(), "precondition: the latch is set");
+
+        // Now make writes succeed again by restoring the epoch this store holds --
+        // standing in for the competing holder having exited.
+        store
+            .with_raw_conn(|c| {
+                c.execute("UPDATE cortexkit_fence SET epoch = ?1 WHERE id = 0", [held])
+            })
+            .expect("restore the held epoch");
+
+        // The write goes through: this is a genuine success, not a second rejection,
+        // so the assertion below is about the latch rather than about the write failing.
+        store.invalidate("id").expect("the write now succeeds");
+
+        assert!(
+            store.is_fenced_out(),
+            "a later successful write must NOT clear the fenced-out latch: this process \
+             cannot regain lost write authority, only a restart can"
+        );
+        let metas = store.list_meta().expect("list_meta");
+        let health = crate::health::VaultHealth::summarize(&metas, 0, store.is_fenced_out());
+        assert_eq!(
+            health.status,
+            crate::health::VaultHealthStatus::Failing,
+            "health must stay Failing until the process is replaced"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -358,6 +358,19 @@ Three things that make these read wrong:
   change, so it skips the write-ahead log — on a live vault that silently returns a
   pre-WAL snapshot, answering confidently about the past. `immutable=1` is for a store
   nobody is writing, such as a copy kept as a rollback target.
+- **`mode=ro` is also what makes the read INERT, and dropping it is not harmless just
+  because the SQL is a `SELECT`.** SQLite checkpoints on close when the closing connection
+  is the last one attached to the database, and that is a property of the CONNECTION, not
+  of the statements run through it. Measured both ways on this platform, same database,
+  same query, only the open mode differing: a read-write last closer truncated the WAL and
+  removed it; a read-only last closer left it byte-for-byte intact. So a plain
+  `sqlite3 store.db "SELECT ..."` against a **stopped** vault rewrites the main database
+  file and deletes the WAL — an operator looking for evidence, modifying the evidence.
+  Nothing is corrupted and nothing warns, which is exactly why it is worth a line here:
+  the next reader sees a store whose file timestamps and WAL state were changed by the
+  investigation. Against a *running* vault the daemon holds a connection, so a stray
+  read-write visitor is not the last closer and this does not fire — meaning the dangerous
+  case is the careful one, where the operator stopped the daemon first.
 - **The table is `audit_log`, and its timestamp column is `ts_ms`.** A misspelled table
   errors, but a wrong *column* in a `WHERE` clause returns zero rows — indistinguishable
   from "nothing happened". Check the schema before believing an empty result.

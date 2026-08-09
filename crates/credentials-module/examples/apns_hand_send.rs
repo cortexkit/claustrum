@@ -234,15 +234,21 @@ async fn main() {
             println!("There is no delivery callback; the device is the only observer.");
             // The observations are listed here rather than left to be recalled because
             // this is the moment someone needs them, and because the middle row is the
-            // trap: it has three causes and reads like one. Someone who takes it for a
-            // decrypt failure investigates the sealing and opening code, which is the
-            // part with tests, while the actual fault is a payload field or a routing
-            // hop that fails by doing nothing.
+            // trap: it has three causes and reads like one.
+            //
+            // It is stated as proving NOTHING rather than as ruling any cause in or out.
+            // Naming a likely cause sends the investigation there, and naming an
+            // unlikely one sends it away -- both are the same error, and one of the
+            // three causes IS the decryption not happening, since an extension that
+            // never runs never decrypts. The three are indistinguishable from this
+            // side because each fails by doing nothing at all.
             println!();
             println!("What each observation on the device proves:");
             println!("  opens to the ask         the payload decrypted AND the tap routed");
-            println!("  opens, stays put         the id was absent OR routing is broken");
-            println!("                           (this does NOT mean the decrypt failed)");
+            println!("  opens, stays put         proves NOTHING on its own. Three causes:");
+            println!("                           the id was absent from the payload, OR the");
+            println!("                           extension never ran, OR the tap routing is");
+            println!("                           broken. Each fails by doing nothing.");
             println!("  generic line, untapped   proves delivery only, nothing about decryption");
             println!("  nothing at all           delivery failed; APNs already said it accepted");
         }

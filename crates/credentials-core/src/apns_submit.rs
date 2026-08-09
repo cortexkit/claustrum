@@ -8,14 +8,21 @@
 //!
 //! APNs answers a successful submission with a bare 200 and no body. That is the
 //! whole confirmation — it means *accepted for delivery*, NOT delivered, and there is
-//! no later callback that says otherwise. So a caller cannot distinguish "arrived on
-//! the device" from "accepted and silently dropped" by anything on this side, and
-//! every failure mode that matters (wrong environment, unregistered device, revoked
-//! key) either surfaces here as a typed refusal or never surfaces at all.
+//! no later callback that says otherwise. So a 200 is the weakest useful signal in
+//! this path: it says the request was well-formed and authorized, and nothing about
+//! whether a device ever saw it.
 //!
-//! That asymmetry is why the refusal reasons are modelled rather than logged as
-//! strings: the ones worth branching on say something an operator must act on, and
-//! collapsing them into "push failed" throws away the only diagnosis APNs offers.
+//! What that does NOT mean, measured against the live service rather than reasoned
+//! from the property: APNs is not silent about misconfiguration. A provider token
+//! minted from a key configured for the other environment is refused AT SUBMIT with
+//! `BadEnvironmentKeyInToken` — a named reason, not a drop. It is worth stating
+//! because the opposite is the intuitive conclusion from "a token is valid in one
+//! environment only", and reasoning from that true property to a silent failure
+//! produces a plausible claim that costs an operator hours in the wrong place.
+//!
+//! So the refusals below are the diagnosis APNs actually offers, which is more than
+//! it is usually credited with. Collapsing them into "push failed" throws it away;
+//! that is the reason they are modelled as reasons rather than logged as strings.
 
 use crate::apns::{device_path, ApnsEnvironment};
 
@@ -43,6 +50,21 @@ pub enum RefusalKind {
     /// The signing key or the minted token is wrong. Retrying with the same token
     /// cannot succeed; minting a fresh one might.
     ProviderToken,
+    /// 403 `BadEnvironmentKeyInToken`. The signing key is configured for the OTHER
+    /// APNs environment than the host being addressed.
+    ///
+    /// Kept apart from [`RefusalKind::ProviderToken`] even though both are 403s,
+    /// because the remedies are opposite: that arm says mint a fresh token, and
+    /// minting a thousand fresh tokens from this key will never satisfy this host.
+    /// The fix is the host or the key, never the token.
+    ///
+    /// This is also the reason a `.p8` needs no environment field to be diagnosable:
+    /// the key's environment is not recorded in the file, but the service reports it
+    /// on a mismatch. Submitting the same token to both hosts is therefore a live
+    /// measurement of which environment a key was configured for — the production
+    /// host answers `BadDeviceToken` (it authenticated, then failed to find the
+    /// device) while the sandbox host answers this.
+    EnvironmentMismatch,
     /// 400 `BadDeviceToken` / 410 `Unregistered`. The device token does not belong
     /// to this environment+topic, or the app was uninstalled.
     ///
@@ -80,6 +102,7 @@ impl RefusalKind {
             "ExpiredProviderToken" | "InvalidProviderToken" | "MissingProviderToken" => {
                 RefusalKind::ProviderToken
             }
+            "BadEnvironmentKeyInToken" => RefusalKind::EnvironmentMismatch,
             "BadDeviceToken" | "Unregistered" => RefusalKind::DeviceToken,
             "TopicDisallowed" | "DeviceTokenNotForTopic" => RefusalKind::Topic,
             "PayloadTooLarge" => RefusalKind::PayloadTooLarge,
@@ -164,6 +187,11 @@ mod tests {
             (403, "ExpiredProviderToken", RefusalKind::ProviderToken),
             (403, "InvalidProviderToken", RefusalKind::ProviderToken),
             (403, "MissingProviderToken", RefusalKind::ProviderToken),
+            (
+                403,
+                "BadEnvironmentKeyInToken",
+                RefusalKind::EnvironmentMismatch,
+            ),
             (400, "BadDeviceToken", RefusalKind::DeviceToken),
             (410, "Unregistered", RefusalKind::DeviceToken),
             (400, "TopicDisallowed", RefusalKind::Topic),
@@ -199,6 +227,33 @@ mod tests {
         assert_ne!(
             RefusalKind::classify(400, "BadDeviceToken"),
             RefusalKind::classify(400, "TopicDisallowed")
+        );
+    }
+
+    /// The two 403s that mean opposite things must never share an arm.
+    ///
+    /// `InvalidProviderToken` says the token is wrong, and the remedy is to mint a
+    /// fresh one. `BadEnvironmentKeyInToken` says the KEY is for the other
+    /// environment, and no token minted from it will ever satisfy this host. Folding
+    /// the second into the first sends an operator into a mint-and-retry loop that
+    /// cannot terminate, which is strictly worse than reporting no diagnosis at all.
+    ///
+    /// Both reasons are observed values rather than guesses: a live probe against
+    /// both APNs hosts with a deliberately impossible device token returned
+    /// `BadDeviceToken` from production and `BadEnvironmentKeyInToken` from sandbox,
+    /// with a corrupted-bearer control returning `InvalidProviderToken` to prove the
+    /// first answer depended on the key rather than being that host's default reply.
+    #[test]
+    fn an_environment_mismatch_is_not_a_bad_token() {
+        assert_eq!(
+            RefusalKind::classify(403, "BadEnvironmentKeyInToken"),
+            RefusalKind::EnvironmentMismatch
+        );
+        assert_ne!(
+            RefusalKind::classify(403, "BadEnvironmentKeyInToken"),
+            RefusalKind::classify(403, "InvalidProviderToken"),
+            "minting a fresh token cannot fix a key configured for the other \
+             environment; the arms must not merge"
         );
     }
 

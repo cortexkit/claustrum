@@ -31,6 +31,10 @@ cortexkit-store = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
+# For the APNs hand-send example, which performs the submission itself. The daemon
+# does not submit notifications; the core crate owns the request shape and this
+# crate only needs a client to hand it.
+reqwest = { workspace = true }
 async-trait = { workspace = true }
 # The CLI's `login` command stamps the minted token's expiry from wall-clock time.
 chrono = { workspace = true }

@@ -314,6 +314,7 @@ dependencies = [
  "cortexkit-store",
  "credentials-core",
  "dialoguer",
+ "reqwest",
  "rusqlite",
  "serde",
  "serde_json",

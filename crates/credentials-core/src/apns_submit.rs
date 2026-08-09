@@ -148,9 +148,182 @@ pub fn submit_url(request: &SubmitRequest<'_>) -> String {
     )
 }
 
+/// The headers APNs requires, as (name, value) pairs.
+///
+/// Built separately from the send so the header set is testable without a network.
+/// `apns-topic` is mandatory under token auth (it is optional only for certificate
+/// auth with a single-topic certificate), and omitting it is a 400 `MissingTopic`
+/// rather than a default.
+pub fn submit_headers<'a>(
+    request: &SubmitRequest<'a>,
+    bearer_jwt: &'a str,
+) -> Vec<(&'static str, String)> {
+    let mut headers = vec![
+        ("authorization", format!("bearer {bearer_jwt}")),
+        ("apns-topic", request.topic.to_string()),
+        ("apns-push-type", request.push_type.to_string()),
+        ("apns-priority", request.priority.to_string()),
+    ];
+    if let Some(collapse) = request.collapse_id {
+        headers.push(("apns-collapse-id", collapse.to_string()));
+    }
+    headers
+}
+
+/// Classify an APNs response into an outcome.
+///
+/// Split from the send so the mapping is testable against recorded responses: the
+/// interesting behaviour is what a status and body MEAN, and pinning that against
+/// real captured shapes is worth more than exercising a socket.
+pub fn classify_response(status: u16, apns_id: Option<String>, body: &str) -> SubmitOutcome {
+    if status == 200 {
+        return SubmitOutcome::Accepted { apns_id };
+    }
+    // APNs puts the reason in a JSON body: {"reason":"BadDeviceToken"}. A body that
+    // does not parse is not an error to swallow -- it means Apple answered something
+    // this code does not model, and an empty reason must not read as a known one.
+    let reason = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| {
+            v.get("reason")
+                .and_then(|r| r.as_str())
+                .map(|s| s.to_string())
+        })
+        .unwrap_or_default();
+    SubmitOutcome::Refused {
+        status,
+        detail: RefusalKind::classify(status, &reason),
+        reason,
+    }
+}
+
+/// Send one sealed notification to APNs.
+///
+/// Takes an already-minted bearer and an already-built body, because both are
+/// decisions this function should not be making: the token is reused across many
+/// sends (minting per request is a documented way to get rate-limited), and the
+/// body's admissible contents are a contract question rather than a transport one.
+///
+/// The client MUST be built with HTTP/2 available. APNs speaks nothing else, and a
+/// client that negotiates 1.1 is refused at the transport before any request is
+/// seen — which presents as a connection error rather than as an APNs refusal, so
+/// it is worth ruling out first when a submission fails without a reason string.
+pub async fn submit(
+    client: &reqwest::Client,
+    request: &SubmitRequest<'_>,
+    bearer_jwt: &str,
+    body: &[u8],
+) -> Result<SubmitOutcome, String> {
+    let mut req = client
+        .post(submit_url(request))
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(body.to_vec());
+    for (name, value) in submit_headers(request, bearer_jwt) {
+        req = req.header(name, value);
+    }
+
+    let response = req.send().await.map_err(|e| e.to_string())?;
+    let status = response.status().as_u16();
+    // Read apns-id BEFORE consuming the body: it is Apple's identifier for the
+    // notification and the only handle a support conversation can use, so losing it
+    // on the success path costs the one durable reference to a delivery.
+    let apns_id = response
+        .headers()
+        .get("apns-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let text = response.text().await.unwrap_or_default();
+    Ok(classify_response(status, apns_id, &text))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The header set APNs requires under token auth, including the one whose
+    /// absence is a refusal rather than a default: `apns-topic` is optional only for
+    /// certificate auth, and omitting it here is a 400 `MissingTopic`.
+    #[test]
+    fn headers_carry_what_token_auth_requires() {
+        let req = SubmitRequest {
+            device_token_hex: "abc123",
+            topic: "io.cortexkit.alfonso",
+            environment: ApnsEnvironment::Production,
+            push_type: "alert",
+            priority: 10,
+            collapse_id: None,
+        };
+        let headers = submit_headers(&req, "JWT");
+        let get = |name: &str| {
+            headers
+                .iter()
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| v.clone())
+        };
+        assert_eq!(get("authorization").as_deref(), Some("bearer JWT"));
+        assert_eq!(get("apns-topic").as_deref(), Some("io.cortexkit.alfonso"));
+        assert_eq!(get("apns-push-type").as_deref(), Some("alert"));
+        assert_eq!(get("apns-priority").as_deref(), Some("10"));
+        assert_eq!(
+            get("apns-collapse-id"),
+            None,
+            "an absent collapse id must not become an empty header; APNs treats an \
+             empty collapse id as a real one and coalesces unrelated notifications"
+        );
+
+        let collapsing = SubmitRequest {
+            collapse_id: Some("ask-7"),
+            ..req
+        };
+        let headers = submit_headers(&collapsing, "JWT");
+        assert!(headers
+            .iter()
+            .any(|(k, v)| *k == "apns-collapse-id" && v == "ask-7"));
+    }
+
+    /// A 200 is acceptance; anything else carries Apple's own reason through to the
+    /// classifier. The unparseable-body arm is the one worth having: a body this code
+    /// cannot read must not resolve to a known reason.
+    #[test]
+    fn responses_classify_by_status_and_reason() {
+        assert_eq!(
+            classify_response(200, Some("id-1".into()), ""),
+            SubmitOutcome::Accepted {
+                apns_id: Some("id-1".into())
+            }
+        );
+
+        assert_eq!(
+            classify_response(400, None, r#"{"reason":"BadDeviceToken"}"#),
+            SubmitOutcome::Refused {
+                status: 400,
+                reason: "BadDeviceToken".into(),
+                detail: RefusalKind::DeviceToken,
+            }
+        );
+
+        assert_eq!(
+            classify_response(403, None, r#"{"reason":"BadEnvironmentKeyInToken"}"#),
+            SubmitOutcome::Refused {
+                status: 403,
+                reason: "BadEnvironmentKeyInToken".into(),
+                detail: RefusalKind::EnvironmentMismatch,
+            }
+        );
+
+        // An unreadable body yields an empty reason and an Unclassified detail --
+        // never a known arm, since a known arm carries a remedy.
+        let garbled = classify_response(400, None, "<html>gateway error</html>");
+        assert_eq!(
+            garbled,
+            SubmitOutcome::Refused {
+                status: 400,
+                reason: String::new(),
+                detail: RefusalKind::Unclassified,
+            },
+            "a body this code cannot parse must not resolve to a remedy"
+        );
+    }
 
     #[test]
     fn url_composes_host_and_device_path() {

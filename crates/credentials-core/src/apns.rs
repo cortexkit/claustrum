@@ -125,6 +125,17 @@ impl ProviderToken {
     /// Also true for a token issued in the FUTURE: a clock that jumped backwards
     /// would otherwise make a token look permanently fresh, and APNs judges `iat`
     /// against its own clock rather than ours.
+    ///
+    /// NOTHING IN THIS WORKSPACE CALLS THIS YET, and that is a statement about the
+    /// sender rather than about the method. It exists for a caller that HOLDS a
+    /// token across sends; the only sender today mints one per invocation, so it
+    /// has no token old enough to ask about. Apple's guidance is explicit that a
+    /// provider should reuse a token rather than mint per request, so the caller is
+    /// an obligation of the first long-lived sender, not a hypothetical.
+    ///
+    /// Recorded here because an uncalled function is indistinguishable from an
+    /// abandoned one, and the next reader deleting it would remove the reuse bound
+    /// at the same time as the code that has not needed it yet.
     pub fn is_stale_at(&self, now_secs: i64) -> bool {
         let age = now_secs - self.issued_at_secs;
         !(0..REUSE_LIMIT_SECS).contains(&age)

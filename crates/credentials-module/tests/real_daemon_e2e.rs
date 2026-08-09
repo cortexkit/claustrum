@@ -440,8 +440,16 @@ async fn real_daemon_admin_op_over_route_while_offline_refused() {
     let _ = std::fs::remove_dir_all(&project_root);
 }
 
-/// An UNKNOWN handle returns a fail-closed not_found (no enumeration), through the
-/// real daemon.
+/// An UNKNOWN handle returns a fail-closed not_found through the real daemon.
+///
+/// This asserts ONE arm. The anti-enumeration property is that an unknown handle and a
+/// REVOKED one are indistinguishable, and a single arm cannot establish that -- a daemon
+/// returning a distinct `revoked` code would pass this test while leaking which handles
+/// once existed. The pair is proven where the mechanism lives, in the store's
+/// `handle_mint_resolve_revoke`: both cases go through one query whose WHERE clause
+/// carries `revoked = 0`, so an absent row and a revoked row are the same result with no
+/// branch to get wrong. What this test adds is that the wire path does not reintroduce a
+/// distinction after resolution.
 #[tokio::test]
 #[ignore = "builds subc-core in ../subconscious and binds loopback ports"]
 async fn real_daemon_unknown_handle_is_not_found() {

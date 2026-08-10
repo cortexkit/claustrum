@@ -78,6 +78,28 @@ fn normalize_device_token(raw: &str) -> String {
         eprintln!("error: --device-token is empty");
         std::process::exit(2);
     }
+    // Before reporting a hex problem, check whether this is prose rather than a
+    // damaged token. A value produced by a failing device-side read can reach a
+    // clipboard as its own error text, and "not valid hex" is then true, precise and
+    // misdirecting: it sends the reader to inspect their paste, while the fault it is
+    // describing already happened on the device. An error message that becomes a
+    // value stops being an error message, so the receiver has to recognise the shape.
+    let looks_like_prose = trimmed.contains(':')
+        || trimmed.contains(' ')
+            && trimmed.split_whitespace().any(|w| {
+                w.chars()
+                    .any(|c| c.is_ascii_alphabetic() && !c.is_ascii_hexdigit())
+            });
+    if looks_like_prose {
+        eprintln!("error: --device-token looks like a MESSAGE rather than a token: {trimmed:?}");
+        eprintln!(
+            "  A device token is bare lowercase hex. Text like this usually means the \
+             value was copied from a control that reported a failure instead of \
+             producing a key or token -- so the fault is on the device that generated \
+             it, not in the paste. Do not retry the send; read the reported failure."
+        );
+        std::process::exit(2);
+    }
     if let Some(bad) = trimmed.chars().find(|c| !c.is_ascii_hexdigit()) {
         eprintln!(
             "error: --device-token contains {bad:?}, which is not a hex digit. APNs \

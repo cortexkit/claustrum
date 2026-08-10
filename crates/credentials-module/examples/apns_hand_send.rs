@@ -175,11 +175,17 @@ async fn main() {
     // silent and land on the device, which is the one place none of the senders can
     // observe -- so the tool composes the envelope rather than trusting each operator
     // to remember it.
+    // Carried alongside the body so the acceptance can report what was sent. `None`
+    // means this tool did not compose the payload, so it cannot vouch for its
+    // contents -- which is a different statement from "no blob was sent" and is
+    // reported as such.
+    let mut sent_blob_len: Option<usize> = None;
     let body = match (sealed_hex.as_deref(), payload_hex.as_deref()) {
         (Some(sealed), None) => {
             // Validate as hex before wrapping, so a malformed blob is refused here
             // rather than delivered as a payload the device silently fails to open.
             let raw = decode_hex(sealed, "--sealed-hex");
+            sent_blob_len = Some(raw.len());
             // Compose BEFORE reporting. Announcing the wrap first would print a
             // success line for a blob about to be refused, and the reader who scans
             // for the last line would see the error while the reader who scans for
@@ -285,11 +291,26 @@ async fn main() {
             // path: APNs offers no delivery callback, so acceptance is the strongest
             // signal that exists and it is not a confirmation.
             println!();
-            // Echo the title with the acceptance. An observer comparing what appeared
-            // on a device against what was sent needs both halves, and only this
-            // process holds the second one -- so printing it here is what makes a
-            // later comparison possible rather than a recollection.
+            // Echo what was sent alongside the acceptance. An observer comparing what
+            // appeared on a device against what left here needs both halves, and only
+            // this process holds the second one -- so printing it is what makes a later
+            // comparison possible rather than a recollection.
+            //
+            // The sealed-key line is the load-bearing one. "Arrived carrying no sealed
+            // blob" has two causes on different sides: the body was composed without
+            // one, or it carried one and something between here and the device dropped
+            // it. Nothing observable on the device separates them, because the device
+            // sees only what arrived. Recording presence and size at the sending end is
+            // the only evidence that can, and it costs one line.
             println!("Sent with title: {title}");
+            println!(
+                "Sent with \"{}\": {}",
+                SEALED_BLOB_KEY,
+                match sent_blob_len {
+                    Some(n) => format!("present, {n} sealed byte(s) before base64"),
+                    None => "ABSENT (verbatim payload; this tool did not compose it)".to_string(),
+                }
+            );
             println!();
             println!("This means APNs accepted the request, NOT that a device received it.");
             println!("There is no delivery callback; the device is the only observer.");

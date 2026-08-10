@@ -67,6 +67,41 @@ fn arg(name: &str) -> Option<String> {
         .cloned()
 }
 
+/// Strip surrounding whitespace and reject anything that is not lowercase-able hex.
+///
+/// Refuses rather than silently repairing anything beyond whitespace: a token with a
+/// `0x` prefix or internal spaces is a paste that went wrong, and quietly "fixing" it
+/// risks sending to an address the operator did not intend.
+fn normalize_device_token(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        eprintln!("error: --device-token is empty");
+        std::process::exit(2);
+    }
+    if let Some(bad) = trimmed.chars().find(|c| !c.is_ascii_hexdigit()) {
+        eprintln!(
+            "error: --device-token contains {bad:?}, which is not a hex digit. APNs \
+             device tokens are hex only."
+        );
+        eprintln!(
+            "  A token pasted from a screen may carry spaces or a 0x prefix. Note APNs \
+             answers BadDeviceToken for a malformed token AND for an unregistered \
+             device, so an unvalidated paste is indistinguishable from a device that \
+             was never enrolled."
+        );
+        std::process::exit(2);
+    }
+    if !trimmed.len().is_multiple_of(2) {
+        eprintln!(
+            "error: --device-token has an odd number of hex digits ({}), so it is \
+             truncated or over-copied.",
+            trimmed.len()
+        );
+        std::process::exit(2);
+    }
+    trimmed.to_ascii_lowercase()
+}
+
 fn flag(name: &str) -> bool {
     std::env::args().any(|a| a == name)
 }
@@ -107,7 +142,16 @@ async fn main() {
     let key_id = require("--key-id");
     let team_id = require("--team-id");
     let topic = require("--topic");
-    let device_token = require("--device-token");
+    // The device token arrives by copy-paste from a phone screen, so it is the input
+    // most likely to carry whitespace or a stray prefix. It is interpolated straight
+    // into the request path, and an unvalidated one produces a URL that APNs refuses
+    // with `BadDeviceToken` -- the same reason a genuinely unknown device produces.
+    //
+    // That collision is the whole reason for validating here: `BadDeviceToken` is the
+    // arm that means "this device is not registered for this environment and topic",
+    // which sends someone to re-check the environment, the topic, and the enrollment.
+    // A trailing newline would send them down that path over a paste artifact.
+    let device_token = normalize_device_token(&require("--device-token"));
     let sealed_hex = arg("--sealed-hex");
     let payload_hex = arg("--payload-hex");
 

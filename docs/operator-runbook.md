@@ -360,20 +360,35 @@ Three things that make these read wrong:
   nobody is writing, such as a copy kept as a rollback target.
 
   **The exception, and it presents as a broken file rather than as a wrong mode:** a
-  store copied with a plain `cp` of `store.db` alone arrives with no `store.db-wal` or
-  `store.db-shm` beside it, and a WAL-mode database cannot be opened read-only without
-  a `-shm` — a read-only connection is not permitted to create one. The result is
+  store with no `store.db-wal` or `store.db-shm` beside it cannot be opened read-only
+  at all, because the file's header still says WAL and a read-only connection is not
+  permitted to create the `-shm` that mode needs. The result is
   `Error: in prepare, unable to open database file (14)` on a file that is present,
   readable, and carries a valid `SQLite format 3` header. **That message reads as
-  missing or corrupt, and the file is neither.** `immutable=1` opens it immediately,
-  and is correct there for the same reason it is wrong on a live store: there is no
-  writer and no WAL to miss.
+  missing or corrupt, and the file is neither.** `immutable=1` opens it immediately.
 
-  **So the discriminator is whether the companion files exist, not whether the module
-  is running.** Check with `ls store.db-wal store.db-shm` before choosing. Note a clean
-  shutdown does NOT remove the companions — measured — so a companion-less store is
-  the signature of a partial copy, which also means the copy is missing every commit
-  that was still in the WAL when it was taken.
+  **Check the companions, not the story:** `ls store.db-wal store.db-shm` decides the
+  open mode, and nothing else does.
+
+  **Do not infer how the file got that way, because two very different histories
+  produce the identical shape and neither is distinguishable on disk:**
+
+  - a **cleanly closed** store — the daemon's SQLite build deletes both companions on
+    the last connection close, *after* checkpointing, so this file is COMPLETE.
+  - a **partial copy** — `cp store.db` taken while a writer held it, which leaves
+    everything still in the WAL behind. This file is SHORT OF DATA, and it can be
+    short of quite a lot: in a probe here, a table created moments earlier was absent
+    entirely from such a copy.
+
+  Both open the same way and read as intact. The completeness question is answered by
+  the audit chain — compare `MAX(seq)` against what the vault should have — never by
+  the file opening successfully.
+
+  **Whether a clean close deletes the companions is a property of the SQLite BUILD,
+  not of SQLite.** The daemon links its own (3.46.0, which deletes them); the system
+  `sqlite3` on macOS links Apple's, which keeps them. So a store closed by the daemon
+  and one closed by a CLI session do not look alike, and a rule learned from one build
+  will mislead on the other.
 - **`mode=ro` is also what makes the read INERT, and dropping it is not harmless just
   because the SQL is a `SELECT`.** SQLite checkpoints on close when the closing connection
   is the last one attached to the database, and that is a property of the CONNECTION, not

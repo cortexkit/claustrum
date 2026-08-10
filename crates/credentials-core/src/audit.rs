@@ -115,9 +115,14 @@ pub struct AuditCtx<'a> {
     /// The op recorded for this mutation. Distinguishes e.g. a `put` from an
     /// `import` even though both go through the same create path.
     pub op: AuditOp,
-    /// The actor: a connection id (`"conn-N"`) for a daemon read-surface action,
-    /// `"offline-cli"` for an admin CLI write, or `"vault"` for a vault-owned action
-    /// (refresh, reconciliation).
+    /// The actor: `"conn-N"` for a daemon read-surface action, `"offline-cli"` for an
+    /// admin CLI write, `"route-admin"` for an admin write through the running daemon,
+    /// or `"vault"` for a vault-owned action (refresh, reconciliation).
+    ///
+    /// `N` in `"conn-N"` is the ROUTE CHANNEL NUMBER, which is assigned to a route
+    /// binding and reused as bindings come and go. It is not a consumer identity and
+    /// cannot be read as one: rows sharing a number are not necessarily the same
+    /// caller, and one caller across reconnects may appear under several.
     pub actor: &'a str,
     /// An alarm reason when this mutation should be flagged (every admin write is
     /// flagged `AdminWrite`; a blind overwrite is `OverwriteWithoutCas`).

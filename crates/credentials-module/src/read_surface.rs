@@ -377,8 +377,20 @@ impl ReadSurface {
         // served, so a stale report for a since-refreshed credential is a silent no-op
         // (and a consumer can only ever kill the exact version it saw, not whatever is
         // current). The invalidate audits the revocation feedback in the chain atomically
-        // (actor = the connection).
+        // (actor = the route channel; see below for why that is not a caller identity).
         if params.provider_status == 401 || params.provider_status == 403 {
+            // The actor names the ROUTE CHANNEL, not the consumer. The number is
+            // assigned to a route binding and reused as bindings come and go, so two
+            // entries sharing `conn-1` are not evidence of the same reporter, and one
+            // reporter across reconnects may appear under several numbers.
+            //
+            // Recorded because the chain reads like an identity and is not one: an
+            // incident review asking WHO invalidated a credential gets a plausible
+            // answer from this field and no warning that it cannot support the
+            // question. The vault has nothing better to write -- the read surface is
+            // anonymous by design, and a capability handle authorizes a read without
+            // identifying who presented it -- so establishing the reporter of a
+            // consumer-reported invalidation needs a source outside this record.
             let actor = format!("conn-{connection_id}");
             self.engine
                 .store()

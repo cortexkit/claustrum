@@ -340,6 +340,16 @@ DB="$HOME/.local/share/cortexkit/claustrum/store.db"
 # Recent events. `actor` distinguishes who caused them: `vault` is the refresh engine
 # acting on its own, `route-admin` an operator through the running daemon, `offline-cli`
 # an operator holding the lease directly.
+#
+# `conn-<N>` is NOT a consumer identity. N is the route channel number, assigned to a
+# route binding and reused as bindings come and go: two rows sharing `conn-1` are not
+# evidence of the same reporter, and one reporter across reconnects may appear under
+# several numbers. The read surface is anonymous by design -- a capability handle
+# authorizes a read without identifying who presented it -- so the vault has no caller
+# identity to record. For a CONSUMER-REPORTED invalidation (op `report_auth_failure`)
+# the chain gives you the credential and the instant, never the reporter; correlate
+# that timestamp against sources outside this record, such as consumer or route-layer
+# logs. Operator and vault-owned actions are attributable as usual.
 sqlite3 "file:$DB?mode=ro" "SELECT seq, op, credential_id, actor,
   datetime(ts_ms/1000,'unixepoch','localtime') FROM audit_log ORDER BY seq DESC LIMIT 20;"
 

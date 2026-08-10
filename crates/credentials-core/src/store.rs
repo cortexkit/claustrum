@@ -94,6 +94,16 @@ const MIGRATIONS: &[Migration] = &[
     // the master key. `alarm` flags a detected anomaly (overwrite-without-CAS,
     // fetch-rate anomaly, admin write) as a durable, queryable row rather than a live
     // notification.
+    // `handles.created_at_ms` is WRITTEN AND NEVER READ, deliberately. The audit chain
+    // already answers when a handle was minted -- a `mint_handle` entry carries the
+    // same instant, written in the same transaction -- so this column is a
+    // denormalized copy kept for forensic queries against the table alone, where
+    // joining the chain for a timestamp would be the awkward path.
+    //
+    // Recorded here because a column with no reader is indistinguishable from an
+    // abandoned one: a later cleanup would see an unread field and drop it, taking
+    // the ability to date a handle from its own row along with it, and dropping a
+    // column is not something a test would catch.
     Migration {
         version: 2,
         statements: "CREATE TABLE handles (\

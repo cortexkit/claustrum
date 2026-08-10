@@ -67,13 +67,61 @@ fn arg(name: &str) -> Option<String> {
         .cloned()
 }
 
+/// Take the value out of a `name<sep>value` line, or return the input unchanged.
+///
+/// The values this tool consumes are produced elsewhere and reach it through a human
+/// and a clipboard. A producer that emits them bare forces the human to remember
+/// which of two identically-shaped hex strings goes where; a producer that labels
+/// them removes that decision but hands this tool something it would otherwise reject
+/// as malformed. Accepting the labelled form is what makes the label worth emitting.
+///
+/// Both `=` and `: ` are accepted because both are in use by different producers, and
+/// a receiver that took only one would silently push the cost back onto the person
+/// pasting. The label must MATCH the expected name: a line naming a different field
+/// is a wrong-value paste, which is a different fault from a malformed one and must
+/// not be quietly unwrapped into acceptance.
+fn strip_label<'a>(line: &'a str, expected: &str) -> &'a str {
+    let Some((name, value)) = line
+        .split_once('=')
+        .or_else(|| line.split_once(':'))
+        .map(|(n, v)| (n.trim(), v.trim()))
+    else {
+        return line;
+    };
+    // Only a name this tool RECOGNISES counts as a label. Accepting any
+    // separator-prefixed word would swallow text that merely contains a colon --
+    // including a failure message, whose first word would then be reported as a
+    // mislabelled field. That reading is both wrong and less useful than the one it
+    // displaces, because the prose arm below says where the fault actually happened.
+    //
+    // So an unrecognised name falls through untouched and reaches the checks that can
+    // classify it, rather than being claimed by this one.
+    const KNOWN_LABELS: [&str; 2] = ["apns_device_token_hex", "push_seal_pubkey_hex"];
+    if !KNOWN_LABELS
+        .iter()
+        .any(|known| name.eq_ignore_ascii_case(known))
+    {
+        return line;
+    }
+    if name.eq_ignore_ascii_case(expected) {
+        return value;
+    }
+    eprintln!("error: this value is labelled {name:?}, but {expected:?} was expected.");
+    eprintln!(
+        "  Pasting one artefact where another belongs is not a formatting problem: \
+         two 32-byte hex values are indistinguishable once the label is gone, and the \
+         wrong one can be accepted all the way to the device before anything fails."
+    );
+    std::process::exit(2);
+}
+
 /// Strip surrounding whitespace and reject anything that is not lowercase-able hex.
 ///
 /// Refuses rather than silently repairing anything beyond whitespace: a token with a
 /// `0x` prefix or internal spaces is a paste that went wrong, and quietly "fixing" it
 /// risks sending to an address the operator did not intend.
 fn normalize_device_token(raw: &str) -> String {
-    let trimmed = raw.trim();
+    let trimmed = strip_label(raw.trim(), "apns_device_token_hex");
     if trimmed.is_empty() {
         eprintln!("error: --device-token is empty");
         std::process::exit(2);

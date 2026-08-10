@@ -384,12 +384,22 @@ Three things that make these read wrong:
   ls store.db-wal          # the check that matters, before opening anything
   ```
 
-  **Do not try to infer how a companion-less file got that way.** A clean close leaves
-  one on some builds (the daemon's checkpoints first, so that file is complete); a
-  `cp store.db` taken while a writer held it leaves the identical shape, missing
-  everything still in the WAL. **The two are indistinguishable on disk and only one is
-  complete.** Completeness is answered by the audit chain — `MAX(seq)` against what the
-  vault should have — never by the file opening or by `integrity_check`.
+  **What a companion-less main file contains is exactly what had been CHECKPOINTED,
+  and nothing else.** That is the whole rule, and every case follows from it:
+
+  ```
+  closed cleanly          everything was checkpointed      complete
+  copied mid-write        nothing was checkpointed         reads as empty
+  copied mid-write        a checkpoint had partly run      AN ARBITRARY PREFIX
+  ```
+
+  **The third is the dangerous one, because it is the only outcome that looks like a
+  working database.** It opens, it answers, `integrity_check` says `ok`, and it is
+  short by an amount nothing on the file can tell you — a probe here produced one row
+  of fifty. Checkpoint timing leaves no trace in the file, so **completeness is not
+  merely hard to infer from a store, it is absent from it.** The audit chain is not a
+  fallback for answering this: `MAX(seq)` against what the vault should have is the
+  only source that exists.
 
   **If you are copying a store, copy the directory, never the file.** The main file on
   its own is a partial artefact whose losses are silent.

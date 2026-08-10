@@ -358,6 +358,22 @@ Three things that make these read wrong:
   change, so it skips the write-ahead log — on a live vault that silently returns a
   pre-WAL snapshot, answering confidently about the past. `immutable=1` is for a store
   nobody is writing, such as a copy kept as a rollback target.
+
+  **The exception, and it presents as a broken file rather than as a wrong mode:** a
+  store copied with a plain `cp` of `store.db` alone arrives with no `store.db-wal` or
+  `store.db-shm` beside it, and a WAL-mode database cannot be opened read-only without
+  a `-shm` — a read-only connection is not permitted to create one. The result is
+  `Error: in prepare, unable to open database file (14)` on a file that is present,
+  readable, and carries a valid `SQLite format 3` header. **That message reads as
+  missing or corrupt, and the file is neither.** `immutable=1` opens it immediately,
+  and is correct there for the same reason it is wrong on a live store: there is no
+  writer and no WAL to miss.
+
+  **So the discriminator is whether the companion files exist, not whether the module
+  is running.** Check with `ls store.db-wal store.db-shm` before choosing. Note a clean
+  shutdown does NOT remove the companions — measured — so a companion-less store is
+  the signature of a partial copy, which also means the copy is missing every commit
+  that was still in the WAL when it was taken.
 - **`mode=ro` is also what makes the read INERT, and dropping it is not harmless just
   because the SQL is a `SELECT`.** SQLite checkpoints on close when the closing connection
   is the last one attached to the database, and that is a property of the CONNECTION, not

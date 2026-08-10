@@ -108,9 +108,10 @@ fn strip_label<'a>(line: &'a str, expected: &str) -> &'a str {
     }
     eprintln!("error: this value is labelled {name:?}, but {expected:?} was expected.");
     eprintln!(
-        "  Pasting one artefact where another belongs is not a formatting problem: \
-         two 32-byte hex values are indistinguishable once the label is gone, and the \
-         wrong one can be accepted all the way to the device before anything fails."
+        "  Two 32-byte hex values are indistinguishable once their labels are gone, so \
+         the label is the only thing that can catch this. Sent anyway, this would be \
+         refused by APNs as an unknown device -- which reads as an enrollment or \
+         environment problem and sends you checking things that are fine."
     );
     std::process::exit(2);
 }

@@ -359,36 +359,40 @@ Three things that make these read wrong:
   pre-WAL snapshot, answering confidently about the past. `immutable=1` is for a store
   nobody is writing, such as a copy kept as a rollback target.
 
-  **The exception, and it presents as a broken file rather than as a wrong mode:** a
-  store with no `store.db-wal` or `store.db-shm` beside it cannot be opened read-only
-  at all, because the file's header still says WAL and a read-only connection is not
-  permitted to create the `-shm` that mode needs. The result is
-  `Error: in prepare, unable to open database file (14)` on a file that is present,
-  readable, and carries a valid `SQLite format 3` header. **That message reads as
-  missing or corrupt, and the file is neither.** `immutable=1` opens it immediately.
+  **A `store.db` with no `store.db-wal` beside it is the dangerous case, and the
+  danger is that it usually does NOT announce itself.** A WAL database keeps recent
+  commits in the `-wal`; the main file alone holds only what was checkpointed. What
+  happens when you open one depends entirely on which SQLite you are holding —
+  measured here on one identical file:
 
-  **Check the companions, not the story:** `ls store.db-wal store.db-shm` decides the
-  open mode, and nothing else does.
+  ```
+  system sqlite3 (Apple 3.51.0)   Error: unable to open database file (14)
+  the daemon's build (3.46.0)     opens, answers from pre-WAL state, integrity ok
+  ```
 
-  **Do not infer how the file got that way, because two very different histories
-  produce the identical shape and neither is distinguishable on disk:**
+  So the error-14 refusal is a property of the tool, not of the file. **Through the
+  daemon's own build the same store opens without complaint and silently under-reports
+  — in a probe here, a live copy taken with 50 rows committed answered as though the
+  table did not exist.** It is missing data, it says nothing, and `PRAGMA
+  integrity_check` returns `ok`, because the file it has is internally consistent.
 
-  - a **cleanly closed** store — the daemon's SQLite build deletes both companions on
-    the last connection close, *after* checkpointing, so this file is COMPLETE.
-  - a **partial copy** — `cp store.db` taken while a writer held it, which leaves
-    everything still in the WAL behind. This file is SHORT OF DATA, and it can be
-    short of quite a lot: in a probe here, a table created moments earlier was absent
-    entirely from such a copy.
+  **`-wal` is the load-bearing companion; `-shm` is a rebuildable index over it.**
+  Measured: `main+wal+shm` and `main+wal` both read correctly; `main+shm` and `main`
+  alone both read stale.
 
-  Both open the same way and read as intact. The completeness question is answered by
-  the audit chain — compare `MAX(seq)` against what the vault should have — never by
-  the file opening successfully.
+  ```
+  ls store.db-wal          # the check that matters, before opening anything
+  ```
 
-  **Whether a clean close deletes the companions is a property of the SQLite BUILD,
-  not of SQLite.** The daemon links its own (3.46.0, which deletes them); the system
-  `sqlite3` on macOS links Apple's, which keeps them. So a store closed by the daemon
-  and one closed by a CLI session do not look alike, and a rule learned from one build
-  will mislead on the other.
+  **Do not try to infer how a companion-less file got that way.** A clean close leaves
+  one on some builds (the daemon's checkpoints first, so that file is complete); a
+  `cp store.db` taken while a writer held it leaves the identical shape, missing
+  everything still in the WAL. **The two are indistinguishable on disk and only one is
+  complete.** Completeness is answered by the audit chain — `MAX(seq)` against what the
+  vault should have — never by the file opening or by `integrity_check`.
+
+  **If you are copying a store, copy the directory, never the file.** The main file on
+  its own is a partial artefact whose losses are silent.
 - **`mode=ro` is also what makes the read INERT, and dropping it is not harmless just
   because the SQL is a `SELECT`.** SQLite checkpoints on close when the closing connection
   is the last one attached to the database, and that is a property of the CONNECTION, not

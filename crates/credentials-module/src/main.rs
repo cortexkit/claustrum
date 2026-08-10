@@ -454,7 +454,15 @@ async fn send_hello(
         // through the same channel-0 dispatch and report L3 domain health from a
         // cheap no-decrypt metadata scan.
         control_ops: Some(vec![MODULE_CONTROL_OP_HEALTH_CHECK.to_string()]),
-        // Echo the supervisor's launch nonce so subc accepts our reserved id.
+        // Echo the supervisor's launch nonce. This is the module half of the
+        // reserved-id ceremony: it proves this process was spawned by the
+        // supervisor rather than merely able to complete the handshake.
+        //
+        // Whether the supervisor ENFORCES that is a property of its config, not of
+        // this code -- an id it does not treat as reserved authorizes any HELLO,
+        // and the echo is then a key for a lock nobody installed. This module
+        // cannot observe which case it is in and must send the nonce either way,
+        // so nothing here should be read as evidence that the check happens.
         launch_nonce: config.launch_nonce.clone(),
     })
     .map_err(ModuleError::Json)?;

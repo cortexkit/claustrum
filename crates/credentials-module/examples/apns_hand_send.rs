@@ -111,6 +111,27 @@ async fn main() {
     let sealed_hex = arg("--sealed-hex");
     let payload_hex = arg("--payload-hex");
 
+    // The title labels which send produced a given notification. It is not a
+    // diagnostic: see the module header for why a sender cannot distinguish an
+    // extension that never ran from one that ran and failed to decrypt.
+    //
+    // The default is distinct per send rather than a fixed string. A receiver that
+    // preserves the sent title lets an observer say WHICH submission produced a given
+    // notification, but only if the titles differ -- and with a fixed default the
+    // useful case would depend on remembering to pass a flag, where forgetting is
+    // indistinguishable from a receiver that discarded the value. The suffix is the
+    // submission's own clock, so uniqueness needs no state and no coordination.
+    let title = arg("--title").unwrap_or_else(|| {
+        format!(
+            "Alfonso #{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() % 100_000)
+                .unwrap_or(0)
+        )
+    });
+    let body = arg("--body").unwrap_or_else(|| "needs you".to_string());
+
     let environment = if flag("--sandbox") {
         ApnsEnvironment::Sandbox
     } else {
@@ -159,11 +180,6 @@ async fn main() {
             // Validate as hex before wrapping, so a malformed blob is refused here
             // rather than delivered as a payload the device silently fails to open.
             let raw = decode_hex(sealed, "--sealed-hex");
-            // The title labels which send produced a given notification. It is not a
-            // diagnostic: see the module header for why a sender cannot distinguish an
-            // extension that never ran from one that ran and failed.
-            let title = arg("--title").unwrap_or_else(|| "Alfonso".to_string());
-            let body = arg("--body").unwrap_or_else(|| "needs you".to_string());
             // Compose BEFORE reporting. Announcing the wrap first would print a
             // success line for a blob about to be refused, and the reader who scans
             // for the last line would see the error while the reader who scans for
@@ -268,6 +284,12 @@ async fn main() {
             // Said plainly because the distinction is the whole difficulty of this
             // path: APNs offers no delivery callback, so acceptance is the strongest
             // signal that exists and it is not a confirmation.
+            println!();
+            // Echo the title with the acceptance. An observer comparing what appeared
+            // on a device against what was sent needs both halves, and only this
+            // process holds the second one -- so printing it here is what makes a
+            // later comparison possible rather than a recollection.
+            println!("Sent with title: {title}");
             println!();
             println!("This means APNs accepted the request, NOT that a device received it.");
             println!("There is no delivery callback; the device is the only observer.");

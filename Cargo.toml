@@ -54,10 +54,19 @@ async-trait = "0.1"
 
 # HTTP for OAuth refresh adapters (rustls, no native-tls).
 #
-# `http2` is NOT an optimization here: APNs speaks HTTP/2 only, and a client built
-# without it negotiates HTTP/1.1 and is refused at the transport before any request
-# is seen. Every OAuth adapter works fine over 1.1, so nothing else in this
-# workspace would notice if the feature were dropped.
+# `http2` is required by ONE caller and enabled for EVERY caller, because this is a
+# workspace dependency and cargo unions features across the graph. APNs speaks HTTP/2
+# only — a client built without it negotiates 1.1 and is refused at the transport
+# before any request is seen — but the daemon links the same client for OAuth token
+# refresh, so its provider requests can now negotiate HTTP/2 where they previously
+# could not.
+#
+# That is a behaviour change to the credential-serving path arriving as a side effect
+# of an unrelated feature, and it is recorded here rather than assumed benign: the
+# providers are ordinary HTTPS endpoints and reqwest negotiates by ALPN, so a server
+# that does not offer h2 continues to be spoken to over 1.1. If a refresh ever fails
+# in a way that looks like a transport rather than a credential problem, this line is
+# the change to suspect first.
 reqwest = { version = "0.12", default-features = false, features = [
   "rustls-tls",
   "json",

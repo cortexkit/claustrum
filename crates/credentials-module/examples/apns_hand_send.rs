@@ -418,6 +418,24 @@ async fn main() {
             // sees only what arrived. Recording presence and size at the sending end is
             // the only evidence that can, and it costs one line.
             println!("Sent with title: {title}");
+            // Echo the address this was sent to, abbreviated.
+            //
+            // The device token and the sealing key are both 32 bytes of hex, so a
+            // human comparing them has nothing to go on but the values themselves --
+            // no length, shape or checksum separates them. Printing the ends of what
+            // was actually used lets someone hold it against the value the device
+            // reports, which is the only comparison available once both artefacts have
+            // left their sources and become indistinguishable strings.
+            //
+            // Ends rather than the whole thing: enough to compare against a screen, and
+            // it keeps a routing address out of a line that may be pasted into a
+            // channel. The full value is what was passed in, so it is not lost.
+            println!(
+                "Sent to device: {}…{} ({} hex chars)",
+                &device_token[..8.min(device_token.len())],
+                &device_token[device_token.len().saturating_sub(8)..],
+                device_token.len()
+            );
             println!(
                 "Sent with \"{}\": {}",
                 SEALED_BLOB_KEY,

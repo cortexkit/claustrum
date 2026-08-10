@@ -37,15 +37,21 @@
 //!
 //! ## Why the title is settable
 //!
-//! A notification that arrives showing its generic text has two causes with opposite
-//! meanings: the receiving extension never executed, or it executed and the decrypt
-//! failed. From this side they are identical, and the resulting report — the submit
-//! worked and the phone did nothing — names no component.
+//! To LABEL a send, not to diagnose one. When several notifications are in flight,
+//! the title is what identifies which submission produced the one on screen.
 //!
-//! If the extension rewrites the title unconditionally before attempting any decrypt,
-//! then the title that appears on screen answers which of the two happened, with no
-//! logs and no access to the device. Worth setting a distinctive one on a first send
-//! to a build whose extension has never run.
+//! It is deliberately not a diagnostic, and the distinction is worth stating because
+//! the opposite is intuitive. A notification arriving with its sent title unchanged
+//! is consistent with the receiving extension never having run AND with it having run
+//! and failed to decrypt — two causes with different owners — whenever that extension
+//! leaves the visible text alone on its failure path. Leaving it alone is the sane
+//! choice there, since a failed decrypt should still show something coherent rather
+//! than a diagnostic string, so a sender cannot assume otherwise.
+//!
+//! Splitting those two therefore requires something written unconditionally by the
+//! receiver, which is not a property a sender can supply or verify. Treating the
+//! title as that instrument would report "never invoked" for a decrypt failure and
+//! send the investigation to the wrong component with false confidence.
 
 use credentials_core::apns::{mint_provider_token, ApnsEnvironment, ApnsKeyIdentity};
 use credentials_core::apns_submit::{
@@ -153,16 +159,9 @@ async fn main() {
             // Validate as hex before wrapping, so a malformed blob is refused here
             // rather than delivered as a payload the device silently fails to open.
             let raw = decode_hex(sealed, "--sealed-hex");
-            // The title is settable because it is the only field that survives to the
-            // screen unchanged whether or not the receiving extension runs.
-            //
-            // A notification that arrives showing the generic line has two causes with
-            // opposite meanings: the extension never executed, or it executed and the
-            // decrypt failed. From the sending side those are identical, and the report
-            // that comes back -- "the submit worked and the phone did nothing" -- names
-            // no component. If the extension rewrites the title unconditionally before
-            // attempting any decrypt, then the title that appears answers which of the
-            // two happened, with no logs and no device access.
+            // The title labels which send produced a given notification. It is not a
+            // diagnostic: see the module header for why a sender cannot distinguish an
+            // extension that never ran from one that ran and failed.
             let title = arg("--title").unwrap_or_else(|| "Alfonso".to_string());
             let body = arg("--body").unwrap_or_else(|| "needs you".to_string());
             // Compose BEFORE reporting. Announcing the wrap first would print a

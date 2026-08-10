@@ -15,6 +15,67 @@ fn cli() -> Command {
     Command::new(env!("CARGO_BIN_EXE_ck-auth"))
 }
 
+/// Both documented orders of a global flag must reach the same vault.
+///
+/// The verb is positional and is read before the flags, so a flag written BEFORE it
+/// would be taken as the verb itself and produce "unexpected argument '<path>' for
+/// '--data-dir'" -- a message naming the flag as a verb, from an invocation the help
+/// text presents as correct. Nothing about the parser is visible to a caller, so the
+/// two orders have to be equivalent rather than one of them being a rule to learn.
+///
+/// Driven through the real binary, because the ordering fix lives in argv handling
+/// before dispatch: a unit test calling the helper directly passes whether or not
+/// anything invokes it.
+#[test]
+fn a_global_flag_before_the_verb_reaches_the_same_vault_as_one_after_it() {
+    let root = tmp_root("flag-order");
+    let data_dir = root.join("vault");
+    let key_path = root.join("keys").join("master.key");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    std::fs::create_dir_all(key_path.parent().unwrap()).unwrap();
+
+    let mut boot = cli();
+    boot.arg("bootstrap")
+        .arg("--data-dir")
+        .arg(&data_dir)
+        .arg("--key-path")
+        .arg(&key_path);
+    assert!(boot.output().expect("bootstrap").status.success());
+
+    // Flags AFTER the verb: the form that has always worked.
+    let mut after = cli();
+    after
+        .arg("list")
+        .arg("--data-dir")
+        .arg(&data_dir)
+        .arg("--key-path")
+        .arg(&key_path);
+    let after = after.output().expect("list, flags after verb");
+
+    // Flags BEFORE the verb: the form the help text documents.
+    let mut before = cli();
+    before
+        .arg("--data-dir")
+        .arg(&data_dir)
+        .arg("--key-path")
+        .arg(&key_path)
+        .arg("list");
+    let before = before.output().expect("list, flags before verb");
+
+    assert!(
+        before.status.success(),
+        "a global flag before the verb must not be read as the verb; got: {}",
+        String::from_utf8_lossy(&before.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&before.stdout),
+        String::from_utf8_lossy(&after.stdout),
+        "both orders must address the same vault and print the same inventory"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 fn tmp_root(tag: &str) -> PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);

@@ -138,6 +138,16 @@ fn run() -> Result<(), CliError> {
         println!("ck-auth {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
+    // The verb is positional and is taken FIRST, so a global flag written before it
+    // would be read as the verb itself. Rather than let that surface as "unexpected
+    // argument '<path>' for '--data-dir'" -- which names the flag as a verb and tells
+    // the reader nothing about what to do -- accept the leading-flag form by moving
+    // any leading global flags (and their values) after the verb.
+    //
+    // Both orders are documented as working and an operator has no way to know the
+    // parser is positional, so refusing one of them would be a rule with no reason a
+    // caller could see.
+    hoist_leading_global_flags(&mut args);
     let command = args.remove(0);
 
     // A `--help`/`-h` ANYWHERE prints help and exits WITHOUT running the command.
@@ -189,6 +199,31 @@ fn run() -> Result<(), CliError> {
             usage_short()
         ))),
     }
+}
+
+/// Move any global flags that appear BEFORE the verb to after it, so both orders work.
+///
+/// Each global flag takes a value, so the flag and the token following it move
+/// together. Stops at the first token that is not a leading global flag, which is the
+/// verb -- so flags written after the verb are untouched, and a bare `--data-dir` with
+/// no value is left in place to be reported by the normal flag parser rather than
+/// silently swallowed here.
+fn hoist_leading_global_flags(args: &mut Vec<String>) {
+    const GLOBAL_WITH_VALUE: [&str; 3] = ["--data-dir", "--subc", "--key-path"];
+    let mut hoisted: Vec<String> = Vec::new();
+    while args
+        .first()
+        .is_some_and(|a| GLOBAL_WITH_VALUE.contains(&a.as_str()))
+    {
+        // Only move the pair when a value is actually present; a trailing flag with
+        // no value is left for the parser to refuse with its own message.
+        if args.len() < 2 {
+            break;
+        }
+        hoisted.push(args.remove(0));
+        hoisted.push(args.remove(0));
+    }
+    args.extend(hoisted);
 }
 
 /// Reject any leftover arg that is not an accepted flag (or a flag's value) for the
@@ -2247,6 +2282,46 @@ mod tests {
 
     fn v(args: &[&str]) -> Vec<String> {
         args.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_global_flag_before_the_verb_lands_where_one_after_it_would() {
+        // The verb is positional and read before the flags, so a leading global flag
+        // would otherwise BE the verb. Both orders are documented and a caller cannot
+        // see that the parser is positional.
+        let mut leading: Vec<String> = ["--data-dir", "/tmp/v", "list"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        hoist_leading_global_flags(&mut leading);
+        assert_eq!(leading, vec!["list", "--data-dir", "/tmp/v"]);
+
+        // Two of them, and each flag must stay next to its own value.
+        let mut two: Vec<String> = ["--data-dir", "/tmp/v", "--key-path", "/tmp/k", "status"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        hoist_leading_global_flags(&mut two);
+        assert_eq!(
+            two,
+            vec!["status", "--data-dir", "/tmp/v", "--key-path", "/tmp/k"]
+        );
+
+        // A flag already after the verb is untouched: the hoist must not reorder an
+        // invocation that already worked.
+        let mut trailing: Vec<String> = ["list", "--data-dir", "/tmp/v"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let before = trailing.clone();
+        hoist_leading_global_flags(&mut trailing);
+        assert_eq!(trailing, before);
+
+        // A flag with no value is left in place so the normal parser reports it,
+        // rather than this function consuming the arg and producing a stranger error.
+        let mut valueless: Vec<String> = vec!["--data-dir".to_string()];
+        hoist_leading_global_flags(&mut valueless);
+        assert_eq!(valueless, vec!["--data-dir"]);
     }
 
     #[test]

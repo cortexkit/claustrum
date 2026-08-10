@@ -26,9 +26,26 @@
 //!     --key-id XXXXXXXXXX --team-id YYYYYYYYYY \
 //!     --topic io.cortexkit.alfonso \
 //!     --device-token <hex> \
-//!     --payload-hex <hex of the sealed blob> \
+//!     --sealed-hex <hex of the sealed blob> \
+//!     [--title TEXT] [--body TEXT] [--dry-run] \
 //!     [--sandbox] [--push-type background] [--priority 5]
 //! ```
+//!
+//! `--sealed-hex` takes the blob alone and composes the APNs payload around it.
+//! `--payload-hex` is the escape hatch: it sends a complete JSON body verbatim, for
+//! shapes this tool does not model.
+//!
+//! ## Why the title is settable
+//!
+//! A notification that arrives showing its generic text has two causes with opposite
+//! meanings: the receiving extension never executed, or it executed and the decrypt
+//! failed. From this side they are identical, and the resulting report — the submit
+//! worked and the phone did nothing — names no component.
+//!
+//! If the extension rewrites the title unconditionally before attempting any decrypt,
+//! then the title that appears on screen answers which of the two happened, with no
+//! logs and no access to the device. Worth setting a distinctive one on a first send
+//! to a build whose extension has never run.
 
 use credentials_core::apns::{mint_provider_token, ApnsEnvironment, ApnsKeyIdentity};
 use credentials_core::apns_submit::{
@@ -136,11 +153,23 @@ async fn main() {
             // Validate as hex before wrapping, so a malformed blob is refused here
             // rather than delivered as a payload the device silently fails to open.
             let raw = decode_hex(sealed, "--sealed-hex");
+            // The title is settable because it is the only field that survives to the
+            // screen unchanged whether or not the receiving extension runs.
+            //
+            // A notification that arrives showing the generic line has two causes with
+            // opposite meanings: the extension never executed, or it executed and the
+            // decrypt failed. From the sending side those are identical, and the report
+            // that comes back -- "the submit worked and the phone did nothing" -- names
+            // no component. If the extension rewrites the title unconditionally before
+            // attempting any decrypt, then the title that appears answers which of the
+            // two happened, with no logs and no device access.
+            let title = arg("--title").unwrap_or_else(|| "Alfonso".to_string());
+            let body = arg("--body").unwrap_or_else(|| "needs you".to_string());
             // Compose BEFORE reporting. Announcing the wrap first would print a
             // success line for a blob about to be refused, and the reader who scans
             // for the last line would see the error while the reader who scans for
             // the first would see a confirmation of something that did not happen.
-            let envelope = match compose_envelope(&raw, "Alfonso", "needs you") {
+            let envelope = match compose_envelope(&raw, &title, &body) {
                 Ok(envelope) => envelope,
                 Err(why) => {
                     eprintln!("error: {why}");

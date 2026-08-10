@@ -404,6 +404,39 @@ before a new one is staged). Offline-only: stop the daemon first.
 The daemon and CLI are installed at `~/.local/share/cortexkit/bin/`, with `ck-auth`
 also symlinked into `~/.local/bin/` for the `ck` dispatcher.
 
+### Before building a release: the full gate
+
+`cargo test --workspace` is **not** the gate. It silently skips the two suites that
+cover the properties a credential vault exists to guarantee — the real-daemon
+end-to-end tests are `#[ignore]` by default, and the crash-safety proofs sit behind
+feature flags. Run all four:
+
+```sh
+cargo test --workspace
+CRED_REQUIRE_DAEMON=1 cargo test -p credentials-module --test real_daemon_e2e -- --ignored
+cargo test -p credentials-core --features kill9-test-seam  --test kill9_mid_refresh
+cargo test -p credentials-core --features rotate-test-seam --test rotate_crash_cut
+cargo test -p credentials-core --features login-test-seam  --test login_crash_cut
+```
+
+`CRED_REQUIRE_DAEMON=1` is an anti-masking switch: without it, the end-to-end suite
+is allowed to skip when it cannot build or reach the sibling `ck-subc`, which reads
+as a pass. With it, an unreachable daemon is a failure.
+
+**Read the counts, not the word `ok`.** Each of these lines is a passing run that
+proved nothing:
+
+```
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out
+```
+
+`0 passed` with a non-zero `filtered out` means the filter excluded everything —
+usually a mistyped target name, or `--ignored` applied to tests that are not marked
+ignored (that flag runs **only** ignored tests, so adding it to a normal suite runs
+nothing). Expected counts at the time of writing: 7 end-to-end, 1 kill9, 4 rotate,
+2 login. If a number drops, find out why before shipping; a suite that shrank is
+indistinguishable from one that passed.
+
 **Sign with a pinned identifier at build time, then place with a plain copy:**
 
 ```sh

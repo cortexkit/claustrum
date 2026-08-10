@@ -18,10 +18,19 @@
 //!
 //! Run with: cargo run -p credentials-core --example negotiated_protocol
 
+use credentials_core::http::ReqwestTransport;
+use credentials_core::refresh_adapters::HttpTransport;
+
 #[tokio::main]
 async fn main() {
-    // The same construction the daemon ships: a default client with a timeout. Not a
-    // hand-tuned one, because the question is what the PRODUCTION path negotiates.
+    // An UNPINNED client, built here rather than taken from the library.
+    //
+    // This used to be described as the construction the daemon ships, and that stopped
+    // being true when `ReqwestTransport` was pinned to HTTP/1.1 -- so the arm below is
+    // now a measurement of what the workspace's feature set MAKES AVAILABLE, not of
+    // what production does. Both are worth knowing and they are no longer the same
+    // thing: this arm says what would happen if the pin were removed, which is the
+    // question anyone removing it will have.
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
@@ -101,8 +110,61 @@ async fn main() {
         }
     }
     println!();
-    println!("Both outcomes are conformant: ALPN lets each server choose. What this");
-    println!("run establishes is which providers ACTUALLY move to h2 when the feature");
-    println!("is enabled -- i.e. how much of the refresh path changes behaviour at the");
-    println!("next release build, rather than how much could in principle.");
+
+    // THE PRODUCTION TRANSPORT ITSELF, which neither arm above exercises.
+    //
+    // Both arms above build a client here, so both measure a construction that lives
+    // in this file. The pin they exist to reason about lives in `ReqwestTransport`,
+    // and nothing else reaches it against a real server: `reqwest::ClientBuilder`
+    // offers the setting with no getter, a built client cannot be interrogated, and
+    // the unit test asserts the call is PRESENT IN THE SOURCE rather than effective.
+    //
+    // So this arm closes the gap between "the pin is written" and "the pinned client
+    // completes a real exchange". It cannot report the negotiated version -- the
+    // transport returns a status and a body, deliberately, since adapters have no
+    // business knowing the protocol -- but a completed request over a pinned client
+    // is the property that matters: a pin that broke connectivity would fail here,
+    // and nothing else would notice until a token needed refreshing.
+    println!("production transport (ReqwestTransport, HTTP/1.1-pinned):");
+    let transport = match ReqwestTransport::new() {
+        Ok(t) => t,
+        Err(why) => {
+            eprintln!("could not build the production transport: {why}");
+            std::process::exit(1);
+        }
+    };
+    let mut completed = 0usize;
+    for (name, url) in endpoints {
+        match transport
+            .post(url, &[], "application/x-www-form-urlencoded", Vec::new())
+            .await
+        {
+            Ok(resp) => {
+                completed += 1;
+                // A 411 here is an artifact of the empty probe body, not a fault: over
+                // HTTP/1.1 a POST without a body carries no Content-Length, and at
+                // least one provider requires it. The same endpoint answers 400 once a
+                // form body is present, which is what every real refresh sends.
+                // Measured, because a status that appears only on the pinned arm looks
+                // exactly like the pin having broken something.
+                let note = if resp.status == 411 {
+                    "  (length required: the empty probe body, not the pin)"
+                } else {
+                    ""
+                };
+                println!("  {name:<16} completed, status {}{note}", resp.status);
+            }
+            Err(why) => println!("  {name:<16} FAILED: {why}"),
+        }
+    }
+    println!(
+        "  {completed}/{} completed over the pinned client",
+        endpoints.len()
+    );
+
+    println!();
+    println!("Both outcomes are conformant: ALPN lets each server choose. The first two");
+    println!("arms measure what the workspace's features make available; the third is");
+    println!("what production actually uses, and only the third proves the pinned");
+    println!("client can still reach these providers at all.");
 }

@@ -251,6 +251,22 @@ The vault must not serve a dead token until `expires_at_ms`:
 - **`credential.invalidate { credential_id }`** (admin): authoritative revoke (user
   logout / incident).
 
+**A revoked handle and a handle that never existed are one observation.** Resolution
+selects on `handle_hash = ? AND revoked = 0`, so both produce `NotFound` with class
+`permanent`, and no read operation distinguishes them. That is deliberate: a caller
+holding a handle it was never given must not be able to learn whether the handle
+names something real, which is exactly what an enumeration sweep is trying to find
+out.
+
+The cost lands on the legitimate consumer, so it is stated here rather than left to
+be discovered during an incident. After a revocation a consumer sees the same error
+it would see from a typo, a truncated copy, or a handle issued by a different vault.
+The `permanent` class is still correct — no retry will help — but it says nothing
+about whether access was withdrawn or the request is simply malformed. Neither side
+can tell those apart from the wire, and a consumer that needs to know must ask an
+operator: there is no read that answers it, and adding one would answer it for a
+sweep too.
+
 ---
 
 ## 8. Vault-owned OAuth refresh + crash-safety — closes B2

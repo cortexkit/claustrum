@@ -424,8 +424,16 @@ async fn main() {
             // human comparing them has nothing to go on but the values themselves --
             // no length, shape or checksum separates them. Printing the ends of what
             // was actually used lets someone hold it against the value the device
-            // reports, which is the only comparison available once both artefacts have
-            // left their sources and become indistinguishable strings.
+            // reports.
+            //
+            // What that comparison can and cannot do is worth being exact about,
+            // because a displayed value reads as verification. Both renderings derive
+            // from the same source value, so agreement proves only that it survived
+            // the journey intact: it catches a truncated copy, a dropped character, a
+            // paste that picked up part of a neighbouring line. It CANNOT show that
+            // the right artefact was chosen -- the wrong value, faithfully copied,
+            // matches perfectly. Only a party holding the corresponding private key
+            // can establish that, and this process holds nothing of the kind.
             //
             // Ends rather than the whole thing: enough to compare against a screen, and
             // it keeps a routing address out of a line that may be pasted into a

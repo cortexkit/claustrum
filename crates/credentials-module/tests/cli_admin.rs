@@ -302,6 +302,18 @@ fn logout_is_reversible_stop_serving_and_status_reports_it() {
 /// `record_version` (the consumer cache-invalidation signal) and keeps the
 /// existing handle, exactly like `login --replace` does for an OAuth record.
 #[test]
+/// Note the property under test belongs to the REPLACE APPLIER, not to `put`.
+///
+/// `put --replace` and `login --replace` both build an `AdminOpBody::Store` carrying
+/// `StoreMode::ReplaceUnconditional`, which dispatches to
+/// `overwrite_unconditional_audited` — that updates the credential row and never
+/// touches the handles table. So a consumer's handle surviving an operator's re-login
+/// is this same guarantee, reached through the same code.
+///
+/// Worth saying because the name says `put`, so someone asking "does a re-login keep
+/// my handle?" would not find it here. The OAuth login arm is not driven instead
+/// because it needs a real provider exchange; this arm reaches the shared applier
+/// offline.
 fn put_replace_rotates_a_static_key_bumping_version_and_keeping_the_handle() {
     let root = tmp_root("put-replace");
     let data_dir = root.join("data");
@@ -387,17 +399,31 @@ fn put_replace_rotates_a_static_key_bumping_version_and_keeping_the_handle() {
         "replace bumped the version and kept it active: {rows}"
     );
 
-    // The handle SURVIVES the rotation: revoking that exact handle string still finds
-    // it (proving the replace kept the handles table row, not orphaned it). A revoke
-    // of an unknown handle reports 0 revoked; this must report the live one.
+    // The handle SURVIVES the rotation, asserted on a COUNT rather than on an exit
+    // status.
+    //
+    // `revoke-handle` succeeds for an unknown handle too -- measured: revoking a
+    // never-minted string prints "revoked handle" and exits 0, deliberately, since
+    // revocation is idempotent and must not confirm whether a handle exists. So
+    // asserting that it succeeds proves nothing about the row surviving; it passes
+    // just as well against a replace that orphaned every handle.
+    //
+    // `revoke-all-handles` reports the number it revoked, which is the signal that
+    // distinguishes those cases: 1 if the replace kept the row, 0 if it did not.
     let mut c = cli();
-    c.arg("revoke-handle").arg("--handle").arg(&handle);
+    c.arg("revoke-all-handles").arg("--id").arg("apikey:vast");
     global(&mut c);
-    let out = c.output().expect("run revoke-handle");
+    let out = c.output().expect("run revoke-all-handles");
+    let report = String::from_utf8_lossy(&out.stdout);
     assert!(
         out.status.success(),
-        "the pre-rotation handle still resolves post-replace: {}",
+        "revoke-all-handles: {}",
         String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        report.contains("revoked 1 handle"),
+        "the pre-rotation handle must still be live after the replace, so exactly one \
+         is revoked here; got: {report}"
     );
 
     // --replace and --expected-hash are mutually exclusive.

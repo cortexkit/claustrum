@@ -645,18 +645,41 @@ fn health_report(health: &credentials_core::health::VaultHealth) -> ModuleContro
     } else {
         None
     };
-    let metrics = json!({
-        "credentialsTotal": health.credentials_total,
-        "active": health.active,
-        "needsReauth": health.needs_reauth,
-        "corrupt": health.corrupt,
-        "needsReauthIds": health.needs_reauth_ids,
-        "corruptIds": health.corrupt_ids,
-        "openIntents": health.open_intents,
+    // The counts are OMITTED when the store could not be read, rather than reported as
+    // zero.
+    //
+    // Zero is what an empty vault reports, so a consumer plotting `active` cannot tell
+    // "no credentials" from "could not count credentials" and draws a clean line either
+    // way. The provenance is available -- `storeReadable` is false in the same object,
+    // and `detail` names the reason -- but that requires the consumer to correlate two
+    // fields, and nothing makes it. Omission does: a field that is absent cannot be
+    // plotted as a value, so the bad reading becomes impossible instead of merely
+    // avoidable.
+    //
+    // The flags stay present in both cases, because they are measurements about the
+    // daemon rather than about the store, and they remain true when the store is
+    // unreadable.
+    let mut metrics = json!({
         "storeReadable": health.store_readable,
         "fencedOut": health.fenced_out,
         "refresherStalled": health.refresher_stalled,
     });
+    if health.store_readable {
+        let counted = json!({
+            "credentialsTotal": health.credentials_total,
+            "active": health.active,
+            "needsReauth": health.needs_reauth,
+            "corrupt": health.corrupt,
+            "needsReauthIds": health.needs_reauth_ids,
+            "corruptIds": health.corrupt_ids,
+            "openIntents": health.open_intents,
+        });
+        if let (Some(target), Some(source)) = (metrics.as_object_mut(), counted.as_object()) {
+            for (k, v) in source {
+                target.insert(k.clone(), v.clone());
+            }
+        }
+    }
     ModuleControlResponse::HealthCheck {
         status,
         detail,
@@ -1311,6 +1334,67 @@ mod tests {
     /// This drives every non-Ok snapshot the ladder can produce through the wire mapping
     /// and requires a non-empty reason from each, so that omission fails here instead of
     /// arriving as an unexplained degraded state on a supervisor dashboard.
+    #[test]
+    fn unreadable_store_omits_counts_rather_than_reporting_zero() {
+        use credentials_core::health::VaultHealth;
+
+        // The counted fields. Each is a measurement OF THE STORE, so none of them has a
+        // meaning when the store could not be read.
+        const COUNTED: [&str; 7] = [
+            "credentialsTotal",
+            "active",
+            "needsReauth",
+            "corrupt",
+            "needsReauthIds",
+            "corruptIds",
+            "openIntents",
+        ];
+
+        let unreadable = health_report(&VaultHealth::unreadable());
+        let ModuleControlResponse::HealthCheck { metrics, .. } = unreadable else {
+            panic!("expected HealthCheck");
+        };
+        let metrics = metrics.expect("an unreadable report still carries metrics");
+
+        for field in COUNTED {
+            assert!(
+                metrics.get(field).is_none(),
+                "{field} must be ABSENT when the store is unreadable: reporting 0 is what an \
+                 empty vault reports, so a consumer plotting it cannot tell 'none' from \
+                 'could not count'"
+            );
+        }
+        // The flags describe the daemon rather than the store, so they survive.
+        assert_eq!(
+            metrics.get("storeReadable").and_then(|v| v.as_bool()),
+            Some(false),
+            "the reason the counts are missing must still be readable"
+        );
+
+        // THE DISAMBIGUATOR. Without this, an implementation that omitted the counts
+        // unconditionally -- or emitted no metrics at all -- would satisfy every
+        // assertion above, and the omission would be indistinguishable from the field
+        // never existing.
+        let readable = health_report(&VaultHealth::summarize(&[], 0, false));
+        let ModuleControlResponse::HealthCheck { metrics, .. } = readable else {
+            panic!("expected HealthCheck");
+        };
+        let metrics = metrics.expect("a healthy report carries metrics");
+        for field in COUNTED {
+            assert!(
+                metrics.get(field).is_some(),
+                "{field} must be PRESENT when the store was read, including when the count \
+                 is genuinely zero -- that is the case the absent form has to be \
+                 distinguishable from"
+            );
+        }
+        assert_eq!(
+            metrics.get("active").and_then(|v| v.as_u64()),
+            Some(0),
+            "an empty but readable vault reports a real zero"
+        );
+    }
+
     #[test]
     fn every_non_ok_health_report_carries_a_reason() {
         use credentials_core::health::{VaultHealth, VaultHealthStatus};

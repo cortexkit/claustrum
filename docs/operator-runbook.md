@@ -552,6 +552,23 @@ so a real run takes seconds; a skip returns in milliseconds. Two rigs measured t
 independently — 0.00s versus ~2s here, 0.06s versus 2.58s in the peer rig. If a
 process-boundary suite finishes instantly, it did not spawn anything.
 
+**The three crash-cut suites vanish without their feature flags, and say so only in
+the counts.** Each is gated at file level (`#![cfg(all(unix, feature = "..."))]`), so
+omitting the flag removes the whole file — there is no code left to print a warning,
+and no switch can help:
+
+```
+cargo test -p credentials-core --test kill9_mid_refresh
+running 0 tests
+test result: ok. 0 passed; 0 failed
+```
+
+That is a passing run of nothing. **The `--features` argument in the commands above
+is not optional decoration; it is what makes those lines mean anything.** CI always
+passes them, so this bites a local run only — which is the run with nobody checking.
+Expected counts are listed below; `0 passed` on any of them means the seam was not
+compiled in.
+
 **Read the counts, not the word `ok`.** Each of these lines is a passing run that
 proved nothing:
 

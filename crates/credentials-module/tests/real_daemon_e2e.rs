@@ -80,6 +80,20 @@ fn require_daemon() -> bool {
     std::env::var_os(REQUIRE_DAEMON_ENV).is_some_and(|v| !v.is_empty() && v != "0")
 }
 
+/// The notice a skipped arm prints, naming the switch that would make it a failure.
+///
+/// Every skip here reports `ok` to the test runner, so this line is the ONLY thing
+/// distinguishing a test that passed from one that never ran. Shared rather than
+/// written per arm: two of the three used to omit the switch entirely, and a reader
+/// who happened to hit one of those was told a test was skipped without being told
+/// how to stop that happening.
+fn skip_notice(arm: &str) -> String {
+    format!(
+        "SKIPPING {arm}: sibling subc-core unavailable. This reports `ok` \
+         — set {REQUIRE_DAEMON_ENV}=1 to make it a failure instead."
+    )
+}
+
 /// Which condition is forcing the gate, for a panic message that would otherwise
 /// name the wrong cause.
 ///
@@ -345,7 +359,7 @@ macro_rules! seeded_or_skip {
         match start_seeded_vault().await {
             Some(v) => v,
             None => {
-                eprintln!("skipping real-daemon e2e: sibling subc-core unavailable (set CRED_REQUIRE_DAEMON=1 to require it)");
+                eprintln!("{}", skip_notice("real-daemon e2e"));
                 return;
             }
         }
@@ -738,7 +752,7 @@ async fn real_daemon_boot_gate_records_why_a_dangling_intent_forced_reauth() {
     {
         Some(v) => v,
         None => {
-            eprintln!("skipping boot-gate arm: sibling subc-core unavailable");
+            eprintln!("{}", skip_notice("boot-gate arm"));
             return;
         }
     };
@@ -890,7 +904,7 @@ async fn fixture_dogfood_import_opencode_round_trips_through_real_daemon() {
     {
         Some(v) => v,
         None => {
-            eprintln!("skipping fixture dogfood: sibling subc-core unavailable");
+            eprintln!("{}", skip_notice("fixture dogfood"));
             return;
         }
     };

@@ -298,6 +298,26 @@ supervisor probes:
 ones rather than failing whole, which is why a single dead credential never takes the
 vault down.
 
+The supervisor logs every non-ok probe, so its log is the history behind that table.
+**Strip the colour escapes before searching it**, or field-name patterns match nothing
+and return a confident zero:
+
+```sh
+sed -E 's/\x1b\[[0-9;]*m//g' ~/.local/share/cortexkit/run/subc.log \
+  | grep 'module reported non-ok health' | grep 'module_id=claustrum'
+```
+
+Without the `sed`, `status=` never appears as literal bytes — on disk it is
+`status\e[0m\e[2m=\e[0m` — so a search for it finds nothing whether or not the
+condition ever occurred. That log is also SHARED and interleaved across every
+supervised module, with lines spliced mid-field, so require both terms on one line
+rather than counting matches anywhere in the file.
+
+Measured 2026-08-11 across the whole log: 906 `Degraded` for this vault and no
+`Failing`, so the stalled-refresher arm of that table has never fired in production.
+The zero is only worth stating because the same predicate finds the one `Failing`
+that does exist fleet-wide — a zero from a pattern that cannot match is not evidence.
+
 To repair a flagged credential, re-login it and keep its handles:
 
 ```sh

@@ -2003,6 +2003,18 @@ pub struct AuthEvent {
 /// sequence of failures and what preceded them, small enough that a consumer stuck in
 /// a retry loop cannot grow the store without bound. Older rows for that credential
 /// are dropped as newer ones arrive.
+///
+/// SO THIS TABLE CANNOT ANSWER "HOW OFTEN DOES THIS CREDENTIAL FAIL", and that is a
+/// consequence rather than a decision. The cap bounds ROWS, not TIME, so the window
+/// it covers is a function of the failure rate itself: a credential that fails twice
+/// a month retains a year, while one in a retry loop retains minutes. Any rate
+/// computed from these rows is therefore biased toward whatever was failing most, and
+/// a credential whose rows all survive is indistinguishable from one whose earlier
+/// rows were evicted.
+///
+/// The audit chain is the place to ask about frequency: it is append-only, never
+/// trimmed, and records every invalidation that actually changed a credential. This
+/// table explains an incident; the chain counts them.
 pub const AUTH_EVENTS_PER_CREDENTIAL: u32 = 64;
 
 /// What a caller observed about a credential's authentication, for `auth_events`.

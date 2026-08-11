@@ -492,6 +492,26 @@ nothing). Expected counts at the time of writing: 7 end-to-end, 1 kill9, 4 rotat
 2 login. If a number drops, find out why before shipping; a suite that shrank is
 indistinguishable from one that passed.
 
+**Read the listing, not only the totals** — a test can leave the suite without the
+total falling. A `#[test]` attribute binds to whatever function follows it, so
+inserting a new test between an existing attribute and its function hands the
+attribute to the newcomer and silently unregisters the original. Both counts stay
+plausible (one test replaces another) and nothing fails. Measured here: a run
+reported nine tests with one name printed twice and another absent, all green.
+
+The cheap check is that every name appears exactly once, which the per-test lines
+already show. To verify a whole target, compare the attributes against what the
+runner registers:
+
+```sh
+grep -cE '^#\[(tokio::)?test(\(.*\))?\]' crates/credentials-module/tests/cli_admin.rs
+cargo test -p credentials-module --test cli_admin -- --list | grep -c ': test'
+```
+
+Match the attribute pattern loosely: `#[tokio::test(flavor = "multi_thread")]` is a
+test and an exact-string search for `#[tokio::test]` misses it, which reports a
+mismatch in the file rather than in the search.
+
 **Sign with a pinned identifier at build time, then place with a plain copy:**
 
 ```sh

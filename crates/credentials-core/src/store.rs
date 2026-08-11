@@ -390,6 +390,26 @@ pub struct EncryptedStore {
     // the other. Epoch monotonicity is therefore load-bearing for write custody here
     // and is not enforced by this crate, so it must be preserved by any change to
     // the lease — which will not be apparent from that crate's own tests.
+    //
+    // AND NOTHING ON THIS SIDE WOULD CATCH IT EITHER, which is the part worth
+    // stating rather than leaving as an exercise. The latch's own test rolls the
+    // epoch BACK by hand to make a later write succeed — i.e. it simulates the very
+    // reuse this comment forbids, precisely to prove the latch does not clear. So it
+    // asserts the local property while deliberately violating the inherited one, and
+    // cannot detect its loss.
+    //
+    // NOR DOES THE E2E, checked rather than assumed: the real-daemon suite proves
+    // MUTUAL EXCLUSION (the offline CLI is refused, exit 3, while the daemon holds
+    // the lease) and never reads the epoch, so a reused epoch would still exclude
+    // correctly and pass. Verifying monotonicity means observing the value rise
+    // across a real handover, and nothing in either crate does that today.
+    //
+    // Stated because a limitation named in prose reads as one that was handled. It
+    // was not: this is a dependency on another crate's invariant with no automated
+    // test on either side of the boundary. What exists is operational: the runbook's
+    // deploy acceptance reads the fence epoch across a restart, so a reused epoch
+    // would show up as a value that failed to rise — caught by a human comparing two
+    // numbers, if they compare them.
     fenced_out: AtomicBool,
 }
 

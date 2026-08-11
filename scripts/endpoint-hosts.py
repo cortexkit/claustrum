@@ -86,7 +86,13 @@ def discover() -> list[tuple[str, str, str]]:
                 # A templated host ({account}.snowflakecomputing.com) still has a
                 # pinnable suffix: the tenant varies, the provider domain must not.
                 host = urlsplit(m.group(2)).netloc
-                found.append((str(path.relative_to(ROOT)), m.group(1), host))
+                # POSIX separators always. `str(Path)` yields backslashes on Windows,
+                # so the manifest would read as 29 REMOVED plus 29 NEW there --
+                # every row "changed" while nothing in source did. The manifest is a
+                # committed artifact shared across platforms, so its keys cannot
+                # carry the local path flavour.
+                rel = path.relative_to(ROOT).as_posix()
+                found.append((rel, m.group(1), host))
     return sorted(found)
 
 

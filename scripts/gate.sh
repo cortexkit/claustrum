@@ -18,8 +18,20 @@
 # lets through exactly what it was trusted to catch.
 #
 # Matching the SET is not matching the STEPS: this gate once ran every CI arm and
-# still diverged, because the e2e arm dropped CI's --test-threads=1 and failed 8/8
-# on contention. Copy the flags, not just the command.
+# still diverged, because the e2e arm dropped CI's --test-threads=1. Copy the
+# flags, not just the command.
+#
+# AND EVEN A PERFECT MATCH IS ONE PLATFORM. CI runs ubuntu AND windows; this runs
+# wherever you are. A green gate followed by a red build is therefore EXPECTED for
+# anything platform-dependent, and has already happened once: the endpoint manifest
+# keyed rows by `str(Path)`, which is identical on posix and backslashed on Windows,
+# so ubuntu passed while windows reported all 29 rows removed and re-added. Nothing
+# runnable here could have caught it.
+#
+# So this gate's claim is bounded: it proves the checks pass ON THIS MACHINE. Treat
+# path rendering, line endings, and shell builtins as unverified until CI says
+# otherwise — and do not let a green run here become the reason to skip reading a
+# red one there.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."

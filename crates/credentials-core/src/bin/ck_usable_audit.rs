@@ -93,6 +93,7 @@ fn main() {
 
     let now = now_ms();
     let (mut serviceable, mut stranded, mut unreadable) = (0, 0, 0);
+    let mut unservable_identity = 0;
 
     for row in rows {
         let (id, version, state, blob) = row.expect("row");
@@ -116,6 +117,20 @@ fn main() {
                 continue;
             }
         };
+
+        // An identity that renders a value while resolving nothing. The sink in
+        // `with_identity` now normalises this away at WRITE time, but a record sealed
+        // BEFORE that landed deserializes with the shape intact and serves it --
+        // `VaultRecord::decode` is plain serde and does not pass through the sink.
+        // Reported per record rather than counted, because the repair is per record
+        // (a re-login or re-import) and a bare count would not say which.
+        if !record.identity.is_servable() {
+            println!(
+                "  {id:34} IDENTITY    email with no account_id: serves a label that \
+                 resolves nothing (re-login or re-import to repair)"
+            );
+            unservable_identity += 1;
+        }
 
         let oauth = record.oauth.as_ref();
         if !is_serviceable(oauth) {
@@ -151,7 +166,10 @@ fn main() {
     }
 
     println!();
-    println!("  serviceable: {serviceable}   stranded: {stranded}   unreadable: {unreadable}");
+    println!(
+        "  serviceable: {serviceable}   stranded: {stranded}   unreadable: {unreadable}   \
+         unservable identity: {unservable_identity}"
+    );
     println!();
     println!("  Serviceable means the record decrypts under the current master key and");
     println!("  holds material the engine can either serve or refresh from. It is NOT a");

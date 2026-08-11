@@ -152,8 +152,34 @@ impl VaultRecord {
 
     /// Attach non-secret account identity (builder-style, used by login flows that
     /// capture identity from the exchange response).
+    ///
+    /// AN EMAIL WITH NO `account_id` IS NORMALISED AWAY HERE rather than stored,
+    /// because that shape is worse than storing nothing: the read surface serves
+    /// `account_id` as the identity consumers resolve and `email` as display, so the
+    /// record would render a value while resolving nothing and a consumer labelling
+    /// per account would collapse its accounts into one unlabelled entry -- a symptom
+    /// that reads as "identity was never captured".
+    ///
+    /// Enforced at the sink rather than trusted at each source. There are three
+    /// capture sites and they do not share a shape: `account_id` has exactly two
+    /// origins (Anthropic's inline account uuid, ChatGPT's token claim) while `email`
+    /// has a third (any OIDC `id_token`), so a provider that returns an id_token
+    /// without either account form produces the bad shape without anyone writing it
+    /// deliberately. xAI requests `openid`+`email` and matches neither account form,
+    /// so it is one provider-side response change away from doing exactly that.
+    ///
+    /// Normalising beats refusing: an identity is display metadata, and failing a
+    /// login over it would trade a labelling gap for a lost credential.
     pub fn with_identity(mut self, identity: RecordIdentity) -> Self {
-        self.identity = identity;
+        self.identity = if identity.is_servable() {
+            identity
+        } else {
+            RecordIdentity {
+                account_id: None,
+                email: None,
+                org_name: identity.org_name,
+            }
+        };
         self
     }
 
@@ -247,6 +273,45 @@ mod tests {
             "a record that captured nothing is not the failure being described: it \
              claims no identity, so nothing is misled"
         );
+    }
+
+    /// The sink drops an email that arrives without an `account_id`.
+    ///
+    /// The predicate alone only describes the bad shape; this is what stops it being
+    /// STORED. Three capture sites write identities and they do not share a shape, so
+    /// checking each source is a rule someone has to remember at a fourth -- and the
+    /// site most likely to produce it (an OIDC id_token from a provider with no
+    /// account claim) reaches the bad shape without anyone writing it deliberately.
+    #[test]
+    fn an_email_without_an_account_id_is_not_stored_on_the_record() {
+        let record = VaultRecord::new_static(CredentialKind::ApiKey, "t", b"k".to_vec(), None)
+            .with_identity(RecordIdentity {
+                account_id: None,
+                email: Some("a@x.com".into()),
+                org_name: Some("Acme".into()),
+            });
+        assert_eq!(
+            record.identity.email, None,
+            "an email that resolves no identity must not be stored: it renders a \
+             value while labelling nothing"
+        );
+        assert_eq!(
+            record.identity.org_name.as_deref(),
+            Some("Acme"),
+            "org_name is display-only and independent -- dropping it too would lose \
+             information for no reason"
+        );
+
+        // THE DISAMBIGUATOR: a sink that dropped every identity would satisfy the
+        // assertion above. A servable identity must survive intact.
+        let kept = VaultRecord::new_static(CredentialKind::ApiKey, "t", b"k".to_vec(), None)
+            .with_identity(RecordIdentity {
+                account_id: Some("acct-1".into()),
+                email: Some("a@x.com".into()),
+                org_name: None,
+            });
+        assert_eq!(kept.identity.account_id.as_deref(), Some("acct-1"));
+        assert_eq!(kept.identity.email.as_deref(), Some("a@x.com"));
     }
 
     fn oauth_cred() -> OAuthCredential {

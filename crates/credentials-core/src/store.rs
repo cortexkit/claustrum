@@ -954,9 +954,25 @@ impl EncryptedStore {
         let audit_key = self.audit_key.clone();
         let changed = self
             .fenced_write(|tx| {
+                // `state <> needs_reauth` makes this a STATE TRANSITION rather than a
+                // repeatable write, and that is what bounds the audit chain here.
+                //
+                // The version guard alone does not: invalidating does not bump
+                // record_version, so a consumer reporting the same version twice
+                // matched twice, and every match appends to a chain that is
+                // append-only by design and must never be trimmed. Measured before
+                // this guard existed: eight identical reports produced eight
+                // `report_auth_failure` entries, seven of which changed nothing --
+                // the credential was already `needs_reauth` after the first.
+                //
+                // With the clause, a repeat matches zero rows and audits nothing,
+                // while the FIRST report still audits exactly as before. The
+                // diagnostic record of the repeats is not lost: `auth_events` records
+                // every report either way, which is what that table is for, and it is
+                // bounded per credential where the chain cannot be.
                 let n = tx.execute(
                     "UPDATE credentials SET state = ?2, updated_at_ms = ?3 \
-                 WHERE credential_id = ?1 AND record_version = ?4",
+                 WHERE credential_id = ?1 AND record_version = ?4 AND state <> ?2",
                     rusqlite::params![
                         credential_id,
                         RecordState::NeedsReauth.as_str(),
@@ -3076,6 +3092,73 @@ mod tests {
         assert!(
             events[0].applied,
             "a report at the current version must record as applied"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A repeated report audits ONCE, because the chain cannot be trimmed.
+    ///
+    /// The version guard does not bound this on its own: invalidating does not bump
+    /// `record_version`, so a consumer reporting the same version twice matches twice,
+    /// and every match appends to a log that is append-only by design. Requiring an
+    /// actual state transition makes the repeat a no-op.
+    ///
+    /// The second arm is the disambiguator: a guard that simply refused everything
+    /// would satisfy the first assertion alone.
+    #[test]
+    fn a_repeated_report_audits_once_but_is_recorded_every_time() {
+        let (root, store) = tmp_store(65);
+        store.create("id", &oauth_record()).expect("create");
+        let ctx = AuditCtx {
+            op: AuditOp::ReportAuthFailure,
+            actor: "conn-1",
+            alarm: None,
+        };
+        let obs = AuthObservation {
+            kind: "consumer_report",
+            provider_status: Some(401),
+            detail: None,
+        };
+
+        // First report at the served version: a real transition.
+        let hit = store
+            .invalidate_if_version_reported("id", 1, ctx, Some(obs))
+            .expect("first report");
+        assert!(hit, "the first report must invalidate");
+
+        // Six more identical reports. The credential is already needs_reauth, and the
+        // version has not moved, so each still MATCHES the version guard.
+        for _ in 0..6 {
+            let hit = store
+                .invalidate_if_version_reported("id", 1, ctx, Some(obs))
+                .expect("repeat report");
+            assert!(!hit, "a repeat changes nothing and must report so");
+        }
+
+        let audited = store
+            .read_audit(None)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.op == "report_auth_failure")
+            .count();
+        assert_eq!(
+            audited, 1,
+            "only the transition may append to the untrimmable chain; got {audited}"
+        );
+
+        // THE DISAMBIGUATOR: every report is still recorded as a diagnostic, which is
+        // the table that CAN be bounded. A guard that dropped these too would pass the
+        // assertion above while destroying the evidence of the loop.
+        let events = store.recent_auth_events(100).expect("read events");
+        assert_eq!(
+            events.len(),
+            7,
+            "every report must still be recorded as an observation"
+        );
+        assert_eq!(
+            events.iter().filter(|e| e.applied).count(),
+            1,
+            "exactly one of them applied"
         );
         let _ = std::fs::remove_dir_all(&root);
     }

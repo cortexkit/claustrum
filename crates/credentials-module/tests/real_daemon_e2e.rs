@@ -34,6 +34,9 @@ use common::{
     connect_consumer, count_alarm_rows, credential_get, credential_get_many, raw_route_request,
     route_open, unique_temp_dir, wait_for_catalog, MODULE_ID, SETUP_TIMEOUT,
 };
+use cortexkit_store::{open_sqlite, Isolation, StorageBackend, StorageDescriptor};
+use credentials_core::resolver::{KeySource, ResolverConfig};
+use credentials_core::store::EncryptedStore;
 
 const SUBCONSCIOUS_REL: &str = "../../../subconscious";
 
@@ -606,6 +609,175 @@ async fn real_daemon_malformed_request_is_typed_error_not_crash() {
 
 /// Operator dogfood on a DISPOSABLE FIXTURE — the exact real operator flow, but on a
 /// fake auth.json (no real credential, throwaway operator-path key, never the
+/// The DAEMON's boot gate resolves a dangling refresh intent and records WHY.
+///
+/// Every other proof of this path reconciles IN-TEST: the kill-9 conformance test
+/// spawns a real helper and SIGKILLs it, then constructs its own `RefreshEngine` and
+/// calls `reconcile`. That proves the engine, not the daemon — a boot gate that never
+/// ran reconciliation would pass it. This is the arm that drives the real binary.
+///
+/// Offline by construction, which is what keeps it cheap: reconciliation never calls
+/// the rotating refresh endpoint, and the optional `non_mutating_check` is a trait
+/// default returning `None` that no shipped adapter overrides. So a dangling intent
+/// resolves to `needs_reauth` with reason `no_validity_check` and no provider is
+/// contacted.
+///
+/// ACCEPTANCE: delete the `record_reconciliation_reasons` call from `build_surface`
+/// and this test must fail. If it still passes, it is proving the function rather
+/// than the daemon, which is the exact defect it exists to close.
+#[tokio::test]
+#[ignore = "builds subc-core in ../subconscious and binds loopback ports"]
+async fn real_daemon_boot_gate_records_why_a_dangling_intent_forced_reauth() {
+    const FAKE_ACCESS: &str = "boot-gate-access-NOT-REAL";
+    const FAKE_REFRESH: &str = "boot-gate-refresh-NOT-REAL";
+    let fixture = serde_json::json!({
+        "refresh": FAKE_REFRESH,
+        "access": FAKE_ACCESS,
+        "expires": 1_999_999_999_000i64,
+    });
+
+    let seeded = match start_vault_with_seed(|ctx| {
+        let json_path = std::path::Path::new(&ctx.key_path)
+            .parent()
+            .unwrap()
+            .join("boot-gate-auth.json");
+        std::fs::write(&json_path, serde_json::to_vec(&fixture).unwrap()).unwrap();
+        run_cli(&[
+            "import",
+            "--source",
+            "opencode",
+            "--id",
+            "opencode:anthropic",
+            "--json",
+            &json_path.to_string_lossy(),
+            "--data-dir",
+            &ctx.data_dir,
+            "--key-path",
+            &ctx.key_path,
+        ]);
+
+        // Leave a DANGLING INTENT: exactly what a crash between the refresh's two
+        // transactions leaves behind (intent written, commit never reached). No CLI
+        // verb writes one, so the seed opens the store directly — this closure runs
+        // BEFORE the supervisor spawns, so the single-writer lease is free.
+        //
+        // The hash must MATCH the stored refresh token: a mismatch takes the
+        // corruption-guard branch and yields `hash_mismatch` instead of the
+        // ordinary interrupted-rotation reason this test is about.
+        let descriptor = StorageDescriptor {
+            module_id: MODULE_ID.to_string(),
+            storage_namespace: "default".to_string(),
+            isolation: Isolation::Module,
+            backend: StorageBackend::Sqlite {
+                path: std::path::Path::new(&ctx.data_dir)
+                    .join("store.db")
+                    .to_string_lossy()
+                    .into_owned(),
+            },
+        };
+        let sqlite = open_sqlite(&descriptor).expect("open store for seeding");
+        let key = credentials_core::resolver::resolve(
+            &ResolverConfig {
+                data_dir: PathBuf::from(&ctx.data_dir),
+                source: KeySource::OperatorPath {
+                    path: PathBuf::from(&ctx.key_path),
+                },
+            },
+            None,
+        )
+        .expect("resolve the operator key");
+        let store = EncryptedStore::open(sqlite, key).expect("open encrypted store");
+        store
+            .open_intent(
+                "opencode:anthropic",
+                1,
+                &credentials_core::store::refresh_token_hash(FAKE_REFRESH),
+            )
+            .expect("seed a dangling intent");
+
+        (
+            "opencode:anthropic".to_string(),
+            FAKE_ACCESS.as_bytes().to_vec(),
+        )
+    })
+    .await
+    {
+        Some(v) => v,
+        None => {
+            eprintln!("skipping boot-gate arm: sibling subc-core unavailable");
+            return;
+        }
+    };
+
+    // POLL FOR THE ROW RATHER THAN BARRIER ON CATALOG-LIVE.
+    //
+    // Catalog-live looks like the right barrier and is NOT: the module sends HELLO
+    // (main.rs:225) BEFORE `build_surface` runs the boot gate (main.rs:230), so it can
+    // answer the catalog while reconciliation is still in flight. A single read after
+    // `wait_for_catalog` passed alone and failed under the parallel suite -- timing
+    // luck, reported as "the boot gate recorded no reason", which reads as a missing
+    // feature rather than a race.
+    //
+    // The supervisor's connection file is weaker still: it appears before the module
+    // has started. So the honest barrier is the ROW ITSELF, bounded by the same setup
+    // timeout the rest of the rig uses.
+    let deadline = tokio::time::Instant::now() + SETUP_TIMEOUT;
+    let boot = loop {
+        let events = credentials_core::store::read_auth_events_read_only(&seeded.db_path, 10)
+            .expect("read auth events from the running vault");
+        if let Some(e) = events.iter().find(|e| e.kind == "reconcile_needs_reauth") {
+            break e.clone();
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the daemon's boot gate recorded no reason within {SETUP_TIMEOUT:?}; rows: {events:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert_eq!(boot.credential_id, "opencode:anthropic");
+    assert_eq!(
+        boot.detail.as_deref(),
+        Some("no_validity_check"),
+        "the reason must name the CAUSE -- the audit chain's entry for this is a \
+         generic invalidate that cannot distinguish it from any other"
+    );
+
+    // The credential itself really was invalidated, so the recorded reason describes
+    // something that happened rather than sitting beside a healthy row. Read the state
+    // directly rather than through `ck auth list`, which takes the single-writer lease
+    // the running daemon holds and would refuse -- correctly.
+    let conn = rusqlite::Connection::open_with_flags(
+        format!("file:{}?mode=ro", seeded.db_path.display()),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+    )
+    .expect("open the live vault read-only");
+    let state: String = conn
+        .query_row(
+            "SELECT state FROM credentials WHERE credential_id = ?1",
+            rusqlite::params!["opencode:anthropic"],
+            |r| r.get(0),
+        )
+        .expect("read the reconciled credential");
+    assert_eq!(
+        state, "needs_reauth",
+        "the boot gate must have invalidated the credential it recorded a reason for"
+    );
+
+    // And the intent is GONE: reconciliation resolves the dangling intent rather than
+    // leaving it for the next boot to find again.
+    let intents: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM refresh_intent WHERE credential_id = ?1",
+            rusqlite::params!["opencode:anthropic"],
+            |r| r.get(0),
+        )
+        .expect("count intents");
+    assert_eq!(
+        intents, 0,
+        "the dangling intent must be cleared, not carried"
+    );
+}
+
 /// keychain). Proves the import path end-to-end: `ck-auth import --source
 /// opencode` of an auth.json-shaped fixture, mint a handle, then drive
 /// `credential.get` through the REAL supervised daemon and assert the IMPORTED

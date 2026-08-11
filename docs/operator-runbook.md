@@ -678,8 +678,35 @@ no error. Pinning also makes the published hash equal the placed hash, so a plai
 |-------|----------------------|
 | deployed hash equals the **new** build's hash, and differs from the **old** one | publish both values — comparing the system to itself passes trivially |
 | running process's image inode equals the deploy path's inode | proves the process is not still executing an unlinked predecessor |
+| the open `store.db` is the one you expect (below) | every other check answers "is it healthy", not "is it the right vault" |
 | `ck auth status` reports every credential serving | a daemon whose master key was unavailable at boot is alive and serving nothing |
 | mint a throwaway handle, then revoke it | exercises the fenced write path and its atomic audit append |
+
+```sh
+lsof -p "$(pgrep -x ck-claustrum)" | awk '$NF ~ /store\.db$/ {print $NF}'
+# /Users/<you>/.local/share/cortexkit/claustrum/store.db
+```
+
+**Ask the kernel, not the process.** This reads what the daemon actually has open
+rather than what it believes it opened, so it survives a stale config, a
+supervisor passing a different descriptor, and a second vault on the same host —
+all cases where a self-reported path would agree with the wrong answer. The vault
+never announces its store, and does not need to while this is available.
+
+**`pgrep -x`, never `pgrep -f`, and this is not style.** `-f` matches the whole
+command line, so it also matches any SHELL whose script text contains the name —
+including the script running the check. Measured: inside a `bash -c` block that
+mentions `ck-claustrum`, `-f` returned two pids (the daemon and the script) while
+`-x` returned one. Piping that through `head -1` then hands `lsof` the wrong
+process, which reports no `store.db` at all and reads as "the daemon has no vault
+open". Worse than consistently wrong: it depends on the text of the script around
+it, so it works until someone edits a comment.
+
+Relocating the data directory is safe in the sense that matters: **the daemon
+never bootstraps**, so a moved vault finds no key for its new keychain scope and
+refuses to serve rather than coming up empty. That is worth knowing precisely
+because the opposite — start fresh, look healthy — is the usual behaviour for a
+state directory.
 
 The last two are the ones that matter. A restarted daemon can be running, answering,
 and serving nothing — so the acceptance assertion is **"N/N serving"**, never "the

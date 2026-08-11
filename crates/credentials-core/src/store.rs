@@ -1149,6 +1149,27 @@ impl EncryptedStore {
                     "DELETE FROM handles WHERE credential_id = ?1",
                     rusqlite::params![credential_id],
                 )?;
+                // Diagnostic events go WITH the credential, and this is the one
+                // place they can go.
+                //
+                // `auth_events` is capped per credential, but the trim runs on
+                // insert -- and a removed credential never gets another insert, so
+                // without this its rows would be the one thing in the store nothing
+                // can ever reclaim. Small per removal and driven by an operator
+                // rather than by traffic, so this is tidiness rather than a bound,
+                // but it is also the difference between `ck auth events` showing a
+                // live vault and showing a graveyard.
+                //
+                // Nothing forensic is lost: the chain holds this credential's whole
+                // history including the removal itself, and it is the chain that is
+                // evidence -- these rows are explanation, and there is nothing left
+                // to explain once the credential is gone. A removal ordered BECAUSE
+                // a credential was failing is the case to think about, and there the
+                // events were read before the removal, not after.
+                tx.execute(
+                    "DELETE FROM auth_events WHERE credential_id = ?1",
+                    rusqlite::params![credential_id],
+                )?;
                 append_audit_tx(
                     tx,
                     &audit_key,
@@ -2323,6 +2344,23 @@ mod tests {
             .put_handle_hash("deadbeef", "gone", AuditCtx::vault(AuditOp::MintHandle))
             .expect("mint handle");
         store.open_intent("gone", 1, "rhash").expect("open intent");
+        // Diagnostic events for both, so removal can be shown to take one and spare
+        // the other. These are the only rows in the store with no other reclaim path:
+        // the per-credential cap trims on INSERT, and a removed credential never gets
+        // another insert.
+        for id in ["gone", "keep"] {
+            store
+                .record_auth_event(
+                    id,
+                    AuthObservation {
+                        kind: "consumer_report",
+                        provider_status: Some(401),
+                        detail: None,
+                    },
+                    Some(1),
+                )
+                .expect("record event");
+        }
 
         // Unknown id: loud NotFound, nothing audited for it.
         match store.remove_audited("nope", AuditCtx::vault(AuditOp::Remove)) {
@@ -2338,6 +2376,18 @@ mod tests {
         assert!(matches!(store.meta("gone"), Err(StoreOpError::NotFound)));
         assert!(store.read_intent("gone").expect("read intent").is_none());
         assert!(store.meta("keep").is_ok());
+        // Diagnostics went with it, and ONLY its own: a removal that swept the table
+        // would take the history of every credential still in service.
+        let events = store.recent_auth_events(100).expect("read events");
+        assert!(
+            !events.iter().any(|e| e.credential_id == "gone"),
+            "a removed credential's events must go with it -- nothing else can reclaim them"
+        );
+        assert_eq!(
+            events.iter().filter(|e| e.credential_id == "keep").count(),
+            1,
+            "a sibling credential's events must survive the removal"
+        );
         // The audit chain records the removal and still verifies end-to-end.
         let entries = store.read_audit(None).expect("read audit");
         let last = entries.last().expect("has entries");

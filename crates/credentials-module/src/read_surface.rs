@@ -227,6 +227,21 @@ pub struct ReadSurface {
 /// serving a stale snapshot as healthy. A small multiple of `HEALTH_REFRESH_INTERVAL`
 /// (5s) so a single slow scan does not false-trigger, but a genuinely stuck refresher is
 /// caught within a few probe cycles.
+///
+/// THE HEADROOM IS ENORMOUS AND THAT IS THE POINT, because the two quantities are not
+/// the same kind of thing. Measured against the live vault (23 credentials), the scan
+/// this must not false-trigger on runs in UNDER 2ms — four orders of magnitude inside
+/// the limit. The window is not sized to cover a slow scan; it is sized so that a
+/// refresher which has STOPPED is caught within a few probe cycles, and a scan taking
+/// anywhere near 20s would mean the store is wedged, which is a genuine `Failing`
+/// rather than a false trigger.
+///
+/// Note this bound's governing quantity is not stored anywhere: `last_refresh_ms`
+/// records the completion INSTANT, never the duration, so nothing in the vault can
+/// answer "how long do scans take" after the fact. It has to be measured directly, as
+/// above. That is fine while the answer is 2ms against 20s; it would stop being fine if
+/// the scan ever grew a network or keychain dependency, and whoever adds one should
+/// re-measure rather than trusting this note.
 const HEALTH_STALE_LIMIT_MS: i64 = 20_000;
 
 fn now_ms() -> i64 {

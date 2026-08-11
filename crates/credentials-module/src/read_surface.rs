@@ -553,6 +553,23 @@ impl ReadSurface {
             let mut limiter = self.limiter.lock().await;
             limiter.admit(connection_id, probe_key, Instant::now())
         };
+        // This writes an EVENT to the audit chain, not a state transition, and it is
+        // correct that it does -- which is worth stating, because the sibling rule on
+        // the invalidate path is the opposite and someone applying it here would break
+        // this.
+        //
+        // There, a consumer repeating a report about an unchanged credential was
+        // restating one fact, and each restatement appended to a log that can never be
+        // trimmed; the fix was to require an actual state change. Here `first` is
+        // per-connection and resets when the connection drops, so a reconnecting
+        // sweeper does append a fresh entry per session -- deliberately. Two anomalous
+        // sessions are two events, not one fact stated twice, and collapsing them
+        // would hide exactly the pattern this detects: someone reconnecting to evade a
+        // per-connection ceiling.
+        //
+        // The bound is that reaching it costs a real sweep (the ceilings are distinct
+        // handles and fetch rate within a window), so entries track attacker effort
+        // rather than being free to emit.
         if let Admission::Anomaly { first: true } = admission {
             let _ = self.engine.store().append_audit(&AuditRecord {
                 op: AuditOp::FetchAnomaly,

@@ -298,10 +298,96 @@ fn logout_is_reversible_stop_serving_and_status_reports_it() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// `invalidate` reports what it actually did, and reaches the state it claims.
+///
+/// The verb exits 0 for a credential that does not exist -- measured -- printing
+/// "invalidated <id>; revoked 0 handle(s)". So an exit status says nothing here, and
+/// the observable that separates a real invalidation from a no-op is the reported
+/// handle count together with the resulting lifecycle state.
+///
+/// The store layer's own test covers `invalidate_audited`. This covers the verb: that
+/// the CLI reaches that path, that its count comes from the transaction rather than
+/// being printed unconditionally, and that a consumer's handle stops resolving.
+#[test]
+fn invalidate_reports_the_handles_it_revoked_and_leaves_the_row_needing_reauth() {
+    let root = tmp_root("invalidate");
+    let data_dir = root.join("data");
+    let key_path = root.join("secrets").join("master.key");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    std::fs::create_dir_all(key_path.parent().unwrap()).unwrap();
+    let global = |c: &mut Command| {
+        c.arg("--data-dir")
+            .arg(&data_dir)
+            .arg("--key-path")
+            .arg(&key_path);
+    };
+
+    let mut c = cli();
+    c.arg("bootstrap");
+    global(&mut c);
+    assert!(c.output().unwrap().status.success());
+
+    let mut c = cli();
+    c.arg("put")
+        .arg("--id")
+        .arg("apikey:inv")
+        .arg("--payload")
+        .arg("k");
+    global(&mut c);
+    assert!(c.output().unwrap().status.success());
+
+    for _ in 0..2 {
+        let mut c = cli();
+        c.arg("mint-handle").arg("--id").arg("apikey:inv");
+        global(&mut c);
+        assert!(c.output().unwrap().status.success());
+    }
+
+    let mut c = cli();
+    c.arg("invalidate").arg("--id").arg("apikey:inv");
+    global(&mut c);
+    let out = c.output().expect("run invalidate");
+    let report = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "invalidate: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        report.contains("revoked 2 handle(s)"),
+        "the count must come from the transaction, not be printed regardless; got: {report}"
+    );
+
+    let mut c = cli();
+    c.arg("list");
+    global(&mut c);
+    let rows = String::from_utf8_lossy(&c.output().unwrap().stdout).into_owned();
+    assert!(
+        rows.contains("needs_reauth") && rows.contains("apikey:inv"),
+        "the row must be left needing reauth: {rows}"
+    );
+
+    // The negative arm, and the reason the count above is the assertion rather than
+    // the exit status: the same verb on an absent credential also succeeds.
+    let mut c = cli();
+    c.arg("invalidate").arg("--id").arg("apikey:never-existed");
+    global(&mut c);
+    let out = c.output().expect("run invalidate on an absent id");
+    let report = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "an absent id still exits 0");
+    assert!(
+        report.contains("revoked 0 handle(s)"),
+        "a no-op must report zero, which is what makes the positive count meaningful; \
+         got: {report}"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// `put --replace` is the routine static-key rotation path: it bumps
 /// `record_version` (the consumer cache-invalidation signal) and keeps the
 /// existing handle, exactly like `login --replace` does for an OAuth record.
-#[test]
+///
 /// Note the property under test belongs to the REPLACE APPLIER, not to `put`.
 ///
 /// `put --replace` and `login --replace` both build an `AdminOpBody::Store` carrying
@@ -314,6 +400,7 @@ fn logout_is_reversible_stop_serving_and_status_reports_it() {
 /// my handle?" would not find it here. The OAuth login arm is not driven instead
 /// because it needs a real provider exchange; this arm reaches the shared applier
 /// offline.
+#[test]
 fn put_replace_rotates_a_static_key_bumping_version_and_keeping_the_handle() {
     let root = tmp_root("put-replace");
     let data_dir = root.join("data");

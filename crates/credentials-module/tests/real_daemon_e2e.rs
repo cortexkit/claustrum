@@ -728,10 +728,23 @@ async fn real_daemon_boot_gate_records_why_a_dangling_intent_forced_reauth() {
         if let Some(e) = events.iter().find(|e| e.kind == "reconcile_needs_reauth") {
             break e.clone();
         }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the daemon's boot gate recorded no reason within {SETUP_TIMEOUT:?}; rows: {events:?}"
-        );
+        if tokio::time::Instant::now() >= deadline {
+            // SAY WHICH FAILURE THIS IS. A bare "no reason recorded" reads as an
+            // ABSENCE and points at the recording path -- but a barrier that fired too
+            // early produces the identical text, so the next reader hunts a bug that
+            // may not exist.
+            //
+            // The intent row discriminates: still present means the daemon never
+            // reconciled (did not start, or slower than the timeout); cleared means it
+            // DID reconcile and recorded nothing, which is the defect under test.
+            let intent_remains = intent_count(&seeded.db_path, "opencode:anthropic") > 0;
+            panic!(
+                "no boot-gate reason within {SETUP_TIMEOUT:?}. Dangling intent still \
+                 present: {intent_remains}. If TRUE the daemon never reconciled \
+                 (start-up or timing, NOT the recording path); if FALSE it reconciled \
+                 and recorded nothing, which is the defect under test. rows: {events:?}"
+            );
+        }
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
     assert_eq!(boot.credential_id, "opencode:anthropic");
@@ -765,17 +778,31 @@ async fn real_daemon_boot_gate_records_why_a_dangling_intent_forced_reauth() {
 
     // And the intent is GONE: reconciliation resolves the dangling intent rather than
     // leaving it for the next boot to find again.
-    let intents: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM refresh_intent WHERE credential_id = ?1",
-            rusqlite::params!["opencode:anthropic"],
-            |r| r.get(0),
-        )
-        .expect("count intents");
     assert_eq!(
-        intents, 0,
+        intent_count(&seeded.db_path, "opencode:anthropic"),
+        0,
         "the dangling intent must be cleared, not carried"
     );
+}
+
+/// Count a credential's dangling refresh intents, lease-free against a RUNNING vault.
+///
+/// Used as an assertion and — more importantly — inside the poll's timeout message,
+/// where it separates "the daemon never reconciled" from "it reconciled and recorded
+/// nothing". Those two produce identical symptoms and call for opposite
+/// investigations.
+fn intent_count(db_path: &Path, credential_id: &str) -> i64 {
+    let conn = rusqlite::Connection::open_with_flags(
+        format!("file:{}?mode=ro", db_path.display()),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+    )
+    .expect("open the live vault read-only");
+    conn.query_row(
+        "SELECT COUNT(*) FROM refresh_intent WHERE credential_id = ?1",
+        rusqlite::params![credential_id],
+        |r| r.get(0),
+    )
+    .expect("count intents")
 }
 
 /// keychain). Proves the import path end-to-end: `ck-auth import --source

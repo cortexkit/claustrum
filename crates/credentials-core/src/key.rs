@@ -23,6 +23,20 @@ pub const MASTER_KEY_LEN: usize = 32;
 
 /// The key fingerprint is the first 8 bytes of a domain-separated SHA-256 of the
 /// key. Eight bytes is ample for a fail-fast check (see the module docs).
+///
+/// CHANGING THIS WIDTH BRICKS EVERY EXISTING VAULT, and no test says so, because
+/// every assertion about the fingerprint derives its expectation from this same
+/// constant and therefore moves with it. Measured on a real vault: bootstrap at 8,
+/// rebuild at 4, and the next open fails with `vault_secrets audit-key row has an
+/// invalid key_id fingerprint '<16 hex chars>' (corrupt anchor)` -- the store is
+/// intact and unreadable, and the operator is told the vault is corrupt rather than
+/// that the binary changed.
+///
+/// The reason is that the fingerprint is PERSISTED as plaintext hex in
+/// `vault_secrets` and re-derived on open, so the width is an on-disk format
+/// parameter rather than an implementation detail. It is a compatibility constant
+/// with no migration path: a rotation cannot help, since resolving the key requires
+/// reading the anchor that no longer parses.
 pub const KEY_ID_LEN: usize = 8;
 
 /// Domain-separation label for the key fingerprint, so a `KeyId` can never
@@ -159,6 +173,18 @@ mod tests {
         let restored = KeyId::from_bytes(*id.as_bytes());
         assert_eq!(id, restored);
         assert_eq!(id.to_hex().len(), KEY_ID_LEN * 2);
+        // AND against a LITERAL, because the assertion above derives both sides from
+        // the same constant and so cannot fail when the constant moves. The width is
+        // persisted in `vault_secrets` and re-derived on open, so a change to it makes
+        // every existing vault unreadable -- measured: an existing store then refuses
+        // with "corrupt anchor", telling the operator the vault is broken rather than
+        // that the binary changed. This literal is the only thing that reddens.
+        assert_eq!(
+            id.to_hex().len(),
+            16,
+            "the on-disk key fingerprint is 16 hex chars; changing it bricks every \
+             existing vault with no migration path"
+        );
         assert!(id.to_hex().chars().all(|c| c.is_ascii_hexdigit()));
     }
 

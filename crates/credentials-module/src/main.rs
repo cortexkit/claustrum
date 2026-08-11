@@ -2046,6 +2046,15 @@ mod tests {
 
         // AT the cap: every item is served, with its own payload — so the batch path
         // works and the refusal below is about the bound, not about get_many at all.
+        //
+        // WHAT THIS TEST CANNOT PROVE, stated so nobody reads it as covering more: it
+        // seeds GET_MANY_MAX handles and asserts against GET_MANY_MAX, so both sides
+        // move together and the cap's VALUE is invisible here — measured, widening it
+        // to 1000 leaves this green. That is the correct scope for a unit test of the
+        // batch path, but it means the value is pinned elsewhere: the e2e arm
+        // `real_daemon_over_cap_get_many_is_rejected` sends a literal 9 items over the
+        // wire and fails if the cap moves. Deleting that arm would leave the bound
+        // unproven while this test stays green.
         let served = surface.get_many(81, &params(&handles)).await;
         assert_eq!(served.len(), GET_MANY_MAX, "a batch at the cap is served");
         for (i, outcome) in served.iter().enumerate() {

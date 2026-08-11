@@ -78,6 +78,9 @@ pub enum Reconciliation {
 /// Why a dangling intent resolved to `needs_reauth` (for the audit alarm).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReauthReason {
+    // Note for anyone adding a variant: [`ReauthReason::as_str`] is written to a
+    // durable diagnostics row, so a name here becomes a stored value an operator
+    // reads after an incident. Keep them short and descriptive of the CAUSE.
     /// No non-mutating validity check exists for this adapter (the v1 default): an
     /// interrupted rotation is INDETERMINATE, so fail safe to re-login.
     NoValidityCheck,
@@ -86,6 +89,20 @@ pub enum ReauthReason {
     /// The stored refresh token's hash did not match the intent's — a write
     /// occurred without clearing the intent (rogue / corruption guard).
     HashMismatch,
+}
+
+impl ReauthReason {
+    /// The stable string recorded for this reason.
+    ///
+    /// Distinct from `Debug` because this value is persisted: a rename of the variant
+    /// must not silently change what past rows meant.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReauthReason::NoValidityCheck => "no_validity_check",
+            ReauthReason::CheckInvalid => "check_invalid",
+            ReauthReason::HashMismatch => "hash_mismatch",
+        }
+    }
 }
 
 /// A refresh-on-read failure surfaced to the read surface.

@@ -351,10 +351,24 @@ async fn build_surface(
     let engine = Arc::new(RefreshEngine::new(store, adapters, http));
 
     // THE BOOT GATE: resolve every dangling intent before serving any read.
-    engine
+    //
+    // Each outcome names WHY a credential was forced to needs_reauth, and that reason
+    // is otherwise unrecoverable: the store's audit entry for these is a generic
+    // `invalidate` from actor `vault`, identical whether the adapter had no validity
+    // check, ran one and it failed, or the record could not be read. Only the
+    // corruption-guard arm writes a distinguishing alarm. So an operator asking why a
+    // credential needed re-login after a crash gets no answer unless the reason is
+    // recorded here.
+    //
+    // Written to `auth_events` rather than the chain: the chain already holds the
+    // authoritative invalidate, and this is the explanation, which is exactly the
+    // split that table exists for. Best-effort -- a diagnostics write must never fail
+    // the boot gate, whose job is to resolve intents before serving reads.
+    let outcomes = engine
         .reconcile()
         .await
         .map_err(|e| ModuleError::Message(format!("boot reconciliation: {e}")))?;
+    record_reconciliation_reasons(&engine, &outcomes);
 
     // The admin surface shares the engine (same store + per-credential single-flight
     // locks), so a route-driven admin write and a refresh for one credential are
@@ -369,6 +383,37 @@ async fn build_surface(
         ReadSurface::new(engine, FetchLimiter::new(Caps::default())),
         admin,
     ))
+}
+
+/// Record WHY boot reconciliation forced any credential to `needs_reauth`.
+///
+/// A free function rather than an inline loop so the boot gate and its test call the
+/// SAME code. Written inline first, which made the test pass with the boot gate's copy
+/// deleted -- it was exercising its own duplicate, not the daemon's path.
+///
+/// Best-effort: a diagnostics write must never fail the boot gate, whose job is to
+/// resolve dangling intents before any read is served.
+fn record_reconciliation_reasons(
+    engine: &RefreshEngine,
+    outcomes: &[credentials_core::engine::Reconciliation],
+) {
+    for outcome in outcomes {
+        if let credentials_core::engine::Reconciliation::NeedsReauth {
+            credential_id,
+            reason,
+        } = outcome
+        {
+            let _ = engine.store().record_auth_event(
+                credential_id,
+                credentials_core::store::AuthObservation {
+                    kind: "reconcile_needs_reauth",
+                    provider_status: None,
+                    detail: Some(reason.as_str()),
+                },
+                None,
+            );
+        }
+    }
 }
 
 /// Drain both egress lanes to the wire, CONTROL-FIRST. On every wakeup, all currently-
@@ -1052,6 +1097,61 @@ mod tests {
 
     fn tmp_surface(seed: u8) -> Arc<ReadSurface> {
         tmp_surface_with_store(seed).0
+    }
+
+    /// Boot reconciliation's REASON survives as a durable row.
+    ///
+    /// The engine already returns why each dangling intent forced `needs_reauth`, and
+    /// its own tests assert that. What was missing is that the module DISCARDED the
+    /// value: the store's audit entry for these is a generic `invalidate` from actor
+    /// `vault`, identical across every cause, so after a crash an operator could see
+    /// that a credential needed re-login and never why.
+    ///
+    /// This drives the boot-gate sequence and asserts the reason lands. Written
+    /// against the same call the daemon makes, because the defect was never in the
+    /// engine -- it was at the call site.
+    #[tokio::test]
+    async fn boot_reconciliation_records_why_a_credential_needs_reauth() {
+        let (_, store, _) = tmp_surface_with_store(71);
+        let record = VaultRecord::new_oauth(
+            "test",
+            "stub",
+            credentials_core::oauth::OAuthCredential {
+                access_token: "at".into(),
+                refresh_token: "rt".into(),
+                expires_at_ms: Some(0),
+                token_url: "https://example.invalid/token".into(),
+                client_id: None,
+                scopes: Vec::new(),
+            },
+            b"payload".to_vec(),
+        );
+        store.create("apikey:crashed", &record).expect("create");
+        let hash = credentials_core::store::refresh_token_hash("rt");
+        store
+            .open_intent("apikey:crashed", 1, &hash)
+            .expect("open intent");
+
+        let http = Arc::new(ReqwestTransport::new().expect("http"));
+        let engine = Arc::new(RefreshEngine::new(Arc::clone(&store), Vec::new(), http));
+
+        // The daemon's own boot-gate sequence: reconcile, then record. Calls the same
+        // function `build_surface` calls -- an inline copy here would pass with the
+        // daemon's recording deleted, which is exactly what it did before this was
+        // extracted.
+        let outcomes = engine.reconcile().await.expect("reconcile");
+        record_reconciliation_reasons(&engine, &outcomes);
+
+        let events = store.recent_auth_events(10).expect("read events");
+        assert_eq!(events.len(), 1, "the reconciliation must leave a row");
+        assert_eq!(events[0].credential_id, "apikey:crashed");
+        assert_eq!(events[0].kind, "reconcile_needs_reauth");
+        assert_eq!(
+            events[0].detail.as_deref(),
+            Some("no_validity_check"),
+            "the row must carry WHY, which is the whole point -- the audit chain's \
+             entry for this is a generic invalidate that cannot distinguish causes"
+        );
     }
 
     /// A test AdminSurface over the same engine/store shape as tmp_surface, with a

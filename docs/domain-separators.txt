@@ -1,0 +1,24 @@
+# DERIVED FILE -- regenerate with scripts/endpoint-hosts.py --update and
+# review the DIFF. Do not hand-edit.
+#
+# One line per cryptographic domain separator: <file> <value> <value>.
+# The value appears twice so the row is keyed by it: line numbers move when
+# unrelated code shifts, and a checker that cries wolf gets regenerated
+# without being read.
+#
+# THESE ARE ON-DISK FORMAT PARAMETERS, NOT NAMES. Each is authenticated or
+# hashed into stored data and re-derived on read, so changing one makes every
+# existing vault unreadable -- measured on the envelope AAD: seal under v1,
+# reopen under v2, EncryptedStore::open fails authenticated decryption, and
+# nothing in the test suite noticed.
+#
+# The `cortexkit-credentials` prefix is the PRE-RENAME module id. Updating it
+# to `claustrum` for consistency is the destructive edit this file exists to
+# catch. A separator only ever changes as a deliberate, migrated format bump.
+crates/credentials-core/src/admin_auth.rs cortexkit-credentials/admin-mac-key/v1 cortexkit-credentials/admin-mac-key/v1
+crates/credentials-core/src/admin_auth.rs cortexkit-credentials/admin-op/v1\0 cortexkit-credentials/admin-op/v1\0
+crates/credentials-core/src/admin_auth.rs cortexkit-credentials/vault-id/v1 cortexkit-credentials/vault-id/v1
+crates/credentials-core/src/envelope.rs cortexkit-credentials/envelope-aad/v1 cortexkit-credentials/envelope-aad/v1
+crates/credentials-core/src/key.rs cortexkit-credentials/key-id/v1 cortexkit-credentials/key-id/v1
+crates/credentials-core/src/store.rs cortexkit-credentials/handle/v1 cortexkit-credentials/handle/v1
+crates/credentials-core/src/store.rs cortexkit-credentials/refresh-token-hash/v1 cortexkit-credentials/refresh-token-hash/v1

@@ -75,6 +75,20 @@ pub const MIN_ENVELOPE_LEN: usize = HEADER_LEN + TAG_LEN;
 
 /// Domain-separation label mixed into every AAD, so this envelope's AAD can never
 /// alias another protocol's authenticated data.
+///
+/// AN ON-DISK FORMAT PARAMETER, NOT A NAME. It is authenticated into every sealed
+/// record and re-derived on open, so changing these bytes makes every existing
+/// vault unreadable. The `cortexkit-credentials` prefix is the pre-rename module id
+/// and MUST NOT be updated to `claustrum` — that is the whole hazard in one
+/// tempting edit, and the rename sweep spared it deliberately.
+///
+/// Measured rather than reasoned about: sealing a vault under this value and
+/// reopening it under `…/v2` fails at `EncryptedStore::open` with "cipher envelope
+/// failed authenticated decryption", because the sealed audit key is the first
+/// thing opened. That is the good version of this failure — the vault refuses
+/// WHOLE, before any record read, so nothing is quarantined and the store stays
+/// intact (verified: the record's state was still `active` afterwards). A
+/// per-record decrypt failure would have flipped rows to `corrupt` permanently.
 const AAD_DOMAIN: &[u8] = b"cortexkit-credentials/envelope-aad/v1";
 
 /// Identity an envelope is cryptographically bound to (folded into the AAD). The

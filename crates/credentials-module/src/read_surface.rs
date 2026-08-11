@@ -236,12 +236,19 @@ pub struct ReadSurface {
 /// anywhere near 20s would mean the store is wedged, which is a genuine `Failing`
 /// rather than a false trigger.
 ///
+/// The 2ms figure is one vault's worth, which is a floor rather than a distribution.
+/// The scan is a full table read, so its tail is a LARGER VAULT rather than a slower
+/// machine — measured at 10,000 credentials it is 2.5ms, still ~7900x inside the
+/// limit. A vault would have to hold on the order of a hundred million credentials to
+/// approach it, so the bound is safe across any size this will ever see.
+///
 /// Note this bound's governing quantity is not stored anywhere: `last_refresh_ms`
 /// records the completion INSTANT, never the duration, so nothing in the vault can
 /// answer "how long do scans take" after the fact. It has to be measured directly, as
-/// above. That is fine while the answer is 2ms against 20s; it would stop being fine if
-/// the scan ever grew a network or keychain dependency, and whoever adds one should
-/// re-measure rather than trusting this note.
+/// above. That is fine while the work is a local table read; it would stop being fine
+/// if the scan ever grew a network or keychain dependency, whose tail is unbounded in
+/// a way row count is not — whoever adds one should re-measure rather than trust this
+/// note.
 const HEALTH_STALE_LIMIT_MS: i64 = 20_000;
 
 fn now_ms() -> i64 {

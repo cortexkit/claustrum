@@ -62,7 +62,36 @@ impl Drop for RealDaemon {
 const REQUIRE_DAEMON_ENV: &str = "CRED_REQUIRE_DAEMON";
 
 fn require_daemon() -> bool {
+    // CI forces it on, so the ship gate cannot zero out to green on a runner even if
+    // the workflow's explicit setting is ever dropped.
+    //
+    // Locally the default stays permissive, because a contributor without the sibling
+    // checkout should get a skip rather than a failure they cannot act on. That is a
+    // real cost: THE ENVIRONMENT WHERE A WRONG RESULT IS CAUGHT BY REVIEW IS THE
+    // HARDENED ONE, and the environment where someone reasons alone at speed is the
+    // one allowed to lie. Accepted here only because the local skip is narrow --
+    // `build_subc_core` BUILDS the sibling rather than requiring it prebuilt, so the
+    // routine "binary not built" case cannot trigger it and only a missing checkout
+    // can. Set the variable explicitly whenever a green run is going to be used as
+    // evidence.
+    if std::env::var_os("CI").is_some_and(|v| v == "true") {
+        return true;
+    }
     std::env::var_os(REQUIRE_DAEMON_ENV).is_some_and(|v| !v.is_empty() && v != "0")
+}
+
+/// Which condition is forcing the gate, for a panic message that would otherwise
+/// name the wrong cause.
+///
+/// The gate has two triggers, and a message hard-coding one of them is wrong half
+/// the time — a failure text that misnames its own cause sends the reader to check
+/// an environment variable that is not set.
+fn why_required() -> &'static str {
+    if std::env::var_os("CI").is_some_and(|v| v == "true") {
+        "CI=true"
+    } else {
+        REQUIRE_DAEMON_ENV
+    }
 }
 
 /// Resolve the sibling subconscious checkout, or `None` if it is not present.
@@ -74,8 +103,10 @@ fn subconscious_root() -> Option<PathBuf> {
         Err(e) => {
             if require_daemon() {
                 panic!(
-                    "{REQUIRE_DAEMON_ENV} is set but the sibling subconscious checkout is \
-                     missing at {} ({e}) — the real-daemon ship-gate test must not be skipped",
+                    "the real-daemon gate is required ({}) but the sibling subconscious \
+                     checkout is missing at {} ({e}) — the real-daemon ship-gate test \
+                     must not be skipped",
+                    why_required(),
                     path.display()
                 );
             }
@@ -98,7 +129,10 @@ fn build_subc_core() -> Option<PathBuf> {
         .expect("run cargo build for ck-subc");
     if !status.success() {
         if require_daemon() {
-            panic!("{REQUIRE_DAEMON_ENV} is set but building ck-subc failed");
+            panic!(
+                "the real-daemon gate is required ({}) but building ck-subc failed",
+                why_required()
+            );
         }
         return None;
     }

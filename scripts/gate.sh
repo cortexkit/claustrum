@@ -47,7 +47,16 @@ run_expect() {
   fi
 }
 
-run_expect 200 "workspace unit + integration" \
+# The floor is the MEASURED total, not a round number below it. A floor with slack
+# is a check that tolerates exactly the defect it exists to catch: tests vanish one
+# at a time (a misplaced #[test] attribute silently unregisters the function that
+# follows it), and any gap between the floor and the real count is how many can go
+# before anyone is told. Measured 314 across the workspace's suites at the time of
+# writing; an earlier floor of 200 left a third of them free to disappear.
+#
+# Raise this when tests are added. A failure here is normally that, not a defect --
+# but it should be a deliberate edit rather than a number nobody revisits.
+run_expect 314 "workspace unit + integration" \
   cargo test --locked --workspace
 
 # Two independent defences, because each catches what the other misses:

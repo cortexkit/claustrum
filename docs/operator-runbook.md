@@ -515,6 +515,18 @@ also symlinked into `~/.local/bin/` for the `ck` dispatcher.
 
 ### Before building a release: the full gate
 
+```sh
+./scripts/gate.sh
+```
+
+That is the gate. It runs all five suites with the right flags, asserts a minimum
+count for each, and fails if any arm skipped — the three ways a green run can prove
+nothing. Prefer it over composing the commands by hand, because the hand-composed
+version is what drops a flag.
+
+The individual commands are below for when you want one suite, and the paragraphs
+after them explain what each guard is for.
+
 `cargo test --workspace` is **not** the gate. It silently skips the two suites that
 cover the properties a credential vault exists to guarantee — the real-daemon
 end-to-end tests are `#[ignore]` by default, and the crash-safety proofs sit behind

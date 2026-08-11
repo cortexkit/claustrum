@@ -267,7 +267,11 @@ pub fn import_antigravity_account(
         },
         // Empty is not a value: the field is optional in the store, and an empty
         // string would present downstream as an account labelled with nothing.
-        email: acct.email.as_deref().filter(|s| !s.is_empty()).map(Into::into),
+        email: acct
+            .email
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(Into::into),
     })
 }
 

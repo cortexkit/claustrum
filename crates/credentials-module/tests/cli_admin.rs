@@ -404,7 +404,12 @@ fn an_antigravity_import_stores_a_resolvable_account_identity() {
     );
     // The identity must track the SELECTED account, not the store's first.
     assert!(
-        record.oauth.as_ref().unwrap().refresh_token.starts_with("1//0-bbb"),
+        record
+            .oauth
+            .as_ref()
+            .unwrap()
+            .refresh_token
+            .starts_with("1//0-bbb"),
         "sanity: the active account's credential was the one imported"
     );
 

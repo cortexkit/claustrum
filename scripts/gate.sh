@@ -8,14 +8,47 @@
 # and silently -- a suite whose feature is missing prints "running 0 tests ... ok",
 # and the end-to-end arms skip to a pass unless the switch is set.
 #
-# So the five invocations below are not a convenience. Typing four of five, or
-# dropping one --features argument, produces a green run that proves less than it
-# appears to, in the exact loop where nobody is reviewing.
+# So the invocations below are not a convenience. Typing most of them, or dropping
+# one --features argument, produces a green run that proves less than it appears to,
+# in the exact loop where nobody is reviewing.
+#
+# THE SET MUST MATCH CI. Every arm here corresponds to a step in
+# .github/workflows/ci.yml; when a step is added there, add it here. A local gate
+# that covers a subset is worse than none, because it earns trust and then lets
+# through exactly what it was trusted to catch.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
 fail() { printf '\nGATE FAILED: %s\n' "$1" >&2; exit 1; }
+
+# Run a command that produces no test counts, failing the gate if it does.
+run_check() {
+  local label="$1"; shift
+  printf '\n=== %s ===\n' "$label"
+  local out
+  out="$("$@" 2>&1)" || { printf '%s\n' "$out"; fail "$label"; }
+  printf '  ok\n'
+}
+
+# FORMAT AND LINT COME FIRST, because they are what CI fails on while a local run
+# of the test arms alone passes.
+#
+# This gate was built to stop a hand-composed command proving less than it appears
+# to -- and then omitted two of the checks CI runs, so "GATE PASSED" locally was
+# followed by a red build on formatting. A gate that covers a subset of CI teaches
+# people to trust it and then contradicts them, which is worse than no gate: it
+# converts a fast local failure into a slow remote one.
+#
+# The clippy arms are run BOTH ways for the same reason the test arms are: code
+# behind a feature flag is not compiled without it, so a lint error inside a
+# crash-cut seam is invisible to the default invocation.
+run_check "format" cargo fmt --all -- --check
+run_check "clippy" \
+  cargo clippy --locked --workspace --all-targets -- -D warnings
+run_check "clippy (seam features)" \
+  cargo clippy --locked --workspace --all-targets \
+    --features kill9-test-seam,rotate-test-seam,login-test-seam,migration-tools -- -D warnings
 
 # Run a cargo invocation and require at least `min` tests to have PASSED, and that
 # no arm announced a skip.

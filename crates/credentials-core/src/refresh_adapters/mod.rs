@@ -80,6 +80,34 @@ pub enum RefreshError {
     Decode(String),
     /// The provider returned an unexpected non-success status.
     Status(u16, String),
+    // NOTE for anyone persisting or forwarding these: every variant's `String` is RAW
+    // PROVIDER RESPONSE TEXT. An OAuth error body can echo submitted parameters, so
+    // these strings are not safe to write to a plaintext column or a log. Use
+    // [`RefreshError::variant_name`] and [`RefreshError::provider_status`], which carry
+    // the diagnostic value without the payload.
+}
+
+impl RefreshError {
+    /// The variant name alone, safe to persist.
+    ///
+    /// Exists so diagnostics can record WHICH failure occurred without touching the
+    /// attached provider text, which may echo submitted parameters.
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            RefreshError::InvalidGrant(_) => "invalid_grant",
+            RefreshError::Transport(_) => "transport",
+            RefreshError::Decode(_) => "decode",
+            RefreshError::Status(_, _) => "status",
+        }
+    }
+
+    /// The provider's HTTP status, when the failure carried one.
+    pub fn provider_status(&self) -> Option<u16> {
+        match self {
+            RefreshError::Status(status, _) => Some(*status),
+            _ => None,
+        }
+    }
 }
 
 impl std::fmt::Display for RefreshError {

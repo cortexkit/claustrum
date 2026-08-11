@@ -41,7 +41,9 @@ use crate::audit::{AlarmReason, AuditCtx, AuditOp};
 use crate::oauth::OAuthCredential;
 use crate::record::VaultRecord;
 use crate::refresh_adapters::{HttpTransport, RefreshAdapter, RefreshError, ValidityOutcome};
-use crate::store::{refresh_token_hash, EncryptedStore, RefreshIntent, StoreOpError};
+use crate::store::{
+    refresh_token_hash, AuthObservation, EncryptedStore, RefreshIntent, StoreOpError,
+};
 
 /// Default clock skew (ms) treated as "about to expire": a token within this of
 /// its expiry is refreshed proactively so a call does not start on a token that
@@ -319,10 +321,15 @@ impl RefreshEngine {
             // replacement would kill a healthy credential the verdict never saw. The
             // stale invalidation then no-ops silently; the replacement stands.
             Err(e @ RefreshError::InvalidGrant(_)) => {
-                self.store.invalidate_if_version_audited(
+                self.store.invalidate_if_version_reported(
                     credential_id,
                     record.record_version,
                     AuditCtx::vault(AuditOp::Invalidate),
+                    Some(AuthObservation {
+                        kind: "refresh_failed",
+                        provider_status: None,
+                        detail: Some(e.variant_name()),
+                    }),
                 )?;
                 Err(EngineError::RefreshFailed(e))
             }
@@ -335,6 +342,20 @@ impl RefreshEngine {
             // ⇒ needs_reauth then (self-healing), never a silent dead token.
             Err(other) => {
                 self.store.clear_intent(credential_id)?;
+                // Record that the provider WAS called and refused, which nothing else
+                // does on this arm: the intent is cleared and the record left active,
+                // so a credential failing every refresh looked untouched from outside.
+                // Best-effort by construction -- a diagnostics write must never mask
+                // the provider failure being returned.
+                let _ = self.store.record_auth_event(
+                    credential_id,
+                    AuthObservation {
+                        kind: "refresh_failed",
+                        provider_status: other.provider_status(),
+                        detail: Some(other.variant_name()),
+                    },
+                    Some(record.record_version),
+                );
                 Err(EngineError::RefreshFailed(other))
             }
         }

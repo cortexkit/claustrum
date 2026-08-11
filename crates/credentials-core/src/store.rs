@@ -131,6 +131,50 @@ const MIGRATIONS: &[Migration] = &[
                          envelope  BLOB NOT NULL\
                      );",
     },
+    // `auth_events`: why a credential stopped working, which the audit chain cannot say.
+    //
+    // The chain records mutations, and that is the wrong shape for this question in two
+    // specific ways, both measured after an incident where two OAuth credentials were
+    // marked `needs_reauth` and nothing on disk could say why:
+    //
+    //   - It records only what CHANGED. A consumer's report naming a superseded
+    //     `record_version` is a deliberate no-op, so it writes nothing at all -- the
+    //     case where a consumer is reporting against stale state is exactly the one
+    //     that leaves no trace. Likewise a refresh that fails transiently clears its
+    //     intent and returns; nothing durable says the provider was ever called.
+    //   - It has no field for the DETAIL. `provider_status` arrives on every report and
+    //     is discarded, though 401 (token rejected) and 403 (request forbidden) point
+    //     at different causes and different fixes.
+    //
+    // A field could not simply be added to `audit_log`: the entry MAC covers a fixed
+    // field list, so a new column in the transcript changes the MAC of every historical
+    // entry and breaks verification of the whole chain. Reusing `alarm_reason` fails
+    // differently -- `alarm` is derived as `alarm_reason.is_some()`, so recording a
+    // routine 401 there would raise an operator alarm for normal provider behaviour.
+    //
+    // Hence a separate table, deliberately NOT chained. These rows are diagnostics, not
+    // evidence: they are not MAC-protected, they may be pruned, and nothing should
+    // depend on them being complete. The chain remains the authority for what happened;
+    // this only explains it.
+    //
+    // `detail` carries a TYPED VARIANT NAME and never provider body text. Adapters put
+    // raw response bodies into their error values, and an OAuth error body can echo
+    // submitted parameters -- so persisting one risks writing token material into a
+    // plaintext column, which is the one thing this table must never do.
+    Migration {
+        version: 3,
+        statements: "CREATE TABLE auth_events (\
+                         seq             INTEGER PRIMARY KEY AUTOINCREMENT, \
+                         ts_ms           INTEGER NOT NULL, \
+                         credential_id   TEXT NOT NULL, \
+                         kind            TEXT NOT NULL, \
+                         provider_status INTEGER, \
+                         detail          TEXT, \
+                         record_version  INTEGER, \
+                         applied         INTEGER NOT NULL DEFAULT 0\
+                     ); \
+                     CREATE INDEX idx_auth_events_credential ON auth_events(credential_id);",
+    },
 ];
 
 /// The `vault_secrets` row name for the audit-chain HMAC key. The audit key is a
@@ -888,6 +932,24 @@ impl EncryptedStore {
         expected_version: u64,
         ctx: AuditCtx<'_>,
     ) -> Result<bool, StoreOpError> {
+        self.invalidate_if_version_reported(credential_id, expected_version, ctx, None)
+    }
+
+    /// As [`Self::invalidate_if_version_audited`], additionally recording WHY.
+    ///
+    /// `observation` describes what the caller saw, and is written to `auth_events`
+    /// in the same transaction WHETHER OR NOT the version matched. That is the point:
+    /// a report naming a superseded version is deliberately a no-op on the credential,
+    /// and previously left nothing behind, so the case where a consumer is acting on
+    /// stale state -- the one worth investigating -- was the one with no record. The
+    /// row's `applied` column distinguishes the two outcomes.
+    pub fn invalidate_if_version_reported(
+        &self,
+        credential_id: &str,
+        expected_version: u64,
+        ctx: AuditCtx<'_>,
+        observation: Option<AuthObservation<'_>>,
+    ) -> Result<bool, StoreOpError> {
         let now = now_ms();
         let audit_key = self.audit_key.clone();
         let changed = self
@@ -902,6 +964,9 @@ impl EncryptedStore {
                         expected_version as i64
                     ],
                 )?;
+                if let Some(obs) = observation {
+                    append_auth_event_tx(tx, credential_id, &obs, Some(expected_version), n > 0)?;
+                }
                 if n > 0 {
                     // Same version still current: this is an authoritative revoke, so clear
                     // any dangling intent and audit it, exactly like invalidate_audited.
@@ -922,6 +987,59 @@ impl EncryptedStore {
             })
             .map_err(StoreOpError::from)?;
         Ok(changed > 0)
+    }
+
+    /// Record an authentication observation WITHOUT changing the credential.
+    ///
+    /// For events that explain a credential's health but authorise no state change --
+    /// chiefly a refresh that failed transiently, which clears its intent and leaves
+    /// the record active. Nothing durable said the provider had been called and
+    /// refused, so a credential could fail repeatedly and look untouched.
+    ///
+    /// Diagnostics only, and this write deliberately skips the fence that guards every
+    /// credential mutation. That fence rejects a write from an instance whose lease has
+    /// been taken over, which is right for anything carrying authority and wrong here:
+    /// an explanatory row would then fail exactly when a handover is making the system
+    /// hardest to explain.
+    pub fn record_auth_event(
+        &self,
+        credential_id: &str,
+        observation: AuthObservation<'_>,
+        record_version: Option<u64>,
+    ) -> Result<(), StoreOpError> {
+        self.store
+            .with_conn(|c| {
+                let tx = c.unchecked_transaction()?;
+                append_auth_event_tx(&tx, credential_id, &observation, record_version, false)?;
+                tx.commit()
+            })
+            .map_err(StoreOpError::from)
+    }
+
+    /// Read recent authentication events, newest first. Diagnostics for an operator
+    /// asking why a credential stopped working; never an authority for what happened.
+    pub fn recent_auth_events(&self, limit: u32) -> Result<Vec<AuthEvent>, StoreOpError> {
+        self.store
+            .with_conn(|c| {
+                let mut stmt = c.prepare(
+                    "SELECT ts_ms, credential_id, kind, provider_status, detail, record_version, \
+                            applied \
+                     FROM auth_events ORDER BY seq DESC LIMIT ?1",
+                )?;
+                let rows = stmt.query_map(rusqlite::params![limit], |r| {
+                    Ok(AuthEvent {
+                        ts_ms: r.get(0)?,
+                        credential_id: r.get(1)?,
+                        kind: r.get(2)?,
+                        provider_status: r.get::<_, Option<i64>>(3)?.map(|s| s as u16),
+                        detail: r.get(4)?,
+                        record_version: r.get::<_, Option<i64>>(5)?.map(|v| v as u64),
+                        applied: r.get::<_, i64>(6)? != 0,
+                    })
+                })?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .map_err(StoreOpError::from)
     }
 
     /// Invalidate, auditing as a vault-owned `Invalidate`. Convenience wrapper for
@@ -1751,6 +1869,66 @@ pub fn mint_handle() -> Result<MintedHandle, getrandom::Error> {
 /// into a mutation's own transaction so the audit entry and the mutation commit
 /// together. The single-writer lease guarantees no concurrent appender, so reading
 /// the tip and inserting the next seq is race-free.
+/// One recorded authentication observation, as read back for diagnostics.
+#[derive(Debug, Clone)]
+pub struct AuthEvent {
+    pub ts_ms: i64,
+    pub credential_id: String,
+    pub kind: String,
+    pub provider_status: Option<u16>,
+    pub detail: Option<String>,
+    pub record_version: Option<u64>,
+    /// Whether this observation actually changed the credential. False for a report
+    /// against a superseded version, and for events that authorise no change.
+    pub applied: bool,
+}
+
+/// What a caller observed about a credential's authentication, for `auth_events`.
+///
+/// `detail` must be a TYPED VARIANT NAME (`invalid_grant`, `transport`, `status`),
+/// never provider response text: adapters carry raw bodies in their error values, and
+/// an OAuth error body can echo submitted parameters, so writing one here would risk
+/// putting token material in a plaintext column.
+#[derive(Debug, Clone, Copy)]
+pub struct AuthObservation<'a> {
+    /// What kind of event this was, e.g. `consumer_report` or `refresh_failed`.
+    pub kind: &'a str,
+    /// The provider's HTTP status, when there was one.
+    pub provider_status: Option<u16>,
+    /// A typed variant name. Never response text.
+    pub detail: Option<&'a str>,
+}
+
+/// Append one `auth_events` row. Diagnostics only: not MAC-chained, prunable, and
+/// nothing may depend on it being complete.
+///
+/// `applied` records whether the observation actually changed the credential, which is
+/// what separates "a consumer reported a dead token and we marked it" from "a consumer
+/// reported against a version we had already replaced".
+pub(crate) fn append_auth_event_tx(
+    tx: &rusqlite::Transaction,
+    credential_id: &str,
+    obs: &AuthObservation<'_>,
+    record_version: Option<u64>,
+    applied: bool,
+) -> rusqlite::Result<()> {
+    tx.execute(
+        "INSERT INTO auth_events \
+             (ts_ms, credential_id, kind, provider_status, detail, record_version, applied) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        rusqlite::params![
+            now_ms(),
+            credential_id,
+            obs.kind,
+            obs.provider_status.map(|s| s as i64),
+            obs.detail,
+            record_version.map(|v| v as i64),
+            applied as i64,
+        ],
+    )?;
+    Ok(())
+}
+
 pub(crate) fn append_audit_tx(
     tx: &rusqlite::Transaction,
     audit_key: &[u8; 32],
@@ -2736,6 +2914,71 @@ mod tests {
             .filter(|e| e.op == "report_auth_failure")
             .count();
         assert_eq!(reports, 0, "a stale version-CAS no-op audits nothing");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The no-op case is the one worth explaining, so it must leave a diagnostic row.
+    ///
+    /// A report naming a superseded version changes nothing and audits nothing -- both
+    /// correct. The consequence was that a consumer acting on stale state, which is a
+    /// real thing to want to know about, was invisible afterwards. `auth_events` records
+    /// the observation either way and marks whether it applied.
+    #[test]
+    fn a_stale_report_is_still_recorded_as_an_observation_that_did_not_apply() {
+        let (root, store) = tmp_store(63);
+        store.create("id", &oauth_record()).expect("create");
+        store
+            .overwrite_unconditional_audited(
+                "id",
+                &oauth_record(),
+                AuditCtx::vault(AuditOp::Overwrite),
+            )
+            .expect("bump to version 2");
+
+        let ctx = AuditCtx {
+            op: AuditOp::ReportAuthFailure,
+            actor: "conn-1",
+            alarm: None,
+        };
+        let obs = AuthObservation {
+            kind: "consumer_report",
+            provider_status: Some(401),
+            detail: None,
+        };
+
+        // Stale report against v1 while the store holds v2.
+        let hit = store
+            .invalidate_if_version_reported("id", 1, ctx, Some(obs))
+            .expect("stale report");
+        assert!(!hit, "a superseded version must not invalidate");
+        assert_eq!(
+            store.meta("id").unwrap().state,
+            RecordState::Active,
+            "the fresh credential is untouched"
+        );
+
+        let events = store.recent_auth_events(10).expect("read events");
+        assert_eq!(events.len(), 1, "the no-op must still be recorded");
+        assert_eq!(events[0].provider_status, Some(401));
+        assert_eq!(events[0].record_version, Some(1));
+        assert!(
+            !events[0].applied,
+            "the row must say the observation did NOT change the credential -- that is \
+             what separates a stale report from a real one"
+        );
+
+        // THE DISAMBIGUATOR: a matching report records `applied = true`. Without this
+        // arm, an implementation writing `applied = false` unconditionally passes.
+        let hit = store
+            .invalidate_if_version_reported("id", 2, ctx, Some(obs))
+            .expect("current report");
+        assert!(hit, "a report at the served version must invalidate");
+        let events = store.recent_auth_events(10).expect("read events");
+        assert_eq!(events.len(), 2);
+        assert!(
+            events[0].applied,
+            "a report at the current version must record as applied"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

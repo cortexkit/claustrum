@@ -394,7 +394,7 @@ impl ReadSurface {
             let actor = format!("conn-{connection_id}");
             self.engine
                 .store()
-                .invalidate_if_version_audited(
+                .invalidate_if_version_reported(
                     &credential_id,
                     params.record_version,
                     AuditCtx {
@@ -402,6 +402,16 @@ impl ReadSurface {
                         actor: &actor,
                         alarm: None,
                     },
+                    // The status is recorded because 401 and 403 mean different things
+                    // -- a rejected token versus a forbidden request -- and the audit
+                    // chain has no field for it, so previously both arrived here and
+                    // were discarded, leaving an incident with no way to tell them
+                    // apart afterwards.
+                    Some(credentials_core::store::AuthObservation {
+                        kind: "consumer_report",
+                        provider_status: Some(params.provider_status),
+                        detail: None,
+                    }),
                 )
                 .map_err(|e| map_store_error(&e))?;
         }

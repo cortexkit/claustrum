@@ -387,10 +387,19 @@ impl ReadSurface {
             // Recorded because the chain reads like an identity and is not one: an
             // incident review asking WHO invalidated a credential gets a plausible
             // answer from this field and no warning that it cannot support the
-            // question. The vault has nothing better to write -- the read surface is
-            // anonymous by design, and a capability handle authorizes a read without
-            // identifying who presented it -- so establishing the reporter of a
-            // consumer-reported invalidation needs a source outside this record.
+            // question. A capability handle authorizes a read without identifying who
+            // presented it, so for a caller that opens a bare connection there is
+            // genuinely nothing better to write.
+            //
+            // NOT a claim that the identity is unavailable in general, which would be
+            // too strong: `Principal::Reserved` carries a `module_id`, the daemon
+            // stamps it at route-bind time, and this module already keeps it per
+            // channel for the admin gate. A supervised consumer that presents identity
+            // COULD therefore be named here; this code just does not look. Whether it
+            // SHOULD is a live question -- recording a consumer's identity against a
+            // credential failure is a different decision from recording the failure --
+            // so until that is settled, establishing the reporter needs a source
+            // outside this record.
             let actor = format!("conn-{connection_id}");
             self.engine
                 .store()

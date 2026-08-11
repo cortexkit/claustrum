@@ -389,12 +389,18 @@ DB="$HOME/.local/share/cortexkit/claustrum/store.db"
 # `conn-<N>` is NOT a consumer identity. N is the route channel number, assigned to a
 # route binding and reused as bindings come and go: two rows sharing `conn-1` are not
 # evidence of the same reporter, and one reporter across reconnects may appear under
-# several numbers. The read surface is anonymous by design -- a capability handle
-# authorizes a read without identifying who presented it -- so the vault has no caller
-# identity to record. For a CONSUMER-REPORTED invalidation (op `report_auth_failure`)
-# the chain gives you the credential and the instant, never the reporter; correlate
-# that timestamp against sources outside this record, such as consumer or route-layer
-# logs. Operator and vault-owned actions are attributable as usual.
+# several numbers. A capability handle authorizes a read without identifying who
+# presented it, so for a caller on a bare connection there is no identity to record.
+#
+# So for a CONSUMER-REPORTED invalidation (op `report_auth_failure`) this chain gives
+# you the credential and the instant, never the reporter: correlate that timestamp
+# against sources outside it, such as consumer or route-layer logs. Operator and
+# vault-owned actions are attributable as usual.
+#
+# Note this is a property of what the vault RECORDS, not of what the route plane
+# knows: a supervised consumer can present a module identity at bind time, and the
+# daemon stamps it. Do not read these rows as proof that the caller was unidentifiable
+# -- only that this record does not carry it.
 sqlite3 "file:$DB?mode=ro" "SELECT seq, op, credential_id, actor,
   datetime(ts_ms/1000,'unixepoch','localtime') FROM audit_log ORDER BY seq DESC LIMIT 20;"
 

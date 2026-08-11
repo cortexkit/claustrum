@@ -12,10 +12,14 @@
 # one --features argument, produces a green run that proves less than it appears to,
 # in the exact loop where nobody is reviewing.
 #
-# THE SET MUST MATCH CI. Every arm here corresponds to a step in
-# .github/workflows/ci.yml; when a step is added there, add it here. A local gate
-# that covers a subset is worse than none, because it earns trust and then lets
-# through exactly what it was trusted to catch.
+# THE SET MUST MATCH CI, AND SO MUST EACH INVOCATION. Every arm here corresponds to
+# a step in .github/workflows/ci.yml; when a step is added there, add it here. A
+# local gate covering a subset is worse than none, because it earns trust and then
+# lets through exactly what it was trusted to catch.
+#
+# Matching the SET is not matching the STEPS: this gate once ran every CI arm and
+# still diverged, because the e2e arm dropped CI's --test-threads=1 and failed 8/8
+# on contention. Copy the flags, not just the command.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -89,7 +93,7 @@ run_expect() {
 #
 # Raise this when tests are added. A failure here is normally that, not a defect --
 # but it should be a deliberate edit rather than a number nobody revisits.
-run_expect 315 "workspace unit + integration" \
+run_expect 316 "workspace unit + integration" \
   cargo test --locked --workspace
 
 # Two independent defences, because each catches what the other misses:
@@ -98,8 +102,26 @@ run_expect 315 "workspace unit + integration" \
 #   - --nocapture surfaces the skip notice so run_expect's check can see it, in case
 #     an arm ever skips for a reason the switch does not cover.
 # The count covers neither: skipped arms still report as passed.
+#
+# --test-threads=1 MATCHES CI. Each arm spawns a real ck-subc supervising a real
+# module, and CI has always serialized them; this arm had silently dropped that.
+#
+# NOT A DIAGNOSIS OF THE FAILURE THAT PROMPTED IT. On 2026-08-11 this suite failed
+# 8/8 with "daemon did not publish a connection file within 15s" during a gate run,
+# then passed 8/8 alone minutes later. Parallelism was the first hypothesis and it
+# is REFUTED -- a serialized run failed the same way, and afterwards the same
+# serialized run passed. Machine load and output capture were tested and refuted
+# too (an arm passes in 2.3s against a saturated box, and 8/8 pass piped with
+# --nocapture). The cause is unexplained and the failure is not currently
+# reproducible, so this flag is here for CI parity, NOT as a fix.
+#
+# If it recurs: the barrier is a 15s wait for the supervisor's connection file, so
+# what needs capturing is the SUPERVISOR's own stderr at that moment -- the arm
+# reports only that the file never appeared, which is an absence and says nothing
+# about why. Do not let this comment become a claim that the flag settled it.
 CRED_REQUIRE_DAEMON=1 run_expect 8 "real-daemon e2e (ship gate)" \
-  cargo test --locked -p credentials-module --test real_daemon_e2e -- --ignored --nocapture
+  cargo test --locked -p credentials-module --test real_daemon_e2e -- \
+    --ignored --nocapture --test-threads=1
 
 # The crash-safety proofs are gated at FILE level: without the feature the file is
 # not compiled and the run reports "running 0 tests ... ok". Nothing inside a file

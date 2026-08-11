@@ -217,3 +217,57 @@ pub trait RefreshAdapter: Send + Sync {
         None
     }
 }
+
+#[cfg(test)]
+mod endpoint_pins {
+    //! Every provider endpoint a refresh can reach, pinned against a LITERAL.
+    //!
+    //! Each adapter's own tests assert the endpoint by comparing the request's url to
+    //! the same `TOKEN_URL` constant the fixture put on the credential, so both sides
+    //! move together and the value is invisible. Measured: repointing Anthropic's
+    //! `TOKEN_URL` at another host left all 238 core tests and all 8 e2e arms green.
+    //!
+    //! WHAT THAT COSTS IS NOT A FAILED TEST. A refresh posts a live refresh token in
+    //! the request body, so a wrong host RECEIVES A WORKING CREDENTIAL. The symptom is
+    //! then indistinguishable from a dead login: the exchange fails, the account reads
+    //! as needing re-auth, and the operator's remedy -- log in again -- neither fixes
+    //! it nor reveals the cause.
+    //!
+    //! These constants are the fallback for a record carrying no `token_url`, which is
+    //! every credential taken through the import path (`import_*` stores an empty
+    //! `token_url`), so the fallback is live rather than vestigial.
+    //!
+    //! A literal here looks redundant beside the constant it duplicates. That is the
+    //! point: a relationship and a value are different claims, and only the value
+    //! survives the constant changing. Editing an endpoint must mean editing this test
+    //! too -- the deliberate step this exists to force.
+
+    #[test]
+    fn refresh_token_endpoints_are_the_expected_hosts() {
+        assert_eq!(
+            super::anthropic::TOKEN_URL,
+            "https://platform.claude.com/v1/oauth/token"
+        );
+        assert_eq!(
+            super::anthropic::LOGIN_TOKEN_URL,
+            "https://api.anthropic.com/v1/oauth/token"
+        );
+        assert_eq!(
+            super::google::TOKEN_URL,
+            "https://oauth2.googleapis.com/token"
+        );
+        assert_eq!(
+            super::antigravity::TOKEN_URL,
+            "https://oauth2.googleapis.com/token"
+        );
+        assert_eq!(
+            super::openai::TOKEN_URL,
+            "https://auth.openai.com/oauth/token"
+        );
+        assert_eq!(super::xai::TOKEN_URL, "https://auth.x.ai/oauth2/token");
+        assert_eq!(
+            super::xai::DEVICE_TOKEN_URL,
+            "https://auth.x.ai/oauth2/token"
+        );
+    }
+}

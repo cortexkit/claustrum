@@ -532,6 +532,26 @@ cargo test -p credentials-core --features login-test-seam  --test login_crash_cu
 is allowed to skip when it cannot build or reach the sibling `ck-subc`, which reads
 as a pass. With it, an unreachable daemon is a failure.
 
+**Setting the switch is not the same as knowing it works.** Prove it once, on any
+machine where you are about to trust these runs — point `SUBCONSCIOUS_REL` in
+`tests/real_daemon_e2e.rs` at a path that does not exist and run both ways:
+
+```
+guard on   thread ... panicked: the real-daemon ship-gate test must not be skipped
+guard off  test result: ok. 1 passed; 0 failed                            0.00s
+```
+
+The second line is a test that never ran, reporting success. That is the state the
+switch exists to prevent, and one deliberate break is what separates having a guard
+from having a working one. A peer seat read four consecutive skips as four passes
+with the same switch available but unset, and the guard's *existence* was what made
+the runs feel accounted for.
+
+**Duration is the corroborating tell.** These tests spawn a supervisor and a daemon,
+so a real run takes seconds; a skip returns in milliseconds. Two rigs measured this
+independently — 0.00s versus ~2s here, 0.06s versus 2.58s in the peer rig. If a
+process-boundary suite finishes instantly, it did not spawn anything.
+
 **Read the counts, not the word `ok`.** Each of these lines is a passing run that
 proved nothing:
 

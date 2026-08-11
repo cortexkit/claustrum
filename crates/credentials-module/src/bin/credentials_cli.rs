@@ -193,6 +193,7 @@ fn run() -> Result<(), CliError> {
         "revoke-all-handles" => cmd_revoke_all_handles(&global, &args),
         "list" => cmd_list(&global),
         "audit" => cmd_audit(&global, &args),
+        "events" => cmd_events(&global, &args),
         "verify-audit" => cmd_verify_audit(&global),
         other => Err(CliError::Usage(format!(
             "unknown verb '{other}'\n\n{}",
@@ -250,6 +251,7 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
         "logout" => &["--provider", "--id"],
         "revoke-handle" => &["--handle"],
         "audit" => &["--limit"],
+        "events" => &["--limit"],
         // bootstrap / rotate-master-key / verify-audit take no per-command flags.
         _ => &[],
     };
@@ -302,6 +304,7 @@ fn usage_short() -> String {
        revoke-all-handles  revoke every handle for a credential\n\
        invalidate          mark a credential needs-reauth\n\
        audit               print the audit chain\n\
+       events              why credentials failed to authenticate\n\
        verify-audit        verify the audit-chain integrity\n\
        rotate-master-key   rotate the vault master key (offline)\n\
        bootstrap           initialize a new vault (offline)\n\
@@ -425,6 +428,23 @@ fn help_verb(verb: &str) -> String {
              \n\
              Print the tamper-evident HMAC audit chain (offline-only; stop the daemon\n\
              to release the lease first)."
+        }
+        "events" => {
+            "ck auth events [--limit N]\n\
+             \n\
+             Print recent authentication events: why a credential stopped working.\n\
+             Records a consumer's reported provider status (401 vs 403) and refresh\n\
+             failures, neither of which the audit chain can carry.\n\
+             \n\
+             `applied` says whether the event changed the credential. A report naming\n\
+             a record_version the vault had already replaced is a deliberate no-op --\n\
+             shown here as applied=no, because a consumer acting on stale state is\n\
+             worth seeing and leaves no other trace.\n\
+             \n\
+             Reads the store read-only and takes no lease, so it works against a\n\
+             RUNNING vault. These rows are diagnostics, not evidence: unlike the audit\n\
+             chain they are not tamper-evident and may be pruned. For what authoritatively\n\
+             happened, use `audit`."
         }
         "verify-audit" => {
             "ck auth verify-audit\n\
@@ -2047,6 +2067,98 @@ fn cmd_audit(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
         );
     }
     Ok(())
+}
+
+/// Print recent authentication events.
+///
+/// Deliberately does NOT go through `open_for_admin`, which takes the single-writer
+/// lease and therefore requires the daemon stopped. These rows exist to explain a
+/// credential that just stopped working, and the moment an operator wants them is the
+/// moment the vault is running -- a diagnostic that requires an outage to read would
+/// be useless exactly when it is needed.
+///
+/// Every column is plaintext (no envelope, no master key), so a read-only connection
+/// is sufficient and takes nothing the daemon holds.
+fn cmd_events(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
+    let limit: u32 = optional(args, "--limit")
+        .map(|s| s.parse::<u32>())
+        .transpose()
+        .map_err(|e| CliError::Usage(format!("--limit not an integer: {e}")))?
+        .unwrap_or(20);
+
+    let db = global.data_dir.join("store.db");
+    if !db.exists() {
+        return Err(CliError::Usage(format!(
+            "no vault at {} (run 'ck auth bootstrap' first)",
+            global.data_dir.display()
+        )));
+    }
+
+    let events = match credentials_core::store::read_auth_events_read_only(&db, limit) {
+        Ok(events) => events,
+        // The table is absent, not empty: this store predates the migration that adds
+        // it. Distinguished because "no events" would claim nothing has gone wrong,
+        // when in fact nothing CAN be recorded until the daemon restarts and migrates.
+        Err(credentials_core::store::StoreOpError::NotFound) => {
+            println!("this vault has no authentication-event table yet");
+            println!("  (it arrives with a schema migration the daemon applies on restart;");
+            println!("   until then no events can be recorded, which is not the same as none)");
+            return Ok(());
+        }
+        Err(e) => return Err(CliError::Store(e)),
+    };
+
+    for e in &events {
+        let when = format_ts_ms(e.ts_ms);
+        let what = match (e.provider_status, e.detail.as_deref()) {
+            (Some(s), Some(d)) => format!("{s} {d}"),
+            (Some(s), None) => s.to_string(),
+            (None, Some(d)) => d.to_string(),
+            (None, None) => "-".to_string(),
+        };
+        let version = e
+            .record_version
+            .map(|v| format!("v{v}"))
+            .unwrap_or_else(|| "-".into());
+        println!(
+            "{when}  {:34} {:16} {what:22} {version:6} applied={}",
+            e.credential_id,
+            e.kind,
+            if e.applied { "yes" } else { "no" }
+        );
+    }
+    if events.is_empty() {
+        // Say what an empty table MEANS, because "nothing here" reads as either "no
+        // failures" or "the recorder is broken", and those need different responses.
+        println!("no authentication events recorded");
+        println!("  (no consumer has reported a provider rejection and no refresh has failed");
+        println!("   since this vault's store was created or last pruned)");
+    }
+    Ok(())
+}
+
+/// Render a millisecond timestamp as local `YYYY-MM-DD HH:MM:SS`.
+///
+/// Hand-rolled because the crate takes no date dependency and this is the only place
+/// that needs one; the arithmetic is the civil-from-days algorithm.
+fn format_ts_ms(ts_ms: i64) -> String {
+    let secs = ts_ms.div_euclid(1000);
+    let days = secs.div_euclid(86_400);
+    let tod = secs.rem_euclid(86_400);
+    let (h, m, s) = (tod / 3600, (tod % 3600) / 60, tod % 60);
+
+    // Civil date from a days-since-epoch count (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { y + 1 } else { y };
+    format!("{year:04}-{month:02}-{d:02} {h:02}:{m:02}:{s:02}")
 }
 
 fn cmd_list(global: &GlobalArgs) -> Result<(), CliError> {

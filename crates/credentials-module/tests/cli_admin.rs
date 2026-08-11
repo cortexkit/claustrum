@@ -298,6 +298,88 @@ fn logout_is_reversible_stop_serving_and_status_reports_it() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// `events` separates three outcomes an operator must not confuse.
+///
+/// "no events" and "this store cannot record events" would otherwise render the same,
+/// and they call for different responses: the first means nothing has gone wrong, the
+/// second means the recorder is not installed yet and an incident would leave no trace.
+///
+/// Also pins that the verb takes NO LEASE. The rows exist to explain a credential that
+/// just failed, so requiring the daemon stopped would make the diagnostic unavailable
+/// exactly when it is wanted.
+#[test]
+fn events_distinguishes_no_events_from_no_table_and_takes_no_lease() {
+    let root = tmp_root("events");
+    let data_dir = root.join("data");
+    let key_path = root.join("secrets").join("master.key");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    std::fs::create_dir_all(key_path.parent().unwrap()).unwrap();
+    let global = |c: &mut Command| {
+        c.arg("--data-dir")
+            .arg(&data_dir)
+            .arg("--key-path")
+            .arg(&key_path);
+    };
+
+    let mut c = cli();
+    c.arg("bootstrap");
+    global(&mut c);
+    assert!(c.output().unwrap().status.success());
+    // A write, so the schema (and with it the events table) is actually created.
+    let mut c = cli();
+    c.arg("put")
+        .arg("--id")
+        .arg("apikey:e")
+        .arg("--payload")
+        .arg("k");
+    global(&mut c);
+    assert!(c.output().unwrap().status.success());
+
+    let mut c = cli();
+    c.arg("events");
+    global(&mut c);
+    let out = c.output().expect("run events");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "events on a migrated vault must succeed"
+    );
+    assert!(
+        text.contains("no authentication events recorded"),
+        "an empty table must say so plainly; got: {text}"
+    );
+
+    // A store WITHOUT the table: the same command must say something different, because
+    // "nothing recorded" and "nothing can be recorded" are different facts.
+    let old = root.join("old");
+    std::fs::create_dir_all(&old).unwrap();
+    let conn = open_sqlite(&StorageDescriptor {
+        module_id: credentials_core::contract::MODULE_ID.into(),
+        storage_namespace: "default".into(),
+        isolation: Isolation::Module,
+        backend: StorageBackend::Sqlite {
+            path: old.join("store.db").to_string_lossy().into_owned(),
+        },
+    })
+    .expect("open a bare store");
+    drop(conn);
+
+    let mut c = cli();
+    c.arg("events").arg("--data-dir").arg(&old);
+    let out = c.output().expect("run events on a pre-migration store");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "an absent table is a reportable state, not a failure"
+    );
+    assert!(
+        text.contains("no authentication-event table yet"),
+        "an absent table must be distinguishable from an empty one; got: {text}"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// `invalidate` reports what it actually did, and reaches the state it claims.
 ///
 /// The verb exits 0 for a credential that does not exist -- measured -- printing

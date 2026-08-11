@@ -328,6 +328,44 @@ ck auth audit
 (e.g. `fetch_rate_anomaly`) is a durable detection signal surfaced here on demand,
 not a live notification.
 
+### Why a credential stopped working
+
+The chain says a credential was invalidated. It cannot say why — it records
+mutations, and the reason lives in fields it has no room for. `ck auth events` answers
+that instead:
+
+```sh
+ck auth events              # most recent first, 20 by default
+ck auth events --limit 100
+```
+
+```
+2026-08-11 07:58:09  chatgpt:openai   consumer_report  403        v7   applied=yes
+2026-08-11 07:57:50  chatgpt:openai   consumer_report  401        v5   applied=no
+2026-08-11 06:12:03  oauth:xai        refresh_failed   503 status v2   applied=no
+```
+
+- **`consumer_report`** — a consumer spent the token and the provider refused it. The
+  status distinguishes a rejected token (401) from a forbidden request (403), which
+  point at different causes.
+- **`refresh_failed`** — the vault called the provider to refresh and the exchange
+  failed. On a transient failure the record is left active and the intent cleared, so
+  without this row nothing would show the attempt happened at all.
+- **`applied`** — whether the event changed the credential. `no` on a report means the
+  version it named had already been replaced, so the report was correctly ignored; a
+  run of those is a consumer working from stale state, which nothing else surfaces.
+
+**Unlike `audit`, this takes no lease and works against a running vault** — which is
+the point, since the moment to ask is right after a credential fails. **And unlike
+`audit`, these rows are not evidence:** they are not tamper-evident, they may be
+pruned, and nothing should depend on them being complete. For what authoritatively
+happened, read the chain.
+
+Two empty results that mean different things, and the command distinguishes them:
+`no authentication events recorded` (nothing has failed) versus `no
+authentication-event table yet` (this store predates the migration, so an incident
+would leave no trace until the daemon restarts).
+
 ### Reading the chain directly
 
 The verbs above need the daemon stopped. To inspect a **running** vault — or to answer

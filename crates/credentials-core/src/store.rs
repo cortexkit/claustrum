@@ -1869,6 +1869,73 @@ pub fn mint_handle() -> Result<MintedHandle, getrandom::Error> {
 /// into a mutation's own transaction so the audit entry and the mutation commit
 /// together. The single-writer lease guarantees no concurrent appender, so reading
 /// the tip and inserting the next seq is race-free.
+/// Read recent authentication events from a store file WITHOUT a lease or a key.
+///
+/// Separate from [`EncryptedStore::recent_auth_events`] because opening an
+/// `EncryptedStore` acquires the single-writer lease, which requires the daemon
+/// stopped. The moment an operator wants these rows is the moment a credential just
+/// failed, i.e. while the vault is running -- a diagnostic that needs an outage to
+/// read is useless exactly when it is needed.
+///
+/// Safe against a live vault: every column is plaintext (no envelope, so no master
+/// key), and the connection is read-only, which also leaves the WAL untouched -- a
+/// read-write open would checkpoint on close and rewrite the file being inspected.
+///
+/// `mode=ro` rather than `immutable=1`: immutable skips the write-ahead log, and
+/// against a live store the newest events -- the ones being asked about -- are exactly
+/// what is still in the WAL.
+pub fn read_auth_events_read_only(
+    store_path: &std::path::Path,
+    limit: u32,
+) -> Result<Vec<AuthEvent>, StoreOpError> {
+    let map = |e: rusqlite::Error| StoreOpError::from(StoreError::Backend(e.to_string()));
+    let conn = rusqlite::Connection::open_with_flags(
+        format!("file:{}?mode=ro", store_path.display()),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+    )
+    .map_err(map)?;
+
+    // A MISSING TABLE IS NOT AN EMPTY ONE, and the caller has to be able to tell them
+    // apart. The table arrived in a later migration, so a store written by an older
+    // build has no `auth_events` at all -- and a running daemon does not migrate until
+    // it restarts. Reported as its own outcome, because the raw sqlite "no such table"
+    // reads like a broken install, and "no events" would be a lie: this vault cannot
+    // record one yet.
+    let table_exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'auth_events'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .map_err(map)?
+        != 0;
+    if !table_exists {
+        return Err(StoreOpError::NotFound);
+    }
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT ts_ms, credential_id, kind, provider_status, detail, record_version, \
+                    applied \
+             FROM auth_events ORDER BY seq DESC LIMIT ?1",
+        )
+        .map_err(map)?;
+    let rows = stmt
+        .query_map(rusqlite::params![limit], |r| {
+            Ok(AuthEvent {
+                ts_ms: r.get(0)?,
+                credential_id: r.get(1)?,
+                kind: r.get(2)?,
+                provider_status: r.get::<_, Option<i64>>(3)?.map(|s| s as u16),
+                detail: r.get(4)?,
+                record_version: r.get::<_, Option<i64>>(5)?.map(|v| v as u64),
+                applied: r.get::<_, i64>(6)? != 0,
+            })
+        })
+        .map_err(map)?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(map)
+}
+
 /// One recorded authentication observation, as read back for diagnostics.
 #[derive(Debug, Clone)]
 pub struct AuthEvent {

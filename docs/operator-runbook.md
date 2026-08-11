@@ -33,6 +33,21 @@ There are two programs:
 > command works. On this host neither is set — both halves use the keychain — so
 > the variable matters only for a headless or CI deployment.
 >
+> The OTHER environment variables the vault is sensitive to are supplied by the
+> supervisor, not by you: `XDG_DATA_HOME` and `XDG_RUNTIME_DIR` (which move the
+> data directory and the connection file), and `SUBC_MODULE_ID` / `SUBC_LAUNCH_NONCE`
+> (identity, echoed at HELLO). **Moving the data directory does not silently start
+> a fresh vault**: the daemon never bootstraps — only `ck auth bootstrap` creates a
+> key — so a relocated vault finds no key for its new keychain scope and refuses to
+> serve rather than coming up empty. Verified at the boot path, and worth knowing
+> because the opposite behaviour (start fresh, look healthy) is the common one for
+> state directories and is what a sibling module's redemption journal does.
+>
+> `CK_GOOGLE_OAUTH_CLIENT_ID` / `_SECRET` and the `CK_ANTIGRAVITY_*` pair override
+> the embedded public OAuth clients. Deliberately left out of the procedures below:
+> a wrong value fails loudly at the provider with a reason, so it needs no runbook
+> entry — recorded here so a later sweep does not re-open the question.
+>
 > **`--data-dir` must be `<data_home>/cortexkit/<module_id>`**, where `<module_id>`
 > is the subc.jsonc module key — **`claustrum`**, NOT a shortened
 > `credentials`. The supervised daemon derives its store path from the module id

@@ -38,6 +38,9 @@ async fn main() {
     let mut min_ttl_ms: Option<i64> = None;
     let mut show_account_id = false;
     let mut show_claims = false;
+    let mut report_auth_failure = false;
+    let mut provider_status: u16 = 401;
+    let mut record_version: Option<u64> = None;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -70,6 +73,27 @@ async fn main() {
             // — header+signature, the actual bearer secret — is never printed. For
             // diffing two grants' claim sets during entitlement forensics.
             "--show-claims" => show_claims = true,
+            // Send `credential.report_auth_failure` INSTEAD of a get, reporting the
+            // given provider status against the given record_version.
+            //
+            // This exists so the report path can be exercised against a running vault
+            // at all. It otherwise has no client: the only way to produce a report is a
+            // consumer meeting a real provider 401, so the vault's handling of one was
+            // covered by unit tests and by nothing live.
+            //
+            // Reporting a version the store has already moved past is the SAFE way to
+            // drive it: the invalidate is version-gated, so a stale version changes
+            // nothing, while the surrounding diagnostics still record the observation.
+            // Point it at a disposable credential regardless -- a report at the CURRENT
+            // version will mark that credential needs_reauth, which is the whole point
+            // of the call.
+            "--report-auth-failure" => report_auth_failure = true,
+            "--provider-status" => {
+                provider_status = args.next().and_then(|v| v.parse().ok()).unwrap_or(401);
+            }
+            "--record-version" => {
+                record_version = args.next().and_then(|v| v.parse().ok());
+            }
             other => {
                 eprintln!("vault_read_probe: unexpected arg '{other}'");
                 std::process::exit(2);
@@ -107,6 +131,31 @@ async fn main() {
 
     let (route_channel, route_epoch) = route_open(&mut stream, &root).await;
     eprintln!("[probe] route.open -> route_channel={route_channel} route_epoch={route_epoch}");
+
+    if report_auth_failure {
+        let version = record_version.unwrap_or_else(|| {
+            eprintln!(
+                "vault_read_probe: --record-version <n> is required with \
+                 --report-auth-failure (the vault refuses a versionless report)"
+            );
+            std::process::exit(2);
+        });
+        let body = credential_report_auth_failure(
+            &mut stream,
+            route_channel,
+            route_epoch,
+            &handle,
+            provider_status,
+            version,
+        )
+        .await;
+        let parsed: Value = serde_json::from_slice(&body.body).unwrap_or(Value::Null);
+        eprintln!(
+            "[probe] report_auth_failure status={provider_status} record_version={version} -> {}",
+            serde_json::to_string(&parsed).unwrap_or_default()
+        );
+        return;
+    }
 
     let body = credential_get(
         &mut stream,
@@ -203,6 +252,45 @@ async fn route_open(stream: &mut TcpStream, root: &std::path::Path) -> (u16, u32
         value["route_channel"].as_u64().unwrap() as u16,
         value["route_epoch"].as_u64().unwrap() as u32,
     )
+}
+
+/// Send `credential.report_auth_failure`. See the `--report-auth-failure` arm for why
+/// this exists and why a stale `record_version` is the safe way to drive it.
+async fn credential_report_auth_failure(
+    stream: &mut TcpStream,
+    route_channel: u16,
+    route_epoch: u32,
+    handle: &str,
+    provider_status: u16,
+    record_version: u64,
+) -> Frame {
+    let params = json!({
+        "handle": handle,
+        "provider_status": provider_status,
+        "record_version": record_version,
+    });
+    let frame = Frame::build(
+        FrameType::Request,
+        Flags::new(false, Priority::Interactive, false),
+        route_channel,
+        route_epoch,
+        8,
+        serde_json::to_vec(&json!({
+            "method": "credential.report_auth_failure",
+            "params": params,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    write_frame(stream, &frame).await.unwrap();
+    loop {
+        let frame = read_frame_timeout(stream).await;
+        if frame.header.corr == 8
+            && matches!(frame.header.ty, FrameType::Response | FrameType::Error)
+        {
+            return frame;
+        }
+    }
 }
 
 async fn credential_get(

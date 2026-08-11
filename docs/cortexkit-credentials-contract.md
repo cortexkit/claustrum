@@ -147,6 +147,19 @@ refresh or replacement.
 Reads take a **capability handle**, not a public alias (§6). Reads are READ-ONLY —
 no write op exists on this channel.
 
+**A handle survives repair of the credential it names.** An operator repairing a
+dead credential (`login --replace`, `put --replace`) resets it to `active` and bumps
+`record_version` WITHOUT touching the handles table, so a handle held across the
+repair keeps resolving and starts serving the new secret. This is a guarantee
+consumers may depend on, not an implementation accident: it is what lets a consumer
+that paused on `needs_reauth` resume with the handle it already holds, rather than
+needing an out-of-band re-mint it has no channel to request.
+
+The two ways a handle stops working are unrelated to repair: explicit revocation
+(`revoke-handle`, `revoke-all-handles`) and `invalidate`, which revokes every handle
+as part of taking a credential out of service. So a handle that stops resolving means
+someone withdrew it — never that the credential behind it was fixed.
+
 ### Admin surface (off the runtime channel — master-key-gated, operator action)
 ```
 credential.put    { credential_id, record, expected_payload_hash? }   (CREATE-ONLY by default)

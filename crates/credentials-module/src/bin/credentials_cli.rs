@@ -100,9 +100,17 @@ impl std::fmt::Display for CliError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CliError::Usage(m) => write!(f, "{m}"),
+            // NAME THE FIX, not just the cause. This refusal is the one moment a
+            // caller is guaranteed to be reading, and the old text offered only
+            // "stop the daemon" -- which is the WORSE of the two remedies and the
+            // only one it mentioned. Routing through the running module needs no
+            // downtime and is what an operator almost always wants; it was documented
+            // under `help overrides`, i.e. exactly where someone who does not yet know
+            // the flag exists will not look.
             CliError::DaemonRunning => f.write_str(
-                "the credentials daemon is running (holds the single-writer lease); \
-                 stop it before running an admin command",
+                "the credentials daemon is running (holds the single-writer lease). \
+                 Either commit through it with --subc <connection-file> (no downtime), \
+                 or stop the daemon to use the offline path.",
             ),
             CliError::MasterKey(e) => write!(f, "master key: {e}"),
             CliError::Store(e) => write!(f, "{e}"),

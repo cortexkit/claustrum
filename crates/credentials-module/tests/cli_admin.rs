@@ -787,6 +787,21 @@ fn admin_write_refused_while_lease_held() {
     );
     assert_eq!(out.status.code(), Some(3), "daemon-running exit code");
 
+    // AND THE REFUSAL NAMES THE NO-DOWNTIME FIX. A caller hitting this has no reason
+    // to know --subc exists: it lives under `help overrides`, which is exactly where
+    // someone who does not know the flag's name will not look. A refusal that names
+    // only "stop the daemon" pushes every routine repair through an outage, so the
+    // remedy has to travel with the refusal rather than be findable from it.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--subc"),
+        "the refusal must name the flag that makes the write succeed; got: {stderr}"
+    );
+    assert!(
+        stderr.contains("stop the daemon"),
+        "and must still offer the offline path; got: {stderr}"
+    );
+
     drop(_held);
     let _ = std::fs::remove_dir_all(&root);
 }

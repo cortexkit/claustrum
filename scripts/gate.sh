@@ -47,6 +47,10 @@ run_check() {
 # The clippy arms are run BOTH ways for the same reason the test arms are: code
 # behind a feature flag is not compiled without it, so a lint error inside a
 # crash-cut seam is invisible to the default invocation.
+# The endpoint-host manifest is a population check, which no unit test can be: a
+# per-constant assertion cannot fail when a NEW endpoint appears, and "is this URL
+# asserted somewhere" is satisfied by a test comparing a constant to itself.
+run_check "endpoint hosts" python3 scripts/endpoint-hosts.py
 run_check "format" cargo fmt --all -- --check
 run_check "clippy" \
   cargo clippy --locked --workspace --all-targets -- -D warnings

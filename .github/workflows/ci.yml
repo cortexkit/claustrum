@@ -100,6 +100,16 @@ jobs:
         shell: bash
         run: ./scripts/check-inbound-contracts.sh ../subconscious/docs/specs/push-sealed-payload.md
 
+      # Pins the HOST every provider endpoint constant reaches. A population check
+      # rather than a unit test: a per-constant assertion cannot fail when a NEW
+      # endpoint appears, and comparing a constant to itself proves nothing about the
+      # value. A wrong host receives a live refresh token and the failure looks like
+      # an ordinary dead login, so it is worth failing the build over.
+      # Pinned to bash on both legs for the same reason as the contract check above.
+      - name: Endpoint hosts
+        shell: bash
+        run: python3 scripts/endpoint-hosts.py
+
       - name: Format check
         run: cargo fmt --all -- --check
 

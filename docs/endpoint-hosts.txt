@@ -1,0 +1,40 @@
+# DERIVED FILE -- regenerate with scripts/endpoint-hosts.py --update and
+# review the DIFF. Do not hand-edit: a transcribed host inherits the errors
+# of recollection while looking more authoritative than the source.
+#
+# One line per endpoint constant: <file> <CONST> <host>. Only the host is
+# pinned; paths change with upstream APIs and say nothing about where a
+# credential travels.
+#
+# A host that changed without a reason is a finding: a refresh posts a live
+# refresh token in the body, so a wrong host RECEIVES a working credential
+# and the failure looks like an ordinary dead login.
+crates/credentials-core/src/google_login.rs AUTHORIZE_URL accounts.google.com
+crates/credentials-core/src/google_login.rs LOAD_CODE_ASSIST_URL cloudcode-pa.googleapis.com
+crates/credentials-core/src/google_login.rs ONBOARD_USER_URL cloudcode-pa.googleapis.com
+crates/credentials-core/src/google_login.rs TOKEN_URL oauth2.googleapis.com
+crates/credentials-core/src/google_login.rs USERINFO_URL www.googleapis.com
+crates/credentials-core/src/refresh_adapters/anthropic.rs AUTHORIZE_URL claude.ai
+crates/credentials-core/src/refresh_adapters/anthropic.rs LOGIN_TOKEN_URL api.anthropic.com
+crates/credentials-core/src/refresh_adapters/anthropic.rs TOKEN_URL platform.claude.com
+crates/credentials-core/src/refresh_adapters/antigravity.rs TOKEN_URL oauth2.googleapis.com
+crates/credentials-core/src/refresh_adapters/cursor.rs LOGIN_URL cursor.com
+crates/credentials-core/src/refresh_adapters/cursor.rs POLL_URL api2.cursor.sh
+crates/credentials-core/src/refresh_adapters/cursor.rs TOKEN_URL api2.cursor.sh
+crates/credentials-core/src/refresh_adapters/devin.rs AUTHORIZE_URL app.devin.ai
+crates/credentials-core/src/refresh_adapters/devin.rs TOKEN_URL api.devin.ai
+crates/credentials-core/src/refresh_adapters/digitalocean.rs AUTHORIZE_URL cloud.digitalocean.com
+crates/credentials-core/src/refresh_adapters/github_copilot.rs DEVICE_CODE_URL github.com
+crates/credentials-core/src/refresh_adapters/github_copilot.rs DEVICE_TOKEN_URL github.com
+crates/credentials-core/src/refresh_adapters/github_copilot.rs TOKEN_URL api.github.com
+crates/credentials-core/src/refresh_adapters/google.rs TOKEN_URL oauth2.googleapis.com
+crates/credentials-core/src/refresh_adapters/kimi.rs DEVICE_AUTH_URL auth.kimi.com
+crates/credentials-core/src/refresh_adapters/kimi.rs HOST auth.kimi.com
+crates/credentials-core/src/refresh_adapters/kimi.rs TOKEN_URL auth.kimi.com
+crates/credentials-core/src/refresh_adapters/openai.rs AUTHORIZE_URL auth.openai.com
+crates/credentials-core/src/refresh_adapters/openai.rs TOKEN_URL auth.openai.com
+crates/credentials-core/src/refresh_adapters/snowflake.rs TOKEN_URL_BASE {account}.snowflakecomputing.com
+crates/credentials-core/src/refresh_adapters/xai.rs AUTHORIZE_URL auth.x.ai
+crates/credentials-core/src/refresh_adapters/xai.rs DEVICE_CODE_URL auth.x.ai
+crates/credentials-core/src/refresh_adapters/xai.rs DEVICE_TOKEN_URL auth.x.ai
+crates/credentials-core/src/refresh_adapters/xai.rs TOKEN_URL auth.x.ai

@@ -25,6 +25,14 @@ There are two programs:
 > `store.db`) and a key source: `--key-path <file>` for an operator-path key, or
 > nothing for the macOS keychain default.
 >
+> **The DAEMON has no such flag — it reads `CK_MASTER_KEY_PATH` from its
+> environment instead**, set in `subc.jsonc`. Same choice, two different
+> mechanisms, and they must agree: if the CLI is given `--key-path` while the
+> daemon has no `CK_MASTER_KEY_PATH`, the daemon looks in the keychain, finds
+> nothing for that vault, and fails closed with `vault_locked` while every CLI
+> command works. On this host neither is set — both halves use the keychain — so
+> the variable matters only for a headless or CI deployment.
+>
 > **`--data-dir` must be `<data_home>/cortexkit/<module_id>`**, where `<module_id>`
 > is the subc.jsonc module key — **`claustrum`**, NOT a shortened
 > `credentials`. The supervised daemon derives its store path from the module id

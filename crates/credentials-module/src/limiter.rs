@@ -182,6 +182,39 @@ mod tests {
         assert_eq!(l.admit(1, "e", now), Admission::Anomaly { first: false });
     }
 
+    /// The SHIPPED caps wire each constant to the arm it belongs to.
+    ///
+    /// Every other test in this file builds a local `caps()` fixture, so they prove
+    /// the limiter's LOGIC and say nothing about what production runs with. Measured:
+    /// widening `DEFAULT_RATE_CEILING` to a million left all 314 workspace tests and
+    /// all 8 e2e arms green, and so did wiring `rate_ceiling` to the DISTINCT
+    /// constant -- a transposition that silently raises the rate ceiling from 64 to
+    /// 16 (or, the other way, disables a detector) with nothing to catch it.
+    ///
+    /// The e2e sweep does not cover this: it trips the DISTINCT ceiling, so it pins
+    /// that arm and leaves the rate arm free. Two detectors, one of them proven.
+    #[test]
+    fn the_default_caps_wire_each_constant_to_its_own_arm() {
+        let caps = Caps::default();
+        assert_eq!(
+            caps.distinct_ceiling, DEFAULT_DISTINCT_CEILING,
+            "the distinct arm must read the distinct constant"
+        );
+        assert_eq!(
+            caps.rate_ceiling, DEFAULT_RATE_CEILING,
+            "the rate arm must read the rate constant -- a transposition here changes \
+             both detectors' thresholds and no other test can see it"
+        );
+        assert_eq!(caps.window, DEFAULT_WINDOW);
+        // The two ceilings must stay DISTINGUISHABLE, or the assertions above pass
+        // under a transposition and this test becomes decorative.
+        assert_ne!(
+            DEFAULT_DISTINCT_CEILING, DEFAULT_RATE_CEILING,
+            "if these are ever equal, a transposed wiring is undetectable by value; \
+             the arms would need separate proof"
+        );
+    }
+
     #[test]
     fn rapid_refetch_over_rate_ceiling_flags() {
         let mut l = FetchLimiter::new(caps());

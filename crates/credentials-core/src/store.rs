@@ -1463,6 +1463,16 @@ impl EncryptedStore {
     /// every other durable mutation uses). Mint is admin-only; the caller's audit
     /// context records WHICH admin origin performed it (offline CLI vs the module's
     /// authenticated route admin surface) so the trail is truthful provenance.
+    ///
+    /// DELIBERATELY INDIFFERENT TO THE CREDENTIAL'S STATE: a handle is a grant to a
+    /// credential, not an assertion that it currently works, so minting for a
+    /// `needs_reauth` record succeeds. That is the shape production reaches on its own
+    /// — a live consumer holds a handle across a credential dying and being repaired,
+    /// and the same handle serves afterwards.
+    ///
+    /// Adding a state check here would look like a safety improvement and would break
+    /// that: it would make a handle un-mintable exactly when an operator is repairing
+    /// a dead credential.
     pub fn put_handle_hash(
         &self,
         handle_hash_hex: &str,
@@ -3142,6 +3152,67 @@ mod tests {
         assert!(
             events[0].applied,
             "a report at the current version must record as applied"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A handle can be minted for a credential that is already `needs_reauth`, and
+    /// the compound invalidate revokes only handles that exist WHEN IT RUNS.
+    ///
+    /// Both halves are load-bearing for a consumer holding a handle across a
+    /// credential dying and being repaired — the handle must survive, because the
+    /// alternative is re-provisioning every consumer after every provider hiccup.
+    ///
+    /// So the two orderings are both reachable and mean different things:
+    /// invalidate-then-mint leaves a live handle, mint-then-invalidate revokes it.
+    /// AFTER EITHER, THE CREDENTIAL READS `needs_reauth` — identical state, opposite
+    /// handle state — so anything checking only the credential cannot tell them
+    /// apart. That is what makes the second arm worth writing: it pins the handle row
+    /// as the discriminator, and would fail if minting ever started refusing a dead
+    /// credential.
+    #[test]
+    fn a_handle_mints_for_a_dead_credential_and_invalidate_only_revokes_what_exists() {
+        let (root, store) = tmp_store(67);
+        let ctx = AuditCtx::vault(AuditOp::MintHandle);
+
+        // invalidate -> mint: the compound has nothing to revoke, then the mint lands.
+        store.create("id", &oauth_record()).expect("create");
+        let revoked = store
+            .invalidate_and_revoke_all_audited("id", AuditCtx::vault(AuditOp::Invalidate))
+            .expect("invalidate");
+        assert_eq!(revoked, 0, "nothing to revoke before a handle exists");
+        let live = mint_handle().expect("mint");
+        store
+            .put_handle_hash(&live.hash, "id", ctx)
+            .expect("minting for a needs_reauth credential must succeed");
+        assert_eq!(
+            store.resolve_handle(&live.raw).expect("resolve"),
+            "id",
+            "the handle must RESOLVE: this is the state production reaches on its own, \
+             and resolution selects on revoked = 0"
+        );
+
+        // mint -> invalidate: same credential state, opposite handle state.
+        store.create("id2", &oauth_record()).expect("create");
+        let dead = mint_handle().expect("mint");
+        store.put_handle_hash(&dead.hash, "id2", ctx).expect("mint");
+        let revoked = store
+            .invalidate_and_revoke_all_audited("id2", AuditCtx::vault(AuditOp::Invalidate))
+            .expect("invalidate");
+        assert_eq!(
+            revoked, 1,
+            "an existing handle IS revoked by the operator verb"
+        );
+        assert!(
+            matches!(store.resolve_handle(&dead.raw), Err(StoreOpError::NotFound)),
+            "revoked, while the credential reads needs_reauth exactly as above"
+        );
+
+        assert_eq!(
+            store.meta("id").unwrap().state,
+            store.meta("id2").unwrap().state,
+            "the credential state cannot discriminate the two orderings -- which is \
+             why the handle row is the guard"
         );
         let _ = std::fs::remove_dir_all(&root);
     }

@@ -1037,22 +1037,8 @@ impl EncryptedStore {
     pub fn recent_auth_events(&self, limit: u32) -> Result<Vec<AuthEvent>, StoreOpError> {
         self.store
             .with_conn(|c| {
-                let mut stmt = c.prepare(
-                    "SELECT ts_ms, credential_id, kind, provider_status, detail, record_version, \
-                            applied \
-                     FROM auth_events ORDER BY seq DESC LIMIT ?1",
-                )?;
-                let rows = stmt.query_map(rusqlite::params![limit], |r| {
-                    Ok(AuthEvent {
-                        ts_ms: r.get(0)?,
-                        credential_id: r.get(1)?,
-                        kind: r.get(2)?,
-                        provider_status: r.get::<_, Option<i64>>(3)?.map(|s| s as u16),
-                        detail: r.get(4)?,
-                        record_version: r.get::<_, Option<i64>>(5)?.map(|v| v as u64),
-                        applied: r.get::<_, i64>(6)? != 0,
-                    })
-                })?;
+                let mut stmt = c.prepare(AUTH_EVENTS_SELECT)?;
+                let rows = stmt.query_map(rusqlite::params![limit], auth_event_from_row)?;
                 rows.collect::<rusqlite::Result<Vec<_>>>()
             })
             .map_err(StoreOpError::from)
@@ -1960,27 +1946,36 @@ pub fn read_auth_events_read_only(
         return Err(StoreOpError::NotFound);
     }
 
-    let mut stmt = conn
-        .prepare(
-            "SELECT ts_ms, credential_id, kind, provider_status, detail, record_version, \
-                    applied \
-             FROM auth_events ORDER BY seq DESC LIMIT ?1",
-        )
-        .map_err(map)?;
+    let mut stmt = conn.prepare(AUTH_EVENTS_SELECT).map_err(map)?;
     let rows = stmt
-        .query_map(rusqlite::params![limit], |r| {
-            Ok(AuthEvent {
-                ts_ms: r.get(0)?,
-                credential_id: r.get(1)?,
-                kind: r.get(2)?,
-                provider_status: r.get::<_, Option<i64>>(3)?.map(|s| s as u16),
-                detail: r.get(4)?,
-                record_version: r.get::<_, Option<i64>>(5)?.map(|v| v as u64),
-                applied: r.get::<_, i64>(6)? != 0,
-            })
-        })
+        .query_map(rusqlite::params![limit], auth_event_from_row)
         .map_err(map)?;
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(map)
+}
+
+/// The `auth_events` read, shared by both readers.
+///
+/// Kept beside [`auth_event_from_row`] because the two must agree on COLUMN ORDER:
+/// the mapper addresses columns positionally, so reordering this list without
+/// reordering the mapper compiles cleanly and returns wrong values silently. There
+/// are two readers (leased and lease-free), and duplicating the pair would mean two
+/// places that have to be changed together with nothing to catch a miss.
+const AUTH_EVENTS_SELECT: &str =
+    "SELECT ts_ms, credential_id, kind, provider_status, detail, record_version, applied \
+     FROM auth_events ORDER BY seq DESC LIMIT ?1";
+
+/// Decode one `auth_events` row. Positional, so it is bound to the column order in
+/// [`AUTH_EVENTS_SELECT`].
+fn auth_event_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<AuthEvent> {
+    Ok(AuthEvent {
+        ts_ms: r.get(0)?,
+        credential_id: r.get(1)?,
+        kind: r.get(2)?,
+        provider_status: r.get::<_, Option<i64>>(3)?.map(|s| s as u16),
+        detail: r.get(4)?,
+        record_version: r.get::<_, Option<i64>>(5)?.map(|v| v as u64),
+        applied: r.get::<_, i64>(6)? != 0,
+    })
 }
 
 /// One recorded authentication observation, as read back for diagnostics.

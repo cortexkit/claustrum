@@ -394,12 +394,22 @@ impl ReadSurface {
             // NOT a claim that the identity is unavailable in general, which would be
             // too strong: `Principal::Reserved` carries a `module_id`, the daemon
             // stamps it at route-bind time, and this module already keeps it per
-            // channel for the admin gate. A supervised consumer that presents identity
-            // COULD therefore be named here; this code just does not look. Whether it
-            // SHOULD is a live question -- recording a consumer's identity against a
-            // credential failure is a different decision from recording the failure --
-            // so until that is settled, establishing the reporter needs a source
-            // outside this record.
+            // channel for the admin gate. This is reachable in production rather than
+            // hypothetical -- the main consumer confirmed its client attaches
+            // consumer_identity on every route.open, so the vault sees a named module
+            // for real reports today and this code simply does not look.
+            //
+            // Whether it SHOULD look is a live question: recording a consumer's
+            // identity against a credential failure is a different decision from
+            // recording the failure. Until it is settled, establishing the reporter
+            // needs a source outside this record.
+            //
+            // If it is ever wired: the launch nonce is NOT the value to store. It is
+            // the secret a module echoes to prove it is the process entitled to claim
+            // its id, and this store's plaintext columns are non-secret by
+            // construction. A per-bind incarnation tag (derived, non-secret)
+            // distinguishes a restarted process from a long-lived one without putting
+            // an authentication token in a readable column.
             let actor = format!("conn-{connection_id}");
             self.engine
                 .store()

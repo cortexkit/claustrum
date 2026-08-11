@@ -347,7 +347,9 @@ ck auth events --limit 100
 
 - **`consumer_report`** — a consumer spent the token and the provider refused it. The
   status distinguishes a rejected token (401) from a forbidden request (403), which
-  point at different causes.
+  point at different causes. The reporter is whoever SAW the refusal, not whoever
+  caused it: a report can arrive for a credential that was repaired in between, and
+  that case shows as `applied=no` rather than being hidden.
 - **`refresh_failed`** — the vault called the provider to refresh and the exchange
   failed. On a transient failure the record is left active and the intent cleared, so
   without this row nothing would show the attempt happened at all.
@@ -398,9 +400,10 @@ DB="$HOME/.local/share/cortexkit/claustrum/store.db"
 # vault-owned actions are attributable as usual.
 #
 # Note this is a property of what the vault RECORDS, not of what the route plane
-# knows: a supervised consumer can present a module identity at bind time, and the
-# daemon stamps it. Do not read these rows as proof that the caller was unidentifiable
-# -- only that this record does not carry it.
+# knows: a supervised consumer presents a module identity at bind time and the daemon
+# stamps it -- confirmed with the main consumer, whose client attaches it on every
+# route open, so real reports arrive from a named module. Do not read these rows as
+# proof that the caller was unidentifiable; only that this record does not carry it.
 sqlite3 "file:$DB?mode=ro" "SELECT seq, op, credential_id, actor,
   datetime(ts_ms/1000,'unixepoch','localtime') FROM audit_log ORDER BY seq DESC LIMIT 20;"
 

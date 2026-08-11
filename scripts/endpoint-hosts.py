@@ -57,17 +57,29 @@ def discover() -> list[tuple[str, str, str]]:
     population is wrong is worse than none -- it reports a count that sounds like
     coverage and cannot be checked by looking at it.
 
-    The cut is the first `#[cfg(test)]` in the file, which is coarse: it assumes
-    test modules sit at the end, as they do throughout this crate. If someone puts
-    a production constant BELOW a test module it silently drops out of the
-    manifest, so the count is asserted separately (a drop shows up as REMOVED).
+    THE CUT IS THE TEST MODULE, NOT THE FIRST `#[cfg(test)]`, and the difference is
+    a real bug rather than pedantry. That attribute also marks PRODUCTION test
+    seams -- `store.rs` has `with_raw_conn`, `read_surface.rs` has
+    `force_stale_refresher_for_test`, and `refresh_adapters/mod.rs` declares
+    `pub(crate) mod fixture` that way. Cutting at the first occurrence would drop
+    everything below those, and the run would still report clean: an
+    UNDER-inclusion that is invisible in the count, exactly as the over-inclusion
+    was. No endpoint sits below one today, so the naive cut would have been correct
+    by coincidence -- one edit away from silently pinning less than it claims.
+
+    Both directions of this boundary fail quietly, which is why the guard is tested
+    both ways: a constant planted after a production `#[cfg(test)]` must be FOUND,
+    and one planted inside the test module must be IGNORED.
     """
+    # `#[cfg(test)]` immediately followed by a module declaration -- the conventional
+    # trailing test module, and the only form that should truncate the scan.
+    TEST_MOD_RE = re.compile(r"#\[cfg\(test\)\]\s*(?:pub\s+)?mod\s+\w+\s*\{")
     found: list[tuple[str, str, str]] = []
     for src in SOURCE_DIRS:
         for path in sorted(src.rglob("*.rs")):
             text = path.read_text(encoding="utf-8")
-            cfg_tests = [m.start() for m in re.finditer(r"#\[cfg\(test\)\]", text)]
-            cutoff = min(cfg_tests) if cfg_tests else len(text)
+            test_mods = [m.start() for m in TEST_MOD_RE.finditer(text)]
+            cutoff = min(test_mods) if test_mods else len(text)
             for m in CONST_RE.finditer(text):
                 if m.start() > cutoff:
                     continue

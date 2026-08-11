@@ -298,6 +298,119 @@ fn logout_is_reversible_stop_serving_and_status_reports_it() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// An antigravity import stores an identity a consumer can actually resolve.
+///
+/// The importer parses the account's email out of the plugin store and, before this
+/// was fixed, dropped it. That is invisible from inside the vault: the record stores
+/// and serves normally, and the only symptom is downstream, where a consumer joining
+/// on `account_id` cannot distinguish two antigravity accounts and collapses them
+/// into one unlabelled entry.
+///
+/// So the assertion is on `account_id`, not `email`. Populating `email` alone would
+/// look like a fix, render a value, and leave the symptom exactly as it was --
+/// antigravity access tokens are opaque, so there is no live claim to fall back on.
+///
+/// Driven through the real binary, because the capture happens at the CLI call site:
+/// a core-level test of the parser passes whether or not anything stores what it
+/// returns.
+#[test]
+fn an_antigravity_import_stores_a_resolvable_account_identity() {
+    use credentials_core::resolver::{KeySource, ResolverConfig};
+    use credentials_core::store::EncryptedStore;
+
+    let root = tmp_root("ag-import");
+    let data_dir = root.join("vault");
+    let key_path = root.join("keys").join("master.key");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    std::fs::create_dir_all(key_path.parent().unwrap()).unwrap();
+
+    // The plugin's on-disk shape, with two accounts so the selected one is not also
+    // the first -- a capture that always took accounts[0] would otherwise pass.
+    let store_json = root.join("antigravity-accounts.json");
+    std::fs::write(
+        &store_json,
+        br#"{"version":4,"activeIndex":1,"accounts":[
+              {"email":"first@x.com","refreshToken":"1//0-aaa","projectId":"proj-a"},
+              {"email":"active@x.com","refreshToken":"1//0-bbb","projectId":"proj-b"}
+            ]}"#,
+    )
+    .unwrap();
+
+    let global = |c: &mut Command| {
+        c.arg("--data-dir")
+            .arg(&data_dir)
+            .arg("--key-path")
+            .arg(&key_path);
+    };
+    let mut boot = cli();
+    boot.arg("bootstrap");
+    global(&mut boot);
+    assert!(boot.output().unwrap().status.success(), "bootstrap");
+
+    let mut imp = cli();
+    imp.arg("import")
+        .arg("--source")
+        .arg("antigravity")
+        .arg("--id")
+        .arg("antigravity:google")
+        .arg("--json")
+        .arg(&store_json);
+    global(&mut imp);
+    let out = imp.output().expect("run import");
+    assert!(
+        out.status.success(),
+        "import failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Read the stored record back through the real decrypt path.
+    let config = ResolverConfig {
+        data_dir: data_dir.clone(),
+        source: KeySource::OperatorPath {
+            path: key_path.clone(),
+        },
+    };
+    let key = credentials_core::resolver::resolve(&config, None).expect("resolve key");
+    let sqlite = open_sqlite(&StorageDescriptor {
+        // Same shape the other tests in this file use: the module id is imported
+        // rather than spelled so a rename cannot silently point this at a different
+        // store than the CLI just wrote to.
+        module_id: credentials_core::contract::MODULE_ID.into(),
+        storage_namespace: credentials_core::contract::STORAGE_NAMESPACE.into(),
+        isolation: Isolation::Module,
+        backend: StorageBackend::Sqlite {
+            path: data_dir.join("store.db").to_string_lossy().into_owned(),
+        },
+    })
+    .expect("open store");
+    EncryptedStore::migrate(&sqlite).expect("migrate");
+    let store = EncryptedStore::open(sqlite, key).expect("open vault");
+    let record = store.get("antigravity:google").expect("read the record");
+
+    assert_eq!(
+        record.identity.account_id.as_deref(),
+        Some("active@x.com"),
+        "account_id is the field a consumer resolves identity from; without it the \
+         record renders an email and still labels nothing"
+    );
+    assert_eq!(
+        record.identity.email.as_deref(),
+        Some("active@x.com"),
+        "and the display field agrees with it"
+    );
+    assert!(
+        record.identity.is_servable(),
+        "the stored identity must satisfy the servable predicate"
+    );
+    // The identity must track the SELECTED account, not the store's first.
+    assert!(
+        record.oauth.as_ref().unwrap().refresh_token.starts_with("1//0-bbb"),
+        "sanity: the active account's credential was the one imported"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// `events` separates three outcomes an operator must not confuse.
 ///
 /// "no events" and "this store cannot record events" would otherwise render the same,

@@ -693,11 +693,20 @@ fn cmd_import(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     } else {
         // OAuth (incl. antigravity / chatgpt / legacy) → a refreshable record. The
         // stored adapter is the method's default, overridable with --adapter.
+        // Antigravity carries an identity the other import sources do not: its access
+        // tokens are opaque, so the email in the plugin store is the only thing that
+        // can distinguish two accounts downstream.
+        let mut identity_email: Option<String> = None;
         let oauth = if source == "antigravity" {
             // For antigravity the credentials live in the plugin's accounts-array
             // store instead of the normal provider auth.json file — read the selected
             // account and pack its refresh.
-            credentials_core::oauth::import_antigravity_account(&raw, provider_sel.as_deref())
+            credentials_core::oauth::import_antigravity_account(&raw, provider_sel.as_deref()).map(
+                |imported| {
+                    identity_email = imported.email;
+                    imported.oauth
+                },
+            )
         } else {
             match &provider_sel {
                 Some(provider) => credentials_core::oauth::OAuthCredential::import_provider(
@@ -715,7 +724,30 @@ fn cmd_import(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
                 ))
             })?;
         let payload = oauth.access_token.clone().into_bytes();
-        VaultRecord::new_oauth(source, adapter, oauth, payload)
+        let record = VaultRecord::new_oauth(source, adapter, oauth, payload);
+        match identity_email {
+            // Only attach an identity when one was actually read. An unconditional
+            // `with_identity` would stamp an all-None identity onto every other import
+            // source, which reads as "captured, and empty" rather than "never captured".
+            //
+            // THE EMAIL GOES IN BOTH FIELDS, and `account_id` is the load-bearing one.
+            // The read surface serves `account_id` as the identity consumers join on,
+            // and treats `email` as display metadata; a record carrying only `email`
+            // renders a value while still resolving no identity, so a consumer
+            // labelling per account keeps collapsing and the wire looks unchanged.
+            // The read surface already states this as an invariant -- email never
+            // ships without account_id -- and populating one field alone breaks it.
+            //
+            // An email is a legitimate account_id here: consumers treat it as an opaque
+            // stable string, and antigravity has no other per-account identifier,
+            // since its access tokens are opaque rather than JWTs.
+            Some(email) => record.with_identity(credentials_core::record::RecordIdentity {
+                account_id: Some(email.clone()),
+                email: Some(email),
+                org_name: None,
+            }),
+            None => record,
+        }
     };
 
     // `--replace` overwrites an existing credential UNCONDITIONALLY (re-seal at

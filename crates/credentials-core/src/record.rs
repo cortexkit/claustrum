@@ -49,6 +49,18 @@ pub enum CredentialKind {
 /// claims). Stored because some providers' access tokens are opaque (Anthropic), so
 /// identity cannot be parsed live at serve time the way the OpenAI claim table does.
 /// Display/routing metadata only — never part of an authorization decision.
+///
+/// THE TWO IDENTITY FIELDS ARE NOT INTERCHANGEABLE, and which one a capture site
+/// fills decides whether consumers can tell accounts apart. `account_id` is what the
+/// read surface serves as identity and what consumers join on; `email` is display
+/// metadata. A record carrying only `email` therefore RENDERS a value while
+/// resolving no identity, which presents downstream as accounts collapsing into one
+/// unlabelled entry -- a symptom that looks like the capture never happened.
+///
+/// So: never populate `email` alone. When a provider discloses only an email (opaque
+/// tokens, no claim to parse), put it in BOTH fields -- consumers treat `account_id`
+/// as an opaque stable string, and an email satisfies that. [`Self::is_servable`]
+/// states the rule as a predicate.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RecordIdentity {
     /// The provider's stable account id (Anthropic account uuid, ChatGPT account id).
@@ -64,6 +76,17 @@ pub struct RecordIdentity {
 }
 
 impl RecordIdentity {
+    /// Whether this identity can be served without collapsing a consumer's labelling.
+    ///
+    /// False for the one shape that looks captured and behaves as though it was not:
+    /// an `email` with no `account_id`. Written as a predicate rather than left in
+    /// prose so a capture site can be tested against it, since the failure is silent
+    /// at every layer -- it type-checks, it stores, it serves, and it surfaces only as
+    /// a consumer that cannot distinguish two accounts.
+    pub fn is_servable(&self) -> bool {
+        !(self.email.is_some() && self.account_id.is_none())
+    }
+
     /// Whether every field is absent (nothing worth storing).
     pub fn is_empty(&self) -> bool {
         self.account_id.is_none() && self.email.is_none() && self.org_name.is_none()
@@ -179,6 +202,52 @@ impl VaultRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The identity shape that looks captured and serves as though it was not.
+    ///
+    /// `email` alone type-checks, stores, and serves — and then a consumer joining on
+    /// `account_id` resolves nothing, so its accounts collapse into one unlabelled
+    /// entry. The symptom is indistinguishable from never having captured an identity,
+    /// which is why this is a predicate a capture site can be tested against rather
+    /// than a sentence in a doc comment.
+    #[test]
+    fn an_email_without_an_account_id_is_not_servable() {
+        let email_only = RecordIdentity {
+            account_id: None,
+            email: Some("a@x.com".into()),
+            org_name: None,
+        };
+        assert!(
+            !email_only.is_servable(),
+            "email alone renders a value while resolving no identity"
+        );
+
+        // THE DISAMBIGUATORS: a predicate that simply returned false would satisfy the
+        // assertion above. Each of these is a shape that MUST stay servable.
+        assert!(
+            RecordIdentity {
+                account_id: Some("a@x.com".into()),
+                email: Some("a@x.com".into()),
+                org_name: None,
+            }
+            .is_servable(),
+            "an email in both fields is the correct shape for an opaque-token provider"
+        );
+        assert!(
+            RecordIdentity {
+                account_id: Some("acct-uuid".into()),
+                email: None,
+                org_name: None,
+            }
+            .is_servable(),
+            "an account_id with no email is fine — identity resolves"
+        );
+        assert!(
+            RecordIdentity::default().is_servable(),
+            "a record that captured nothing is not the failure being described: it \
+             claims no identity, so nothing is misled"
+        );
+    }
 
     fn oauth_cred() -> OAuthCredential {
         OAuthCredential {

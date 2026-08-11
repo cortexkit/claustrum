@@ -151,7 +151,16 @@ pub fn cmd_login(
         tokens.access_token.into_bytes(),
     )
     .with_identity(RecordIdentity {
-        account_id: None,
+        // The email is the identity, not just a label. The read surface serves
+        // `account_id` as the field consumers join on and treats `email` as display
+        // metadata, so populating only `email` yields a record that renders a value
+        // while resolving no identity -- a consumer labelling per account collapses
+        // its accounts into one unlabelled entry and the wire looks unchanged. The
+        // read surface states the invariant: email never ships without account_id.
+        //
+        // Google/antigravity access tokens are opaque rather than JWTs, so there is no
+        // claim to parse live and no other stable per-account identifier available.
+        account_id: email.clone(),
         email,
         org_name: None,
     });

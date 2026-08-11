@@ -188,10 +188,17 @@ impl OAuthCredential {
 /// matches an account `email` (forward-compat with multi-account
 /// `antigravity:google:<email>`), or `s` as a numeric index. A store with no usable
 /// account is a typed error.
+///
+/// Returns the account's `email` ALONGSIDE the credential, because it is the only
+/// per-account identity this provider has. Antigravity access tokens are opaque
+/// Google tokens rather than JWTs, so the parse-live claim path that serves
+/// `account_id` for other providers cannot work here -- if the email is dropped at
+/// ingest, nothing downstream can tell two antigravity accounts apart, and a consumer
+/// labelling per account collapses them into one unlabelled entry.
 pub fn import_antigravity_account(
     raw_json: &[u8],
     account: Option<&str>,
-) -> Result<OAuthCredential, ImportError> {
+) -> Result<ImportedAntigravityAccount, ImportError> {
     // Account fields are camelCase in the on-disk file (refreshToken, managedProjectId).
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
@@ -249,14 +256,33 @@ pub fn import_antigravity_account(
         Some(managed) => format!("{refresh}|{project_segment}|{managed}"),
         None => format!("{refresh}|{project_segment}"),
     };
-    Ok(OAuthCredential {
-        access_token: String::new(),
-        refresh_token: packed,
-        expires_at_ms: None,
-        token_url: String::new(),
-        client_id: None,
-        scopes: Vec::new(),
+    Ok(ImportedAntigravityAccount {
+        oauth: OAuthCredential {
+            access_token: String::new(),
+            refresh_token: packed,
+            expires_at_ms: None,
+            token_url: String::new(),
+            client_id: None,
+            scopes: Vec::new(),
+        },
+        // Empty is not a value: the field is optional in the store, and an empty
+        // string would present downstream as an account labelled with nothing.
+        email: acct.email.as_deref().filter(|s| !s.is_empty()).map(Into::into),
     })
+}
+
+/// One antigravity account read out of the plugin's store: the credential, plus the
+/// non-secret identity that came with it.
+///
+/// A struct rather than a tuple so the caller cannot silently swap the two, and so
+/// adding a further identity field later does not churn every call site.
+#[derive(Debug, Clone)]
+pub struct ImportedAntigravityAccount {
+    /// The packed OAuth credential the antigravity refresh adapter reads back.
+    pub oauth: OAuthCredential,
+    /// The account's email, when the store carried one. Non-secret, and the only
+    /// stable per-account identifier available for this provider.
+    pub email: Option<String>,
 }
 
 /// Extract a static API key from an auth file. Returns the raw key bytes for a
@@ -449,24 +475,45 @@ mod tests {
         // activeIndex picks account[1].
         let c = import_antigravity_account(raw, None).expect("active account");
         assert_eq!(
-            c.refresh_token, "1//0-bbb||encouraging-env-qwp21",
+            c.oauth.refresh_token, "1//0-bbb||encouraging-env-qwp21",
             "packs <refresh>||<managed> (empty plain project segment)"
         );
         assert!(
-            c.access_token.is_empty(),
+            c.oauth.access_token.is_empty(),
             "antigravity store carries no access token"
         );
         // effective_project_id returns the managed id.
         assert_eq!(
-            crate::refresh_adapters::antigravity::effective_project_id(&c.refresh_token).as_deref(),
+            crate::refresh_adapters::antigravity::effective_project_id(&c.oauth.refresh_token)
+                .as_deref(),
             Some("encouraging-env-qwp21")
+        );
+        // THE IDENTITY COMES BACK WITH THE SELECTED ACCOUNT, and it must be the
+        // selected one rather than the first: antigravity access tokens are opaque, so
+        // this email is the only thing that can tell two accounts apart downstream, and
+        // returning the wrong account's email is worse than returning none.
+        assert_eq!(
+            c.email.as_deref(),
+            Some("b@x.com"),
+            "the active account's email, not the store's first"
         );
         // Select a specific account by email (forward-compat multi-account).
         let a = import_antigravity_account(raw, Some("a@x.com")).expect("by email");
-        assert_eq!(a.refresh_token, "1//0-aaa||proj-a");
+        assert_eq!(a.oauth.refresh_token, "1//0-aaa||proj-a");
+        assert_eq!(a.email.as_deref(), Some("a@x.com"), "tracks the selection");
         // Select by numeric index.
         let byidx = import_antigravity_account(raw, Some("0")).expect("by index");
-        assert_eq!(byidx.refresh_token, "1//0-aaa||proj-a");
+        assert_eq!(byidx.oauth.refresh_token, "1//0-aaa||proj-a");
+        assert_eq!(byidx.email.as_deref(), Some("a@x.com"));
+        // An account with NO email is None rather than an empty string, which would
+        // present downstream as an account labelled with nothing.
+        let no_email = import_antigravity_account(
+            br#"{"version":4,"activeIndex":0,"accounts":[{"refreshToken":"1//0-ccc"}]}"#,
+            None,
+        )
+        .expect("account without an email");
+        assert_eq!(no_email.email, None);
+        assert_eq!(no_email.oauth.refresh_token, "1//0-ccc|");
         // An unknown selector is a typed error; an empty store is rejected.
         assert!(matches!(
             import_antigravity_account(raw, Some("nope@x.com")),

@@ -1950,6 +1950,14 @@ pub struct AuthEvent {
     pub applied: bool,
 }
 
+/// How many `auth_events` rows are kept per credential.
+///
+/// Sized for reading a single incident rather than a history: enough to show a
+/// sequence of failures and what preceded them, small enough that a consumer stuck in
+/// a retry loop cannot grow the store without bound. Older rows for that credential
+/// are dropped as newer ones arrive.
+pub const AUTH_EVENTS_PER_CREDENTIAL: u32 = 64;
+
 /// What a caller observed about a credential's authentication, for `auth_events`.
 ///
 /// `detail` must be a TYPED VARIANT NAME (`invalid_grant`, `transport`, `status`),
@@ -1992,6 +2000,29 @@ pub(crate) fn append_auth_event_tx(
             record_version.map(|v| v as i64),
             applied as i64,
         ],
+    )?;
+
+    // BOUND THE TABLE, in the same transaction as the insert.
+    //
+    // Recording an observation whether or not it applied is the point of this table --
+    // a report naming a superseded version changes nothing and previously left no
+    // trace. The cost is that a write which used to be a silent no-op now always
+    // writes, and nothing upstream refuses one: the read surface's limiter raises an
+    // alarm on a report flood and then lets the call through, so N repeated no-op
+    // reports produce N rows.
+    //
+    // So the flood is bounded here rather than at the caller, because every writer
+    // reaches this function and a caller-side guard would have to be repeated at each.
+    // Trimming PER CREDENTIAL rather than globally is what keeps it honest: a consumer
+    // looping on one credential would otherwise evict every other credential's
+    // history, and those rows are what explains whatever failure is being diagnosed.
+    tx.execute(
+        "DELETE FROM auth_events \
+         WHERE credential_id = ?1 AND seq NOT IN (\
+             SELECT seq FROM auth_events WHERE credential_id = ?1 \
+             ORDER BY seq DESC LIMIT ?2\
+         )",
+        rusqlite::params![credential_id, AUTH_EVENTS_PER_CREDENTIAL as i64],
     )?;
     Ok(())
 }
@@ -3045,6 +3076,71 @@ mod tests {
         assert!(
             events[0].applied,
             "a report at the current version must record as applied"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A flood against one credential is bounded, and cannot evict another's history.
+    ///
+    /// Recording an observation even when it changes nothing is the point of this
+    /// table, and the cost is that a formerly silent no-op now always writes. Nothing
+    /// upstream refuses one -- the read surface's limiter alarms on a report flood and
+    /// lets the call through -- so the bound lives at the insert.
+    ///
+    /// The per-credential scope is the load-bearing part: under a global cap, one
+    /// consumer looping on one credential would evict every other credential's
+    /// history -- the rows that explain whatever failure is being diagnosed.
+    #[test]
+    fn an_event_flood_is_bounded_per_credential_and_spares_other_credentials() {
+        let (root, store) = tmp_store(64);
+        store
+            .create("noisy", &oauth_record())
+            .expect("create noisy");
+        store
+            .create("quiet", &oauth_record())
+            .expect("create quiet");
+
+        // One event for the quiet credential, which must survive the flood.
+        store
+            .record_auth_event(
+                "quiet",
+                AuthObservation {
+                    kind: "refresh_failed",
+                    provider_status: Some(503),
+                    detail: Some("status"),
+                },
+                Some(1),
+            )
+            .expect("quiet event");
+
+        // Well past the cap, as a stuck consumer would produce.
+        let flood = AUTH_EVENTS_PER_CREDENTIAL + 40;
+        for _ in 0..flood {
+            store
+                .record_auth_event(
+                    "noisy",
+                    AuthObservation {
+                        kind: "consumer_report",
+                        provider_status: Some(401),
+                        detail: None,
+                    },
+                    Some(1),
+                )
+                .expect("noisy event");
+        }
+
+        let events = store.recent_auth_events(10_000).expect("read events");
+        let noisy = events.iter().filter(|e| e.credential_id == "noisy").count();
+        let quiet = events.iter().filter(|e| e.credential_id == "quiet").count();
+
+        assert_eq!(
+            noisy as u32, AUTH_EVENTS_PER_CREDENTIAL,
+            "a flood must be trimmed to the cap, not grow without bound"
+        );
+        assert_eq!(
+            quiet, 1,
+            "a flood against one credential must not evict another's history -- those \
+             are the rows an operator reads during the incident"
         );
         let _ = std::fs::remove_dir_all(&root);
     }

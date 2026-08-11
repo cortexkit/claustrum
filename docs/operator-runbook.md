@@ -366,6 +366,13 @@ Two empty results that mean different things, and the command distinguishes them
 authentication-event table yet` (this store predates the migration, so an incident
 would leave no trace until the daemon restarts).
 
+**Only the most recent events per credential are kept** (64), because nothing refuses
+a report: a consumer stuck in a retry loop would otherwise grow the store without
+bound. The trim is per credential rather than global, so a flood against one cannot
+evict another's history — which matters, since those are the rows being read during
+the incident that caused the flood. A credential showing exactly 64 events has had at
+least that many, not exactly that many.
+
 ### Reading the chain directly
 
 The verbs above need the daemon stopped. To inspect a **running** vault — or to answer

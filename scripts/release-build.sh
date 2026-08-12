@@ -65,6 +65,32 @@ for bin in ck-claustrum ck-auth; do
     "$(shasum -a 256 "$STAGE/$bin" | cut -d' ' -f1)"
 done
 
+# EXERCISE THE STAGED FILE, not the source it came from.
+#
+# `cargo test` spawns a binary it builds for the test run, so a green suite is
+# evidence about the SOURCE and none at all about these bytes -- proven by deleting a
+# staged artifact and watching all eight arms pass. CRED_DAEMON_BIN points the same
+# arms at the exact file, under a real supervisor. Nothing else runs a release daemon
+# before it replaces a production one, and a binary that panics at startup would
+# otherwise first announce itself as an outage.
+#
+# Skipped when the sibling subc-core is absent (the suite's own graceful skip), which
+# is why the summary line below states whether it ran rather than assuming it did.
+echo
+echo "verifying the staged daemon under a real supervisor..."
+if CRED_REQUIRE_DAEMON=1 CRED_DAEMON_BIN="$PWD/$STAGE/ck-claustrum" \
+   cargo test --locked -p credentials-module --test real_daemon_e2e \
+   -- --ignored --test-threads=1 >/tmp/ck-stage-verify.$$ 2>&1; then
+  grep -E '^test result' /tmp/ck-stage-verify.$$ | sed 's/^/  /'
+  echo "  the STAGED artifact passed, not merely the source it was built from"
+else
+  echo "STAGED ARTIFACT FAILED VERIFICATION -- do not deploy it" >&2
+  tail -30 /tmp/ck-stage-verify.$$ >&2
+  rm -f /tmp/ck-stage-verify.$$
+  exit 1
+fi
+rm -f /tmp/ck-stage-verify.$$
+
 echo
 echo "staged in ${STAGE}/ -- outside cargo's reach, so these hashes stay true."
 echo "Copy into place with a plain cp -- do NOT re-sign."

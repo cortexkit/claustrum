@@ -61,6 +61,43 @@ impl Drop for RealDaemon {
 /// Unset (a local run without the sibling), the e2e gracefully skips.
 const REQUIRE_DAEMON_ENV: &str = "CRED_REQUIRE_DAEMON";
 
+/// Point the suite at a specific `ck-claustrum` instead of the one cargo just built.
+///
+/// WHY AN OVERRIDE IS NEEDED AT ALL: `CARGO_BIN_EXE_*` resolves per-profile and cargo
+/// rebuilds before running, so `cargo test` — with or without `--release` — always
+/// spawns a binary it produced for the test run, never a staged one. Proven by
+/// deleting the staged file and watching all arms pass. That makes a green suite
+/// evidence about the SOURCE and no evidence at all about the bytes being shipped,
+/// which is the reassuring reading that has to be closed rather than documented:
+/// nothing else exercises a release artifact before it replaces a production daemon,
+/// and a binary that panics at startup would first announce itself as an outage.
+///
+/// With this set, the same eight arms drive the exact file. Used by
+/// `scripts/release-build.sh` after staging.
+const DAEMON_BIN_ENV: &str = "CRED_DAEMON_BIN";
+
+/// The daemon binary the suite should exercise.
+///
+/// REFUSES a path that does not exist rather than falling back to the built one: a
+/// typo'd override that silently tested the wrong binary would report exactly the
+/// green the caller was hoping for, which is worse than the gap it closes.
+fn daemon_binary() -> PathBuf {
+    match std::env::var_os(DAEMON_BIN_ENV) {
+        Some(raw) => {
+            let path = PathBuf::from(raw);
+            assert!(
+                path.is_file(),
+                "{DAEMON_BIN_ENV} points at {} which is not a file — refusing to fall \
+                 back to the cargo-built binary, because a silent fallback would report \
+                 the staged artifact as verified when it was never run",
+                path.display()
+            );
+            path
+        }
+        None => PathBuf::from(env!("CARGO_BIN_EXE_ck-claustrum")),
+    }
+}
+
 fn require_daemon() -> bool {
     // CI forces it on, so the ship gate cannot zero out to green on a runner even if
     // the workflow's explicit setting is ever dropped.
@@ -248,7 +285,7 @@ where
     F: FnOnce(&SeedCtx) -> (String, Vec<u8>),
 {
     let subc_core = build_subc_core()?;
-    let credentials_module = PathBuf::from(env!("CARGO_BIN_EXE_ck-claustrum"));
+    let credentials_module = daemon_binary();
     assert!(credentials_module.exists());
 
     let rig = unique_temp_dir("cred-real-daemon");

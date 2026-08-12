@@ -595,14 +595,26 @@ also symlinked into `~/.local/bin/` for the `ck` dispatcher.
 ```
 
 Stamps the source revision into both binaries, signs each with its **pinned**
-identifier, and prints the revision and hash it produced. It refuses on a dirty
+identifier, and prints the revision and sha256 it produced. It refuses on a dirty
 tree: a stamped revision that names a commit whose contents are not what was built
 is worse than no stamp, because the whole point is to be trusted during an
 incident.
 
+Artifacts land in `target/staged/<rev>/`, **not** `target/release/`. That
+directory belongs to cargo, and any later `--release` command silently overwrites
+what is in it — measured: an e2e run rebuilt a staged, signed daemon on top of
+itself, so a published hash stopped describing the file within one command.
+
 Copy the results into place with a plain `cp`. **Do not re-sign at the
 destination** — a pinned identifier is not sticky, and one `codesign --force --sign
 -` there reverts it to the derived form.
+
+**The test suite cannot verify a staged artifact.** `CARGO_BIN_EXE_*` resolves
+per-profile and cargo rebuilds before running, so even `cargo test --release`
+spawns a binary it just built rather than the one you staged — verified by
+destroying the staged file and watching all 8 e2e arms pass anyway. The suite
+proves the SOURCE is good. The only checks that see the deployed bytes are the
+acceptance legs below, which run after placement.
 
 That is the gate. It runs all five suites with the right flags, asserts a minimum
 count for each, and fails if any arm skipped — the three ways a green run can prove

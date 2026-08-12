@@ -1,0 +1,40 @@
+# One line per THRESHOLD constant: <constant> <file> <boundary test>
+#
+# Hand-maintained, and checked by scripts/threshold-controls.py. Unlike the
+# endpoint and domain-separator manifests this one is NOT derived: the mapping
+# from a threshold to the test that covers its boundary cannot be recovered by
+# reading the code, which is the whole reason it is written down.
+#
+# WHAT A BOUNDARY TEST MUST DO: exercise the value where the PREDICATE decides
+# -- just below the threshold and at it -- rather than at zero or empty.
+#
+# WHY, measured 2026-08-12: the auth_events cap shipped with a negative control
+# asserting that an EMPTY table produces no warning, and a mutant that warned
+# UNCONDITIONALLY survived it. GROUP BY over zero rows returns nothing whatever
+# the HAVING clause says, so the control tested the input rather than the
+# predicate -- a second copy of the positive arm wearing a negative's name.
+#
+# AND WHY A MANIFEST RATHER THAN A RULE IN SOMEONE'S HEAD: a sweep of all five
+# thresholds found exactly one instance, and it was code written that same day.
+# The defect is a property of YOUNG thresholds -- a second test naturally grows
+# the right control eventually -- so the moment worth catching is INTRODUCTION.
+# A new threshold with no row here fails the check, which puts the question in
+# front of whoever adds it instead of hoping a later sweep finds it.
+#
+# THE OTHER HALF, and it is why the third column names a test rather than
+# asserting a pattern: MIN_ENVELOPE_LEN reads as UNCOVERED under any search for
+# tests that mention it. Its boundary is covered from the accepting side by
+# `empty_plaintext_round_trips`, whose name says nothing about boundaries --
+# it seals an empty plaintext, asserts the result is exactly MIN_ENVELOPE_LEN,
+# and opens it again. Enumeration by mention cannot see coverage by
+# consequence. Recording the mapping is what makes the next audit a lookup
+# rather than a re-derivation, and it is what stops a reviewer "fixing" a
+# threshold that is already covered.
+
+MIN_SEALED_LEN crates/credentials-core/src/apns_submit.rs a_blob_too_short_to_decrypt_is_refused
+GET_MANY_MAX crates/credentials-module/src/limiter.rs get_many_serves_at_the_cap_and_refuses_whole_past_it
+MIN_ENVELOPE_LEN crates/credentials-core/src/envelope.rs empty_plaintext_round_trips
+REUSE_LIMIT_SECS crates/credentials-core/src/apns.rs staleness_covers_both_directions
+DEFAULT_DISTINCT_CEILING crates/credentials-module/src/limiter.rs distinct_spread_over_ceiling_flags_once
+DEFAULT_RATE_CEILING crates/credentials-module/src/limiter.rs rapid_refetch_over_rate_ceiling_flags
+AUTH_EVENTS_PER_CREDENTIAL crates/credentials-core/src/store.rs events_discloses_that_the_retention_cap_discarded_older_rows

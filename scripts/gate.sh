@@ -81,7 +81,9 @@ run_check() {
 # per-constant assertion cannot fail when a NEW endpoint appears, and "is this URL
 # asserted somewhere" is satisfied by a test comparing a constant to itself.
 run_check "endpoint hosts" python3 scripts/endpoint-hosts.py
+run_check "threshold controls" python3 scripts/threshold-controls.py
 run_check "format" cargo fmt --all -- --check
+
 run_check "clippy" \
   cargo clippy --locked --workspace --all-targets -- -D warnings
 run_check "clippy (seam features)" \

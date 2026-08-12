@@ -110,6 +110,12 @@ jobs:
         shell: bash
         run: python3 scripts/endpoint-hosts.py
 
+      - name: Threshold boundary controls
+        # Same bash pin as the checks above: the script walks paths and the Windows
+        # leg renders them with backslashes under the default shell.
+        shell: bash
+        run: python3 scripts/threshold-controls.py
+
       - name: Format check
         run: cargo fmt --all -- --check
 

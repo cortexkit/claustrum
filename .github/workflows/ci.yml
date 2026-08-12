@@ -111,8 +111,9 @@ jobs:
         run: python3 scripts/endpoint-hosts.py
 
       - name: Threshold boundary controls
-        # Same bash pin as the checks above: the script walks paths and the Windows
-        # leg renders them with backslashes under the default shell.
+        # Bash-pinned to match its siblings. NOTE the path rendering is handled in
+        # the script via as_posix(), not by this pin: the separator comes from
+        # Python, so the shell choice does not affect it.
         shell: bash
         run: python3 scripts/threshold-controls.py
 

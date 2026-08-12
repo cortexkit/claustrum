@@ -70,7 +70,12 @@ def scan_source() -> dict[str, str]:
             continue
         for name in THRESHOLD_NAME.findall(path.read_text(encoding="utf-8")):
             if name not in NOT_THRESHOLDS:
-                found[name] = str(path.relative_to(ROOT))
+                # as_posix(), NOT str(): on Windows str(Path) renders backslashes
+                # and every manifest row fails to match. Same defect fixed in
+                # endpoint-hosts.py on 2026-08-11 -- and pinning shell: bash does
+                # NOT help, because the separator comes from Python's path
+                # rendering rather than from the shell.
+                found[name] = path.relative_to(ROOT).as_posix()
     found.update(NAME_RULE_BLIND)
     return found
 

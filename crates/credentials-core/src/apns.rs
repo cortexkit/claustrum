@@ -151,6 +151,79 @@ fn b64url(bytes: &[u8]) -> String {
 /// `issued_at_secs` is a parameter rather than read from the clock so the output is
 /// a pure function of its inputs — which is what makes the shape testable against
 /// Apple's published example without a fixed-clock seam.
+/// What a PKCS#8 PEM actually contains, for a refusal that describes the OPERATOR'S
+/// file rather than the parser's expectation.
+///
+/// Deliberately shallow: it reads the algorithm and named-curve OIDs and nothing else,
+/// because its only job is to let a refusal say "this is an RSA key" or "this is
+/// P-384". Returns `None` when the structure is unrecognisable, in which case the
+/// caller keeps the raw decoder error -- an honest "I cannot tell" beats a guess.
+fn describe_key_material(pem: &str) -> Option<&'static str> {
+    use p256::pkcs8::der::Decode as _;
+
+    // Strip the PEM armour by hand rather than pulling in a parser: the payload is one
+    // base64 blob between the BEGIN/END lines.
+    let body: String = pem
+        .lines()
+        .filter(|l| !l.starts_with("-----"))
+        .collect::<Vec<_>>()
+        .join("");
+    let der = base64_decode_standard(body.trim())?;
+    let info = p256::pkcs8::PrivateKeyInfo::from_der(&der).ok()?;
+
+    const ID_EC_PUBLIC_KEY: &str = "1.2.840.10045.2.1";
+    const RSA_ENCRYPTION: &str = "1.2.840.113549.1.1.1";
+    const ED25519: &str = "1.3.101.112";
+    const SECP384R1: &str = "1.3.132.0.34";
+    const SECP521R1: &str = "1.3.132.0.35";
+    const SECP256K1: &str = "1.3.132.0.10";
+
+    let algorithm = info.algorithm.oid.to_string();
+    match algorithm.as_str() {
+        RSA_ENCRYPTION => Some("an RSA key"),
+        ED25519 => Some("an Ed25519 key"),
+        ID_EC_PUBLIC_KEY => {
+            // The curve rides in the algorithm parameters, and it is the field that
+            // actually decides whether ES256 can be produced.
+            let curve = info
+                .algorithm
+                .parameters_oid()
+                .ok()
+                .map(|oid| oid.to_string())
+                .unwrap_or_default();
+            match curve.as_str() {
+                SECP384R1 => Some("an EC key on P-384"),
+                SECP521R1 => Some("an EC key on P-521"),
+                SECP256K1 => Some("an EC key on secp256k1"),
+                _ => Some("an EC key on a curve other than P-256"),
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Standard-alphabet base64 decode for the PEM body. Separate from [`b64url`], which
+/// emits the URL alphabet the JWT wants and cannot read this.
+fn base64_decode_standard(s: &str) -> Option<Vec<u8>> {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = Vec::new();
+    let mut acc: u32 = 0;
+    let mut bits = 0u32;
+    for byte in s.bytes() {
+        if byte == b'=' || byte.is_ascii_whitespace() {
+            continue;
+        }
+        let value = ALPHABET.iter().position(|&c| c == byte)? as u32;
+        acc = (acc << 6) | value;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    Some(out)
+}
+
 pub fn mint_provider_token(
     p8_pem: &str,
     identity: &ApnsKeyIdentity,
@@ -163,6 +236,19 @@ pub fn mint_provider_token(
         return Err(ApnsTokenError::MalformedIdentity("team id"));
     }
 
+    // NAME WHAT THE FILE HOLDS, NOT WHAT THE PARSER WANTED.
+    //
+    // Measured 2026-08-12, feeding real keys of each shape: the upstream error names
+    // the EXPECTED OID and never the found one, and the reported value is absent from
+    // the file in both failing cases. An RSA key reports `1.2.840.10045.2.1`
+    // (id-ecPublicKey); a P-384 key reports `1.2.840.10045.3.1.7`, which IS prime256v1.
+    //
+    // That last one is not merely unhelpful, it is INVERTED: an operator with a P-384
+    // key looks the OID up, finds P-256 -- exactly what APNs requires -- and reads the
+    // message as "your P-256 key is unsupported". Every subsequent move is wrong, and
+    // the message was confident and specific throughout. Prefer no detail to detail
+    // that argues for the wrong conclusion.
+    //
     // NAME THE REMEDY FOR THE CONTAINER MISMATCH, not just the cause.
     //
     // A SEC1 PEM (`BEGIN EC PRIVATE KEY`) holds the SAME key material and is what
@@ -179,6 +265,13 @@ pub fn mint_provider_token(
                 "{detail} -- this is a SEC1 key (BEGIN EC PRIVATE KEY). It holds the \
                  right material in the wrong envelope; convert it with: openssl pkcs8 \
                  -topk8 -nocrypt -in <file> -out <file>.p8"
+            ))
+        } else if let Some(found) = describe_key_material(p8_pem) {
+            ApnsTokenError::KeyDecode(format!(
+                "this key is {found}; APNs provider tokens are ES256, which requires a \
+                 P-256 (prime256v1) EC key. The underlying decoder names the OID it \
+                 EXPECTED rather than the one it found, so ignore any OID it quotes: \
+                 [{detail}]"
             ))
         } else {
             ApnsTokenError::KeyDecode(detail)
@@ -365,6 +458,85 @@ OF/2NxApJCzGCEDdfSp6VQO30hyhRANCAAQRWz+jn65BtOMvdyHKcvjBeBSDZH2r\n\
             msg.contains("openssl pkcs8 -topk8"),
             "the refusal must carry the conversion command -- the operator's key is \
              valid and one command from working: {msg}"
+        );
+    }
+
+    /// A wrong-ALGORITHM and a wrong-CURVE key are each named for what they ARE.
+    ///
+    /// Found by measuring the refusals rather than reading them, while checking a peer's
+    /// claim that our two signers refused the same shapes. The upstream decoder names
+    /// the OID it EXPECTED and never the one it found, and the quoted value is absent
+    /// from the file in both cases: an RSA key reported `1.2.840.10045.2.1`
+    /// (id-ecPublicKey), and a P-384 key reported `1.2.840.10045.3.1.7` -- which IS
+    /// prime256v1.
+    ///
+    /// The P-384 case is INVERTED rather than merely unhelpful: an operator looks the
+    /// OID up, finds P-256 (exactly what APNs requires), and reads the message as "your
+    /// P-256 key is unsupported". Confident, specific, and wrong in the direction that
+    /// makes every next move wrong too.
+    ///
+    /// Both fixtures are real keys, so the refusal is about the MATERIAL rather than
+    /// malformed bytes.
+    #[test]
+    fn a_wrong_algorithm_or_curve_is_named_for_what_it_is() {
+        // A real RSA-2048 key and a real P-384 key, generated for these tests and used
+        // nowhere else.
+        const RSA: &str = "-----BEGIN PRIVATE KEY-----\n\
+             MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7S+VVs7sxbf+8\n\
+             0ndRhzRHdhArFB2go1d5b22SBZsphkS9mF+H4Xro/3oqX473yCVSoPJYf/d8p43o\n\
+             3OK9L5TIQLwJdQJ0yq9qrKQz1zRReUF3xz4XSytNWCHxndbGjuTyj969YJSB7Aww\n\
+             3nD6zTTtBFuCU1L2gUI4tgGOyyBrxTR6ifyTgkmIK/3rwpEkvi3j2ELmzg7OCy4I\n\
+             ICs40r3YSJhzDvYj9zIX91DupWu23VvEBHqe/ND3IU/ATfsXXFdNCqv+j+sdXARY\n\
+             5JL4kQZitrDVie1haPifHA9AJhEgaLrnWiPYXKDnO3CpEznxGnoY05ukTQOL1V1j\n\
+             se6cg7XXAgMBAAECggEAVK0KYMWiAsXlUbuhQBWtOAWTZ7ZvcpmGSZtr4RFxxcMz\n\
+             PrgtsGPrSn1+ALw1CabN4N5s0kAAZrXlvXpnc/qX/DTwDiJ9WsnrpoGotts7hv4X\n\
+             8Av+8U8Fo7ENn4updxlRPqx2mg2Y9mf+VvWqBGlT3TgUGwaKwnFLvBHlAGarIK0/\n\
+             gqBoLsBezLJqIAWch044xrtFrVMtQN5CUFGTHAO1rmaUXj5kms9nnOJf8izhqOQx\n\
+             DVKQwab3OUY881wFfPah8fhFNkWeZ+XFNmHAvR82cCZpIbRLQ7ieB2DCiEh9Qjut\n\
+             KK+MBBy26F5HY6TFzYhGPLhHwC3WnTqxEdFqtiHMaQKBgQDx8Y/gBHjcS4VA3Fx7\n\
+             KwT76+jIDQxS+jlKqZkDLC7ViKt6qGbvIV/QGj3+kVhmkryAe8kEB3kG5zAjwvzK\n\
+             FG275JzlhpVd6/qDCEK5UwDUPikq9IH6bCdgaZDFF//r+O1DnMtp09qxA4SS6R4d\n\
+             K1jITnbzTU7A16HAIfCclWDcFQKBgQDGLZCHuLiO97WeUsBT6uzI9vnabFSCFa34\n\
+             JwzgekbxFG9TTUNwjo24KnIThQeoeiSFP1YQ0TdinrMox2Knknqhc2rRmebLUesU\n\
+             8s8LwsjnuvrPaiWnfpoDAHpY2EL9ckN90fFvRjolRsfzL9IOKMf16xqQk0m3kgki\n\
+             9ZQ/p3NJOwKBgQCwQcsO6DMkSeBJ4D9/e1emL7bmBptz19blDajrJsT3yxkhwo06\n\
+             qJWkhXmkez5re3rYH1XSGZ+R59qqMuL2VOucdm/WxrUKN1/JFbuGR3HTLXXQVVBb\n\
+             n28QTdepvlIzFqXDG/cUocIwMt/iJvJJTcrgIkmF9kvpMS4lSpR/flOSAQKBgGuT\n\
+             WkxCOnTpA/6QXvRupuAkKNanTWxbxlbZI8VKuu2ssQ2f+EbGKynYaJot8U1EGET4\n\
+             b4ireQwgp5IwQV5DRiwT0d07VKvzqM9zSm7Q6mvX9MPYk94K/CE7Bi7qHdskRnyr\n\
+             FQrZLUEE3g8lWznyazET0RS/zxlFvY3rjvDKver3AoGAMZ6lOiTxgQIOCHUHtchA\n\
+             TyQ1S3yW2czLSgV5yrrNwEFlYqvUitPak59B3klNuYPHGQpd+abwvqealufBnNxa\n\
+             oQUPsczurQFdpMVzsfFscMnWifcqEz8V5t2FPfiNtQjXS/bK7KBo/sCHOdmknMv7\n\
+             KlJd/97QR+5d41fpw7622cQ=\n\
+             -----END PRIVATE KEY-----\n";
+        const P384: &str = "-----BEGIN PRIVATE KEY-----\n\
+             MIG2AgEAMBAGByqGSM49AgEGBSuBBAAiBIGeMIGbAgEBBDAXePjbqN+yQPga51Eg\n\
+             fXmzU6lFVK3H36w6/8pmkxAm10teqiX8/wIY4glzlwxuAzyhZANiAATxAlKXdgw6\n\
+             O7TN160oB24/EZsZ0KEzv4kS3AagU27ZHQB10otXUcjT5WlZ5fHEA5gF3VB9bUC+\n\
+             DXUfW1ZHlFS3raU1JkCU+IvUuvlO4uOEDNDCEF05+vUcNDwfgn8WJeg=\n\
+             -----END PRIVATE KEY-----\n";
+
+        let rsa_msg = format!(
+            "{}",
+            mint_provider_token(RSA, &identity(), 0).expect_err("an RSA key must be refused")
+        );
+        assert!(
+            rsa_msg.contains("an RSA key"),
+            "the refusal must name what the file HOLDS: {rsa_msg}"
+        );
+
+        let p384_msg = format!(
+            "{}",
+            mint_provider_token(P384, &identity(), 0).expect_err("a P-384 key must be refused")
+        );
+        assert!(
+            p384_msg.contains("P-384"),
+            "the refusal must name the curve the operator actually has: {p384_msg}"
+        );
+        assert!(
+            p384_msg.contains("ignore any OID"),
+            "the quoted OID is the EXPECTED one, and for P-384 it reads as prime256v1 -- \
+             the message must warn rather than let the operator trust it: {p384_msg}"
         );
     }
 

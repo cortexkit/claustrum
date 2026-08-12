@@ -647,6 +647,21 @@ impl EncryptedStore {
             // SAME transaction: a fresh credential must never inherit a stale intent
             // from a prior id reuse (and on overwrite this is what stops a boot
             // reconciliation from undoing a legitimate re-login).
+            //
+            // THIS TAIL REPEATS IN THE REPLACE AND OVERWRITE PATHS AND IS NOT WORTH
+            // EXTRACTING. A duplicate scan reports the three as one group, which is why
+            // the reason is here rather than in a commit message nobody reads at the
+            // moment they are tidying.
+            //
+            // The three sit under different write contracts -- unconditional insert,
+            // version-guarded replace, unconditional overwrite -- each with its own SQL
+            // and its own definition of what `n > 0` means. A shared helper would have
+            // to decide, on its callers' behalf, when the intent may be cleared and
+            // which audit op to append. That is the shape that has bitten twice in this
+            // codebase and once in a sibling: a helper enforcing an invariant on the way
+            // in while some caller writes around it, and a fix constraining a type no
+            // reachable writer goes through. Three visible copies under three contracts
+            // beat one helper hiding which contract it is serving.
             if n > 0 {
                 clear_intent_tx(tx, credential_id)?;
                 append_audit_tx(

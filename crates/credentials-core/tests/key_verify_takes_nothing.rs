@@ -37,6 +37,15 @@
 //!
 //! Requires `--features migration-tools`, which is what builds the binary.
 
+// GATED ON THE FEATURE THAT BUILDS THE BINARY THIS DRIVES.
+//
+// Without it the workspace run compiles this file while `ck_key_verify` is not built,
+// so `CARGO_BIN_EXE_ck_key_verify` names a path that does not exist and the spawn
+// fails. It passed locally and failed on CI because I had built that binary by hand
+// earlier in the session -- the test was reading a stale artifact, which is the same
+// defect class as a suite that cannot see the file it claims to verify.
+#![cfg(feature = "migration-tools")]
+
 use std::path::PathBuf;
 
 use cortexkit_store::{open_sqlite, Isolation, StorageBackend, StorageDescriptor};

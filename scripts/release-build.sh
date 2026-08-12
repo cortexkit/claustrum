@@ -40,18 +40,33 @@ echo "building at ${REV}"
 CK_BUILD_REV="$REV" cargo build --locked --release -p credentials-module \
   --bin ck-claustrum --bin ck-auth
 
+# COPY OUT OF target/ BEFORE PUBLISHING ANYTHING ABOUT THESE FILES.
+#
+# target/release/ belongs to cargo, and any later `--release` command silently
+# overwrites what is in it. Measured the hard way: an e2e run with `--release` REBUILT
+# ck-claustrum on top of a staged, signed artifact, so a sha published from that path
+# stopped describing the file within one command. A hash is a promise about a specific
+# byte sequence; publishing one for a path a build tool owns is a promise nobody can
+# keep.
+#
+# The staging dir is keyed by revision, so two builds of one commit land in the same
+# place and a different commit cannot quietly replace the first.
+STAGE="target/staged/${REV}"
+mkdir -p "$STAGE"
+
 for bin in ck-claustrum ck-auth; do
-  path="target/release/$bin"
+  cp "target/release/$bin" "$STAGE/$bin"
   # Pin the identifier. NEVER re-sign at the destination: a pin is not sticky, and one
   # `codesign --force --sign -` at placement reverts it to the derived form.
-  codesign --force --sign - --identifier "$bin" "$path"
-  printf '%-14s rev=%s sha=%s\n' \
+  codesign --force --sign - --identifier "$bin" "$STAGE/$bin"
+  printf '%-14s rev=%s sha256=%s\n' \
     "$bin" \
-    "$("$path" --version | sed -E 's/.*\((.*)\)/\1/')" \
-    "$(shasum -a 256 "$path" | cut -c1-16)"
+    "$("$STAGE/$bin" --version | sed -E 's/.*\((.*)\)/\1/')" \
+    "$(shasum -a 256 "$STAGE/$bin" | cut -d' ' -f1)"
 done
 
 echo
-echo "staged in target/release/. Copy into place with a plain cp -- do NOT re-sign."
+echo "staged in ${STAGE}/ -- outside cargo's reach, so these hashes stay true."
+echo "Copy into place with a plain cp -- do NOT re-sign."
 echo "Then verify AFTER placement: codesign -dv <dest> shows the pinned Identifier,"
 echo "and <dest> --version reports ${REV}."

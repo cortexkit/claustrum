@@ -356,6 +356,32 @@ Two verbs express intent that `--replace` does not:
 - **`remove`** — permanently delete the credential, its refresh intent and its
   handles. Audited, but not undoable.
 
+### Is anything unrecoverable?
+
+The health probe and `ck auth list` both read metadata only — they never open an
+envelope, so neither can see a record that decrypts to nothing usable. One tool
+answers that, by decrypting every record in memory:
+
+```sh
+cargo run --bin ck_usable_audit -- ~/.local/share/cortexkit/claustrum
+cargo run --bin ck_usable_audit -- /srv/vault --key-path /etc/cortexkit/master.key
+```
+
+Safe against a running vault: read-only connection, **no lease**, nothing written.
+(`mode=ro`, not `immutable=1` — immutable skips the WAL and answers about a live
+store's past.)
+
+It scores **stranded** — a record holding neither a usable access token nor refresh
+material, so no `get` can recover it without an operator login. **It deliberately
+does NOT score access-token expiry**: an expired access token beside live refresh
+material is the routine state of a healthy credential, and counting it would report
+normal operation as a fault. It also flags an identity that renders a value while
+resolving nothing (an email with no account id).
+
+`stranded: 0` is the expected reading. A non-zero count is the signal that a
+credential needs a re-login, and it is the one number the health gauge cannot
+produce.
+
 ## 6. Verify the audit chain
 
 Every durable mutation is recorded in a tamper-evident, HMAC-keyed audit chain.

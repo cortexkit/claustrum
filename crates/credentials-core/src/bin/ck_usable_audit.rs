@@ -58,28 +58,80 @@ fn is_serviceable(oauth: Option<&OAuthCredential>) -> bool {
     }
 }
 
+/// Exit with a diagnostic on stderr rather than a panic. A panic prints a backtrace
+/// hint and an "the application panicked" frame around what is an ordinary usage or
+/// configuration error, which reads as a tool defect to an operator.
+fn fail(msg: &str) -> ! {
+    eprintln!("ck_usable_audit: {msg}");
+    std::process::exit(2);
+}
+
 fn main() {
-    let dir = PathBuf::from(
-        std::env::args()
-            .nth(1)
-            .expect("usage: ck_usable_audit <DATA_DIR>"),
-    );
+    let mut args = std::env::args().skip(1);
+    let mut dir: Option<PathBuf> = None;
+    let mut key_path: Option<PathBuf> = None;
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            // Mirrors `ck auth --key-path`: an operator-path vault has no keychain
+            // item, so without this the tool cannot open the one deployment where a
+            // read-only diagnostic matters most -- a headless or CI host.
+            "--key-path" => {
+                key_path = Some(PathBuf::from(args.next().unwrap_or_else(|| {
+                    fail("--key-path needs a file");
+                })));
+            }
+            other if other.starts_with('-') => fail(&format!("unexpected argument {other}")),
+            other if dir.is_none() => dir = Some(PathBuf::from(other)),
+            other => fail(&format!("unexpected argument {other}")),
+        }
+    }
+    let Some(dir) = dir else {
+        fail("usage: ck_usable_audit <DATA_DIR> [--key-path <file>]");
+    };
 
-    let key = KeySource::Keychain
-        .backend()
-        .load_slot(&dir, KeySlot::Current)
-        .expect("read keychain")
-        .expect("no master key at this vault's derived scope");
+    let source = match key_path {
+        Some(path) => KeySource::OperatorPath { path },
+        None => KeySource::Keychain,
+    };
+    // Name the source in the refusal. "No master key at this vault's derived scope"
+    // is true for a keychain miss AND for a wrong --key-path, and the two need
+    // opposite responses (unlock/bootstrap vs fix the path).
+    let label = match &source {
+        KeySource::OperatorPath { path } => format!("key file {}", path.display()),
+        KeySource::Keychain => "the macOS keychain".to_string(),
+    };
+    let key = match source.backend().load_slot(&dir, KeySlot::Current) {
+        Ok(Some(key)) => key,
+        Ok(None) => fail(&format!("no master key for {} in {label}", dir.display())),
+        Err(e) => fail(&format!("reading {label}: {e}")),
+    };
 
-    let conn = Connection::open_with_flags(
-        dir.join("store.db"),
+    let db = dir.join("store.db");
+    let conn = match Connection::open_with_flags(
+        &db,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
-    )
-    .expect("open store.db read-only");
+    ) {
+        Ok(conn) => conn,
+        Err(e) => fail(&format!("opening {} read-only: {e}", db.display())),
+    };
 
-    let mut stmt = conn
+    // A bootstrapped-but-never-written vault has a key and no schema: the tables are
+    // created by the first write, not by `bootstrap`. Say that, rather than surfacing
+    // "no such table: credentials", which reads as a corrupt store when it is an empty
+    // one.
+    let mut stmt = match conn
         .prepare("SELECT credential_id, record_version, state, envelope FROM credentials ORDER BY credential_id")
-        .expect("prepare");
+    {
+        Ok(stmt) => stmt,
+        Err(rusqlite::Error::SqliteFailure(_, Some(msg))) if msg.contains("no such table") => {
+            println!();
+            println!("  {} holds no credentials yet", dir.display());
+            println!("  (the vault is bootstrapped; its schema is created by the first write)");
+            println!();
+            return;
+        }
+        Err(e) => fail(&format!("reading {}: {e}", db.display())),
+    };
     let rows = stmt
         .query_map([], |r| {
             Ok((

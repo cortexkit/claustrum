@@ -144,7 +144,7 @@ CRED_REQUIRE_DAEMON=1 run_expect 8 "real-daemon e2e (ship gate)" \
 # that does not exist can warn, so the counts are the only available instrument.
 run_expect 1 "kill-9 mid-refresh crash cut" \
   cargo test --locked -p credentials-core --features kill9-test-seam --test kill9_mid_refresh
-run_expect 4 "master-key rotation crash cuts" \
+run_expect 5 "master-key rotation crash cuts" \
   cargo test --locked -p credentials-core --features rotate-test-seam --test rotate_crash_cut
 run_expect 2 "login crash cut" \
   cargo test --locked -p credentials-core --features login-test-seam --test login_crash_cut

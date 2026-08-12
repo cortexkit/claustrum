@@ -26,11 +26,33 @@
 //! immutable skips the write-ahead log and would answer about a live store's past.
 
 use credentials_core::envelope::{open as envelope_open, RecordBinding};
+use credentials_core::key::KeyId;
 use credentials_core::oauth::OAuthCredential;
 use credentials_core::record::VaultRecord;
-use credentials_core::resolver::{KeySlot, KeySource};
+use credentials_core::resolver::{self, KeySource, ResolverConfig};
 use rusqlite::{Connection, OpenFlags};
 use std::path::PathBuf;
+
+/// The master-key fingerprint the store records in plaintext, read over the same
+/// read-only connection.
+///
+/// `EncryptedStore::read_db_key_id` needs an opened store, which takes the
+/// single-writer lease -- the thing this tool must not do. The row is plaintext, so
+/// reading it directly costs nothing and keeps the lease-free property.
+///
+/// `None` covers both a store predating the anchor row and any read failure: the
+/// caller then falls back to a plain resolve, which fails closed with its own
+/// message if no key matches.
+fn read_db_key_id_read_only(conn: &Connection) -> Option<KeyId> {
+    let hex: String = conn
+        .query_row(
+            "SELECT key_id FROM vault_secrets WHERE name = '__vault_audit_key__'",
+            [],
+            |r| r.get(0),
+        )
+        .ok()?;
+    KeyId::from_hex(&hex)
+}
 
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
@@ -100,12 +122,6 @@ fn main() {
         KeySource::OperatorPath { path } => format!("key file {}", path.display()),
         KeySource::Keychain => "the macOS keychain".to_string(),
     };
-    let key = match source.backend().load_slot(&dir, KeySlot::Current) {
-        Ok(Some(key)) => key,
-        Ok(None) => fail(&format!("no master key for {} in {label}", dir.display())),
-        Err(e) => fail(&format!("reading {label}: {e}")),
-    };
-
     let db = dir.join("store.db");
     let conn = match Connection::open_with_flags(
         &db,
@@ -113,6 +129,38 @@ fn main() {
     ) {
         Ok(conn) => conn,
         Err(e) => fail(&format!("opening {} read-only: {e}", db.display())),
+    };
+
+    // RESOLVE THE SLOT THE DATABASE NAMES, exactly as the daemon does, rather than
+    // assuming `Current`.
+    //
+    // A rotation that crashed after the rewrap and before the promote leaves the
+    // store sealed under `Next` -- the state the two-slot handover exists to survive,
+    // and one the daemon recovers from silently via `resolve_for_db`. Loading
+    // `Current` here reported every record UNREADABLE with a KeyMismatch on a vault
+    // that was serving perfectly well. That is the worst possible answer from a
+    // diagnostic: it accuses the store during the one window when an operator is
+    // already anxious about a rotation, and the true reading is "healthy, finish the
+    // promote". Measured with the shipped rotate_cut_helper at its `rewrap` cut, which
+    // is a real SIGKILL rather than a hand-forged slot layout.
+    //
+    // The db's plaintext key fingerprint is the authority for which slot to use, so
+    // read it first and let the resolver pick; fall back to a plain resolve for a
+    // store too young to have the anchor row.
+    let config = ResolverConfig {
+        data_dir: dir.clone(),
+        source,
+    };
+    let key = match read_db_key_id_read_only(&conn) {
+        Some(db_key_id) => resolver::resolve_for_db(&config, db_key_id),
+        None => resolver::resolve(&config, None),
+    };
+    let key = match key {
+        Ok(key) => key,
+        Err(e) => fail(&format!(
+            "master key for {} from {label}: {e}",
+            dir.display()
+        )),
     };
 
     // A bootstrapped-but-never-written vault has a key and no schema: the tables are

@@ -21,6 +21,7 @@
 
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use cortexkit_store::{open_sqlite, Isolation, StorageBackend, StorageDescriptor};
@@ -31,8 +32,18 @@ use credentials_core::store::{EncryptedStore, StoreOpError};
 /// Spawn the helper at one cut point, wait for it to park, SIGKILL it, and return
 /// the rig dir so the caller can re-open the vault from the killed-at-cut state.
 fn kill_at_cut(cut: &str) -> PathBuf {
-    let root =
-        std::env::temp_dir().join(format!("ck-cred-rotate-cut-{}-{}", cut, std::process::id()));
+    // Unique per CALL, not per cut. Keying on the cut name alone collided the moment a
+    // second test reused a cut: both rigs resolved to one directory, the second helper
+    // found a provisioned key slot and panicked, and the failure surfaced in whichever
+    // test lost the race rather than in the one that was added. The counter makes the
+    // rig private to a call the way the test reads as if it already were.
+    static RIG_SEQ: AtomicU32 = AtomicU32::new(0);
+    let root = std::env::temp_dir().join(format!(
+        "ck-cred-rotate-cut-{}-{}-{}",
+        cut,
+        std::process::id(),
+        RIG_SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
     let _ = std::fs::remove_dir_all(&root);
     let data_dir = root.join("data");
     let key_dir = root.join("secrets");
@@ -55,7 +66,22 @@ fn kill_at_cut(cut: &str) -> PathBuf {
     while !marker.exists() {
         if Instant::now() > deadline {
             let _ = child.kill();
-            panic!("helper never reached cut '{cut}' within 30s");
+            // NAME WHAT DISCRIMINATES. "Never reached the cut" is equally true of a
+            // helper that hung mid-rotation, one that could not start at all, and a
+            // machine so loaded that a first-run link plus five parallel rotations
+            // blew the budget — which is what a cold run after a rebuild looks like,
+            // and the only shape observed so far. Without the rig state in the
+            // message, a load problem reads as a rotation defect.
+            panic!(
+                "helper never reached cut '{cut}' within 30s\n\
+                 rig: {}\n\
+                 store.db exists: {}   key slots present: {}\n\
+                 (all cuts timing out together points at load or a build, not at the \
+                 rotation; one cut timing out alone points at that cut)",
+                root.display(),
+                db_path.exists(),
+                std::fs::read_dir(&key_dir).map(|d| d.count()).unwrap_or(0),
+            );
         }
         if let Ok(Some(status)) = child.try_wait() {
             panic!("helper exited early ({status:?}) before parking at '{cut}'");
@@ -324,5 +350,51 @@ fn crash_during_a_resumed_second_rotation_never_bricks() {
         "the second rotation's key occupies next"
     );
     assert_wrong_key_fails_closed(&root);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The read-only diagnostic must read a vault the daemon can still open.
+///
+/// `ck_usable_audit` originally loaded `KeySlot::Current` directly instead of
+/// resolving the slot the database names. At the rewrap cut the store is sealed
+/// under `Next`, so every record came back UNREADABLE with a KeyMismatch on a vault
+/// that was serving perfectly well — the diagnostic accusing the store during the
+/// one window when an operator is already anxious about a rotation, when the true
+/// reading is "healthy, finish the promote".
+///
+/// Drives the real binary because that is where the defect lived: the resolution
+/// logic it now calls was always correct, and a unit test of that function would
+/// have passed throughout.
+#[test]
+fn the_usable_audit_reads_a_vault_left_mid_rotation() {
+    let root = kill_at_cut("rewrap");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_ck_usable_audit"))
+        .arg(root.join("data"))
+        .arg("--key-path")
+        .arg(root.join("secrets").join("master.key"))
+        .output()
+        .expect("run ck_usable_audit");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert!(
+        out.status.success(),
+        "the audit must not fail on a mid-rotation vault the daemon opens fine\n\
+         stdout: {stdout}\nstderr: {stderr}"
+    );
+    // The specific old failure, named so a regression cannot hide behind a generic
+    // non-zero exit.
+    assert!(
+        !stdout.contains("UNREADABLE"),
+        "a record sealed under the unpromoted `next` slot is readable — reporting it \
+         UNREADABLE blames the store for a resolvable rotation state\nstdout: {stdout}"
+    );
+    // POSITIVE ARM: an audit that printed nothing at all would satisfy the assertion
+    // above. It must actually decrypt and count the record the helper wrote.
+    assert!(
+        stdout.contains("serviceable: 1"),
+        "the audit must decrypt and count the record, not merely avoid the error\n\
+         stdout: {stdout}"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }

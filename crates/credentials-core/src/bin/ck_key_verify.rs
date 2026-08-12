@@ -48,6 +48,35 @@ fn db_key_id(data_dir: &std::path::Path) -> Option<KeyId> {
     KeyId::from_hex(&hex)
 }
 
+/// The key source for an operator tool, honouring `CK_MASTER_KEY_PATH`.
+///
+/// Both migration tools hardcoded `KeySource::Keychain`, which made them unusable on an
+/// OPERATOR-PATH vault -- a headless or CI host, which is a large part of who runs a
+/// migration. The daemon and `ck auth` both honour a key path already; these did not,
+/// and the same defect had been fixed in the usable-audit hours earlier without a sweep
+/// for siblings, which is why it survived here.
+///
+/// Reads the DAEMON's variable rather than inventing a second spelling: one concept,
+/// one name, and an operator who set it for the daemon does not have to learn another.
+fn key_source_from_env() -> KeySource {
+    match std::env::var_os("CK_MASTER_KEY_PATH") {
+        Some(path) => KeySource::OperatorPath {
+            path: PathBuf::from(path),
+        },
+        None => KeySource::Keychain,
+    }
+}
+
+/// How the key source will be described in output, so a refusal names WHICH store was
+/// consulted. "No key at the derived scope" is equally true of a keychain miss and a
+/// wrong key path, and those need opposite responses.
+fn key_source_label(source: &KeySource) -> String {
+    match source {
+        KeySource::OperatorPath { path } => format!("key file {}", path.display()),
+        KeySource::Keychain => "the macOS keychain".to_string(),
+    }
+}
+
 fn main() {
     let dir = PathBuf::from(
         std::env::args()
@@ -61,17 +90,23 @@ fn main() {
 
     // What the resolver would actually reach for this data dir. Reading a keychain slot
     // acquires nothing and mutates nothing.
-    let backend = KeySource::Keychain.backend();
-    let resolved = backend
-        .load_slot(&dir, KeySlot::Current)
-        .expect("read keychain Current")
-        .expect("no key at the derived scope for this data dir")
-        .key_id()
-        .to_hex();
+    let source = key_source_from_env();
+    let label = key_source_label(&source);
+    let resolved = match source.backend().load_slot(&dir, KeySlot::Current) {
+        Ok(Some(key)) => key.key_id().to_hex(),
+        Ok(None) => {
+            eprintln!("ck_key_verify: no key for {} in {label}", dir.display());
+            std::process::exit(2);
+        }
+        Err(e) => {
+            eprintln!("ck_key_verify: reading {label}: {e}");
+            std::process::exit(2);
+        }
+    };
 
     println!("  data dir     {}", dir.display());
     println!("  db anchor    {anchor}");
-    println!("  keychain     {resolved}");
+    println!("  {label:<12} {resolved}");
     assert_eq!(
         resolved, anchor,
         "the key at this vault's keychain scope is NOT the key its database is sealed under"

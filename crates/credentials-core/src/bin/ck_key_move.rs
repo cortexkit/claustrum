@@ -10,12 +10,43 @@
 use credentials_core::resolver::{KeySlot, KeySource};
 use std::path::PathBuf;
 
+/// The key source for an operator tool, honouring `CK_MASTER_KEY_PATH`.
+///
+/// Both migration tools hardcoded `KeySource::Keychain`, which made them unusable on an
+/// OPERATOR-PATH vault -- a headless or CI host, which is a large part of who runs a
+/// migration. The daemon and `ck auth` both honour a key path already; these did not,
+/// and the same defect had been fixed in the usable-audit hours earlier without a sweep
+/// for siblings, which is why it survived here.
+///
+/// Reads the DAEMON's variable rather than inventing a second spelling: one concept,
+/// one name, and an operator who set it for the daemon does not have to learn another.
+fn key_source_from_env() -> KeySource {
+    match std::env::var_os("CK_MASTER_KEY_PATH") {
+        Some(path) => KeySource::OperatorPath {
+            path: PathBuf::from(path),
+        },
+        None => KeySource::Keychain,
+    }
+}
+
+/// How the key source will be described in output, so a refusal names WHICH store was
+/// consulted. "No key at the derived scope" is equally true of a keychain miss and a
+/// wrong key path, and those need opposite responses.
+fn key_source_label(source: &KeySource) -> String {
+    match source {
+        KeySource::OperatorPath { path } => format!("key file {}", path.display()),
+        KeySource::Keychain => "the macOS keychain".to_string(),
+    }
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let old_dir = PathBuf::from(args.next().expect("usage: ck_key_move <OLD_DIR> <NEW_DIR>"));
     let new_dir = PathBuf::from(args.next().expect("usage: ck_key_move <OLD_DIR> <NEW_DIR>"));
 
-    let backend = KeySource::Keychain.backend();
+    let source = key_source_from_env();
+    println!("key store: {}", key_source_label(&source));
+    let backend = source.backend();
 
     println!("old dir: {}", old_dir.display());
     println!("new dir: {}", new_dir.display());

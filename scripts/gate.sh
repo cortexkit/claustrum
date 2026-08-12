@@ -109,7 +109,7 @@ run_expect() {
 #
 # Raise this when tests are added. A failure here is normally that, not a defect --
 # but it should be a deliberate edit rather than a number nobody revisits.
-run_expect 326 "workspace unit + integration" \
+run_expect 327 "workspace unit + integration" \
   cargo test --locked --workspace
 
 # Two independent defences, because each catches what the other misses:
@@ -148,5 +148,11 @@ run_expect 5 "master-key rotation crash cuts" \
   cargo test --locked -p credentials-core --features rotate-test-seam --test rotate_crash_cut
 run_expect 2 "login crash cut" \
   cargo test --locked -p credentials-core --features login-test-seam --test login_crash_cut
+# The migration tools are feature-gated, so clippy compiles them but nothing RAN them
+# until this arm existed. Compiling proves they build; the property that matters -- the
+# key-identity diagnostic works while the daemon holds the lease -- is a runtime fact.
+run_expect 1 "migration tools" \
+  cargo test --locked -p credentials-core --features migration-tools \
+  --test key_verify_takes_nothing
 
 printf '\nGATE PASSED\n'

@@ -2247,6 +2247,27 @@ fn cmd_events(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             if e.applied { "yes" } else { "no" }
         );
     }
+    // DISCLOSE THE TRIM. The per-credential cap is enforced by a silent DELETE, so a
+    // reader cannot otherwise distinguish "this is everything that happened" from "this
+    // is what survived" -- and those close an investigation in opposite directions.
+    match credentials_core::store::auth_events_at_cap_read_only(&db) {
+        Ok(ids) if !ids.is_empty() => {
+            println!();
+            println!(
+                "note: {} credential(s) are at the {}-event retention cap, so older events",
+                ids.len(),
+                credentials_core::store::AUTH_EVENTS_PER_CREDENTIAL
+            );
+            println!("      for them have been discarded:");
+            for id in &ids {
+                println!("        {id}");
+            }
+        }
+        // Absent table or a read problem is not worth failing the command over: the
+        // events themselves already printed, and this is a footnote about them.
+        Ok(_) | Err(_) => {}
+    }
+
     if events.is_empty() {
         // Say what an empty table MEANS, because "nothing here" reads as either "no
         // failures" or "the recorder is broken", and those need different responses.

@@ -1430,3 +1430,131 @@ fn a_lease_refusal_advises_only_a_remedy_that_exists_for_that_verb() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// `events` discloses that older rows were discarded, rather than presenting a trimmed
+/// window as the whole history.
+///
+/// The per-credential cap is enforced by a silent DELETE, which is right -- an unbounded
+/// diagnostic table on a path a hostile consumer can drive is a disk-exhaustion lever.
+/// But it leaves a reader unable to tell "this is everything that happened" from "this
+/// is what survived", and those close an investigation in opposite directions: the first
+/// says the cause is not here, the second says the evidence is gone.
+///
+/// A peer hit the same shape tonight in a retention job that pruned 125,000 rows and
+/// advanced a tamper-evident seal while logging only on error -- a successful first run
+/// and a dead worker were indistinguishable.
+#[test]
+fn events_discloses_that_the_retention_cap_discarded_older_rows() {
+    let root = tmp_root("events-cap");
+    let data_dir = root.join("vault");
+    let key_path = root.join("keys").join("master.key");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    std::fs::create_dir_all(key_path.parent().unwrap()).unwrap();
+
+    let run = |args: &[&str]| -> std::process::Output {
+        let mut c = cli();
+        c.args(args)
+            .arg("--data-dir")
+            .arg(&data_dir)
+            .arg("--key-path")
+            .arg(&key_path);
+        c.output().expect("run ck-auth")
+    };
+    assert!(run(&["bootstrap"]).status.success());
+
+    // NEGATIVE CONTROL, and it must be a credential WITH events but BELOW the cap.
+    //
+    // My first version used an EMPTY table, and a mutation that always warns survived
+    // it: GROUP BY over zero rows returns nothing whatever the HAVING clause says, so
+    // the control could not distinguish a correct check from one that fires
+    // unconditionally. An empty-input control tests the input, not the predicate.
+
+    // Flood one credential past the cap directly through the store, which is what a
+    // consumer looping on report_auth_failure produces.
+    {
+        let descriptor = StorageDescriptor {
+            module_id: credentials_core::contract::MODULE_ID.into(),
+            storage_namespace: credentials_core::contract::STORAGE_NAMESPACE.into(),
+            isolation: Isolation::Module,
+            backend: StorageBackend::Sqlite {
+                path: data_dir.join("store.db").to_string_lossy().into_owned(),
+            },
+        };
+        let raw = open_sqlite(&descriptor).expect("open");
+        // bootstrap provisioned the KEY; the schema arrives on first open by the daemon
+        // or CLI, so migrate before opening the vault here.
+        credentials_core::store::EncryptedStore::migrate(&raw).expect("migrate");
+        let key = credentials_core::resolver::resolve(
+            &credentials_core::resolver::ResolverConfig {
+                data_dir: data_dir.clone(),
+                source: credentials_core::resolver::KeySource::OperatorPath {
+                    path: key_path.clone(),
+                },
+            },
+            None,
+        )
+        .expect("resolve");
+        let store = credentials_core::store::EncryptedStore::open(raw, key).expect("vault");
+        let rec = credentials_core::record::VaultRecord::new_static(
+            credentials_core::record::CredentialKind::ApiKey,
+            "test",
+            b"secret".to_vec(),
+            None,
+        );
+        store.create("apikey:flooded", &rec).expect("seed");
+        // The below-cap sibling: it must NOT appear in the notice.
+        store
+            .create("apikey:quiet", &rec)
+            .expect("seed the quiet one");
+        for _ in 0..3 {
+            store
+                .record_auth_event(
+                    "apikey:quiet",
+                    credentials_core::store::AuthObservation {
+                        kind: "consumer_report",
+                        provider_status: Some(401),
+                        detail: None,
+                    },
+                    Some(1),
+                )
+                .expect("record a below-cap event");
+        }
+        for _ in 0..(credentials_core::store::AUTH_EVENTS_PER_CREDENTIAL + 5) {
+            store
+                .record_auth_event(
+                    "apikey:flooded",
+                    credentials_core::store::AuthObservation {
+                        kind: "consumer_report",
+                        provider_status: Some(401),
+                        detail: None,
+                    },
+                    Some(1),
+                )
+                .expect("record an event");
+        }
+    }
+
+    let out = run(&["events"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "events must succeed: {stdout}");
+    assert!(
+        stdout.contains("retention cap"),
+        "a credential at the cap must be disclosed, so a trimmed window is not read as \
+         the whole history: {stdout}"
+    );
+    // THE CONTROL THAT DISCRIMINATES: a credential with events but below the cap must
+    // NOT be named. A check that fires unconditionally passes every other assertion.
+    assert!(
+        !stdout.contains("apikey:quiet"),
+        "a credential below the cap must not be reported as having lost history -- a \
+         notice that names everything tells an operator nothing: {stdout}"
+    );
+    assert!(
+        stdout.contains("apikey:flooded"),
+        "the notice must NAME which credential lost history -- 'some rows were \
+         discarded' does not tell an operator whether it was the one they are \
+         investigating: {stdout}"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}

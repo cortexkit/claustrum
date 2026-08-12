@@ -1997,6 +1997,50 @@ pub fn verify_audit_chain_read_only(
     Ok(audit::verify_chain(&audit_key, &entries))
 }
 
+/// Credential ids whose diagnostic history is AT the retention cap, and has therefore
+/// almost certainly been trimmed.
+///
+/// `auth_events` is capped per credential and the trim is a silent DELETE. That is the
+/// right behaviour -- an unbounded diagnostic table on a path a hostile consumer can
+/// drive is a disk-exhaustion lever -- but it leaves a reader unable to tell "this is
+/// everything that happened" from "this is what survived". Those need different
+/// responses: the first closes an investigation, the second says the evidence is gone
+/// and the window has to be reconstructed another way.
+///
+/// At-cap is a heuristic and deliberately so: a credential sitting at exactly the cap
+/// might never have been trimmed. Reporting a possible loss that did not happen costs
+/// an operator one sentence; concealing one that did costs them the wrong conclusion.
+pub fn auth_events_at_cap_read_only(
+    store_path: &std::path::Path,
+) -> Result<Vec<String>, StoreOpError> {
+    let map = |e: rusqlite::Error| StoreOpError::from(StoreError::Backend(e.to_string()));
+    let conn = rusqlite::Connection::open_with_flags(
+        format!("file:{}?mode=ro", store_path.display()),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+    )
+    .map_err(map)?;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT credential_id FROM auth_events \
+             GROUP BY credential_id HAVING COUNT(*) >= ?1 ORDER BY credential_id",
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::SqliteFailure(_, Some(ref m)) if m.contains("no such table") => {
+                StoreOpError::NotFound
+            }
+            other => map(other),
+        })?;
+    let ids = stmt
+        .query_map(rusqlite::params![AUTH_EVENTS_PER_CREDENTIAL as i64], |r| {
+            r.get::<_, String>(0)
+        })
+        .map_err(map)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(map)?;
+    Ok(ids)
+}
+
 /// Read the audit chain from a store file WITHOUT a lease or a master key.
 ///
 /// Every column here is plaintext -- seq, op, credential id, actor, alarm -- so unlike

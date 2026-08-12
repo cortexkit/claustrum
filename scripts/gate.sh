@@ -82,6 +82,7 @@ run_check() {
 # asserted somewhere" is satisfied by a test comparing a constant to itself.
 run_check "endpoint hosts" python3 scripts/endpoint-hosts.py
 run_check "threshold controls" python3 scripts/threshold-controls.py
+run_check "path rendering" python3 scripts/check-path-rendering.py
 run_check "format" cargo fmt --all -- --check
 
 run_check "clippy" \

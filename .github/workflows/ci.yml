@@ -110,6 +110,13 @@ jobs:
         shell: bash
         run: python3 scripts/endpoint-hosts.py
 
+      - name: Path rendering
+        # The scripts compare paths against posix literals in manifests. str(Path)
+        # renders backslashes on Windows, which has broken this build twice --
+        # both times in a script whose author had just fixed the other one.
+        shell: bash
+        run: python3 scripts/check-path-rendering.py
+
       - name: Threshold boundary controls
         # Bash-pinned to match its siblings. NOTE the path rendering is handled in
         # the script via as_posix(), not by this pin: the separator comes from

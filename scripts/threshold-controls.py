@@ -66,7 +66,12 @@ def scan_source() -> dict[str, str]:
     """Every threshold constant in the crates, mapped to its file."""
     found: dict[str, str] = {}
     for path in sorted((ROOT / "crates").rglob("*.rs")):
-        if "/tests/" in str(path):
+        # as_posix() here too, and this line is why the rule needs a checker rather
+        # than a comment: it sat ONE LINE ABOVE the comment warning about exactly
+        # this, and CI passed on Windows because no threshold is currently defined
+        # in a test file. A latent instance of a defect you just fixed, inside the
+        # fix. Zero impact today; the platforms disagree the moment someone adds one.
+        if "/tests/" in path.as_posix():
             continue
         for name in THRESHOLD_NAME.findall(path.read_text(encoding="utf-8")):
             if name not in NOT_THRESHOLDS:

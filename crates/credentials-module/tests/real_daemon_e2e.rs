@@ -375,7 +375,7 @@ where
     )
     .unwrap();
 
-    let child = Command::new(&subc_core)
+    let mut child = Command::new(&subc_core)
         .env("XDG_CONFIG_HOME", rig.join("config"))
         .env("XDG_RUNTIME_DIR", &runtime_dir)
         .env("XDG_DATA_HOME", &data_home)
@@ -391,7 +391,36 @@ where
     while !connection_file.exists() {
         assert!(
             tokio::time::Instant::now() < deadline,
-            "daemon did not publish a connection file within {SETUP_TIMEOUT:?}"
+            // NAME WHAT DISCRIMINATES. This fires identically when subc-core crashed at
+            // startup, when it was built wrong, and when the machine was merely too
+            // busy to get it running inside the window -- and the last one is the
+            // common case on a shared box, where it reads as "the release artifact is
+            // broken" and can block a deploy that is actually fine. Observed at load
+            // average 6-9, where an ordinarily 5-second suite took 81s and this arm
+            // timed out while the same artifacts passed on a quieter rerun.
+            "subc-core did not publish a connection file within {SETUP_TIMEOUT:?}\n\
+             supervisor process alive: {}\n\
+             1-minute load average: {}\n\
+             (this is the SUPERVISOR's readiness, not the vault binary's -- a high load\n\
+              average with the process alive means contention, not a bad artifact)",
+            matches!(child.try_wait(), Ok(None)),
+            std::fs::read_to_string("/proc/loadavg")
+                .ok()
+                .and_then(|s| s.split_whitespace().next().map(str::to_string))
+                .unwrap_or_else(|| {
+                    // macOS has no /proc; uptime is the portable-enough fallback and
+                    // this is a diagnostic, not an assertion input.
+                    std::process::Command::new("uptime")
+                        .output()
+                        .ok()
+                        .and_then(|o| String::from_utf8(o.stdout).ok())
+                        .and_then(|s| {
+                            s.split("load averages:")
+                                .nth(1)
+                                .map(|t| t.trim().to_string())
+                        })
+                        .unwrap_or_else(|| "unknown".to_string())
+                })
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }

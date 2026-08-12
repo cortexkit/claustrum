@@ -106,6 +106,32 @@ verify "daemon e2e" cargo test --locked -p credentials-module --test real_daemon
   -- --ignored --test-threads=1
 verify "admin cli " cargo test --locked -p credentials-module --test cli_admin
 
+# THE BOUNDARY OF WHAT THE ABOVE PROVES, enforced rather than remembered.
+#
+# A test reaching through a `cfg(debug_assertions)` seam is structurally incapable of
+# verifying a release artifact: the seam is compiled out, so the arm either fails
+# against the staged binary or -- worse -- passes without exercising what it names.
+# Those arms are enumerable in advance by grepping for the cfg, which is what this
+# does. One seam is known and handled (the api-key validation bypass, whose arm skips
+# under CRED_CLI_BIN and says so).
+#
+# A NEW seam silently NARROWS artifact verification while every line above still prints
+# green, so the count is pinned. Raising it means deciding what the matching test arm
+# does under an override -- skip with a printed reason, or be rewritten not to need the
+# seam -- rather than discovering the narrowing at some later deploy.
+KNOWN_DEBUG_SEAMS=1
+seams="$(grep -rc 'cfg(debug_assertions)' crates/*/src --include='*.rs' 2>/dev/null \
+  | awk -F: '{n += $2} END {print n + 0}')"
+if [ "$seams" -ne "$KNOWN_DEBUG_SEAMS" ]; then
+  echo "REFUSING: found ${seams} cfg(debug_assertions) seams, expected ${KNOWN_DEBUG_SEAMS}." >&2
+  echo "  Each one is a place artifact verification cannot reach. Decide what the" >&2
+  echo "  matching test arm does under CRED_CLI_BIN / CRED_DAEMON_BIN, then update" >&2
+  echo "  KNOWN_DEBUG_SEAMS in this script." >&2
+  grep -rn 'cfg(debug_assertions)' crates/*/src --include='*.rs' >&2
+  exit 1
+fi
+echo "  debug seams: ${seams} (known, and its test arm skips with a printed reason)"
+
 echo "  the STAGED artifacts passed, not merely the source they were built from"
 
 echo

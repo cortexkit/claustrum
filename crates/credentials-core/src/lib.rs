@@ -40,6 +40,7 @@ pub mod record;
 pub mod refresh_adapters;
 pub mod resolver;
 pub mod store;
+pub mod usable;
 
 pub use admin_auth::{
     generate_admin_nonce, vault_id_for_canonical_dir, AdminMacKey, TranscriptParts,

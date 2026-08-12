@@ -353,48 +353,55 @@ fn crash_during_a_resumed_second_rotation_never_bricks() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// The read-only diagnostic must read a vault the daemon can still open.
+/// The read-only usable-scan must read a vault the daemon can still open.
 ///
-/// `ck_usable_audit` originally loaded `KeySlot::Current` directly instead of
-/// resolving the slot the database names. At the rewrap cut the store is sealed
-/// under `Next`, so every record came back UNREADABLE with a KeyMismatch on a vault
-/// that was serving perfectly well — the diagnostic accusing the store during the
-/// one window when an operator is already anxious about a rotation, when the true
-/// reading is "healthy, finish the promote".
+/// `ck auth usable` originally loaded `KeySlot::Current` directly instead of resolving
+/// the slot the database names. At the rewrap cut the store is sealed under `Next`, so
+/// every record came back UNREADABLE with a KeyMismatch on a vault that was serving
+/// perfectly well -- the diagnostic accusing the store during the one window when an
+/// operator is already anxious about a rotation, when the true reading is "healthy,
+/// finish the promote".
 ///
-/// Drives the real binary because that is where the defect lived: the resolution
-/// logic it now calls was always correct, and a unit test of that function would
-/// have passed throughout.
+/// Exercises the same two steps the command performs, against a store left mid-handover
+/// by a real SIGKILL rather than a forged slot layout: read the fingerprint the store
+/// records, resolve THAT slot, then scan. A test that resolved via `Current` would
+/// reproduce the bug rather than catch it.
 #[test]
-fn the_usable_audit_reads_a_vault_left_mid_rotation() {
-    let root = kill_at_cut("rewrap");
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_ck_usable_audit"))
-        .arg(root.join("data"))
-        .arg("--key-path")
-        .arg(root.join("secrets").join("master.key"))
-        .output()
-        .expect("run ck_usable_audit");
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
+fn the_usable_scan_reads_a_vault_left_mid_rotation() {
+    use credentials_core::usable;
 
-    assert!(
-        out.status.success(),
-        "the audit must not fail on a mid-rotation vault the daemon opens fine\n\
-         stdout: {stdout}\nstderr: {stderr}"
-    );
+    let root = kill_at_cut("rewrap");
+    let cfg = ResolverConfig {
+        data_dir: root.join("data"),
+        source: KeySource::OperatorPath {
+            path: root.join("secrets").join("master.key"),
+        },
+    };
+
+    let conn = usable::open_store_read_only(&root.join("data").join("store.db"))
+        .expect("open the mid-rotation store read-only");
+    let db_key_id =
+        usable::read_db_key_id_read_only(&conn).expect("the store records its key fingerprint");
+    let key = resolver::resolve_for_db(&cfg, db_key_id)
+        .expect("the key is reachable through the unpromoted `next` slot");
+
+    let rows = usable::scan(&conn, &key).expect("scan the mid-rotation store");
+
     // The specific old failure, named so a regression cannot hide behind a generic
-    // non-zero exit.
+    // error: every record came back Unreadable.
     assert!(
-        !stdout.contains("UNREADABLE"),
-        "a record sealed under the unpromoted `next` slot is readable — reporting it \
-         UNREADABLE blames the store for a resolvable rotation state\nstdout: {stdout}"
+        !rows
+            .iter()
+            .any(|r| matches!(r.usability, usable::Usability::Unreadable { .. })),
+        "a record sealed under the unpromoted `next` slot is readable -- reporting it \
+         unreadable blames the store for a resolvable rotation state: {rows:?}"
     );
-    // POSITIVE ARM: an audit that printed nothing at all would satisfy the assertion
-    // above. It must actually decrypt and count the record the helper wrote.
-    assert!(
-        stdout.contains("serviceable: 1"),
-        "the audit must decrypt and count the record, not merely avoid the error\n\
-         stdout: {stdout}"
+    // POSITIVE ARM: an empty report would satisfy the assertion above. The scan must
+    // actually decrypt the record the helper wrote.
+    assert_eq!(
+        rows.len(),
+        1,
+        "the scan must decrypt and report the record, not merely avoid the error: {rows:?}"
     );
     let _ = std::fs::remove_dir_all(&root);
 }

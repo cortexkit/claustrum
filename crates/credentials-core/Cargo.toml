@@ -44,10 +44,10 @@ rotate-test-seam = []
 migration-tools = []
 
 # The two rename-ceremony one-shots. Gated together because they are used at the same
-# moment and never afterwards. Deliberately NOT sharing a gate with ck_usable_audit,
-# which stays default-built: that one is an ongoing operator diagnostic, run against a
-# healthy live vault whenever the question comes up, and gating a routine check behind
-# a feature flag is how it stops being run.
+# moment and never afterwards, and they WRITE master-key material -- so they must not
+# be built into an ordinary `cargo install`. The ongoing operator diagnostic that used
+# to sit beside them is now `ck auth usable`, in the deployed CLI: gating a routine
+# check behind a feature flag, or behind a source tree, is how it stops being run.
 [[bin]]
 name = "ck_key_move"
 path = "src/bin/ck_key_move.rs"

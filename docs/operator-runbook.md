@@ -363,8 +363,8 @@ envelope, so neither can see a record that decrypts to nothing usable. One tool
 answers that, by decrypting every record in memory:
 
 ```sh
-cargo run --bin ck_usable_audit -- ~/.local/share/cortexkit/claustrum
-cargo run --bin ck_usable_audit -- /srv/vault --key-path /etc/cortexkit/master.key
+ck auth usable
+ck auth usable --data-dir /srv/vault --key-path /etc/cortexkit/master.key
 ```
 
 Safe against a running vault: read-only connection, **no lease**, nothing written.

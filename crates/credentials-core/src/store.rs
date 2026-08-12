@@ -2250,6 +2250,61 @@ mod tests {
         )
     }
 
+    /// The usable-scan reads a REAL sealed store and reaches its stranded arm.
+    ///
+    /// `is_serviceable` is unit-tested on hand-built credentials, which proves the
+    /// predicate and nothing about whether the scan wires it to the bytes on disk. This
+    /// seals records through the ordinary write path and reads them back through the
+    /// lease-free scan, so a scan that mislabelled every record -- or never called the
+    /// predicate -- fails here.
+    #[test]
+    fn the_usable_scan_reaches_its_stranded_arm_on_a_real_store() {
+        use crate::usable::{scan, Usability};
+
+        let (root, store) = tmp_store(41);
+        store.create("good:oauth", &oauth_record()).expect("create");
+
+        // An OAuth record with neither token: the state that needs an operator login
+        // and that no metadata read can see.
+        let mut dead = oauth_record();
+        if let Some(o) = dead.oauth.as_mut() {
+            o.access_token = String::new();
+            o.refresh_token = String::new();
+        }
+        store.create("dead:oauth", &dead).expect("create stranded");
+
+        // tmp_store derives its key from the seed, so the scan can reconstruct the
+        // same one without an accessor that would exist only for tests.
+        let key = MasterKey::from_bytes([41u8; MASTER_KEY_LEN]);
+        drop(store); // release the single-writer lease before the read-only open
+
+        let conn = crate::usable::open_store_read_only(&root.join("store.db")).expect("open ro");
+        let rows = scan(&conn, &key).expect("scan");
+
+        let dead_row = rows
+            .iter()
+            .find(|r| r.credential_id == "dead:oauth")
+            .expect("the stranded record is in the report");
+        assert_eq!(
+            dead_row.usability,
+            Usability::Stranded,
+            "an oauth record with neither token is stranded"
+        );
+
+        // DISAMBIGUATOR: a scan that marked everything stranded would satisfy the
+        // assertion above. The healthy record must come back serviceable.
+        let good_row = rows
+            .iter()
+            .find(|r| r.credential_id == "good:oauth")
+            .expect("the healthy record is in the report");
+        assert!(
+            matches!(good_row.usability, Usability::Serviceable { .. }),
+            "a record with both tokens is serviceable, got {:?}",
+            good_row.usability
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn create_then_get_round_trips() {
         let (root, store) = tmp_store(1);

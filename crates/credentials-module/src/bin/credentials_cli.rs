@@ -202,6 +202,7 @@ fn run() -> Result<(), CliError> {
         "list" => cmd_list(&global),
         "audit" => cmd_audit(&global, &args),
         "events" => cmd_events(&global, &args),
+        "usable" => cmd_usable(&global),
         "verify-audit" => cmd_verify_audit(&global),
         other => Err(CliError::Usage(format!(
             "unknown verb '{other}'\n\n{}",
@@ -313,6 +314,7 @@ fn usage_short() -> String {
        invalidate          mark a credential needs-reauth\n\
        audit               print the audit chain\n\
        events              why credentials failed to authenticate\n\
+       usable              which credentials can still serve or refresh\n\
        verify-audit        verify the audit-chain integrity\n\
        rotate-master-key   rotate the vault master key (offline)\n\
        bootstrap           initialize a new vault (offline)\n\
@@ -453,6 +455,24 @@ fn help_verb(verb: &str) -> String {
              RUNNING vault. These rows are diagnostics, not evidence: unlike the audit\n\
              chain they are not tamper-evident and may be pruned. For what authoritatively\n\
              happened, use `audit`."
+        }
+        "usable" => {
+            "ck auth usable\n\
+             \n\
+             Open every credential's envelope and report what its contents imply.\n\
+             \n\
+             The only command that decrypts. 'status' and 'list' read plaintext\n\
+             metadata, so neither can see a record that decrypts to nothing usable.\n\
+             \n\
+             Scores STRANDED: a record holding neither a usable access token nor any\n\
+             refresh material, so it can never serve again without an operator login.\n\
+             Expiry is printed but never scored -- an expired access token beside live\n\
+             refresh material is the routine state of a healthy credential, and it\n\
+             refreshes on the next read.\n\
+             \n\
+             Safe while the daemon runs: read-only, takes no lease, writes nothing.\n\
+             \n\
+             'stranded: 0' is the expected reading."
         }
         "verify-audit" => {
             "ck auth verify-audit\n\
@@ -2208,6 +2228,119 @@ fn cmd_list(global: &GlobalArgs) -> Result<(), CliError> {
     let result = request_admin_status(global)?;
     let rows = parse_inventory(&result)?;
     print_inventory(&rows);
+    Ok(())
+}
+
+/// Report whether each credential still holds material the engine can work with.
+///
+/// The only command that OPENS EVERY ENVELOPE. `status` and `list` read plaintext
+/// metadata, so neither can see a record that decrypts to nothing usable -- the one
+/// state that needs an operator login and that no gauge can infer from the outside.
+///
+/// Lease-free like `events`, and for the same reason: the moment an operator asks is
+/// the moment the vault is running, and a diagnostic that needs an outage to read is
+/// useless exactly when it is needed. Unlike `events` this needs the master key, so it
+/// resolves one WITHOUT opening an `EncryptedStore` (which would take the lease).
+fn cmd_usable(global: &GlobalArgs) -> Result<(), CliError> {
+    use credentials_core::usable::{self, ScanError, Usability};
+
+    let db = global.data_dir.join("store.db");
+    if !db.exists() {
+        return Err(CliError::Usage(format!(
+            "no vault at {} (run 'ck auth bootstrap' first)",
+            global.data_dir.display()
+        )));
+    }
+    let conn = usable::open_store_read_only(&db).map_err(|e| CliError::Io(e.to_string()))?;
+
+    // Resolve the slot the STORE names, exactly as the daemon does. A rotation that
+    // crashed after the rewrap and before the promote leaves the store sealed under
+    // `next`; loading `current` would report every record unreadable on a vault that is
+    // serving perfectly well.
+    let cfg = resolver_config(global);
+    let key = match usable::read_db_key_id_read_only(&conn) {
+        Some(db_key_id) => resolver::resolve_for_db(&cfg, db_key_id),
+        None => resolver::resolve(&cfg, None),
+    }
+    .map_err(CliError::MasterKey)?;
+
+    let rows = match usable::scan(&conn, &key) {
+        Ok(rows) => rows,
+        // Bootstrapped but never written: the schema arrives with the first write, not
+        // with `bootstrap`. Said plainly, because the raw sqlite error reads as a
+        // corrupt store when the store is merely empty.
+        Err(ScanError::NoSchema) => {
+            println!("{} holds no credentials yet", global.data_dir.display());
+            println!("  (the vault is bootstrapped; its schema is created by the first write)");
+            return Ok(());
+        }
+        Err(e) => return Err(CliError::Io(e.to_string())),
+    };
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let (mut serviceable, mut stranded, mut unreadable, mut bad_identity) = (0, 0, 0, 0);
+    for row in &rows {
+        let id = &row.credential_id;
+        if row.unservable_identity {
+            println!(
+                "  {id:34} IDENTITY    email with no account_id: serves a label that \
+                 resolves nothing (re-login or re-import to repair)"
+            );
+            bad_identity += 1;
+        }
+        match &row.usability {
+            Usability::Unreadable { why } => {
+                println!("  {id:34} UNREADABLE  {why}");
+                unreadable += 1;
+            }
+            Usability::Stranded => {
+                println!(
+                    "  {id:34} oauth   {}  STRANDED: no access token and no refresh token",
+                    row.state
+                );
+                stranded += 1;
+            }
+            Usability::Static => {
+                println!("  {id:34} static  {}", row.state);
+                serviceable += 1;
+            }
+            Usability::Serviceable { expires_at_ms } => {
+                // Expiry is printed as context and never scored: an expired access
+                // token is the routine state of a healthy credential, so counting it
+                // would report normal operation as a problem.
+                let ttl = match expires_at_ms {
+                    Some(exp) => {
+                        let mins = (exp - now) / 60_000;
+                        if mins < 0 {
+                            format!("access expired {}m ago, refreshes on next get", -mins)
+                        } else {
+                            format!("access good for {mins}m")
+                        }
+                    }
+                    None => "no expiry recorded".to_string(),
+                };
+                println!("  {id:34} oauth   {}  {ttl}", row.state);
+                serviceable += 1;
+            }
+        }
+    }
+
+    println!();
+    println!(
+        "  serviceable: {serviceable}   stranded: {stranded}   unreadable: {unreadable}   \
+         unservable identity: {bad_identity}"
+    );
+    println!();
+    println!("  Serviceable means the record decrypts under the current master key and");
+    println!("  holds material the engine can either serve or refresh from. It is NOT a");
+    println!("  claim that the provider will still honour it: only spending a token");
+    println!("  answers that, and for rotating providers spending it invalidates the copy");
+    println!("  we hold, so no dry run exists even in principle. The authoritative signal");
+    println!("  for a provider-rejected credential is the `needs_reauth` state, which a");
+    println!("  consumer sets via report_auth_failure and the health gauge already counts.");
     Ok(())
 }
 

@@ -163,8 +163,27 @@ pub fn mint_provider_token(
         return Err(ApnsTokenError::MalformedIdentity("team id"));
     }
 
-    let signing_key =
-        SigningKey::from_pkcs8_pem(p8_pem).map_err(|e| ApnsTokenError::KeyDecode(e.to_string()))?;
+    // NAME THE REMEDY FOR THE CONTAINER MISMATCH, not just the cause.
+    //
+    // A SEC1 PEM (`BEGIN EC PRIVATE KEY`) holds the SAME key material and is what
+    // `openssl ecparam -genkey` produces by default, so an operator can hold a
+    // perfectly valid key that this refuses. The underlying error names the ASN.1
+    // problem, which is accurate and useless at 3am: it reads as "this credential is
+    // broken" when the truth is "this credential is fine, in the other envelope", and
+    // the conversion is one command. Callosum's Worker-side signer hit exactly this
+    // and hardened against it; the same key can arrive at either signer.
+    let signing_key = SigningKey::from_pkcs8_pem(p8_pem).map_err(|e| {
+        let detail = e.to_string();
+        if p8_pem.contains("BEGIN EC PRIVATE KEY") {
+            ApnsTokenError::KeyDecode(format!(
+                "{detail} -- this is a SEC1 key (BEGIN EC PRIVATE KEY). It holds the \
+                 right material in the wrong envelope; convert it with: openssl pkcs8 \
+                 -topk8 -nocrypt -in <file> -out <file>.p8"
+            ))
+        } else {
+            ApnsTokenError::KeyDecode(detail)
+        }
+    })?;
 
     // Field order inside each JSON object is fixed here rather than left to a
     // serializer: the signature covers the exact bytes, so a reordering would
@@ -313,6 +332,40 @@ OF/2NxApJCzGCEDdfSp6VQO30hyhRANCAAQRWz+jn65BtOMvdyHKcvjBeBSDZH2r\n\
         // Positive control: the well-formed identity mints, so the refusals above
         // are about the identity rather than about the key or the signer.
         assert!(mint_provider_token(TEST_P8, &identity(), 0).is_ok());
+    }
+
+    /// A SEC1 key -- the same material in the other envelope -- is refused WITH THE
+    /// CONVERSION COMMAND.
+    ///
+    /// The garbage-input test below proves the signer rejects nonsense. This proves the
+    /// harder case: a key that is genuinely VALID and genuinely the operator's, which
+    /// `openssl ecparam -genkey` produces by default, and which the underlying ASN.1
+    /// error describes accurately and uselessly. Without the remedy in the message the
+    /// reading is "this credential is broken" when the truth is "wrong envelope, one
+    /// command away".
+    ///
+    /// The fixture is a REAL SEC1 block rather than a malformed string, because the
+    /// point is that parsing gets far enough to identify the container.
+    #[test]
+    fn a_sec1_key_is_refused_with_the_conversion_command() {
+        // A real prime256v1 SEC1 key, generated for this test and used nowhere.
+        const SEC1: &str = "-----BEGIN EC PRIVATE KEY-----\n\
+             MHcCAQEEIETz/ydtOsothIXt2aKZgPl9yWljo/vJpYC6JC0H2BSvoAoGCCqGSM49\n\
+             AwEHoUQDQgAEQXE5PChcWqV3bw8OnWJxTfjcHF+qSH+8el1GrbA/pWnDxKaLjwIs\n\
+             8gD3rFdEA8xX1bSEwDFsiwmdde0vvP6ihA==\n\
+             -----END EC PRIVATE KEY-----\n";
+
+        let err = mint_provider_token(SEC1, &identity(), 0).expect_err("SEC1 must be refused");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("SEC1"),
+            "the refusal must name the container, not just the ASN.1 failure: {msg}"
+        );
+        assert!(
+            msg.contains("openssl pkcs8 -topk8"),
+            "the refusal must carry the conversion command -- the operator's key is \
+             valid and one command from working: {msg}"
+        );
     }
 
     /// A non-key input fails closed rather than producing a token that APNs would

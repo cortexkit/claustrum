@@ -24,6 +24,29 @@ use sha2::{Digest, Sha256};
 /// the CLI builds the storage descriptor with it; they MUST match.
 pub const MODULE_ID: &str = "claustrum";
 
+/// The source revision this binary was built from, or `"unknown"`.
+///
+/// WHY A BINARY HAS TO CARRY THIS. Nothing else in a shipped Mach-O identifies its
+/// source. `CARGO_PKG_VERSION` is a constant that has not moved in the project's
+/// lifetime, so `--version` answered "is this ck-auth" and never "which ck-auth". And
+/// LC_UUID — the identity the deploy runbook compares — is PATH-DEPENDENT: measured
+/// 2026-08-12, the same commit built in the main tree and in a git worktree produced
+/// two different UUIDs. It proves two FILES match, which is what a deploy needs, and
+/// cannot name a commit, which is what an incident needs. So "which code is running"
+/// was unanswerable from a running binary, and the obvious fallback — rebuild
+/// candidate commits until a UUID matches — does not work for the same reason.
+///
+/// Read from the environment at compile time rather than from a `build.rs` that shells
+/// out to git: a build script reading HEAD reruns on every commit and rebuilds the
+/// crate graph behind it. `scripts/release-build.sh` sets `CK_BUILD_REV`; an ordinary
+/// `cargo build` leaves it unset and gets `"unknown"`, which is the honest answer — a
+/// dev build IS of unknown provenance, and stamping a possibly-dirty tree's HEAD would
+/// assert otherwise.
+pub const BUILD_REV: &str = match option_env!("CK_BUILD_REV") {
+    Some(rev) => rev,
+    None => "unknown",
+};
+
 /// The storage namespace the vault is resolved under. subc delivers this to the
 /// daemon in `HELLO_ACK.storage`; the CLI must build its descriptor with the SAME
 /// value. The single-writer lease key is `(module_id, backend, storage_namespace)`,

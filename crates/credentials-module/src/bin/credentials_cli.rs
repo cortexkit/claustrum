@@ -143,7 +143,14 @@ fn run() -> Result<(), CliError> {
         return Ok(());
     }
     if args.as_slice() == ["--version"] || args.as_slice() == ["-V"] {
-        println!("ck-auth {}", env!("CARGO_PKG_VERSION"));
+        // The package version alone cannot identify a build -- it is a constant that
+        // has not moved in the project's lifetime. The revision is what answers "which
+        // ck-auth", and it is `unknown` unless this came from the release script.
+        println!(
+            "ck-auth {} ({})",
+            env!("CARGO_PKG_VERSION"),
+            credentials_core::contract::BUILD_REV
+        );
         return Ok(());
     }
     // The verb is positional and is taken FIRST, so a global flag written before it

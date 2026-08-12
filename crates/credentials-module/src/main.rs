@@ -96,6 +96,18 @@ const OP_ADMIN_OP: &str = "admin.op";
 
 #[tokio::main]
 async fn main() -> Result<(), ModuleError> {
+    // Answered BEFORE the --subc gate, so it works on a binary that is not being
+    // supervised. Without this the only way to ask a deployed daemon what it is was to
+    // start it, which needs a connection file and a live supervisor -- an identity
+    // check that requires the thing being identified to already be running correctly.
+    if std::env::args_os().skip(1).any(|a| a == "--version") {
+        println!(
+            "ck-claustrum {} ({})",
+            env!("CARGO_PKG_VERSION"),
+            credentials_core::contract::BUILD_REV
+        );
+        return Ok(());
+    }
     let config = ModuleConfig::from_env()?;
     run(config).await
 }

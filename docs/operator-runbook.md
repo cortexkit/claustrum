@@ -588,6 +588,22 @@ also symlinked into `~/.local/bin/` for the `ck` dispatcher.
 ./scripts/gate.sh
 ```
 
+### Building the release binaries
+
+```sh
+./scripts/release-build.sh
+```
+
+Stamps the source revision into both binaries, signs each with its **pinned**
+identifier, and prints the revision and hash it produced. It refuses on a dirty
+tree: a stamped revision that names a commit whose contents are not what was built
+is worse than no stamp, because the whole point is to be trusted during an
+incident.
+
+Copy the results into place with a plain `cp`. **Do not re-sign at the
+destination** — a pinned identifier is not sticky, and one `codesign --force --sign
+-` there reverts it to the derived form.
+
 That is the gate. It runs all five suites with the right flags, asserts a minimum
 count for each, and fails if any arm skipped — the three ways a green run can prove
 nothing. Prefer it over composing the commands by hand, because the hand-composed
@@ -703,6 +719,7 @@ no error. Pinning also makes the published hash equal the placed hash, so a plai
 | check | why it discriminates |
 |-------|----------------------|
 | deployed hash equals the **new** build's hash, and differs from the **old** one | publish both values — comparing the system to itself passes trivially |
+| `<dest> --version` reports the revision you built | the only check that asks the BINARY what it is, instead of inferring it from a path, a timestamp, or a hash you have to already hold |
 | running process's image inode equals the deploy path's inode | proves the process is not still executing an unlinked predecessor |
 | the open `store.db` is the one you expect (below) | every other check answers "is it healthy", not "is it the right vault" |
 | `ck auth status` reports every credential serving | a daemon whose master key was unavailable at boot is alive and serving nothing |
@@ -743,3 +760,10 @@ If a hash comparison fails after someone re-signed the binary, re-sign a **copy*
 the known build with the known identifier and compare that — a legitimate re-sign and
 a substituted binary are otherwise indistinguishable. `dwarfdump --uuid` (invariant
 under signing) and a signature-stripped `shasum` also settle it.
+
+**LC_UUID compares files; it cannot name a commit.** Measured 2026-08-12: the same
+commit built in the main tree and in a git worktree produced two different UUIDs, so
+it identifies a *(commit, path, toolchain)* triple. That is exactly what a deploy
+needs — both sides are in hand — and useless in an incident, where only the running
+binary is. Rebuilding candidate commits until a UUID matches does not work either,
+for the same reason. Ask `--version` instead.

@@ -201,9 +201,18 @@ fn version_reports_the_built_cli_without_configuration() {
         "version: {}",
         String::from_utf8_lossy(&out.stderr)
     );
+    // The package version alone was the WHOLE assertion here, which is what let the
+    // flag ship answering "is this ck-auth" rather than "which ck-auth": the constant
+    // it pinned has not moved in the project's lifetime, so the test passed no matter
+    // what code was inside. Now it must also carry the revision field.
+    let stdout = String::from_utf8_lossy(&out.stdout);
     assert_eq!(
-        String::from_utf8_lossy(&out.stdout).trim(),
-        format!("ck-auth {}", env!("CARGO_PKG_VERSION"))
+        stdout.trim(),
+        format!(
+            "ck-auth {} ({})",
+            env!("CARGO_PKG_VERSION"),
+            credentials_core::contract::BUILD_REV
+        )
     );
 }
 
@@ -1065,4 +1074,48 @@ fn the_rotate_verb_leaves_the_vault_usable_and_can_run_twice() {
     }
 
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Both binaries report their source revision, and the daemon does it WITHOUT a
+/// supervisor.
+///
+/// `--version` used to print only the package version -- a constant that has not moved
+/// in the project's lifetime, so it answered "is this ck-auth" and never "which one".
+/// The daemon had no `--version` at all: asking it what it was required starting it,
+/// which needs a connection file and a live supervisor, so the identity check depended
+/// on the thing being identified already running correctly.
+///
+/// The daemon arm is the load-bearing one. Its flag is handled before the `--subc`
+/// gate, and that ordering is invisible from the code below it: moving argument parsing
+/// earlier, or making the gate stricter, would restore the old behaviour with nothing
+/// else failing.
+#[test]
+fn both_binaries_report_a_build_revision_without_a_supervisor() {
+    for (bin, label) in [
+        (env!("CARGO_BIN_EXE_ck-auth"), "ck-auth"),
+        (env!("CARGO_BIN_EXE_ck-claustrum"), "ck-claustrum"),
+    ] {
+        let out = std::process::Command::new(bin)
+            .arg("--version")
+            .output()
+            .unwrap_or_else(|e| panic!("run {label} --version: {e}"));
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success(),
+            "{label} --version failed: {}{stdout}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            stdout.starts_with(label),
+            "{label} --version must name the binary: {stdout}"
+        );
+        // The revision is present as its own field. An unstamped build says `unknown`,
+        // which is the honest answer and still proves the field is wired -- the release
+        // script is what fills it, and a missing field would read as a stamped build
+        // whose revision happened not to print.
+        assert!(
+            stdout.contains('(') && stdout.contains(')'),
+            "{label} --version must carry a revision field: {stdout}"
+        );
+    }
 }

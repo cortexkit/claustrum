@@ -2353,6 +2353,62 @@ mod tests {
         (root, EncryptedStore::open(store, key).expect("open vault"))
     }
 
+    /// EVERY write path refuses an empty non-OAuth payload, not merely the one that
+    /// happens to be covered elsewhere.
+    ///
+    /// The guard lives in `seal_record` -- a chokepoint every writer passes through --
+    /// rather than in `VaultRecord::new_static`, which only debug_asserts the KIND. That
+    /// is the right shape, because a constructor is sidesteppable by a struct literal
+    /// and a chokepoint is not. But "every writer passes through it" is a claim about
+    /// the call graph, and that is precisely the kind of claim that stops being true
+    /// quietly.
+    ///
+    /// So this enumerates the writers rather than trusting the chokepoint. Prompted by
+    /// the sibling defect in a peer's code: an invariant stated explicitly in one arm of
+    /// a function and silently inherited in the other, where the CORRECT arm is what
+    /// makes the incorrect one invisible to a reader.
+    #[test]
+    fn every_write_path_refuses_an_empty_non_oauth_payload() {
+        let (_root, store) = tmp_store(0x5A);
+        let empty = VaultRecord::new_static(CredentialKind::ApiKey, "test", Vec::new(), None);
+
+        assert!(
+            store.create("apikey:empty", &empty).is_err(),
+            "create must refuse an empty payload"
+        );
+        assert!(
+            store
+                .create_audited("apikey:empty", &empty, AuditCtx::admin(AuditOp::Put))
+                .is_err(),
+            "create_audited must refuse an empty payload"
+        );
+
+        // Seed a good record, then try to REPLACE it with an empty one. The replace
+        // paths are the dangerous ones: overwriting a working credential with zero bytes
+        // reads downstream as an authentication failure rather than as corruption.
+        let good = VaultRecord::new_static(CredentialKind::ApiKey, "test", b"real".to_vec(), None);
+        store.create("apikey:one", &good).expect("seed");
+        assert!(
+            store
+                .overwrite_unconditional_audited(
+                    "apikey:one",
+                    &empty,
+                    AuditCtx::admin(AuditOp::Put)
+                )
+                .is_err(),
+            "overwrite_unconditional_audited must refuse an empty payload"
+        );
+
+        // POSITIVE ARM: the seeded record survives the refused write. A refusal that
+        // damaged the row on its way out would satisfy every assertion above.
+        let loaded = store.get("apikey:one").expect("reload the seeded record");
+        assert_eq!(
+            loaded.payload,
+            b"real".to_vec(),
+            "a refused write must leave the existing record untouched"
+        );
+    }
+
     fn oauth_record() -> VaultRecord {
         VaultRecord::new_oauth(
             "opencode",

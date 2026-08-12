@@ -81,20 +81,43 @@ const DAEMON_BIN_ENV: &str = "CRED_DAEMON_BIN";
 /// REFUSES a path that does not exist rather than falling back to the built one: a
 /// typo'd override that silently tested the wrong binary would report exactly the
 /// green the caller was hoping for, which is worse than the gap it closes.
+/// Point the suite at a specific `ck-auth`, for the same reason as [`DAEMON_BIN_ENV`].
+///
+/// The pair matters as a pair. Verifying a staged daemon while driving it with a
+/// cargo-built CLI proves neither artifact: the two are deployed together, and the
+/// wire between them is exactly where a mismatched build would show.
+const CLI_BIN_ENV: &str = "CRED_CLI_BIN";
+
+/// The `ck-auth` the suite should exercise. Refuses a bad override rather than
+/// falling back, for the reason given on [`daemon_binary`].
+fn cli_binary() -> PathBuf {
+    binary_override(CLI_BIN_ENV, env!("CARGO_BIN_EXE_ck-auth"))
+}
+
 fn daemon_binary() -> PathBuf {
-    match std::env::var_os(DAEMON_BIN_ENV) {
+    binary_override(DAEMON_BIN_ENV, env!("CARGO_BIN_EXE_ck-claustrum"))
+}
+
+/// Resolve one binary from an env override, or fall back to the cargo-built default.
+///
+/// REFUSES a path that does not exist rather than falling back: a typo'd override that
+/// silently tested the cargo-built binary would report exactly the green the caller was
+/// hoping for, which is worse than the gap it closes -- a wrong shape reading as an
+/// absence, with a deploy gate attached.
+fn binary_override(var: &str, built: &str) -> PathBuf {
+    match std::env::var_os(var) {
         Some(raw) => {
             let path = PathBuf::from(raw);
             assert!(
                 path.is_file(),
-                "{DAEMON_BIN_ENV} points at {} which is not a file — refusing to fall \
-                 back to the cargo-built binary, because a silent fallback would report \
-                 the staged artifact as verified when it was never run",
+                "{var} points at {} which is not a file — refusing to fall back to the \
+                 cargo-built binary, because a silent fallback would report the staged \
+                 artifact as verified when it was never run",
                 path.display()
             );
             path
         }
-        None => PathBuf::from(env!("CARGO_BIN_EXE_ck-claustrum")),
+        None => PathBuf::from(built),
     }
 }
 
@@ -207,7 +230,7 @@ fn run_cli(args: &[&str]) -> String {
 /// Run the admin CLI without asserting success — for tests that need to inspect the
 /// exit code / stderr (e.g. the offline path refusing while the daemon is up).
 fn run_cli_raw(args: &[&str]) -> std::process::Output {
-    let bin = PathBuf::from(env!("CARGO_BIN_EXE_ck-auth"));
+    let bin = cli_binary();
     std::process::Command::new(&bin)
         .args(args)
         .output()
@@ -979,7 +1002,7 @@ async fn fixture_dogfood_import_opencode_round_trips_through_real_daemon() {
         .join("secrets/master.key")
         .to_string_lossy()
         .to_string();
-    let verify = std::process::Command::new(env!("CARGO_BIN_EXE_ck-auth"))
+    let verify = std::process::Command::new(cli_binary())
         .args([
             "verify-audit",
             "--data-dir",

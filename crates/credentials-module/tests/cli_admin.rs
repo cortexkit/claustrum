@@ -11,8 +11,36 @@ use std::process::Command;
 
 use cortexkit_store::{open_sqlite, Isolation, StorageBackend, StorageDescriptor};
 
+/// Point this suite at a specific `ck-auth` instead of the one cargo just built.
+///
+/// `CARGO_BIN_EXE_*` resolves per-profile and cargo rebuilds before running, so
+/// `cargo test` -- with or without `--release` -- always drives a binary produced for
+/// the test run, never a staged one. A green suite is therefore evidence about the
+/// SOURCE and none at all about the bytes being shipped.
+///
+/// That matters most for THIS binary. `ck-auth` is what an operator reaches for during
+/// an incident and the only thing that takes the single-writer lease to mutate the
+/// vault, so a broken artifact is discovered while trying to repair something else.
+/// `scripts/release-build.sh` sets this after staging.
+const CLI_BIN_ENV: &str = "CRED_CLI_BIN";
+
 fn cli() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_ck-auth"))
+    // REFUSES a bad override rather than falling back: a typo that silently tested the
+    // cargo-built binary would report exactly the green the caller was hoping for.
+    match std::env::var_os(CLI_BIN_ENV) {
+        Some(raw) => {
+            let path = PathBuf::from(raw);
+            assert!(
+                path.is_file(),
+                "{CLI_BIN_ENV} points at {} which is not a file — refusing to fall back \
+                 to the cargo-built binary, because a silent fallback would report the \
+                 staged artifact as verified when it was never run",
+                path.display()
+            );
+            Command::new(path)
+        }
+        None => Command::new(env!("CARGO_BIN_EXE_ck-auth")),
+    }
 }
 
 /// Both documented orders of a global flag must reach the same vault.
@@ -206,14 +234,27 @@ fn version_reports_the_built_cli_without_configuration() {
     // it pinned has not moved in the project's lifetime, so the test passed no matter
     // what code was inside. Now it must also carry the revision field.
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert_eq!(
-        stdout.trim(),
-        format!(
-            "ck-auth {} ({})",
-            env!("CARGO_PKG_VERSION"),
-            credentials_core::contract::BUILD_REV
-        )
+    let stdout = stdout.trim();
+
+    // Shape, not value. The revision is a property of the BINARY UNDER TEST, and under
+    // CRED_CLI_BIN that is a staged artifact stamped with a real commit while this test
+    // was compiled unstamped -- so asserting equality with the test's own BUILD_REV
+    // would fail on exactly the artifact the override exists to verify, and would be
+    // asserting the test's build rather than the binary's.
+    let rest = stdout
+        .strip_prefix(&format!("ck-auth {} (", env!("CARGO_PKG_VERSION")))
+        .and_then(|r| r.strip_suffix(')'))
+        .unwrap_or_else(|| panic!("unexpected --version shape: {stdout}"));
+    assert!(
+        !rest.is_empty(),
+        "the revision field must carry a value, even if it is `unknown`: {stdout}"
     );
+    // Without an override this IS the test's own build, so the exact value is still
+    // pinned in the ordinary run -- which is what keeps the field from silently
+    // becoming a constant again.
+    if std::env::var_os(CLI_BIN_ENV).is_none() {
+        assert_eq!(rest, credentials_core::contract::BUILD_REV);
+    }
 }
 
 /// `logout` stops serving reversibly (invalidate + revoke handles, row + audit
@@ -877,8 +918,30 @@ fn validation_bypass_is_absent_from_a_release_build() {
     );
 }
 
+/// NOT RUNNABLE AGAINST A STAGED RELEASE ARTIFACT, deliberately on both sides.
+///
+/// This drives a real `login --provider zai`, which validates the key against the
+/// provider's live endpoint. A debug build short-circuits that through
+/// `CORTEXKIT_TEST_BYPASS_VALIDATION`; a release build COMPILES THE BYPASS OUT, so the
+/// staged binary would attempt a genuine network call and fail.
+///
+/// Both halves are correct and the conflict is real, so it is skipped under
+/// `CRED_CLI_BIN` rather than resolved by weakening either: shipping a validation
+/// bypass in a release binary is the worse outcome by a wide margin, and a test that
+/// silently passed by reaching a provider would be worse still.
+///
+/// This is the honest boundary of artifact verification: an arm that depends on a
+/// debug-only seam verifies the SOURCE and cannot verify the SHIPPED BYTES. Recorded
+/// here so the skip reads as a known limit rather than as flakiness.
 #[test]
 fn api_key_login_flow_integration() {
+    if std::env::var_os(CLI_BIN_ENV).is_some() {
+        eprintln!(
+            "skipping api_key_login_flow_integration: {CLI_BIN_ENV} is set, and this arm \
+             needs the debug-only validation bypass that release builds omit"
+        );
+        return;
+    }
     let root = tmp_root("api-key-login");
     let data_dir = root.join("data");
     let key_dir = root.join("secrets");
@@ -1091,11 +1154,12 @@ fn the_rotate_verb_leaves_the_vault_usable_and_can_run_twice() {
 /// else failing.
 #[test]
 fn both_binaries_report_a_build_revision_without_a_supervisor() {
-    for (bin, label) in [
-        (env!("CARGO_BIN_EXE_ck-auth"), "ck-auth"),
-        (env!("CARGO_BIN_EXE_ck-claustrum"), "ck-claustrum"),
-    ] {
-        let out = std::process::Command::new(bin)
+    for label in ["ck-auth", "ck-claustrum"] {
+        let mut cmd = match label {
+            "ck-auth" => cli(),
+            _ => std::process::Command::new(env!("CARGO_BIN_EXE_ck-claustrum")),
+        };
+        let out = cmd
             .arg("--version")
             .output()
             .unwrap_or_else(|e| panic!("run {label} --version: {e}"));

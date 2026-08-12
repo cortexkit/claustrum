@@ -77,19 +77,36 @@ done
 # Skipped when the sibling subc-core is absent (the suite's own graceful skip), which
 # is why the summary line below states whether it ran rather than assuming it did.
 echo
-echo "verifying the staged daemon under a real supervisor..."
-if CRED_REQUIRE_DAEMON=1 CRED_DAEMON_BIN="$PWD/$STAGE/ck-claustrum" \
-   cargo test --locked -p credentials-module --test real_daemon_e2e \
-   -- --ignored --test-threads=1 >/tmp/ck-stage-verify.$$ 2>&1; then
-  grep -E '^test result' /tmp/ck-stage-verify.$$ | sed 's/^/  /'
-  echo "  the STAGED artifact passed, not merely the source it was built from"
-else
-  echo "STAGED ARTIFACT FAILED VERIFICATION -- do not deploy it" >&2
-  tail -30 /tmp/ck-stage-verify.$$ >&2
-  rm -f /tmp/ck-stage-verify.$$
-  exit 1
-fi
-rm -f /tmp/ck-stage-verify.$$
+echo "verifying the staged artifacts..."
+
+# BOTH binaries, and as a PAIR. Verifying a staged daemon while driving it with a
+# cargo-built CLI proves neither: the two are deployed together and the wire between
+# them is exactly where a mismatched build would show.
+#
+# ck-auth is the higher-stakes half. It is what an operator reaches for during an
+# incident and the only thing that takes the single-writer lease to mutate the vault,
+# so a broken artifact is discovered while trying to repair something else.
+verify() {
+  local label="$1"; shift
+  if CRED_REQUIRE_DAEMON=1 \
+     CRED_DAEMON_BIN="$PWD/$STAGE/ck-claustrum" \
+     CRED_CLI_BIN="$PWD/$STAGE/ck-auth" \
+     "$@" >"/tmp/ck-stage-verify.$$" 2>&1; then
+    grep -E '^test result' "/tmp/ck-stage-verify.$$" | sed "s/^/  ${label}: /"
+  else
+    echo "STAGED ARTIFACT FAILED VERIFICATION (${label}) -- do not deploy it" >&2
+    tail -30 "/tmp/ck-stage-verify.$$" >&2
+    rm -f "/tmp/ck-stage-verify.$$"
+    exit 1
+  fi
+  rm -f "/tmp/ck-stage-verify.$$"
+}
+
+verify "daemon e2e" cargo test --locked -p credentials-module --test real_daemon_e2e \
+  -- --ignored --test-threads=1
+verify "admin cli " cargo test --locked -p credentials-module --test cli_admin
+
+echo "  the STAGED artifacts passed, not merely the source they were built from"
 
 echo
 echo "staged in ${STAGE}/ -- outside cargo's reach, so these hashes stay true."

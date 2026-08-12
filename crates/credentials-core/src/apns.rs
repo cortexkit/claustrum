@@ -329,6 +329,19 @@ OF/2NxApJCzGCEDdfSp6VQO30hyhRANCAAQRWz+jn65BtOMvdyHKcvjBeBSDZH2r\n\
 1RTwjmYSi9R/zpBnuQ4EiMnCqfMPWiZqB4QdbAd0E7oH50VpuZ1P087G\n\
 -----END PRIVATE KEY-----\n";
 
+    const P384_FIXTURE: &str = "-----BEGIN PRIVATE KEY-----\n\
+             MIG2AgEAMBAGByqGSM49AgEGBSuBBAAiBIGeMIGbAgEBBDAXePjbqN+yQPga51Eg\n\
+             fXmzU6lFVK3H36w6/8pmkxAm10teqiX8/wIY4glzlwxuAzyhZANiAATxAlKXdgw6\n\
+             O7TN160oB24/EZsZ0KEzv4kS3AagU27ZHQB10otXUcjT5WlZ5fHEA5gF3VB9bUC+\n\
+             DXUfW1ZHlFS3raU1JkCU+IvUuvlO4uOEDNDCEF05+vUcNDwfgn8WJeg=\n\
+             -----END PRIVATE KEY-----\n";
+
+    const SEC1_FIXTURE: &str = "-----BEGIN EC PRIVATE KEY-----\n\
+             MHcCAQEEIETz/ydtOsothIXt2aKZgPl9yWljo/vJpYC6JC0H2BSvoAoGCCqGSM49\n\
+             AwEHoUQDQgAEQXE5PChcWqV3bw8OnWJxTfjcHF+qSH+8el1GrbA/pWnDxKaLjwIs\n\
+             8gD3rFdEA8xX1bSEwDFsiwmdde0vvP6ihA==\n\
+             -----END EC PRIVATE KEY-----\n";
+
     fn identity() -> ApnsKeyIdentity {
         ApnsKeyIdentity {
             key_id: "3Y54KF7PCW".to_string(),
@@ -442,11 +455,7 @@ OF/2NxApJCzGCEDdfSp6VQO30hyhRANCAAQRWz+jn65BtOMvdyHKcvjBeBSDZH2r\n\
     #[test]
     fn a_sec1_key_is_refused_with_the_conversion_command() {
         // A real prime256v1 SEC1 key, generated for this test and used nowhere.
-        const SEC1: &str = "-----BEGIN EC PRIVATE KEY-----\n\
-             MHcCAQEEIETz/ydtOsothIXt2aKZgPl9yWljo/vJpYC6JC0H2BSvoAoGCCqGSM49\n\
-             AwEHoUQDQgAEQXE5PChcWqV3bw8OnWJxTfjcHF+qSH+8el1GrbA/pWnDxKaLjwIs\n\
-             8gD3rFdEA8xX1bSEwDFsiwmdde0vvP6ihA==\n\
-             -----END EC PRIVATE KEY-----\n";
+        const SEC1: &str = SEC1_FIXTURE;
 
         let err = mint_provider_token(SEC1, &identity(), 0).expect_err("SEC1 must be refused");
         let msg = format!("{err}");
@@ -459,6 +468,31 @@ OF/2NxApJCzGCEDdfSp6VQO30hyhRANCAAQRWz+jn65BtOMvdyHKcvjBeBSDZH2r\n\
             "the refusal must carry the conversion command -- the operator's key is \
              valid and one command from working: {msg}"
         );
+
+        // THE CLAIM IS THAT THE REMEDY WORKS, and the assertion above only checks that
+        // the sentence is present -- my text containing my text, which passes however
+        // wrong the advice is. So convert the fixture the way the message says and
+        // require the RESULT to be accepted. Done in-process rather than by shelling
+        // out to openssl: the point is that this exact material, in PKCS#8, signs.
+        let converted = sec1_fixture_as_pkcs8();
+        mint_provider_token(&converted, &identity(), 0).expect(
+            "the refusal promises the key is fine in the other envelope -- if \
+                     this fails, the message is telling operators to run a command that \
+                     does not fix their problem",
+        );
+    }
+
+    /// The SEC1 fixture re-encoded as PKCS#8, which is what the refusal's `openssl
+    /// pkcs8 -topk8` invocation produces. Kept beside the test so the conversion claim
+    /// is checked against the SAME key the refusal is shown for.
+    fn sec1_fixture_as_pkcs8() -> String {
+        use p256::pkcs8::EncodePrivateKey as _;
+        use p256::SecretKey;
+
+        let key = SecretKey::from_sec1_pem(SEC1_FIXTURE).expect("the fixture is a real SEC1 key");
+        key.to_pkcs8_pem(p256::pkcs8::LineEnding::LF)
+            .expect("re-encode as PKCS#8")
+            .to_string()
     }
 
     /// A wrong-ALGORITHM and a wrong-CURVE key are each named for what they ARE.
@@ -509,12 +543,7 @@ OF/2NxApJCzGCEDdfSp6VQO30hyhRANCAAQRWz+jn65BtOMvdyHKcvjBeBSDZH2r\n\
              oQUPsczurQFdpMVzsfFscMnWifcqEz8V5t2FPfiNtQjXS/bK7KBo/sCHOdmknMv7\n\
              KlJd/97QR+5d41fpw7622cQ=\n\
              -----END PRIVATE KEY-----\n";
-        const P384: &str = "-----BEGIN PRIVATE KEY-----\n\
-             MIG2AgEAMBAGByqGSM49AgEGBSuBBAAiBIGeMIGbAgEBBDAXePjbqN+yQPga51Eg\n\
-             fXmzU6lFVK3H36w6/8pmkxAm10teqiX8/wIY4glzlwxuAzyhZANiAATxAlKXdgw6\n\
-             O7TN160oB24/EZsZ0KEzv4kS3AagU27ZHQB10otXUcjT5WlZ5fHEA5gF3VB9bUC+\n\
-             DXUfW1ZHlFS3raU1JkCU+IvUuvlO4uOEDNDCEF05+vUcNDwfgn8WJeg=\n\
-             -----END PRIVATE KEY-----\n";
+        const P384: &str = P384_FIXTURE;
 
         let rsa_msg = format!(
             "{}",
@@ -537,6 +566,44 @@ OF/2NxApJCzGCEDdfSp6VQO30hyhRANCAAQRWz+jn65BtOMvdyHKcvjBeBSDZH2r\n\
             p384_msg.contains("ignore any OID"),
             "the quoted OID is the EXPECTED one, and for P-384 it reads as prime256v1 -- \
              the message must warn rather than let the operator trust it: {p384_msg}"
+        );
+    }
+
+    /// PINS THE UPSTREAM BEHAVIOUR THE WARNING ABOVE COMPENSATES FOR.
+    ///
+    /// That assertion checks my own text against my own text, so it passes whatever the
+    /// decoder does -- which makes the CLAIM inside it unguarded. If `p256` ever fixes
+    /// its decoder to report the OID it FOUND, my "ignore any OID it quotes" becomes
+    /// advice to disregard the one accurate fact in the message, and nothing above would
+    /// notice.
+    ///
+    /// A peer made the general argument while declining to wrap their own correct
+    /// upstream message: a paraphrase is a permanent obligation to stay in step with a
+    /// string you do not control, and a stale one is a confident message describing
+    /// something other than what happened. Wrapping is worth it here because the
+    /// upstream is actively misleading -- but only if the wrapper's premise is itself
+    /// checked.
+    ///
+    /// So this asserts the DEFECT still exists: the decoder quotes prime256v1's OID for
+    /// a key that is not prime256v1. When this fails, the upstream was fixed and the
+    /// warning must be deleted rather than the test relaxed.
+    #[test]
+    fn the_upstream_decoder_still_reports_the_expected_oid_not_the_found_one() {
+        use p256::ecdsa::SigningKey;
+        use p256::pkcs8::DecodePrivateKey as _;
+
+        // The same real P-384 key the arm above uses.
+        let err = SigningKey::from_pkcs8_pem(P384_FIXTURE)
+            .expect_err("a P-384 key cannot yield a P-256 signing key");
+        let raw = err.to_string();
+
+        const PRIME256V1_OID: &str = "1.2.840.10045.3.1.7";
+        assert!(
+            raw.contains(PRIME256V1_OID),
+            "the wrapper warns that the quoted OID is the EXPECTED one. If the decoder \
+             no longer quotes prime256v1's OID for a P-384 key, that warning is now \
+             telling operators to ignore accurate information -- DELETE THE WARNING \
+             rather than relaxing this test. Got: {raw}"
         );
     }
 

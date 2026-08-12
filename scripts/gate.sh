@@ -36,7 +36,25 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-fail() { printf '\nGATE FAILED: %s\n' "$1" >&2; exit 1; }
+# A FAILURE MUST SURVIVE `| tail -1`.
+#
+# Every arm already prints its own diagnostic, and I still lost a real failure to my
+# own `| tail -1` three times in a row: the gate said GATE FAILED and the sentence
+# explaining WHICH failure scrolled past above it. A summary line that omits the one
+# fact you need is worse than no summary, because it looks like it told you.
+#
+# So the last thing printed carries the machine's state too. Contention is the common
+# transient on a shared box and it reads exactly like a broken artifact; naming the
+# load average at the moment of failure lets a reader tell them apart from the tail
+# alone, without re-running and hoping it reproduces.
+fail() {
+  local load
+  load="$(uptime 2>/dev/null | sed 's/.*load averages*: //' || echo unknown)"
+  printf '\nGATE FAILED: %s  [load %s]\n' "$1" "$load" >&2
+  printf '  Scroll up for the failing arm output. A high load average here means\n' >&2
+  printf '  contention is a live suspect: the e2e arms time out under it.\n' >&2
+  exit 1
+}
 
 # Run a command that produces no test counts, failing the gate if it does.
 run_check() {
@@ -109,7 +127,7 @@ run_expect() {
 #
 # Raise this when tests are added. A failure here is normally that, not a defect --
 # but it should be a deliberate edit rather than a number nobody revisits.
-run_expect 328 "workspace unit + integration" \
+run_expect 329 "workspace unit + integration" \
   cargo test --locked --workspace
 
 # Two independent defences, because each catches what the other misses:

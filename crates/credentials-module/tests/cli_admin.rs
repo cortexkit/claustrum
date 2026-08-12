@@ -957,3 +957,112 @@ fn api_key_login_flow_integration() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// The rotate verb's HAPPY PATH, end to end through the real binary.
+///
+/// The crash-cut suite proves the two-slot handover survives a SIGKILL at each cut,
+/// but it drives a helper that re-implements the sequence -- parking between steps
+/// requires them separated. So the sequence the CLI actually runs (heal, stage,
+/// rewrap, promote, in that order) had no test at all: a verb nobody runs casually,
+/// because it needs the daemon stopped, and whose first real exercise would be during
+/// a key-compromise incident.
+///
+/// Asserts the four things an operator is relying on when they type it, each of which
+/// can fail independently of the printed "rotated master key to ..." line:
+///   1. records still decrypt (a rewrap that half-failed prints success too),
+///   2. the audit chain still verifies ACROSS the re-seal,
+///   3. handles survive, so consumers are not silently cut off,
+///   4. a SECOND rotation works on the slot state the first one left behind.
+///
+/// WHAT PASS 2 DOES NOT PROVE, measured rather than assumed: it does not exercise the
+/// heal. Deleting `heal_pending_rotation` leaves this test green, because after a
+/// SUCCESSFUL rotation `promote` has already cleared `next`, so the heal is a no-op --
+/// it only does work when a PRIOR rotation crashed between rewrap and promote. That
+/// state needs a real SIGKILL to produce, and the crash-cut suite's
+/// `double-heal-staged` cut is where it is proven. Deleting `promote` also leaves this
+/// green, and correctly so: the next rotation's heal recovers exactly that state, which
+/// is why the code calls promote hygiene rather than a safety step.
+///
+/// Recorded because the obvious reading of a two-pass loop is that it covers the
+/// second-rotation guards, and it does not.
+#[test]
+fn the_rotate_verb_leaves_the_vault_usable_and_can_run_twice() {
+    let root = tmp_root("rotate-happy");
+    let data_dir = root.join("vault");
+    let key_path = root.join("keys").join("master.key");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    std::fs::create_dir_all(key_path.parent().unwrap()).unwrap();
+
+    let run = |args: &[&str]| -> std::process::Output {
+        let mut c = cli();
+        c.args(args)
+            .arg("--data-dir")
+            .arg(&data_dir)
+            .arg("--key-path")
+            .arg(&key_path);
+        c.output().expect("run ck-auth")
+    };
+
+    assert!(run(&["bootstrap"]).status.success());
+    assert!(
+        run(&["put", "--id", "apikey:one", "--payload", "secret-one"])
+            .status
+            .success()
+    );
+    let minted = run(&["mint-handle", "--id", "apikey:one"]);
+    assert!(minted.status.success());
+    let handle = String::from_utf8_lossy(&minted.stdout).trim().to_string();
+    assert!(handle.starts_with("ckh_"), "minted: {handle}");
+
+    for pass in 1..=2 {
+        let out = run(&["rotate-master-key"]);
+        assert!(
+            out.status.success(),
+            "rotation {pass} failed: {}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains("rotated master key to key_id"),
+            "rotation {pass} printed no new fingerprint"
+        );
+
+        // The record must still decrypt UNDER THE NEW KEY. `usable` is the only verb
+        // that opens an envelope, so it is the one that can tell a real rewrap from a
+        // rotation that reported success and left rows sealed under a key nobody holds.
+        let scan = run(&["usable"]);
+        let scan_out = String::from_utf8_lossy(&scan.stdout);
+        assert!(scan.status.success(), "usable failed after rotation {pass}");
+        assert!(
+            scan_out.contains("serviceable: 1")
+                && scan_out.contains("stranded: 0")
+                && scan_out.contains("unreadable: 0"),
+            "rotation {pass} left the record unreadable:\n{scan_out}"
+        );
+
+        // The chain spans the re-seal: the audit key is stored sealed and re-wrapped
+        // with everything else, so a rotation that dropped it would break verification
+        // of entries written before it.
+        let verified = run(&["verify-audit"]);
+        assert!(
+            String::from_utf8_lossy(&verified.stdout).contains("intact"),
+            "rotation {pass} broke the audit chain"
+        );
+
+        // Consumers hold handles and cannot distinguish a revoked one from an unknown
+        // one, so a rotation that dropped them would read as an unexplained outage.
+        // `revoke-all-handles` reports its count, which is the available proof the row
+        // is still there without a live daemon to resolve against.
+        let count = run(&["revoke-all-handles", "--id", "apikey:one"]);
+        let count_out = String::from_utf8_lossy(&count.stdout);
+        assert!(
+            count_out.contains("revoked 1 handle"),
+            "rotation {pass} lost the pre-rotation handle: {count_out}"
+        );
+        // Re-mint for the next pass, so pass 2 tests a handle that has itself crossed
+        // a rotation.
+        assert!(run(&["mint-handle", "--id", "apikey:one"]).status.success());
+    }
+
+    let _ = std::fs::remove_dir_all(&root);
+}

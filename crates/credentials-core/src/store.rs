@@ -2944,6 +2944,12 @@ mod tests {
     fn rotated_vault_reopens_only_under_new_key() {
         let (root, mut store) = tmp_store(21);
         store.create("a", &oauth_record()).unwrap();
+        // Minted BEFORE the rotation: a consumer's live grant, which must survive both
+        // the rewrap and the close/reopen below.
+        let handle = mint_handle().expect("mint a pre-rotation handle");
+        store
+            .put_handle_hash(&handle.hash, "a", AuditCtx::admin(AuditOp::MintHandle))
+            .expect("record the handle");
         let db_path = root.join("store.db");
         let new_key = MasterKey::from_bytes([0x88; MASTER_KEY_LEN]);
         store
@@ -2972,6 +2978,21 @@ mod tests {
         let store = EncryptedStore::open(reopened, new_key).expect("new key opens");
         assert_eq!(store.get("a").unwrap().payload, b"payload-bytes");
         assert_eq!(store.verify_audit_chain().unwrap(), None);
+
+        // A ROTATION MUST NOT REVOKE ANYONE'S ACCESS. Handles are hashed, not sealed,
+        // so nothing in the rewrap should touch them -- but that is an argument from
+        // how the code is written today, and a future rewrap that rebuilt rows
+        // wholesale would silently cut off every consumer while every assertion above
+        // still passed. Consumers hold these values and cannot tell a revoked handle
+        // from an unknown one (both answer NotFound, deliberately), so the failure
+        // would surface as an unexplained fleet-wide outage.
+        let resolved = store
+            .resolve_handle(&handle.raw)
+            .expect("the pre-rotation handle still resolves");
+        assert_eq!(
+            resolved, "a",
+            "a handle minted before the rotation must still name its credential"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

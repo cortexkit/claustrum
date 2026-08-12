@@ -2392,13 +2392,29 @@ fn cmd_usable(global: &GlobalArgs) -> Result<(), CliError> {
                 // Expiry is printed as context and never scored: an expired access
                 // token is the routine state of a healthy credential, so counting it
                 // would report normal operation as a problem.
+                // "refreshes on next get" is TRUE OF THE MATERIAL AND FALSE OF THE
+                // RECORD once the state is needs_reauth. EncryptedStore::get refuses at
+                // the state check, before decrypting and long before the engine could
+                // attempt a refresh -- so there is no next get, and the phrase invites
+                // an operator to wait for a recovery that cannot arrive.
+                //
+                // Live instance: oauth:anthropic:ufuk3 sat needs_reauth for five hours
+                // reading "refreshes on next get", while three sibling anthropic
+                // accounts refreshed normally around it.
+                let refresh_reachable = row.state != "needs_reauth";
                 let ttl = match expires_at_ms {
                     Some(exp) => {
                         let mins = (exp - now) / 60_000;
-                        if mins < 0 {
+                        if mins >= 0 {
+                            format!("access good for {mins}m")
+                        } else if refresh_reachable {
                             format!("access expired {}m ago, refreshes on next get", -mins)
                         } else {
-                            format!("access good for {mins}m")
+                            format!(
+                                "access expired {}m ago; refresh material is intact but \
+                                 UNREACHABLE while the state is {} -- only a login clears it",
+                                -mins, row.state
+                            )
                         }
                     }
                     None => "no expiry recorded".to_string(),

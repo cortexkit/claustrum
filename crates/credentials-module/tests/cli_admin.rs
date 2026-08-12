@@ -1558,3 +1558,128 @@ fn events_discloses_that_the_retention_cap_discarded_older_rows() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// `usable` must not promise a refresh that the state makes unreachable.
+///
+/// An expired access token on an ACTIVE record genuinely does refresh on the next
+/// get -- that is the routine state of a healthy credential. On a NEEDS_REAUTH
+/// record the same material is inert: `EncryptedStore::get` refuses at the state
+/// check, before decrypting and long before the engine could attempt a refresh.
+/// There is no next get.
+///
+/// The old line said "refreshes on next get" for both, which is true of the MATERIAL
+/// and false of the RECORD -- and it invites an operator to wait for a recovery that
+/// cannot arrive. Live instance: oauth:anthropic:ufuk3 read that way for five hours
+/// while three sibling accounts refreshed normally around it.
+///
+/// Both arms asserted together, because the fix is a discrimination: making every
+/// expired row say "unreachable" would satisfy the first assertion and lie about
+/// every healthy credential in the vault.
+#[test]
+fn usable_does_not_promise_a_refresh_the_state_makes_unreachable() {
+    let root = tmp_root("usable-unreachable");
+    let data_dir = root.join("vault");
+    let key_path = root.join("keys").join("master.key");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    std::fs::create_dir_all(key_path.parent().unwrap()).unwrap();
+
+    let run = |args: &[&str]| -> std::process::Output {
+        let mut c = cli();
+        c.args(args)
+            .arg("--data-dir")
+            .arg(&data_dir)
+            .arg("--key-path")
+            .arg(&key_path);
+        c.output().expect("run ck-auth")
+    };
+    assert!(run(&["bootstrap"]).status.success());
+
+    // Two OAuth records with EXPIRED access tokens and live refresh material. They
+    // differ only in state, which is the whole point.
+    {
+        let descriptor = StorageDescriptor {
+            module_id: credentials_core::contract::MODULE_ID.into(),
+            storage_namespace: credentials_core::contract::STORAGE_NAMESPACE.into(),
+            isolation: Isolation::Module,
+            backend: StorageBackend::Sqlite {
+                path: data_dir.join("store.db").to_string_lossy().into_owned(),
+            },
+        };
+        let raw = open_sqlite(&descriptor).expect("open");
+        credentials_core::store::EncryptedStore::migrate(&raw).expect("migrate");
+        let key = credentials_core::resolver::resolve(
+            &credentials_core::resolver::ResolverConfig {
+                data_dir: data_dir.clone(),
+                source: credentials_core::resolver::KeySource::OperatorPath {
+                    path: key_path.clone(),
+                },
+            },
+            None,
+        )
+        .expect("resolve");
+        let store = credentials_core::store::EncryptedStore::open(raw, key).expect("vault");
+
+        let expired_at = chrono_now_ms() - 60_000;
+        for id in ["oauth:healthy", "oauth:dead"] {
+            let rec = credentials_core::record::VaultRecord::new_oauth(
+                "test",
+                "anthropic",
+                credentials_core::oauth::OAuthCredential {
+                    access_token: "stale".into(),
+                    refresh_token: "live-refresh-material".into(),
+                    expires_at_ms: Some(expired_at),
+                    token_url: "https://example.invalid/token".into(),
+                    client_id: None,
+                    scopes: Vec::new(),
+                },
+                b"stale".to_vec(),
+            );
+            store.create(id, &rec).expect("seed");
+        }
+        // Only the second is marked dead, exactly as a consumer report would.
+        store
+            .invalidate_if_version_audited(
+                "oauth:dead",
+                1,
+                credentials_core::audit::AuditCtx::admin(
+                    credentials_core::audit::AuditOp::ReportAuthFailure,
+                ),
+            )
+            .expect("mark needs_reauth");
+    }
+
+    let out = run(&["usable"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "usable must succeed: {stdout}");
+
+    let dead_line = stdout
+        .lines()
+        .find(|l| l.contains("oauth:dead"))
+        .unwrap_or_else(|| panic!("no line for the dead credential: {stdout}"));
+    assert!(
+        dead_line.contains("UNREACHABLE"),
+        "a needs_reauth record must not promise a refresh that get() refuses before \
+         reaching: {dead_line}"
+    );
+
+    // THE ARM THAT KEEPS IT HONEST: an active expired record still promises the
+    // refresh, because it genuinely happens.
+    let healthy_line = stdout
+        .lines()
+        .find(|l| l.contains("oauth:healthy"))
+        .unwrap_or_else(|| panic!("no line for the healthy credential: {stdout}"));
+    assert!(
+        healthy_line.contains("refreshes on next get"),
+        "an ACTIVE expired record is the routine state of a healthy credential and \
+         must still say it refreshes: {healthy_line}"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+fn chrono_now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_millis() as i64
+}

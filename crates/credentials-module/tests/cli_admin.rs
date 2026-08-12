@@ -1183,3 +1183,173 @@ fn both_binaries_report_a_build_revision_without_a_supervisor() {
         );
     }
 }
+
+/// `verify-audit` runs against a vault whose lease is HELD, and discriminates.
+///
+/// It used to go through `open_for_admin`, which takes the single-writer lease, so the
+/// tamper-evidence check required stopping the daemon. That is why it had never run on
+/// the live store in six weeks: nobody takes the credential vault down for an integrity
+/// check, and a mechanism nobody can afford to invoke provides evidence of nothing.
+///
+/// The lease arm is the load-bearing one. A regression to the lease-taking form would
+/// be invisible in every ordinary test -- they all run against an idle vault -- and
+/// would only surface when someone tried to verify a live one, which is exactly the
+/// situation that never happens.
+#[test]
+fn verify_audit_reads_a_leased_vault_and_names_a_broken_chain() {
+    let root = tmp_root("verify-leased");
+    let data_dir = root.join("vault");
+    let key_path = root.join("keys").join("master.key");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    std::fs::create_dir_all(key_path.parent().unwrap()).unwrap();
+
+    let run = |args: &[&str]| -> std::process::Output {
+        let mut c = cli();
+        c.args(args)
+            .arg("--data-dir")
+            .arg(&data_dir)
+            .arg("--key-path")
+            .arg(&key_path);
+        c.output().expect("run ck-auth")
+    };
+
+    assert!(run(&["bootstrap"]).status.success());
+    for i in 0..3 {
+        assert!(run(&[
+            "put",
+            "--id",
+            &format!("apikey:t{i}"),
+            "--payload",
+            "secret"
+        ])
+        .status
+        .success());
+    }
+
+    // THE ARM THAT MATTERS: hold the single-writer lease, exactly as the running
+    // daemon does, and verify anyway.
+    let descriptor = StorageDescriptor {
+        module_id: credentials_core::contract::MODULE_ID.into(),
+        storage_namespace: credentials_core::contract::STORAGE_NAMESPACE.into(),
+        isolation: Isolation::Module,
+        backend: StorageBackend::Sqlite {
+            path: data_dir.join("store.db").to_string_lossy().into_owned(),
+        },
+    };
+    let _lease = open_sqlite(&descriptor).expect("take the lease as the daemon would");
+
+    let held = run(&["verify-audit"]);
+    let held_out = String::from_utf8_lossy(&held.stdout);
+    assert!(
+        held.status.success(),
+        "verify-audit must work while the lease is held: {}{}",
+        held_out,
+        String::from_utf8_lossy(&held.stderr)
+    );
+    assert!(
+        held_out.contains("intact"),
+        "expected an intact chain, got: {held_out}"
+    );
+
+    // POSITIVE ARM FOR THE DETECTOR. "Intact" is only worth having if the check can
+    // say BROKEN -- an implementation that always reported intact would satisfy every
+    // assertion above.
+    let db = data_dir.join("store.db");
+    let conn = rusqlite::Connection::open(&db).expect("open to tamper");
+    conn.execute("UPDATE audit_log SET actor = 'tampered' WHERE seq = 2", [])
+        .expect("tamper one row");
+    drop(conn);
+
+    let broken = run(&["verify-audit"]);
+    let stderr = String::from_utf8_lossy(&broken.stderr);
+    assert!(
+        !broken.status.success(),
+        "a tampered chain must fail: {}",
+        String::from_utf8_lossy(&broken.stdout)
+    );
+    assert!(
+        stderr.contains("BROKEN at seq 2"),
+        "the refusal must name WHERE the chain broke, so an operator knows what to \
+         inspect: {stderr}"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// `audit` reads a leased vault, and names WHY a row is flagged.
+///
+/// Two properties, both invisible until an operator needs them.
+///
+/// It used to take the single-writer lease, so the forensic log was unreadable while
+/// the vault ran -- i.e. whenever anyone actually wanted it. Every column is plaintext,
+/// so it needs neither the lease nor a master key.
+///
+/// And it rendered a bare "ALARM" for any flagged row. The alarm column is set on every
+/// admin write BY DESIGN, so admin activity is loud: in the production vault 169 of 172
+/// flagged rows are ordinary mints and revokes and 3 are the real detection signal.
+/// Collapsing both into one word makes the routine 98% read as faults and buries the
+/// thing an operator is scanning for.
+#[test]
+fn audit_reads_a_leased_vault_and_names_the_alarm_reason() {
+    let root = tmp_root("audit-leased");
+    let data_dir = root.join("vault");
+    let key_path = root.join("keys").join("master.key");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    std::fs::create_dir_all(key_path.parent().unwrap()).unwrap();
+
+    let run = |args: &[&str]| -> std::process::Output {
+        let mut c = cli();
+        c.args(args)
+            .arg("--data-dir")
+            .arg(&data_dir)
+            .arg("--key-path")
+            .arg(&key_path);
+        c.output().expect("run ck-auth")
+    };
+
+    assert!(run(&["bootstrap"]).status.success());
+    assert!(run(&["put", "--id", "apikey:one", "--payload", "secret"])
+        .status
+        .success());
+
+    // Hold the lease exactly as the running daemon does.
+    let descriptor = StorageDescriptor {
+        module_id: credentials_core::contract::MODULE_ID.into(),
+        storage_namespace: credentials_core::contract::STORAGE_NAMESPACE.into(),
+        isolation: Isolation::Module,
+        backend: StorageBackend::Sqlite {
+            path: data_dir.join("store.db").to_string_lossy().into_owned(),
+        },
+    };
+    let _lease = open_sqlite(&descriptor).expect("take the lease as the daemon would");
+
+    let out = run(&["audit"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "audit must read while the lease is held: {}{}",
+        stdout,
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // The put is an admin write, so it is flagged -- and the row must say WHICH kind of
+    // flag, not merely that there is one.
+    assert!(
+        stdout.contains("[admin_write]"),
+        "a flagged row must name its reason, so routine admin activity is \
+         distinguishable from a detection signal: {stdout}"
+    );
+    assert!(
+        !stdout.contains(" ALARM"),
+        "the bare ALARM marker collapses a routine admin write and a real anomaly into \
+         one word: {stdout}"
+    );
+    // POSITIVE ARM: an implementation printing nothing at all would satisfy the
+    // assertions above. The row itself has to be there.
+    assert!(
+        stdout.contains("apikey:one"),
+        "the entry for the credential must be listed: {stdout}"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}

@@ -1922,6 +1922,125 @@ pub fn mint_handle() -> Result<MintedHandle, getrandom::Error> {
 /// into a mutation's own transaction so the audit entry and the mutation commit
 /// together. The single-writer lease guarantees no concurrent appender, so reading
 /// the tip and inserting the next seq is race-free.
+/// Verify the audit chain from a store file WITHOUT taking the single-writer lease.
+///
+/// Separate from [`EncryptedStore::verify_audit_chain`] for the reason that method
+/// could never be used in production: opening an `EncryptedStore` acquires the lease,
+/// so the tamper-evidence check required stopping the daemon. Nobody stops a vault to
+/// run an integrity check, which means THE CHECK THAT JUSTIFIES THE HMAC CHAIN HAD
+/// NEVER RUN ON THE LIVE STORE -- and a tamper-evidence mechanism nobody can afford to
+/// invoke provides evidence of nothing.
+///
+/// The verification itself is a pure read: fetch the entries, recompute each MAC over
+/// its predecessor. It needs the master key only to unseal the stored audit key, never
+/// to write. `mode=ro` rather than `immutable=1`, so the newest entries -- still in the
+/// WAL on a live store, and the ones an operator is usually asking about -- are seen.
+///
+/// Returns the seq of the first broken entry, or `None` when the chain verifies.
+pub fn verify_audit_chain_read_only(
+    store_path: &std::path::Path,
+    key: &MasterKey,
+) -> Result<Option<i64>, StoreOpError> {
+    let map = |e: rusqlite::Error| StoreOpError::from(StoreError::Backend(e.to_string()));
+    let conn = rusqlite::Connection::open_with_flags(
+        format!("file:{}?mode=ro", store_path.display()),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+    )
+    .map_err(map)?;
+
+    // Unseal the audit key. Its absence is NOT an empty chain: it means this store was
+    // never opened by a build that provisions one, and reporting "verified" for a store
+    // whose key cannot be found would be the exact false green the chain exists to
+    // prevent.
+    let sealed: Vec<u8> = conn
+        .query_row(
+            "SELECT envelope FROM vault_secrets WHERE name = ?1",
+            rusqlite::params![AUDIT_KEY_SECRET_NAME],
+            |r| r.get(0),
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => StoreOpError::NotFound,
+            other => map(other),
+        })?;
+    let binding = RecordBinding {
+        credential_id: AUDIT_KEY_SECRET_NAME,
+        record_version: AUDIT_KEY_RECORD_VERSION,
+    };
+    // A decrypt failure here is the WRONG KEY, not a broken chain: say so, because
+    // "verification failed" would send an operator hunting tampering when the real
+    // answer is that the vault is sealed under a different master key.
+    let plain = envelope::open(key, &sealed, &binding).map_err(|e| {
+        StoreOpError::from(StoreError::Backend(format!(
+            "the audit key does not open under this master key ({e:?}) -- wrong key, \
+             not a broken chain"
+        )))
+    })?;
+    let audit_key: [u8; 32] = plain
+        .as_slice()
+        .try_into()
+        .map_err(|_| StoreOpError::from(StoreError::Backend("audit key length".into())))?;
+    let audit_key = Zeroizing::new(audit_key);
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT seq, ts_ms, op, credential_id, payload_hash, actor, alarm, \
+                    alarm_reason, prev_mac, entry_mac \
+             FROM audit_log ORDER BY seq ASC",
+        )
+        .map_err(map)?;
+    let entries = stmt
+        .query_map([], row_to_audit)
+        .map_err(map)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(map)?;
+
+    Ok(audit::verify_chain(&audit_key, &entries))
+}
+
+/// Read the audit chain from a store file WITHOUT a lease or a master key.
+///
+/// Every column here is plaintext -- seq, op, credential id, actor, alarm -- so unlike
+/// [`verify_audit_chain_read_only`] this needs no key at all, only a read-only
+/// connection.
+///
+/// Separate from [`EncryptedStore::read_audit`] for the same reason as the other
+/// lease-free readers: the moment an operator asks what happened is the moment the
+/// vault is running, and a forensic log that requires an outage to read is unavailable
+/// exactly when it is wanted.
+///
+/// `limit` caps to the most recent N entries; `None` reads the whole chain. Returned
+/// oldest-first, matching chain order.
+pub fn read_audit_read_only(
+    store_path: &std::path::Path,
+    limit: Option<usize>,
+) -> Result<Vec<AuditEntry>, StoreOpError> {
+    let map = |e: rusqlite::Error| StoreOpError::from(StoreError::Backend(e.to_string()));
+    let conn = rusqlite::Connection::open_with_flags(
+        format!("file:{}?mode=ro", store_path.display()),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+    )
+    .map_err(map)?;
+
+    // Newest-first with the cap, then reversed into chain order -- the same shape as
+    // the leased reader, so a capped read returns the RECENT entries rather than the
+    // oldest ones.
+    let cap: i64 = limit.map(|n| n as i64).unwrap_or(-1);
+    let mut stmt = conn
+        .prepare(
+            "SELECT seq, ts_ms, op, credential_id, payload_hash, actor, alarm, \
+                    alarm_reason, prev_mac, entry_mac \
+             FROM audit_log ORDER BY seq DESC LIMIT ?1",
+        )
+        .map_err(map)?;
+    let mut entries = stmt
+        .query_map(rusqlite::params![cap], row_to_audit)
+        .map_err(map)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(map)?;
+    entries.reverse();
+    Ok(entries)
+}
+
 /// Read recent authentication events from a store file WITHOUT a lease or a key.
 ///
 /// Separate from [`EncryptedStore::recent_auth_events`] because opening an

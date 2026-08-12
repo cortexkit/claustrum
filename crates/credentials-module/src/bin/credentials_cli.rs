@@ -2120,10 +2120,35 @@ fn cmd_audit(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
         .map(|s| s.parse::<usize>())
         .transpose()
         .map_err(|e| CliError::Usage(format!("--limit not an integer: {e}")))?;
-    let store = open_for_admin(global)?;
-    let entries = store.read_audit(limit).map_err(CliError::Store)?;
+    // Lease-free, like `verify-audit` and `events`: the audit_log columns are all
+    // plaintext, so this needs neither the lease nor a master key. It used to take the
+    // lease, which meant the forensic log was unreadable while the vault ran -- i.e.
+    // whenever anyone actually wanted it.
+    let db = global.data_dir.join("store.db");
+    if !db.exists() {
+        return Err(CliError::Usage(format!(
+            "no vault at {} (run 'ck auth bootstrap' first)",
+            global.data_dir.display()
+        )));
+    }
+    let entries =
+        credentials_core::store::read_audit_read_only(&db, limit).map_err(CliError::Store)?;
     for e in entries {
-        let alarm = if e.alarm { " ALARM" } else { "" };
+        // PRINT THE REASON, NOT A BARE "ALARM".
+        //
+        // The alarm column is set on every admin write by design, so admin activity is
+        // loud -- 169 of the 172 flagged rows in this vault are ordinary mints and
+        // revokes, and 3 are the real detection signal (fetch_rate_anomaly). Rendering
+        // both as the same word makes the routine 98% look like faults and buries the
+        // one thing an operator scans for. The reason already distinguishes them; the
+        // renderer was discarding it.
+        let alarm = match (e.alarm, e.alarm_reason.as_deref()) {
+            (true, Some(reason)) => format!(" [{reason}]"),
+            // Flagged with no reason recorded: say so rather than printing nothing,
+            // because a silent flag is indistinguishable from an unflagged row.
+            (true, None) => " [alarm: reason not recorded]".to_string(),
+            (false, _) => String::new(),
+        };
         println!(
             "{:>5} {} {} {}{}",
             e.seq,
@@ -2351,16 +2376,55 @@ fn cmd_usable(global: &GlobalArgs) -> Result<(), CliError> {
     Ok(())
 }
 
+/// Verify the tamper-evidence chain, WITHOUT stopping the daemon.
+///
+/// This used to go through `open_for_admin`, which takes the single-writer lease and
+/// therefore required the vault offline. That made it unrunnable in practice: nobody
+/// takes the credential vault down to run an integrity check, so the check that
+/// justifies the whole HMAC chain had never once run against the live store. A
+/// tamper-evidence mechanism nobody can afford to invoke provides evidence of nothing.
+///
+/// The verification is a pure read -- fetch the entries, recompute each MAC over its
+/// predecessor -- and needs the master key only to unseal the stored audit key. So it
+/// resolves the key the way the daemon does (matching the slot the store's own
+/// fingerprint names, so a vault left mid-rotation still verifies) and reads through a
+/// lease-free connection, exactly like `events` and `usable`.
 fn cmd_verify_audit(global: &GlobalArgs) -> Result<(), CliError> {
-    let store = open_for_admin(global)?;
-    match store.verify_audit_chain().map_err(CliError::Store)? {
-        None => {
+    let db = global.data_dir.join("store.db");
+    if !db.exists() {
+        return Err(CliError::Usage(format!(
+            "no vault at {} (run 'ck auth bootstrap' first)",
+            global.data_dir.display()
+        )));
+    }
+
+    let conn = credentials_core::usable::open_store_read_only(&db)
+        .map_err(|e| CliError::Io(e.to_string()))?;
+    let cfg = resolver_config(global);
+    let key = match credentials_core::usable::read_db_key_id_read_only(&conn) {
+        Some(db_key_id) => resolver::resolve_for_db(&cfg, db_key_id),
+        None => resolver::resolve(&cfg, None),
+    }
+    .map_err(CliError::MasterKey)?;
+    drop(conn);
+
+    match credentials_core::store::verify_audit_chain_read_only(&db, &key) {
+        Ok(None) => {
             println!("audit chain verified: intact");
             Ok(())
         }
-        Some(seq) => Err(CliError::Io(format!(
+        Ok(Some(seq)) => Err(CliError::Io(format!(
             "audit chain BROKEN at seq {seq} (tamper detected)"
         ))),
+        // An absent audit key is not an empty chain. Reporting "intact" for a store
+        // whose key cannot be found would be the exact false green the chain exists to
+        // prevent.
+        Err(credentials_core::store::StoreOpError::NotFound) => Err(CliError::Io(
+            "this vault has no audit key, so the chain cannot be verified \
+             (it predates the sealed-audit-key scheme, or the row was removed)"
+                .to_string(),
+        )),
+        Err(e) => Err(CliError::Store(e)),
     }
 }
 

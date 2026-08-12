@@ -88,7 +88,6 @@ they operate on the store as a whole rather than on one credential:
 |------|------------------------|
 | `bootstrap` | creates the vault; there is no daemon yet |
 | `rotate-master-key` | re-wraps every record and the sealed audit key in one transaction |
-| `audit` / `verify-audit` | reads the whole chain under the lease |
 
 Run these with the daemon stopped. Every other write verb — `login`, `logout`,
 `remove`, `put`, `import`, `invalidate`, `mint-handle`, `revoke-handle`,
@@ -385,17 +384,39 @@ produce.
 ## 6. Verify the audit chain
 
 Every durable mutation is recorded in a tamper-evident, HMAC-keyed audit chain.
-Both verbs are offline-only — stop the daemon first:
 
 ```sh
-ck auth verify-audit
-ck auth audit
+ck auth verify-audit    # safe while the daemon runs
+ck auth audit           # safe while the daemon runs
 ```
 
-`verify-audit` reports the chain intact or names the first broken entry.
-`audit` lists the entries (seq, op, credential, actor, and any alarm). An alarm row
-(e.g. `fetch_rate_anomaly`) is a durable detection signal surfaced here on demand,
-not a live notification.
+`verify-audit` reports the chain intact or names the first broken entry. **It takes
+no lease**, so it runs against a live vault. It used to require the daemon stopped,
+which is why the production chain went six weeks unverified: nobody takes the
+credential vault down for an integrity check, and a tamper-evidence mechanism
+nobody can afford to invoke provides evidence of nothing.
+
+Four outcomes, deliberately distinct — the middle two are configuration problems
+and say so rather than implying tampering:
+
+| outcome | meaning |
+|---------|---------|
+| `audit chain verified: intact` | every MAC chains to its predecessor |
+| `audit chain BROKEN at seq N` | the chain fails at N — inspect from there |
+| `no master key slot holds the key this vault is sealed under` | wrong key or wrong vault, not tampering |
+| `this vault has no audit key` | nothing to verify against; not an empty chain |
+
+Note what the chain does **not** cover: it is tamper-evident against edits,
+reorders and inserts, but not against TRUNCATION. An attacker with write access can
+delete a suffix of recent entries and the remaining prefix still verifies. Detecting
+that needs an external monotonic anchor (periodically recording the tip
+`(last_seq, entry_mac)` off-box), which is out of scope here.
+`audit` lists the entries (seq, op, credential, actor, and any alarm) and is also
+lease-free. A flagged row prints its REASON in brackets, which matters because the
+alarm column is set on every admin write by design: in this vault 169 of 172 flagged
+rows are routine `[admin_write]` mints and revokes, and 3 are `[fetch_rate_anomaly]`
+-- the real detection signal. Scan for the reason, not for the flag. An alarm row is
+a durable signal surfaced here on demand, not a live notification.
 
 ### Why a credential stopped working
 

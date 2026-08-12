@@ -1353,3 +1353,80 @@ fn audit_reads_a_leased_vault_and_names_the_alarm_reason() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// A refused verb must not advise a remedy that does not exist for it.
+///
+/// `rotate-master-key` and `bootstrap` have no admin op, so they can only run offline.
+/// The lease refusal used to advise `--subc` for every verb -- following it lands on
+/// the identical error, and an operator reasonably concludes the vault is broken. For
+/// rotate that happens DURING A KEY COMPROMISE, which is the worst possible moment to
+/// be sent through a door that is not there.
+///
+/// The two arms are asserted together because the fix is a discrimination, not a
+/// wording change: making both say "offline only" would pass the first assertion and
+/// break every mutation, which really can be committed through the running daemon.
+#[test]
+fn a_lease_refusal_advises_only_a_remedy_that_exists_for_that_verb() {
+    let root = tmp_root("refusal-remedy");
+    let data_dir = root.join("vault");
+    let key_path = root.join("keys").join("master.key");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    std::fs::create_dir_all(key_path.parent().unwrap()).unwrap();
+
+    let run = |args: &[&str]| -> std::process::Output {
+        let mut c = cli();
+        c.args(args)
+            .arg("--data-dir")
+            .arg(&data_dir)
+            .arg("--key-path")
+            .arg(&key_path);
+        c.output().expect("run ck-auth")
+    };
+    assert!(run(&["bootstrap"]).status.success());
+
+    // Hold the lease exactly as the running daemon does.
+    let descriptor = StorageDescriptor {
+        module_id: credentials_core::contract::MODULE_ID.into(),
+        storage_namespace: credentials_core::contract::STORAGE_NAMESPACE.into(),
+        isolation: Isolation::Module,
+        backend: StorageBackend::Sqlite {
+            path: data_dir.join("store.db").to_string_lossy().into_owned(),
+        },
+    };
+    let _lease = open_sqlite(&descriptor).expect("take the lease as the daemon would");
+
+    // NO ROUTE PATH: must say so, and must not point at --subc.
+    let rotate = run(&["rotate-master-key"]);
+    let rotate_err = String::from_utf8_lossy(&rotate.stderr);
+    assert!(!rotate.status.success(), "rotate must refuse under a lease");
+    assert!(
+        rotate_err.contains("no route path"),
+        "rotate has no admin op and must say so: {rotate_err}"
+    );
+    assert!(
+        rotate_err.contains("--subc will NOT help"),
+        "the refusal must rule out the remedy an operator would otherwise try: \
+         {rotate_err}"
+    );
+
+    // ROUTE PATH EXISTS: the mutation arm must still offer --subc. Without this, a
+    // "fix" that told every verb to go offline would pass the assertions above while
+    // removing the zero-downtime path that 11 of 13 write verbs depend on.
+    let put = run(&["put", "--id", "apikey:one", "--payload", "secret"]);
+    let put_err = String::from_utf8_lossy(&put.stderr);
+    assert!(
+        !put.status.success(),
+        "an offline put must refuse under a lease"
+    );
+    assert!(
+        put_err.contains("--subc <connection-file>"),
+        "a mutation CAN be committed through the running daemon, and the refusal must \
+         say so: {put_err}"
+    );
+    assert!(
+        !put_err.contains("no route path"),
+        "a mutation must not be described as offline-only: {put_err}"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}

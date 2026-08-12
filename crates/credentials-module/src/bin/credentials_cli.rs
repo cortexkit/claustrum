@@ -69,8 +69,15 @@ fn main() -> ExitCode {
 #[derive(Debug)]
 enum CliError {
     Usage(String),
-    /// The daemon holds the lease — the operator must stop it first.
-    DaemonRunning,
+    /// The daemon holds the lease. The payload says whether a route path EXISTS for
+    /// the refused verb, because the remedy differs and a wrong one is worse than
+    /// none: an operator told to retry with `--subc` on a verb that has no admin op
+    /// gets the identical error again and reasonably concludes the vault is broken.
+    /// For `rotate-master-key` that happens during a key compromise, which is the
+    /// worst possible moment to be sent through a door that is not there.
+    DaemonRunning {
+        route_path_exists: bool,
+    },
     /// The master key could not be resolved (locked / absent / wrong).
     MasterKey(MasterKeyError),
     Store(StoreOpError),
@@ -86,7 +93,7 @@ enum CliError {
 impl CliError {
     fn exit_code(&self) -> ExitCode {
         match self {
-            CliError::DaemonRunning => ExitCode::from(3),
+            CliError::DaemonRunning { .. } => ExitCode::from(3),
             CliError::MasterKey(_) => ExitCode::from(4),
             // A dispatched-but-unknown outcome gets its own code so a script does not
             // treat it as a clean failure and blindly retry a possibly-committed op.
@@ -107,10 +114,20 @@ impl std::fmt::Display for CliError {
             // downtime and is what an operator almost always wants; it was documented
             // under `help overrides`, i.e. exactly where someone who does not yet know
             // the flag exists will not look.
-            CliError::DaemonRunning => f.write_str(
+            CliError::DaemonRunning {
+                route_path_exists: true,
+            } => f.write_str(
                 "the credentials daemon is running (holds the single-writer lease). \
                  Either commit through it with --subc <connection-file> (no downtime), \
                  or stop the daemon to use the offline path.",
+            ),
+            CliError::DaemonRunning {
+                route_path_exists: false,
+            } => f.write_str(
+                "the credentials daemon is running (holds the single-writer lease), and \
+                 this verb has no route path — it can only run offline. Stop the daemon \
+                 (ck module stop claustrum), run it, then start the daemon again. \
+                 --subc will NOT help here.",
             ),
             CliError::MasterKey(e) => write!(f, "master key: {e}"),
             CliError::Store(e) => write!(f, "{e}"),
@@ -549,17 +566,25 @@ fn commit_admin(
             }
         }
     }
-    let store = open_for_admin(global)?;
+    let store = open_for_admin(global, true)?;
     credentials_core::admin_ops::apply(&store, op, "offline-cli").map_err(CliError::Store)
 }
 
 /// Open the vault for an admin write: resolve the master key (proof of possession)
 /// and take the single-writer lease (proof the daemon is stopped). Either failing
 /// is a clean, typed refusal.
-fn open_for_admin(global: &GlobalArgs) -> Result<EncryptedStore, CliError> {
+/// `route_path_exists` is the CALLER's answer, not this function's: the same lease
+/// failure means different things to its two callers. A mutation can be committed
+/// through the running daemon, so `--subc` is a real remedy; `rotate-master-key` has no
+/// admin op and can only run offline, so the same advice sends an operator through a
+/// door that is not there -- during a key compromise, when they can least afford it.
+fn open_for_admin(
+    global: &GlobalArgs,
+    route_path_exists: bool,
+) -> Result<EncryptedStore, CliError> {
     let store = open_sqlite(&descriptor(global)).map_err(|e| match e {
         // A held lease means the daemon is up — the structural "while stopped" gate.
-        StoreError::Lease(_) => CliError::DaemonRunning,
+        StoreError::Lease(_) => CliError::DaemonRunning { route_path_exists },
         other => CliError::StoreOpen(other),
     })?;
     EncryptedStore::migrate(&store).map_err(CliError::StoreOpen)?;
@@ -577,7 +602,10 @@ fn cmd_bootstrap(global: &GlobalArgs) -> Result<(), CliError> {
     // Bootstrap must also take the lease (the daemon must be stopped) and must not
     // clobber an existing key.
     let _store = open_sqlite(&descriptor(global)).map_err(|e| match e {
-        StoreError::Lease(_) => CliError::DaemonRunning,
+        // No admin op bootstraps a vault: there is no daemon to ask yet.
+        StoreError::Lease(_) => CliError::DaemonRunning {
+            route_path_exists: false,
+        },
         other => CliError::StoreOpen(other),
     })?;
     let key = resolver::bootstrap(&resolver_config(global)).map_err(CliError::MasterKey)?;
@@ -2039,7 +2067,7 @@ fn cmd_rotate_master_key(global: &GlobalArgs) -> Result<(), CliError> {
     //   4. PROMOTE `next` to `current` and clear `next` (hygiene; off the brick-path).
     // A crash after (2) resolves via current (db still old); after (3) via next (db
     // now new); after (4) via current. No state matches neither slot.
-    let mut store = open_for_admin(global)?;
+    let mut store = open_for_admin(global, false)?;
     let new_key = MasterKey::generate().map_err(|_| CliError::Io("csprng".to_string()))?;
     let new_key_id = new_key.key_id();
     let config = resolver_config(global);

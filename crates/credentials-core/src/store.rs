@@ -1177,23 +1177,31 @@ impl EncryptedStore {
     /// an account or cleaning up a mistaken id; a temporary stop is `logout`
     /// (invalidate + revoke, reversible). Returns [`StoreOpError::NotFound`] when the
     /// id has no row, so a typo'd remove is loud instead of a silent no-op.
+    /// Returns how many handle rows were deleted, because a consumer holding one
+    /// cannot be told by the vault. Handles are bearer capabilities: nothing records
+    /// WHO holds one, so removal cannot notify anybody, and a consumer's next fetch
+    /// gets `not_found` with no explanation of why. Reporting the count gives the
+    /// operator the one fact that says "go check your consumers" at the moment they
+    /// can still act on it -- observed live, a removed credential left a stale entry
+    /// in a consumer's handle file and blinded its sibling accounts until noticed.
     pub fn remove_audited(
         &self,
         credential_id: &str,
         ctx: AuditCtx<'_>,
-    ) -> Result<(), StoreOpError> {
+    ) -> Result<usize, StoreOpError> {
         let audit_key = self.audit_key.clone();
-        let removed = self.fenced_write(|tx| {
+        let (removed, handles) = self.fenced_write(|tx| {
             let n = tx.execute(
                 "DELETE FROM credentials WHERE credential_id = ?1",
                 rusqlite::params![credential_id],
             )?;
+            let mut handles = 0usize;
             if n > 0 {
                 clear_intent_tx(tx, credential_id)?;
                 // Handle rows are deleted outright (not just revoked): the credential
                 // is gone, so retaining hash rows would only grow an unusable table.
                 // The mint/revoke history stays in the audit chain.
-                tx.execute(
+                handles = tx.execute(
                     "DELETE FROM handles WHERE credential_id = ?1",
                     rusqlite::params![credential_id],
                 )?;
@@ -1230,12 +1238,12 @@ impl EncryptedStore {
                     },
                 )?;
             }
-            Ok(n)
+            Ok((n, handles))
         })?;
         if removed == 0 {
             return Err(StoreOpError::NotFound);
         }
-        Ok(())
+        Ok(handles)
     }
 
     /// Quarantine a record (`corrupt`). Used by the read path on a decrypt/parse
@@ -3561,6 +3569,55 @@ mod tests {
     /// AFTER EITHER, THE CREDENTIAL READS `needs_reauth` — identical state, opposite
     /// handle state — so anything checking only the credential cannot tell them
     /// apart. That is what makes the second arm worth writing: it pins the handle row
+    /// `remove` reports how many handles it deleted, and the count is real.
+    ///
+    /// A consumer holding a capability handle cannot be told by the vault that its
+    /// credential is gone: handles are bearer tokens and nothing records who holds
+    /// one, so the holder's next fetch gets a bare `not_found`. The count is the only
+    /// warning available and it is only actionable at the moment of removal --
+    /// observed live, a removed credential left a stale entry in a consumer's handle
+    /// file which blinded three healthy sibling accounts until they noticed
+    /// independently.
+    ///
+    /// Both arms, because a function returning a constant satisfies either one alone:
+    /// two handles must report two, and none must report zero so the CLI can stay
+    /// silent rather than warning about consumers that cannot exist.
+    #[test]
+    fn remove_reports_how_many_handles_stopped_resolving() {
+        let (root, store) = tmp_store(73);
+        let ctx = AuditCtx::vault(AuditOp::MintHandle);
+
+        store
+            .create("with-handles", &oauth_record())
+            .expect("create");
+        for _ in 0..2 {
+            let h = mint_handle().expect("mint");
+            store
+                .put_handle_hash(&h.hash, "with-handles", ctx)
+                .expect("store handle");
+        }
+        store.create("bare", &oauth_record()).expect("create bare");
+
+        let n = store
+            .remove_audited("with-handles", AuditCtx::admin(AuditOp::Remove))
+            .expect("remove");
+        assert_eq!(
+            n, 2,
+            "the count must be the number of handles that just stopped resolving"
+        );
+
+        let none = store
+            .remove_audited("bare", AuditCtx::admin(AuditOp::Remove))
+            .expect("remove bare");
+        assert_eq!(
+            none, 0,
+            "a credential with no handles must report zero, so the operator is not \
+             warned about consumers that cannot exist"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// A REPEAT logout changes nothing, says so, and writes no audit entry.
     ///
     /// The first call is the control: without it, a function that never reports a

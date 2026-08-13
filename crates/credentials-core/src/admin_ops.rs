@@ -169,8 +169,15 @@ pub fn apply(
         }
         AdminOpBody::Remove { id, .. } => {
             let ctx = AuditCtx::route_admin(AuditOp::Remove, actor);
-            store.remove_audited(&id, ctx)?;
-            Ok(serde_json::json!({ "removed": true }))
+            let handles_deleted = store.remove_audited(&id, ctx)?;
+            // The count rides the wire so the CLI can tell an operator that live
+            // capability handles just stopped resolving. Handles are bearer tokens
+            // with no record of who holds them, so this is the only warning
+            // available and it is only useful at the moment of the removal.
+            Ok(serde_json::json!({
+                "removed": true,
+                "handles_deleted": handles_deleted,
+            }))
         }
         AdminOpBody::MintHandle { id, .. } => {
             // The credential must exist before a handle is minted for it (the handles

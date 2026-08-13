@@ -1962,14 +1962,36 @@ fn cmd_logout(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
 /// `--provider` shorthand: a permanent delete should name its exact target).
 fn cmd_remove(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     let id = required(args, "--id")?;
-    commit_admin(
+    let result = commit_admin(
         global,
         AdminOpBody::Remove {
             v: ADMIN_OP_SCHEMA_V1,
             id: id.clone(),
         },
     )?;
-    println!("removed {id}: row, refresh intent, and handles deleted (audit history kept)");
+    // Absent on a daemon older than the field: print the old line rather than
+    // claiming a count we did not get.
+    let handles = result["handles_deleted"].as_u64();
+    match handles {
+        Some(n) => println!(
+            "removed {id}: row, refresh intent, and {n} handle(s) deleted (audit history kept)"
+        ),
+        None => {
+            println!("removed {id}: row, refresh intent, and handles deleted (audit history kept)")
+        }
+    }
+    // NAME THE CONSEQUENCE THE VAULT CANNOT ACT ON. Handles are bearer
+    // capabilities: nothing records who holds one, so removal cannot notify the
+    // holder and their next fetch gets a bare `not_found`. The operator is the only
+    // party who knows which consumers were given one, and this is the last moment
+    // that knowledge is actionable. Observed live: a removed credential left a
+    // stale entry in a consumer's handle file, and that one dangling entry blinded
+    // its three healthy sibling accounts until the consumer noticed independently.
+    if handles.is_some_and(|n| n > 0) {
+        println!("  those handle(s) no longer resolve for whoever holds them.");
+        println!("  the vault cannot tell them: a handle records no holder. if you gave");
+        println!("  one to a consumer, drop it from that consumer's config now.");
+    }
     Ok(())
 }
 

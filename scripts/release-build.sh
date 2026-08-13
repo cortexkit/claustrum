@@ -134,8 +134,41 @@ echo "  debug seams: ${seams} (known, and its test arm skips with a printed reas
 
 echo "  the STAGED artifacts passed, not merely the source they were built from"
 
+# THE REACHABILITY PROBE, and the script refuses without one.
+#
+# Every acceptance leg asks whether the right bytes are in the right place. None
+# asks whether the BEHAVIOUR reached production, and that gap has been the half
+# that mattered on two consecutive placements: a CLI fix accepted on all ten legs
+# while its effect stayed invisible, because the logic ran in the daemon and only
+# the CLI had been placed.
+#
+# It cannot be derived. The placer knows which binaries moved; only the REQUESTER
+# knows which behaviour changed and what proves it. So the probe is an input, and
+# a build that cannot name one has to say so explicitly -- "none" with a reason is
+# an acceptable answer and an unanswered prompt is not, because the whole failure
+# mode is a step everybody assumes someone else did.
+if [ -z "${PROBE:-}" ]; then
+  echo >&2
+  echo "REFUSING: no reachability probe given." >&2
+  echo >&2
+  echo "  Set PROBE to a command whose output proves the change is LIVE, e.g." >&2
+  echo "    PROBE='ck auth remove --id X should print \"1 handle(s)\"' $0" >&2
+  echo >&2
+  echo "  If this build changes no observable behaviour, say so and why:" >&2
+  echo "    PROBE='none: comment-only in store.rs, no executable change' $0" >&2
+  echo >&2
+  echo "  It cannot be derived from the diff: the placer sees which binaries" >&2
+  echo "  moved, and only you know which behaviour to look for afterwards." >&2
+  exit 1
+fi
+
 echo
 echo "staged in ${STAGE}/ -- outside cargo's reach, so these hashes stay true."
 echo "Copy into place with a plain cp -- do NOT re-sign."
 echo "Then verify AFTER placement: codesign -dv <dest> shows the pinned Identifier,"
 echo "and <dest> --version reports ${REV}."
+echo
+echo "reachability probe: ${PROBE}"
+echo "  ^ include this line VERBATIM in the staging request. The placer runs it as"
+echo "    a standard leg; it is the only one that proves the change is live rather"
+echo "    than merely placed."

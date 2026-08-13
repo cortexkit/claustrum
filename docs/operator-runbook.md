@@ -612,7 +612,7 @@ also symlinked into `~/.local/bin/` for the `ck` dispatcher.
 ### Building the release binaries
 
 ```sh
-./scripts/release-build.sh
+PROBE='<command> should print <X> against the live daemon' ./scripts/release-build.sh
 ```
 
 Stamps the source revision into both binaries, signs each with its **pinned**
@@ -746,6 +746,23 @@ grants to that identifier and attributes them to the responsible process (the
 supervisor), every unpinned release silently revokes those grants with no prompt and
 no error. Pinning also makes the published hash equal the placed hash, so a plain
 `shasum` comparison is a valid deployment check.
+
+**When to cut a staging request: at the BEHAVIOURAL BOUNDARY, not on a timer.**
+CLI-only commits accumulate freely — they change nothing the placer must act on.
+The moment a commit touches daemon-linked source (`credentials-core/src`, or
+anything under `credentials-module/src` outside `bin/`), that is the cut point and
+the pair ships. Rate stays low without freshness suffering.
+
+The failure this avoids is a rate one: three supersessions in a day trains a
+reader to skip to the latest, and the next genuine *non*-supersession — "the
+staged pair is still correct, do not churn your window" — stops being read.
+A superseding chain only carries information while it is rare.
+
+**Every staging request carries a reachability probe.** `release-build.sh`
+refuses without one. It is the only check that proves a change is LIVE rather
+than merely placed, and it cannot be derived: the placer knows which binaries
+moved, and only the requester knows which behaviour to look for. "none: <reason>"
+is a valid answer for a build with no observable change; silence is not.
 
 **Acceptance, after restarting the module.** Run the ladder rather than retyping it:
 

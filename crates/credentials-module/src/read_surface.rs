@@ -704,6 +704,52 @@ mod error_class_tests {
         );
     }
 
+    /// An UNMAPPED store error degrades to a TRANSIENT code, never a permanent one.
+    ///
+    /// This is the property a cross-repo consumer's destructive behaviour rests on,
+    /// which is why it is pinned separately from the classification table. A vault
+    /// outage must not be able to surface as `not_found`: `resolve_handle` returns
+    /// `NotFound` only on a clean zero-row read, and every other store failure has to
+    /// land somewhere retryable. A consumer told `permanent` + `not_found` is entitled
+    /// to conclude the credential is GONE and act on it -- ck-quota reaps a dangling
+    /// handle from its config on exactly that answer.
+    ///
+    /// So the catch-all arm's DIRECTION is load-bearing. Measured: changing
+    /// `_ => RefreshFailed` to `_ => NotFound` left the entire workspace green, and
+    /// would have turned every unmapped store error into a permanent verdict that
+    /// deletes live consumer configuration.
+    ///
+    /// The test asserts the direction rather than the specific code, because the
+    /// contract that matters is "unknown failures are retryable", not which retryable
+    /// arm they pick.
+    #[test]
+    fn an_unmapped_store_error_is_never_permanent() {
+        // A store error with no explicit arm in `map_store_error`. Chosen because it is
+        // an infrastructure failure -- exactly the outage shape a consumer must not read
+        // as an absent credential.
+        // `Store` is the underlying storage/backend error -- the actual outage shape,
+        // and it has no explicit arm in `map_store_error`.
+        let unmapped = StoreOpError::Store("disk went away".into());
+        let code = map_store_error(&unmapped);
+        assert_eq!(
+            code.class(),
+            ErrorClass::Transient,
+            "an unmapped store error surfaced as {code:?} ({:?}). A consumer treats \
+             permanent as 'this credential is gone' and acts destructively on it, so \
+             the catch-all must degrade toward RETRY, never toward a verdict.",
+            code.class()
+        );
+
+        // The positive control: a genuine zero-row read IS permanent, so the assertion
+        // above is about the catch-all rather than about classification refusing
+        // everything.
+        assert_eq!(
+            map_store_error(&StoreOpError::NotFound).class(),
+            ErrorClass::Permanent,
+            "a real not-found must stay permanent, or the guard above proves nothing"
+        );
+    }
+
     /// Every ReadError code maps to the contract class the vault produced it as.
     /// This is the vault-side classification table, asserted so a new ReadError arm
     /// cannot ship without a deliberate class decision (match is exhaustive) and an

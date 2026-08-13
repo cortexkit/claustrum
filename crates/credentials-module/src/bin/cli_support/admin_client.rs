@@ -5,9 +5,10 @@
 //! over the subc route plane instead, authenticating each op with a master-key
 //! challenge-response (the module's Gate 2). The CLI resolves the SAME master key
 //! from the keychain WITHOUT opening the database or taking the lease — the
-//! challenge returns the module's `key_id`, and `resolver::resolve` loads the
-//! matching keychain slot (rotation is offline-only, so the live key is always the
-//! Current slot).
+//! challenge returns the module's `key_id`, and `resolver::resolve_for_db` loads
+//! the slot whose fingerprint matches it. BOTH slots are searched: a rotation that
+//! crashed before its promote leaves the live key in `Next`, and it stays there
+//! until someone rotates again.
 //!
 //! Fallback discipline (Oracle finding 10): the caller falls back to the offline
 //! lease path ONLY when no live module is reachable. Once an `admin.op` has been
@@ -139,14 +140,28 @@ async fn commit_async(
         );
     }
 
-    // Resolve the master key from the keychain by the module's key_id, WITHOUT
-    // opening the DB or taking the lease. Rotation is offline-only, so the live key
-    // is the Current slot; `resolve` checks the fingerprint matches.
+    // Resolve the master key by the module's key_id, WITHOUT opening the DB or
+    // taking the lease.
+    //
+    // `resolve_for_db` rather than `resolve`, and the name understates it here: it
+    // takes the fingerprint as an argument and never touches the database, so the
+    // module's challenge reply serves as the anchor exactly as the DB row does for
+    // the daemon. The difference that matters is that it searches BOTH key slots.
+    //
+    // This used to be `resolve`, justified by "rotation is offline-only, so the live
+    // key is the Current slot". That reasoning is sound and the conclusion is still
+    // wrong: a rotation that crashed after the rewrap and before the promote leaves
+    // the vault sealed under `Next`, and it STAYS there. The daemon boots fine --
+    // it resolves against the DB fingerprint and finds `Next` -- so the vault serves
+    // normally while every online admin op is refused for a key mismatch, which is
+    // the worst shape for diagnosis: healthy reads, dead writes, and an error naming
+    // keys rather than rotation. Proven in resolver.rs by
+    // `a_crashed_rotation_makes_resolve_and_resolve_for_db_disagree`.
     let key_id = match credentials_core::key::KeyId::from_hex(&key_id_hex) {
         Some(k) => k,
         None => return RouteCommit::Refused("module returned a malformed key_id".into()),
     };
-    let key = match resolver::resolve(config, Some(key_id)) {
+    let key = match resolver::resolve_for_db(config, key_id) {
         Ok(k) => k,
         Err(e) => {
             return RouteCommit::Refused(format!(

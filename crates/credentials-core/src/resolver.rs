@@ -1466,6 +1466,58 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// After a rotation that crashed post-rewrap and pre-promote, `resolve` and
+    /// `resolve_for_db` DISAGREE -- and that disagreement is a live operational
+    /// state, not a theoretical one.
+    ///
+    /// The daemon boots through `resolve_for_db`, finds the key in `Next`, and
+    /// serves normally. The CLI's online admin path calls plain `resolve`, which
+    /// reads `Current` only, and gets a key whose fingerprint does not match the
+    /// database. Every online admin op is then refused while the vault looks healthy.
+    ///
+    /// Recorded as a test rather than a fix because the fix is a judgement about
+    /// which caller should change, and the state is currently UNREACHABLE in
+    /// production only because `rotate-master-key` heals a pending rotation before
+    /// staging a new one. That healing runs at the START of the next rotation, so
+    /// the window persists for as long as nobody rotates again.
+    #[test]
+    fn a_crashed_rotation_makes_resolve_and_resolve_for_db_disagree() {
+        let dir = tmp_dir("crashed-rotation-disagreement");
+        // The key lives OUTSIDE the data dir: bootstrap refuses a key path under it.
+        std::fs::create_dir_all(dir.join("keys")).expect("key dir");
+        let config = ResolverConfig {
+            data_dir: dir.join("vault"),
+            source: KeySource::OperatorPath {
+                path: dir.join("keys").join("master.key"),
+            },
+        };
+        let k2 = MasterKey::from_bytes([2u8; MASTER_KEY_LEN]);
+
+        bootstrap(&config).expect("bootstrap");
+        // The crash cut: the new key is staged into `Next` and the database has been
+        // rewrapped under it, but `promote_next` never ran.
+        stage_next(&config, &k2).expect("stage");
+        let db_says = k2.key_id();
+
+        // The daemon's path finds it.
+        let for_db = resolve_for_db(&config, db_says).expect("daemon resolves post-crash");
+        assert_eq!(
+            for_db.key_id(),
+            db_says,
+            "resolve_for_db must find the key the database is sealed under"
+        );
+
+        // The CLI's online admin path does not.
+        let plain = resolve(&config, Some(db_says));
+        assert!(
+            matches!(plain, Err(MasterKeyError::KeyMismatch { .. })),
+            "plain resolve reads Current only, so it cannot authorize an admin op \
+             against a database sealed under Next: {plain:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn promote_is_idempotent() {
         let root = tmp_dir("slot-promote-idem");

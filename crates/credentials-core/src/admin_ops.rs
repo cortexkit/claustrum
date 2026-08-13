@@ -157,8 +157,15 @@ pub fn apply(
         }
         AdminOpBody::Invalidate { id, .. } => {
             let ctx = AuditCtx::route_admin(AuditOp::Invalidate, actor);
-            let revoked = store.invalidate_and_revoke_all_audited(&id, ctx)?;
-            Ok(serde_json::json!({ "handles_revoked": revoked }))
+            let outcome = store.invalidate_and_revoke_all_audited(&id, ctx)?;
+            // `state_changed` rides the wire so the CLI can tell an operator whether
+            // this call did anything. `handles_revoked` alone cannot: a credential
+            // with no handles reports zero whether it was live or already dead.
+            Ok(serde_json::json!({
+                "handles_revoked": outcome.handles_revoked,
+                "state_changed": outcome.state_changed,
+                "intent_cleared": outcome.intent_cleared,
+            }))
         }
         AdminOpBody::Remove { id, .. } => {
             let ctx = AuditCtx::route_admin(AuditOp::Remove, actor);

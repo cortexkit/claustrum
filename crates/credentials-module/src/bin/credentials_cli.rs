@@ -1933,8 +1933,25 @@ fn cmd_logout(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
         },
     )?;
     let revoked = result["handles_revoked"].as_u64().unwrap_or(0);
-    println!("logged out {id}: stopped serving, revoked {revoked} handle(s)");
-    println!("(reversible: `login --provider <p> --replace` restores it; the record and audit chain are kept)");
+    // Absent on a daemon older than the field: treat that as "changed", which keeps
+    // the pre-existing message rather than claiming a no-op we cannot observe.
+    let state_changed = result["state_changed"].as_bool().unwrap_or(true);
+    let intent_cleared = result["intent_cleared"].as_bool().unwrap_or(false);
+
+    if state_changed || intent_cleared || revoked > 0 {
+        println!("logged out {id}: stopped serving, revoked {revoked} handle(s)");
+        println!("(reversible: `login --provider <p> --replace` restores it; the record and audit chain are kept)");
+    } else {
+        // SAY THAT NOTHING CHANGED, and name the verb that does what the operator is
+        // probably after. Reporting plain success here is what makes logout read as
+        // broken: the credential was already dead, the listing is identical
+        // afterwards, and running it again produces the same success. Observed live
+        // -- three consecutive logouts, three identical successes, no change.
+        println!("{id} was already logged out: nothing changed");
+        println!("  state was already needs_reauth and no live handles remained.");
+        println!("  it stays listed because logout is REVERSIBLE and keeps the record;");
+        println!("  to delete it for good: `ck auth remove --id {id}`");
+    }
     Ok(())
 }
 

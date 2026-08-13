@@ -1094,37 +1094,60 @@ impl EncryptedStore {
     /// crash between them leaves a dead credential still resolvable by handle. The
     /// offline CLI performs the same pair; the online admin surface additionally
     /// must not let a relay reorder or split the two halves, so the compound op is
-    /// the only online shape. Returns the number of handles revoked.
+    /// the only online shape.
+    ///
+    /// REPORTS WHAT IT ACTUALLY CHANGED, and the state flip is guarded so a repeat
+    /// is a true no-op. Without the guard this always "succeeded": running it on an
+    /// already-invalidated credential rewrote the same state, revoked nothing, and
+    /// appended an `Invalidate` audit entry recording that nothing happened. An
+    /// operator seeing an unchanged listing after a success message reasonably
+    /// concludes the command is broken — observed live, three consecutive logouts
+    /// against one already-dead credential, three identical successes.
+    ///
+    /// Suppressing the no-op audit entry matters on its own: the chain is
+    /// tamper-evident and therefore UNTRIMMABLE, so an operator (or a script)
+    /// repeating a logout would grow it without bound with entries that record no
+    /// mutation. The same guard was added to the consumer-driven path for the same
+    /// reason; this is the operator-driven half of it.
     pub fn invalidate_and_revoke_all_audited(
         &self,
         credential_id: &str,
         ctx: AuditCtx<'_>,
-    ) -> Result<usize, StoreOpError> {
+    ) -> Result<InvalidateOutcome, StoreOpError> {
         let now = now_ms();
         let audit_key = self.audit_key.clone();
         self.fenced_write(|tx| {
-            tx.execute(
+            // `AND state <> ?2` makes this a TRANSITION rather than a write: the
+            // rows-changed count is then the answer to "did this do anything",
+            // which is what both the audit decision and the operator message need.
+            let state_changed = tx.execute(
                 "UPDATE credentials SET state = ?2, updated_at_ms = ?3 \
-                 WHERE credential_id = ?1",
+                 WHERE credential_id = ?1 AND state <> ?2",
                 rusqlite::params![credential_id, RecordState::NeedsReauth.as_str(), now],
-            )?;
-            clear_intent_tx(tx, credential_id)?;
+            )? > 0;
+            let intent_cleared = clear_intent_tx(tx, credential_id)? > 0;
             let revoked = tx.execute(
                 "UPDATE handles SET revoked = 1 \
                  WHERE credential_id = ?1 AND revoked = 0",
                 rusqlite::params![credential_id],
             )?;
-            append_audit_tx(
-                tx,
-                &audit_key,
-                &AuditRecord {
-                    op: ctx.op,
-                    credential_id: Some(credential_id.to_string()),
-                    payload_hash: None,
-                    actor: ctx.actor.to_string(),
-                    alarm: ctx.alarm,
-                },
-            )?;
+            // Audit the mutation, not the request. A logout that finds the
+            // credential already dead with no live handles mutated nothing, and an
+            // audit entry claiming otherwise is a false record in a chain whose
+            // whole value is that its entries are true.
+            if state_changed || intent_cleared {
+                append_audit_tx(
+                    tx,
+                    &audit_key,
+                    &AuditRecord {
+                        op: ctx.op,
+                        credential_id: Some(credential_id.to_string()),
+                        payload_hash: None,
+                        actor: ctx.actor.to_string(),
+                        alarm: ctx.alarm,
+                    },
+                )?;
+            }
             if revoked > 0 {
                 append_audit_tx(
                     tx,
@@ -1138,7 +1161,11 @@ impl EncryptedStore {
                     },
                 )?;
             }
-            Ok(revoked)
+            Ok(InvalidateOutcome {
+                state_changed,
+                intent_cleared,
+                handles_revoked: revoked,
+            })
         })
         .map_err(StoreOpError::from)
     }
@@ -2176,6 +2203,31 @@ fn auth_event_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<AuthEvent> {
     })
 }
 
+/// What a compound invalidate actually changed.
+///
+/// Three separate facts rather than one boolean, because they drive different
+/// operator advice: a credential that was already dead needs a DIFFERENT next step
+/// (`remove`, or a re-login) from one this call just killed, and "handles revoked"
+/// alone cannot distinguish them -- a credential with no handles reports zero in
+/// both cases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidateOutcome {
+    /// The state moved to `needs_reauth`. False when it was already there.
+    pub state_changed: bool,
+    /// A dangling refresh intent was cleared.
+    pub intent_cleared: bool,
+    /// How many live handles were revoked.
+    pub handles_revoked: usize,
+}
+
+impl InvalidateOutcome {
+    /// Whether anything at all changed. A false answer is the one worth surfacing:
+    /// it means the command reports success while the vault is exactly as it was.
+    pub fn changed_anything(&self) -> bool {
+        self.state_changed || self.intent_cleared || self.handles_revoked > 0
+    }
+}
+
 /// One recorded authentication observation, as read back for diagnostics.
 #[derive(Debug, Clone)]
 pub struct AuthEvent {
@@ -2594,12 +2646,16 @@ mod tests {
             .expect("store sibling handle");
         store.open_intent("out", 1, "rhash").expect("open intent");
 
-        let revoked = store
+        let outcome = store
             .invalidate_and_revoke_all_audited("out", AuditCtx::admin(AuditOp::Invalidate))
             .expect("logout");
         assert_eq!(
-            revoked, 2,
+            outcome.handles_revoked, 2,
             "every live handle must be revoked, not just one"
+        );
+        assert!(
+            outcome.state_changed,
+            "a live credential's state must report as changed"
         );
 
         // All four effects, together.
@@ -3505,6 +3561,75 @@ mod tests {
     /// AFTER EITHER, THE CREDENTIAL READS `needs_reauth` — identical state, opposite
     /// handle state — so anything checking only the credential cannot tell them
     /// apart. That is what makes the second arm worth writing: it pins the handle row
+    /// A REPEAT logout changes nothing, says so, and writes no audit entry.
+    ///
+    /// The first call is the control: without it, a function that never reports a
+    /// change would pass every assertion below.
+    ///
+    /// Two properties, and they fail differently. The OUTCOME must report no change,
+    /// because a CLI that prints plain success on a no-op reads as broken -- observed
+    /// live: three consecutive logouts against one already-dead credential, three
+    /// identical success messages, an identical listing after each. The AUDIT CHAIN
+    /// must not grow, because it is tamper-evident and therefore untrimmable: an
+    /// operator repeating a logout would otherwise extend it without bound with
+    /// entries recording that nothing happened.
+    #[test]
+    fn a_repeat_logout_changes_nothing_and_appends_no_audit_entry() {
+        let (root, store) = tmp_store(71);
+        store.create("dead", &oauth_record()).expect("create");
+        let h = mint_handle().expect("mint");
+        store
+            .put_handle_hash(&h.hash, "dead", AuditCtx::vault(AuditOp::MintHandle))
+            .expect("store handle");
+
+        // CONTROL: the first logout genuinely mutates.
+        let first = store
+            .invalidate_and_revoke_all_audited("dead", AuditCtx::admin(AuditOp::Invalidate))
+            .expect("first logout");
+        assert!(
+            first.state_changed && first.handles_revoked == 1,
+            "the first logout must actually invalidate and revoke: {first:?}"
+        );
+        assert!(
+            first.changed_anything(),
+            "a logout that killed a live credential must report a change"
+        );
+
+        let entries_after_first = store.read_audit(None).expect("read audit").len();
+
+        // The repeat.
+        let second = store
+            .invalidate_and_revoke_all_audited("dead", AuditCtx::admin(AuditOp::Invalidate))
+            .expect("second logout");
+        assert!(
+            !second.changed_anything(),
+            "a logout against an already-dead credential with no live handles must \
+             report that nothing changed, or the CLI cannot tell an operator why the \
+             listing is identical: {second:?}"
+        );
+        assert!(
+            !second.state_changed && second.handles_revoked == 0,
+            "no state flip and no revocation on the repeat: {second:?}"
+        );
+
+        let entries_after_second = store.read_audit(None).expect("read audit").len();
+        assert_eq!(
+            entries_after_first, entries_after_second,
+            "the tamper-evident chain must not grow on a no-op -- it cannot be \
+             trimmed, so a repeated logout would extend it without bound"
+        );
+
+        // The record still exists: logout is reversible, which is exactly why it
+        // stays listed and why `remove` is the verb for making it go away.
+        assert_eq!(
+            store.meta("dead").expect("meta").state,
+            RecordState::NeedsReauth,
+            "logout keeps the row"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// as the discriminator, and would fail if minting ever started refusing a dead
     /// credential.
     #[test]
@@ -3517,7 +3642,10 @@ mod tests {
         let revoked = store
             .invalidate_and_revoke_all_audited("id", AuditCtx::vault(AuditOp::Invalidate))
             .expect("invalidate");
-        assert_eq!(revoked, 0, "nothing to revoke before a handle exists");
+        assert_eq!(
+            revoked.handles_revoked, 0,
+            "nothing to revoke before a handle exists"
+        );
         let live = mint_handle().expect("mint");
         store
             .put_handle_hash(&live.hash, "id", ctx)
@@ -3537,7 +3665,7 @@ mod tests {
             .invalidate_and_revoke_all_audited("id2", AuditCtx::vault(AuditOp::Invalidate))
             .expect("invalidate");
         assert_eq!(
-            revoked, 1,
+            revoked.handles_revoked, 1,
             "an existing handle IS revoked by the operator verb"
         );
         assert!(

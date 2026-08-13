@@ -747,7 +747,21 @@ supervisor), every unpinned release silently revokes those grants with no prompt
 no error. Pinning also makes the published hash equal the placed hash, so a plain
 `shasum` comparison is a valid deployment check.
 
-**Acceptance, after restarting the module.** Each leg must be able to fail:
+**Acceptance, after restarting the module.** Run the ladder rather than retyping it:
+
+```sh
+scripts/accept-deploy.sh <rev> target/staged/<rev>
+```
+
+The legs below are what it runs, and the prose is why each discriminates — but
+**run the script, not the commands.** These guards were all written down before
+the day an inode leg was retyped by hand, took the wrong `lsof` field, and printed
+a pid where an inode belonged: a plausible integer next to a real one. The written
+form already said "second-to-last field", from an identical slip weeks earlier in
+another repo. A script runs the form that was written after the lesson; muscle
+memory runs the form you learned before it.
+
+Each leg must be able to fail:
 
 | check | why it discriminates |
 |-------|----------------------|
@@ -788,6 +802,20 @@ The last two are the ones that matter. A restarted daemon can be running, answer
 and serving nothing — so the acceptance assertion is **"N/N serving"**, never "the
 process is up". And a read-only check cannot prove the vault can still write; the
 mint/revoke pair can.
+
+**What the ladder does NOT cover: whether the behaviour you shipped is reachable.**
+Every leg asks whether the right bytes are in the right place. None asks whether
+the CHANGE is live. Measured: a CLI fix was deployed and accepted on all legs while
+its effect stayed invisible, because the logic ran inside the daemon and the daemon
+half had not been placed — the new message simply did not appear. **A deployed CLI
+is not a deployed behaviour** whenever the logic sits behind the route plane.
+Exercise the specific change end to end, and if it does not show, check which
+binary owns it before assuming the deploy failed.
+
+A related trap when hunting for it: **which binary carries the user-visible string
+is itself a design fact.** In that case the sentence lived in the CLI and the wire
+field in the daemon, so grepping either binary alone for the operator-facing text
+concludes the fix is absent from both.
 
 If a hash comparison fails after someone re-signed the binary, re-sign a **copy** of
 the known build with the known identifier and compare that — a legitimate re-sign and

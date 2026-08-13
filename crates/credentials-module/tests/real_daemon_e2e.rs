@@ -606,6 +606,22 @@ async fn real_daemon_unknown_handle_is_not_found() {
         response["result"]["error"]["code"], "not_found",
         "an unknown handle is a uniform not_found"
     );
+    // THE CLASS, on the wire, in the same body as the code.
+    //
+    // This is the pair a consumer branches on, and it was asserted at neither layer:
+    // the classification table pins ReadError::NotFound.class() internally, and this
+    // arm pinned the code. Neither established that a consumer RECEIVES both together
+    // -- which is the whole of the guarantee ck-quota reaps configuration on, and they
+    // were told to branch on the class rather than the code.
+    //
+    // The shape has to be exercised where it is promised: an internal mapping test and
+    // a wire test of a DIFFERENT code are both true and neither covers this.
+    assert_eq!(
+        response["result"]["error"]["class"], "permanent",
+        "the class must ride the same body as the code: a consumer branching on class \
+         alone is what the error-class contract asks for, and a destructive consumer \
+         acts on exactly this pair"
+    );
 
     let _ = std::fs::remove_dir_all(&project_root);
 }

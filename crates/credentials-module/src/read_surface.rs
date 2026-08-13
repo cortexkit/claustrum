@@ -638,6 +638,19 @@ fn err(code: ReadError) -> GetOutcome {
 }
 
 /// Map a store error to a non-secret read code (fail-closed; never leaks detail).
+///
+/// WIDENING WHAT MAPS TO `NotFound` DELETES LIVE CONSUMER CONFIGURATION. A
+/// consumer told `permanent` + `not_found` is entitled to conclude the credential
+/// is gone and act on it: ck-quota reaps a dangling handle out of its own config
+/// file on exactly that answer, on the strength of a guarantee this vault gave
+/// them — that a vault OUTAGE can never produce it, because `resolve_handle`
+/// returns `NotFound` only on a clean zero-row read.
+///
+/// So the catch-all's direction is load-bearing, and the edit that breaks it is a
+/// tidy-up rather than a blunder: rewriting this match toward "an unknown id means
+/// not found" is a reasonable simplification that silently inverts a cross-repo
+/// promise. It is pinned by `an_unmapped_store_error_is_never_permanent`, which
+/// exists because that mutation once left the entire workspace green.
 fn map_store_error(e: &StoreOpError) -> ReadError {
     use credentials_core::envelope::EnvelopeError;
     match e {

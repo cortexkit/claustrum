@@ -80,6 +80,7 @@ run_check() {
 # The endpoint-host manifest is a population check, which no unit test can be: a
 # per-constant assertion cannot fail when a NEW endpoint appears, and "is this URL
 # asserted somewhere" is satisfied by a test comparing a constant to itself.
+run_check "inbound contracts" bash scripts/check-inbound-contracts.sh
 run_check "endpoint hosts" python3 scripts/endpoint-hosts.py
 run_check "threshold controls" python3 scripts/threshold-controls.py
 run_check "path rendering" python3 scripts/check-path-rendering.py
@@ -176,4 +177,38 @@ run_expect 1 "migration tools" \
   cargo test --locked -p credentials-core --features migration-tools \
   --test key_verify_takes_nothing
 
-printf '\nGATE PASSED\n'
+# The release-artifact assertion CI runs as its own step: the debug-only
+# validation bypass must be absent from a --release binary. Ignored by default
+# because it builds one.
+run_expect 1 "release artifact (bypass absent)" \
+  cargo test --locked -p credentials-module --test cli_admin \
+  validation_bypass_is_absent -- --ignored
+
+# PROVE the scope claim rather than asserting it. "Every check CI runs" rots the
+# moment CI grows an arm, and that is exactly how it broke: CI gained an inbound
+# contract check and a release-artifact assertion, this gate did not, and its
+# header still promised parity. A claim about another file has to be checked
+# against that file or it is a comment pretending to be a guarantee.
+ci_steps=$(grep -cE '^      - name:' .github/workflows/ci.yml)
+gate_arms=$(grep -cE '^run_(check|expect)' "$0")
+# CI has 4 setup steps (checkout x3, token mint) plus a build step that the gate
+# gets for free by running in the workspace. Anything beyond that gap is a check
+# CI runs and this gate does not.
+if [ "$((ci_steps - gate_arms))" -gt 5 ]; then
+    printf '\nREFUSING: CI has %s steps, this gate has %s arms.\n' "$ci_steps" "$gate_arms" >&2
+    printf 'CI has grown past the gate; a subset-of-CI gate converts a fast local\n' >&2
+    printf 'failure into a slow remote one. Add the missing arm, or widen this bound\n' >&2
+    printf 'deliberately if the new step genuinely cannot run locally.\n' >&2
+    exit 1
+fi
+
+# NAME THE LANE, not just the verdict. Two checkers whose success lines are
+# indistinguishable let a transcript from one be read as covering the other --
+# and the scope note in this header is read by whoever opens the file, never by
+# whoever is looking at the output. Every arm here maps to a CI step, and the
+# claim below is only true while that stays so: CI grew two steps past this gate
+# (inbound contracts, release artifact) before anyone noticed, which is exactly
+# the subset-of-CI failure this file's header says it exists to prevent.
+printf '\nGATE PASSED -- every check CI runs, on this working tree\n'
+printf '  NOT covered: cross-platform (CI also runs Windows), and whether a\n'
+printf '  deployed BINARY carries what you just built (scripts/accept-deploy.sh).\n'

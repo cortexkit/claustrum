@@ -271,3 +271,66 @@ mod endpoint_pins {
         );
     }
 }
+
+#[cfg(test)]
+mod documented_count_tests {
+    /// The adapter count stated in the contract and the charter matches the tree.
+    ///
+    /// Both documents said "v1 adapters are bounded to the 4 providers llm-runner
+    /// uses" long after the login expansion took it to 11, and the contract adds
+    /// "adding an adapter is a contract amendment" -- so that sentence is an
+    /// AMENDMENT LEDGER, not decoration, and it had silently stopped counting.
+    ///
+    /// A corrected sentence rots again at adapter 12. This checks the number against
+    /// the thing it describes, so whoever adds the next one updates the docs rather
+    /// than discovering the drift a year later. A peer found the identical shape the
+    /// same day -- a matrix claiming 37 providers against a registry that builds 36,
+    /// the count taken from a grep of `Box::new` rather than from the registry.
+    ///
+    /// Counts MODULES rather than trait impls deliberately: the population the docs
+    /// describe is "one adapter per provider we can log in to", and a file is what
+    /// gets added. `fixture.rs` is the test double and is excluded by name.
+    #[test]
+    fn the_documented_adapter_count_matches_the_tree() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/refresh_adapters");
+        let mut adapters: Vec<String> = std::fs::read_dir(&dir)
+            .expect("read refresh_adapters/")
+            .filter_map(|e| {
+                let name = e.ok()?.file_name().to_string_lossy().to_string();
+                let stem = name.strip_suffix(".rs")?.to_string();
+                (stem != "mod" && stem != "fixture").then_some(stem)
+            })
+            .collect();
+        adapters.sort();
+        let actual = adapters.len();
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("workspace root");
+        for doc in ["docs/cortexkit-credentials-contract.md", "docs/charter.md"] {
+            let text = std::fs::read_to_string(root.join(doc))
+                .unwrap_or_else(|e| panic!("read {doc}: {e}"));
+            // The sentence names the count immediately before the word "adapters".
+            let stated = text
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .windows(2)
+                .find_map(|w| {
+                    w[1].starts_with("adapters")
+                        .then(|| w[0].trim_matches(|c: char| !c.is_ascii_digit()))
+                        .filter(|n| !n.is_empty())
+                        .and_then(|n| n.parse::<usize>().ok())
+                })
+                .unwrap_or_else(|| {
+                    panic!("{doc} states no adapter count; the ledger sentence is gone")
+                });
+            assert_eq!(
+                stated, actual,
+                "{doc} says {stated} adapters, the tree has {actual}: {adapters:?}.\n\
+                 Adding an adapter is a contract amendment -- update the sentence, \
+                 not this test."
+            );
+        }
+    }
+}

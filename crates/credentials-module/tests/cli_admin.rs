@@ -1683,3 +1683,108 @@ fn chrono_now_ms() -> i64 {
         .expect("clock")
         .as_millis() as i64
 }
+
+/// The temp-dir connection file is discovered, and ambiguity refuses rather than guesses.
+///
+/// subc writes `<temp>/subc-<user-token>.connection.json` when `XDG_RUNTIME_DIR` is
+/// unset -- which is STOCK MACOS, so this is the default arrangement there rather
+/// than an edge case. A CLI that misses it does not fail loudly: it concludes no
+/// daemon is running, takes the offline path, hits the single-writer lease, and
+/// tells the operator to STOP THE DAEMON -- naming the one remedy they should not
+/// use, while never mentioning the `--subc` route that would have worked. Reported
+/// from a real box (claustrum#3).
+///
+/// Drives the DEFAULT path deliberately: auto-discovery is scoped to a defaulted
+/// `--data-dir`, because an explicit vault dir means "this vault" and a discovered
+/// daemon may serve a different one. So the probe overrides HOME/XDG_DATA_HOME to
+/// move the default derivation into a throwaway tree rather than passing --data-dir,
+/// which would disable the very thing under test.
+#[test]
+fn a_temp_dir_connection_file_is_found_and_ambiguity_refuses() {
+    let root = std::env::temp_dir().join(format!(
+        "ck-disco-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let tmp = root.join("tmp");
+    let home = root.join("home");
+    std::fs::create_dir_all(&tmp).expect("tmp");
+    std::fs::create_dir_all(&home).expect("home");
+
+    let run = |extra: &[(&str, &std::path::Path)]| -> String {
+        let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_ck-auth"));
+        cmd.arg("list")
+            .env("TMPDIR", &tmp)
+            .env("HOME", &home)
+            .env("XDG_DATA_HOME", home.join("share"))
+            .env_remove("XDG_RUNTIME_DIR");
+        for (k, v) in extra {
+            cmd.env(k, v);
+        }
+        let out = cmd.output().expect("run list");
+        String::from_utf8_lossy(&out.stderr).to_string()
+    };
+
+    // A REAL vault in the default location, so `list` gets past key resolution and
+    // the route attempt is reachable. Without this the one-candidate and
+    // no-candidate paths produce byte-identical output ("no master key has been
+    // provisioned") and the assertion below proves nothing -- measured, not assumed.
+    let key_path = root.join("master.key");
+    let bootstrap = std::process::Command::new(env!("CARGO_BIN_EXE_ck-auth"))
+        .arg("bootstrap")
+        .arg("--key-path")
+        .arg(&key_path)
+        .env("TMPDIR", &tmp)
+        .env("HOME", &home)
+        .env("XDG_DATA_HOME", home.join("share"))
+        .env_remove("XDG_RUNTIME_DIR")
+        .output()
+        .expect("bootstrap");
+    assert!(
+        bootstrap.status.success(),
+        "probe vault must bootstrap: {}",
+        String::from_utf8_lossy(&bootstrap.stderr)
+    );
+
+    // NO candidate: nothing is discovered, so no route is attempted at all.
+    let none_found = run(&[("CK_MASTER_KEY_PATH", key_path.as_path())]);
+    assert!(
+        !none_found.contains("no live module"),
+        "with no connection file anywhere, the CLI must not attempt a route: {none_found}"
+    );
+
+    // ONE candidate: discovered, so a route IS attempted -- and fails, because the
+    // file is a stub. The attempt is the observable difference, and it is what the
+    // temp-dir arm exists to produce.
+    std::fs::write(tmp.join("subc-1000.connection.json"), "{}").expect("write one");
+    let single = run(&[("CK_MASTER_KEY_PATH", key_path.as_path())]);
+    assert!(
+        single.contains("no live module"),
+        "one candidate must be DISCOVERED and routed to (the stub then fails, which \
+         is the observable proof the arm ran): {single}"
+    );
+    assert!(
+        !single.contains("not guessing which daemon is yours"),
+        "exactly one candidate must be used rather than refused: {single}"
+    );
+
+    // TWO candidates: refuse and name them. On a shared temp dir the token exists
+    // precisely so different OS users do not collide, so two files mean two users --
+    // picking one could point an admin op at another user's daemon.
+    std::fs::write(tmp.join("subc-1001.connection.json"), "{}").expect("write two");
+    let ambiguous = run(&[]);
+    assert!(
+        ambiguous.contains("not guessing which daemon is yours"),
+        "two candidates must REFUSE rather than pick one: {ambiguous}"
+    );
+    assert!(
+        ambiguous.contains("subc-1000.connection.json")
+            && ambiguous.contains("subc-1001.connection.json"),
+        "the refusal must name both so --subc can be chosen: {ambiguous}"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}

@@ -2624,7 +2624,60 @@ fn discover_subc_connection_file() -> Option<PathBuf> {
             return Some(p);
         }
     }
-    None
+    temp_dir_connection_file()
+}
+
+/// The daemon's LAST-RESORT location: when `XDG_RUNTIME_DIR` is unset, subc writes
+/// `<temp>/subc-<user-token>.connection.json` (bootstrap.rs `connection_file_path`).
+///
+/// This arm exists because a CLI that misses it does not fail loudly -- it silently
+/// concludes no daemon is running, takes the offline path, hits the single-writer
+/// lease, and tells the operator to STOP THE DAEMON. The remedy it names is the one
+/// thing they should not do, and the `--subc` route that would have worked is never
+/// mentioned. Reported from a real box, and STOCK MACOS sets no `XDG_RUNTIME_DIR`,
+/// so it is the default there rather than an edge case; this machine only avoids it
+/// because something sets that variable explicitly.
+///
+/// It GLOBS rather than recomputing the name. The token comes from
+/// `user_connection_token()`, whose unix arm derives a uid by WRITING A PROBE FILE --
+/// side-effecting, several fallbacks deep, and silently wrong if reimplemented a
+/// little differently. Asking the filesystem what exists needs none of that and
+/// survives any future change to the naming scheme.
+///
+/// Ambiguity REFUSES rather than guessing: on a shared temp dir the token exists
+/// precisely so different OS users do not collide, so more than one match means the
+/// files belong to different users and picking one could point an admin op at
+/// another user's daemon.
+fn temp_dir_connection_file() -> Option<PathBuf> {
+    let dir = std::env::temp_dir();
+    let mut found: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("subc-") && n.ends_with(".connection.json"))
+                && p.is_file()
+        })
+        .collect();
+    match found.len() {
+        1 => found.pop(),
+        0 => None,
+        _ => {
+            found.sort();
+            eprintln!(
+                "note: {} subc connection files in {} -- not guessing which daemon is \
+                 yours. Pass --subc <connection-file> to choose:",
+                found.len(),
+                dir.display()
+            );
+            for p in &found {
+                eprintln!("  {}", p.display());
+            }
+            None
+        }
+    }
 }
 
 fn non_empty_env(key: &str) -> Option<std::ffi::OsString> {

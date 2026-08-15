@@ -6,6 +6,25 @@ what has actually shipped as pieces land — a detailed design reads as an
 existing system to anyone who did not write it, and that mistake has cost this
 fleet real debugging time twice.
 
+## Why this is designed and not built
+
+Everything below is specified: wire verified against GitHub's docs, crypto
+chosen, handle shape settled, registry fields agreed with ALF. Nothing blocks an
+implementation except material.
+
+**It waits for a real key on purpose.** This repo's refresh adapters are built to
+the fidelity rule -- conformance tests assert against RECORDED provider
+responses, never invented ones. Without a real GitHub App there is no recorded
+`access_tokens` response to test against, only the shape the documentation
+describes. An adapter tested against a documented shape passes exactly as
+convincingly as one tested against a real one, and discovers nothing the docs
+already said.
+
+So the sequencing is deliberate rather than idle: when the PEM batch lands, mint
+one token against real GitHub, record the response, and build against that. The
+design work done ahead of it is the part that pays -- it has already killed a bad
+dependency and corrected a registry field before ~20 rows existed.
+
 ## What it is
 
 One GitHub App per CortexKit head Alfonso (~20 apps). The vault custodies each

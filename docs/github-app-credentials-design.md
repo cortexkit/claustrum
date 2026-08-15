@@ -12,9 +12,39 @@ One GitHub App per CortexKit head Alfonso (~20 apps). The vault custodies each
 app's **private key (PEM)**, handed over once at mint, and serves short-lived
 **installation tokens** on demand:
 
-1. Sign a JWT with the app key (`iss` = app id, ≤10 min).
-2. `POST /app/installations/{installation_id}/access_tokens` with it.
-3. Receive an installation token, ~1h expiry.
+1. Sign a JWT with the app key (`iss` = client id, ≤10 min).
+2. `POST /app/installations/{installation_id}/access_tokens` with it,
+   `Authorization: Bearer <jwt>`.
+3. Receive an installation token, **1h** expiry.
+
+## Wire facts, verified against GitHub's docs 2026-08-15
+
+Read before implementing; three of these contradict what a reasonable person
+would assume, and one contradicts an earlier version of this note.
+
+- **The JWT MUST be RS256.** Not ES256. The `p256` signer already in this repo
+  (`apns.rs`, for APNs provider tokens) **cannot produce it** — it is a
+  different curve and a different algorithm family. An RSA signing dependency is
+  therefore new, and it lands on a credential path. That is a real cost this
+  note previously did not carry; see "What riding the OAuth path buys" for what
+  is and is not reused.
+- **`iss` should be the CLIENT ID, not the app id.** GitHub's current guidance
+  recommends the client id; the numeric app id still works. This corrects the
+  registry-field statement made to ALF: carry the client id.
+- **`iat` should be backdated 60 seconds** against clock drift, and **`exp` may
+  be at most 10 minutes ahead**. A JWT minted with a longer window is refused,
+  so the mint is not a place to be generous.
+- **Installation tokens last 1 hour** and do not rotate — minting a new one does
+  not invalidate the old.
+- **NEVER ASSUME A 40-CHARACTER TOKEN.** From April 2026 GitHub is rolling out a
+  stateless installation-token format (`ghs_APPID_JWT`), so tokens are no longer
+  a fixed length. Any length check, column width, or regex pinned to 40 breaks
+  on rollout — and it breaks *per token*, as the rollout is staged, so it will
+  look intermittent. The vault stores payloads as opaque bytes and has no such
+  check; this is recorded for consumers.
+- The `permissions` body parameter can scope a minted token BELOW the
+  installation's grant. Not used initially, but it is the mechanism if a
+  consumer should hold less than the app does.
 
 Consumers: PLEX first (reactions, GitHub writes as the agent identity), later
 commit and PR surfaces. The exchange lives here so it exists **once** rather
@@ -59,7 +89,9 @@ a class of bugs that only appear on power loss.
 
 ### What riding the OAuth path buys, concretely
 
-Every one of these is inherited rather than rebuilt:
+NOT the signing: RS256 is a new dependency either way, and no existing signer in
+this repo produces it. What is inherited is the *custody and lifecycle*
+machinery, which is the expensive half:
 
 - **Serve-from-cache-until-near-expiry**, which is exactly the agreed contract.
   `is_stale` already triggers on expiry-with-skew, so "mint on demand, cache

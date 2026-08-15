@@ -23,11 +23,9 @@ Read before implementing; three of these contradict what a reasonable person
 would assume, and one contradicts an earlier version of this note.
 
 - **The JWT MUST be RS256.** Not ES256. The `p256` signer already in this repo
-  (`apns.rs`, for APNs provider tokens) **cannot produce it** — it is a
-  different curve and a different algorithm family. An RSA signing dependency is
-  therefore new, and it lands on a credential path. That is a real cost this
-  note previously did not carry; see "What riding the OAuth path buys" for what
-  is and is not reused.
+  (`apns.rs`, for APNs provider tokens) **cannot produce it** — different curve,
+  different algorithm family. WHICH RSA implementation to use is its own section
+  below, because the obvious choice is the wrong one.
 - **`iss` should be the CLIENT ID, not the app id.** GitHub's current guidance
   recommends the client id; the numeric app id still works. This corrects the
   registry-field statement made to ALF: carry the client id.
@@ -89,9 +87,9 @@ a class of bugs that only appear on power loss.
 
 ### What riding the OAuth path buys, concretely
 
-NOT the signing: RS256 is a new dependency either way, and no existing signer in
-this repo produces it. What is inherited is the *custody and lifecycle*
-machinery, which is the expensive half:
+NOT the signing — no existing signer here produces RS256, though the right RSA
+choice adds no new compiled crate (see the section above). What IS inherited is
+the *custody and lifecycle* machinery, which is the expensive half:
 
 - **Serve-from-cache-until-near-expiry**, which is exactly the agreed contract.
   `is_stale` already triggers on expiry-with-skew, so "mint on demand, cache
@@ -118,6 +116,47 @@ Two consequences:
    the only interface and consumers must not cache: a cached installation token
    silently outlives any revocation, and neither the vault nor the operator can
    see that it is still in use. Agreed fleet-wide with ALF and PLEX.
+
+## Use `ring` for the RS256 signature, NOT the `rsa` crate
+
+The obvious pick is RustCrypto's `rsa`, since this repo already uses `p256` from
+the same family. **Do not.**
+
+`rsa` carries **RUSTSEC-2023-0071** (Marvin attack: potential private-key
+recovery through timing sidechannels). As of 2026-08-15 the advisory still reads
+*"no patch is yet available"* — reported 2023-11, last modified 2026-04. The
+upstream tracking issue shows constant-time modexp landed, while padding-mode and
+default-path blinding remain open. Its own stated workaround is to avoid the
+crate where an attacker can observe timing.
+
+A case can be made that our use sits outside the attack: Marvin is a
+chosen-ciphertext oracle against *decryption*, and we only ever *sign* a payload
+we construct ourselves — no attacker-supplied input, no oracle. That argument is
+probably correct. **It is also unnecessary, and that is what settles it:**
+accepting an unpatched advisory on a credential path in exchange for nothing is a
+bad trade even when the reasoning holds.
+
+**`ring` is already compiled into this workspace.** `ring 0.17.14`, pulled by
+`rustls` via `reqwest`, confirmed in `Cargo.lock`; `rsa` is not in the tree at
+all. So the real choice is between ADDING a crate with an open advisory and
+DECLARING one already built, audited, and constant-time by design.
+
+API confirmed present at the pinned version rather than recalled
+(`ring-0.17.14/src/rsa/keypair.rs`, `src/signature.rs`):
+
+- `RsaKeyPair::from_der` — PKCS#1 DER, which is what a GitHub App `.pem` holds
+  (`BEGIN RSA PRIVATE KEY`). PEM to DER is base64 over the body: no extra
+  dependency.
+- `RsaKeyPair::from_pkcs8` — for a key already converted.
+- `signature::RSA_PKCS1_SHA256` — exactly the encoding GitHub requires.
+
+`ring`'s signing API takes an RNG, so the blinded path is the default rather than
+an opt-in.
+
+**Cost correction.** The signer is therefore NO NEW COMPILED DEPENDENCY, only a
+direct declaration of one already present. An earlier revision of this note, and
+a message to ALF, said a new RSA dependency was required: true of the naive
+choice, false of the right one.
 
 ## Handle shape
 

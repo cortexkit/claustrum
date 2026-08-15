@@ -1714,18 +1714,37 @@ fn a_temp_dir_connection_file_is_found_and_ambiguity_refuses() {
     std::fs::create_dir_all(&tmp).expect("tmp");
     std::fs::create_dir_all(&home).expect("home");
 
-    let run = |extra: &[(&str, &std::path::Path)]| -> String {
-        let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_ck-auth"));
-        cmd.arg("list")
-            .env("TMPDIR", &tmp)
+    // std::env::temp_dir() reads TMPDIR on unix and TMP/TEMP on Windows, so all
+    // three must be set or the probe silently scans the REAL temp dir -- which
+    // finds nothing, attempts no route, and fails for a reason that has nothing to
+    // do with the code under test.
+    let point_at_probe_dirs = |cmd: &mut std::process::Command| {
+        cmd.env("TMPDIR", &tmp)
+            .env("TMP", &tmp)
+            .env("TEMP", &tmp)
             .env("HOME", &home)
             .env("XDG_DATA_HOME", home.join("share"))
             .env_remove("XDG_RUNTIME_DIR");
-        for (k, v) in extra {
-            cmd.env(k, v);
+    };
+
+    // --key-path, NOT CK_MASTER_KEY_PATH: that env var is the DAEMON's override,
+    // and parse_global takes the FLAG only. Passing the env var leaves the CLI on
+    // the keychain backend, where the outcome depends on whether the platform has a
+    // keychain binary at all rather than on discovery. (--key-path is safe here
+    // because only an explicit --data-dir disables auto-discovery.)
+    let run = |key: Option<&std::path::Path>| -> String {
+        let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_ck-auth"));
+        cmd.arg("list");
+        if let Some(k) = key {
+            cmd.arg("--key-path").arg(k);
         }
+        point_at_probe_dirs(&mut cmd);
         let out = cmd.output().expect("run list");
-        String::from_utf8_lossy(&out.stderr).to_string()
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
     };
 
     // A REAL vault in the default location, so `list` gets past key resolution and
@@ -1733,16 +1752,10 @@ fn a_temp_dir_connection_file_is_found_and_ambiguity_refuses() {
     // no-candidate paths produce byte-identical output ("no master key has been
     // provisioned") and the assertion below proves nothing -- measured, not assumed.
     let key_path = root.join("master.key");
-    let bootstrap = std::process::Command::new(env!("CARGO_BIN_EXE_ck-auth"))
-        .arg("bootstrap")
-        .arg("--key-path")
-        .arg(&key_path)
-        .env("TMPDIR", &tmp)
-        .env("HOME", &home)
-        .env("XDG_DATA_HOME", home.join("share"))
-        .env_remove("XDG_RUNTIME_DIR")
-        .output()
-        .expect("bootstrap");
+    let mut boot = std::process::Command::new(env!("CARGO_BIN_EXE_ck-auth"));
+    boot.arg("bootstrap").arg("--key-path").arg(&key_path);
+    point_at_probe_dirs(&mut boot);
+    let bootstrap = boot.output().expect("bootstrap");
     assert!(
         bootstrap.status.success(),
         "probe vault must bootstrap: {}",
@@ -1750,7 +1763,7 @@ fn a_temp_dir_connection_file_is_found_and_ambiguity_refuses() {
     );
 
     // NO candidate: nothing is discovered, so no route is attempted at all.
-    let none_found = run(&[("CK_MASTER_KEY_PATH", key_path.as_path())]);
+    let none_found = run(Some(key_path.as_path()));
     assert!(
         !none_found.contains("no live module"),
         "with no connection file anywhere, the CLI must not attempt a route: {none_found}"
@@ -1760,7 +1773,7 @@ fn a_temp_dir_connection_file_is_found_and_ambiguity_refuses() {
     // file is a stub. The attempt is the observable difference, and it is what the
     // temp-dir arm exists to produce.
     std::fs::write(tmp.join("subc-1000.connection.json"), "{}").expect("write one");
-    let single = run(&[("CK_MASTER_KEY_PATH", key_path.as_path())]);
+    let single = run(Some(key_path.as_path()));
     assert!(
         single.contains("no live module"),
         "one candidate must be DISCOVERED and routed to (the stub then fails, which \
@@ -1775,7 +1788,7 @@ fn a_temp_dir_connection_file_is_found_and_ambiguity_refuses() {
     // precisely so different OS users do not collide, so two files mean two users --
     // picking one could point an admin op at another user's daemon.
     std::fs::write(tmp.join("subc-1001.connection.json"), "{}").expect("write two");
-    let ambiguous = run(&[]);
+    let ambiguous = run(Some(key_path.as_path()));
     assert!(
         ambiguous.contains("not guessing which daemon is yours"),
         "two candidates must REFUSE rather than pick one: {ambiguous}"

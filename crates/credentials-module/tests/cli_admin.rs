@@ -1801,3 +1801,68 @@ fn a_temp_dir_connection_file_is_found_and_ambiguity_refuses() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// `ck auth usable` reports a static record's AGE from the store's plaintext
+/// updated_at_ms, end to end against a real store.
+///
+/// The failure this exists for is a WRONG COLUMN INDEX in the scan's row mapping.
+/// `updated_at_ms` and `record_version` are both i64, so reading the wrong one
+/// compiles, runs, and renders a plausible-looking age: version 1 read as a
+/// millisecond timestamp is 1970, i.e. "written 20000d ago". No unit test on the
+/// predicate can see that, because the predicate never touches the query.
+///
+/// So a record written seconds ago must report 0 days -- a value only the right column
+/// can produce.
+#[test]
+fn usable_reports_a_static_records_age_from_the_stores_own_timestamp() {
+    let root = tmp_root("age-probe");
+    let data = root.join("vault");
+    let key = root.join("master.key");
+    std::fs::create_dir_all(&data).expect("data dir");
+
+    let run = |args: &[&str]| -> std::process::Output {
+        let mut cmd = cli();
+        cmd.args(args)
+            .arg("--data-dir")
+            .arg(&data)
+            .arg("--key-path")
+            .arg(&key)
+            .output()
+            .expect("run ck-auth")
+    };
+
+    assert!(run(&["bootstrap"]).status.success(), "bootstrap");
+
+    let payload = root.join("p.txt");
+    std::fs::write(&payload, "probe-key").expect("payload");
+    let put = run(&[
+        "put",
+        "--id",
+        "apikey:age-probe",
+        "--payload-file",
+        payload.to_str().unwrap(),
+    ]);
+    assert!(
+        put.status.success(),
+        "put: {}",
+        String::from_utf8_lossy(&put.stderr)
+    );
+
+    let out = run(&["usable"]);
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let line = text
+        .lines()
+        .find(|l| l.contains("apikey:age-probe"))
+        .unwrap_or_else(|| panic!("no row for the probe credential in:\n{text}"));
+
+    assert!(
+        line.contains("written 0d ago"),
+        "a record written seconds ago must report 0 days. Any other number means the \
+         scan read the wrong column -- record_version is also i64, and as a millisecond \
+         timestamp it lands in 1970. Got: {line}"
+    );
+}

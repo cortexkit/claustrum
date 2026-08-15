@@ -44,13 +44,27 @@ pub enum Usability {
     /// A static key: no refresh path. `expires_at_ms` is the operator's OWN
     /// declaration at `put --expires-ms`, not something the provider told us.
     ///
+    /// `written_at_ms` is the plaintext `updated_at_ms` column. For a STATIC record it
+    /// means what an operator would expect "age" to mean, because nothing but an
+    /// operator write moves it -- there is no refresh to touch the row. That is why it
+    /// is carried on this variant and NOT on `Serviceable`: on an OAuth record the same
+    /// column advances on every refresh, so it measures time-since-last-refresh and
+    /// rendering it as age would be a plausible-looking lie.
+    ///
+    /// Age is the honest signal for a credential class whose real lifetime cannot be
+    /// declared: it states elapsed time since the operator last wrote it, and claims
+    /// nothing about whether the provider still honours it.
+    ///
     /// Absent a declaration nothing readable here distinguishes a live key from one
     /// the provider revoked an hour ago. WITH one, the operator has stated a lifetime
     /// and that statement is worth reporting against -- it is the only forward-looking
     /// signal a non-refreshable credential can carry, and until this variant held the
     /// field the value was accepted at `put`, sealed into the record, and then read by
     /// nothing: a declared-expired key reported `active` and counted as healthy.
-    Static { expires_at_ms: Option<i64> },
+    Static {
+        expires_at_ms: Option<i64>,
+        written_at_ms: i64,
+    },
     /// OAuth with material the engine can serve or refresh from. `expires_at_ms` is
     /// carried for display and deliberately not scored.
     Serviceable { expires_at_ms: Option<i64> },
@@ -171,8 +185,8 @@ pub fn open_store_read_only(store_path: &Path) -> Result<Connection, ScanError> 
 /// envelope must not hide the state of the other twenty-two.
 pub fn scan(conn: &Connection, key: &MasterKey) -> Result<Vec<RecordUsability>, ScanError> {
     let mut stmt = match conn.prepare(
-        "SELECT credential_id, record_version, state, envelope FROM credentials \
-         ORDER BY credential_id",
+        "SELECT credential_id, record_version, state, envelope, updated_at_ms \
+         FROM credentials ORDER BY credential_id",
     ) {
         Ok(stmt) => stmt,
         Err(rusqlite::Error::SqliteFailure(_, Some(msg))) if msg.contains("no such table") => {
@@ -187,13 +201,15 @@ pub fn scan(conn: &Connection, key: &MasterKey) -> Result<Vec<RecordUsability>, 
                 r.get::<_, i64>(1)? as u64,
                 r.get::<_, String>(2)?,
                 r.get::<_, Vec<u8>>(3)?,
+                r.get::<_, i64>(4)?,
             ))
         })
         .map_err(|e| ScanError::Read(e.to_string()))?;
 
     let mut out = Vec::new();
     for row in rows {
-        let (id, version, state, blob) = row.map_err(|e| ScanError::Read(e.to_string()))?;
+        let (id, version, state, blob, written_at_ms) =
+            row.map_err(|e| ScanError::Read(e.to_string()))?;
         let binding = RecordBinding {
             credential_id: &id,
             record_version: version,
@@ -236,6 +252,7 @@ pub fn scan(conn: &Connection, key: &MasterKey) -> Result<Vec<RecordUsability>, 
                 // this is the only place a declared lifetime lives.
                 None => Usability::Static {
                     expires_at_ms: record.expires_at_ms,
+                    written_at_ms,
                 },
                 Some(oauth) => Usability::Serviceable {
                     expires_at_ms: oauth.expires_at_ms,
@@ -304,10 +321,15 @@ mod declared_expiry_tests {
         );
 
         // The scan's own classification arm, exercised directly: no oauth block, so it
-        // must land on Static and must carry the record's field.
+        // must land on Static and must carry the record's field. `written_at_ms` comes
+        // from the store's plaintext column rather than the record, so it is supplied
+        // here the way the scan supplies it -- the end-to-end pin that it is read from
+        // the RIGHT column lives in cli_admin.rs, which needs a real store to see it.
+        let written_at_ms = 1_699_000_000_000i64;
         let usability = match record.oauth.as_ref() {
             None => Usability::Static {
                 expires_at_ms: record.expires_at_ms,
+                written_at_ms,
             },
             Some(o) => Usability::Serviceable {
                 expires_at_ms: o.expires_at_ms,
@@ -316,7 +338,8 @@ mod declared_expiry_tests {
         assert_eq!(
             usability,
             Usability::Static {
-                expires_at_ms: Some(declared)
+                expires_at_ms: Some(declared),
+                written_at_ms
             },
             "a static record must report the expiry its operator declared"
         );
@@ -376,7 +399,8 @@ mod tests {
         assert_ne!(
             Usability::Stranded,
             Usability::Static {
-                expires_at_ms: None
+                expires_at_ms: None,
+                written_at_ms: 0
             }
         );
         assert_ne!(

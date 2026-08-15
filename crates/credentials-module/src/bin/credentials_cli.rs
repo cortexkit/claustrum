@@ -2469,7 +2469,24 @@ fn cmd_usable(global: &GlobalArgs) -> Result<(), CliError> {
                 );
                 stranded += 1;
             }
-            Usability::Static { expires_at_ms } => {
+            Usability::Static {
+                expires_at_ms,
+                written_at_ms,
+            } => {
+                // AGE, not a lifetime claim. For a static record nothing but an
+                // operator write moves this column -- no refresh touches the row -- so
+                // elapsed time since it is exactly "how long since a human last put
+                // this". It says nothing about whether the provider still honours the
+                // credential, and deliberately does not try to.
+                //
+                // Reported because a declared TTL is undeclarable for the class that
+                // needs this most: an external contributor's live data on two cookie
+                // providers gave 14+ and 5+ days still-alive with NO expiry event ever
+                // observed, both right-censored at n=1. Their argument, which I could
+                // not improve on: regularity is a property of a distribution, and there
+                // is no distribution -- so a declared TTL there would be a guess
+                // wearing the costume of a measurement. Age is a fact.
+                let age_days = (now - written_at_ms) / 86_400_000;
                 // A declared expiry is the ONLY forward-looking signal a
                 // non-refreshable credential can carry, and it is the operator's own
                 // statement rather than the provider's -- so a key past it is called
@@ -2490,7 +2507,10 @@ fn cmd_usable(global: &GlobalArgs) -> Result<(), CliError> {
                         Some(exp) => format!("declared good for {}m", (exp - now) / 60_000),
                         None => "no expiry declared".to_string(),
                     };
-                    println!("  {id:34} static  {}  {ttl}", row.state);
+                    println!(
+                        "  {id:34} static  {}  written {age_days}d ago, {ttl}",
+                        row.state
+                    );
                     serviceable += 1;
                 }
             }

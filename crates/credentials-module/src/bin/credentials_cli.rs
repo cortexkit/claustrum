@@ -2238,6 +2238,31 @@ fn cmd_audit(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
 ///
 /// Every column is plaintext (no envelope, no master key), so a read-only connection
 /// is sufficient and takes nothing the daemon holds.
+///
+/// *** AN EMPTY RESULT IS AMBIGUOUS, AND IT READS LIKE GOOD NEWS. ***
+///
+/// This table fills only when a consumer calls `credential.report_auth_failure`. So
+/// "no rows for this credential" is equally consistent with:
+///
+///   - the credential works and no consumer has ever been refused, and
+///   - the credential is dead and its consumer does not report.
+///
+/// The vault cannot tell those apart from here. It never observes a provider's verdict
+/// -- it hands over bytes, and only the consumer that spends them learns whether they
+/// were honoured. Nothing readable in the store distinguishes a live credential from
+/// one revoked an hour ago.
+///
+/// So an empty result establishes something about a credential ONLY for consumers
+/// KNOWN to report. Establishing that is a question for the consumer's source, not for
+/// this table: the reporting hook is a trait method that a consumer can leave
+/// unimplemented and still compile and run, which fails silently in exactly this
+/// direction. When it matters, ask the consumer and get the answer from their call
+/// site rather than inferring from this table's silence.
+///
+/// Recorded because I nearly made that inference myself while investigating whether a
+/// credential was behind a downstream failure: the empty table was the first thing I
+/// reached for, and reading it as "fine" would have been wrong for a reason invisible
+/// in the output.
 fn cmd_events(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     let limit: u32 = optional(args, "--limit")
         .map(|s| s.parse::<u32>())
@@ -2266,6 +2291,26 @@ fn cmd_events(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
         }
         Err(e) => return Err(CliError::Store(e)),
     };
+
+    // AN EMPTY TABLE READS AS GOOD NEWS AND IS NOT. It fills only when a consumer
+    // calls report_auth_failure, so silence here is equally consistent with a working
+    // credential and with a dead one whose consumer does not report -- and the vault
+    // cannot tell those apart, because it never sees a provider's verdict. Said in the
+    // OUTPUT rather than only in the source, since an operator reads this at the
+    // moment they are deciding whether a credential is the cause of something.
+    if events.is_empty() {
+        println!("no authentication events recorded");
+        println!();
+        println!("  This is NOT evidence that every credential is being honoured. Rows");
+        println!("  appear only when a consumer reports a refusal, so an empty table");
+        println!("  also describes a dead credential whose consumer never reports. The");
+        println!("  vault hands over bytes and never learns the provider's verdict.");
+        println!();
+        println!("  To rule a credential in or out, ask the consumer that spends it");
+        println!("  whether it calls credential.report_auth_failure -- the hook can be");
+        println!("  left unimplemented and still compile and run.");
+        return Ok(());
+    }
 
     for e in &events {
         let when = format_ts_ms(e.ts_ms);

@@ -2402,6 +2402,7 @@ fn cmd_usable(global: &GlobalArgs) -> Result<(), CliError> {
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
     let (mut serviceable, mut stranded, mut unreadable, mut bad_identity) = (0, 0, 0, 0);
+    let mut declared_expired = 0;
     for row in &rows {
         let id = &row.credential_id;
         if row.unservable_identity {
@@ -2423,9 +2424,30 @@ fn cmd_usable(global: &GlobalArgs) -> Result<(), CliError> {
                 );
                 stranded += 1;
             }
-            Usability::Static => {
-                println!("  {id:34} static  {}", row.state);
-                serviceable += 1;
+            Usability::Static { expires_at_ms } => {
+                // A declared expiry is the ONLY forward-looking signal a
+                // non-refreshable credential can carry, and it is the operator's own
+                // statement rather than the provider's -- so a key past it is called
+                // out as DECLARED dead, not proven dead. Counted separately from
+                // serviceable because an audit that folds it in tells an operator
+                // everything is fine while a credential they themselves marked
+                // short-lived sits a day past its date.
+                if credentials_core::usable::static_past_declared_expiry(*expires_at_ms, now) {
+                    let mins = (now - expires_at_ms.unwrap_or(now)) / 60_000;
+                    println!(
+                        "  {id:34} static  {}  DECLARED EXPIRED {mins}m ago: no refresh \
+                         path, so only a re-put replaces it",
+                        row.state
+                    );
+                    declared_expired += 1;
+                } else {
+                    let ttl = match expires_at_ms {
+                        Some(exp) => format!("declared good for {}m", (exp - now) / 60_000),
+                        None => "no expiry declared".to_string(),
+                    };
+                    println!("  {id:34} static  {}  {ttl}", row.state);
+                    serviceable += 1;
+                }
             }
             Usability::Serviceable { expires_at_ms } => {
                 // Expiry is printed as context and never scored: an expired access
@@ -2466,7 +2488,8 @@ fn cmd_usable(global: &GlobalArgs) -> Result<(), CliError> {
 
     println!();
     println!(
-        "  serviceable: {serviceable}   stranded: {stranded}   unreadable: {unreadable}   \
+        "  serviceable: {serviceable}   declared expired: {declared_expired}   \
+         stranded: {stranded}   unreadable: {unreadable}   \
          unservable identity: {bad_identity}"
     );
     println!();

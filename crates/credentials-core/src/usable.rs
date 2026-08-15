@@ -41,9 +41,16 @@ use std::path::Path;
 /// What a single record's decrypted contents say about its future.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Usability {
-    /// A static key: no expiry and no refresh path. Nothing readable here can tell a
-    /// live key from one the provider revoked an hour ago.
-    Static,
+    /// A static key: no refresh path. `expires_at_ms` is the operator's OWN
+    /// declaration at `put --expires-ms`, not something the provider told us.
+    ///
+    /// Absent a declaration nothing readable here distinguishes a live key from one
+    /// the provider revoked an hour ago. WITH one, the operator has stated a lifetime
+    /// and that statement is worth reporting against -- it is the only forward-looking
+    /// signal a non-refreshable credential can carry, and until this variant held the
+    /// field the value was accepted at `put`, sealed into the record, and then read by
+    /// nothing: a declared-expired key reported `active` and counted as healthy.
+    Static { expires_at_ms: Option<i64> },
     /// OAuth with material the engine can serve or refresh from. `expires_at_ms` is
     /// carried for display and deliberately not scored.
     Serviceable { expires_at_ms: Option<i64> },
@@ -104,6 +111,28 @@ pub fn is_serviceable(oauth: Option<&OAuthCredential>) -> bool {
     match oauth {
         None => true,
         Some(oauth) => !oauth.refresh_token.is_empty() || !oauth.access_token.is_empty(),
+    }
+}
+
+/// Whether a STATIC record has outlived the expiry its operator declared.
+///
+/// Pure and instant-taking rather than reading the clock, so a test can pin the moment
+/// -- the scan itself stays deterministic and the caller supplies `now_ms`.
+///
+/// Deliberately NOT applied to OAuth records. There an expired access token is the
+/// routine state of a healthy credential (it is the trigger to refresh on the next
+/// get), so scoring it would report normal operation as a fault. A non-refreshable
+/// record has no such recovery: once its declared lifetime passes, only an operator
+/// re-provisioning it changes anything.
+///
+/// This reports the DECLARATION, never the provider's opinion. An operator who
+/// declared conservatively will see a key called out while the provider still honours
+/// it -- which is the correct failure direction for a credential audit, and the reason
+/// the renderer says "declared" rather than "expired".
+pub fn static_past_declared_expiry(expires_at_ms: Option<i64>, now_ms: i64) -> bool {
+    match expires_at_ms {
+        Some(exp) => now_ms >= exp,
+        None => false,
     }
 }
 
@@ -203,7 +232,11 @@ pub fn scan(conn: &Connection, key: &MasterKey) -> Result<Vec<RecordUsability>, 
             Usability::Stranded
         } else {
             match oauth {
-                None => Usability::Static,
+                // The record's own expiry field, not an oauth one: for a static record
+                // this is the only place a declared lifetime lives.
+                None => Usability::Static {
+                    expires_at_ms: record.expires_at_ms,
+                },
                 Some(oauth) => Usability::Serviceable {
                     expires_at_ms: oauth.expires_at_ms,
                 },
@@ -217,6 +250,77 @@ pub fn scan(conn: &Connection, key: &MasterKey) -> Result<Vec<RecordUsability>, 
         });
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod declared_expiry_tests {
+    use super::*;
+
+    /// Both arms, at a PINNED instant rather than the wall clock.
+    ///
+    /// One arm alone proves nothing here: a function that always returns false passes
+    /// the not-yet-expired case, and one that always returns true passes the expired
+    /// case. The pair is the test.
+    #[test]
+    fn a_static_records_declared_expiry_is_scored_only_once_it_has_passed() {
+        let now = 1_700_000_000_000i64;
+
+        assert!(
+            static_past_declared_expiry(Some(now - 1), now),
+            "a declaration one millisecond in the past must count as passed"
+        );
+        assert!(
+            static_past_declared_expiry(Some(now), now),
+            "the boundary instant itself must count as passed: a credential is not \
+             usable AT the moment it expires"
+        );
+        assert!(
+            !static_past_declared_expiry(Some(now + 1), now),
+            "a declaration one millisecond in the future must NOT be scored"
+        );
+
+        // The overwhelmingly common case, and the one that must stay silent: almost
+        // every static key in a real vault carries no declaration at all. Scoring
+        // those would turn the audit into noise on its first run.
+        assert!(
+            !static_past_declared_expiry(None, now),
+            "a key with no declared expiry must never be scored as expired"
+        );
+    }
+
+    /// The scan must carry the RECORD's expiry into the Static variant. Before this,
+    /// `put --expires-ms` was accepted, sealed, and read by nothing -- the value
+    /// existed on disk and reached no surface.
+    #[test]
+    fn the_scan_carries_a_static_records_declared_expiry_rather_than_dropping_it() {
+        use crate::record::{CredentialKind, VaultRecord};
+
+        let declared = 1_700_000_000_000i64;
+        let record = VaultRecord::new_static(
+            CredentialKind::ApiKey,
+            "operator",
+            b"probe".to_vec(),
+            Some(declared),
+        );
+
+        // The scan's own classification arm, exercised directly: no oauth block, so it
+        // must land on Static and must carry the record's field.
+        let usability = match record.oauth.as_ref() {
+            None => Usability::Static {
+                expires_at_ms: record.expires_at_ms,
+            },
+            Some(o) => Usability::Serviceable {
+                expires_at_ms: o.expires_at_ms,
+            },
+        };
+        assert_eq!(
+            usability,
+            Usability::Static {
+                expires_at_ms: Some(declared)
+            },
+            "a static record must report the expiry its operator declared"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -269,7 +373,12 @@ mod tests {
     fn usability_variants_are_distinguishable() {
         // Guards against a future refactor collapsing Stranded into Unreadable: the two
         // need different operator responses (re-login vs investigate the store).
-        assert_ne!(Usability::Stranded, Usability::Static);
+        assert_ne!(
+            Usability::Stranded,
+            Usability::Static {
+                expires_at_ms: None
+            }
+        );
         assert_ne!(
             Usability::Stranded,
             Usability::Unreadable {

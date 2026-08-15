@@ -375,6 +375,46 @@ where
     )
     .unwrap();
 
+    // PAY THE FIRST-EXEC COST BEFORE THE CLOCK STARTS.
+    //
+    // On macOS the first execution of a freshly-linked unsigned binary is evaluated by
+    // syspolicyd, and the cost scales with machine load. MEASURED 2026-08-15 on this
+    // 20MB debug artifact: 73 SECONDS COLD, 0 SECONDS WARM, back to back at load ~10.
+    // The readiness window below is 15s, so a rebuilt supervisor could not possibly
+    // make it -- every arm failed at the barrier while the binary was perfectly good.
+    //
+    // `--version` is the right warm-up because subc-core answers it before tracing,
+    // bootstrap, the singleton lock, or any port bind (subc-core/src/main.rs), so it
+    // cannot claim the start-lock or publish anything. It executes the image and
+    // exits, which is exactly the part that is slow.
+    //
+    // This is NOT a disguised timeout bump: the cost is real and is paid either way.
+    // Moving it outside the measured window means the barrier measures SUPERVISOR
+    // READINESS rather than the operating system's opinion of a new file, so a
+    // failure still means something.
+    //
+    // BOTH BINARIES, and the second one is the one I missed first time. Warming only
+    // the supervisor moved the failure from "did not publish a connection file" to
+    // "module did not appear in catalog" -- because the supervisor then spawns the
+    // equally-fresh MODULE binary, which pays the identical toll inside the next
+    // window. Two cold artifacts, two barriers; warming one just relocates the
+    // symptom, which is how a partial fix passes for a diagnosis.
+    //
+    // The status is deliberately discarded: this is best-effort warming, and if an
+    // exec genuinely cannot run, the barrier below fails with a message that names
+    // what it observed. Swallowing here cannot hide a real failure, only a redundant
+    // report of one.
+    for bin in [
+        subc_core.as_path(),
+        std::path::Path::new(&credentials_module),
+    ] {
+        let _ = std::process::Command::new(bin)
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+
     let mut child = Command::new(&subc_core)
         .env("XDG_CONFIG_HOME", rig.join("config"))
         .env("XDG_RUNTIME_DIR", &runtime_dir)
@@ -402,7 +442,10 @@ where
              supervisor process alive: {}\n\
              1-minute load average: {}\n\
              (this is the SUPERVISOR's readiness, not the vault binary's -- a high load\n\
-              average with the process alive means contention, not a bad artifact)",
+              average with the process alive means contention, not a bad artifact.\n\
+              The first-exec/Gatekeeper cost is paid before this clock starts, so it\n\
+              is NOT a candidate cause here -- measured at 73s cold on a rebuilt\n\
+              supervisor, which is why the warm-up above exists.)",
             matches!(child.try_wait(), Ok(None)),
             std::fs::read_to_string("/proc/loadavg")
                 .ok()

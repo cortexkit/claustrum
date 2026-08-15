@@ -54,6 +54,35 @@ CK_BUILD_REV="$REV" cargo build --locked --release -p credentials-module \
 STAGE="target/staged/${REV}"
 mkdir -p "$STAGE"
 
+# PRUNE OLD STAGES. Each is ~16MB of two binaries and they accumulate silently --
+# 15 of them (242MB) had piled up before anyone looked, because nothing in the
+# deploy loop ever removes one and a stale stage is invisible until you measure.
+#
+# Keeping three is not a disk decision. A stage exists so the sha you published can
+# still be checked against the file it named; once three deploys have happened the
+# older ones answer a question nobody is asking, and every one of them is
+# reproducible by re-running this script at that rev.
+#
+# AND NEVER PRUNE THE DEPLOYED REV, whatever its age. Normally it is the newest and
+# survives anyway -- but stage two revs whose gates fail and the one stage you would
+# actually want to diff against is the one that ages out. The script does not have to
+# guess which that is: it asks the deployed binary, which is the same
+# ask-the-artifact instrument the acceptance legs use.
+DEPLOYED_REV="$(
+  "${HOME}/.local/share/cortexkit/bin/ck-auth" --version 2>/dev/null \
+    | grep -oE '\([0-9a-f]{7,}\)' | tr -d '()'
+)"
+find target/staged -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null \
+  | xargs -0 -r ls -dt 2>/dev/null \
+  | tail -n +4 \
+  | while read -r old; do
+      case "$(basename "$old")" in
+        "$(basename "$STAGE")") continue ;;
+        "${DEPLOYED_REV:-__none__}") continue ;;
+      esac
+      rm -rf "$old"
+    done
+
 for bin in ck-claustrum ck-auth; do
   cp "target/release/$bin" "$STAGE/$bin"
   # Pin the identifier. NEVER re-sign at the destination: a pin is not sticky, and one

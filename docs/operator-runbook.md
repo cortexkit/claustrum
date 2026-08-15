@@ -60,6 +60,37 @@ There are two programs:
 
 ---
 
+## Deploy artifacts: what to keep, and why the pile is a hazard
+
+Two things accumulate every time a binary is placed, and nothing in the loop
+removed either until 2026-08-15, when 21 rollback copies and 15 staged trees
+(407MB) had built up unnoticed.
+
+**Staged trees** (`target/staged/<rev>/`) are pruned automatically by
+`scripts/release-build.sh`: it keeps the three newest AND, whatever its age, the
+stage matching the currently deployed binary. It learns which that is by running
+`ck-auth --version`, the same ask-the-artifact instrument the acceptance legs
+use. The deployed one is exempt because it is the stage you would diff against
+during an incident, and it ages out exactly when several later revs were staged
+and never deployed — which is the case where you most want it.
+
+**Rollback copies** (`~/.local/share/cortexkit/bin/ck-auth.pre-<rev>-<ts>`) are
+created by hand at placement and are NOT pruned automatically, because deleting
+from the fleet bin path should be a deliberate act. Keep the two most recent;
+delete the rest.
+
+The retention rule is not about disk. A rollback copy is useful only until the
+next deploy is accepted, and every one is reproducible by re-running
+`release-build.sh` at its rev. **The real cost of the pile is that the fleet bin
+path ends up holding twenty similarly-named `ck-auth` binaries, which is a place
+where somebody eventually runs the wrong one.**
+
+One that will not be reproducible from its name: a copy named for an event
+rather than a rev, e.g. `ck-auth.pre-claustrum-*` from the module rename. That
+one also targeted the pre-rename data directory, so running it would have been
+actively wrong rather than merely old — worth deleting on sight rather than
+keeping for sentiment.
+
 ## The single-writer rule (read this first)
 
 There is exactly one writer at a time, always. What changes is **who** it is.

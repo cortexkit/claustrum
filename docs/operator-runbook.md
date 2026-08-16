@@ -657,6 +657,20 @@ directory belongs to cargo, and any later `--release` command silently overwrite
 what is in it — measured: an e2e run rebuilt a staged, signed daemon on top of
 itself, so a published hash stopped describing the file within one command.
 
+**A stage is safe from overwrite, NOT from `cargo clean`.** `target/staged` is
+still under `target/`, and clean takes the whole tree — measured 2026-08-16 with
+`cargo clean --dry-run -v`, which names the staged paths in its removal list.
+The two hazards differ in severity and only the first is addressed here:
+
+- **Overwrite** (`target/release/`) is SILENT. The artifact still exists, the
+  published hash no longer describes it, and nothing errors. This is the one
+  the placement fixes.
+- **Deletion** (anywhere under `target/`) is LOUD. The file is gone and the
+  stage is reproducible by re-running the release script at that rev.
+
+So do not run `cargo clean` between staging and placement, and if a stage ever
+needs to survive one, it has to leave `target/` entirely.
+
 Copy the results into place with a plain `cp`. **Do not re-sign at the
 destination** — a pinned identifier is not sticky, and one `codesign --force --sign
 -` there reverts it to the derived form.

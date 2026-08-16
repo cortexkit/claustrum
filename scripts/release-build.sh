@@ -51,6 +51,21 @@ CK_BUILD_REV="$REV" cargo build --locked --release -p credentials-module \
 #
 # The staging dir is keyed by revision, so two builds of one commit land in the same
 # place and a different commit cannot quietly replace the first.
+# WHY target/staged AND NOT target/release: a later release-profile build --
+# including `cargo test --release`, including the verification run below --
+# recompiles the binary IN PLACE, after the sha has been computed. You publish a
+# hash that no longer names the file, and nothing errors. Cargo does not write
+# build output here, so the hashes stay true.
+#
+# THIS IS NOT OUTSIDE CARGO'S REACH, and an earlier version of this comment said
+# it was. `cargo clean` removes the WHOLE target directory: measured 2026-08-16
+# with `cargo clean --dry-run -v`, which names these staged paths in its removal
+# list. Two different hazards, and only one is fixed by this placement:
+#   OVERWRITE (target/release) -- silent, corrupts a published hash, artifact
+#     still present and wrong. This is the one that placement fixes.
+#   DELETION (anywhere under target/) -- loud, file simply gone, recoverable by
+#     re-running this script at the named rev. Accepted, not fixed.
+# If a stage ever needs to survive a clean, it has to leave target/ entirely.
 STAGE="target/staged/${REV}"
 mkdir -p "$STAGE"
 

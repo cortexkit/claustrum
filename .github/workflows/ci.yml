@@ -8,6 +8,23 @@ on:
   # Manual trigger, so a commit whose push webhook was missed (GitHub occasionally
   # drops one) can be re-run without an empty commit: `gh workflow run CI`.
   workflow_dispatch:
+  # DAILY, TO CATCH SIBLING DRIFT THAT NO PUSH OF OURS WOULD REVEAL.
+  #
+  # The subconscious and commons checkouts below carry no `ref:`, so they take each
+  # repo's DEFAULT BRANCH -- this pipeline floats on their tip by design, which is
+  # what makes it able to see an upstream break at all. But push/PR triggers only
+  # fire on OUR commits, so a breaking change upstream stays invisible here until we
+  # happen to push, which may be days.
+  #
+  # Measured 2026-08-16: subc-protocol made two manifest fields required at 15:19;
+  # our last CI run was the previous night, so the break sat undetected on this side
+  # while a peer who builds claustrum in THEIR pipeline hit it first. For a
+  # credential vault the bad version of that story is discovering it during an
+  # emergency deploy, when the pressure is highest and the diagnosis budget lowest.
+  #
+  # 2 minutes a day converts "whenever we next push" into "within 24 hours".
+  schedule:
+    - cron: "17 6 * * *"
 
 concurrency:
   group: ci-${{ github.ref }}

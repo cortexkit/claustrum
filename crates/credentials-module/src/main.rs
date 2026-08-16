@@ -40,6 +40,7 @@ use credentials_core::resolver::{self, KeySource, ResolverConfig};
 use credentials_core::store::EncryptedStore;
 use serde::Deserialize;
 use serde_json::json;
+use subc_protocol::manifest::Concurrency;
 use subc_protocol::{
     manifest::{
         Bindings, IdentityBinding, ManagementOperation, ManagementOperationKind, ModuleManifest,
@@ -947,11 +948,20 @@ async fn send_route_error(
     code: &str,
     message: &str,
 ) -> Result<(), ModuleError> {
-    let body = serde_json::to_vec(&ErrorBody {
-        code: code.to_string(),
-        message: message.to_string(),
-    })
-    .map_err(ModuleError::Json)?;
+    // ErrorBody::new rather than a struct literal: detail is None here deliberately,
+    // and the constructor keeps a future required field from silently defaulting.
+    //
+    // NO DETAIL ON THIS PATH, and that is a decision rather than an omission. These
+    // are transport-level refusals (malformed frame, unknown operation), whose remedy
+    // is fully carried by the code. The vault's READ-surface errors are the ones a
+    // consumer branches on, and they already carry their machine-parsable half as the
+    // `class` field inside the result body per the fleet error-class contract --
+    // moving that into `detail` would fork one contract across two wire locations.
+    //
+    // If a refusal here ever needs more than a code, it must not carry secrets:
+    // handle values, credential payloads and key material are all out of bounds, and
+    // an error body is exactly where they would look harmless.
+    let body = serde_json::to_vec(&ErrorBody::new(code, message)).map_err(ModuleError::Json)?;
     let frame = Frame::build_with_version(
         ver,
         FrameType::Error,
@@ -1019,6 +1029,33 @@ fn manifest(module_id: &str) -> ModuleManifest {
         protocol_ver: PROTOCOL_VERSION,
         trust_tier: TrustTier::FirstParty,
         provides: vec![ProviderRole::ManagementSurface {
+            // ModuleManaged, and this is a claim about observed behaviour rather than
+            // the value that compiles. All three would.
+            //
+            // NOT Serial: one in-flight call at a time would be a lie and an
+            // expensive one. A `get` that triggers an OAuth refresh blocks on a
+            // provider's token endpoint for hundreds of milliseconds, and every other
+            // consumer's read of an unrelated credential would queue behind it.
+            //
+            // NOT StatelessParallel: this surface has ordering-sensitive state.
+            // Credential-scoped admin mutations serialize under
+            // RefreshEngine::with_admin_lock so they cannot interleave with a refresh
+            // of the same credential, and concurrent gets on one credential are
+            // coalesced by the engine's per-credential single-flight lock rather than
+            // each firing its own token exchange.
+            //
+            // ModuleManaged says exactly what is true: calls may arrive concurrently
+            // across channels, and THIS MODULE decides what may overlap -- which it
+            // does per credential id, not per connection.
+            //
+            // The claim rests on a tested property rather than on this comment:
+            // `concurrent_gets_single_flight_one_upstream_call` in
+            // credentials-core/src/engine_tests.rs proves concurrent gets on one
+            // credential produce exactly ONE upstream token exchange. Delete that
+            // coalescing and each caller fires its own refresh -- at which point the
+            // module is no longer scheduling anything and this declaration becomes a
+            // lie the manifest still asserts.
+            concurrency: Concurrency::ModuleManaged,
             operations: vec![
                 ManagementOperation {
                     name: OP_GET.to_string(),

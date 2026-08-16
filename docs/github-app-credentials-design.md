@@ -192,34 +192,44 @@ that scopes the minted token **below** the installation's own grant. A handle
 therefore carries an optional permission subset, and `credential.get` mints
 against that subset rather than against everything the App was granted.
 
-**Why this earns its place rather than being a nicety.** The per-agent GitHub
-work (see the fleet room on external-surface identity) governs writes with a
-trust tier declared per action: comments need an asserted identity, merges need
-a signed attestation. That is reviewable policy enforced by a manifest field and
-a test over it — and the failure mode everyone in that discussion recognised is
-BLUR: an op added to the wrong tier, or a token check that grows a fallback, and
-the strong tier quietly degrades into the weak one.
-
-A scoped handle turns one of those layers into arithmetic. Mint the
-comments-tier handle with `issues:write` only and it **cannot** merge — not
-because policy forbids it, but because the credential GitHub issued does not
-carry the permission. If a later edit puts `merge_pr` in the weak tier anyway,
-the call still fails, at GitHub, with a 403.
-
-**It is the floor, not the UX.** A 403 from GitHub is a backstop that fires
-after a request has left the fleet; the manifest check and its enumeration test
-are the fast local refusals that should normally do the work. The point is that
-the three now fail INDEPENDENTLY, and the last one cannot be edited into
-agreement with the others.
+**Why this earns its place.** A consumer that only needs to comment should not
+hold a credential that can merge. If that token leaks, is misused by a confused
+agent, or is reached by something that should not have had it, the damage is
+bounded by what GitHub issued rather than by what our code remembered to check.
+That is least privilege, and it does not depend on any policy layer above it
+being correct.
 
 Cost is nothing extra: handles are already the unit of grant, so one per
-(consumer, tier) is the same minting path with a different subset recorded.
+(consumer, capability set) is the same minting path with a different subset
+recorded.
 
-### Where the floor holds, and where it does not
+A STRONGER CLAIM ONCE LIVED HERE AND DID NOT SURVIVE CONTACT — see the next
+section. It is kept rather than deleted because the reason it failed is more
+reusable than the claim was.
 
-I first pitched the scoped handle as if it made every tier physical. PLEX
-checked GitHub's permission granularity at source and it does not cut where our
-tiers cut:
+### Why the subset is least-privilege, NOT tier enforcement
+
+THE TIER RATIONALE THIS SECTION ORIGINALLY CARRIED IS DEAD, and the way it died
+is worth keeping. I pitched scoped handles as making a trust tier physical:
+comment-tier tokens that cannot merge. The fleet then established that MERGE IS
+ALREADY AGENT-DRIVEN -- twenty agents merge their own pull requests with `gh pr
+merge` today, ungated. So a tier that elevates merge does not raise a floor; it
+raises the cost of the governed path while the ungoverned one stays open, which
+makes the governed path the slow way to do something already done freely.
+
+The exportable rule, which is the chair's: BEFORE DESIGNING A GATE, MEASURE WHAT
+THE UNGOVERNED PATH ALREADY PERMITS. Blast radius tells you what a gate is
+WORTH; current practice tells you whether it is a GATE AT ALL. Five seats
+reasoned about merge from its blast radius and none asked what happens today.
+
+WHAT SURVIVES, on different grounds: a handle that only needs to comment should
+not carry the power to merge, because a leaked or misused token can then only do
+what its holder needed. That is least privilege, and it stands whatever the
+tiers do.
+
+The granularity detail below is retained for whoever mints handles, because it
+still decides what a minimal subset CAN be -- but it no longer decides a
+security posture, and the measurement it once justified is NOT worth pilot time:
 
 | permission | covers |
 | --- | --- |
@@ -231,8 +241,7 @@ the same `pull_requests:write` that lets an agent comment on a pull request also
 lets it merge one. For that pair the floor is not physical and we are back to
 policy -- manifest tier plus the enumeration test.
 
-**Except that GitHub's merge endpoint documents a second requirement, which
-restores it.** `PUT /repos/{owner}/{repo}/pulls/{number}/merge` carries:
+**GitHub's merge endpoint documents a second requirement.** `PUT /repos/{owner}/{repo}/pulls/{number}/merge` carries:
 
 > If making a request on behalf of a GitHub App you must also have permissions
 > to write the contents of the head repository.
@@ -242,12 +251,15 @@ So for an App -- our exact case -- merge needs `contents:write` ON TOP of
 comment on a PR and cannot merge it, and the arithmetic floor covers the pair
 after all.
 
-DOCUMENTED, NOT YET MEASURED. This is read off GitHub's endpoint docs, and the
-whole build gate here is that a documented shape is not a recorded response. The
-confirming instrument is better than a guess though: GitHub returns
+DOCUMENTED, NOT MEASURED, AND NO LONGER WORTH CHASING. Read off GitHub's
+endpoint docs; a documented shape is not a recorded response. When this mattered
+for tiers it was worth a pinned pilot measurement, and it is not any more --
+record the answer if it falls out of the pilot for free, do not spend a step on
+it.
+
+The instrument, if it is ever wanted: GitHub returns
 `X-Accepted-GitHub-Permissions` on REST responses, naming what the endpoint
-required. Pin the merge endpoint's header value at pilot time and record it
-beside this table whichever way it lands.
+actually required.
 
 ONE EDGE THE NOTE IMPLIES: it says the HEAD repository. For a same-repo PR head
 and base coincide, so `contents:write` on the one installation is the whole

@@ -15,8 +15,22 @@
 //! The signing key is passed by PATH rather than read from the vault over the route
 //! plane, because the vault serves credentials to consumers that can reach it and
 //! this tool runs beside an operator. The vault holds the key as source of record
-//! with an audit chain; an operator reads it out and hands it here. That is the same
-//! shape the eventual push Worker uses — a deploy-time read, not a runtime one.
+//! with an audit chain; an operator reads it out and hands it here.
+//!
+//! DO NOT COPY THIS CHOICE INTO A SENDER. It is right for a hand-run diagnostic and
+//! wrong for anything automated. The original text here generalised it to "the same
+//! shape the eventual push Worker uses — a deploy-time read, not a runtime one", and
+//! that reasoning only holds for an EDGE WORKER, which cannot reach this vault at all
+//! and must therefore receive the key as a deployed secret.
+//!
+//! A HOST-SIDE SENDER CAN REACH THE VAULT, so it should fetch by capability handle at
+//! send time. Two properties a deploy-time read cannot give it: revocation actually
+//! takes effect (a deployed copy keeps working after the grant is withdrawn), and no
+//! `.p8` exists in the sender's config or environment. prefrontal-core's push producer
+//! is built that way deliberately.
+//!
+//! The generalisation was mine and it nearly propagated: it reads as guidance to the
+//! next person who opens this file, and the next person's sender was not a Worker.
 //!
 //! ## Usage
 //!

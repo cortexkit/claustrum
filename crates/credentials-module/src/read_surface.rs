@@ -174,6 +174,28 @@ impl ReadError {
     /// Consumer rule: on `permanent`, refuse the operation, account it, surface it to
     /// an operator, and CHANGE NOTHING. Do not retry (nothing about the world changed)
     /// and do not reap (you cannot tell which case you are in).
+    ///
+    /// DO NOT EXPORT THIS SILENCE AS A FLEET RULE. It is right here for one reason and
+    /// that reason does not travel: A CAPABILITY HANDLE IS A BEARER TOKEN, so the
+    /// caller may be a stranger, and any refusal that distinguishes revoked from
+    /// unknown is an enumeration oracle for one. Withholding the reason is the security
+    /// property, not a house style.
+    ///
+    /// On a surface whose caller is ALREADY AUTHENTICATED TO THE SCOPE it is asking
+    /// about, the same posture is just a worse error message -- it withholds something
+    /// the caller could obtain by asking correctly, and buys nothing. Callosum's device
+    /// read is the worked example: its caller holds an account credential and can
+    /// enumerate that account's devices legitimately, so when a lookup misses it names
+    /// WHY (a supplied value that is actually one of the account's sealing keys returns
+    /// a `wrong_key_field` reason) instead of a bare not-found. Correct there, and it
+    /// would be a defect here.
+    ///
+    /// SILENCE IS MANDATORY ONLY WHEN THE CALLER COULD BE A STRANGER. The discriminator
+    /// is the caller's identity, never the refusal's shape -- which is why two fleet
+    /// surfaces reach opposite answers and both are right. A reader who ports this
+    /// comment's conclusion to an authenticated surface will believe they are
+    /// hardening a leak while removing a diagnostic; a reader who ports callosum's to
+    /// this one opens the oracle.
     pub fn class(self) -> ErrorClass {
         match self {
             // Handle revoked/unknown, record quarantined, or a static credential with

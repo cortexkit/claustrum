@@ -185,10 +185,47 @@ choice, false of the right one.
 - `credential.get` returns the **installation token**. The PEM never leaves the
   vault, exactly as no refresh token does.
 
+## A handle may mint a token weaker than the installation it names
+
+GitHub's `access_tokens` endpoint takes an optional `permissions` body parameter
+that scopes the minted token **below** the installation's own grant. A handle
+therefore carries an optional permission subset, and `credential.get` mints
+against that subset rather than against everything the App was granted.
+
+**Why this earns its place rather than being a nicety.** The per-agent GitHub
+work (see the fleet room on external-surface identity) governs writes with a
+trust tier declared per action: comments need an asserted identity, merges need
+a signed attestation. That is reviewable policy enforced by a manifest field and
+a test over it — and the failure mode everyone in that discussion recognised is
+BLUR: an op added to the wrong tier, or a token check that grows a fallback, and
+the strong tier quietly degrades into the weak one.
+
+A scoped handle turns one of those layers into arithmetic. Mint the
+comments-tier handle with `issues:write` only and it **cannot** merge — not
+because policy forbids it, but because the credential GitHub issued does not
+carry the permission. If a later edit puts `merge_pr` in the weak tier anyway,
+the call still fails, at GitHub, with a 403.
+
+**It is the floor, not the UX.** A 403 from GitHub is a backstop that fires
+after a request has left the fleet; the manifest check and its enumeration test
+are the fast local refusals that should normally do the work. The point is that
+the three now fail INDEPENDENTLY, and the last one cannot be edited into
+agreement with the others.
+
+Cost is nothing extra: handles are already the unit of grant, so one per
+(consumer, tier) is the same minting path with a different subset recorded.
+
+OPEN, and deliberately not decided here: whether the subset lives on the handle
+row or on a per-consumer grant record. The handle is the natural home because it
+is already what gets revoked, but nothing is built yet and the first real
+consumer should shape it.
+
 ## Registry fields
 
-`{app_id, installation_id}` is sufficient to serve: `app_id` is the JWT `iss`,
-`installation_id` selects the exchange endpoint.
+`{client_id, installation_id}` is sufficient to serve: `client_id` is the JWT
+`iss` (see the wire facts above — the numeric `app_id` still works, but GitHub's
+current guidance is the client id), and `installation_id` selects the exchange
+endpoint.
 
 Also stored, diagnostic rather than functional: the app **slug** and the
 **installation's org/account**. A revoked installation returns 404, and 404

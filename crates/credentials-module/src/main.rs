@@ -1048,13 +1048,24 @@ fn manifest(module_id: &str) -> ModuleManifest {
             // across channels, and THIS MODULE decides what may overlap -- which it
             // does per credential id, not per connection.
             //
-            // The claim rests on a tested property rather than on this comment:
-            // `concurrent_gets_single_flight_one_upstream_call` in
-            // credentials-core/src/engine_tests.rs proves concurrent gets on one
-            // credential produce exactly ONE upstream token exchange. Delete that
-            // coalescing and each caller fires its own refresh -- at which point the
-            // module is no longer scheduling anything and this declaration becomes a
-            // lie the manifest still asserts.
+            // BOTH HALVES OF THE CLAIM REST ON TESTS RATHER THAN ON THIS COMMENT,
+            // in credentials-core/src/engine_tests.rs:
+            //
+            //   `concurrent_gets_single_flight_one_upstream_call` -- the module
+            //   schedules internally: concurrent gets on ONE credential produce
+            //   exactly ONE upstream token exchange. Delete the coalescing and each
+            //   caller fires its own refresh, so the module schedules nothing.
+            //
+            //   `refreshes_on_different_credentials_overlap_rather_than_serialising`
+            //   -- calls may overlap ACROSS credentials. Key the single-flight map
+            //   globally instead of per credential and this surface is secretly
+            //   Serial; the first test still passes, because it never touches a
+            //   second credential.
+            //
+            // The second test was missing until 2026-08-16, so half of this
+            // declaration was decoration. Both are proofs by construction: one counts
+            // upstream calls, the other blocks each refresh on a two-party barrier so
+            // a serialising engine HANGS rather than passing slowly.
             concurrency: Concurrency::ModuleManaged,
             operations: vec![
                 ManagementOperation {

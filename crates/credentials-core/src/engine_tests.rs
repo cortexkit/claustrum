@@ -29,6 +29,12 @@ struct StubAdapter {
     check: Option<Result<ValidityOutcome, ()>>,
     fail: Option<&'static str>,
     access_token: &'static str,
+    /// When set, every refresh waits here until the barrier's full party has
+    /// arrived. Turns "did these overlap?" from a timing question into a
+    /// structural one: if the engine serialises refreshes across credentials, the
+    /// first arrival waits for a second that cannot start, and the test hangs
+    /// rather than passing slowly.
+    rendezvous: Option<Arc<tokio::sync::Barrier>>,
 }
 
 impl StubAdapter {
@@ -39,6 +45,7 @@ impl StubAdapter {
             check: None,
             fail: None,
             access_token: "refreshed-access",
+            rendezvous: None,
         }
     }
 }
@@ -57,6 +64,9 @@ impl RefreshAdapter for StubAdapter {
         self.calls.fetch_add(1, Ordering::SeqCst);
         // A tiny await point so concurrent callers actually contend on the lock.
         tokio::task::yield_now().await;
+        if let Some(barrier) = self.rendezvous.as_ref() {
+            barrier.wait().await;
+        }
         if let Some(reason) = self.fail {
             return match reason {
                 "invalid_grant" => Err(RefreshError::InvalidGrant("dead".into())),
@@ -294,6 +304,64 @@ async fn concurrent_gets_single_flight_one_upstream_call() {
         calls.load(Ordering::SeqCst),
         1,
         "N concurrent gets => exactly ONE upstream refresh"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn refreshes_on_different_credentials_overlap_rather_than_serialising() {
+    // The OTHER half of the manifest's ModuleManaged declaration.
+    //
+    // `concurrent_gets_single_flight_one_upstream_call` proves the module schedules
+    // internally. It says nothing about whether unrelated credentials can proceed at
+    // the same time -- a global lock would make this surface secretly Serial and that
+    // test would still pass, because it only ever touches one credential.
+    //
+    // PROOF BY CONSTRUCTION RATHER THAN BY TIMING: the adapter blocks inside refresh
+    // until a two-party barrier is satisfied. Overlapping refreshes both arrive and
+    // release each other. A serialising engine holds the first one at the barrier
+    // waiting for a second that cannot start until the first returns, and the test
+    // hangs instead of passing slowly -- so it cannot be green for the wrong reason.
+    let (root, d) = tmp_descriptor();
+    let store = open_store(&d, 2);
+    store.create("cred-a", &stale_oauth_record()).unwrap();
+    store.create("cred-b", &stale_oauth_record()).unwrap();
+
+    let mut adapter = StubAdapter::new("stub");
+    adapter.rendezvous = Some(Arc::new(tokio::sync::Barrier::new(2)));
+    let (eng, calls) = engine(store, adapter);
+    let eng = Arc::new(eng);
+
+    let a = {
+        let e = eng.clone();
+        tokio::spawn(async move { e.get("cred-a", None, false).await })
+    };
+    let b = {
+        let e = eng.clone();
+        tokio::spawn(async move { e.get("cred-b", None, false).await })
+    };
+
+    // The bound only has to exclude "hung": both refreshes are already in flight
+    // before either can return, so a passing run completes immediately.
+    let both = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        (a.await.unwrap(), b.await.unwrap())
+    })
+    .await
+    .expect(
+        "two refreshes on DIFFERENT credentials did not overlap: each blocked waiting \
+         for the other, which is what a global lock looks like. The manifest declares \
+         ModuleManaged, whose second half is that calls may proceed concurrently \
+         across channels -- a surface that serialises unrelated credentials is Serial \
+         and the manifest would be asserting something false.",
+    );
+
+    both.0.expect("cred-a get ok");
+    both.1.expect("cred-b get ok");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "two distinct credentials must each refresh once -- single-flight is keyed \
+         per credential, not global"
     );
     let _ = std::fs::remove_dir_all(&root);
 }

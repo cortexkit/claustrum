@@ -156,6 +156,24 @@ pub const ERROR_CLASS_WIRE_SET: [&str; 4] = [
 
 impl ReadError {
     /// The produced classification for each fail-closed category.
+    ///
+    /// NO REFUSAL HERE EVER MEANS "GONE FOREVER, DESTROY YOUR STATE", and a consumer
+    /// must not invent one. Neighbouring fleet surfaces split permanent refusals two
+    /// ways -- refuse-but-keep-state, versus proof-of-death that authorises deleting a
+    /// route or registration (callosum's push submit does exactly this: 400
+    /// BadDeviceToken keeps the route, 410 destroys it). THIS SURFACE HAS ONLY THE
+    /// FIRST KIND.
+    ///
+    /// It is forced rather than unfinished. Handle resolution answers identically for
+    /// a REVOKED handle and one that never existed, because distinguishing them is an
+    /// enumeration oracle. That same indistinguishability denies the consumer the
+    /// difference between "my grant was withdrawn" and "my config holds the wrong
+    /// string" -- so no refusal can license destroying configuration, since the typo
+    /// case would turn one bad character into a self-sustaining outage.
+    ///
+    /// Consumer rule: on `permanent`, refuse the operation, account it, surface it to
+    /// an operator, and CHANGE NOTHING. Do not retry (nothing about the world changed)
+    /// and do not reap (you cannot tell which case you are in).
     pub fn class(self) -> ErrorClass {
         match self {
             // Handle revoked/unknown, record quarantined, or a static credential with

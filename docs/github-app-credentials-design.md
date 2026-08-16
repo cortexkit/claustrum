@@ -285,6 +285,28 @@ consumer should shape it.
 current guidance is the client id), and `installation_id` selects the exchange
 endpoint.
 
+### `installation_id` does not exist when the App is created
+
+Worth stating because it looks like a registry field and is not obtainable like
+one. App CREATION and app INSTALLATION are separate events: the manifest flow
+returns `{id, slug, client_id, pem}` and no installation id, because nothing is
+installed yet. Someone then installs the App on an org, and that is what mints
+one.
+
+So a ceremony that captures everything the conversion response offers still
+cannot supply the one field serving needs. Measured against a real ceremony
+(prefrontal's, 2026-08-16): its decoder captures exactly `{id, slug, client_id,
+pem}` -- correct, complete for that step, and one short of servable.
+
+RESOLVE IT HERE RATHER THAN IN THE CEREMONY. `GET /app/installations` is
+authenticated by the App JWT itself, so the vault can discover the id with the
+key it already holds -- no operator step and no browser. Prefer discovering it
+lazily at mint time and caching, over storing it at ingest: an uninstall and
+reinstall mints a NEW installation id, so a stored one silently becomes a 404,
+which is exactly the incident this section's diagnostic fields exist to make
+legible. Self-healing beats stored-and-stale for a value the platform can
+re-issue behind our back.
+
 Also stored, diagnostic rather than functional: the app **slug** and the
 **installation's org/account**. A revoked installation returns 404, and 404
 against a bare numeric id is a poor thing to hand an operator during an

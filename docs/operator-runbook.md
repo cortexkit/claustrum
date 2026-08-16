@@ -854,6 +854,28 @@ process, which reports no `store.db` at all and reads as "the daemon has no vaul
 open". Worse than consistently wrong: it depends on the text of the script around
 it, so it works until someone edits a comment.
 
+**`pgrep` ALSO FALSE-NEGATIVES ON YOUR OWN ANCESTORS, and that direction is more
+dangerous than the false positive above.** Measured 2026-08-16 on macOS: from an
+agent shell whose ancestry is `bash -> sh -> ck-aft -> ck-subc(41345)`, both
+`pgrep -x ck-subc` and `pgrep -f 'bin/ck-subc$'` returned EMPTY, while
+`ps -o stat=,etime= -p 41345` showed the process alive, state `S`, 22h uptime.
+The sibling `ck-subc-mcp` matched normally in the same call, so the discriminator
+is ancestry rather than the name.
+
+This is safe for `ck-claustrum`, which is a supervised module and never an
+ancestor of an operator shell -- the acceptance script's use is sound. It is NOT
+safe for checking the SUPERVISOR from an agent session, which is the natural
+thing to do during an incident: the check reports the fleet's root process as
+down while it is serving. That happened here, and the wrong conclusion ("the
+supervisor is down, my daemon is orphaned") survived two follow-up commands
+before `ps -p` contradicted it.
+
+So: `pgrep` answers "is a process named X running" only for processes that are
+not your own ancestors. **When the answer is empty and it matters, confirm with
+`ps -p <pid>` against a pid from another source** -- the connection file, `lsof`,
+or the module's own parent -- before concluding anything is down. An empty
+`pgrep` is not evidence of absence.
+
 Relocating the data directory is safe in the sense that matters: **the daemon
 never bootstraps**, so a moved vault finds no key for its new keychain scope and
 refuses to serve rather than coming up empty. That is worth knowing precisely

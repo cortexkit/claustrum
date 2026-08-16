@@ -215,6 +215,52 @@ agreement with the others.
 Cost is nothing extra: handles are already the unit of grant, so one per
 (consumer, tier) is the same minting path with a different subset recorded.
 
+### Where the floor holds, and where it does not
+
+I first pitched the scoped handle as if it made every tier physical. PLEX
+checked GitHub's permission granularity at source and it does not cut where our
+tiers cut:
+
+| permission | covers |
+| --- | --- |
+| `issues:write` | issues and their comments, assignees, labels, milestones |
+| `pull_requests:write` | pull requests and their comments, assignees, labels, milestones, **and merges** |
+
+So an ISSUE comment is cleanly separable from a merge, and a PR COMMENT IS NOT:
+the same `pull_requests:write` that lets an agent comment on a pull request also
+lets it merge one. For that pair the floor is not physical and we are back to
+policy -- manifest tier plus the enumeration test.
+
+**Except that GitHub's merge endpoint documents a second requirement, which
+restores it.** `PUT /repos/{owner}/{repo}/pulls/{number}/merge` carries:
+
+> If making a request on behalf of a GitHub App you must also have permissions
+> to write the contents of the head repository.
+
+So for an App -- our exact case -- merge needs `contents:write` ON TOP of
+`pull_requests:write`. Withholding `contents` therefore yields a token that can
+comment on a PR and cannot merge it, and the arithmetic floor covers the pair
+after all.
+
+DOCUMENTED, NOT YET MEASURED. This is read off GitHub's endpoint docs, and the
+whole build gate here is that a documented shape is not a recorded response. The
+confirming instrument is better than a guess though: GitHub returns
+`X-Accepted-GitHub-Permissions` on REST responses, naming what the endpoint
+required. Pin the merge endpoint's header value at pilot time and record it
+beside this table whichever way it lands.
+
+ONE EDGE THE NOTE IMPLIES: it says the HEAD repository. For a same-repo PR head
+and base coincide, so `contents:write` on the one installation is the whole
+story. For a PR FROM A FORK the head repo is the fork, which our App is probably
+not installed on -- so a fork PR may be unmergeable by an App token regardless
+of tier. That is a capability question, not a security one, and it should be
+discovered at pilot rather than at first use.
+
+SECOND DIMENSION, from the same source check: `repositories` /
+`repository_ids` (up to 500) scopes a minted token to named repos. Orthogonal to
+permissions, and it maps onto per-repo write-enabling filters -- so a handle can
+be arithmetic in two dimensions, not one.
+
 OPEN, and deliberately not decided here: whether the subset lives on the handle
 row or on a per-consumer grant record. The handle is the natural home because it
 is already what gets revoked, but nothing is built yet and the first real

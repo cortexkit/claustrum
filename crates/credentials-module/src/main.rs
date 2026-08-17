@@ -1066,6 +1066,19 @@ fn manifest(module_id: &str) -> ModuleManifest {
             // declaration was decoration. Both are proofs by construction: one counts
             // upstream calls, the other blocks each refresh on a two-party barrier so
             // a serialising engine HANGS rather than passing slowly.
+            //
+            // DECLARING IT EXPLICITLY CHANGES NOTHING ON THE WIRE TODAY, and that is
+            // worth knowing before someone treats a protocol bump as deploy pressure.
+            // `ManagementSurface.concurrency` carries `#[serde(default)]` upstream and
+            // `Default for Concurrency` is `ModuleManaged`, so a daemon built before the
+            // field existed registers with the same value this line states. Checked at
+            // source 2026-08-16 against subc-protocol 0.12 (ToolProvider has NO default
+            // -- new roles must declare it; only the pre-existing shape is defaulted).
+            //
+            // So an older deployed vault is safe across a supervisor upgrade: it neither
+            // fails to register nor gets a different concurrency contract. The value of
+            // saying it out loud is that the manifest stops depending on an upstream
+            // default staying what it is.
             concurrency: Concurrency::ModuleManaged,
             operations: vec![
                 ManagementOperation {

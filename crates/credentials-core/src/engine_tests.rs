@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::audit::AuditOp;
+use crate::audit::{AuditCtx, AuditOp};
 use crate::engine::{EngineError, ReauthReason, Reconciliation, RefreshEngine};
 use crate::key::{MasterKey, MASTER_KEY_LEN};
 use crate::oauth::OAuthCredential;
@@ -419,6 +419,62 @@ async fn invalid_grant_marks_needs_reauth() {
     match eng.store().get("id") {
         Err(StoreOpError::NeedsReauth) => {}
         other => panic!("expected NeedsReauth, got {other:?}"),
+    }
+    assert!(eng.store().read_intent("id").unwrap().is_none());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn reactivating_a_genuinely_dead_credential_returns_it_to_needs_reauth() {
+    // THE SAFETY ARGUMENT FOR EXPOSING `reactivate` AT ALL, and until now it was prose.
+    //
+    // The verb lets an operator contradict a needs_reauth verdict without touching the
+    // material, which is only defensible because a WRONG assertion is cheap: the vault
+    // re-verifies on next use, so a credential that really is dead comes straight back
+    // to needs_reauth and costs one failed request rather than serving a bad token.
+    //
+    // Nothing tested that. The store-level test covers the transition and the corrupt
+    // refusal; the self-correction spans store AND engine, so it lives here. Without it,
+    // an engine change that stopped marking on InvalidGrant would leave `reactivate` as
+    // a way to keep a dead credential permanently "active" -- exactly the failure the
+    // doc comment promises cannot happen.
+    let (root, d) = tmp_descriptor();
+    let store = open_store(&d, 9);
+    store.create("id", &stale_oauth_record()).unwrap();
+    let mut adapter = StubAdapter::new("stub");
+    adapter.fail = Some("invalid_grant");
+    let (eng, _calls) = engine(store, adapter);
+
+    // First death: the provider says the grant is gone.
+    let _ = eng.get("id", None, false).await.expect_err("must fail");
+    match eng.store().get("id") {
+        Err(StoreOpError::NeedsReauth) => {}
+        other => panic!("expected NeedsReauth after invalid_grant, got {other:?}"),
+    }
+
+    // An operator asserts it was marked in error. The vault takes the assertion.
+    let changed = eng
+        .store()
+        .reactivate_audited("id", AuditCtx::admin(AuditOp::Reactivate))
+        .expect("reactivate");
+    assert!(
+        changed,
+        "the reactivate must land, or the rest proves nothing"
+    );
+
+    // AND THE ASSERTION IS RE-TESTED AGAINST THE PROVIDER, not trusted. This is the
+    // arm that makes a wrong assertion cheap instead of permanent.
+    let err = eng
+        .get("id", None, false)
+        .await
+        .expect_err("a dead credential must fail again");
+    assert!(matches!(err, crate::engine::EngineError::RefreshFailed(_)));
+    match eng.store().get("id") {
+        Err(StoreOpError::NeedsReauth) => {}
+        other => panic!(
+            "a reactivated-but-dead credential must return to NeedsReauth on next use; \
+             got {other:?} -- reactivate would otherwise pin a dead credential active"
+        ),
     }
     assert!(eng.store().read_intent("id").unwrap().is_none());
     let _ = std::fs::remove_dir_all(&root);

@@ -155,6 +155,26 @@ pub trait HttpTransport: Send + Sync {
 
 /// A minimal HTTP response: status + body bytes (all an adapter needs to parse a
 /// token endpoint's reply).
+///
+/// WHETHER AN ADAPTER CARRIES `body` INTO ITS ERROR VALUE IS A DECISION, NOT A STYLE
+/// CHOICE, and it has to be made per adapter rather than once here.
+///
+/// Carrying it is usually right: a constant like "Cursor refresh failed" tells a
+/// diagnosing operator nothing the status did not already say, and a sibling module lost
+/// four hours on 2026-08-17 to a bare 403 whose body named the cause in one line the
+/// moment it was allowed to reach a log.
+///
+/// BUT A TOKEN ENDPOINT'S ERROR BODY CAN ECHO THE PARAMETERS YOU SENT IT, including the
+/// refresh token. That is why `AuthObservation::detail` is restricted to typed variant
+/// names, and why an error value that reaches the wire or a plaintext column must not
+/// carry a raw body. An error value that only reaches an operator's terminal can.
+///
+/// MEASURED 2026-08-17, so the state of this is known rather than assumed: `anthropic`,
+/// `google`, `antigravity` and `github_app` carry bodies into errors that stay local.
+/// `cursor`, `github_copilot`, `kimi` and `snowflake` substitute a constant and discard
+/// the vendor's explanation -- omissions rather than decisions, left alone deliberately
+/// because the safe fix is a bounded redacted detail on the operator-only path, and a
+/// redactor for arbitrary provider bodies is how a token reaches a log.
 #[derive(Debug, Clone)]
 pub struct HttpResponse {
     /// HTTP status code.

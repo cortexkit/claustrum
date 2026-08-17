@@ -1284,6 +1284,74 @@ impl EncryptedStore {
         self.set_state(credential_id, RecordState::NeedsReauth, false, None)
     }
 
+    /// Clear `needs_reauth` back to active WITHOUT touching the stored material.
+    ///
+    /// THE REPAIR PATH FOR A VERDICT THAT WAS WRONG. `needs_reauth` is a claim about the
+    /// OUTSIDE WORLD -- a provider rejected us, or a consumer said one did -- and the
+    /// outside world can be misreported. On 2026-08-17 a consumer relayed GitHub's 403
+    /// ("this token is valid and lacks one permission") as an auth failure, and a
+    /// seconds-old, perfectly good App credential went dead.
+    ///
+    /// Without this verb that state was UNRECOVERABLE for the class it hit hardest.
+    /// GitHub App keys are shredded after deposit by the vault's own custody rule, so
+    /// the vault holds the only copy: `put --replace` needs a PEM nobody has, and no
+    /// login flow exists to re-mint one. Repairing material the vault already held
+    /// intact would have required a fresh key from GitHub and an operator at a browser.
+    /// A consumer's mistaken report could force a human ceremony.
+    ///
+    /// ONLY FROM `NeedsReauth`, never from `Corrupt`, and the distinction is the whole
+    /// safety argument. Corrupt is a claim about OUR OWN BYTES -- they failed to decrypt,
+    /// or the payload was empty -- which this vault verified itself and which clearing
+    /// cannot fix; it would only put known-broken bytes back into service. Reactivating a
+    /// corrupt record is refused rather than silently ignored.
+    ///
+    /// SELF-CORRECTING BY CONSTRUCTION, which is why it is safe to expose. The operator
+    /// asserts the material is good; the vault verifies on next use. If the credential
+    /// really is dead, a refreshable record's next `get` gets `InvalidGrant` from the
+    /// provider and returns to `needs_reauth` on its own, and a static record's consumer
+    /// reports again. The cost of a wrong assertion is one failed call, not a bad state
+    /// that persists.
+    ///
+    /// Guarded as a TRANSITION: reactivating an already-active credential changes nothing
+    /// and writes nothing, so a retry loop cannot append to the untrimmable audit chain.
+    pub fn reactivate_audited(
+        &self,
+        credential_id: &str,
+        ctx: AuditCtx<'_>,
+    ) -> Result<bool, StoreOpError> {
+        let now = now_ms();
+        let audit_key = self.audit_key.clone();
+        self.fenced_write(|tx| {
+            // The state predicate is IN the UPDATE, so the guard cannot be defeated by a
+            // concurrent writer between a read and a write.
+            let n = tx.execute(
+                "UPDATE credentials SET state = ?2, updated_at_ms = ?3 \
+                 WHERE credential_id = ?1 AND state = ?4",
+                rusqlite::params![
+                    credential_id,
+                    RecordState::Active.as_str(),
+                    now,
+                    RecordState::NeedsReauth.as_str()
+                ],
+            )?;
+            if n > 0 {
+                append_audit_tx(
+                    tx,
+                    &audit_key,
+                    &AuditRecord {
+                        op: ctx.op,
+                        credential_id: Some(credential_id.to_string()),
+                        payload_hash: None,
+                        actor: ctx.actor.to_string(),
+                        alarm: ctx.alarm,
+                    },
+                )?;
+            }
+            Ok(n > 0)
+        })
+        .map_err(StoreOpError::from)
+    }
+
     fn set_state(
         &self,
         credential_id: &str,
@@ -3360,6 +3428,68 @@ mod tests {
         let health = crate::health::VaultHealth::summarize(&metas, 0, store.is_fenced_out());
         assert_eq!(health.status, crate::health::VaultHealthStatus::Failing);
         assert!(health.fenced_out);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Reactivate clears needs_reauth, leaves the SECRET alone, and refuses corrupt.
+    ///
+    /// Three properties in one test because they are one guarantee: this verb contradicts
+    /// a VERDICT, it never repairs BYTES. Corrupt is excluded precisely because it IS a
+    /// claim about our own bytes -- clearing it would return known-broken material to
+    /// service, and no operator assertion makes an undecryptable envelope decrypt.
+    #[test]
+    fn reactivate_clears_needs_reauth_without_touching_the_secret_and_refuses_corrupt() {
+        let (root, store) = tmp_store(7);
+        let rec =
+            VaultRecord::new_static(CredentialKind::ApiKey, "test", b"the-secret".to_vec(), None);
+        store.create("live", &rec).expect("create");
+        store.create("broken", &rec).expect("create broken");
+
+        store
+            .invalidate_and_revoke_all_audited("live", AuditCtx::admin(AuditOp::Invalidate))
+            .expect("invalidate");
+        assert!(matches!(
+            store.meta("live").expect("meta").state,
+            RecordState::NeedsReauth
+        ));
+
+        let changed = store
+            .reactivate_audited("live", AuditCtx::admin(AuditOp::Reactivate))
+            .expect("reactivate");
+        assert!(changed, "a needs_reauth credential must reactivate");
+        assert!(matches!(
+            store.meta("live").expect("meta").state,
+            RecordState::Active
+        ));
+        assert_eq!(
+            store.get("live").expect("read back").payload,
+            b"the-secret".to_vec(),
+            "reactivate must not disturb the stored material"
+        );
+
+        // A TRANSITION, not a repeatable write: a retry loop must not append to the
+        // untrimmable audit chain.
+        let again = store
+            .reactivate_audited("live", AuditCtx::admin(AuditOp::Reactivate))
+            .expect("second reactivate");
+        assert!(!again, "reactivating an active credential must be a no-op");
+
+        // CORRUPT IS REFUSED. The arm that keeps the verb honest.
+        store.quarantine("broken").expect("quarantine");
+        let corrupt_changed = store
+            .reactivate_audited("broken", AuditCtx::admin(AuditOp::Reactivate))
+            .expect("reactivate corrupt");
+        assert!(
+            !corrupt_changed,
+            "a corrupt record must NOT reactivate: its own bytes failed"
+        );
+        assert!(
+            matches!(
+                store.meta("broken").expect("meta").state,
+                RecordState::Corrupt
+            ),
+            "the corrupt record must still be corrupt"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

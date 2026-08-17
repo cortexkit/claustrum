@@ -49,6 +49,14 @@ pub enum AuditOp {
     /// A credential row was permanently removed (its audit history is retained —
     /// removal deletes the row, never the chain).
     Remove,
+    /// An operator cleared `needs_reauth` back to active WITHOUT touching the stored
+    /// material — the assertion that the credential was marked dead in error.
+    ///
+    /// Distinct from `Put`/`Overwrite` on purpose: those replace the secret, this one
+    /// only contradicts a verdict about it. An incident review asking "was this
+    /// credential re-keyed or merely un-marked?" gets different answers, and the chain
+    /// has to be able to tell them apart.
+    Reactivate,
     /// A capability handle was minted.
     MintHandle,
     /// A capability handle (or all for a credential) was revoked.
@@ -71,6 +79,7 @@ impl AuditOp {
             AuditOp::RefreshCommit => "refresh_commit",
             AuditOp::ReportAuthFailure => "report_auth_failure",
             AuditOp::Remove => "remove",
+            AuditOp::Reactivate => "reactivate",
             AuditOp::MintHandle => "mint_handle",
             AuditOp::RevokeHandle => "revoke_handle",
             AuditOp::FetchAnomaly => "fetch_anomaly",

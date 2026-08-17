@@ -39,6 +39,16 @@ pub enum AdminOpBody {
     },
     #[serde(rename = "admin.invalidate")]
     Invalidate { v: u32, id: String },
+    /// Clear `needs_reauth` back to active WITHOUT replacing the stored material: the
+    /// operator asserting the credential was marked dead in error.
+    ///
+    /// The counterpart to `Invalidate`, and NOT a substitute for `Store` -- it changes
+    /// no secret, only a verdict about one. Exists because a mistaken consumer report
+    /// could otherwise strand material the vault holds intact: a GitHub App key is
+    /// shredded after deposit by custody rule, so there is no copy to re-put and no
+    /// login flow to re-mint, and recovering would need a browser ceremony.
+    #[serde(rename = "admin.reactivate")]
+    Reactivate { v: u32, id: String },
     /// PERMANENT removal: delete the credential row, its intent, and its handles
     /// (audited; the chain keeps the history). `logout` (invalidate) is the
     /// reversible sibling — remove is for retiring an account or cleaning up a
@@ -66,6 +76,7 @@ impl AdminOpBody {
         match self {
             AdminOpBody::Store { v, .. }
             | AdminOpBody::Invalidate { v, .. }
+            | AdminOpBody::Reactivate { v, .. }
             | AdminOpBody::Remove { v, .. }
             | AdminOpBody::MintHandle { v, .. }
             | AdminOpBody::RevokeHandle { v, .. }
@@ -81,6 +92,7 @@ impl AdminOpBody {
         match self {
             AdminOpBody::Store { id, .. }
             | AdminOpBody::Invalidate { id, .. }
+            | AdminOpBody::Reactivate { id, .. }
             | AdminOpBody::Remove { id, .. }
             | AdminOpBody::MintHandle { id, .. }
             | AdminOpBody::RevokeAllHandles { id, .. } => Some(id),
@@ -166,6 +178,15 @@ pub fn apply(
                 "state_changed": outcome.state_changed,
                 "intent_cleared": outcome.intent_cleared,
             }))
+        }
+        AdminOpBody::Reactivate { id, .. } => {
+            let ctx = AuditCtx::route_admin(AuditOp::Reactivate, actor);
+            let state_changed = store.reactivate_audited(&id, ctx)?;
+            // `state_changed` rides the wire for the same reason it does on invalidate:
+            // without it, a no-op (already active, or corrupt and refused) is
+            // indistinguishable from a real repair, and an operator would read success
+            // as "the credential is back" when nothing happened.
+            Ok(serde_json::json!({ "state_changed": state_changed }))
         }
         AdminOpBody::Remove { id, .. } => {
             let ctx = AuditCtx::route_admin(AuditOp::Remove, actor);

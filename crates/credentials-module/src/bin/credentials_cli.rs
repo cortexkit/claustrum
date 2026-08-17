@@ -216,6 +216,7 @@ fn run() -> Result<(), CliError> {
         "import" => cmd_import(&global, &args),
         "login" => cmd_login(&global, &args),
         "invalidate" => cmd_invalidate(&global, &args),
+        "reactivate" => cmd_reactivate(&global, &args),
         "logout" => cmd_logout(&global, &args),
         "remove" => cmd_remove(&global, &args),
         "status" => cmd_status(&global),
@@ -284,7 +285,7 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
         ],
         "import" => &["--source", "--provider", "--id", "--json", "--adapter"],
         "login" => &["--provider", "--id", "--payload-file", "--account"],
-        "invalidate" | "mint-handle" | "revoke-all-handles" | "remove" => &["--id"],
+        "invalidate" | "reactivate" | "mint-handle" | "revoke-all-handles" | "remove" => &["--id"],
         "logout" => &["--provider", "--id"],
         "revoke-handle" => &["--handle"],
         "audit" => &["--limit"],
@@ -340,6 +341,7 @@ fn usage_short() -> String {
        revoke-handle       revoke one capability handle\n\
        revoke-all-handles  revoke every handle for a credential\n\
        invalidate          mark a credential needs-reauth\n\
+       reactivate          clear needs-reauth without replacing the secret\n\
        audit               print the audit chain\n\
        events              why credentials failed to authenticate\n\
        usable              which credentials can still serve or refresh\n\
@@ -453,6 +455,17 @@ fn help_verb(verb: &str) -> String {
              \n\
              Revoke every capability handle for a credential in one audited step. The\n\
              record itself is untouched (still refreshable; mint new handles later)."
+        }
+        "reactivate" => {
+            "ck auth reactivate --id <id>\n\
+             \n\
+             Clear needs-reauth WITHOUT replacing the secret: the operator asserting the\n\
+             credential was marked dead in error (a consumer can misreport a provider's\n\
+             refusal). The stored material is untouched, so this is not a re-login.\n\
+             \n\
+             Self-correcting: the next use verifies it, and a credential that really is\n\
+             dead returns to needs-reauth on its own. Refused for `corrupt` records —\n\
+             those failed our own integrity check and only a re-deposit fixes them."
         }
         "invalidate" => {
             "ck auth invalidate --id <id>\n\
@@ -1948,6 +1961,40 @@ fn cmd_invalidate(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> 
     )?;
     let revoked = result["handles_revoked"].as_u64().unwrap_or(0);
     println!("invalidated {id}; revoked {revoked} handle(s)");
+    Ok(())
+}
+
+/// `reactivate` = clear `needs_reauth` back to active WITHOUT replacing the secret.
+///
+/// The repair for a verdict that was wrong rather than for a credential that is. It
+/// exists because that state was otherwise unrecoverable for material the vault holds
+/// the only copy of: a GitHub App key is shredded after deposit by custody rule, so
+/// `put --replace` has no PEM to read and no login flow can re-mint one, and a mistaken
+/// consumer report could force an operator back to a browser to repair bytes that were
+/// never damaged.
+///
+/// Refuses from `corrupt` by design -- that is a claim about our own bytes, which this
+/// vault verified itself, and clearing it would return known-broken material to service.
+fn cmd_reactivate(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
+    let id = required(args, "--id")?;
+    let result = commit_admin(
+        global,
+        AdminOpBody::Reactivate {
+            v: ADMIN_OP_SCHEMA_V1,
+            id: id.clone(),
+        },
+    )?;
+    if result["state_changed"].as_bool().unwrap_or(false) {
+        println!("reactivated {id}: needs_reauth cleared, material untouched");
+        println!("  the next use verifies it; if the credential really is dead it returns to");
+        println!("  needs_reauth on its own, so a wrong call costs one failed request.");
+    } else {
+        // A no-op has two causes and the operator needs to know WHICH, because one is
+        // benign and the other means they reached for the wrong verb.
+        println!("reactivated nothing: {id} was not in needs_reauth");
+        println!("  already active, unknown, or corrupt. Corrupt is refused here because the");
+        println!("  bytes themselves failed, and only a re-deposit fixes that.");
+    }
     Ok(())
 }
 

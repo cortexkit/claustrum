@@ -54,6 +54,96 @@ fn cli() -> Command {
 /// Driven through the real binary, because the ordering fix lives in argv handling
 /// before dispatch: a unit test calling the helper directly passes whether or not
 /// anything invokes it.
+/// A github_app deposit must NOT land as a static record.
+///
+/// Static is what `put` builds for every other kind, and it is precisely wrong here:
+/// `credential.get` would serve the PEM verbatim, and a consumer putting newline-laden
+/// key material into an HTTP header fails before the wire. That is the failure plexus
+/// hit on 2026-08-17, and this asserts the SHAPE that prevents it rather than the CLI's
+/// success message -- "created" printed identically for the broken shape.
+#[test]
+fn a_github_app_deposit_lands_oauth_shaped_rather_than_static() {
+    let rig = tmp_root("github-app-put");
+    std::fs::create_dir_all(&rig).unwrap();
+    let key = rig.join("master.key");
+    std::fs::write(&key, "11".repeat(32)).unwrap();
+    let data_dir = rig.join("vault");
+    let pem = rig.join("app.pem");
+    // Shape only -- this test never signs, so PEM-looking text is enough.
+    std::fs::write(
+        &pem,
+        "-----BEGIN PRIVATE KEY-----\nQUJD\n-----END PRIVATE KEY-----",
+    )
+    .unwrap();
+
+    let run = |args: &[&str]| {
+        let out = cli()
+            .args([
+                "--data-dir",
+                data_dir.to_str().unwrap(),
+                "--key-path",
+                key.to_str().unwrap(),
+            ])
+            .args(args)
+            .output()
+            .expect("cli runs");
+        (
+            String::from_utf8_lossy(&out.stdout).to_string(),
+            String::from_utf8_lossy(&out.stderr).to_string(),
+        )
+    };
+
+    run(&["bootstrap"]);
+    let (stdout, stderr) = run(&[
+        "put",
+        "--id",
+        "github_app:probe",
+        "--payload-file",
+        pem.to_str().unwrap(),
+        "--client-id",
+        "Iv23TESTCLIENT",
+    ]);
+    assert!(
+        stdout.contains("created"),
+        "deposit failed: {stdout}{stderr}"
+    );
+
+    // `usable` renders the record KIND, which is the observable separating the two
+    // shapes: an oauth row mints on get, a static row serves its bytes forever.
+    let (listed, _) = run(&["usable"]);
+    let row = listed
+        .lines()
+        .find(|l| l.contains("github_app:probe"))
+        .unwrap_or_else(|| panic!("no github_app row in:\n{listed}"));
+    assert!(
+        row.contains("oauth"),
+        "a github_app deposit must be oauth-shaped so it can mint; got: {row}"
+    );
+
+    // Both refusals: a github_app record with no client_id could never mint, so it must
+    // not be creatable at all, and client_id is meaningless on a static kind.
+    let (_, e1) = run(&[
+        "put",
+        "--id",
+        "apikey:x",
+        "--payload",
+        "y",
+        "--client-id",
+        "z",
+    ]);
+    assert!(e1.contains("only to a github_app"), "got: {e1}");
+    let (_, e2) = run(&[
+        "put",
+        "--id",
+        "github_app:y",
+        "--payload-file",
+        pem.to_str().unwrap(),
+    ]);
+    assert!(e2.contains("needs --client-id"), "got: {e2}");
+
+    let _ = std::fs::remove_dir_all(&rig);
+}
+
 #[test]
 fn a_global_flag_before_the_verb_reaches_the_same_vault_as_one_after_it() {
     let root = tmp_root("flag-order");

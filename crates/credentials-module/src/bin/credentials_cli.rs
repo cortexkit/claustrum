@@ -277,6 +277,10 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
             "--kind",
             "--expires-ms",
             "--expected-hash",
+            // github_app deposits only: the App JWT issuer. A flag handled in cmd_put
+            // but missing HERE is rejected before cmd_put ever runs, so this list and
+            // that handler have to move together.
+            "--client-id",
         ],
         "import" => &["--source", "--provider", "--id", "--json", "--adapter"],
         "login" => &["--provider", "--id", "--payload-file", "--account"],
@@ -643,6 +647,37 @@ fn cmd_put(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             ))
         }
     };
+    // A GitHub App deposit is the one `put` that must NOT produce a static record.
+    //
+    // The App private key is a DURABLE credential that mints short-lived installation
+    // tokens -- structurally the refresh-token/access-token relationship, so it belongs
+    // in the OAuth shape where the engine's single-flight, expiry and version-CAS
+    // machinery already lives. Stored static instead, `credential.get` serves the PEM
+    // verbatim; a consumer then puts newline-laden key material into an HTTP header and
+    // fails before the wire. That is not hypothetical -- it is what plexus hit on
+    // 2026-08-17, and the reason this branch exists.
+    //
+    // `--client-id` is what selects the shape, because the adapter cannot mint without
+    // it: it is the App JWT's `iss`. Requiring it here means a github_app record cannot
+    // be created in a state that can never serve.
+    let client_id = optional(args, "--client-id");
+    let is_github_app = id.starts_with("github_app:");
+    match (&client_id, is_github_app) {
+        (Some(_), false) => {
+            return Err(CliError::Usage(
+                "--client-id applies only to a github_app:<slug> id".to_string(),
+            ))
+        }
+        (None, true) => {
+            return Err(CliError::Usage(
+                "a github_app deposit needs --client-id <app client id> (the App JWT issuer); \
+                 without it the record can never mint a token"
+                    .to_string(),
+            ))
+        }
+        _ => {}
+    }
+
     let kind = match optional(args, "--kind").as_deref() {
         None | Some("api_key") => CredentialKind::ApiKey,
         Some("dsn") => CredentialKind::Dsn,
@@ -658,7 +693,30 @@ fn cmd_put(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
         .transpose()
         .map_err(|e| CliError::Usage(format!("--expires-ms not an integer: {e}")))?;
 
-    let record = VaultRecord::new_static(kind, "operator", payload, expires_at_ms);
+    let record = match client_id {
+        Some(client_id) => {
+            // Empty access_token on purpose: `is_stale` short-circuits an empty access
+            // token to stale, so the FIRST get mints rather than serving nothing. The
+            // empty payload is legal here for the same reason it is legal for a
+            // refresh-only OAuth import -- the non-empty-payload invariant guards
+            // records that have no way to fill themselves, and this one refreshes.
+            //
+            // token_url stays empty because this adapter pins GitHub's endpoints as
+            // constants rather than reading them off the record.
+            let oauth = credentials_core::oauth::OAuthCredential {
+                access_token: String::new(),
+                refresh_token: String::from_utf8(payload).map_err(|_| {
+                    CliError::Usage("the App private key must be UTF-8 PEM text".to_string())
+                })?,
+                expires_at_ms: None,
+                token_url: String::new(),
+                client_id: Some(client_id),
+                scopes: Vec::new(),
+            };
+            VaultRecord::new_oauth("operator", "github_app", oauth, Vec::new())
+        }
+        None => VaultRecord::new_static(kind, "operator", payload, expires_at_ms),
+    };
     // CREATE-ONLY by default. An overwrite is either an explicit --expected-hash CAS
     // (concurrency-safe: fails if the record changed under you) or --replace
     // (unconditional: bumps record_version, keeps existing handles). --replace is the

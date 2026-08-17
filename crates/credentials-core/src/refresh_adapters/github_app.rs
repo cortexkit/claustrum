@@ -26,7 +26,19 @@ pub const ADAPTER_NAME: &str = "github_app";
 
 const GITHUB_ACCEPT: &str = "application/vnd.github+json";
 const GITHUB_API_VERSION: &str = "2022-11-28";
-const USER_AGENT: &str = "cortexkit-credentials";
+/// Sent on every GitHub call because the REST API REFUSES a request without one, with
+/// `403 "Request forbidden by administrative rules..."` -- a status indistinguishable
+/// from a permission refusal, which is how it cost a sibling module hours on
+/// 2026-08-17. `reqwest` sends none unless configured.
+///
+/// Enforcement VARIES BY ENDPOINT on this vendor (GitHub's MCP surface does not require
+/// it), so "our calls work today" is not evidence that a new endpoint will accept them.
+/// The test asserts it on the captured request rather than reading this constant.
+///
+/// Value is a plain module identifier: GitHub asks for a name it can contact an operator
+/// about, and any non-empty string satisfies the check. Safe to rename -- unlike the
+/// keychain-service and AAD domain strings, nothing is derived from it.
+const USER_AGENT: &str = "claustrum";
 const JWT_BACKDATE_SECS: i64 = 60;
 const JWT_LIFETIME_SECS: i64 = 9 * 60;
 
@@ -528,6 +540,57 @@ mod tests {
             format!("{err}").contains("EC PRIVATE KEY"),
             "the refusal must name what was found; got {err}"
         );
+    }
+
+    /// EVERY GitHub call must carry a User-Agent, on the wire, not in a constant.
+    ///
+    /// GitHub's REST API refuses a request without one -- `403 "Request forbidden by
+    /// administrative rules. Please make sure your request has a User-Agent header"` --
+    /// and `reqwest` sends none unless configured. A peer lost hours to exactly this on
+    /// 2026-08-17: five hypotheses eliminated from the outside because a bare 403 is
+    /// compatible with all of them, and the body named the cause in one line.
+    ///
+    /// WHY OUR SUCCESS DOES NOT PROVE OUR SAFETY, which is the reason this test exists:
+    /// enforcement VARIES BY ENDPOINT on this vendor. GitHub's MCP surface does not
+    /// enforce it, and the peer's REST path did. So an adapter can pass every live call
+    /// it happens to make today and fail the moment it reaches a stricter endpoint --
+    /// installation discovery and the token exchange are two different paths, and this
+    /// asserts BOTH rather than trusting that a shared helper stays shared.
+    ///
+    /// Asserted on the CAPTURED REQUEST, never on the constant: a test that reads
+    /// `USER_AGENT` proves a value is stored, not that a vendor would see it.
+    #[tokio::test]
+    async fn every_github_request_carries_a_user_agent_because_the_api_refuses_without_one() {
+        let http = fixture_transport(vec![
+            (200, RECORDED_INSTALLATIONS),
+            (201, RECORDED_ACCESS_TOKENS),
+        ]);
+        let adapter = GithubAppAdapter::default();
+        let _ = adapter.refresh(&credential(), &http).await;
+
+        let requests = http.requests();
+        assert!(
+            requests.len() >= 2,
+            "expected discovery AND exchange to be attempted; got {}",
+            requests.len()
+        );
+        for request in requests.iter() {
+            let ua = request
+                .headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("user-agent"));
+            assert!(
+                ua.is_some(),
+                "no User-Agent on {} -- GitHub answers 403 with an administrative-rules \
+                 message, which is indistinguishable from a permission refusal",
+                request.url
+            );
+            assert!(
+                !ua.expect("checked").1.is_empty(),
+                "an empty User-Agent is refused the same as a missing one: {}",
+                request.url
+            );
+        }
     }
 
     /// A GitHub 401 must be TRANSIENT, never a permanent needs_reauth.

@@ -1265,6 +1265,26 @@ impl EncryptedStore {
     /// failure; idempotent. Does NOT clear a refresh intent or audit — quarantine is
     /// an internal integrity flip, not a recorded mutation, and a corrupt record's
     /// intent (if any) is for reconciliation to resolve, not for this path to discard.
+    /// ITS INVERSE EXISTS UNDER A DIFFERENT NAME, which is worth saying because a reader
+    /// counting absences will otherwise reach the wrong conclusion in one of two ways.
+    ///
+    /// There is no un-quarantine, and `reactivate_audited` refuses `Corrupt` on purpose:
+    /// this state means the sealed bytes failed their own integrity check, and no
+    /// assertion makes an undecryptable envelope decrypt. But the record is NOT lost --
+    /// `put --replace` (overwrite-unconditional) writes fresh material into the same id,
+    /// clearing the state as a side effect and keeping the credential's audit lineage and
+    /// its handles.
+    ///
+    /// THE EXPENSIVE MISREADING IS THE QUIET ONE. A reader who concludes a corrupt record
+    /// is unrecoverable reaches for `remove`, which DELETEs the row and its handles -- so
+    /// every consumer holding a handle loses it, and for a platform-issued key the repair
+    /// becomes a fresh operator ceremony rather than one command. Replace repairs in
+    /// place; remove escalates a fixable state into a ceremony.
+    ///
+    /// So the three shapes of a missing inverse each need their own note: DECLINED (handle
+    /// revocation -- implementable, refused, arguable), IMPOSSIBLE (`remove` -- the bytes
+    /// are gone), and RENAMED (this one -- it exists, under a name that does not look like
+    /// an inverse).
     pub fn quarantine(&self, credential_id: &str) -> Result<(), StoreOpError> {
         self.set_state(credential_id, RecordState::Corrupt, false, None)
     }
@@ -3472,6 +3492,48 @@ mod tests {
         let health = crate::health::VaultHealth::summarize(&metas, 0, store.is_fenced_out());
         assert_eq!(health.status, crate::health::VaultHealthStatus::Failing);
         assert!(health.fenced_out);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A corrupt record is repaired by REPLACE, not by an inverse of quarantine.
+    ///
+    /// Pins the claim the quarantine doc comment makes, because a comment describing a
+    /// repair path is worth less than a test that fails if the path closes. The costly
+    /// misreading is quiet: a reader who believes corrupt is unrecoverable reaches for
+    /// `remove`, which deletes the row and every handle with it, turning a one-command
+    /// fix into an operator ceremony for a platform-issued key.
+    #[test]
+    fn a_corrupt_record_is_repaired_by_replace_and_keeps_its_handles() {
+        let (root, store) = tmp_store(11);
+        let rec = VaultRecord::new_static(CredentialKind::ApiKey, "test", b"one".to_vec(), None);
+        store.create("id", &rec).expect("create");
+        let handle = mint_handle().expect("mint");
+        store
+            .put_handle_hash(&handle.hash, "id", AuditCtx::admin(AuditOp::MintHandle))
+            .expect("put handle");
+        store.quarantine("id").expect("quarantine");
+        assert!(matches!(
+            store.meta("id").expect("meta").state,
+            RecordState::Corrupt
+        ));
+
+        let fresh = VaultRecord::new_static(CredentialKind::ApiKey, "test", b"two".to_vec(), None);
+        store
+            .overwrite_unconditional_audited("id", &fresh, AuditCtx::admin(AuditOp::Put))
+            .expect("replace");
+
+        let meta = store.meta("id").expect("meta");
+        assert!(
+            matches!(meta.state, RecordState::Active),
+            "replace must clear corrupt, or the doc comment is lying about the repair path"
+        );
+        assert_eq!(store.get("id").expect("read back").payload, b"two".to_vec());
+        // The handle survives -- which is the whole reason replace beats remove here.
+        assert_eq!(
+            store.resolve_handle(&handle.raw).expect("resolve"),
+            "id",
+            "the repair must not cost consumers their handles"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -2738,22 +2738,20 @@ fn discover_subc_connection_file() -> Option<PathBuf> {
 /// another user's daemon.
 fn temp_dir_connection_file() -> Option<PathBuf> {
     let dir = std::env::temp_dir();
-    let mut found: Vec<PathBuf> = std::fs::read_dir(&dir)
-        .ok()?
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with("subc-") && n.ends_with(".connection.json"))
-                && p.is_file()
-        })
-        .collect();
-    match found.len() {
-        1 => found.pop(),
-        0 => None,
-        _ => {
-            found.sort();
+    match connection_file_in(&dir) {
+        ConnectionSearch::Found(p) => Some(p),
+        // The ordinary answer: no daemon, take the offline path silently.
+        ConnectionSearch::NotPresent => None,
+        ConnectionSearch::Unreadable(e) => {
+            eprintln!(
+                "note: could not read {} while looking for a running daemon ({e}). \
+                 Proceeding as if none is running; if one IS running, pass \
+                 --subc <connection-file> rather than stopping it.",
+                dir.display()
+            );
+            None
+        }
+        ConnectionSearch::Ambiguous(found) => {
             eprintln!(
                 "note: {} subc connection files in {} -- not guessing which daemon is \
                  yours. Pass --subc <connection-file> to choose:",
@@ -2765,6 +2763,103 @@ fn temp_dir_connection_file() -> Option<PathBuf> {
             }
             None
         }
+    }
+}
+
+/// What a search of one directory found. An ENUM rather than `Option` because the
+/// three outcomes need different operator responses and `None` erases the difference:
+/// "nothing here" is the ordinary no-daemon case, while "could not look" and "several
+/// candidates" both mean a running daemon may be reachable and the offline path is
+/// about to give bad advice.
+///
+/// The distinction lives in the TYPE, not in an eprintln, for a reason measured on
+/// this very function: with both arms returning `None`, a test asserting `None`
+/// passes whether the error is reported or discarded -- I wrote exactly that test,
+/// claimed it was mutation-proof in its own comment, and the mutation survived.
+/// A difference only visible on stderr is a difference no test can hold.
+#[derive(Debug, PartialEq)]
+enum ConnectionSearch {
+    Found(PathBuf),
+    /// Directory readable, no candidate present. The ordinary "no daemon" answer.
+    NotPresent,
+    /// The directory could not be read. NOT the same as absent: an inability to get
+    /// an answer is not an answer, and treating it as one sends the caller offline
+    /// into a lease refusal whose advice is to stop a daemon that may be serving.
+    Unreadable(String),
+    /// Several candidates. The per-user token exists so different OS users do not
+    /// collide, so more than one means they belong to different users and picking
+    /// one could point an admin op at someone else's daemon.
+    Ambiguous(Vec<PathBuf>),
+}
+
+/// The searchable half, split out so every arm can be TESTED.
+///
+/// Driving this through the CLI cannot reach it: auto-discovery is gated on
+/// `--data-dir` being defaulted, so any invocation that pins a data dir -- which a
+/// test must, to avoid touching the operator's vault -- skips discovery entirely.
+/// Three probes read as clean before I noticed the gate was mine.
+fn connection_file_in(dir: &std::path::Path) -> ConnectionSearch {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) => return ConnectionSearch::Unreadable(e.to_string()),
+    };
+    let mut found: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("subc-") && n.ends_with(".connection.json"))
+                && p.is_file()
+        })
+        .collect();
+    match found.len() {
+        1 => ConnectionSearch::Found(found.pop().expect("len checked")),
+        0 => ConnectionSearch::NotPresent,
+        _ => {
+            found.sort();
+            ConnectionSearch::Ambiguous(found)
+        }
+    }
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    use super::{connection_file_in, ConnectionSearch};
+
+    /// An unreadable directory must not read as "no daemon is running".
+    ///
+    /// The arm this covers was `.ok()?` -- a real I/O error discarded and returned as
+    /// the same `None` an empty directory produces, so the caller took the offline
+    /// path, hit the single-writer lease, and told the operator to STOP THE DAEMON.
+    ///
+    /// This assertion discriminates because the outcomes are different VARIANTS.
+    /// Mutation-verified: collapsing the error arm back to a not-present result reds
+    /// this by name. The earlier `Option`-returning version of this same test survived
+    /// that mutation, which is why the enum exists.
+    #[test]
+    fn an_unreadable_search_dir_is_not_reported_as_absent() {
+        let missing = std::path::Path::new("/definitely/not/a/real/dir/ckcred-probe");
+        assert!(
+            !missing.exists(),
+            "probe path must not exist or this proves nothing"
+        );
+        assert!(
+            matches!(connection_file_in(missing), ConnectionSearch::Unreadable(_)),
+            "an unreadable directory must be distinguishable from an empty one"
+        );
+    }
+
+    /// POSITIVE CONTROL for the test above: a readable directory with no candidates
+    /// must be NotPresent, so the Unreadable assertion cannot pass by everything
+    /// returning the same variant.
+    #[test]
+    fn a_readable_dir_without_candidates_is_not_present() {
+        let empty = std::env::temp_dir().join(format!("ckcred-empty-{}", std::process::id()));
+        std::fs::create_dir_all(&empty).unwrap();
+        let got = connection_file_in(&empty);
+        let _ = std::fs::remove_dir_all(&empty);
+        assert_eq!(got, ConnectionSearch::NotPresent);
     }
 }
 

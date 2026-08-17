@@ -33,6 +33,8 @@ pub enum AuthMethod {
     Chatgpt,
     /// GitHub Copilot OAuth backed by a durable GitHub grant.
     Copilot,
+    /// GitHub App private key that refreshes into a short-lived installation token.
+    GithubApp,
 }
 
 impl AuthMethod {
@@ -45,6 +47,7 @@ impl AuthMethod {
             "antigravity" => Some(AuthMethod::Antigravity),
             "chatgpt" => Some(AuthMethod::Chatgpt),
             "copilot" => Some(AuthMethod::Copilot),
+            "github_app" => Some(AuthMethod::GithubApp),
             _ => None,
         }
     }
@@ -57,6 +60,7 @@ impl AuthMethod {
             AuthMethod::Antigravity => "antigravity",
             AuthMethod::Chatgpt => "chatgpt",
             AuthMethod::Copilot => "copilot",
+            AuthMethod::GithubApp => "github_app",
         }
     }
 
@@ -134,12 +138,14 @@ pub fn parse_credential_id(id: &str) -> ParsedCredentialId {
 /// - antigravity → `antigravity`
 /// - chatgpt → `openai` (refreshed via the openai token endpoint)
 /// - apikey → `None` (static)
+/// - github_app → `github_app` (App assertion to installation-token exchange)
 pub fn default_refresh_adapter(method: Option<AuthMethod>, provider: &str) -> Option<String> {
     match method {
         None | Some(AuthMethod::Oauth) => Some(provider.to_string()),
         Some(AuthMethod::Antigravity) => Some("antigravity".to_string()),
         Some(AuthMethod::Chatgpt) => Some("openai".to_string()),
         Some(AuthMethod::Copilot) => Some("github-copilot".to_string()),
+        Some(AuthMethod::GithubApp) => Some("github_app".to_string()),
         Some(AuthMethod::ApiKey) => None,
     }
 }
@@ -167,6 +173,10 @@ mod tests {
         assert_eq!(k.method, Some(AuthMethod::ApiKey));
         assert_eq!(k.provider, "openai");
         assert_eq!(k.account.as_deref(), Some("work"));
+
+        let app = parse_credential_id("github_app:plex-alfonso");
+        assert_eq!(app.method, Some(AuthMethod::GithubApp));
+        assert_eq!(app.provider, "plex-alfonso");
     }
 
     #[test]
@@ -207,6 +217,11 @@ mod tests {
             "copilot → GitHub Copilot bearer exchange"
         );
         assert_eq!(
+            default_refresh_adapter(Some(AuthMethod::GithubApp), "plex-alfonso"),
+            Some("github_app".to_string()),
+            "github_app → App JWT to installation-token exchange"
+        );
+        assert_eq!(
             default_refresh_adapter(Some(AuthMethod::ApiKey), "deepseek"),
             None,
             "apikey → static, no adapter"
@@ -215,6 +230,14 @@ mod tests {
             default_refresh_adapter(None, "anthropic"),
             Some("anthropic".to_string()),
             "legacy → provider-named oauth adapter"
+        );
+    }
+
+    #[test]
+    fn github_app_credentials_select_the_github_app_refresh_adapter() {
+        assert_eq!(
+            default_refresh_adapter(Some(AuthMethod::GithubApp), "plex-alfonso"),
+            Some("github_app".to_string())
         );
     }
 }

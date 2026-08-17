@@ -94,3 +94,6 @@ hmac = "0.12"
 # ECDSA signature that APNs rejects, so the encoding is part of the contract.
 p256 = { version = "0.13", features = ["ecdsa", "pem"] }
 base64 = "0.22"
+# RS256 GitHub App assertions. `ring` is already linked through rustls; declaring it
+# directly avoids adding RustCrypto's `rsa` crate and its open timing advisory.
+ring = "0.17.14"

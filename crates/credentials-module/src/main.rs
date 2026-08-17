@@ -32,9 +32,9 @@ use credentials_core::engine::RefreshEngine;
 use credentials_core::http::ReqwestTransport;
 use credentials_core::refresh_adapters::{
     anthropic::AnthropicAdapter, antigravity::AntigravityAdapter, cursor::CursorAdapter,
-    devin::DevinAdapter, digitalocean::DigitalOceanAdapter, github_copilot::GithubCopilotAdapter,
-    google::GoogleAdapter, kimi::KimiAdapter, openai::OpenAiAdapter, snowflake::SnowflakeAdapter,
-    xai::XaiAdapter, RefreshAdapter,
+    devin::DevinAdapter, digitalocean::DigitalOceanAdapter, github_app::GithubAppAdapter,
+    github_copilot::GithubCopilotAdapter, google::GoogleAdapter, kimi::KimiAdapter,
+    openai::OpenAiAdapter, snowflake::SnowflakeAdapter, xai::XaiAdapter, RefreshAdapter,
 };
 use credentials_core::resolver::{self, KeySource, ResolverConfig};
 use credentials_core::store::EncryptedStore;
@@ -293,7 +293,7 @@ impl Drop for AbortOnDrop {
 
 /// Build the read surface from the HELLO_ACK's storage descriptor: resolve the
 /// master key, open + migrate the encrypted store, build the refresh engine with
-/// the four adapters, and run boot reconciliation (the gate).
+/// the registered adapters, then reconcile persisted refresh state before exposing reads.
 async fn build_surface(
     ack: &ModuleHelloAckBody,
 ) -> Result<(ReadSurface, admin_surface::AdminSurface), ModuleError> {
@@ -356,6 +356,7 @@ async fn build_surface(
         Arc::new(SnowflakeAdapter::new()),
         Arc::new(XaiAdapter::new()),
         Arc::new(GithubCopilotAdapter::new()),
+        Arc::new(GithubAppAdapter::new()),
         Arc::new(KimiAdapter::new(kimi_device_id)),
         // Antigravity (Google Code-Assist OAuth) — its own public client, distinct
         // from the gemini-cli client the google adapter uses.

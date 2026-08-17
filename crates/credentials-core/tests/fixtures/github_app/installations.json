@@ -1,0 +1,53 @@
+[
+  {
+    "id": 154356189,
+    "client_id": "Iv23lilSfNz1vScb8un3",
+    "account": {
+      "login": "cortexkit",
+      "id": 271195168,
+      "node_id": "O_kgDOECocIA",
+      "avatar_url": "https://avatars.githubusercontent.com/u/271195168?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/cortexkit",
+      "html_url": "https://github.com/cortexkit",
+      "followers_url": "https://api.github.com/users/cortexkit/followers",
+      "following_url": "https://api.github.com/users/cortexkit/following{/other_user}",
+      "gists_url": "https://api.github.com/users/cortexkit/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/cortexkit/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/cortexkit/subscriptions",
+      "organizations_url": "https://api.github.com/users/cortexkit/orgs",
+      "repos_url": "https://api.github.com/users/cortexkit/repos",
+      "events_url": "https://api.github.com/users/cortexkit/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/cortexkit/received_events",
+      "type": "Organization",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "repository_selection": "selected",
+    "access_tokens_url": "https://api.github.com/app/installations/154356189/access_tokens",
+    "repositories_url": "https://api.github.com/installation/repositories",
+    "html_url": "https://github.com/organizations/cortexkit/settings/installations/154356189",
+    "app_id": 4617236,
+    "app_slug": "plex-alfonso",
+    "target_id": 271195168,
+    "target_type": "Organization",
+    "permissions": {
+      "issues": "write",
+      "contents": "read",
+      "metadata": "read",
+      "pull_requests": "write"
+    },
+    "events": [
+
+    ],
+    "created_at": "2026-08-17T09:02:14.000Z",
+    "updated_at": "2026-08-17T09:03:48.000Z",
+    "single_file_name": null,
+    "has_multiple_single_files": false,
+    "single_file_paths": [
+
+    ],
+    "suspended_by": null,
+    "suspended_at": null
+  }
+]

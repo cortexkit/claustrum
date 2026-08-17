@@ -1,0 +1,11 @@
+{
+ "token": "ghs_4617...MASKED_LIVE_TOKEN",
+ "expires_at": "2026-08-17T10:18:57Z",
+ "permissions": {
+  "contents": "read",
+  "issues": "write",
+  "metadata": "read",
+  "pull_requests": "write"
+ },
+ "repository_selection": "selected"
+}

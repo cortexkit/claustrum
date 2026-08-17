@@ -296,6 +296,7 @@ dependencies = [
  "p256",
  "proptest",
  "reqwest",
+ "ring",
  "rusqlite",
  "serde",
  "serde_json",

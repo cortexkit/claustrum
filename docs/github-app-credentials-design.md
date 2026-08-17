@@ -1,10 +1,10 @@
 # `github_app` credentials — design
 
-**Status: DESIGN ACCEPTED, NOTHING IS BUILT.** No code exists, no records exist,
-no adapter is registered. Measured 2026-08-15. Replace this line with a list of
-what has actually shipped as pieces land — a detailed design reads as an
-existing system to anyone who did not write it, and that mistake has cost this
-fleet real debugging time twice.
+**Status: ADAPTER SHIPPED.** The `github_app` refresh adapter signs RS256 App
+JWTs, discovers installations lazily, and exchanges them for installation tokens.
+The existing static PEM record still needs an explicit administrative migration to
+the OAuth-shaped record described below; deployment and vault mutation are outside
+this repository change.
 
 ## Why this is designed and not built
 

@@ -68,6 +68,7 @@ pub use refresh_adapters::antigravity::AntigravityAdapter;
 pub use refresh_adapters::cursor::CursorAdapter;
 pub use refresh_adapters::devin::DevinAdapter;
 pub use refresh_adapters::digitalocean::DigitalOceanAdapter;
+pub use refresh_adapters::github_app::GithubAppAdapter;
 pub use refresh_adapters::github_copilot::GithubCopilotAdapter;
 pub use refresh_adapters::google::GoogleAdapter;
 pub use refresh_adapters::kimi::KimiAdapter;

@@ -31,6 +31,7 @@ pub mod antigravity;
 pub mod cursor;
 pub mod devin;
 pub mod digitalocean;
+pub mod github_app;
 pub mod github_copilot;
 pub mod google;
 pub mod kimi;
@@ -265,6 +266,14 @@ mod endpoint_pins {
             "https://auth.openai.com/oauth/token"
         );
         assert_eq!(super::xai::TOKEN_URL, "https://auth.x.ai/oauth2/token");
+        assert_eq!(
+            super::github_app::INSTALLATIONS_URL,
+            "https://api.github.com/app/installations"
+        );
+        assert_eq!(
+            super::github_app::ACCESS_TOKENS_URL_PREFIX,
+            "https://api.github.com/app/installations/"
+        );
         assert_eq!(
             super::xai::DEVICE_TOKEN_URL,
             "https://auth.x.ai/oauth2/token"

@@ -1,0 +1,43 @@
+{
+  "id": 4617236,
+  "client_id": "Iv23lilSfNz1vScb8un3",
+  "slug": "plex-alfonso",
+  "node_id": "A_kwHOECocIM4ARnQU",
+  "owner": {
+    "login": "cortexkit",
+    "id": 271195168,
+    "node_id": "O_kgDOECocIA",
+    "avatar_url": "https://avatars.githubusercontent.com/u/271195168?v=4",
+    "gravatar_id": "",
+    "url": "https://api.github.com/users/cortexkit",
+    "html_url": "https://github.com/cortexkit",
+    "followers_url": "https://api.github.com/users/cortexkit/followers",
+    "following_url": "https://api.github.com/users/cortexkit/following{/other_user}",
+    "gists_url": "https://api.github.com/users/cortexkit/gists{/gist_id}",
+    "starred_url": "https://api.github.com/users/cortexkit/starred{/owner}{/repo}",
+    "subscriptions_url": "https://api.github.com/users/cortexkit/subscriptions",
+    "organizations_url": "https://api.github.com/users/cortexkit/orgs",
+    "repos_url": "https://api.github.com/users/cortexkit/repos",
+    "events_url": "https://api.github.com/users/cortexkit/events{/privacy}",
+    "received_events_url": "https://api.github.com/users/cortexkit/received_events",
+    "type": "Organization",
+    "user_view_type": "public",
+    "site_admin": false
+  },
+  "name": "plex-alfonso",
+  "description": null,
+  "external_url": "https://github.com",
+  "html_url": "https://github.com/apps/plex-alfonso",
+  "created_at": "2026-08-16T21:54:33Z",
+  "updated_at": "2026-08-17T09:01:19Z",
+  "permissions": {
+    "contents": "read",
+    "issues": "write",
+    "metadata": "read",
+    "pull_requests": "write"
+  },
+  "events": [
+
+  ],
+  "installations_count": 1
+}

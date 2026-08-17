@@ -24,6 +24,8 @@ crates/credentials-core/src/refresh_adapters/cursor.rs TOKEN_URL api2.cursor.sh
 crates/credentials-core/src/refresh_adapters/devin.rs AUTHORIZE_URL app.devin.ai
 crates/credentials-core/src/refresh_adapters/devin.rs TOKEN_URL api.devin.ai
 crates/credentials-core/src/refresh_adapters/digitalocean.rs AUTHORIZE_URL cloud.digitalocean.com
+crates/credentials-core/src/refresh_adapters/github_app.rs ACCESS_TOKENS_URL_PREFIX api.github.com
+crates/credentials-core/src/refresh_adapters/github_app.rs INSTALLATIONS_URL api.github.com
 crates/credentials-core/src/refresh_adapters/github_copilot.rs DEVICE_CODE_URL github.com
 crates/credentials-core/src/refresh_adapters/github_copilot.rs DEVICE_TOKEN_URL github.com
 crates/credentials-core/src/refresh_adapters/github_copilot.rs TOKEN_URL api.github.com

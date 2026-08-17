@@ -55,7 +55,7 @@ around it.
   operator-supplied key path **OUTSIDE the data tree** (co-location with `store.db`
   is FORBIDDEN — fail-closed if the key path resolves under the data dir). Bootstrap
   = CSPRNG 32-byte key, fail-closed if neither store is writable. Vault dir `0700`.
-- **Bounded refresh adapters** (§8): 11 adapters, one per provider CortexKit can
+- **Bounded refresh adapters** (§8): 12 adapters, one per provider CortexKit can
   log in to, in a `refresh_adapters/` submodule with
   **per-adapter conformance tests over recorded HTTP fixtures** (never invented
   response strings — the fidelity rule). Adding an adapter is a contract amendment.

@@ -177,6 +177,38 @@ direct declaration of one already present. An earlier revision of this note, and
 a message to ALF, said a new RSA dependency was required: true of the naive
 choice, false of the right one.
 
+## Recorded provider responses (2026-08-17)
+
+The build gate for this adapter is that it asserts against RECORDED real
+responses, never a documented shape. Those recordings now exist, captured with
+the real `plex-alfonso` key against real GitHub:
+
+    ~/.local/share/cortexkit/exchange/plex-alfonso-recordings/
+      app.json / .headers             GET  /app                          200
+      installations.json / .headers   GET  /app/installations            200
+      access_tokens.json / .headers   POST /app/installations/{id}/access_tokens  201
+
+Verified parseable and field-complete on 2026-08-17; the minted token VALUE is
+masked in the capture, which costs nothing because the adapter asserts on shape
+and fields rather than on a token string.
+
+THE FINDING THAT JUSTIFIES THE WHOLE GATE, because the docs imply otherwise: the
+201 body's `repositories` array is EMPTY even when `repository_selection` is
+`selected`. The repository list rides `GET /installation/repositories` with the
+installation token; it does NOT come back inline from the mint. An adapter built
+against the documented shape would have asserted an inline list and passed its
+own tests while being wrong about the wire.
+
+Confirmed by the same capture, and worth knowing before someone reads a 403 as a
+bug: this installation grants `contents: read`, so a token minted from it CANNOT
+merge -- GitHub requires contents write on the head repo for an App to merge. The
+installation's own grant is the ceiling. Raising it is a permissions change at
+the install, not a code change.
+
+Recorded `installation_id` is 154356189. Treat it as a FIXTURE, not as
+configuration -- an uninstall and reinstall mints a new one, which is why the
+section below prefers lazy discovery.
+
 ## Handle shape
 
 - Credential id: `github_app:<slug>` (`:<n>` if slugs ever collide).

@@ -367,6 +367,44 @@ async fn refreshes_on_different_credentials_overlap_rather_than_serialising() {
 }
 
 #[tokio::test]
+async fn a_refresh_commit_preserves_the_client_id_the_next_refresh_needs() {
+    // client_id is an INPUT to the refresh exchange for anthropic, openai, xai and
+    // github_app -- for github_app it is the App JWT's issuer, without which nothing
+    // can be minted at all. commit_refresh rebuilds OAuthCredential field by field, so
+    // dropping one line there loses it.
+    //
+    // THE FAILURE IS DELAYED, WHICH IS WHY THIS IS WORTH PINNING: the refresh that
+    // drops client_id SUCCEEDS, because the adapter already read it from the old record.
+    // Only the NEXT refresh fails, hours later, on a credential that worked once. A test
+    // asserting one successful refresh cannot see it -- this asserts the committed
+    // record still carries what a second exchange would need.
+    let (root, d) = tmp_descriptor();
+    let store = open_store(&d, 2);
+    store.create("id", &stale_oauth_record()).unwrap();
+    let (eng, _calls) = engine(store, StubAdapter::new("stub"));
+
+    let served = eng.get("id", None, false).await.expect("get ok");
+    assert_eq!(served.payload, b"refreshed-access");
+
+    let after = eng.store().get("id").expect("record still readable");
+    let oauth = after.oauth.as_ref().expect("still an oauth record");
+    assert_eq!(
+        oauth.client_id.as_deref(),
+        Some("c"),
+        "the committed record lost client_id, so the NEXT refresh has no issuer"
+    );
+
+    // The payload must also be filled from the new access token. Left empty, the read
+    // surface quarantines the record as corrupt on the very next get -- which does not
+    // merely fail, it POISONS a healthy credential.
+    assert!(
+        !after.payload.is_empty(),
+        "a committed refresh left an empty payload, which the read surface quarantines"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
 async fn invalid_grant_marks_needs_reauth() {
     let (root, d) = tmp_descriptor();
     let store = open_store(&d, 3);

@@ -126,9 +126,27 @@ impl GithubAppAdapter {
         http: &dyn HttpTransport,
     ) -> Result<u64, RefreshError> {
         let response = http.get(INSTALLATIONS_URL, headers).await?;
+        // A 401 HERE IS NOT A DEATH STATEMENT, so it must not become one.
+        //
+        // InvalidGrant is reserved in this crate for a provider EXPLICITLY declaring a
+        // grant dead: anthropic raises it only when the body literally contains
+        // "invalid_grant", and a bare 400 falls through to Status. GitHub's 401 on an App
+        // JWT carries no such statement -- it is returned for a revoked key AND for CLOCK
+        // SKEW, since an `iat` in the future or an `exp` too far out are both rejected
+        // this way.
+        //
+        // Mapped to InvalidGrant, a clock blip flips a healthy App to needs_reauth: a
+        // permanent, serving-stopped state that only an operator re-deposit clears, for a
+        // condition that heals itself. Transient is the honest reading -- a genuinely
+        // dead key keeps failing and surfaces through auth_events, and a slow alarm is
+        // cheaper than a wrong permanent verdict.
         if response.status == 401 {
-            return Err(RefreshError::InvalidGrant(
-                "GitHub rejected the App JWT while discovering installations".into(),
+            return Err(RefreshError::Status(
+                401,
+                format!(
+                    "GitHub rejected the App JWT while discovering installations: {}",
+                    String::from_utf8_lossy(&response.body)
+                ),
             ));
         }
         if response.status != 200 {
@@ -195,9 +213,14 @@ impl RefreshAdapter for GithubAppAdapter {
         let response = http
             .post(&url, &headers, "application/json", b"{}".to_vec())
             .await?;
+        // Same reasoning as the discovery 401 above: transient, never InvalidGrant.
         if response.status == 401 {
-            return Err(RefreshError::InvalidGrant(
-                "GitHub rejected the App JWT while minting an installation token".into(),
+            return Err(RefreshError::Status(
+                401,
+                format!(
+                    "GitHub rejected the App JWT at the token exchange: {}",
+                    String::from_utf8_lossy(&response.body)
+                ),
             ));
         }
         if response.status == 404 {
@@ -411,6 +434,34 @@ mod tests {
     }
 
     /// The captured 201 body supplies the opaque installation token and absolute expiry.
+    /// A GitHub 401 must be TRANSIENT, never a permanent needs_reauth.
+    ///
+    /// GitHub returns 401 on an App JWT for a revoked key AND for clock skew. Only the
+    /// first is permanent, and nothing in the response distinguishes them -- so the
+    /// classification has to take the recoverable reading. InvalidGrant here would flip
+    /// a healthy App to needs_reauth on a clock blip: serving stops, and only an
+    /// operator re-deposit clears it.
+    #[tokio::test]
+    async fn a_github_401_is_transient_because_clock_skew_also_produces_one() {
+        let http = fixture_transport(vec![(
+            401,
+            br#"{"message":"A JSON web token could not be decoded"}"#,
+        )]);
+        let adapter = GithubAppAdapter::default();
+        let err = adapter
+            .refresh(&credential(), &http)
+            .await
+            .expect_err("a 401 must fail the refresh");
+        assert!(
+            !matches!(err, RefreshError::InvalidGrant(_)),
+            "a bare 401 is not the provider declaring the key dead; got {err:?}"
+        );
+        assert!(
+            matches!(err, RefreshError::Status(401, _)),
+            "expected a transient status error carrying the code; got {err:?}"
+        );
+    }
+
     #[tokio::test]
     async fn a_recorded_installation_token_response_sets_token_and_expiry() {
         let http = fixture_transport(vec![

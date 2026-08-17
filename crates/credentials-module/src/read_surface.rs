@@ -708,6 +708,25 @@ impl ReadSurface {
         // The bound is that reaching it costs a real sweep (the ceilings are distinct
         // handles and fetch rate within a window), so entries track attacker effort
         // rather than being free to emit.
+        // IT ALARMS AND DOES NOT REFUSE, and that is a decision rather than an omission.
+        //
+        // A flagged connection keeps being served. Refusing would make this surface a
+        // denial-of-service lever pointed at a live consumer: the ceilings are heuristic,
+        // a legitimate burst during an incident looks exactly like a sweep, and the
+        // moment a consumer most needs credentials is the moment it fetches unusually.
+        // An alarm a human can read is recoverable; a refusal is an outage.
+        //
+        // WHAT THAT LEAVES UNBOUNDED, so nobody meets it as a surprise: a GRANTED
+        // consumer can drive `force_refresh` without limit, and each one is a real
+        // upstream token exchange. For a `github_app` record that is a mint against a
+        // vendor with its own rate limits, so one looping consumer can exhaust a budget
+        // shared by every other holder of that App. The only bound today is an audit
+        // entry nobody reads in real time.
+        //
+        // NOT the same hazard as an UNGRANTED caller reaching a mint, which cannot
+        // happen here: a capability handle IS the grant, and resolution precedes every
+        // fetch. This is a granted party misbehaving -- a different threat with a
+        // different answer (revoke the handle), which is why the trade above still holds.
         if let Admission::Anomaly { first: true } = admission {
             let _ = self.engine.store().append_audit(&AuditRecord {
                 op: AuditOp::FetchAnomaly,

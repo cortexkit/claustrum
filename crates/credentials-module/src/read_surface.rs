@@ -236,6 +236,34 @@ pub struct StatusResult {
     pub ready: bool,
     pub last_error_code: Option<ReadError>,
     pub lease_held: bool,
+    /// The record's current version, when a handle resolved to one.
+    ///
+    /// THE CHANGE CURSOR FOR A CONSUMER THAT MUST NOTICE A CREDENTIAL COMING BACK.
+    /// `ready` answers "is it usable now"; this answers "has anything happened since I
+    /// last looked", and together they let a poller distinguish a credential that was
+    /// repaired from one that merely never broke.
+    ///
+    /// It matters because the vault CANNOT PUSH. subc has no module-to-client relay by
+    /// deliberate design, so a consumer waiting on an unusable-to-usable transition has
+    /// to ask. Before this field the only way to observe a change was `credential.get`,
+    /// which MINTS on a stale record -- so polling for repair meant repeatedly buying
+    /// upstream token exchanges, and a consumer holding off to avoid that cost would
+    /// notice the repair late. `status` reads metadata only and never decrypts.
+    ///
+    /// Absent rather than zero when there is no handle (overall readiness) or the handle
+    /// does not resolve: a sentinel version would compare as "older than everything" and
+    /// a poller would read a revoked handle as a pending change forever.
+    ///
+    /// Free to serve: `meta()` already reads it on this path and it was being discarded.
+    /// No new disclosure either -- `get` has always returned it.
+    ///
+    /// ONE DIRECTION ONLY, and consumers must know it: the version bumps on refresh and
+    /// on replace, so it catches every unusable-to-usable transition. It does NOT bump
+    /// when a credential is invalidated (that is a version-GATED compare-and-set, which
+    /// would defeat itself by moving the version it matched on). So a stable version
+    /// with `ready: false` is a normal reading, not a stuck cursor.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub record_version: Option<u64>,
 }
 
 /// The read surface: the engine (for refresh-on-read), the per-connection limiter,
@@ -434,7 +462,32 @@ impl ReadSurface {
         };
 
         // Only an authentication failure (401/403) invalidates; a 5xx/429 is a
-        // provider hiccup, not a dead credential. The invalidate is VERSION-GATED: it
+        // provider hiccup, not a dead credential.
+        //
+        // THE STATUS IS THE TRIGGER AND THAT IS A DESIGN DEFECT, recorded here because
+        // it cost a real incident on 2026-08-17. A consumer took GitHub's 403 on a
+        // reactions call -- "this token is valid and lacks one permission" -- and
+        // reported it, which marked a seconds-old, perfectly good App credential
+        // needs-reauth. Every later call then refused at RESOLUTION, before dispatch, so
+        // the response-body logging built to diagnose the 403 could never fire: the
+        // consequence of the failure disabled the path to its own explanation.
+        //
+        // The vault CANNOT interpret a status code. Whether 403 means "credential dead"
+        // or "credential fine, endpoint forbidden" is provider-specific knowledge only
+        // the consumer holds -- GitHub uses it for permissions and rate limits, xAI for
+        // an entitlement lapse. Same number, opposite meanings, and this surface sees
+        // only the number.
+        //
+        // So the honest input would be the consumer's JUDGEMENT ("I believe this
+        // credential is invalid") with the status carried as diagnostic detail. The
+        // field being NAMED `provider_status` actively invites the wrong behaviour: a
+        // parameter named after a wire value asks to be filled with the wire value, and
+        // a competent implementation read it exactly that way.
+        //
+        // Not changed unilaterally -- other consumers report against this shape today,
+        // and BROCA's providers may well use 403 as a genuine credential signal. The
+        // CONTRACT rule is the fix available without breaking them: REPORT ONLY WHEN YOU
+        // BELIEVE THE CREDENTIAL IS INVALID, NEVER MERELY BECAUSE A CALL WAS REFUSED. The invalidate is VERSION-GATED: it
         // fires only if the credential is still at the record_version the consumer was
         // served, so a stale report for a since-refreshed credential is a silent no-op
         // (and a consumer can only ever kill the exact version it saw, not whatever is
@@ -519,6 +572,7 @@ impl ReadSurface {
                     ready: !fenced_out,
                     last_error_code: None,
                     lease_held,
+                    record_version: None,
                 };
             }
             Some(h) => h,
@@ -541,17 +595,20 @@ impl ReadSurface {
                         credentials_core::store::RecordState::Active => None,
                     },
                     lease_held,
+                    record_version: Some(meta.record_version),
                 },
                 Err(_) => StatusResult {
                     ready: false,
                     last_error_code: Some(ReadError::NotFound),
                     lease_held,
+                    record_version: None,
                 },
             },
             Err(_) => StatusResult {
                 ready: false,
                 last_error_code: Some(ReadError::NotFound),
                 lease_held,
+                record_version: None,
             },
         }
     }

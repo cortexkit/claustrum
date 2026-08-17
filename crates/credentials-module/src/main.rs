@@ -1793,6 +1793,89 @@ mod tests {
         );
     }
 
+    /// `status` must carry the record version, because a consumer waiting for a
+    /// credential to come back has no other cheap way to see that it did.
+    ///
+    /// THE VAULT CANNOT PUSH -- subc has no module-to-client relay by design -- so a
+    /// consumer must ask. Before this, the only way to observe a change was
+    /// `credential.get`, which MINTS on a stale record: polling for repair meant buying
+    /// upstream token exchanges, and a consumer avoiding that cost would notice late.
+    ///
+    /// Asserted as a CURSOR rather than as a field being present: the version must MOVE
+    /// across a replace, and must be ABSENT where there is nothing to version. A field
+    /// that is always Some(1) would satisfy a presence check and be useless.
+    #[tokio::test]
+    async fn status_carries_a_record_version_that_moves_on_replace() {
+        let (surface, store, _db) = tmp_surface_with_store(16);
+        let handle = credentials_core::store::mint_handle().expect("mint handle");
+        store
+            .put_handle_hash(
+                &handle.hash,
+                "apikey:active",
+                AuditCtx::admin(AuditOp::MintHandle),
+            )
+            .expect("put handle");
+
+        let before = surface
+            .status(
+                1,
+                &crate::read_surface::StatusParams {
+                    handle: Some(handle.raw.clone()),
+                },
+            )
+            .await;
+        let v_before = before
+            .record_version
+            .expect("a resolved handle must report its version");
+
+        // A replace is the shape an operator re-auth takes, and the transition a waiting
+        // consumer needs to notice.
+        store
+            .overwrite_unconditional_audited(
+                "apikey:active",
+                &VaultRecord::new_static(CredentialKind::ApiKey, "test", b"k2".to_vec(), None),
+                AuditCtx::admin(AuditOp::Put),
+            )
+            .expect("replace");
+
+        let after = surface
+            .status(
+                1,
+                &crate::read_surface::StatusParams {
+                    handle: Some(handle.raw.clone()),
+                },
+            )
+            .await;
+        let v_after = after.record_version.expect("still resolves");
+        assert!(
+            v_after > v_before,
+            "the version must MOVE on replace or it is not a cursor: {v_before} -> {v_after}"
+        );
+
+        // ABSENT where there is nothing to version. A sentinel here would compare as
+        // older than everything, so a poller would read a dead handle as a pending
+        // change forever.
+        let overall = surface
+            .status(1, &crate::read_surface::StatusParams { handle: None })
+            .await;
+        assert!(
+            overall.record_version.is_none(),
+            "overall readiness has no credential to version"
+        );
+        let unknown = surface
+            .status(
+                2,
+                &crate::read_surface::StatusParams {
+                    handle: Some("ckh_definitely-not-a-handle".to_string()),
+                },
+            )
+            .await;
+        assert!(
+            unknown.record_version.is_none(),
+            "an unresolvable handle must not report a version"
+        );
+    }
+
     #[tokio::test]
     async fn status_handle_probe_runs_the_limiter() {
         let (surface, store, _db) = tmp_surface_with_store(15);

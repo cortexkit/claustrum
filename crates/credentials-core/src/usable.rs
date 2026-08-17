@@ -143,6 +143,28 @@ pub fn is_serviceable(oauth: Option<&OAuthCredential>) -> bool {
 /// declared conservatively will see a key called out while the provider still honours
 /// it -- which is the correct failure direction for a credential audit, and the reason
 /// the renderer says "declared" rather than "expired".
+///
+/// SO "DECLARED" IS A PROVENANCE CLAIM, NOT A HEDGE, and a plausible future change
+/// would quietly break it. A collaborator observing a real cookie expiry (2026-08-17,
+/// MiniMax, ~58d then a 9d replacement on the same account) proposed sorting
+/// cookie-shaped credentials automatically: if the payload decodes as a JWT, read its
+/// `exp` at put time instead of asking the operator. Cheap, needs no declaration, and
+/// the provider's own number is better evidence than a guess.
+///
+/// IT IS ALSO A DIFFERENT FACT WEARING THIS FUNCTION'S LABEL. Today `expires_at_ms`
+/// arrives from one place -- an operator typing `--expires-ms` -- so a false callout is
+/// traceable to a human who chose conservatively. Auto-populated, the same field
+/// becomes the vault's inference from bytes it parsed, and "declared" would be relaying
+/// a claim nobody made. The failure it produces is worse than the one it prevents: an
+/// audit calls a working credential expired, the operator checks what they declared,
+/// and finds they declared nothing.
+///
+/// If auto-population is ever built, it needs a SEPARATE provenance -- the record must
+/// record where the number came from and the renderer must say which, because
+/// "expiry the operator stated" and "expiry parsed out of the token" carry different
+/// trust and warrant different operator responses. A JWT's `exp` is also the token's
+/// lifetime, which is not always the session's; the cookie may outlive it.
+/// One field, two provenances, is how a column starts lying quietly.
 pub fn static_past_declared_expiry(expires_at_ms: Option<i64>, now_ms: i64) -> bool {
     match expires_at_ms {
         Some(exp) => now_ms >= exp,

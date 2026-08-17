@@ -70,9 +70,13 @@ impl GithubAppAdapter {
             .as_deref()
             .filter(|id| !id.is_empty())
             .ok_or_else(|| RefreshError::Decode("GitHub App record has no client_id".into()))?;
-        let pem_der = pkcs8_der_from_pem(&cred.refresh_token)?;
-        let key_pair = signature::RsaKeyPair::from_pkcs8(&pem_der).map_err(|error| {
-            RefreshError::Decode(format!("invalid GitHub App PKCS#8 key: {error}"))
+        let (encoding, der) = private_key_der_from_pem(&cred.refresh_token)?;
+        let key_pair = match encoding {
+            KeyEncoding::Pkcs8 => signature::RsaKeyPair::from_pkcs8(&der),
+            KeyEncoding::Pkcs1 => signature::RsaKeyPair::from_der(&der),
+        }
+        .map_err(|error| {
+            RefreshError::Decode(format!("invalid GitHub App {encoding:?} key: {error}"))
         })?;
 
         let header = base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -254,19 +258,57 @@ impl RefreshAdapter for GithubAppAdapter {
     }
 }
 
-fn pkcs8_der_from_pem(pem: &str) -> Result<Vec<u8>, RefreshError> {
-    if !pem.contains("-----BEGIN PRIVATE KEY-----") || !pem.contains("-----END PRIVATE KEY-----") {
-        return Err(RefreshError::Decode(
-            "GitHub App private key must be a PKCS#8 PEM".into(),
-        ));
-    }
+/// Which ASN.1 container a private-key PEM carries, decided by its armour label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyEncoding {
+    /// `-----BEGIN PRIVATE KEY-----`
+    Pkcs8,
+    /// `-----BEGIN RSA PRIVATE KEY-----`
+    Pkcs1,
+}
+
+/// Decode a private-key PEM, accepting BOTH containers GitHub and OpenSSL emit.
+///
+/// THE DEFAULT GITHUB HANDS YOU IS PKCS#1, AND ONLY PKCS#1. "Generate a private key"
+/// on an App's settings page downloads `-----BEGIN RSA PRIVATE KEY-----`. Accepting
+/// only PKCS#8 therefore rejects every key an operator can actually obtain, while
+/// passing every test written with a key made by `openssl genpkey` (whose default IS
+/// PKCS#8). Measured, not assumed: 21 real App keys deposited across the fleet all
+/// failed here with a decode error before any HTTP call.
+///
+/// The armour label is the discriminator, and it is reliable: the two containers are
+/// different ASN.1 structures and the label names which one follows. `ring` parses each
+/// with a different constructor, so the caller must know which it has -- hence returning
+/// the encoding rather than silently normalising.
+///
+/// NOT SOLVED WITH DOCUMENTATION. Telling operators to run `openssl pkcs8 -topk8` first
+/// would work and is what most projects do; it also means every future deposit is one
+/// forgotten step away from a credential that decodes as garbage hours later. The vault
+/// takes the key the platform issues.
+fn private_key_der_from_pem(pem: &str) -> Result<(KeyEncoding, Vec<u8>), RefreshError> {
+    let encoding = if pem.contains("-----BEGIN PRIVATE KEY-----") {
+        KeyEncoding::Pkcs8
+    } else if pem.contains("-----BEGIN RSA PRIVATE KEY-----") {
+        KeyEncoding::Pkcs1
+    } else {
+        // Name what WAS found rather than only what was wanted -- an EC or encrypted key
+        // pasted here should say so, not produce a generic "must be PEM".
+        let found = pem
+            .lines()
+            .find(|line| line.starts_with("-----BEGIN"))
+            .unwrap_or("no PEM armour at all");
+        return Err(RefreshError::Decode(format!(
+            "GitHub App private key must be an RSA PEM (PKCS#1 or PKCS#8); found: {found}"
+        )));
+    };
     let encoded: String = pem
         .lines()
         .filter(|line| !line.starts_with("-----"))
         .collect();
-    base64::engine::general_purpose::STANDARD
+    let der = base64::engine::general_purpose::STANDARD
         .decode(encoded)
-        .map_err(|error| RefreshError::Decode(format!("decode GitHub App PKCS#8 PEM: {error}")))
+        .map_err(|error| RefreshError::Decode(format!("decode GitHub App key PEM: {error}")))?;
+    Ok((encoding, der))
 }
 
 fn now_secs() -> i64 {
@@ -434,6 +476,60 @@ mod tests {
     }
 
     /// The captured 201 body supplies the opaque installation token and absolute expiry.
+    /// The key format GitHub ACTUALLY issues must sign, not merely the one our
+    /// fixtures were generated with.
+    ///
+    /// "Generate a private key" on an App's settings page downloads PKCS#1
+    /// (`BEGIN RSA PRIVATE KEY`). `openssl genpkey` -- the natural way to make a test
+    /// key -- emits PKCS#8. So a PKCS#8-only parser passes every test and rejects every
+    /// real key, which is exactly what happened: 21 deposited App keys all failed with a
+    /// decode error before any HTTP call.
+    ///
+    /// Both arms are asserted because accepting only PKCS#1 would be the same defect
+    /// mirrored, and a fixture-shaped key must keep working.
+    #[test]
+    fn both_pem_containers_parse_because_github_issues_the_one_openssl_does_not_default_to() {
+        let pkcs1 = std::process::Command::new("openssl")
+            .args(["genrsa", "2048"])
+            .output()
+            .expect("openssl genrsa");
+        let pkcs1 = String::from_utf8(pkcs1.stdout).expect("pem is utf8");
+        assert!(
+            pkcs1.contains("BEGIN RSA PRIVATE KEY"),
+            "openssl genrsa should emit PKCS#1; got: {}",
+            pkcs1.lines().next().unwrap_or("")
+        );
+        let (encoding, der) = private_key_der_from_pem(&pkcs1).expect("PKCS#1 must decode");
+        assert_eq!(encoding, KeyEncoding::Pkcs1);
+        signature::RsaKeyPair::from_der(&der).expect("PKCS#1 DER must load as a signing key");
+
+        let pkcs8 = std::process::Command::new("openssl")
+            .args([
+                "genpkey",
+                "-algorithm",
+                "RSA",
+                "-pkeyopt",
+                "rsa_keygen_bits:2048",
+            ])
+            .output()
+            .expect("openssl genpkey");
+        let pkcs8 = String::from_utf8(pkcs8.stdout).expect("pem is utf8");
+        let (encoding, der) = private_key_der_from_pem(&pkcs8).expect("PKCS#8 must decode");
+        assert_eq!(encoding, KeyEncoding::Pkcs8);
+        signature::RsaKeyPair::from_pkcs8(&der).expect("PKCS#8 DER must load as a signing key");
+
+        // A key that is neither must name what it found, so an EC or encrypted key pasted
+        // here is diagnosable rather than a generic refusal.
+        let err = private_key_der_from_pem(
+            "-----BEGIN EC PRIVATE KEY-----\nAA==\n-----END EC PRIVATE KEY-----",
+        )
+        .expect_err("an EC key must be refused");
+        assert!(
+            format!("{err}").contains("EC PRIVATE KEY"),
+            "the refusal must name what was found; got {err}"
+        );
+    }
+
     /// A GitHub 401 must be TRANSIENT, never a permanent needs_reauth.
     ///
     /// GitHub returns 401 on an App JWT for a revoked key AND for clock skew. Only the

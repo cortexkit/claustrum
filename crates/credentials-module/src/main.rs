@@ -1793,6 +1793,69 @@ mod tests {
         );
     }
 
+    /// `status` must NOT consult the refresh path, which is the only reason the version
+    /// cursor lives here rather than on `get`.
+    ///
+    /// THIS FENCES A JUSTIFICATION, NOT A BEHAVIOUR. The cursor exists so a consumer can
+    /// poll for a credential coming back WITHOUT buying an upstream token exchange each
+    /// time -- `get` mints on a stale record, so polling through it would charge a
+    /// provider call per check and a consumer avoiding that cost would notice the repair
+    /// late. Every other test here asserts what the field CONTAINS; none asserted what
+    /// reading it COSTS, and a plausible consistency refactor routing status through the
+    /// engine would keep them all green while silently making repair-polling expensive.
+    ///
+    /// Discriminated without a network: the record is a STALE OAuth credential and NO
+    /// adapter is registered, so anything that reaches the refresh path fails outright.
+    /// Metadata-only status answers normally.
+    #[tokio::test]
+    async fn status_does_not_consult_the_refresh_path() {
+        let (surface, store, _db) = tmp_surface_with_store(23);
+        // Stale: an OAuth record whose access token expired long ago. Reaching the
+        // refresh path with no adapter registered cannot succeed.
+        let oauth = credentials_core::oauth::OAuthCredential {
+            access_token: "expired".to_string(),
+            refresh_token: "rt".to_string(),
+            expires_at_ms: Some(1),
+            token_url: String::new(),
+            client_id: None,
+            scopes: Vec::new(),
+        };
+        let record = VaultRecord::new_oauth("test", "no-such-adapter", oauth, Vec::new());
+        store.create("oauth:stale", &record).expect("create");
+        let handle = credentials_core::store::mint_handle().expect("mint handle");
+        store
+            .put_handle_hash(
+                &handle.hash,
+                "oauth:stale",
+                AuditCtx::admin(AuditOp::MintHandle),
+            )
+            .expect("put handle");
+
+        let result = surface
+            .status(
+                1,
+                &crate::read_surface::StatusParams {
+                    handle: Some(handle.raw.clone()),
+                },
+            )
+            .await;
+
+        assert!(
+            result.ready,
+            "status must report an Active record as ready from METADATA -- if this fails, \
+             status is consulting the refresh path, which no adapter can satisfy here"
+        );
+        assert!(
+            result.record_version.is_some(),
+            "status must serve the cursor without a provider call"
+        );
+        assert!(
+            result.last_error_code.is_none(),
+            "a stale-but-active credential is not an error to status: staleness is the \
+             refresh path's business, and status does not go there"
+        );
+    }
+
     /// `status` must carry the record version, because a consumer waiting for a
     /// credential to come back has no other cheap way to see that it did.
     ///

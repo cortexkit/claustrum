@@ -1184,6 +1184,21 @@ impl EncryptedStore {
     /// operator the one fact that says "go check your consumers" at the moment they
     /// can still act on it -- observed live, a removed credential left a stale entry
     /// in a consumer's handle file and blinded its sibling accounts until noticed.
+    /// THERE IS NO UN-REMOVE, AND UNLIKE `reactivate` THAT IS IMPOSSIBLE RATHER THAN
+    /// DECLINED. The distinction matters to a reader deciding whether to add one.
+    ///
+    /// `reactivate` exists because `invalidate` only changed a VERDICT while the sealed
+    /// material stayed on disk, so the verdict could be contradicted. This DELETEs the
+    /// credentials row, and the sealed envelope is the only copy of the secret the vault
+    /// ever had -- for a `github_app` key, the only copy anywhere, since the PEM is
+    /// shredded after deposit by custody rule. After this commits there is nothing left
+    /// to restore: the audit chain retains the HISTORY of the credential, never its bytes.
+    ///
+    /// So the repair for a mistaken `remove` is a fresh deposit of fresh material, which
+    /// for a platform-issued key means an operator ceremony. That is the cost of the verb
+    /// and it is why `logout`/`invalidate` is the reversible sibling an operator should
+    /// reach for first -- stated here because now that ONE inverse exists in this file,
+    /// an absent one stops looking deliberate.
     pub fn remove_audited(
         &self,
         credential_id: &str,

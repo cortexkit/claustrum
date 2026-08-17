@@ -112,6 +112,14 @@ pub enum MasterKeyError {
     KeyAlreadyProvisioned(String),
     /// Running the keychain CLI failed (spawn error, non-macOS host, ...).
     KeychainExec(String),
+    /// The platform has no macOS keychain at all -- the `security` binary is absent.
+    ///
+    /// SEPARATE FROM `KeychainExec` ON PURPOSE. Collapsed together, a Linux operator
+    /// who omits `--key-path` is told "keychain command failed: No such file or
+    /// directory", which names a keychain problem and a missing file, and neither is
+    /// the remedy. Reported from a real Linux deployment 2026-08-17 (issue #3): the
+    /// message sends the reader looking for a keychain they can never have.
+    KeychainUnavailable,
     /// A filesystem error preparing the vault dir or reading/writing the key.
     Io(std::io::Error),
     /// The OS CSPRNG failed during bootstrap.
@@ -163,6 +171,10 @@ impl std::fmt::Display for MasterKeyError {
                 write!(f, "stored key material is invalid: {m}")
             }
             MasterKeyError::KeychainExec(m) => write!(f, "keychain command failed: {m}"),
+            MasterKeyError::KeychainUnavailable => f.write_str(
+                "this platform has no macOS keychain (the `security` command is not \
+                 present); pass --key-path <file> to use an operator key file instead",
+            ),
             MasterKeyError::Io(e) => write!(f, "key resolution io: {e}"),
             MasterKeyError::Csprng => f.write_str("OS CSPRNG failed generating a master key"),
         }
@@ -683,11 +695,27 @@ fn classify_keychain_find(code: Option<i32>, stdout: &str, stderr: &str) -> Keyc
     KeychainFind::Error(format!("security exited with {code:?}: {}", stderr.trim()))
 }
 
+/// Classify a failure to SPAWN the `security` binary.
+///
+/// `ErrorKind::NotFound` here means the BINARY is absent, never that a keychain item is
+/// missing -- a missing item is a non-zero exit from a process that did run, and is
+/// classified by [`classify_keychain_find`] instead. The two produce the same io text
+/// ("No such file or directory") and mean completely different things, which is what
+/// made the Linux report confusing: the reader cannot tell a missing platform from a
+/// missing secret.
+fn spawn_error(e: std::io::Error) -> MasterKeyError {
+    if e.kind() == std::io::ErrorKind::NotFound {
+        MasterKeyError::KeychainUnavailable
+    } else {
+        MasterKeyError::KeychainExec(e.to_string())
+    }
+}
+
 fn load_from_keychain(service: &str, account: &str) -> Result<MasterKey, MasterKeyError> {
     let output = std::process::Command::new("security")
         .args(["find-generic-password", "-s", service, "-a", account, "-w"])
         .output()
-        .map_err(|e| MasterKeyError::KeychainExec(e.to_string()))?;
+        .map_err(spawn_error)?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     match classify_keychain_find(output.status.code(), &stdout, &stderr) {
@@ -743,7 +771,7 @@ fn replace_in_keychain(
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .map_err(|e| MasterKeyError::KeychainExec(e.to_string()))?;
+        .map_err(spawn_error)?;
     child
         .stdin
         .take()
@@ -767,7 +795,7 @@ fn delete_from_keychain(service: &str, account: &str) -> Result<(), MasterKeyErr
     let output = std::process::Command::new("security")
         .args(["delete-generic-password", "-s", service, "-a", account])
         .output()
-        .map_err(|e| MasterKeyError::KeychainExec(e.to_string()))?;
+        .map_err(spawn_error)?;
     if output.status.success() {
         return Ok(());
     }
@@ -924,6 +952,38 @@ fn hex_val(c: u8) -> Result<u8, MasterKeyError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A platform with no keychain must SAY SO, and say what to do instead.
+    ///
+    /// Reported from a real Linux deployment (issue #3): omitting `--key-path` produced
+    /// "keychain command failed: No such file or directory", which names a keychain
+    /// problem and a missing file when the actual remedy is an operator key file. The
+    /// assertion is on the REMEDY being present and the misleading phrasing being
+    /// absent, not on exact wording -- a message that merely renames the failure would
+    /// still leave the reader hunting a keychain they can never have.
+    #[test]
+    fn a_missing_security_binary_names_the_key_path_remedy_not_a_keychain_fault() {
+        let absent = std::io::Error::new(std::io::ErrorKind::NotFound, "No such file or directory");
+        let msg = spawn_error(absent).to_string();
+        assert!(
+            msg.contains("--key-path"),
+            "a platform without a keychain must name the remedy; got: {msg}"
+        );
+        assert!(
+            !msg.contains("keychain command failed"),
+            "must not report a command failure for a command that does not exist; got: {msg}"
+        );
+
+        // POSITIVE CONTROL: a real exec failure on a platform that HAS the binary must
+        // still classify as an exec fault. Without this, mapping every spawn error to
+        // "no keychain here" would pass the assertion above while hiding real faults.
+        let denied = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        let msg = spawn_error(denied).to_string();
+        assert!(
+            msg.contains("keychain command failed"),
+            "a genuine exec failure must stay an exec failure; got: {msg}"
+        );
+    }
 
     fn tmp_dir(tag: &str) -> PathBuf {
         use std::sync::atomic::{AtomicU64, Ordering};

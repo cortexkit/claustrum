@@ -1633,6 +1633,35 @@ impl EncryptedStore {
     /// security-relevant handle action — is always tamper-evidently recorded. The
     /// audit entry is keyed by the handle hash (the raw handle is never stored), not a
     /// credential id, since revoke-by-handle does not name the credential.
+    ///
+    /// THERE IS DELIBERATELY NO UN-REVOKE, AND THE ABSENCE IS THE POINT. Written down
+    /// because an absent mechanism cannot be found by reading code: there is no symbol,
+    /// no failing test, and nothing to grep, so the gap is invisible until someone adds
+    /// the "missing" verb.
+    ///
+    /// `reactivate_audited` makes that MORE tempting rather than less, which is why this
+    /// note exists. Shipping a counterpart to `invalidate` establishes a pattern, and
+    /// un-revoke looks like the same shape one level down. It is not:
+    ///
+    /// - `reactivate` restores THE VAULT'S OWN trust in material the vault still holds.
+    ///   The secret never left; only a verdict about it was wrong.
+    /// - un-revoke would restore A THIRD PARTY'S access to a bearer token that has
+    ///   already left the building. A handle is revoked because it may have leaked, and
+    ///   the vault has no record of who holds a copy — un-revoking hands access back to
+    ///   whoever kept the string, including the reason it was revoked.
+    ///
+    /// The repair for a wrongly-revoked handle is to MINT A NEW ONE and distribute it,
+    /// which is cheap and leaves the leaked value dead. If a consumer needs continuity,
+    /// mint before revoking.
+    ///
+    /// UNRELATED AND UNFIXED, noted so it is not lost: this appends an audit entry
+    /// unconditionally, so a script revoking defensively in a loop grows the untrimmable
+    /// chain with entries that changed nothing — the defect
+    /// `invalidate_and_revoke_all_audited` was fixed for. Not changed here tonight
+    /// because it is a genuine design question rather than an oversight: a revocation
+    /// ATTEMPT may be worth recording even when it moved no rows, and the chain has no
+    /// field to say which happened. Admin-gated, so no unauthenticated caller can drive
+    /// it.
     pub fn revoke_handle(&self, raw_handle: &str, ctx: AuditCtx<'_>) -> Result<(), StoreOpError> {
         let h = handle_hash(raw_handle);
         let audit_key = self.audit_key.clone();

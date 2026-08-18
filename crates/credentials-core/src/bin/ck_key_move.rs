@@ -73,8 +73,12 @@ fn main() {
     }
 
     // Carry BOTH slots. `Next` is normally empty, but an unpromoted `Next` is exactly what a
-    // crashed two-slot rotation leaves behind — dropping it here would turn a recoverable
-    // pending rotation into an unrecoverable lost key.
+    // crashed two-slot rotation leaves behind. Dropping it here would move only the
+    // Current slot, and the observable consequence is the reason to care: the database
+    // may be sealed under the NEXT key after a crash between rewrap and promote, so a
+    // move that carries only Current leaves the store's own key_id anchor naming a key
+    // that no longer exists in the destination — every record undecryptable, with no
+    // second copy of that key anywhere on the machine.
     let mut moved = 0usize;
     for slot in [KeySlot::Current, KeySlot::Next] {
         match backend.load_slot(&old_dir, slot) {

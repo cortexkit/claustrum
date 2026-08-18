@@ -480,8 +480,14 @@ impl EncryptedStore {
     /// any credential write.
     ///
     /// Sets `PRAGMA synchronous=FULL` on the store's connection: the vault's SQLite
-    /// IS its own source of truth (a lost token-rotation commit is unrecoverable),
-    /// so it must fsync every commit. This is stronger than WAL's default
+    /// IS its own source of truth, so it must fsync every commit.
+    ///
+    /// The consequence rather than the adjective, because a severity word travels
+    /// unchecked while an observable does not: a provider that ROTATES its refresh token
+    /// hands back a new one and kills the old in the same exchange. If the commit
+    /// recording the new token is lost to power failure, the vault holds a token the
+    /// provider has already retired and there is no second copy anywhere -- the
+    /// credential is dead until an operator re-authenticates it interactively. This is stronger than WAL's default
     /// `synchronous=NORMAL` (which can lose the last transaction on power loss) and
     /// is set vault-locally rather than in `cortexkit-store`, because the other
     /// consumers hold rebuildable projections that are correct at NORMAL and should

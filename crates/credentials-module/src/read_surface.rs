@@ -257,11 +257,23 @@ pub struct StatusResult {
     /// Free to serve: `meta()` already reads it on this path and it was being discarded.
     /// No new disclosure either -- `get` has always returned it.
     ///
-    /// ONE DIRECTION ONLY, and consumers must know it: the version bumps on refresh and
-    /// on replace, so it catches every unusable-to-usable transition. It does NOT bump
+    /// ONE DIRECTION ONLY: the version bumps on refresh and on replace. It does NOT bump
     /// when a credential is invalidated (that is a version-GATED compare-and-set, which
     /// would defeat itself by moving the version it matched on). So a stable version
     /// with `ready: false` is a normal reading, not a stuck cursor.
+    ///
+    /// AND IT DOES NOT CATCH EVERY REPAIR -- read `ready`, not this, to answer "is it
+    /// usable now". `reactivate` clears a wrong `needs_reauth` verdict WITHOUT touching
+    /// the stored material, so a credential goes unusable-to-usable with this field
+    /// unchanged. A consumer polling only the version would keep a repaired credential
+    /// marked dead indefinitely.
+    ///
+    /// That is forced rather than an oversight: `record_version` is bound into the
+    /// envelope's AAD (see `RecordBinding` in the store), so moving it means re-sealing
+    /// the record. Re-sealing on the repair path would put a decrypt-and-encrypt cycle
+    /// on the one route that exists to recover from a wrong verdict, and a failure
+    /// halfway would leave a corrupt record where a recoverable one stood. The version
+    /// tracks the MATERIAL; `ready` tracks the VERDICT; a repair can move either alone.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub record_version: Option<u64>,
 }

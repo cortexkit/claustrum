@@ -69,6 +69,23 @@ async fn kill9_between_response_and_commit_resolves_to_needs_reauth() {
     // Spawn the helper: it seeds a stale credential, opens the intent, stages
     // refreshed tokens, writes the marker, and parks at the pre-commit seam.
     let helper = env!("CARGO_BIN_EXE_kill9_refresh_helper");
+
+    // PRE-WARM BEFORE THE TIMER STARTS. macOS evaluates a freshly linked binary on its
+    // first execution (Gatekeeper/syspolicyd), which on this machine has cost tens of
+    // seconds for a ~20MB unsigned binary -- and this helper is relinked by the very
+    // build that precedes this test, so it is ALWAYS cold here. Under host load that
+    // evaluation blew the 30s readiness deadline below and the suite failed with
+    // "helper never reached the pre-commit seam", which reads exactly like a
+    // crash-safety defect and is not one: the same test passes in 0.51s warm.
+    //
+    // Running it with no arguments makes it exit immediately (it requires two), which
+    // is enough to pay the evaluation cost outside the measured window. The real e2e
+    // harness pre-warms its own binaries for the same reason; this suite was missed.
+    let _ = std::process::Command::new(helper)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+
     let mut child = std::process::Command::new(helper)
         .arg(db_path.to_string_lossy().to_string())
         .arg(marker_path.to_string_lossy().to_string())

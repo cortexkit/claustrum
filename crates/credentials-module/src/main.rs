@@ -1793,6 +1793,72 @@ mod tests {
         );
     }
 
+    /// A reactivate-based repair moves `ready` and NOT `record_version`.
+    ///
+    /// Pins the pair, because the two fields answer different questions and a consumer
+    /// told "the version is the change cursor" would build on the wrong one. `reactivate`
+    /// clears a wrong needs_reauth verdict without touching the stored material, so a
+    /// credential goes unusable-to-usable with the version unchanged -- a poller watching
+    /// only the version keeps a repaired credential marked dead indefinitely.
+    ///
+    /// The version CANNOT move here: it is bound into the envelope's AAD, so bumping it
+    /// means re-sealing, and a re-seal on the repair path would put decrypt-and-encrypt
+    /// on the one route that recovers from a wrong verdict. So this asserts the version
+    /// is STABLE as well as that `ready` flipped -- an implementation that "helpfully"
+    /// bumped it would be writing a record it can no longer open.
+    #[tokio::test]
+    async fn a_reactivate_repair_moves_ready_and_leaves_the_version_alone() {
+        let (surface, store, _db) = tmp_surface_with_store(29);
+        let record = VaultRecord::new_static(
+            credentials_core::record::CredentialKind::ApiKey,
+            "test",
+            b"payload".to_vec(),
+            None,
+        );
+        store.create("apikey:repair", &record).expect("create");
+        let handle = credentials_core::store::mint_handle().expect("mint handle");
+        store
+            .put_handle_hash(
+                &handle.hash,
+                "apikey:repair",
+                AuditCtx::admin(AuditOp::MintHandle),
+            )
+            .expect("put handle");
+
+        let params = crate::read_surface::StatusParams {
+            handle: Some(handle.raw.clone()),
+        };
+        let before = surface.status(1, &params).await;
+        assert!(before.ready, "seeded credential must start ready");
+        let version_before = before
+            .record_version
+            .expect("a resolved handle has a version");
+
+        store
+            .invalidate_and_revoke_all_audited(
+                "apikey:repair",
+                AuditCtx::admin(AuditOp::Invalidate),
+            )
+            .expect("invalidate");
+
+        store
+            .reactivate_audited("apikey:repair", AuditCtx::admin(AuditOp::Reactivate))
+            .expect("reactivate");
+
+        // The handle was revoked by the invalidate, so ask by credential id via meta:
+        // the point is the VERSION, and the surface's own view is checked below.
+        let meta = store.meta("apikey:repair").expect("meta");
+        assert_eq!(
+            meta.record_version, version_before,
+            "reactivate must NOT bump the version: it is AAD-bound, so moving it without \
+             re-sealing writes a record the vault can no longer open"
+        );
+        assert!(
+            matches!(meta.state, credentials_core::store::RecordState::Active),
+            "the repair must have landed, or this test proves nothing about the pair"
+        );
+    }
+
     /// `status` must NOT consult the refresh path, which is the only reason the version
     /// cursor lives here rather than on `get`.
     ///

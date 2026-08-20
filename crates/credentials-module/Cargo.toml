@@ -24,6 +24,8 @@ name = "ck-auth"
 path = "src/bin/credentials_cli.rs"
 
 [dependencies]
+ring = { workspace = true }
+base64 = { workspace = true }
 credentials-core = { path = "../credentials-core" }
 subc-protocol = { workspace = true }
 subc-transport = { workspace = true }

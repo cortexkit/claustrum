@@ -89,6 +89,7 @@ const OP_GET: &str = "credential.get";
 const OP_GET_MANY: &str = "credential.get_many";
 const OP_STATUS: &str = "credential.status";
 const OP_REPORT_AUTH_FAILURE: &str = "credential.report_auth_failure";
+const OP_SIGN: &str = "credential.sign";
 /// Admin ops on the running module (authenticated: direct principal + master-key
 /// challenge-response). `admin.challenge` issues a nonce; `admin.op` carries the
 /// authenticated op body + tag.
@@ -816,6 +817,19 @@ async fn handle_read_request(
                 return invalid_params(writer, ver, channel, epoch, corr, &e.to_string()).await
             }
         },
+        OP_SIGN => match serde_json::from_value::<read_surface::SignParams>(request.params) {
+            Ok(p) => match surface.sign(connection_id, &p).await {
+                Ok(r) => json!({ "result": r }),
+                // Same { code, class } shape every other op uses, so a consumer
+                // branches on the produced class here too.
+                Err(code) => json!({
+                    "result": { "error": read_surface::ErrorBody { code, class: code.class() } }
+                }),
+            },
+            Err(e) => {
+                return invalid_params(writer, ver, channel, epoch, corr, &e.to_string()).await
+            }
+        },
         OP_STATUS => match serde_json::from_value::<StatusParams>(request.params) {
             Ok(p) => json!({ "result": surface.status(connection_id, &p).await }),
             Err(e) => {
@@ -1092,6 +1106,15 @@ fn manifest(module_id: &str) -> ModuleManifest {
                 },
                 ManagementOperation {
                     name: OP_STATUS.to_string(),
+                    kind: ManagementOperationKind::Query,
+                },
+                // Query rather than Mutation: signing reads a stored key and returns a
+                // derived value, changing NO vault state -- no version bump, no audit
+                // mutation, nothing to reconcile after a crash. The authority it
+                // exercises is real, but authority and mutation are different axes and
+                // the manifest kind describes the second.
+                ManagementOperation {
+                    name: OP_SIGN.to_string(),
                     kind: ManagementOperationKind::Query,
                 },
                 ManagementOperation {
@@ -1790,6 +1813,121 @@ mod tests {
         assert_eq!(
             unknown.last_error_code,
             Some(read_surface::ReadError::NotFound)
+        );
+    }
+
+    /// A real Ed25519 PKCS#8 PEM, generated per call.
+    ///
+    /// Generated rather than pasted as a literal so the test material comes from the
+    /// same production path a deposit would: a hand-written fixture agrees with
+    /// whatever its author expected, which is how this repo shipped a parser demanding
+    /// PKCS#8 at a world that issues PKCS#1.
+    fn test_ed25519_pem() -> String {
+        use base64::Engine;
+        use ring::rand::SystemRandom;
+        use ring::signature::Ed25519KeyPair;
+        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).expect("generate");
+        let b64 = base64::engine::general_purpose::STANDARD.encode(pkcs8.as_ref());
+        let mut pem = String::from("-----BEGIN PRIVATE KEY-----\n");
+        for chunk in b64.as_bytes().chunks(64) {
+            pem.push_str(std::str::from_utf8(chunk).expect("ascii"));
+            pem.push('\n');
+        }
+        pem.push_str("-----END PRIVATE KEY-----");
+        pem
+    }
+
+    /// The signing fence: a signing-key credential signs, and EVERY other kind is
+    /// refused with a permanent `kind_not_signable`.
+    ///
+    /// Both arms in one test because the fence is only meaningful as a pair. A test
+    /// that only proves signing works would stay green if the kind check were deleted,
+    /// and that deletion is precisely what turns this module into a general signing
+    /// oracle: a handle for any stored secret could then produce signatures under it.
+    ///
+    /// The negative uses an API-KEY record holding VALID PEM, so the refusal cannot be
+    /// mistaken for a parse failure. If the fence were removed, those bytes would sign
+    /// happily -- which is the whole hazard, and a negative built from garbage bytes
+    /// would refuse for the wrong reason and prove nothing.
+    #[tokio::test]
+    async fn signing_is_fenced_to_signing_key_records() {
+        use credentials_core::record::CredentialKind;
+        let (surface, store, _db) = tmp_surface_with_store(31);
+
+        // One PEM, deposited twice under different kinds. Same bytes, so the ONLY
+        // difference between the two arms is the kind.
+        let pem = test_ed25519_pem();
+
+        let signer = VaultRecord::new_static(
+            CredentialKind::SigningKey,
+            "test",
+            pem.as_bytes().to_vec(),
+            None,
+        );
+        store.create("sign:root", &signer).expect("create signer");
+        let not_signer = VaultRecord::new_static(
+            CredentialKind::ApiKey,
+            "test",
+            pem.as_bytes().to_vec(),
+            None,
+        );
+        store
+            .create("apikey:impostor", &not_signer)
+            .expect("create impostor");
+
+        let h_sign = credentials_core::store::mint_handle().expect("mint");
+        store
+            .put_handle_hash(
+                &h_sign.hash,
+                "sign:root",
+                AuditCtx::admin(AuditOp::MintHandle),
+            )
+            .expect("put handle");
+        let h_api = credentials_core::store::mint_handle().expect("mint");
+        store
+            .put_handle_hash(
+                &h_api.hash,
+                "apikey:impostor",
+                AuditCtx::admin(AuditOp::MintHandle),
+            )
+            .expect("put handle");
+
+        use base64::Engine as _;
+        let payload = base64::engine::general_purpose::STANDARD.encode(b"manifest bytes");
+
+        // POSITIVE: the signing-key record signs, and names the key that did it.
+        let ok = surface
+            .sign(
+                1,
+                &read_surface::SignParams {
+                    handle: h_sign.raw.clone(),
+                    payload_b64: payload.clone(),
+                },
+            )
+            .await
+            .expect("a SigningKey record must sign");
+        assert!(!ok.signature_b64.is_empty(), "a signature must come back");
+        assert_eq!(ok.key_id.len(), 16, "key_id is 8 bytes of hex");
+
+        // NEGATIVE: identical bytes under ApiKey are refused, permanently.
+        let err = surface
+            .sign(
+                1,
+                &read_surface::SignParams {
+                    handle: h_api.raw.clone(),
+                    payload_b64: payload,
+                },
+            )
+            .await
+            .expect_err("an ApiKey record must NOT sign even holding valid PEM");
+        assert_eq!(
+            err,
+            read_surface::ReadError::KindNotSignable,
+            "the refusal must name the fence, not a parse failure"
+        );
+        assert!(
+            matches!(err.class(), read_surface::ErrorClass::Permanent),
+            "no retry turns an api key into a signing key"
         );
     }
 

@@ -311,11 +311,13 @@ name = "credentials-module"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64",
  "chrono",
  "cortexkit-store",
  "credentials-core",
  "dialoguer",
  "reqwest",
+ "ring",
  "rusqlite",
  "serde",
  "serde_json",

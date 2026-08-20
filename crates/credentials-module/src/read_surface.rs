@@ -28,6 +28,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
@@ -47,6 +48,29 @@ pub struct GetParams {
     pub min_ttl_ms: Option<i64>,
     #[serde(default)]
     pub force_refresh: bool,
+}
+
+/// A `credential.sign` request: sign exact bytes with a signing-key credential.
+///
+/// The payload is base64 because JSON cannot carry raw bytes, and the SIGNATURE
+/// COVERS THE DECODED BYTES -- not the base64 text. A verifier that signed the
+/// encoded form would break the moment a caller re-encoded with a different
+/// alphabet or padding, which is the canonicalization mismatch this whole design
+/// avoids by carrying exact bytes.
+#[derive(Debug, Deserialize)]
+pub struct SignParams {
+    pub handle: String,
+    /// The exact bytes to sign, base64 (standard alphabet).
+    pub payload_b64: String,
+}
+
+/// A `credential.sign` result: a detached signature and the key that made it.
+#[derive(Debug, Serialize)]
+pub struct SignResult {
+    pub signature_b64: String,
+    /// Derived from the public key, so a holder of the public half can recompute it
+    /// and check that an envelope names the key that actually signed.
+    pub key_id: String,
 }
 
 /// A `credential.get_many` request: a capped batch of get items.
@@ -121,6 +145,13 @@ pub enum ReadError {
     Corrupt,
     /// `get_many` exceeded the cap.
     TooManyItems,
+    /// `credential.sign` was asked to sign with a credential that is not a signing
+    /// key. THE FENCE, not a diagnostic: without it a handle for any stored secret
+    /// could produce signatures under it and this module would be a general signing
+    /// oracle. Permanent, because no retry makes an API key into a signing key.
+    KindNotSignable,
+    /// `credential.sign` was asked to sign more bytes than the cap allows.
+    SignPayloadTooLarge,
 }
 
 /// The fleet-wide error-class vocabulary (error-class contract, ratified 2026-07-08;
@@ -198,18 +229,22 @@ impl ReadError {
     /// this one opens the oracle.
     pub fn class(self) -> ErrorClass {
         match self {
-            // Handle revoked/unknown, record quarantined, or a static credential with
-            // no refresh path: nothing a retry can change.
-            ReadError::NotFound | ReadError::Corrupt | ReadError::RefreshUnsupported => {
-                ErrorClass::Permanent
-            }
+            // Handle revoked/unknown, record quarantined, a static credential with
+            // no refresh path, or a sign request against a non-signing credential:
+            // nothing a retry can change.
+            ReadError::NotFound
+            | ReadError::Corrupt
+            | ReadError::RefreshUnsupported
+            | ReadError::KindNotSignable => ErrorClass::Permanent,
             // The refresh token is dead; a human must run a fresh login.
             ReadError::NeedsReauth => ErrorClass::AuthRequired,
             // A refresh attempt failed (provider may recover) or the master key is
             // unresolvable right now (keychain/lease may recover).
             ReadError::RefreshFailed | ReadError::VaultLocked => ErrorClass::Transient,
-            // Over the `get_many` cap: reduce the batch and retry.
-            ReadError::TooManyItems => ErrorClass::ContextOverflow,
+            // Over the `get_many` cap, or over the signing-payload cap: reduce and
+            // retry. Both are bounds on ONE request rather than statements about the
+            // credential, which is what separates them from the permanent arm.
+            ReadError::TooManyItems | ReadError::SignPayloadTooLarge => ErrorClass::ContextOverflow,
         }
     }
 }
@@ -349,6 +384,67 @@ impl ReadSurface {
             limiter: Mutex::new(limiter),
             health: std::sync::Mutex::new(initial),
             last_refresh_ms: std::sync::atomic::AtomicI64::new(now_ms()),
+        }
+    }
+
+    /// Sign exact bytes with a signing-key credential. THE KEY NEVER LEAVES THIS
+    /// PROCESS.
+    ///
+    /// The vault exercises the key rather than serving it, which adds no authority --
+    /// a handle that can READ a key is already signing power, since whoever holds the
+    /// bytes can sign with any Ed25519 library -- while removing the window in which a
+    /// second process holds the material.
+    ///
+    /// FENCED ON KIND. Only `CredentialKind::SigningKey` records are signable;
+    /// everything else refuses `KindNotSignable`. Without that fence a handle for any
+    /// stored secret could produce signatures under it.
+    ///
+    /// Deliberately does NOT force-refresh: a signing key is static material with no
+    /// refresh adapter, so a get here reads what is stored and nothing is minted.
+    pub async fn sign(
+        &self,
+        connection_id: u64,
+        params: &SignParams,
+    ) -> Result<SignResult, ReadError> {
+        // Same limiter, same position as `get`: BEFORE resolution and keyed by the
+        // presented handle, so a sweep of unknown handles trips the detector here too
+        // rather than only on the get path.
+        self.check_limiter(connection_id, &params.handle).await;
+
+        let payload = base64::engine::general_purpose::STANDARD
+            .decode(params.payload_b64.as_bytes())
+            .map_err(|_| ReadError::SignPayloadTooLarge)?;
+
+        let credential_id = match self.engine.store().resolve_handle(&params.handle) {
+            Ok(id) => id,
+            Err(StoreOpError::NotFound) => return Err(ReadError::NotFound),
+            Err(e) => return Err(map_store_error(&e)),
+        };
+
+        let record = match self.engine.store().get(&credential_id) {
+            Ok(r) => r,
+            Err(e) => return Err(map_store_error(&e)),
+        };
+
+        // The fence, checked BEFORE the payload is looked at, so a non-signing
+        // credential refuses identically whatever bytes were presented.
+        if record.kind != credentials_core::record::CredentialKind::SigningKey {
+            return Err(ReadError::KindNotSignable);
+        }
+
+        let pem = std::str::from_utf8(&record.payload).map_err(|_| ReadError::Corrupt)?;
+        match credentials_core::signing::sign_ed25519(pem, &payload) {
+            Ok(sig) => Ok(SignResult {
+                signature_b64: sig.signature_b64,
+                key_id: sig.key_id,
+            }),
+            Err(credentials_core::signing::SignError::TooLarge { .. }) => {
+                Err(ReadError::SignPayloadTooLarge)
+            }
+            // An unusable key is OUR bytes failing, not the caller's request: the
+            // record holds something that is not a signing key despite being typed as
+            // one, which is the same class as a record that will not decrypt.
+            Err(credentials_core::signing::SignError::UnusableKey(_)) => Err(ReadError::Corrupt),
         }
     }
 

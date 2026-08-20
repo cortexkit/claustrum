@@ -38,3 +38,4 @@ REUSE_LIMIT_SECS crates/credentials-core/src/apns.rs staleness_covers_both_direc
 DEFAULT_DISTINCT_CEILING crates/credentials-module/src/limiter.rs distinct_spread_over_ceiling_flags_once
 DEFAULT_RATE_CEILING crates/credentials-module/src/limiter.rs rapid_refetch_over_rate_ceiling_flags
 AUTH_EVENTS_PER_CREDENTIAL crates/credentials-core/src/store.rs events_discloses_that_the_retention_cap_discarded_older_rows
+MAX_SIGN_PAYLOAD crates/credentials-core/src/signing.rs the_signing_cap_refuses_one_byte_over_and_accepts_the_cap

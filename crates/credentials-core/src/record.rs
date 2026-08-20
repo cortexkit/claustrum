@@ -42,6 +42,24 @@ pub enum CredentialKind {
     Dsn,
     /// Opaque bytes with no vault-understood structure (no refresh).
     Opaque,
+    /// A private signing key the vault EXERCISES on behalf of a caller rather than
+    /// serving: see `credential.sign`.
+    ///
+    /// This kind is the FENCE, not a label. `credential.sign` refuses every other
+    /// kind with `kind_not_signable`, so without it a capability handle for an API
+    /// key could produce signatures under that key and the vault would be a general
+    /// signing oracle over every stored secret.
+    ///
+    /// Enforced in the type deliberately, and NOT derived from the credential id: a
+    /// prefix is not authoritative here (this repo already rejected prefix-parsing
+    /// for adapter selection, because the stored adapter can be overridden at write
+    /// time, and the same argument applies to anything a writer controls).
+    ///
+    /// A record of this kind is still served by `credential.get` if a handle
+    /// resolves to it -- the kind restricts what the vault will DO, not what it will
+    /// disclose. Callers that must never see key material should not hold a get-
+    /// capable handle for one.
+    SigningKey,
 }
 
 /// NON-SECRET provider account identity, captured once at login from the token

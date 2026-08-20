@@ -73,22 +73,68 @@ answer then is a parsing conformance suite, not a canonicalization rule.
 
 ## 4. The ceremony
 
-Mirrors the mint ceremony: the private half is read into memory, used, and dropped.
-It does not touch disk, argv, or an environment variable at any point.
+**The private key never leaves the daemon.** Signing is a route operation
+(`credential.sign`): handle and bytes in, signature out. The caller never receives
+key material.
 
 1. **Approver records the decision** against the §2 question, naming the manifest
    version and what it stops routing.
 2. **Mint a capability handle** for the root. The key sits with zero live handles
-   between signings, so it is unreachable except during a signing.
-3. **Read the key over the route plane**, sign the exact published manifest bytes,
-   emit a detached Ed25519 signature plus `key_id`.
+   between signings, so it is unreachable except during one.
+3. **Call `credential.sign`** with the exact published manifest bytes. The daemon
+   appends the approval and the signature to the audit chain in ONE transaction and
+   returns a detached Ed25519 signature plus `key_id`.
 4. **Revoke the handle immediately.** Its lifetime is one signing.
 5. **Verify before publishing**: the signature must verify under the public half in
    the trust set, using the consumer's own fixture as the control.
 
-Steps 2 and 4 are why the audit chain shows a mint/revoke pair per signature —
-that pair IS the signing record, and a mint with no matching revoke is an
-unfinished ceremony.
+### Why the vault signs rather than serving the key
+
+An earlier draft of this file said "read the key over the route plane and sign in
+the CLI". **That was inherited, not decided.** This vault serves bytes because that
+is what it does — and the precedent was the APNs key, where serving was FORCED: the
+signer is an edge Worker with no route to a daemon that has zero inbound network
+surface. **That constraint does not exist here.** The signer is on the same machine,
+holding a route.
+
+The general test, worth more than this instance: **an inherited decision is one
+whose original constraint you cannot state.** Ask what forced it. If the answer is
+"it has always been this way", it was inherited rather than chosen.
+
+Signing in the daemon buys three things:
+
+- **No second-process window.** Serving puts the private key in CLI memory for the
+  duration of a signing. That window is the only reason step 3 would need a
+  "read into memory, use, drop" discipline to get wrong.
+- **Zero new authority.** A readable handle already IS signing power — whoever can
+  read the bytes can sign with any Ed25519 library. This exercises the same
+  privilege without copying the material.
+- **The approval becomes a precondition rather than a correlation.** Serving lets
+  the vault record a handle mint and *trust* that a signature followed; signing lets
+  it append approval and signature in one transaction. "No signature exists without
+  its approval" is what §2 was reaching for, and only this shape has it.
+
+### The fence, and why it is a kind rather than a list
+
+`credential.sign` is served ONLY for records whose kind is a signing key, refusing
+everything else with `kind_not_signable`. Without that, the vault becomes a general
+signing oracle over every stored secret — which would let a handle for an API key
+produce signatures under it.
+
+Enforced in the type, not documented in prose, and **not** derived from the
+credential id: a prefix is not authoritative (this repo already rejected
+prefix-parsing for adapter selection, because the stored adapter can be overridden
+at write time).
+
+**This cost a fresh keypair, and the reason is a custody rule working correctly.**
+The root was first minted as `ApiKey` — `put`'s default. Changing a record's kind
+means writing the record, writing means supplying the payload, and the mint ceremony
+deliberately keeps no second copy of it. So the kind could not be changed in place
+and the root was re-minted as a signing-kind record.
+
+Free while nothing consumed it; impossible once a public half is compiled into a
+release trust set. **Dead ids, never to enter a trust set: `da51c38d1ea9a1b4`
+(unverifiable first attempt), `c0342216a1b8edb0` (wrong kind).**
 
 ## 5. Proving the signer against someone else's bytes
 

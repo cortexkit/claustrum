@@ -2,9 +2,36 @@
 
 **Status: ADAPTER SHIPPED.** The `github_app` refresh adapter signs RS256 App
 JWTs, discovers installations lazily, and exchanges them for installation tokens.
-The existing static PEM record still needs an explicit administrative migration to
-the OAuth-shaped record described below; deployment and vault mutation are outside
-this repository change.
+As of 2026-08-20 it mints for 21 fleet Apps and has been proven end to end: a real
+reaction posted on a public issue, attributed to an agent's own bot identity, from
+a token minted on demand.
+
+## What is NOT built: SCOPED minting
+
+**Every token this adapter mints carries the FULL installation grant.** The
+installation-token request sends no `permissions` field and no `repositories`
+field, so GitHub returns everything the installation was granted.
+
+The scoped-token model discussed elsewhere in this fleet -- mint a token *weaker*
+than its installation, so a low-trust handle **cannot** perform a destructive
+operation because the credential GitHub issued does not carry the permission -- is
+a DESIGN NOTE WITH NO CODE BEHIND IT. Read the section below as a proposal, not a
+capability.
+
+This warning exists because a consumer asked whether their work needed anything
+new from this vault and was told it did not, on the strength of that section. The
+failure mode is quiet: **a full-grant token works perfectly in every test and
+differs from a scoped one only when someone attempts the operation the scope was
+supposed to refuse.** A caller who believes it is holding a token that cannot merge
+will discover otherwise by merging something.
+
+Also unresolved, and load-bearing for that design: a peer verified at source that
+GitHub's permission axes do not cut where our trust tiers cut --
+`pull_requests:write` covers PR comments AND merges. Withholding `contents:write`
+appears to separate them (GitHub's merge endpoint documents needing write access to
+the head repository's contents), but that is read from documentation and NOT from a
+recorded response, which is precisely the standard the rest of this file holds
+itself to.
 
 ## Why this is designed and not built
 

@@ -5,11 +5,10 @@
 //! Connects out to the subc daemon, authenticates over loopback TCP, and registers
 //! a reserved `ManagementSurface` — echoing the `SUBC_LAUNCH_NONCE` the supervisor
 //! injected so only the spawned process can claim the `claustrum` id
-//! (closing the vault-impersonation hole). It serves the ANONYMOUS READ surface
-//! over the route channel only: `credential.get` / `get_many` / `status` /
-//! `report_auth_failure`. There is deliberately NO write op on this channel — writes
-//! live in the separate offline admin CLI, gated by master-key possession + the
-//! single-writer lease.
+//! (closing the vault-impersonation hole). It serves the capability-handle read
+//! surface plus the separate principal-scoped `credential.get_scoped` route operation.
+//! There is deliberately NO unauthenticated write op on this channel — writes live in
+//! the admin surface, gated by master-key possession + the single-writer lease.
 //!
 //! The subc registration handshake is a `HELLO` frame the module sends (carrying
 //! its manifest and the launch nonce) and a `HELLO_ACK` the daemon returns
@@ -60,7 +59,9 @@ use tokio::{
 };
 
 use limiter::{Caps, FetchLimiter};
-use read_surface::{GetManyParams, GetParams, ReadSurface, ReportAuthFailureParams, StatusParams};
+use read_surface::{
+    GetManyParams, GetParams, GetScopedParams, ReadSurface, ReportAuthFailureParams, StatusParams,
+};
 
 // The vault's module id — re-exported from the single cross-binary definition site
 // so the daemon and CLI cannot drift. The env var (SUBC_MODULE_ID) still overrides
@@ -84,8 +85,9 @@ const CONTROL_EGRESS_BUFFER: usize = 16;
 // stale, and each tick is a cheap no-decrypt scan that runs OFF the probe path.
 const HEALTH_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
-// Read-surface op names (the four anonymous route-channel operations).
+// Capability-handle read-surface operations plus the separate principal-scoped read.
 const OP_GET: &str = "credential.get";
+const OP_GET_SCOPED: &str = "credential.get_scoped";
 const OP_GET_MANY: &str = "credential.get_many";
 const OP_STATUS: &str = "credential.status";
 const OP_REPORT_AUTH_FAILURE: &str = "credential.report_auth_failure";
@@ -611,8 +613,12 @@ async fn handle_frame(
             let route = egress.route.clone();
             let surface = Arc::clone(surface);
             let admin = Arc::clone(admin);
+            // The epoch check above accepted this frame under the current bind. Snapshot
+            // that bind's principal before spawning so a later route reuse cannot lend
+            // its new principal to an already-accepted request.
+            let principal = admin.principal(frame.header.channel);
             tokio::spawn(async move {
-                let _ = handle_read_request(frame, &route, &surface, &admin).await;
+                let _ = handle_read_request(frame, &route, &surface, &admin, principal).await;
             });
             Ok(true)
         }
@@ -779,6 +785,7 @@ async fn handle_read_request(
     writer: &mpsc::Sender<Frame>,
     surface: &Arc<ReadSurface>,
     admin: &Arc<admin_surface::AdminSurface>,
+    principal: Option<subc_protocol::Principal>,
 ) -> Result<(), ModuleError> {
     let channel = frame.header.channel;
     // Echo the validated ingress epoch on every frame of this route (wire v2:
@@ -807,6 +814,12 @@ async fn handle_read_request(
     let result = match request.method.as_str() {
         OP_GET => match serde_json::from_value::<GetParams>(request.params) {
             Ok(p) => json!({ "result": surface.get(connection_id, &p).await }),
+            Err(e) => {
+                return invalid_params(writer, ver, channel, epoch, corr, &e.to_string()).await
+            }
+        },
+        OP_GET_SCOPED => match serde_json::from_value::<GetScopedParams>(request.params) {
+            Ok(p) => json!({ "result": surface.get_scoped(principal.as_ref(), &p).await }),
             Err(e) => {
                 return invalid_params(writer, ver, channel, epoch, corr, &e.to_string()).await
             }
@@ -1313,6 +1326,319 @@ mod tests {
         let engine = Arc::new(RefreshEngine::new(Arc::clone(&store), Vec::new(), http));
         let surface = Arc::new(ReadSurface::new(engine, FetchLimiter::new(Caps::default())));
         (surface, store, db_path)
+    }
+
+    /// Build a scoped-read rig whose route-bind registry and read surface share one
+    /// store. The route helper below drives the real request dispatcher rather than
+    /// calling `get_scoped` directly, so the principal snapshot is part of the proof.
+    fn scoped_rig(
+        seed: u8,
+    ) -> (
+        Arc<ReadSurface>,
+        Arc<admin_surface::AdminSurface>,
+        Arc<EncryptedStore>,
+    ) {
+        let (surface, store, db_path) = tmp_surface_with_store(seed);
+        let http = Arc::new(ReqwestTransport::new().expect("http"));
+        let engine = Arc::new(RefreshEngine::new(Arc::clone(&store), Vec::new(), http));
+        let key = MasterKey::from_bytes([seed; MASTER_KEY_LEN]);
+        let mac_key = credentials_core::admin_auth::AdminMacKey::derive(&key);
+        let vault_id =
+            credentials_core::vault_id_for(db_path.parent().expect("db dir")).expect("vault id");
+        let admin = Arc::new(admin_surface::AdminSurface::new(
+            engine,
+            mac_key,
+            vault_id,
+            key.key_id(),
+        ));
+        (surface, admin, store)
+    }
+
+    async fn scoped_request(
+        surface: &Arc<ReadSurface>,
+        admin: &Arc<admin_surface::AdminSurface>,
+        channel: u16,
+        credential_id: &str,
+    ) -> serde_json::Value {
+        let (writer, mut responses) = mpsc::channel(1);
+        let frame = Frame::build_with_version(
+            PROTOCOL_VERSION,
+            FrameType::Request,
+            Flags::new(false, Priority::Interactive, false),
+            channel,
+            1,
+            1,
+            serde_json::to_vec(&json!({
+                "method": OP_GET_SCOPED,
+                "params": { "credential_id": credential_id },
+            }))
+            .expect("encode request"),
+        )
+        .expect("build request");
+        let principal = admin.principal(channel);
+        handle_read_request(frame, &writer, surface, admin, principal)
+            .await
+            .expect("serve request");
+        let response = responses.recv().await.expect("route response");
+        serde_json::from_slice(&response.body).expect("decode response")
+    }
+
+    fn assert_scoped_not_found(body: &serde_json::Value) {
+        assert_eq!(body["result"]["error"]["code"], "not_found");
+        assert_eq!(body["result"]["error"]["class"], "permanent");
+    }
+
+    #[tokio::test]
+    async fn scoped_get_serves_a_covered_credential_and_does_not_audit_the_read() {
+        let (surface, admin, store) = scoped_rig(72);
+        store
+            .create(
+                "github_app:fleet-a",
+                &VaultRecord::new_static(CredentialKind::ApiKey, "test", b"key".to_vec(), None),
+            )
+            .expect("create credential");
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "prefrontal-core",
+                "github_app:",
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .expect("create grant");
+        let handle = credentials_core::store::mint_handle().expect("mint handle");
+        store
+            .put_handle_hash(
+                &handle.hash,
+                "github_app:fleet-a",
+                AuditCtx::admin(AuditOp::MintHandle),
+            )
+            .expect("store handle");
+        admin.record_bind(
+            41,
+            subc_protocol::Principal::Reserved {
+                module_id: "prefrontal-core".into(),
+            },
+        );
+
+        let normal = serde_json::to_value(
+            surface
+                .get(
+                    42,
+                    &GetParams {
+                        handle: handle.raw,
+                        min_ttl_ms: None,
+                        force_refresh: false,
+                    },
+                )
+                .await,
+        )
+        .expect("encode normal result");
+        let audits_before_read = store.read_audit(None).expect("read audit");
+        let scoped = scoped_request(&surface, &admin, 41, "github_app:fleet-a").await;
+        assert_eq!(
+            scoped["result"], normal,
+            "credential.get_scoped must return the exact credential.get result body"
+        );
+        assert_eq!(
+            store.read_audit(None).expect("read audit").len(),
+            audits_before_read.len(),
+            "a grant-authorized read must not append to the untrimmable audit chain"
+        );
+
+        store
+            .revoke_read_grant_audited(
+                "reserved",
+                "prefrontal-core",
+                "github_app:",
+                AuditCtx::admin(AuditOp::GrantRevoke),
+            )
+            .expect("revoke grant");
+        let grant_ops: Vec<String> = store
+            .read_audit(None)
+            .expect("read audit")
+            .into_iter()
+            .filter(|entry| matches!(entry.op.as_str(), "grant_create" | "grant_revoke"))
+            .map(|entry| entry.op)
+            .collect();
+        assert_eq!(grant_ops, ["grant_create", "grant_revoke"]);
+    }
+
+    #[tokio::test]
+    async fn scoped_get_refuses_both_wrong_principal_kind_and_wrong_reserved_id() {
+        let (surface, admin, store) = scoped_rig(73);
+        store
+            .create(
+                "github_app:fleet-a",
+                &VaultRecord::new_static(CredentialKind::ApiKey, "test", b"key".to_vec(), None),
+            )
+            .expect("create credential");
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "prefrontal-core",
+                "github_app:",
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .expect("create grant");
+
+        admin.record_bind(43, subc_protocol::Principal::Direct);
+        let direct = scoped_request(&surface, &admin, 43, "github_app:fleet-a").await;
+        assert_scoped_not_found(&direct);
+
+        admin.record_bind(
+            44,
+            subc_protocol::Principal::Reserved {
+                module_id: "other-module".into(),
+            },
+        );
+        let other_reserved = scoped_request(&surface, &admin, 44, "github_app:fleet-a").await;
+        assert_scoped_not_found(&other_reserved);
+    }
+
+    #[tokio::test]
+    async fn scoped_get_uncovered_and_unknown_ids_have_identical_wire_bodies() {
+        let (surface, admin, store) = scoped_rig(74);
+        store
+            .create(
+                "apikey:uncovered",
+                &VaultRecord::new_static(CredentialKind::ApiKey, "test", b"key".to_vec(), None),
+            )
+            .expect("create uncovered credential");
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "prefrontal-core",
+                "github_app:",
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .expect("create grant");
+        admin.record_bind(
+            45,
+            subc_protocol::Principal::Reserved {
+                module_id: "prefrontal-core".into(),
+            },
+        );
+
+        let uncovered = scoped_request(&surface, &admin, 45, "apikey:uncovered").await;
+        let unknown = scoped_request(&surface, &admin, 45, "github_app:missing").await;
+        assert_eq!(
+            uncovered, unknown,
+            "an uncovered stored credential and an unknown credential must be indistinguishable"
+        );
+    }
+
+    #[tokio::test]
+    async fn scoped_get_refusals_record_discriminated_auth_events_behind_uniform_wire_bodies() {
+        let (surface, admin, store) = scoped_rig(75);
+        store
+            .create(
+                "apikey:uncovered",
+                &VaultRecord::new_static(CredentialKind::ApiKey, "test", b"key".to_vec(), None),
+            )
+            .expect("create uncovered credential");
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "prefrontal-core",
+                "github_app:",
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .expect("create grant");
+        admin.record_bind(
+            46,
+            subc_protocol::Principal::Reserved {
+                module_id: "prefrontal-core".into(),
+            },
+        );
+
+        let no_grant = scoped_request(&surface, &admin, 46, "apikey:uncovered").await;
+        let not_found = scoped_request(&surface, &admin, 46, "github_app:missing").await;
+        assert_eq!(
+            no_grant, not_found,
+            "the operator-only distinction must not change the refused wire body"
+        );
+        let events = store.recent_auth_events(10).expect("read events");
+        assert_eq!(
+            events.len(),
+            2,
+            "each refused scoped read needs a diagnostic row"
+        );
+        assert_eq!(events[0].credential_id, "github_app:missing");
+        assert_eq!(events[0].detail.as_deref(), Some("not_found"));
+        assert_eq!(events[1].credential_id, "apikey:uncovered");
+        assert_eq!(events[1].detail.as_deref(), Some("no_grant"));
+        for event in events {
+            assert_eq!(event.kind, "scoped_read_refusal");
+            assert_eq!(event.principal_kind.as_deref(), Some("reserved"));
+            assert_eq!(event.principal_id.as_deref(), Some("prefrontal-core"));
+        }
+    }
+
+    #[test]
+    fn admin_status_lists_sorted_grants_with_their_sorted_covered_credentials() {
+        let (_surface, _admin, store) = scoped_rig(76);
+        for id in ["github_app:z", "github_app:a"] {
+            store
+                .create(
+                    id,
+                    &VaultRecord::new_static(CredentialKind::ApiKey, "test", b"key".to_vec(), None),
+                )
+                .expect("create credential");
+        }
+        for prefix in ["github_app:", "apikey:"] {
+            credentials_core::admin_ops::apply(
+                &store,
+                credentials_core::admin_ops::AdminOpBody::GrantCreate {
+                    v: credentials_core::admin_ops::ADMIN_OP_SCHEMA_V1,
+                    principal_id: "prefrontal-core".into(),
+                    credential_prefix: prefix.into(),
+                },
+                "test",
+            )
+            .expect("create grant");
+        }
+        let status = credentials_core::admin_ops::apply(
+            &store,
+            credentials_core::admin_ops::AdminOpBody::Status {
+                v: credentials_core::admin_ops::ADMIN_OP_SCHEMA_V1,
+            },
+            "test",
+        )
+        .expect("status");
+        let mut grants = status["read_grants"]
+            .as_array()
+            .expect("grant array")
+            .clone();
+        for grant in &mut grants {
+            let created_at_ms = grant
+                .as_object_mut()
+                .expect("grant object")
+                .remove("created_at_ms")
+                .expect("grant timestamp");
+            assert!(
+                created_at_ms.as_i64().is_some(),
+                "grant timestamp must be an integer"
+            );
+        }
+        let expected = json!([
+            {
+                "principal_kind": "reserved",
+                "principal_id": "prefrontal-core",
+                "credential_prefix": "apikey:",
+                "covered_credential_ids": ["apikey:active", "apikey:dead"],
+            },
+            {
+                "principal_kind": "reserved",
+                "principal_id": "prefrontal-core",
+                "credential_prefix": "github_app:",
+                "covered_credential_ids": ["github_app:a", "github_app:z"],
+            },
+        ]);
+        assert_eq!(
+            grants,
+            expected.as_array().expect("expected grant array").clone(),
+            "status must make every grant's current reach diffable"
+        );
     }
 
     /// Bump the fence epoch above the holder on a vault's db, via a fresh raw sqlite

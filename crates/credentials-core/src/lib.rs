@@ -85,5 +85,5 @@ pub use resolver::{
 };
 pub use store::{
     handle_hash, mint_handle, payload_hash, refresh_token_hash, EncryptedStore, MintedHandle,
-    RecordMeta, RecordState, RefreshIntent, StoreOpError,
+    ReadGrant, RecordMeta, RecordState, RefreshIntent, ScopedReadRefusal, StoreOpError,
 };

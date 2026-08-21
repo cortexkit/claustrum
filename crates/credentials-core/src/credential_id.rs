@@ -2,7 +2,7 @@
 //!
 //! A credential id names WHAT a consumer wants. The v1 scheme is
 //! `<method>:<provider>[:<account>]` (e.g. `oauth:anthropic`, `apikey:deepseek`,
-//! `antigravity:google`, `apikey:openai:work`). A provider can hold several
+//! `antigravity:google`, `signing:agent-assertion:7`). A provider can hold several
 //! credentials (different methods, and eventually different accounts), each its own
 //! record + handle.
 //!
@@ -18,7 +18,7 @@
 //! default method (oauth), so old ids do not misroute.
 
 /// An auth method in the credential-id scheme. A method selects the credential KIND
-/// (oauth vs static api-key) and, for oauth methods, the refresh adapter.
+/// and, for refreshable methods, the refresh adapter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthMethod {
     /// Provider-native OAuth (refreshed by the provider-named adapter).
@@ -35,6 +35,9 @@ pub enum AuthMethod {
     Copilot,
     /// GitHub App private key that refreshes into a short-lived installation token.
     GithubApp,
+    /// An Ed25519 private key that the vault exercises but never returns from the
+    /// public-material operation.
+    Signing,
 }
 
 impl AuthMethod {
@@ -48,6 +51,7 @@ impl AuthMethod {
             "chatgpt" => Some(AuthMethod::Chatgpt),
             "copilot" => Some(AuthMethod::Copilot),
             "github_app" => Some(AuthMethod::GithubApp),
+            "signing" => Some(AuthMethod::Signing),
             _ => None,
         }
     }
@@ -61,6 +65,24 @@ impl AuthMethod {
             AuthMethod::Chatgpt => "chatgpt",
             AuthMethod::Copilot => "copilot",
             AuthMethod::GithubApp => "github_app",
+            AuthMethod::Signing => "signing",
+        }
+    }
+
+    /// The record kind this method owns.
+    ///
+    /// Keeping the signing mapping with the method table prevents a `signing:` id
+    /// from being created as an OAuth-shaped record by a future caller that only has
+    /// the parsed method.
+    pub fn credential_kind(&self) -> crate::record::CredentialKind {
+        match self {
+            AuthMethod::ApiKey => crate::record::CredentialKind::ApiKey,
+            AuthMethod::Signing => crate::record::CredentialKind::SigningKey,
+            AuthMethod::Oauth
+            | AuthMethod::Antigravity
+            | AuthMethod::Chatgpt
+            | AuthMethod::Copilot
+            | AuthMethod::GithubApp => crate::record::CredentialKind::Oauth,
         }
     }
 
@@ -101,7 +123,7 @@ pub fn parse_credential_id(id: &str) -> ParsedCredentialId {
 }
 
 /// The refresh-adapter name to STORE for a credential, given its method and provider,
-/// or `None` for a static api-key record (no adapter, no refresh).
+/// or `None` for a static api-key or signing-key record (no adapter, no refresh).
 ///
 /// # Retirement consequence of returning `None`
 ///
@@ -138,6 +160,7 @@ pub fn parse_credential_id(id: &str) -> ParsedCredentialId {
 /// - antigravity → `antigravity`
 /// - chatgpt → `openai` (refreshed via the openai token endpoint)
 /// - apikey → `None` (static)
+/// - signing → `None` (static signing key)
 /// - github_app → `github_app` (App assertion to installation-token exchange)
 pub fn default_refresh_adapter(method: Option<AuthMethod>, provider: &str) -> Option<String> {
     match method {
@@ -146,7 +169,7 @@ pub fn default_refresh_adapter(method: Option<AuthMethod>, provider: &str) -> Op
         Some(AuthMethod::Chatgpt) => Some("openai".to_string()),
         Some(AuthMethod::Copilot) => Some("github-copilot".to_string()),
         Some(AuthMethod::GithubApp) => Some("github_app".to_string()),
-        Some(AuthMethod::ApiKey) => None,
+        Some(AuthMethod::ApiKey) | Some(AuthMethod::Signing) => None,
     }
 }
 
@@ -177,6 +200,37 @@ mod tests {
         let app = parse_credential_id("github_app:plex-alfonso");
         assert_eq!(app.method, Some(AuthMethod::GithubApp));
         assert_eq!(app.provider, "plex-alfonso");
+    }
+
+    /// A `signing:` id must consume its method segment instead of taking the
+    /// provider-first compatibility path, whose implicit OAuth default would make a
+    /// signing key look refreshable to every administrative view.
+    #[test]
+    fn signing_method_is_not_treated_as_legacy_oauth() {
+        let parsed = parse_credential_id("signing:agent-assertion:7");
+
+        assert_eq!(parsed.method, Some(AuthMethod::Signing));
+        assert_ne!(
+            parsed.method, None,
+            "a known signing method must not take the legacy oauth-default path"
+        );
+        assert_eq!(
+            default_refresh_adapter(parsed.method, &parsed.provider),
+            None,
+            "a signing key must not select the legacy provider-named OAuth adapter"
+        );
+    }
+
+    #[test]
+    fn signing_method_selects_a_signing_key_record_and_parses_all_segments() {
+        let parsed = parse_credential_id("signing:agent-assertion:7");
+        assert_eq!(parsed.method, Some(AuthMethod::Signing));
+        assert_eq!(parsed.provider, "agent-assertion");
+        assert_eq!(parsed.account.as_deref(), Some("7"));
+        assert_eq!(
+            parsed.method.map(|method| method.credential_kind()),
+            Some(crate::record::CredentialKind::SigningKey)
+        );
     }
 
     #[test]
@@ -225,6 +279,11 @@ mod tests {
             default_refresh_adapter(Some(AuthMethod::ApiKey), "deepseek"),
             None,
             "apikey → static, no adapter"
+        );
+        assert_eq!(
+            default_refresh_adapter(Some(AuthMethod::Signing), "agent-assertion"),
+            None,
+            "signing → static, no adapter"
         );
         assert_eq!(
             default_refresh_adapter(None, "anthropic"),

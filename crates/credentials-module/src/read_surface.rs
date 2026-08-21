@@ -8,6 +8,8 @@
 //! Operations:
 //! - `credential.get { handle, min_ttl_ms?, force_refresh? }` → the opaque payload,
 //!   refreshed first if stale (single-flight, vault-owned).
+//! - `credential.public_key { handle }` → public Ed25519 material for a signing key;
+//!   never the private payload.
 //! - `credential.get_scoped { credential_id }` → the same ordinary payload body, only
 //!   for a route-bound reserved principal with a literal-prefix read grant.
 //! - `credential.get_many { items: [...] }` → capped at [`limiter::GET_MANY_MAX`].
@@ -82,6 +84,24 @@ pub struct SignResult {
     /// Derived from the public key, so a holder of the public half can recompute it
     /// and check that an envelope names the key that actually signed.
     pub key_id: String,
+}
+
+/// A `credential.public_key` request.
+#[derive(Debug, Deserialize)]
+pub struct PublicKeyParams {
+    pub handle: String,
+}
+
+/// The public material of an Ed25519 signing key.
+///
+/// `credential.get` returns a record payload verbatim, and a signing-key payload is
+/// PKCS#8 private material. This separate response exists so publishing a verifier's
+/// key cannot accidentally publish the signing key to every ordinary read consumer.
+#[derive(Debug, Serialize)]
+pub struct PublicKeyResult {
+    pub public_key_hex: String,
+    pub key_id: String,
+    pub algorithm: &'static str,
 }
 
 /// A `credential.get_many` request: a capped batch of get items.
@@ -464,6 +484,53 @@ impl ReadSurface {
             // one, which is the same class as a record that will not decrypt.
             Err(credentials_core::signing::SignError::UnusableKey(_)) => Err(ReadError::Corrupt),
         }
+    }
+
+    /// Return the public half of a signing-key record without ever serving its private
+    /// payload.
+    ///
+    /// This has the same limiter placement and kind fence as `sign`: a public-key
+    /// lookup is still capability-handle traffic, and accepting any other credential
+    /// kind would turn this operation into a misleading parser for arbitrary secrets.
+    /// It performs no write or audit append because publication can run in a consumer
+    /// loop and must not grow the untrimmable audit chain.
+    pub async fn public_key(
+        &self,
+        connection_id: u64,
+        params: &PublicKeyParams,
+    ) -> Result<PublicKeyResult, ReadError> {
+        // Match `get` and `sign`: rate-limit the presented handle before resolving it,
+        // so unknown-handle sweeps are visible to the same detector as valid traffic.
+        self.check_limiter(connection_id, &params.handle).await;
+
+        let credential_id = match self.engine.store().resolve_handle(&params.handle) {
+            Ok(id) => id,
+            Err(StoreOpError::NotFound) => return Err(ReadError::NotFound),
+            Err(e) => return Err(map_store_error(&e)),
+        };
+
+        let record = match self.engine.store().get(&credential_id) {
+            Ok(record) => record,
+            Err(e) => return Err(map_store_error(&e)),
+        };
+
+        // Check the kind before parsing bytes so non-signing records receive the
+        // same permanent refusal regardless of the secret they carry.
+        if record.kind != credentials_core::record::CredentialKind::SigningKey {
+            return Err(ReadError::KindNotSignable);
+        }
+
+        let pem = std::str::from_utf8(&record.payload).map_err(|_| ReadError::Corrupt)?;
+        let public = credentials_core::signing::public_key_ed25519(pem).map_err(|_| {
+            // A record typed as a signing key but holding unusable bytes is vault
+            // corruption, not a caller request error, just as it is for `sign`.
+            ReadError::Corrupt
+        })?;
+        Ok(PublicKeyResult {
+            public_key_hex: public.public_key_hex,
+            key_id: public.key_id,
+            algorithm: "ed25519",
+        })
     }
 
     /// Serve a single `get`. Resolves the handle, runs the limiter (raising a

@@ -60,7 +60,8 @@ use tokio::{
 
 use limiter::{Caps, FetchLimiter};
 use read_surface::{
-    GetManyParams, GetParams, GetScopedParams, ReadSurface, ReportAuthFailureParams, StatusParams,
+    GetManyParams, GetParams, GetScopedParams, PublicKeyParams, ReadSurface,
+    ReportAuthFailureParams, StatusParams,
 };
 
 // The vault's module id — re-exported from the single cross-binary definition site
@@ -92,6 +93,7 @@ const OP_GET_MANY: &str = "credential.get_many";
 const OP_STATUS: &str = "credential.status";
 const OP_REPORT_AUTH_FAILURE: &str = "credential.report_auth_failure";
 const OP_SIGN: &str = "credential.sign";
+const OP_PUBLIC_KEY: &str = "credential.public_key";
 /// Admin ops on the running module (authenticated: direct principal + master-key
 /// challenge-response). `admin.challenge` issues a nonce; `admin.op` carries the
 /// authenticated op body + tag.
@@ -843,6 +845,17 @@ async fn handle_read_request(
                 return invalid_params(writer, ver, channel, epoch, corr, &e.to_string()).await
             }
         },
+        OP_PUBLIC_KEY => match serde_json::from_value::<PublicKeyParams>(request.params) {
+            Ok(p) => match surface.public_key(connection_id, &p).await {
+                Ok(r) => json!({ "result": r }),
+                Err(code) => json!({
+                    "result": { "error": read_surface::ErrorBody { code, class: code.class() } }
+                }),
+            },
+            Err(e) => {
+                return invalid_params(writer, ver, channel, epoch, corr, &e.to_string()).await
+            }
+        },
         OP_STATUS => match serde_json::from_value::<StatusParams>(request.params) {
             Ok(p) => json!({ "result": surface.status(connection_id, &p).await }),
             Err(e) => {
@@ -1046,7 +1059,7 @@ fn resolver_config_from_env(data_dir: PathBuf) -> ResolverConfig {
     ResolverConfig { data_dir, source }
 }
 
-/// The module's capability manifest: a ManagementSurface exposing the four read
+/// The module's capability manifest: a ManagementSurface exposing its read
 /// operations. Storage is `owns_schema: true` (the vault owns its schema). The
 /// `reserved: true` binding lives in the daemon's subc.jsonc config, not here; the
 /// module proves its reserved identity by echoing the launch nonce in HELLO.
@@ -1128,6 +1141,13 @@ fn manifest(module_id: &str) -> ModuleManifest {
                 // the manifest kind describes the second.
                 ManagementOperation {
                     name: OP_SIGN.to_string(),
+                    kind: ManagementOperationKind::Query,
+                },
+                // Query rather than Mutation for the same reason as `credential.sign`:
+                // this derives public bytes from a stored key without writing a record
+                // or appending to the audit chain, so callers may publish on demand.
+                ManagementOperation {
+                    name: OP_PUBLIC_KEY.to_string(),
                     kind: ManagementOperationKind::Query,
                 },
                 ManagementOperation {
@@ -2298,6 +2318,151 @@ mod tests {
             matches!(err.class(), read_surface::ErrorClass::Permanent),
             "no retry turns an api key into a signing key"
         );
+    }
+
+    /// Public material must verify signatures from the same handle while excluding the
+    /// private PEM that ordinary `credential.get` would expose.
+    ///
+    /// The non-signing negative uses valid PEM under `ApiKey`, so deleting the kind
+    /// fence makes this test fail by publishing a real key instead of refusing for an
+    /// unrelated parse error.
+    #[tokio::test]
+    async fn public_key_matches_signatures_without_serializing_private_material() {
+        use base64::Engine as _;
+        use ring::signature::{UnparsedPublicKey, ED25519};
+
+        // A private payload might be serialized as a JSON string or as a byte array;
+        // inspect both shapes so a future `Vec<u8>` field cannot bypass the PEM-text
+        // check merely because JSON escaped or number-encoded the same bytes.
+        fn json_contains_byte_sequence(value: &serde_json::Value, needle: &[u8]) -> bool {
+            match value {
+                serde_json::Value::String(text) => text
+                    .as_bytes()
+                    .windows(needle.len())
+                    .any(|window| window == needle),
+                serde_json::Value::Array(values) => {
+                    let encoded_bytes: Option<Vec<u8>> = values
+                        .iter()
+                        .map(|value| value.as_u64().and_then(|n| u8::try_from(n).ok()))
+                        .collect();
+                    encoded_bytes.is_some_and(|bytes| {
+                        bytes.windows(needle.len()).any(|window| window == needle)
+                    }) || values
+                        .iter()
+                        .any(|value| json_contains_byte_sequence(value, needle))
+                }
+                serde_json::Value::Object(fields) => fields
+                    .values()
+                    .any(|value| json_contains_byte_sequence(value, needle)),
+                serde_json::Value::Null
+                | serde_json::Value::Bool(_)
+                | serde_json::Value::Number(_) => false,
+            }
+        }
+
+        let (surface, store, _db) = tmp_surface_with_store(32);
+        let pem = test_ed25519_pem();
+        store
+            .create(
+                "signing:agent-assertion:7",
+                &VaultRecord::new_static(
+                    CredentialKind::SigningKey,
+                    "test",
+                    pem.as_bytes().to_vec(),
+                    None,
+                ),
+            )
+            .expect("create signer");
+        store
+            .create(
+                "apikey:valid-pem",
+                &VaultRecord::new_static(
+                    CredentialKind::ApiKey,
+                    "test",
+                    pem.as_bytes().to_vec(),
+                    None,
+                ),
+            )
+            .expect("create non-signer");
+
+        let signer_handle = credentials_core::store::mint_handle().expect("mint signer handle");
+        store
+            .put_handle_hash(
+                &signer_handle.hash,
+                "signing:agent-assertion:7",
+                AuditCtx::admin(AuditOp::MintHandle),
+            )
+            .expect("store signer handle");
+        let non_signer_handle =
+            credentials_core::store::mint_handle().expect("mint non-signer handle");
+        store
+            .put_handle_hash(
+                &non_signer_handle.hash,
+                "apikey:valid-pem",
+                AuditCtx::admin(AuditOp::MintHandle),
+            )
+            .expect("store non-signer handle");
+
+        let public = surface
+            .public_key(
+                1,
+                &read_surface::PublicKeyParams {
+                    handle: signer_handle.raw.clone(),
+                },
+            )
+            .await
+            .expect("a signing key must publish its public half");
+        assert_eq!(public.algorithm, "ed25519");
+
+        // The outer route body is what a consumer receives. It must contain neither
+        // the PEM armour nor the payload bytes, because returning either turns this
+        // public-material route into the private `credential.get` disclosure path.
+        let serialized =
+            serde_json::to_vec(&json!({ "result": &public })).expect("serialize route body");
+        let serialized_value: serde_json::Value =
+            serde_json::from_slice(&serialized).expect("decode serialized route body");
+        assert!(
+            !json_contains_byte_sequence(&serialized_value, pem.as_bytes()),
+            "the serialized public-key response must not contain private key bytes"
+        );
+        assert!(
+            !String::from_utf8_lossy(&serialized).contains("BEGIN PRIVATE KEY"),
+            "the serialized public-key response must not contain PEM armour"
+        );
+
+        let payload = b"canonical manifest bytes";
+        let signature = surface
+            .sign(
+                1,
+                &read_surface::SignParams {
+                    handle: signer_handle.raw,
+                    payload_b64: base64::engine::general_purpose::STANDARD.encode(payload),
+                },
+            )
+            .await
+            .expect("credential.sign must use the same stored key");
+        let public_bytes: Vec<u8> = (0..public.public_key_hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&public.public_key_hex[i..i + 2], 16).expect("hex"))
+            .collect();
+        let signature_bytes = base64::engine::general_purpose::STANDARD
+            .decode(signature.signature_b64)
+            .expect("signature base64");
+        UnparsedPublicKey::new(&ED25519, &public_bytes)
+            .verify(payload, &signature_bytes)
+            .expect("the published public half must verify credential.sign output");
+        assert_eq!(public.key_id, signature.key_id);
+
+        let err = surface
+            .public_key(
+                1,
+                &read_surface::PublicKeyParams {
+                    handle: non_signer_handle.raw,
+                },
+            )
+            .await
+            .expect_err("a non-signing credential must not publish parsed material");
+        assert_eq!(err, read_surface::ReadError::KindNotSignable);
     }
 
     /// A reactivate-based repair moves `ready` and NOT `record_version`.

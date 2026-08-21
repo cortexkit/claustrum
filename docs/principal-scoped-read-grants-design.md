@@ -112,6 +112,35 @@ covering grant answers `NotFound` as well — **not a distinct "no grant" code**
 because a caller who can distinguish "exists but you may not have it" from "does not
 exist" can enumerate the vault's contents by asking.
 
+### The wire is uniform; the vault's own record is not
+
+A uniform refusal buys enumeration resistance and **spends diagnosability**, and
+this repo has already paid that bill once: a refusal carrying no cause is what turned
+a fabricated capability handle into hours of unfalsifiable debugging at the far end.
+Paying it again at every misconfigured deposit is not acceptable.
+
+So the two live in different places. **Enumeration resistance belongs on the wire;
+diagnosability belongs in the vault's own record, where only an operator reads it.**
+Every grant refusal records the discriminated truth — `no_grant` versus `not_found`,
+naming the resolved principal and the requested id — in `auth_events`, reachable
+via `ck auth events` without taking the write lease.
+
+That distinction is load-bearing because **a refused caller and an absent credential
+have different owners.** One is the holder's configuration, one is this vault's
+contents, and a surface that records neither makes every future misconfiguration a
+two-party guessing game.
+
+`auth_events` is the right home rather than the audit chain: it is trimmable
+(64 rows per credential, trimmed in the insert's own transaction), and a route
+operation reachable in a loop must never append to the untrimmable chain.
+
+**The residual, stated because the cap has a sharp edge:** a caller driving refusals
+against one credential can evict that credential's genuine diagnostic history within
+the cap. That hazard sits entirely inside the same-uid non-goal of §4 — driving
+refusals at all requires a route bind — so it is accepted here rather than solved. If
+it ever needs solving, the fix is a per-principal cap rather than a bigger one: bound
+the noisy caller's own history, never the subject's.
+
 ## 6. The hazard a prefix grant carries
 
 A prefix grant's blast radius **grows silently**. Every credential deposited under
@@ -133,6 +162,17 @@ What must NOT happen is a prefix that is broader than its purpose. `github_app:`
 one credential family with one holder. A grant on `apikey:` would cover every static
 secret in the vault, and no accountability argument justifies that.
 
+Two hardenings that make the mitigation mechanical rather than attentive:
+
+- **The holder's grant is exactly `github_app:` and nothing else, and a SECOND
+  prefix on the same principal is itself a review trigger.** Widening by adding a
+  grant row looks like ordinary configuration; widening by adding a prefix to an
+  existing principal looks like nothing at all.
+- **The covered-set enumeration must be pinnable — sorted and diffable**, so a
+  widening shows up as a diff a test can redden on rather than as a status page a
+  human might read. That is the gh-shim delta-test shape, and the reason it is worth
+  copying is that it converts "someone will notice" into "something fails".
+
 ## 7. Revocation and audit
 
 - Grant creation and revocation are **admin operations**, so they carry the
@@ -153,6 +193,11 @@ secret in the vault, and no accountability argument justifies that.
   covered id succeeds while an uncovered id refuses **identically to an unknown id**.
 - Enumeration of the covered set in admin status (§6 is not optional; the mitigation
   is what makes the prefix acceptable).
-- A negative test that a `Direct` principal — the CLI's own bind — cannot use a
-  grant issued to a `Reserved` module. The two principals are different kinds and
-  the check must compare both.
+- Negative tests that a grant issued to `Reserved { prefrontal-core }` is refused
+  for BOTH a `Direct` principal (the CLI's own bind, a different KIND) and a
+  DIFFERENT reserved module (same kind, wrong id). A check that compares kind but
+  not id passes the first test and fails in production; a check that compares id but
+  not kind does the reverse. Only the pair discriminates.
+- A test that a refused read leaves a discriminated `auth_events` row while the wire
+  body stays uniform — the property in §5 is two claims, and a test asserting only
+  the wire half would let the server-side record silently disappear.

@@ -142,7 +142,21 @@ jobs:
         run: python3 scripts/threshold-controls.py
 
       - name: Format check
-        run: cargo fmt --all -- --check
+        # SCOPED TO THIS REPO'S OWN CRATES. `--all` reaches through the sibling path
+        # dependencies and checks sources owned by other repos, so a peer's
+        # unformatted Rust would fail THIS build for code no commit here can fix.
+        # Their formatting is their CI's job. Members are DERIVED rather than typed,
+        # so adding a crate cannot silently drop it from the check, and an empty
+        # derivation refuses rather than passing vacuously.
+        shell: bash
+        run: |
+          set -euo pipefail
+          pkgs=$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c 'import json,sys; print(" ".join("-p "+p["name"] for p in json.load(sys.stdin)["packages"]))')
+          test -n "$pkgs" || { echo "empty format scope; refusing" >&2; exit 1; }
+          echo "format scope: $pkgs"
+          # shellcheck disable=SC2086
+          cargo fmt $pkgs -- --check
 
       - name: Clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings

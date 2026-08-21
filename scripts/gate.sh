@@ -84,7 +84,31 @@ run_check "inbound contracts" bash scripts/check-inbound-contracts.sh
 run_check "endpoint hosts" python3 scripts/endpoint-hosts.py
 run_check "threshold controls" python3 scripts/threshold-controls.py
 run_check "path rendering" python3 scripts/check-path-rendering.py
-run_check "format" cargo fmt --all -- --check
+# FORMAT IS SCOPED TO THIS REPO'S OWN CRATES, and that is a correctness fix rather
+# than a narrowing.
+#
+# `cargo fmt --all` reaches through the sibling PATH DEPENDENCIES (subc-core,
+# cortexkit-store, ...) and checks their sources too. Those live in other repos,
+# owned by other seats, and are edited while this gate runs -- so the arm's result
+# depended on whether a peer happened to be MID-EDIT. Measured 2026-08-21: this gate
+# failed on two diffs in subconscious's daemon_config.rs while that repo's COMMITTED
+# tip formatted clean. Nothing in this repo was wrong and nothing in theirs was
+# either; I was reading someone's unfinished work.
+#
+# THE WORSE DIRECTION IS THE QUIET ONE: it can also pass BECAUSE a sibling's
+# uncommitted state happens to be clean, then fail in CI against their committed tip.
+# A gate whose answer depends on another agent's working tree is not reproducible,
+# and an irreproducible gate teaches people to re-run it rather than read it.
+#
+# The member list is DERIVED from cargo metadata rather than typed, because a
+# hand-written -p list is an enumeration that drifts: add a crate, forget the list,
+# and the arm silently stops checking it while still reporting ok. Refuses on an
+# empty derivation for the same reason the test floor refuses an empty count.
+FMT_PKGS=$(cargo metadata --no-deps --format-version 1 \
+  | python3 -c 'import json,sys; print(" ".join("-p "+p["name"] for p in json.load(sys.stdin)["packages"]))')
+[ -n "$FMT_PKGS" ] || fail "format (could not derive workspace members -- refusing to run an empty scope)"
+# shellcheck disable=SC2086
+run_check "format" cargo fmt $FMT_PKGS -- --check
 
 run_check "clippy" \
   cargo clippy --locked --workspace --all-targets -- -D warnings

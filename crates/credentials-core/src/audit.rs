@@ -64,6 +64,10 @@ pub enum AuditOp {
     /// A read-surface fetch anomaly was detected (an enumeration/rate alarm). Not a
     /// mutation, but recorded durably so the anomaly survives the connection.
     FetchAnomaly,
+    /// A principal-scoped credential-prefix read grant was created.
+    GrantCreate,
+    /// A principal-scoped credential-prefix read grant was revoked.
+    GrantRevoke,
 }
 
 impl AuditOp {
@@ -83,6 +87,8 @@ impl AuditOp {
             AuditOp::MintHandle => "mint_handle",
             AuditOp::RevokeHandle => "revoke_handle",
             AuditOp::FetchAnomaly => "fetch_anomaly",
+            AuditOp::GrantCreate => "grant_create",
+            AuditOp::GrantRevoke => "grant_revoke",
         }
     }
 }

@@ -175,6 +175,21 @@ const MIGRATIONS: &[Migration] = &[
                      ); \
                      CREATE INDEX idx_auth_events_credential ON auth_events(credential_id);",
     },
+    // Principal-scoped read refusals must name the caller for the operator while the
+    // wire remains uniformly `not_found`. These nullable columns preserve the older
+    // non-principal auth-event rows and their existing diagnostics.
+    Migration {
+        version: 4,
+        statements: "CREATE TABLE read_grants (\
+                         principal_kind    TEXT NOT NULL, \
+                         principal_id      TEXT NOT NULL, \
+                         credential_prefix TEXT NOT NULL, \
+                         created_at_ms     INTEGER NOT NULL, \
+                         PRIMARY KEY (principal_kind, principal_id, credential_prefix)\
+                     ); \
+                     ALTER TABLE auth_events ADD COLUMN principal_kind TEXT; \
+                     ALTER TABLE auth_events ADD COLUMN principal_id TEXT;",
+    },
 ];
 
 /// The `vault_secrets` row name for the audit-chain HMAC key. The audit key is a
@@ -229,6 +244,15 @@ pub struct RecordMeta {
     pub key_id_hex: String,
     /// The row's lifecycle state.
     pub state: RecordState,
+}
+
+/// One durable principal-scoped credential-prefix read grant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadGrant {
+    pub principal_kind: String,
+    pub principal_id: String,
+    pub credential_prefix: String,
+    pub created_at_ms: i64,
 }
 
 /// A durable refresh-intent row: the fsynced marker that a refresh is in flight
@@ -606,6 +630,153 @@ impl EncryptedStore {
                             state: RecordState::from_str(&state),
                         },
                     ))
+                })?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .map_err(StoreOpError::from)
+    }
+
+    // ---- principal-scoped read grants -----------------------------------
+
+    /// Create one reserved-principal grant and append its audit transition in the
+    /// same fenced transaction. A duplicate names an existing authority and is
+    /// refused rather than silently accepted as a fresh reviewable change.
+    pub fn create_read_grant_audited(
+        &self,
+        principal_kind: &str,
+        principal_id: &str,
+        credential_prefix: &str,
+        ctx: AuditCtx<'_>,
+    ) -> Result<(), StoreOpError> {
+        if principal_kind != "reserved" || principal_id.is_empty() || credential_prefix.is_empty() {
+            return Err(StoreOpError::Encode(
+                "read grants require a reserved principal and non-empty prefix".into(),
+            ));
+        }
+        let now = now_ms();
+        let audit_key = self.audit_key.clone();
+        // The HMAC transcript has no grant-specific columns (adding one would break
+        // verification of historical entries), so preserve the exact grant target in
+        // its existing non-secret target field.
+        let audit_target =
+            format!("read_grant:{principal_kind}:{principal_id}:{credential_prefix}");
+        let changed = self.fenced_write(|tx| {
+            let changed = tx.execute(
+                "INSERT INTO read_grants \
+                 (principal_kind, principal_id, credential_prefix, created_at_ms) \
+                 VALUES (?1, ?2, ?3, ?4) ON CONFLICT DO NOTHING",
+                rusqlite::params![principal_kind, principal_id, credential_prefix, now],
+            )?;
+            if changed > 0 {
+                append_audit_tx(
+                    tx,
+                    &audit_key,
+                    &AuditRecord {
+                        op: ctx.op,
+                        credential_id: Some(audit_target.clone()),
+                        payload_hash: None,
+                        actor: ctx.actor.to_string(),
+                        alarm: ctx.alarm,
+                    },
+                )?;
+            }
+            Ok(changed)
+        })?;
+        if changed == 0 {
+            return Err(StoreOpError::AlreadyExists);
+        }
+        Ok(())
+    }
+
+    /// Revoke one reserved-principal grant and append the revocation in the same
+    /// fenced transaction. An absent row is not a transition, so it is refused rather
+    /// than producing an audit entry that claims access changed when it did not.
+    pub fn revoke_read_grant_audited(
+        &self,
+        principal_kind: &str,
+        principal_id: &str,
+        credential_prefix: &str,
+        ctx: AuditCtx<'_>,
+    ) -> Result<(), StoreOpError> {
+        if principal_kind != "reserved" || principal_id.is_empty() || credential_prefix.is_empty() {
+            return Err(StoreOpError::Encode(
+                "read grants require a reserved principal and non-empty prefix".into(),
+            ));
+        }
+        let audit_key = self.audit_key.clone();
+        // See creation: the historical HMAC transcript cannot gain grant columns, so
+        // this stable target string makes a later revocation attributable.
+        let audit_target =
+            format!("read_grant:{principal_kind}:{principal_id}:{credential_prefix}");
+        let changed = self.fenced_write(|tx| {
+            let changed = tx.execute(
+                "DELETE FROM read_grants \
+                 WHERE principal_kind = ?1 AND principal_id = ?2 AND credential_prefix = ?3",
+                rusqlite::params![principal_kind, principal_id, credential_prefix],
+            )?;
+            if changed > 0 {
+                append_audit_tx(
+                    tx,
+                    &audit_key,
+                    &AuditRecord {
+                        op: ctx.op,
+                        credential_id: Some(audit_target.clone()),
+                        payload_hash: None,
+                        actor: ctx.actor.to_string(),
+                        alarm: ctx.alarm,
+                    },
+                )?;
+            }
+            Ok(changed)
+        })?;
+        if changed == 0 {
+            return Err(StoreOpError::NotFound);
+        }
+        Ok(())
+    }
+
+    /// Whether a literal credential-id prefix grant covers this request. Prefixes are
+    /// compared in Rust rather than SQL `LIKE`, whose `%` and `_` metacharacters would
+    /// silently widen a grant stored as ordinary text.
+    pub fn read_grant_covers(
+        &self,
+        principal_kind: &str,
+        principal_id: &str,
+        credential_id: &str,
+    ) -> Result<bool, StoreOpError> {
+        self.store
+            .with_conn(|c| {
+                let mut stmt = c.prepare(
+                    "SELECT credential_prefix FROM read_grants \
+                     WHERE principal_kind = ?1 AND principal_id = ?2",
+                )?;
+                let mut prefixes = stmt
+                    .query_map(rusqlite::params![principal_kind, principal_id], |row| {
+                        row.get::<_, String>(0)
+                    })?;
+                prefixes.try_fold(false, |covered, prefix| {
+                    Ok(covered || credential_id.starts_with(&prefix?))
+                })
+            })
+            .map_err(StoreOpError::from)
+    }
+
+    /// List every grant in deterministic principal/prefix order for admin status.
+    pub fn list_read_grants(&self) -> Result<Vec<ReadGrant>, StoreOpError> {
+        self.store
+            .with_conn(|c| {
+                let mut stmt = c.prepare(
+                    "SELECT principal_kind, principal_id, credential_prefix, created_at_ms \
+                     FROM read_grants \
+                     ORDER BY principal_kind, principal_id, credential_prefix",
+                )?;
+                let rows = stmt.query_map([], |row| {
+                    Ok(ReadGrant {
+                        principal_kind: row.get(0)?,
+                        principal_id: row.get(1)?,
+                        credential_prefix: row.get(2)?,
+                        created_at_ms: row.get(3)?,
+                    })
                 })?;
                 rows.collect::<rusqlite::Result<Vec<_>>>()
             })
@@ -1073,12 +1244,43 @@ impl EncryptedStore {
             .map_err(StoreOpError::from)
     }
 
+    /// Record why a principal-scoped read was refused. This is a trimmable diagnostic
+    /// observation, not an authority transition, so it deliberately does not take the
+    /// writer fence or append to the untrimmable audit chain.
+    pub fn record_scoped_read_refusal(
+        &self,
+        credential_id: &str,
+        principal_kind: &str,
+        principal_id: Option<&str>,
+        refusal: ScopedReadRefusal,
+    ) -> Result<(), StoreOpError> {
+        self.store
+            .with_conn(|c| {
+                let tx = c.unchecked_transaction()?;
+                tx.execute(
+                    "INSERT INTO auth_events \
+                     (ts_ms, credential_id, kind, provider_status, detail, record_version, applied, principal_kind, principal_id) \
+                     VALUES (?1, ?2, 'scoped_read_refusal', NULL, ?3, NULL, 0, ?4, ?5)",
+                    rusqlite::params![
+                        now_ms(),
+                        credential_id,
+                        refusal.as_str(),
+                        principal_kind,
+                        principal_id,
+                    ],
+                )?;
+                trim_auth_events_tx(&tx, credential_id)?;
+                tx.commit()
+            })
+            .map_err(StoreOpError::from)
+    }
+
     /// Read recent authentication events, newest first. Diagnostics for an operator
     /// asking why a credential stopped working; never an authority for what happened.
     pub fn recent_auth_events(&self, limit: u32) -> Result<Vec<AuthEvent>, StoreOpError> {
         self.store
             .with_conn(|c| {
-                let mut stmt = c.prepare(AUTH_EVENTS_SELECT)?;
+                let mut stmt = c.prepare(auth_events_select(c)?)?;
                 let rows = stmt.query_map(rusqlite::params![limit], auth_event_from_row)?;
                 rows.collect::<rusqlite::Result<Vec<_>>>()
             })
@@ -2317,7 +2519,9 @@ pub fn read_auth_events_read_only(
         return Err(StoreOpError::NotFound);
     }
 
-    let mut stmt = conn.prepare(AUTH_EVENTS_SELECT).map_err(map)?;
+    let mut stmt = conn
+        .prepare(auth_events_select(&conn).map_err(map)?)
+        .map_err(map)?;
     let rows = stmt
         .query_map(rusqlite::params![limit], auth_event_from_row)
         .map_err(map)?;
@@ -2332,11 +2536,33 @@ pub fn read_auth_events_read_only(
 /// are two readers (leased and lease-free), and duplicating the pair would mean two
 /// places that have to be changed together with nothing to catch a miss.
 const AUTH_EVENTS_SELECT: &str =
-    "SELECT ts_ms, credential_id, kind, provider_status, detail, record_version, applied \
+    "SELECT ts_ms, credential_id, kind, provider_status, detail, record_version, applied, \
+            principal_kind, principal_id \
      FROM auth_events ORDER BY seq DESC LIMIT ?1";
 
+// A read-only CLI can run before the daemon has restarted to apply migration 4. Keep
+// its existing diagnostics readable by projecting absent principal fields as NULL.
+const AUTH_EVENTS_SELECT_PRE_PRINCIPAL: &str =
+    "SELECT ts_ms, credential_id, kind, provider_status, detail, record_version, applied, \
+            NULL AS principal_kind, NULL AS principal_id \
+     FROM auth_events ORDER BY seq DESC LIMIT ?1";
+
+fn auth_events_select(conn: &rusqlite::Connection) -> rusqlite::Result<&'static str> {
+    let mut stmt = conn.prepare("PRAGMA table_info(auth_events)")?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if columns.iter().any(|column| column == "principal_kind")
+        && columns.iter().any(|column| column == "principal_id")
+    {
+        Ok(AUTH_EVENTS_SELECT)
+    } else {
+        Ok(AUTH_EVENTS_SELECT_PRE_PRINCIPAL)
+    }
+}
+
 /// Decode one `auth_events` row. Positional, so it is bound to the column order in
-/// [`AUTH_EVENTS_SELECT`].
+/// [`AUTH_EVENTS_SELECT`] and [`AUTH_EVENTS_SELECT_PRE_PRINCIPAL`].
 fn auth_event_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<AuthEvent> {
     Ok(AuthEvent {
         ts_ms: r.get(0)?,
@@ -2346,6 +2572,8 @@ fn auth_event_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<AuthEvent> {
         detail: r.get(4)?,
         record_version: r.get::<_, Option<i64>>(5)?.map(|v| v as u64),
         applied: r.get::<_, i64>(6)? != 0,
+        principal_kind: r.get(7)?,
+        principal_id: r.get(8)?,
     })
 }
 
@@ -2386,6 +2614,31 @@ pub struct AuthEvent {
     /// Whether this observation actually changed the credential. False for a report
     /// against a superseded version, and for events that authorise no change.
     pub applied: bool,
+    /// The caller's resolved principal kind for a scoped-read refusal. Older events
+    /// and anonymous observations have no principal and remain `None`.
+    pub principal_kind: Option<String>,
+    /// The module id for a reserved principal. Unit principals such as `Direct` carry
+    /// their full identity in `principal_kind`, so this remains `None` for them.
+    pub principal_id: Option<String>,
+}
+
+/// The distinct internal reasons a principal-scoped read was refused. These values
+/// are diagnostics only; the wire response remains uniformly `not_found`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopedReadRefusal {
+    NoGrant,
+    NotFound,
+    StoreError,
+}
+
+impl ScopedReadRefusal {
+    fn as_str(self) -> &'static str {
+        match self {
+            ScopedReadRefusal::NoGrant => "no_grant",
+            ScopedReadRefusal::NotFound => "not_found",
+            ScopedReadRefusal::StoreError => "store_error",
+        }
+    }
 }
 
 /// How many `auth_events` rows are kept per credential.
@@ -2451,21 +2704,12 @@ pub(crate) fn append_auth_event_tx(
             applied as i64,
         ],
     )?;
+    trim_auth_events_tx(tx, credential_id)
+}
 
-    // BOUND THE TABLE, in the same transaction as the insert.
-    //
-    // Recording an observation whether or not it applied is the point of this table --
-    // a report naming a superseded version changes nothing and previously left no
-    // trace. The cost is that a write which used to be a silent no-op now always
-    // writes, and nothing upstream refuses one: the read surface's limiter raises an
-    // alarm on a report flood and then lets the call through, so N repeated no-op
-    // reports produce N rows.
-    //
-    // So the flood is bounded here rather than at the caller, because every writer
-    // reaches this function and a caller-side guard would have to be repeated at each.
-    // Trimming PER CREDENTIAL rather than globally is what keeps it honest: a consumer
-    // looping on one credential would otherwise evict every other credential's
-    // history, and those rows are what explains whatever failure is being diagnosed.
+// Every auth-event writer calls this in the insert transaction, so a repeated scoped
+// read refusal cannot turn diagnostics into an unbounded durable write path.
+fn trim_auth_events_tx(tx: &rusqlite::Transaction, credential_id: &str) -> rusqlite::Result<()> {
     tx.execute(
         "DELETE FROM auth_events \
          WHERE credential_id = ?1 AND seq NOT IN (\
@@ -4162,6 +4406,35 @@ mod tests {
             Err(StoreError::Backend(m)) => assert!(m.contains("corrupt anchor"), "got: {m}"),
             other => panic!("a corrupt anchor must fail closed, got {other:?}"),
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A grant prefix is ordinary text, not a SQL pattern: `%` and `_` in a credential
+    /// id family must never authorize unrelated ids by acting as wildcards.
+    #[test]
+    fn read_grant_prefixes_are_literal_not_like_patterns() {
+        let (root, store) = tmp_store(51);
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "prefrontal-core",
+                "github%_app:",
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .expect("create grant");
+
+        assert!(
+            store
+                .read_grant_covers("reserved", "prefrontal-core", "github%_app:agent")
+                .expect("check literal prefix"),
+            "the exact literal prefix must cover its family"
+        );
+        assert!(
+            !store
+                .read_grant_covers("reserved", "prefrontal-core", "githubZZapp:agent")
+                .expect("check unrelated id"),
+            "percent and underscore in a grant must not widen it as SQL LIKE wildcards"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }

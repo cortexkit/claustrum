@@ -151,6 +151,14 @@ impl AdminSurface {
         }
     }
 
+    /// Snapshot the principal that was stamped on a route bind. The route dispatcher
+    /// captures this before spawning a request so a later channel rebind cannot change
+    /// which caller authorized an already-accepted frame.
+    pub fn principal(&self, channel: u16) -> Option<Principal> {
+        let binds = self.binds.lock().unwrap_or_else(|p| p.into_inner());
+        binds.get(&channel).map(|state| state.principal.clone())
+    }
+
     /// Forget a channel's admin state on route Goodbye. Idempotent.
     pub fn drop_bind(&self, channel: u16) {
         let mut binds = self.binds.lock().unwrap_or_else(|p| p.into_inner());

@@ -1,13 +1,15 @@
-//! The anonymous read surface: the four route-channel operations a consumer calls.
+//! The capability-handle read surface plus its separate principal-scoped operation.
 //!
-//! This is READ-ONLY — there is deliberately no write op here (writes live in the
-//! separate offline admin CLI). Each op takes a capability HANDLE, never a public
-//! alias, and the handle is resolved to a credential id before anything else; an
-//! unknown or revoked handle is a uniform `not_found` so a probe cannot enumerate.
+//! This is READ-ONLY — there is deliberately no unauthenticated write op here (writes
+//! live in the admin surface). Handle operations take a capability HANDLE, never a
+//! public alias, and resolve it to a credential id before anything else; an unknown or
+//! revoked handle is a uniform `not_found` so a probe cannot enumerate.
 //!
 //! Operations:
 //! - `credential.get { handle, min_ttl_ms?, force_refresh? }` → the opaque payload,
 //!   refreshed first if stale (single-flight, vault-owned).
+//! - `credential.get_scoped { credential_id }` → the same ordinary payload body, only
+//!   for a route-bound reserved principal with a literal-prefix read grant.
 //! - `credential.get_many { items: [...] }` → capped at [`limiter::GET_MANY_MAX`].
 //! - `credential.status { handle? }` → non-secret health, never bytes.
 //! - `credential.report_auth_failure { handle, provider_status, record_version }` →
@@ -36,7 +38,8 @@ use credentials_core::audit::{AlarmReason, AuditCtx, AuditOp, AuditRecord};
 use credentials_core::engine::{EngineError, RefreshEngine};
 use credentials_core::health::VaultHealth;
 use credentials_core::refresh_adapters::RefreshError;
-use credentials_core::store::StoreOpError;
+use credentials_core::store::{ScopedReadRefusal, StoreOpError};
+use subc_protocol::Principal;
 
 use crate::limiter::{Admission, FetchLimiter, GET_MANY_MAX};
 
@@ -48,6 +51,14 @@ pub struct GetParams {
     pub min_ttl_ms: Option<i64>,
     #[serde(default)]
     pub force_refresh: bool,
+}
+
+/// A principal-scoped credential-id read. This deliberately has no refresh controls:
+/// a grant authorizes the same ordinary serving path as `credential.get`, not a mint
+/// or force-refresh capability.
+#[derive(Debug, Deserialize)]
+pub struct GetScopedParams {
+    pub credential_id: String,
 }
 
 /// A `credential.sign` request: sign exact bytes with a signing-key credential.
@@ -335,6 +346,11 @@ pub struct ReadSurface {
     // (a panic), this stops advancing; the probe computes the age live and fails closed.
     // One atomic covers both failure modes uniformly, so no separate task-watch is needed.
     last_refresh_ms: std::sync::atomic::AtomicI64,
+    // The store exposes no public way to make one read query fail. This test-only
+    // switch injects that Result after the real lookup so route tests can prove the
+    // diagnostic keeps a lookup failure distinct without shipping a test capability.
+    #[cfg(test)]
+    scoped_grant_lookup_error_for_test: std::sync::atomic::AtomicBool,
 }
 
 /// If the cached health snapshot has not been refreshed within this window, the probe
@@ -384,6 +400,8 @@ impl ReadSurface {
             limiter: Mutex::new(limiter),
             health: std::sync::Mutex::new(initial),
             last_refresh_ms: std::sync::atomic::AtomicI64::new(now_ms()),
+            #[cfg(test)]
+            scoped_grant_lookup_error_for_test: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -531,6 +549,122 @@ impl ReadSurface {
                     email: record.identity.email.clone(),
                     org_name: record.identity.org_name.clone(),
                 })
+            }
+            Err(e) => err(map_engine_error(&e)),
+        }
+    }
+
+    /// Test-only: make the next scoped grant lookup take its store-error refusal arm.
+    #[cfg(test)]
+    pub(crate) fn force_scoped_grant_lookup_error_for_test(&self) {
+        self.scoped_grant_lookup_error_for_test
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Serve a credential-id read after the route layer captures the bind's principal.
+    /// An uncovered principal is rejected before the credential lookup, so it cannot
+    /// turn this operation into a vault inventory oracle.
+    pub async fn get_scoped(
+        &self,
+        principal: Option<&Principal>,
+        params: &GetScopedParams,
+    ) -> GetOutcome {
+        let (principal_kind, principal_id, grant_coverage) = match principal {
+            Some(Principal::Reserved { module_id }) => {
+                let coverage = self.engine.store().read_grant_covers(
+                    "reserved",
+                    module_id,
+                    &params.credential_id,
+                );
+                #[cfg(test)]
+                let coverage = if self
+                    .scoped_grant_lookup_error_for_test
+                    .swap(false, std::sync::atomic::Ordering::SeqCst)
+                {
+                    Err(StoreOpError::Store(
+                        "test scoped grant lookup failure".into(),
+                    ))
+                } else {
+                    coverage
+                };
+                ("reserved", Some(module_id.as_str()), coverage)
+            }
+            Some(Principal::Direct) => ("direct", None, Ok(false)),
+            Some(Principal::Unverified) | None => ("unverified", None, Ok(false)),
+        };
+        let refusal = match grant_coverage {
+            Ok(true) => None,
+            Ok(false) => Some(ScopedReadRefusal::NoGrant),
+            Err(_) => {
+                // The caller must not learn whether the vault could read its grant table:
+                // retain `not_found` on the wire while the internal operator record names
+                // the storage failure instead of misdirecting a grant-configuration repair.
+                Some(ScopedReadRefusal::StoreError)
+            }
+        };
+        if let Some(refusal) = refusal {
+            let _ = self.engine.store().record_scoped_read_refusal(
+                &params.credential_id,
+                principal_kind,
+                principal_id,
+                refusal,
+            );
+            return err(ReadError::NotFound);
+        }
+
+        match self.engine.get(&params.credential_id, None, false).await {
+            Ok(record) => {
+                if record.payload.is_empty() {
+                    match self
+                        .engine
+                        .store()
+                        .quarantine_if_version(&params.credential_id, record.record_version)
+                    {
+                        Ok(true) => return err(ReadError::Corrupt),
+                        Ok(false) => return err(ReadError::RefreshFailed),
+                        Err(e) => return err(map_store_error(&e)),
+                    }
+                }
+
+                let is_antigravity = record.refresh_adapter.as_deref()
+                    == Some(credentials_core::refresh_adapters::antigravity::ADAPTER_NAME);
+                let project_id = if is_antigravity {
+                    record.oauth.as_ref().and_then(|o| {
+                        credentials_core::refresh_adapters::antigravity::effective_project_id(
+                            &o.refresh_token,
+                        )
+                    })
+                } else {
+                    None
+                };
+                let account_id = match (&record.refresh_adapter, &record.oauth) {
+                    (Some(adapter), Some(o)) => {
+                        credentials_core::oauth_login::account_id_for_adapter(
+                            adapter,
+                            &o.access_token,
+                        )
+                    }
+                    _ => None,
+                }
+                .or_else(|| record.identity.account_id.clone());
+                GetOutcome::Ok(GetResult {
+                    payload: record.payload,
+                    expires_at_ms: record.expires_at_ms,
+                    record_version: record.record_version,
+                    project_id,
+                    account_id,
+                    email: record.identity.email.clone(),
+                    org_name: record.identity.org_name.clone(),
+                })
+            }
+            Err(EngineError::Store(StoreOpError::NotFound)) => {
+                let _ = self.engine.store().record_scoped_read_refusal(
+                    &params.credential_id,
+                    principal_kind,
+                    principal_id,
+                    ScopedReadRefusal::NotFound,
+                );
+                err(ReadError::NotFound)
             }
             Err(e) => err(map_engine_error(&e)),
         }

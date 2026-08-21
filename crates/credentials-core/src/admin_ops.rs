@@ -61,6 +61,20 @@ pub enum AdminOpBody {
     RevokeHandle { v: u32, handle: String },
     #[serde(rename = "admin.revoke_all_handles")]
     RevokeAllHandles { v: u32, id: String },
+    /// Grant a reserved module principal literal-prefix credential reads.
+    #[serde(rename = "admin.grant_create")]
+    GrantCreate {
+        v: u32,
+        principal_id: String,
+        credential_prefix: String,
+    },
+    /// Revoke a reserved module principal literal-prefix credential read grant.
+    #[serde(rename = "admin.grant_revoke")]
+    GrantRevoke {
+        v: u32,
+        principal_id: String,
+        credential_prefix: String,
+    },
     /// An authenticated READ: the no-decrypt credential inventory + health summary.
     /// A read, but master-key-gated like every other admin op, because the full
     /// per-credential id/state list is not an anonymous enumeration surface (the
@@ -81,6 +95,8 @@ impl AdminOpBody {
             | AdminOpBody::MintHandle { v, .. }
             | AdminOpBody::RevokeHandle { v, .. }
             | AdminOpBody::RevokeAllHandles { v, .. }
+            | AdminOpBody::GrantCreate { v, .. }
+            | AdminOpBody::GrantRevoke { v, .. }
             | AdminOpBody::Status { v } => *v,
         }
     }
@@ -96,7 +112,10 @@ impl AdminOpBody {
             | AdminOpBody::Remove { id, .. }
             | AdminOpBody::MintHandle { id, .. }
             | AdminOpBody::RevokeAllHandles { id, .. } => Some(id),
-            AdminOpBody::RevokeHandle { .. } | AdminOpBody::Status { .. } => None,
+            AdminOpBody::RevokeHandle { .. }
+            | AdminOpBody::GrantCreate { .. }
+            | AdminOpBody::GrantRevoke { .. }
+            | AdminOpBody::Status { .. } => None,
         }
     }
 
@@ -221,11 +240,30 @@ pub fn apply(
             let n = store.revoke_all_handles(&id, ctx)?;
             Ok(serde_json::json!({ "handles_revoked": n }))
         }
+        AdminOpBody::GrantCreate {
+            principal_id,
+            credential_prefix,
+            ..
+        } => {
+            let ctx = AuditCtx::route_admin(AuditOp::GrantCreate, actor);
+            store.create_read_grant_audited("reserved", &principal_id, &credential_prefix, ctx)?;
+            Ok(serde_json::json!({ "grant_created": true }))
+        }
+        AdminOpBody::GrantRevoke {
+            principal_id,
+            credential_prefix,
+            ..
+        } => {
+            let ctx = AuditCtx::route_admin(AuditOp::GrantRevoke, actor);
+            store.revoke_read_grant_audited("reserved", &principal_id, &credential_prefix, ctx)?;
+            Ok(serde_json::json!({ "grant_revoked": true }))
+        }
         AdminOpBody::Status { .. } => {
             // A no-decrypt inventory + the same fail-closed health ladder the L3
             // probe computes, so `ck creds status` answers "why does the health
             // table say degraded" from one authenticated read. No mutation, no audit.
             let metas = store.list_meta()?;
+            let grants = store.list_read_grants()?;
             let open_intents = store.list_intents()?.len();
             let health =
                 crate::health::VaultHealth::summarize(&metas, open_intents, store.is_fenced_out());
@@ -236,6 +274,26 @@ pub fn apply(
                         "id": id,
                         "state": m.state.as_str(),
                         "record_version": m.record_version,
+                    })
+                })
+                .collect();
+            // Both source lists are SQL-sorted, and the filter retains credential order.
+            // Stable covered-set output makes an added credential under an existing prefix
+            // visible in a status diff instead of silently widening access.
+            let read_grants: Vec<serde_json::Value> = grants
+                .iter()
+                .map(|grant| {
+                    let covered_credential_ids: Vec<&str> = metas
+                        .iter()
+                        .map(|(id, _)| id.as_str())
+                        .filter(|id| id.starts_with(&grant.credential_prefix))
+                        .collect();
+                    serde_json::json!({
+                        "principal_kind": grant.principal_kind,
+                        "principal_id": grant.principal_id,
+                        "credential_prefix": grant.credential_prefix,
+                        "created_at_ms": grant.created_at_ms,
+                        "covered_credential_ids": covered_credential_ids,
                     })
                 })
                 .collect();
@@ -250,6 +308,7 @@ pub fn apply(
                 "open_intents": health.open_intents,
                 "fenced_out": health.fenced_out,
                 "credentials": credentials,
+                "read_grants": read_grants,
             }))
         }
     }

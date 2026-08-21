@@ -26,6 +26,8 @@
 //!   mint-handle --id <id>                      print a fresh handle (once)
 //!   revoke-handle --handle <ckh_...>
 //!   revoke-all-handles --id <id>
+//!   grant --principal <module-id> --prefix <credential-prefix>
+//!   revoke-grant --principal <module-id> --prefix <credential-prefix>
 //!   audit [--limit N] | verify-audit
 //!
 //! Storage location is resolved the same way the daemon resolves it; for the CLI
@@ -224,6 +226,8 @@ fn run() -> Result<(), CliError> {
         "mint-handle" => cmd_mint_handle(&global, &args),
         "revoke-handle" => cmd_revoke_handle(&global, &args),
         "revoke-all-handles" => cmd_revoke_all_handles(&global, &args),
+        "grant" => cmd_grant(&global, &args),
+        "revoke-grant" => cmd_revoke_grant(&global, &args),
         "list" => cmd_list(&global),
         "audit" => cmd_audit(&global, &args),
         "events" => cmd_events(&global, &args),
@@ -288,6 +292,7 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
         "invalidate" | "reactivate" | "mint-handle" | "revoke-all-handles" | "remove" => &["--id"],
         "logout" => &["--provider", "--id"],
         "revoke-handle" => &["--handle"],
+        "grant" | "revoke-grant" => &["--principal", "--prefix"],
         "audit" => &["--limit"],
         "events" => &["--limit"],
         // bootstrap / rotate-master-key / verify-audit take no per-command flags.
@@ -340,6 +345,8 @@ fn usage_short() -> String {
        mint-handle         mint a capability handle for a credential\n\
        revoke-handle       revoke one capability handle\n\
        revoke-all-handles  revoke every handle for a credential\n\
+       grant               grant a reserved module a credential-id prefix\n\
+       revoke-grant        revoke a reserved module's credential-id prefix\n\
        invalidate          mark a credential needs-reauth\n\
        reactivate          clear needs-reauth without replacing the secret\n\
        audit               print the audit chain\n\
@@ -455,6 +462,19 @@ fn help_verb(verb: &str) -> String {
              \n\
              Revoke every capability handle for a credential in one audited step. The\n\
              record itself is untouched (still refreshable; mint new handles later)."
+        }
+        "grant" => {
+            "ck auth grant --principal <module-id> --prefix <credential-prefix>\n\
+             \n\
+             Grant one reserved module principal ordinary reads of credential ids beginning\n\
+             with the literal prefix. Status enumerates the ids currently covered; review\n\
+             that set whenever a credential is added under the prefix."
+        }
+        "revoke-grant" => {
+            "ck auth revoke-grant --principal <module-id> --prefix <credential-prefix>\n\
+             \n\
+             Revoke one reserved module principal's literal-prefix read grant. The change\n\
+             takes effect on the next scoped read and does not affect capability handles."
         }
         "reactivate" => {
             "ck auth reactivate --id <id>\n\
@@ -2162,6 +2182,99 @@ fn print_inventory(rows: &[(String, u64, String)]) {
     }
 }
 
+/// Render the server's sorted grant set instead of asking an operator to mentally
+/// expand prefixes. A newly covered id is a security-relevant status diff.
+fn print_read_grants(result: &serde_json::Value) -> Result<(), CliError> {
+    let Some(grants) = result.get("read_grants") else {
+        // An older daemon cannot have created a grant, so there is no access set to
+        // hide while a newly upgraded CLI is still talking to it.
+        return Ok(());
+    };
+    let grants = grants.as_array().ok_or_else(|| {
+        CliError::RouteRefused("admin.status returned malformed read grants".into())
+    })?;
+    println!();
+    if grants.is_empty() {
+        println!("read grants: none");
+        return Ok(());
+    }
+    println!("read grants:");
+    let mut prior_grant: Option<(String, String, String)> = None;
+    for (index, grant) in grants.iter().enumerate() {
+        let kind = grant
+            .get("principal_kind")
+            .and_then(serde_json::Value::as_str)
+            .filter(|kind| *kind == "reserved")
+            .ok_or_else(|| {
+                CliError::RouteRefused(format!(
+                    "admin.status returned an invalid grant principal kind at row {index}"
+                ))
+            })?;
+        let principal_id = grant
+            .get("principal_id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| {
+                CliError::RouteRefused(format!(
+                    "admin.status returned an invalid grant principal at row {index}"
+                ))
+            })?;
+        let prefix = grant
+            .get("credential_prefix")
+            .and_then(serde_json::Value::as_str)
+            .filter(|prefix| !prefix.is_empty())
+            .ok_or_else(|| {
+                CliError::RouteRefused(format!(
+                    "admin.status returned an invalid grant prefix at row {index}"
+                ))
+            })?;
+        let order_key = (
+            kind.to_string(),
+            principal_id.to_string(),
+            prefix.to_string(),
+        );
+        if prior_grant
+            .as_ref()
+            .is_some_and(|prior| prior >= &order_key)
+        {
+            return Err(CliError::RouteRefused(
+                "admin.status returned grants out of stable order".into(),
+            ));
+        }
+        prior_grant = Some(order_key);
+        let covered = grant
+            .get("covered_credential_ids")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| {
+                CliError::RouteRefused(format!(
+                    "admin.status omitted covered credentials at grant row {index}"
+                ))
+            })?;
+        println!("  {kind}:{principal_id} {prefix}");
+        let mut prior_id: Option<&str> = None;
+        for (covered_index, id) in covered.iter().enumerate() {
+            let id = id.as_str().filter(|id| !id.is_empty()).ok_or_else(|| {
+                CliError::RouteRefused(format!(
+                    "admin.status returned an invalid covered credential at grant row {index}, row {covered_index}"
+                ))
+            })?;
+            if !id.starts_with(prefix) {
+                return Err(CliError::RouteRefused(format!(
+                    "admin.status listed a credential outside its grant prefix at grant row {index}"
+                )));
+            }
+            if prior_id.is_some_and(|prior| prior >= id) {
+                return Err(CliError::RouteRefused(format!(
+                    "admin.status returned covered credentials out of stable order at grant row {index}"
+                )));
+            }
+            prior_id = Some(id);
+            println!("    {id}");
+        }
+    }
+    Ok(())
+}
+
 fn cmd_status(global: &GlobalArgs) -> Result<(), CliError> {
     let result = request_admin_status(global)?;
     let inventory = parse_inventory(&result)?;
@@ -2179,6 +2292,7 @@ fn cmd_status(global: &GlobalArgs) -> Result<(), CliError> {
     }
     println!();
     print_inventory(&inventory);
+    print_read_grants(&result)?;
     // Actionable tail: name what needs the operator, like the health probe does.
     let needs: Vec<&str> = result["needs_reauth_ids"]
         .as_array()
@@ -2284,6 +2398,36 @@ fn cmd_revoke_all_handles(global: &GlobalArgs, args: &[String]) -> Result<(), Cl
     )?;
     let n = result["handles_revoked"].as_u64().unwrap_or(0);
     println!("revoked {n} handle(s) for {id}");
+    Ok(())
+}
+
+fn cmd_grant(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
+    let principal_id = required(args, "--principal")?;
+    let credential_prefix = required(args, "--prefix")?;
+    commit_admin(
+        global,
+        AdminOpBody::GrantCreate {
+            v: ADMIN_OP_SCHEMA_V1,
+            principal_id: principal_id.clone(),
+            credential_prefix: credential_prefix.clone(),
+        },
+    )?;
+    println!("granted reserved:{principal_id} reads of {credential_prefix}");
+    Ok(())
+}
+
+fn cmd_revoke_grant(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
+    let principal_id = required(args, "--principal")?;
+    let credential_prefix = required(args, "--prefix")?;
+    commit_admin(
+        global,
+        AdminOpBody::GrantRevoke {
+            v: ADMIN_OP_SCHEMA_V1,
+            principal_id: principal_id.clone(),
+            credential_prefix: credential_prefix.clone(),
+        },
+    )?;
+    println!("revoked reserved:{principal_id} reads of {credential_prefix}");
     Ok(())
 }
 
@@ -2425,12 +2569,17 @@ fn cmd_events(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             (None, Some(d)) => d.to_string(),
             (None, None) => "-".to_string(),
         };
+        let principal = match (e.principal_kind.as_deref(), e.principal_id.as_deref()) {
+            (Some(kind), Some(id)) => format!("{kind}:{id}"),
+            (Some(kind), None) => kind.to_string(),
+            (None, _) => "-".to_string(),
+        };
         let version = e
             .record_version
             .map(|v| format!("v{v}"))
             .unwrap_or_else(|| "-".into());
         println!(
-            "{when}  {:34} {:16} {what:22} {version:6} applied={}",
+            "{when}  {:34} {:16} {principal:24} {what:22} {version:6} applied={}",
             e.credential_id,
             e.kind,
             if e.applied { "yes" } else { "no" }
@@ -3266,6 +3415,16 @@ mod tests {
         assert!(reject_unknown_args("bootstrap", &v(&[])).is_ok());
         assert!(reject_unknown_args("verify-audit", &v(&[])).is_ok());
         assert!(reject_unknown_args("login", &v(&["--provider", "xai", "--device"])).is_ok());
+        assert!(reject_unknown_args(
+            "grant",
+            &v(&["--principal", "prefrontal-core", "--prefix", "github_app:"])
+        )
+        .is_ok());
+        assert!(reject_unknown_args(
+            "revoke-grant",
+            &v(&["--principal", "prefrontal-core", "--prefix", "github_app:"])
+        )
+        .is_ok());
     }
 
     #[test]

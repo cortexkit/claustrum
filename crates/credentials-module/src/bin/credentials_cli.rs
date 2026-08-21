@@ -2774,20 +2774,63 @@ fn parse_global(args: &mut Vec<String>) -> Result<GlobalArgs, CliError> {
 /// Platform data home, matching subc's `default_data_home` byte-for-byte so the
 /// derived vault directory is exactly the one the supervised daemon serves:
 /// `$XDG_DATA_HOME`, else the Windows roaming profile, else `~/.local/share`.
+///
+/// THAT BYTE-FOR-BYTE CLAIM IS NOW FENCED, and it was not before. It spans two
+/// repositories, so no test's natural scope reached it -- the exact shape that
+/// survives review because it reads as reasoning rather than as a property. The
+/// daemon publishes a golden fixture for its own rule; this repo vendors it and
+/// asserts against it (see `tests/fixtures/data_home` and the test below).
+///
+/// Why a duplicate at all, rather than calling a shared crate: `cortexkit-store-types`
+/// offers `resolve_data_home()`, and on 2026-08-21 its rules DIFFERED from the
+/// daemon's -- no Windows branch, and relative `XDG_DATA_HOME` rejected. Adopting the
+/// shared implementation would have broken a correct alignment. It has since been
+/// corrected to mirror the daemon, but the lesson stands: THE SHARED IMPLEMENTATION
+/// IS NOT AUTOMATICALLY THE AUTHORITATIVE ONE. What matters is tracking whoever
+/// actually builds the storage descriptor, which is the daemon.
 fn default_data_home() -> PathBuf {
-    if let Some(v) = non_empty_env("XDG_DATA_HOME") {
+    resolve_data_home_from(
+        non_empty_env("XDG_DATA_HOME"),
+        non_empty_env("APPDATA"),
+        non_empty_env("USERPROFILE"),
+        non_empty_env("HOME"),
+    )
+}
+
+/// The resolution rule itself, with the environment passed in.
+///
+/// Split out so the golden fixture can drive it directly. Driving it through real
+/// environment variables would mutate process-global state, which races every other
+/// test in the binary -- and a test that must run alone is one that quietly stops
+/// running.
+///
+/// Takes RAW values rather than pre-filtered ones so that empty-means-unset is under
+/// test: the fixture pins `XDG_DATA_HOME=""` falling through to `HOME`, and a caller
+/// that filtered first would assert nothing about it.
+fn resolve_data_home_from(
+    xdg: Option<std::ffi::OsString>,
+    appdata: Option<std::ffi::OsString>,
+    userprofile: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> PathBuf {
+    let present = |v: Option<std::ffi::OsString>| v.filter(|s| !s.is_empty());
+    if let Some(v) = present(xdg) {
         return PathBuf::from(v);
     }
     #[cfg(windows)]
     {
-        if let Some(v) = non_empty_env("APPDATA") {
+        if let Some(v) = present(appdata) {
             return PathBuf::from(v);
         }
-        if let Some(v) = non_empty_env("USERPROFILE") {
+        if let Some(v) = present(userprofile) {
             return PathBuf::from(v).join("AppData").join("Roaming");
         }
     }
-    if let Some(v) = non_empty_env("HOME") {
+    #[cfg(not(windows))]
+    {
+        let _ = (&appdata, &userprofile);
+    }
+    if let Some(v) = present(home) {
         return PathBuf::from(v).join(".local").join("share");
     }
     PathBuf::from(".local").join("share")
@@ -3079,6 +3122,79 @@ fn resolver_config(global: &GlobalArgs) -> ResolverConfig {
 
 #[cfg(test)]
 mod tests {
+    /// This CLI's data-home rule conforms to the daemon's own golden fixture.
+    ///
+    /// The doc comment on `default_data_home` has always claimed byte-for-byte
+    /// equivalence with subc's resolver. Nothing tested it: the claim spans two
+    /// repositories, so no test's natural scope contained it, and it would have gone
+    /// on reading as true for as long as nobody re-derived it. If it were ever false
+    /// the CLI would compute a different vault directory than the daemon serves --
+    /// and because that directory derives the keychain service name and the admin
+    /// transcript id, the visible symptom is `vault_locked` on an intact store, not
+    /// a wrong path.
+    ///
+    /// The fixture is AUTHORED BY THE DAEMON and vendored here (see
+    /// `tests/fixtures/data_home/VENDORED.md`). A conformance fixture written on this
+    /// side would agree with whatever this side expects, which is the failure this
+    /// repo has already paid for three times in key-container parsing.
+    ///
+    /// Platform rows are split by `cfg` rather than parameterised: that keeps the test
+    /// on the REAL production path with real `PathBuf` join semantics, and CI runs
+    /// both Ubuntu and Windows on every push, so every row executes on every push.
+    /// Refuses on an empty selection, because a filter that silently matches nothing
+    /// passes exactly like a conforming implementation.
+    #[test]
+    fn the_data_home_rule_conforms_to_the_daemons_golden_fixture() {
+        let raw = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/data_home/data_home_resolution.json"),
+        )
+        .expect("vendored golden fixture");
+        let doc: serde_json::Value = serde_json::from_str(&raw).expect("fixture parses");
+
+        let mut ran = 0usize;
+        for case in doc["cases"].as_array().expect("cases array") {
+            let platform = case["platform"].as_str().expect("platform");
+            let applies = match platform {
+                "any" => true,
+                "windows" => cfg!(windows),
+                "unix" => !cfg!(windows),
+                other => panic!("unknown platform in fixture: {other}"),
+            };
+            if !applies {
+                continue;
+            }
+            ran += 1;
+
+            let env = &case["env"];
+            let var = |k: &str| {
+                env.get(k)
+                    .and_then(|v| v.as_str())
+                    .map(std::ffi::OsString::from)
+            };
+
+            let got = super::resolve_data_home_from(
+                var("XDG_DATA_HOME"),
+                var("APPDATA"),
+                var("USERPROFILE"),
+                var("HOME"),
+            );
+            assert_eq!(
+                got.to_string_lossy(),
+                case["expect"].as_str().expect("expect"),
+                "case {}: this CLI diverges from the daemon's rule, which means it \
+                 would derive a different vault directory than the daemon serves",
+                case["name"].as_str().unwrap_or("?")
+            );
+        }
+
+        assert!(
+            ran > 0,
+            "no fixture rows applied to this platform -- a conformance test that \
+             matches nothing passes exactly like a conforming implementation"
+        );
+    }
+
     use super::*;
 
     fn v(args: &[&str]) -> Vec<String> {

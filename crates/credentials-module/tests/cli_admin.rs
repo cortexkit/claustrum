@@ -9,7 +9,12 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+use base64::Engine;
 use cortexkit_store::{open_sqlite, Isolation, StorageBackend, StorageDescriptor};
+use credentials_core::key::MasterKey;
+use credentials_core::record::CredentialKind;
+use credentials_core::store::EncryptedStore;
+use ring::signature::{UnparsedPublicKey, ED25519};
 
 /// Point this suite at a specific `ck-auth` instead of the one cargo just built.
 ///
@@ -305,6 +310,147 @@ fn bootstrap_put_mint_audit_end_to_end() {
         "list must never print the payload: {rows}"
     );
 
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A minted signing key is stored under the signing kind, can sign, and publishes the
+/// matching public key. Inspecting the decrypted record and verifying the signature
+/// proves the command's output is tied to the stored key rather than only its text.
+#[test]
+fn mint_signing_key_custodies_a_usable_key_and_prints_its_public_half() {
+    let root = tmp_root("mint-signing-key");
+    let data_dir = root.join("vault");
+    let key_path = root.join("master.key");
+    std::fs::write(&key_path, "11".repeat(32)).expect("write operator master key");
+
+    let run = |args: &[&str]| {
+        cli()
+            .args([
+                "--data-dir",
+                data_dir.to_str().expect("data dir utf8"),
+                "--key-path",
+                key_path.to_str().expect("key path utf8"),
+            ])
+            .args(args)
+            .output()
+            .expect("run CLI")
+    };
+
+    let first = run(&["mint-signing-key", "--id", "signing:agent-assertion:7"]);
+    assert!(
+        first.status.success(),
+        "first mint: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let first_stdout = String::from_utf8_lossy(&first.stdout);
+    let first_public = first_stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("public_key_hex "))
+        .expect("mint must print public key hex")
+        .to_string();
+    let first_key_id = first_stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("key_id "))
+        .expect("mint must print key id")
+        .to_string();
+    assert_eq!(first_public.len(), 64, "Ed25519 public keys are 32 bytes");
+    assert_eq!(first_key_id.len(), 16, "key_id is eight digest bytes");
+    assert!(
+        !first_stdout.contains("PRIVATE KEY"),
+        "the private PEM must never reach command output"
+    );
+
+    // Create-only is the safe default: an operator must explicitly acknowledge an
+    // overwrite because an existing generation may already have signed artifacts.
+    let duplicate = run(&["mint-signing-key", "--id", "signing:agent-assertion:7"]);
+    assert!(
+        !duplicate.status.success(),
+        "minting an existing id without --replace must refuse"
+    );
+
+    let replacement = run(&[
+        "mint-signing-key",
+        "--id",
+        "signing:agent-assertion:7",
+        "--replace",
+    ]);
+    assert!(
+        replacement.status.success(),
+        "replacement mint: {}",
+        String::from_utf8_lossy(&replacement.stderr)
+    );
+    let replacement_stdout = String::from_utf8_lossy(&replacement.stdout);
+    let public_hex = replacement_stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("public_key_hex "))
+        .expect("replacement must print public key hex");
+    let key_id = replacement_stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("key_id "))
+        .expect("replacement must print key id");
+    assert_ne!(
+        first_public, public_hex,
+        "a replacement must generate a fresh key pair, not reprint the old public key"
+    );
+
+    let descriptor = StorageDescriptor {
+        module_id: "cortexkit-credentials".into(),
+        storage_namespace: "default".into(),
+        isolation: Isolation::Module,
+        backend: StorageBackend::Sqlite {
+            path: data_dir.join("store.db").to_string_lossy().into_owned(),
+        },
+    };
+    let sqlite = open_sqlite(&descriptor).expect("open minted vault");
+    EncryptedStore::migrate(&sqlite).expect("migrate minted vault");
+    let vault = EncryptedStore::open(sqlite, MasterKey::from_bytes([0x11; 32]))
+        .expect("open minted vault with operator key");
+    let record = vault
+        .get("signing:agent-assertion:7")
+        .expect("read minted signing record");
+    assert_eq!(record.kind, CredentialKind::SigningKey);
+
+    let payload = b"canonical JSON bytes";
+    let signature = credentials_core::signing::sign_ed25519(
+        std::str::from_utf8(&record.payload).expect("mint stores PEM"),
+        payload,
+    )
+    .expect("the minted record must be usable by credential.sign");
+    let public: Vec<u8> = (0..public_hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&public_hex[i..i + 2], 16).expect("public hex"))
+        .collect();
+    let raw_signature = base64::engine::general_purpose::STANDARD
+        .decode(signature.signature_b64)
+        .expect("signature base64");
+    UnparsedPublicKey::new(&ED25519, &public)
+        .verify(payload, &raw_signature)
+        .expect("printed public key must verify the stored key's signature");
+    assert_eq!(
+        signature.key_id, key_id,
+        "key id derives from the public key"
+    );
+
+    let wrong_method = run(&["mint-signing-key", "--id", "apikey:cannot-sign"]);
+    assert!(
+        !wrong_method.status.success()
+            && String::from_utf8_lossy(&wrong_method.stderr).contains("requires an id beginning"),
+        "minting under a non-signing method must refuse"
+    );
+    let bypass = run(&[
+        "put",
+        "--id",
+        "signing:agent-assertion:unsafe",
+        "--payload",
+        "not-a-key",
+    ]);
+    assert!(
+        !bypass.status.success()
+            && String::from_utf8_lossy(&bypass.stderr).contains("mint-signing-key"),
+        "generic put must not create a signing id with a non-signing record kind"
+    );
+
+    drop(vault);
     let _ = std::fs::remove_dir_all(&root);
 }
 

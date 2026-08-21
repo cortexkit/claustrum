@@ -79,6 +79,18 @@ pub struct Signature {
     pub key_id: String,
 }
 
+/// The shareable half of a stored Ed25519 key.
+///
+/// This deliberately has no private-key field: callers that need verification material
+/// must be unable to accidentally select the custody payload while building a response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicKey {
+    /// The 32-byte Ed25519 verification key, lowercase hex.
+    pub public_key_hex: String,
+    /// First 8 bytes of SHA-256 over `public_key_hex`'s decoded bytes, lowercase hex.
+    pub key_id: String,
+}
+
 /// Parse a PKCS#8 Ed25519 private key out of PEM armour.
 ///
 /// Accepts the `PRIVATE KEY` armour that PKCS#8 uses. Deliberately does NOT accept
@@ -131,6 +143,20 @@ fn parse_pkcs8_pem(pem: &str) -> Result<Ed25519KeyPair, SignError> {
     })
 }
 
+/// Return the public material for the Ed25519 key stored as PKCS#8 PEM in `key_pem`.
+///
+/// Parsing is shared with signing so the public key and `key_id` always come from the
+/// same validated key pair. The private bytes exist only inside the parser and are not
+/// copied into this result.
+pub fn public_key_ed25519(key_pem: &str) -> Result<PublicKey, SignError> {
+    let kp = parse_pkcs8_pem(key_pem)?;
+    let public = kp.public_key().as_ref();
+    Ok(PublicKey {
+        public_key_hex: hex_lower(public),
+        key_id: key_id_for_public(public),
+    })
+}
+
 /// Sign `payload` with the Ed25519 key stored as PKCS#8 PEM in `key_pem`.
 ///
 /// The key material exists only for the duration of this call and is dropped on
@@ -144,13 +170,17 @@ pub fn sign_ed25519(key_pem: &str, payload: &[u8]) -> Result<Signature, SignErro
     }
     let kp = parse_pkcs8_pem(key_pem)?;
     let sig = kp.sign(payload);
-    let public = kp.public_key().as_ref();
-    let digest = ring::digest::digest(&ring::digest::SHA256, public);
-    let key_id = hex_lower(&digest.as_ref()[..8]);
+    let key_id = key_id_for_public(kp.public_key().as_ref());
     Ok(Signature {
         signature_b64: base64::engine::general_purpose::STANDARD.encode(sig.as_ref()),
         key_id,
     })
+}
+
+/// Derive the stable, public key identifier used by both signing and publication.
+fn key_id_for_public(public: &[u8]) -> String {
+    let digest = ring::digest::digest(&ring::digest::SHA256, public);
+    hex_lower(&digest.as_ref()[..8])
 }
 
 fn hex_lower(bytes: &[u8]) -> String {

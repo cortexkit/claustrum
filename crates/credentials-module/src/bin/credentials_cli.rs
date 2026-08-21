@@ -20,6 +20,7 @@
 //! Commands:
 //!   bootstrap                                  provision a new master key
 //!   put       --id <id> --payload <bytes> [--kind api_key|dsn|opaque] [--expires-ms N] [--replace]
+//!   mint-signing-key --id signing:<provider>[:<generation>] [--replace]
 //!   import    --source opencode|pi|antigravity --id <id> --json <file>
 //!   invalidate --id <id>
 //!   rotate-master-key
@@ -47,6 +48,7 @@ mod login_listener;
 #[path = "cli_support/provider_login.rs"]
 mod provider_login;
 
+use base64::Engine;
 use cortexkit_store::{open_sqlite, Isolation, StorageBackend, StorageDescriptor, StoreError};
 use credentials_core::admin_ops::{AdminAuditOp, AdminOpBody, StoreMode, ADMIN_OP_SCHEMA_V1};
 use credentials_core::contract::{MODULE_ID, STORAGE_NAMESPACE};
@@ -55,6 +57,8 @@ use credentials_core::key::MasterKey;
 use credentials_core::record::{CredentialKind, VaultRecord};
 use credentials_core::resolver::{self, KeySource, MasterKeyError, ResolverConfig};
 use credentials_core::store::{EncryptedStore, StoreOpError};
+use ring::rand::SystemRandom;
+use ring::signature::Ed25519KeyPair;
 
 fn main() -> ExitCode {
     match run() {
@@ -215,6 +219,7 @@ fn run() -> Result<(), CliError> {
     match command.as_str() {
         "bootstrap" => cmd_bootstrap(&global),
         "put" => cmd_put(&global, &args),
+        "mint-signing-key" => cmd_mint_signing_key(&global, &args),
         "import" => cmd_import(&global, &args),
         "login" => cmd_login(&global, &args),
         "invalidate" => cmd_invalidate(&global, &args),
@@ -287,6 +292,7 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
             // that handler have to move together.
             "--client-id",
         ],
+        "mint-signing-key" => &["--id"],
         "import" => &["--source", "--provider", "--id", "--json", "--adapter"],
         "login" => &["--provider", "--id", "--payload-file", "--account"],
         "invalidate" | "reactivate" | "mint-handle" | "revoke-all-handles" | "remove" => &["--id"],
@@ -301,6 +307,7 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
     // Boolean (valueless) flags accepted per command.
     let bool_flags: &[&str] = match command {
         "put" => &["--replace"],
+        "mint-signing-key" => &["--replace"],
         "import" => &["--replace"],
         "login" => &["--replace", "--no-listener", "--device"],
         _ => &[],
@@ -340,8 +347,9 @@ fn usage_short() -> String {
        remove              permanently delete a credential\n\
        status              vault health + credential inventory (no secrets)\n\
        list                credential ids + lifecycle state (no secrets)\n\
-       put                 ingest an api key / opaque secret\n\
-       import              import from opencode/pi/gemini-cli/antigravity\n\
+        put                 ingest an api key / opaque secret\n\
+        mint-signing-key    generate and custody a new Ed25519 signing key\n\
+        import              import from opencode/pi/gemini-cli/antigravity\n\
        mint-handle         mint a capability handle for a credential\n\
        revoke-handle       revoke one capability handle\n\
        revoke-all-handles  revoke every handle for a credential\n\
@@ -421,6 +429,17 @@ fn help_verb(verb: &str) -> String {
              \n\
              Print each credential's id + lifecycle state + version (no secrets), e.g.\n\
              to find which credential a health probe flagged needs_reauth."
+        }
+        "mint-signing-key" => {
+            "ck auth mint-signing-key --id signing:<provider>[:<generation>] [--replace]\n\
+             \n\
+             Generate a fresh Ed25519 key pair in this process and seal its PKCS#8 private\n\
+             half directly into the vault. The private key is never written to a file, argv,\n\
+             environment variable, or command output. Prints the public key hex and its\n\
+             derived key_id for handoff to verifiers.\n\
+             \n\
+             Create-only by default: use a new generation id for normal rotation. --replace\n\
+             is an explicit destructive rotation of an existing id and keeps its handles."
         }
         "put" => {
             "ck auth put --id <id> --payload <v> | --payload-file <path>\n\
@@ -653,8 +672,72 @@ fn cmd_bootstrap(global: &GlobalArgs) -> Result<(), CliError> {
     Ok(())
 }
 
+/// Generate and store an Ed25519 signing key without creating a second copy outside
+/// the vault. The public half is derived before the record is committed so it can be
+/// printed only after the admin write succeeds; no private material reaches output.
+fn cmd_mint_signing_key(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
+    let id = required(args, "--id")?;
+    let parsed = parse_credential_id(&id);
+    if !matches!(parsed.method, Some(AuthMethod::Signing)) {
+        return Err(CliError::Usage(
+            "mint-signing-key requires an id beginning with signing:".to_string(),
+        ));
+    }
+
+    // `ring` generates PKCS#8 in memory. The only copy after this function returns is
+    // the encrypted record; neither the key bytes nor this PEM are sent to disk or a
+    // process boundary before the vault seals them.
+    let pkcs8 = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new())
+        .map_err(|_| CliError::Io("generating Ed25519 key failed".to_string()))?;
+    let private_pem = pem_wrap_private_key(pkcs8.as_ref());
+    let public = credentials_core::signing::public_key_ed25519(&private_pem)
+        .map_err(|_| CliError::Io("generated Ed25519 key was unusable".to_string()))?;
+    let record = VaultRecord::new_static(
+        AuthMethod::Signing.credential_kind(),
+        "operator",
+        private_pem.into_bytes(),
+        None,
+    );
+
+    let replace = has_flag(args, "--replace");
+    let (audit_op, mode, success) = if replace {
+        (
+            AdminAuditOp::Overwrite,
+            StoreMode::ReplaceUnconditional,
+            "replaced",
+        )
+    } else {
+        (AdminAuditOp::Put, StoreMode::Create, "created")
+    };
+    commit_admin(global, store_op(&id, record, audit_op, mode))?;
+
+    // Public material is the intentional output of this ceremony. The private PEM
+    // stays inside the sealed record and is never interpolated into a success message.
+    println!("{success} {id}");
+    println!("public_key_hex {}", public.public_key_hex);
+    println!("key_id {}", public.key_id);
+    Ok(())
+}
+
+/// Wrap ring's in-memory PKCS#8 bytes in the only PEM armour the signing parser accepts.
+fn pem_wrap_private_key(pkcs8: &[u8]) -> String {
+    let encoded = base64::engine::general_purpose::STANDARD.encode(pkcs8);
+    let mut pem = String::from("-----BEGIN PRIVATE KEY-----\n");
+    for chunk in encoded.as_bytes().chunks(64) {
+        pem.push_str(std::str::from_utf8(chunk).expect("base64 output is ASCII"));
+        pem.push('\n');
+    }
+    pem.push_str("-----END PRIVATE KEY-----");
+    pem
+}
+
 fn cmd_put(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     let id = required(args, "--id")?;
+    if matches!(parse_credential_id(&id).method, Some(AuthMethod::Signing)) {
+        return Err(CliError::Usage(
+            "signing keys must be generated with mint-signing-key, not put".to_string(),
+        ));
+    }
     // Payload from EITHER --payload <value> (exact bytes) OR --payload-file <path>
     // (the file's bytes, trailing whitespace stripped). --payload-file keeps a real
     // secret OUT of argv (process list / shell history) — the right way to ingest a
@@ -835,6 +918,11 @@ fn cmd_import(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     // refresh adapter to STORE. The adapter is set EXPLICITLY here, never parsed from
     // the id suffix — `--adapter` overrides the method's default.
     let parsed = parse_credential_id(&id);
+    if matches!(parsed.method, Some(AuthMethod::Signing)) {
+        return Err(CliError::Usage(
+            "signing keys must be generated with mint-signing-key, not imported".to_string(),
+        ));
+    }
     let record = if matches!(parsed.method, Some(AuthMethod::ApiKey)) {
         // API key → a static record (no adapter, no refresh). `--provider` selects the
         // entry from a multi-provider auth.json; default to the parsed provider.

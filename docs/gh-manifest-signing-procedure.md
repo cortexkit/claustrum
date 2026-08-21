@@ -81,12 +81,52 @@ key material.
    version and what it stops routing.
 2. **Mint a capability handle** for the root. The key sits with zero live handles
    between signings, so it is unreachable except during one.
-3. **Call `credential.sign`** with the exact published manifest bytes. The daemon
-   appends the approval and the signature to the audit chain in ONE transaction and
-   returns a detached Ed25519 signature plus `key_id`.
+3. **Call `credential.sign`** with the exact published manifest bytes. Returns a
+   detached Ed25519 signature plus `key_id`. **It writes nothing.**
 4. **Revoke the handle immediately.** Its lifetime is one signing.
 5. **Verify before publishing**: the signature must verify under the public half in
    the trust set, using the consumer's own fixture as the control.
+
+### `credential.sign` must NOT write an audit entry, and I argued the opposite first
+
+When the in-vault signing shape was agreed, I told the consumer that the vault
+performing the signature meant "the approval entry and the signing can be appended in
+the same transaction, so no signature exists without its approval". That is a better
+property than meeting-at-the-hash and it is **wrong**, for a reason that is easy to
+miss because the operation looks so rare.
+
+`credential.sign` is a ROUTE operation reachable by any holder of a live capability
+handle, and it can be called in a loop. A durable write per call therefore lets a
+handle holder grow the HMAC audit chain without bound -- and that chain is the one
+structure here that can never be trimmed, because trimming is the exact thing tamper
+evidence is defined against. The rule this repo already carries: **an untrimmable log
+takes transitions only; a trimmable table takes every observation.** A signature is
+an observation of a request, not a state transition.
+
+The procedural rarity of signing is not a defence. Signing is rare BY POLICY (a human
+approves each one); nothing in the mechanism bounds it, and a bound that lives only in
+a procedure is not a bound.
+
+**So the ordering evidence comes from the mint/revoke pair instead**, which is
+genuinely bounded because minting and revoking are admin operations under the
+master-key gate:
+
+```
+approval entry   payload_hash = SHA-256(manifest bytes), actor = approver
+mint_handle      opens the signing window
+  ... signatures happen here, unrecorded and unbounded ...
+revoke_handle    closes it
+```
+
+The approval and the signature **meet at the hash**: the chain proves who approved
+bytes H before the window opened, and the published signature proves the key signed
+bytes H. A signature whose hash has no approval entry is visible as an absence rather
+than merely undocumented.
+
+What this deliberately does NOT give: proof that the number of signatures inside a
+window was one. An unrevoked handle is the gap, which is why step 4 is immediate and
+why **a mint with no matching revoke is an unfinished ceremony** rather than a
+harmless leftover.
 
 ### Why the vault signs rather than serving the key
 

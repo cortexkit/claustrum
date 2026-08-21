@@ -2628,6 +2628,7 @@ pub struct AuthEvent {
 pub enum ScopedReadRefusal {
     NoGrant,
     NotFound,
+    StoreError,
 }
 
 impl ScopedReadRefusal {
@@ -2635,6 +2636,7 @@ impl ScopedReadRefusal {
         match self {
             ScopedReadRefusal::NoGrant => "no_grant",
             ScopedReadRefusal::NotFound => "not_found",
+            ScopedReadRefusal::StoreError => "store_error",
         }
     }
 }

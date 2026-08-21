@@ -1574,6 +1574,49 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn scoped_get_store_lookup_failure_is_uniform_on_wire_and_explicit_in_events() {
+        let (surface, admin, store) = scoped_rig(77);
+        store
+            .create(
+                "github_app:fleet-a",
+                &VaultRecord::new_static(CredentialKind::ApiKey, "test", b"key".to_vec(), None),
+            )
+            .expect("create credential");
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "prefrontal-core",
+                "github_app:",
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .expect("create grant");
+
+        admin.record_bind(47, subc_protocol::Principal::Direct);
+        let ordinary_refusal = scoped_request(&surface, &admin, 47, "github_app:fleet-a").await;
+        admin.record_bind(
+            48,
+            subc_protocol::Principal::Reserved {
+                module_id: "prefrontal-core".into(),
+            },
+        );
+        // There is no public way to make an open store fail one read query. This cfg(test)
+        // one-shot keeps the production surface unchanged while exercising the real route's
+        // Result error arm after it has performed the normal lookup.
+        surface.force_scoped_grant_lookup_error_for_test();
+        let store_refusal = scoped_request(&surface, &admin, 48, "github_app:fleet-a").await;
+
+        assert_eq!(
+            store_refusal, ordinary_refusal,
+            "a grant lookup failure must not make the wire distinguish vault storage from no grant"
+        );
+        let events = store.recent_auth_events(10).expect("read events");
+        assert_eq!(events[0].detail.as_deref(), Some("store_error"));
+        assert_eq!(events[0].principal_kind.as_deref(), Some("reserved"));
+        assert_eq!(events[0].principal_id.as_deref(), Some("prefrontal-core"));
+        assert_eq!(events[1].detail.as_deref(), Some("no_grant"));
+    }
+
     #[test]
     fn admin_status_lists_sorted_grants_with_their_sorted_covered_credentials() {
         let (_surface, _admin, store) = scoped_rig(76);

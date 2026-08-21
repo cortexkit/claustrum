@@ -346,6 +346,11 @@ pub struct ReadSurface {
     // (a panic), this stops advancing; the probe computes the age live and fails closed.
     // One atomic covers both failure modes uniformly, so no separate task-watch is needed.
     last_refresh_ms: std::sync::atomic::AtomicI64,
+    // The store exposes no public way to make one read query fail. This test-only
+    // switch injects that Result after the real lookup so route tests can prove the
+    // diagnostic keeps a lookup failure distinct without shipping a test capability.
+    #[cfg(test)]
+    scoped_grant_lookup_error_for_test: std::sync::atomic::AtomicBool,
 }
 
 /// If the cached health snapshot has not been refreshed within this window, the probe
@@ -395,6 +400,8 @@ impl ReadSurface {
             limiter: Mutex::new(limiter),
             health: std::sync::Mutex::new(initial),
             last_refresh_ms: std::sync::atomic::AtomicI64::new(now_ms()),
+            #[cfg(test)]
+            scoped_grant_lookup_error_for_test: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -547,6 +554,13 @@ impl ReadSurface {
         }
     }
 
+    /// Test-only: make the next scoped grant lookup take its store-error refusal arm.
+    #[cfg(test)]
+    pub(crate) fn force_scoped_grant_lookup_error_for_test(&self) {
+        self.scoped_grant_lookup_error_for_test
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
     /// Serve a credential-id read after the route layer captures the bind's principal.
     /// An uncovered principal is rejected before the credential lookup, so it cannot
     /// turn this operation into a vault inventory oracle.
@@ -555,24 +569,45 @@ impl ReadSurface {
         principal: Option<&Principal>,
         params: &GetScopedParams,
     ) -> GetOutcome {
-        let (principal_kind, principal_id, has_grant) = match principal {
+        let (principal_kind, principal_id, grant_coverage) = match principal {
             Some(Principal::Reserved { module_id }) => {
-                let covers = self
-                    .engine
-                    .store()
-                    .read_grant_covers("reserved", module_id, &params.credential_id)
-                    .unwrap_or(false);
-                ("reserved", Some(module_id.as_str()), covers)
+                let coverage = self.engine.store().read_grant_covers(
+                    "reserved",
+                    module_id,
+                    &params.credential_id,
+                );
+                #[cfg(test)]
+                let coverage = if self
+                    .scoped_grant_lookup_error_for_test
+                    .swap(false, std::sync::atomic::Ordering::SeqCst)
+                {
+                    Err(StoreOpError::Store(
+                        "test scoped grant lookup failure".into(),
+                    ))
+                } else {
+                    coverage
+                };
+                ("reserved", Some(module_id.as_str()), coverage)
             }
-            Some(Principal::Direct) => ("direct", None, false),
-            Some(Principal::Unverified) | None => ("unverified", None, false),
+            Some(Principal::Direct) => ("direct", None, Ok(false)),
+            Some(Principal::Unverified) | None => ("unverified", None, Ok(false)),
         };
-        if !has_grant {
+        let refusal = match grant_coverage {
+            Ok(true) => None,
+            Ok(false) => Some(ScopedReadRefusal::NoGrant),
+            Err(_) => {
+                // The caller must not learn whether the vault could read its grant table:
+                // retain `not_found` on the wire while the internal operator record names
+                // the storage failure instead of misdirecting a grant-configuration repair.
+                Some(ScopedReadRefusal::StoreError)
+            }
+        };
+        if let Some(refusal) = refusal {
             let _ = self.engine.store().record_scoped_read_refusal(
                 &params.credential_id,
                 principal_kind,
                 principal_id,
-                ScopedReadRefusal::NoGrant,
+                refusal,
             );
             return err(ReadError::NotFound);
         }

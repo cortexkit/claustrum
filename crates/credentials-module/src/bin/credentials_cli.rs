@@ -516,8 +516,12 @@ fn help_verb(verb: &str) -> String {
         "audit" => {
             "ck auth audit [--limit N]\n\
              \n\
-             Print the tamper-evident HMAC audit chain (offline-only; stop the daemon\n\
-             to release the lease first)."
+             Print the tamper-evident HMAC audit chain. Reads LEASE-FREE, so it is safe\n\
+             against a running daemon -- do not stop the vault for this.\n\
+             \n\
+             This is where a SUCCESSFUL refresh appears, as refresh_commit. 'ck auth\n\
+             events' records failures only, so read the chain to answer whether a\n\
+             credential is being refreshed at all."
         }
         "events" => {
             "ck auth events [--limit N]\n\
@@ -557,8 +561,9 @@ fn help_verb(verb: &str) -> String {
         "verify-audit" => {
             "ck auth verify-audit\n\
              \n\
-             Verify the audit-chain integrity end to end (offline-only). Fails if any\n\
-             entry was edited, reordered, or inserted."
+             Verify the audit-chain integrity end to end. Reads LEASE-FREE, so it is\n\
+             safe against a running daemon -- do not stop the vault for this. Fails if\n\
+             any entry was edited, reordered, or inserted."
         }
         "rotate-master-key" => {
             "ck auth rotate-master-key\n\
@@ -2649,6 +2654,26 @@ fn cmd_events(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
         return Ok(());
     }
 
+    // *** THIS TABLE RECORDS FAILURES. A SUCCESSFUL REFRESH IS INVISIBLE HERE. ***
+    //
+    // Said in the OUTPUT because the empty-table caveats above do not cover it, and a
+    // NON-empty table is the more misleading case: rows are present, so the reader
+    // trusts the view, and then reasons from which kinds are absent.
+    //
+    // That is not hypothetical. An external operator ran this verb on my advice, saw
+    // consumer_report rows and no refresh_failed rows for a credential, and concluded
+    // the vault had never attempted a refresh -- a claim this table cannot support. A
+    // refresh that SUCCEEDS writes `refresh_commit` to the audit chain and nothing
+    // here. Absence of refresh rows means "no refresh FAILED", never "no refresh ran".
+    //
+    // The fault was mine: I handed over an instrument without saying what it cannot
+    // contain, which is the half of a recommendation that decides what conclusions it
+    // licenses.
+    println!("these are FAILURES and state transitions only -- a refresh that succeeded");
+    println!("writes refresh_commit to the audit chain and appears nowhere below, so the");
+    println!("absence of a refresh row means 'none failed', not 'none was attempted'.");
+    println!();
+
     for e in &events {
         let when = format_ts_ms(e.ts_ms);
         let what = match (e.provider_status, e.detail.as_deref()) {
@@ -2694,13 +2719,14 @@ fn cmd_events(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
         Ok(_) | Err(_) => {}
     }
 
-    if events.is_empty() {
-        // Say what an empty table MEANS, because "nothing here" reads as either "no
-        // failures" or "the recorder is broken", and those need different responses.
-        println!("no authentication events recorded");
-        println!("  (no consumer has reported a provider rejection and no refresh has failed");
-        println!("   since this vault's store was created or last pruned)");
-    }
+    // To see whether refreshes are happening at all, read the chain rather than this
+    // table -- named here because the reader asking that question is looking at this
+    // output, not at a runbook.
+    println!();
+    println!("to see whether a credential is being REFRESHED (as opposed to failing),");
+    println!("read the audit chain for refresh_commit rows:");
+    println!("  ck auth audit --limit 100     (lease-free; safe against a running vault)");
+
     Ok(())
 }
 

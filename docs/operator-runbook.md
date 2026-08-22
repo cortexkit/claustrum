@@ -496,6 +496,47 @@ evict another's history — which matters, since those are the rows being read d
 the incident that caused the flood. A credential showing exactly 64 events has had at
 least that many, not exactly that many.
 
+### A consumer report put a credential in `needs_reauth`. Try `reactivate` first.
+
+**Before re-authenticating, check whether the vault's own refreshes were healthy.** A
+consumer report is a claim about a served token; it says nothing about the refresh
+material, and the two die independently.
+
+```sh
+sqlite3 "file:$HOME/.local/share/cortexkit/claustrum/store.db?mode=ro" \
+  "SELECT datetime(ts_ms/1000,'unixepoch','localtime'), op
+     FROM audit_log WHERE credential_id='<id>' ORDER BY seq DESC LIMIT 8;"
+```
+
+**A `refresh_commit` shortly before the report means the refresh token was alive at
+that moment**, so the credential was recoverable and a re-login is the expensive
+repair for a verdict that may simply be wrong:
+
+```sh
+ck auth reactivate --id <id>     # clears needs_reauth, does NOT touch the secret
+```
+
+This is safe to try because **it is self-correcting**: the vault re-verifies on next
+use, so a credential that really is dead returns to `needs_reauth` on its own and the
+wrong guess costs one failed request. It is refused for `corrupt` records, where the
+vault checked its own bytes and an operator assertion cannot make them decrypt.
+
+**Why this matters more than it looks.** The vault cannot interpret a provider status.
+GitHub returns 403 for a missing permission and for a rate limit; xAI uses it for an
+entitlement lapse — same number, opposite meanings, and this surface sees only the
+number. So a consumer reporting any refusal, rather than only the ones it believes
+mean the credential is invalid, can kill a working credential.
+
+Measured twice. On 2026-08-17 a GitHub App credential was killed seconds after being
+minted, by a 403 that meant "this token is valid and lacks one permission". On
+2026-08-21 `oauth:xai` was killed by a 403 **93 minutes after the vault had refreshed
+it successfully**, having refreshed cleanly every ~6h for days; it stayed dark for
+seven hours until a human ran `login`. `reactivate` would have been one command, and
+it did not exist for the first incident.
+
+If `reactivate` is followed within minutes by another report at the new version, the
+credential is genuinely dead and `login --replace` is the repair.
+
 ### Reading the chain directly
 
 The verbs above need the daemon stopped. To inspect a **running** vault — or to answer

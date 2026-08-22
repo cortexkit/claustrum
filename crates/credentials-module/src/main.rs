@@ -257,6 +257,42 @@ where
     let health_refresher = spawn_health_refresher(Arc::clone(&surface));
     let _refresher_guard = AbortOnDrop(health_refresher);
 
+    // NO READ TIMEOUT HERE, AND THAT IS DELIBERATE -- but it rests on the supervisor,
+    // so the dependency is named rather than left for someone to rediscover.
+    //
+    // An error propagates and a clean EOF returns, both ending this loop and dropping
+    // the connection for the supervisor to respawn against. The uncovered case is a
+    // SILENTLY HALF-OPEN connection where no bytes and no error ever arrive: this
+    // blocks in `read_frame` forever, holding a corpse it cannot notice. That is the
+    // vault's exact profile -- long-lived, low-traffic, idle for hours -- and it is the
+    // shape that took a sibling module's credential leg dark in August.
+    //
+    // THIS DAEMON HAS NO SELF-LIVENESS. Detection is entirely the supervisor's prober,
+    // verified at source in subconscious (supervise.rs): a timed-out probe counts into
+    // consecutive_failures and at the threshold calls health_restart_child on an
+    // UNCONDITIONAL path -- no action config is consulted, so `on_degraded` cannot
+    // suppress it. That lane fires only for a module that does not ANSWER; the
+    // configurable actions gate the other lane, where a module answers with a degraded
+    // status. A deaf daemon rides the unconditional one.
+    //
+    // The numbers, all compiled defaults this module's config does not override:
+    // cadence 30s, deadline 5s, failure_threshold 3, drain 30s. So the dark window is
+    // ~90s to Unresponsive plus up to 30s drain before SIGKILL. Acceptable because a
+    // read failing for two minutes is a `transient` refusal every consumer retries.
+    //
+    // THE BUDGET IS THE REAL FAILURE MODE, not the window: DEFAULT_MAX_RESTARTS is 3,
+    // lifetime. A RECURRING silent death does not converge on a self-healing loop, it
+    // converges on a PARKED MODULE -- every credential in the fleet unreachable until
+    // an operator revives it. "The supervisor restarts us" is true three times.
+    //
+    // Do NOT add a redundant liveness probe here on the strength of the paragraph
+    // above; the supervisor's already fires and a second one would only add a way to
+    // disagree. What WOULD justify revisiting: this daemon acquiring an outbound
+    // request that awaits a reply. Today it is purely reactive after HELLO, which is
+    // why the reused-dead-connection class cannot occur here at all -- there is no
+    // requester object for the defect to live on. That immunity is a property of the
+    // current role shape and ends silently the day the role changes, with nothing in
+    // the diff looking like a connection-lifecycle edit.
     loop {
         let Some(frame) = read_frame(read_half)
             .await

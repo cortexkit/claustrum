@@ -113,7 +113,11 @@ impl KeyId {
             return None;
         }
         let mut bytes = [0u8; KEY_ID_LEN];
-        for (i, chunk) in s.as_bytes().chunks_exact(2).enumerate() {
+        // `as_chunks` over `chunks_exact` so the pair is a `[u8; 2]` and the indexing
+        // below is checked at compile time. The remainder is provably empty: the length
+        // guard above requires an even length.
+        let (pairs, _remainder) = s.as_bytes().as_chunks::<2>();
+        for (i, chunk) in pairs.iter().enumerate() {
             let hi = (chunk[0] as char).to_digit(16)?;
             let lo = (chunk[1] as char).to_digit(16)?;
             bytes[i] = ((hi << 4) | lo) as u8;

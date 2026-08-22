@@ -39,6 +39,8 @@ async fn main() {
     let mut show_account_id = false;
     let mut show_claims = false;
     let mut report_auth_failure = false;
+    let mut sign_payload: Option<String> = None;
+    let mut public_key = false;
     let mut provider_status: u16 = 401;
     let mut record_version: Option<u64> = None;
 
@@ -88,6 +90,17 @@ async fn main() {
             // version will mark that credential needs_reauth, which is the whole point
             // of the call.
             "--report-auth-failure" => report_auth_failure = true,
+            // Exercise `credential.sign` / `credential.public_key` over the wire.
+            //
+            // These are route ops with NO CLI verb -- they exist for consumers, so
+            // nothing an operator can run proves they answer. That gap is not
+            // theoretical: the deploy that shipped them passed every acceptance leg
+            // (hashes, identifiers, inode, serving count, fenced write) while these two
+            // surfaces had never been called once. `scripts/accept-deploy.sh` says so
+            // itself -- it asks whether the right bytes are in the right place, never
+            // whether a behaviour is reachable.
+            "--sign" => sign_payload = args.next(),
+            "--public-key" => public_key = true,
             "--provider-status" => {
                 provider_status = args.next().and_then(|v| v.parse().ok()).unwrap_or(401);
             }
@@ -157,6 +170,39 @@ async fn main() {
         return;
     }
 
+    if public_key || sign_payload.is_some() {
+        // Both halves in one run when both are asked for, because the useful assertion
+        // is that they AGREE: a signature that verifies under the returned key proves
+        // the two ops name the same keypair. Either alone proves only that an op
+        // answered, which is the weaker claim that let this gap exist.
+        if public_key {
+            let body =
+                credential_public_key(&mut stream, route_channel, route_epoch, &handle).await;
+            let parsed: Value = serde_json::from_slice(&body.body).unwrap_or(Value::Null);
+            eprintln!(
+                "[probe] public_key -> {}",
+                serde_json::to_string(&parsed).unwrap_or_default()
+            );
+        }
+        if let Some(payload) = sign_payload {
+            let body = credential_sign(
+                &mut stream,
+                route_channel,
+                route_epoch,
+                &handle,
+                payload.as_bytes(),
+            )
+            .await;
+            let parsed: Value = serde_json::from_slice(&body.body).unwrap_or(Value::Null);
+            eprintln!(
+                "[probe] sign({} bytes) -> {}",
+                payload.len(),
+                serde_json::to_string(&parsed).unwrap_or_default()
+            );
+        }
+        return;
+    }
+
     let body = credential_get(
         &mut stream,
         route_channel,
@@ -167,6 +213,84 @@ async fn main() {
     )
     .await;
     report(&body, show_account_id, show_claims);
+}
+
+/// Send `credential.public_key`.
+///
+/// This op exists precisely BECAUSE `credential.get` returns the record payload
+/// verbatim, and for a signing-key record that payload IS the private PKCS#8. A
+/// consumer that wants to publish a verifier key must have a route that cannot carry
+/// private bytes, and this is it.
+async fn credential_public_key(
+    stream: &mut TcpStream,
+    route_channel: u16,
+    route_epoch: u32,
+    handle: &str,
+) -> Frame {
+    let frame = Frame::build(
+        FrameType::Request,
+        Flags::new(false, Priority::Interactive, false),
+        route_channel,
+        route_epoch,
+        11,
+        serde_json::to_vec(&json!({
+            "method": "credential.public_key",
+            "params": { "handle": handle },
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    write_frame(stream, &frame).await.unwrap();
+    loop {
+        let frame = read_frame_timeout(stream).await;
+        if frame.header.corr == 11
+            && matches!(frame.header.ty, FrameType::Response | FrameType::Error)
+        {
+            return frame;
+        }
+    }
+}
+
+/// Send `credential.sign`.
+///
+/// The payload is base64 on the wire because JSON cannot carry raw bytes, but the
+/// vault signs the DECODED bytes. That distinction is load-bearing: signing the
+/// encoded text would break the moment a caller re-encoded with different padding,
+/// which is the canonicalization mismatch this whole design avoids by carrying exact
+/// bytes end to end.
+async fn credential_sign(
+    stream: &mut TcpStream,
+    route_channel: u16,
+    route_epoch: u32,
+    handle: &str,
+    payload: &[u8],
+) -> Frame {
+    use base64::Engine as _;
+    let frame = Frame::build(
+        FrameType::Request,
+        Flags::new(false, Priority::Interactive, false),
+        route_channel,
+        route_epoch,
+        12,
+        serde_json::to_vec(&json!({
+            "method": "credential.sign",
+            "params": {
+                "handle": handle,
+                "payload_b64": base64::engine::general_purpose::STANDARD.encode(payload),
+            },
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    write_frame(stream, &frame).await.unwrap();
+    loop {
+        let frame = read_frame_timeout(stream).await;
+        if frame.header.corr == 12
+            && matches!(frame.header.ty, FrameType::Response | FrameType::Error)
+        {
+            return frame;
+        }
+    }
 }
 
 async fn control_rpc(stream: &mut TcpStream, corr: u64, body: Value) -> Frame {

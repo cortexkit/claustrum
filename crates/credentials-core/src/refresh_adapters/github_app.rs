@@ -332,7 +332,10 @@ fn now_secs() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use base64::Engine as _;
+    // `base64::Engine` is deliberately NOT imported here: the parent module imports it
+    // and `use super::*` below brings it in, so an explicit one is redundant. The
+    // decode call further down proves it is still in scope -- if this comment is ever
+    // wrong, that call stops compiling rather than silently degrading.
     use ring::signature;
     use serde_json::Value;
 

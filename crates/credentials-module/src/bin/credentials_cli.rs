@@ -3331,7 +3331,10 @@ fn decode_hash(hex: &str) -> Result<[u8; 32], CliError> {
         ));
     }
     let mut out = [0u8; 32];
-    for (i, chunk) in hex.as_bytes().chunks_exact(2).enumerate() {
+    // `as_chunks` over `chunks_exact` so the pair is a `[u8; 2]`. The remainder is
+    // provably empty: the length guard above requires exactly 64 bytes.
+    let (pairs, _remainder) = hex.as_bytes().as_chunks::<2>();
+    for (i, chunk) in pairs.iter().enumerate() {
         let s = std::str::from_utf8(chunk).map_err(|_| CliError::Usage("bad hex".into()))?;
         out[i] = u8::from_str_radix(s, 16).map_err(|_| CliError::Usage("bad hex".into()))?;
     }

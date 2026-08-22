@@ -930,7 +930,11 @@ fn decode_hex_key(raw: &[u8]) -> Result<Zeroizing<[u8; MASTER_KEY_LEN]>, MasterK
         )));
     }
     let mut out = Zeroizing::new([0u8; MASTER_KEY_LEN]);
-    for (i, chunk) in trimmed.chunks_exact(2).enumerate() {
+    // `as_chunks` over `chunks_exact` so the pair is a `[u8; 2]` and the indexing below
+    // is checked at compile time. The remainder is provably empty: the length guard
+    // above requires exactly `MASTER_KEY_LEN * 2` bytes.
+    let (pairs, _remainder) = trimmed.as_chunks::<2>();
+    for (i, chunk) in pairs.iter().enumerate() {
         let hi = hex_val(chunk[0])?;
         let lo = hex_val(chunk[1])?;
         out[i] = (hi << 4) | lo;

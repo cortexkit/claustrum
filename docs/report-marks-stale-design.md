@@ -131,11 +131,21 @@ thing that should be latched dead by a single refusal.
 
 ## 4. What this does NOT fix
 
-- **It is not a fix for the reporter's own treadmill.** Their deaths are genuine
-  upstream revocations of a dual-custody grant; re-sealing restores service because a
-  new grant is imported. The change buys the DISTINCTION — a refresh attempt that
-  either recovers or returns `invalid_grant` — where today the vault cannot tell the
-  two populations apart, retroactively or at the time.
+- **It is not a fix for the reporter's own treadmill, and that is the correct
+  outcome rather than a shortfall.** Confirmed from the reporting seat: their deaths
+  are FAMILY revocations — the imported refresh token dies with its family, so the
+  get-triggered refresh returns `invalid_grant` and latches exactly as today, **one
+  round trip later**. The change costs them one extra exchange and buys them nothing,
+  because there is nothing to recover.
+
+  What it buys is the DISTINCTION. Today the vault cannot tell a revoked-but-
+  refreshable credential from a dead one, at the time or retroactively, because it
+  never asks. After this it always asks, and the answer is recorded. The population
+  that gains is the one `cortexkit/insula#10` names — 403-latched and transiently-
+  refused credentials that are alive and currently die anyway.
+
+  Worth stating plainly because the headline case and the beneficiary are different
+  populations: **the operator who found this defect is not the operator it helps.**
 - **It does not make a status code interpretable.** The vault still cannot know whether
   a 403 means a dead credential or a forbidden endpoint. The contract rule stands:
   report only when you believe the credential is invalid, never merely because a call

@@ -174,13 +174,26 @@ would notice if it did not.
 
 ## 6. Open
 
-- **How the token is marked stale.** Setting `expires_at_ms` to now is the obvious
-  mechanism and re-uses the existing vocabulary, but it OVERWRITES a real provider
-  fact with a local assertion, and that fact is what `ck auth usable` reports. A
-  separate flag does not have that problem and does not compose with `is_stale`'s
-  three existing conditions for free. Decide at implementation, and whichever is
-  chosen, `usable` must not report a locally-staled token as though the provider said
-  so.
+- ~~**How the token is marked stale.**~~ **RESOLVED 2026-08-23: a plaintext column on
+  the `credentials` row, not a rewrite of `expires_at_ms` inside the envelope.**
+
+  Setting `expires_at_ms = now` looked obvious because it re-uses `is_stale`'s
+  existing vocabulary. It is wrong for a reason that only appears when you follow the
+  write: **that field lives INSIDE the sealed envelope, so setting it means re-sealing
+  the record, and re-sealing bumps `record_version`.** The version fence this entire
+  design rests on would then be moved by the very operation it is fencing — a report
+  would invalidate its own CAS, and every consumer's cached version would be stale
+  after a report that changed nothing they can see. It also overwrites a real provider
+  fact with a local assertion, and that fact is what `ck auth usable` reports as TTL.
+
+  So: `stale_pending INTEGER NOT NULL DEFAULT 0` beside `state`, in plaintext, set by
+  a version-guarded `UPDATE` that touches no envelope and does not move the version.
+  `get` reads it alongside `state` and drives the engine's EXISTING force-refresh path;
+  the refresh commit clears it in the same fenced transaction. Schema migration 4.
+
+  The general shape is worth keeping: **the obvious mechanism was obvious because it
+  reused an existing field, and the cost was invisible until the write path was traced
+  to where that field is stored.**
 - **Whether `status` should expose the stale-pending state.** No consumer reads
   `status` today, so nothing forces the question, and adding a field nobody consumes is
   how a surface accumulates. Left out unless a consumer asks.

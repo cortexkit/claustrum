@@ -200,16 +200,36 @@ impl RefreshEngine {
     ///
     /// `min_ttl_ms`: if set, a token with less than this remaining is refreshed.
     /// Refresh is single-flight per credential. A non-refreshable record is served
-    /// as-is. Fails closed on a `needs_reauth`/quarantined record (the store's
-    /// typed errors propagate).
+    /// as-is unless it carries a consumer report marker, which must terminally latch
+    /// because no refresh path can recover it. Fails closed on a
+    /// `needs_reauth`/quarantined record (the store's typed errors propagate).
     pub async fn get(
         &self,
         credential_id: &str,
         min_ttl_ms: Option<i64>,
         force_refresh: bool,
     ) -> Result<VaultRecord, EngineError> {
-        let initial = self.store.get(credential_id)?;
-        let wants_refresh = force_refresh || self.is_stale(&initial, min_ttl_ms);
+        let (initial, stale_pending) = self.store.get_with_stale_pending(credential_id)?;
+        if stale_pending && !initial.is_refreshable() {
+            // A stale marker means a consumer already refused this exact token. A
+            // non-refreshable record cannot replace it, so defer to the existing
+            // version-fenced terminal transition rather than serving it again.
+            self.store.invalidate_if_version_reported(
+                credential_id,
+                initial.record_version,
+                AuditCtx::vault(AuditOp::Invalidate),
+                Some(AuthObservation {
+                    kind: "stale_nonrefreshable_latch",
+                    provider_status: None,
+                    detail: None,
+                }),
+            )?;
+            // If a concurrent write moved the version, return the replacement rather
+            // than incorrectly refusing the record this get did not inspect.
+            return Ok(self.store.get(credential_id)?);
+        }
+
+        let wants_refresh = force_refresh || stale_pending || self.is_stale(&initial, min_ttl_ms);
         if !wants_refresh || !initial.is_refreshable() {
             return Ok(initial);
         }
@@ -222,7 +242,7 @@ impl RefreshEngine {
         // version moved, that holder did the upstream call — return their result
         // without a second one (this is what makes N concurrent gets ⇒ 1 call, and
         // it is correct even under force_refresh).
-        let current = self.store.get(credential_id)?;
+        let (current, _) = self.store.get_with_stale_pending(credential_id)?;
         if current.record_version != initial.record_version {
             return Ok(current);
         }

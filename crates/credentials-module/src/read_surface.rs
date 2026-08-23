@@ -37,6 +37,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use credentials_core::audit::{AlarmReason, AuditCtx, AuditOp, AuditRecord};
+use credentials_core::credential_id::{default_refresh_adapter, parse_credential_id};
 use credentials_core::engine::{EngineError, RefreshEngine};
 use credentials_core::health::VaultHealth;
 use credentials_core::refresh_adapters::RefreshError;
@@ -750,8 +751,9 @@ impl ReadSurface {
         out
     }
 
-    /// Report a consumer-observed auth failure: mark the credential needs_reauth so
-    /// the next get does not serve the dead token. Rate-limited via the same
+    /// Report a consumer-observed auth failure. Refreshable credentials are marked
+    /// stale so their next get attempts recovery; static credentials still latch
+    /// needs_reauth. Rate-limited via the same
     /// limiter (a flood of reports is itself an anomaly). A 401/403 is the
     /// meaningful signal; other statuses are accepted but only a clear auth failure
     /// invalidates.
@@ -835,28 +837,46 @@ impl ReadSurface {
             // distinguishes a restarted process from a long-lived one without putting
             // an authentication token in a readable column.
             let actor = format!("conn-{connection_id}");
-            self.engine
-                .store()
-                .invalidate_if_version_reported(
-                    &credential_id,
-                    params.record_version,
-                    AuditCtx {
-                        op: AuditOp::ReportAuthFailure,
-                        actor: &actor,
-                        alarm: None,
-                    },
-                    // The status is recorded because 401 and 403 mean different things
-                    // -- a rejected token versus a forbidden request -- and the audit
-                    // chain has no field for it, so previously both arrived here and
-                    // were discarded, leaving an incident with no way to tell them
-                    // apart afterwards.
-                    Some(credentials_core::store::AuthObservation {
-                        kind: "consumer_report",
-                        provider_status: Some(params.provider_status),
-                        detail: None,
-                    }),
-                )
-                .map_err(|e| map_store_error(&e))?;
+            let parsed = parse_credential_id(&credential_id);
+            let refreshable = default_refresh_adapter(parsed.method, &parsed.provider).is_some();
+            let audit = AuditCtx {
+                op: AuditOp::ReportAuthFailure,
+                actor: &actor,
+                alarm: None,
+            };
+            // `kind` names the chosen state-machine arm because `applied` alone
+            // cannot distinguish a stale marker from a terminal latch. The status
+            // remains diagnostic detail: 401 and 403 carry different provider facts.
+            let observation = credentials_core::store::AuthObservation {
+                kind: if refreshable {
+                    "consumer_report_stale"
+                } else {
+                    "consumer_report_latch"
+                },
+                provider_status: Some(params.provider_status),
+                detail: None,
+            };
+            if refreshable {
+                self.engine
+                    .store()
+                    .mark_stale_if_version_reported(
+                        &credential_id,
+                        params.record_version,
+                        audit,
+                        observation,
+                    )
+                    .map_err(|e| map_store_error(&e))?;
+            } else {
+                self.engine
+                    .store()
+                    .invalidate_if_version_reported(
+                        &credential_id,
+                        params.record_version,
+                        audit,
+                        Some(observation),
+                    )
+                    .map_err(|e| map_store_error(&e))?;
+            }
         }
         Ok(())
     }

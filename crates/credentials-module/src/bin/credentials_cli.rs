@@ -27,8 +27,8 @@
 //!   mint-handle --id <id>                      print a fresh handle (once)
 //!   revoke-handle --handle <ckh_...>
 //!   revoke-all-handles --id <id>
-//!   grant --principal <module-id> --prefix <credential-prefix>
-//!   revoke-grant --principal <module-id> --prefix <credential-prefix>
+//!   grant --principal <module-id> --prefix <credential-prefix> --operation <read|sign>
+//!   revoke-grant --principal <module-id> --prefix <credential-prefix> --operation <read|sign>
 //!   audit [--limit N] | verify-audit
 //!
 //! Storage location is resolved the same way the daemon resolves it; for the CLI
@@ -56,7 +56,7 @@ use credentials_core::credential_id::{default_refresh_adapter, parse_credential_
 use credentials_core::key::MasterKey;
 use credentials_core::record::{CredentialKind, VaultRecord};
 use credentials_core::resolver::{self, KeySource, MasterKeyError, ResolverConfig};
-use credentials_core::store::{EncryptedStore, StoreOpError};
+use credentials_core::store::{EncryptedStore, GrantOperation, StoreOpError};
 use ring::rand::SystemRandom;
 use ring::signature::Ed25519KeyPair;
 
@@ -298,7 +298,7 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
         "invalidate" | "reactivate" | "mint-handle" | "revoke-all-handles" | "remove" => &["--id"],
         "logout" => &["--provider", "--id"],
         "revoke-handle" => &["--handle"],
-        "grant" | "revoke-grant" => &["--principal", "--prefix"],
+        "grant" | "revoke-grant" => &["--principal", "--prefix", "--operation"],
         "audit" => &["--limit"],
         "events" => &["--limit"],
         // bootstrap / rotate-master-key / verify-audit take no per-command flags.
@@ -483,17 +483,20 @@ fn help_verb(verb: &str) -> String {
              record itself is untouched (still refreshable; mint new handles later)."
         }
         "grant" => {
-            "ck auth grant --principal <module-id> --prefix <credential-prefix>\n\
-             \n\
-             Grant one reserved module principal ordinary reads of credential ids beginning\n\
-             with the literal prefix. Status enumerates the ids currently covered; review\n\
-             that set whenever a credential is added under the prefix."
+            "ck auth grant --principal <module-id> --prefix <credential-prefix> \\\n              --operation <read|sign>\n\
+              \n\
+              Grant one reserved module principal either ordinary reads or signing for\n\
+              credential ids beginning with the literal prefix. Read and sign are separate\n\
+              authorities: neither operation implies the other. Status enumerates the ids\n\
+              currently covered; review that set whenever a credential is added under the\n\
+              prefix."
         }
         "revoke-grant" => {
-            "ck auth revoke-grant --principal <module-id> --prefix <credential-prefix>\n\
-             \n\
-             Revoke one reserved module principal's literal-prefix read grant. The change\n\
-             takes effect on the next scoped read and does not affect capability handles."
+            "ck auth revoke-grant --principal <module-id> --prefix <credential-prefix> \\\n              --operation <read|sign>\n\
+              \n\
+              Revoke one reserved module principal's literal-prefix read or sign grant. The\n\
+              change takes effect on the next scoped operation and does not affect capability\n\
+              handles."
         }
         "reactivate" => {
             "ck auth reactivate --id <id>\n\
@@ -2292,7 +2295,7 @@ fn print_read_grants(result: &serde_json::Value) -> Result<(), CliError> {
         return Ok(());
     }
     println!("read grants:");
-    let mut prior_grant: Option<(String, String, String)> = None;
+    let mut prior_grant: Option<(String, String, String, String)> = None;
     for (index, grant) in grants.iter().enumerate() {
         let kind = grant
             .get("principal_kind")
@@ -2321,9 +2324,19 @@ fn print_read_grants(result: &serde_json::Value) -> Result<(), CliError> {
                     "admin.status returned an invalid grant prefix at row {index}"
                 ))
             })?;
+        let operation = grant
+            .get("operation")
+            .and_then(serde_json::Value::as_str)
+            .filter(|operation| matches!(*operation, "read" | "sign"))
+            .ok_or_else(|| {
+                CliError::RouteRefused(format!(
+                    "admin.status returned an invalid grant operation at row {index}"
+                ))
+            })?;
         let order_key = (
             kind.to_string(),
             principal_id.to_string(),
+            operation.to_string(),
             prefix.to_string(),
         );
         if prior_grant
@@ -2343,7 +2356,7 @@ fn print_read_grants(result: &serde_json::Value) -> Result<(), CliError> {
                     "admin.status omitted covered credentials at grant row {index}"
                 ))
             })?;
-        println!("  {kind}:{principal_id} {prefix}");
+        println!("  {kind}:{principal_id} {operation} {prefix}");
         let mut prior_id: Option<&str> = None;
         for (covered_index, id) in covered.iter().enumerate() {
             let id = id.as_str().filter(|id| !id.is_empty()).ok_or_else(|| {
@@ -2497,30 +2510,44 @@ fn cmd_revoke_all_handles(global: &GlobalArgs, args: &[String]) -> Result<(), Cl
 fn cmd_grant(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     let principal_id = required(args, "--principal")?;
     let credential_prefix = required(args, "--prefix")?;
+    let operation = required(args, "--operation")?
+        .parse::<GrantOperation>()
+        .map_err(CliError::Usage)?;
     commit_admin(
         global,
         AdminOpBody::GrantCreate {
             v: ADMIN_OP_SCHEMA_V1,
             principal_id: principal_id.clone(),
             credential_prefix: credential_prefix.clone(),
+            operation,
         },
     )?;
-    println!("granted reserved:{principal_id} reads of {credential_prefix}");
+    println!(
+        "granted reserved:{principal_id} {} of {credential_prefix}",
+        operation.as_str()
+    );
     Ok(())
 }
 
 fn cmd_revoke_grant(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     let principal_id = required(args, "--principal")?;
     let credential_prefix = required(args, "--prefix")?;
+    let operation = required(args, "--operation")?
+        .parse::<GrantOperation>()
+        .map_err(CliError::Usage)?;
     commit_admin(
         global,
         AdminOpBody::GrantRevoke {
             v: ADMIN_OP_SCHEMA_V1,
             principal_id: principal_id.clone(),
             credential_prefix: credential_prefix.clone(),
+            operation,
         },
     )?;
-    println!("revoked reserved:{principal_id} reads of {credential_prefix}");
+    println!(
+        "revoked reserved:{principal_id} {} of {credential_prefix}",
+        operation.as_str()
+    );
     Ok(())
 }
 
@@ -3534,12 +3561,26 @@ mod tests {
         assert!(reject_unknown_args("login", &v(&["--provider", "xai", "--device"])).is_ok());
         assert!(reject_unknown_args(
             "grant",
-            &v(&["--principal", "prefrontal-core", "--prefix", "github_app:"])
+            &v(&[
+                "--principal",
+                "prefrontal-core",
+                "--prefix",
+                "github_app:",
+                "--operation",
+                "read",
+            ])
         )
         .is_ok());
         assert!(reject_unknown_args(
             "revoke-grant",
-            &v(&["--principal", "prefrontal-core", "--prefix", "github_app:"])
+            &v(&[
+                "--principal",
+                "prefrontal-core",
+                "--prefix",
+                "github_app:",
+                "--operation",
+                "sign",
+            ])
         )
         .is_ok());
     }
@@ -3555,6 +3596,18 @@ mod tests {
         // is the `bootstrap somearg` / `bootstrap --help` class that previously RAN.
         assert!(reject_unknown_args("bootstrap", &v(&["--help"])).is_err());
         assert!(reject_unknown_args("bootstrap", &v(&["stray"])).is_err());
+        assert!(reject_unknown_args(
+            "grant",
+            &v(&[
+                "--principal",
+                "prefrontal-core",
+                "--prefix",
+                "github_app:",
+                "--op",
+                "read"
+            ])
+        )
+        .is_err());
     }
 
     /// The multi-account rail: a login id is the provider default or one labeled

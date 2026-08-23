@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::audit::{AuditCtx, AuditOp};
 use crate::record::VaultRecord;
-use crate::store::{mint_handle, EncryptedStore, StoreOpError};
+use crate::store::{mint_handle, EncryptedStore, GrantOperation, StoreOpError};
 
 /// The admin-op schema version. Bumped only on a breaking op-body change; the
 /// module refuses any other version rather than best-effort parsing it.
@@ -61,19 +61,21 @@ pub enum AdminOpBody {
     RevokeHandle { v: u32, handle: String },
     #[serde(rename = "admin.revoke_all_handles")]
     RevokeAllHandles { v: u32, id: String },
-    /// Grant a reserved module principal literal-prefix credential reads.
+    /// Grant a reserved module principal one literal-prefix credential operation.
     #[serde(rename = "admin.grant_create")]
     GrantCreate {
         v: u32,
         principal_id: String,
         credential_prefix: String,
+        operation: GrantOperation,
     },
-    /// Revoke a reserved module principal literal-prefix credential read grant.
+    /// Revoke a reserved module principal literal-prefix credential operation grant.
     #[serde(rename = "admin.grant_revoke")]
     GrantRevoke {
         v: u32,
         principal_id: String,
         credential_prefix: String,
+        operation: GrantOperation,
     },
     /// An authenticated READ: the no-decrypt credential inventory + health summary.
     /// A read, but master-key-gated like every other admin op, because the full
@@ -243,19 +245,33 @@ pub fn apply(
         AdminOpBody::GrantCreate {
             principal_id,
             credential_prefix,
+            operation,
             ..
         } => {
             let ctx = AuditCtx::route_admin(AuditOp::GrantCreate, actor);
-            store.create_read_grant_audited("reserved", &principal_id, &credential_prefix, ctx)?;
+            store.create_read_grant_audited(
+                "reserved",
+                &principal_id,
+                &credential_prefix,
+                operation,
+                ctx,
+            )?;
             Ok(serde_json::json!({ "grant_created": true }))
         }
         AdminOpBody::GrantRevoke {
             principal_id,
             credential_prefix,
+            operation,
             ..
         } => {
             let ctx = AuditCtx::route_admin(AuditOp::GrantRevoke, actor);
-            store.revoke_read_grant_audited("reserved", &principal_id, &credential_prefix, ctx)?;
+            store.revoke_read_grant_audited(
+                "reserved",
+                &principal_id,
+                &credential_prefix,
+                operation,
+                ctx,
+            )?;
             Ok(serde_json::json!({ "grant_revoked": true }))
         }
         AdminOpBody::Status { .. } => {
@@ -292,6 +308,7 @@ pub fn apply(
                         "principal_kind": grant.principal_kind,
                         "principal_id": grant.principal_id,
                         "credential_prefix": grant.credential_prefix,
+                        "operation": grant.operation.as_str(),
                         "created_at_ms": grant.created_at_ms,
                         "covered_credential_ids": covered_credential_ids,
                     })

@@ -6,7 +6,8 @@
 //! a reserved `ManagementSurface` — echoing the `SUBC_LAUNCH_NONCE` the supervisor
 //! injected so only the spawned process can claim the `claustrum` id
 //! (closing the vault-impersonation hole). It serves the capability-handle read
-//! surface plus the separate principal-scoped `credential.get_scoped` route operation.
+//! surface plus separate principal-scoped `credential.get_scoped` and `credential.sign`
+//! route operations.
 //! There is deliberately NO unauthenticated write op on this channel — writes live in
 //! the admin surface, gated by master-key possession + the single-writer lease.
 //!
@@ -869,14 +870,27 @@ async fn handle_read_request(
             }
         },
         OP_SIGN => match serde_json::from_value::<read_surface::SignParams>(request.params) {
-            Ok(p) => match surface.sign(connection_id, &p).await {
-                Ok(r) => json!({ "result": r }),
-                // Same { code, class } shape every other op uses, so a consumer
-                // branches on the produced class here too.
-                Err(code) => json!({
-                    "result": { "error": read_surface::ErrorBody { code, class: code.class() } }
-                }),
-            },
+            Ok(p) if p.has_exactly_one_authorization() => {
+                match surface.sign(connection_id, principal.as_ref(), &p).await {
+                    Ok(r) => json!({ "result": r }),
+                    // Same { code, class } shape every other op uses, so a consumer
+                    // branches on the produced class here too.
+                    Err(code) => json!({
+                        "result": { "error": read_surface::ErrorBody { code, class: code.class() } }
+                    }),
+                }
+            }
+            Ok(_) => {
+                return invalid_params(
+                    writer,
+                    ver,
+                    channel,
+                    epoch,
+                    corr,
+                    "credential.sign requires exactly one of handle or credential_id",
+                )
+                .await
+            }
             Err(e) => {
                 return invalid_params(writer, ver, channel, epoch, corr, &e.to_string()).await
             }
@@ -1163,6 +1177,10 @@ fn manifest(module_id: &str) -> ModuleManifest {
                     kind: ManagementOperationKind::Query,
                 },
                 ManagementOperation {
+                    name: OP_GET_SCOPED.to_string(),
+                    kind: ManagementOperationKind::Query,
+                },
+                ManagementOperation {
                     name: OP_GET_MANY.to_string(),
                     kind: ManagementOperationKind::Query,
                 },
@@ -1258,6 +1276,7 @@ mod tests {
     use credentials_core::audit::{AuditCtx, AuditOp};
     use credentials_core::key::{MasterKey, MASTER_KEY_LEN};
     use credentials_core::record::{CredentialKind, VaultRecord};
+    use credentials_core::store::GrantOperation;
     use read_surface::ReadSurface;
 
     fn tmp_surface(seed: u8) -> Arc<ReadSurface> {
@@ -1410,11 +1429,12 @@ mod tests {
         (surface, admin, store)
     }
 
-    async fn scoped_request(
+    async fn scoped_route_request(
         surface: &Arc<ReadSurface>,
         admin: &Arc<admin_surface::AdminSurface>,
         channel: u16,
-        credential_id: &str,
+        method: &str,
+        params: serde_json::Value,
     ) -> serde_json::Value {
         let (writer, mut responses) = mpsc::channel(1);
         let frame = Frame::build_with_version(
@@ -1425,8 +1445,8 @@ mod tests {
             1,
             1,
             serde_json::to_vec(&json!({
-                "method": OP_GET_SCOPED,
-                "params": { "credential_id": credential_id },
+                "method": method,
+                "params": params,
             }))
             .expect("encode request"),
         )
@@ -1437,6 +1457,39 @@ mod tests {
             .expect("serve request");
         let response = responses.recv().await.expect("route response");
         serde_json::from_slice(&response.body).expect("decode response")
+    }
+
+    async fn scoped_request(
+        surface: &Arc<ReadSurface>,
+        admin: &Arc<admin_surface::AdminSurface>,
+        channel: u16,
+        credential_id: &str,
+    ) -> serde_json::Value {
+        scoped_route_request(
+            surface,
+            admin,
+            channel,
+            OP_GET_SCOPED,
+            json!({ "credential_id": credential_id }),
+        )
+        .await
+    }
+
+    async fn scoped_sign_request(
+        surface: &Arc<ReadSurface>,
+        admin: &Arc<admin_surface::AdminSurface>,
+        channel: u16,
+        credential_id: &str,
+        payload_b64: &str,
+    ) -> serde_json::Value {
+        scoped_route_request(
+            surface,
+            admin,
+            channel,
+            OP_SIGN,
+            json!({ "credential_id": credential_id, "payload_b64": payload_b64 }),
+        )
+        .await
     }
 
     fn assert_scoped_not_found(body: &serde_json::Value) {
@@ -1458,6 +1511,7 @@ mod tests {
                 "reserved",
                 "prefrontal-core",
                 "github_app:",
+                GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
             )
             .expect("create grant");
@@ -1506,6 +1560,7 @@ mod tests {
                 "reserved",
                 "prefrontal-core",
                 "github_app:",
+                GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantRevoke),
             )
             .expect("revoke grant");
@@ -1533,6 +1588,7 @@ mod tests {
                 "reserved",
                 "prefrontal-core",
                 "github_app:",
+                GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
             )
             .expect("create grant");
@@ -1565,6 +1621,7 @@ mod tests {
                 "reserved",
                 "prefrontal-core",
                 "github_app:",
+                GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
             )
             .expect("create grant");
@@ -1597,6 +1654,7 @@ mod tests {
                 "reserved",
                 "prefrontal-core",
                 "github_app:",
+                GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
             )
             .expect("create grant");
@@ -1644,6 +1702,7 @@ mod tests {
                 "reserved",
                 "prefrontal-core",
                 "github_app:",
+                GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
             )
             .expect("create grant");
@@ -1691,11 +1750,23 @@ mod tests {
                     v: credentials_core::admin_ops::ADMIN_OP_SCHEMA_V1,
                     principal_id: "prefrontal-core".into(),
                     credential_prefix: prefix.into(),
+                    operation: GrantOperation::Read,
                 },
                 "test",
             )
             .expect("create grant");
         }
+        credentials_core::admin_ops::apply(
+            &store,
+            credentials_core::admin_ops::AdminOpBody::GrantCreate {
+                v: credentials_core::admin_ops::ADMIN_OP_SCHEMA_V1,
+                principal_id: "prefrontal-core".into(),
+                credential_prefix: "github_app:".into(),
+                operation: GrantOperation::Sign,
+            },
+            "test",
+        )
+        .expect("create sign grant");
         let status = credentials_core::admin_ops::apply(
             &store,
             credentials_core::admin_ops::AdminOpBody::Status {
@@ -1724,12 +1795,21 @@ mod tests {
                 "principal_kind": "reserved",
                 "principal_id": "prefrontal-core",
                 "credential_prefix": "apikey:",
+                "operation": "read",
                 "covered_credential_ids": ["apikey:active", "apikey:dead"],
             },
             {
                 "principal_kind": "reserved",
                 "principal_id": "prefrontal-core",
                 "credential_prefix": "github_app:",
+                "operation": "read",
+                "covered_credential_ids": ["github_app:a", "github_app:z"],
+            },
+            {
+                "principal_kind": "reserved",
+                "principal_id": "prefrontal-core",
+                "credential_prefix": "github_app:",
+                "operation": "sign",
                 "covered_credential_ids": ["github_app:a", "github_app:z"],
             },
         ]);
@@ -2263,6 +2343,337 @@ mod tests {
         pem
     }
 
+    /// A capability handle authorizes signing and public-key publication for a signing
+    /// key, but must never serve the private PKCS#8 payload through any read operation.
+    #[tokio::test]
+    async fn signing_key_handle_cannot_get_but_can_sign_and_publish() {
+        use base64::Engine as _;
+
+        let (surface, admin, store) = scoped_rig(81);
+        let pem = test_ed25519_pem();
+        let credential_id = "signing:agent-assertion:handle";
+        store
+            .create(
+                credential_id,
+                &VaultRecord::new_static(
+                    CredentialKind::SigningKey,
+                    "test",
+                    pem.as_bytes().to_vec(),
+                    None,
+                ),
+            )
+            .expect("create signing key");
+        let handle = credentials_core::store::mint_handle().expect("mint handle");
+        store
+            .put_handle_hash(
+                &handle.hash,
+                credential_id,
+                AuditCtx::admin(AuditOp::MintHandle),
+            )
+            .expect("store handle");
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "prefrontal-core",
+                "signing:agent-assertion:",
+                GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .expect("create read grant");
+        admin.record_bind(
+            81,
+            subc_protocol::Principal::Reserved {
+                module_id: "prefrontal-core".into(),
+            },
+        );
+
+        let get = serde_json::to_value(
+            surface
+                .get(
+                    81,
+                    &GetParams {
+                        handle: handle.raw.clone(),
+                        min_ttl_ms: None,
+                        force_refresh: false,
+                    },
+                )
+                .await,
+        )
+        .expect("encode get outcome");
+        assert_eq!(get["error"]["code"], "not_found");
+        assert_eq!(get["error"]["class"], "permanent");
+
+        let many = serde_json::to_value(
+            surface
+                .get_many(
+                    81,
+                    &GetManyParams {
+                        items: vec![GetParams {
+                            handle: handle.raw.clone(),
+                            min_ttl_ms: None,
+                            force_refresh: false,
+                        }],
+                    },
+                )
+                .await,
+        )
+        .expect("encode get_many outcomes");
+        assert_eq!(many[0]["error"]["code"], "not_found");
+        assert_eq!(many[0]["error"]["class"], "permanent");
+
+        let scoped = scoped_request(&surface, &admin, 81, credential_id).await;
+        assert_scoped_not_found(&scoped);
+
+        let public = surface
+            .public_key(
+                81,
+                &read_surface::PublicKeyParams {
+                    handle: handle.raw.clone(),
+                },
+            )
+            .await
+            .expect("the same handle must publish the public half");
+        assert_eq!(public.algorithm, "ed25519");
+        let signature = surface
+            .sign(
+                81,
+                None,
+                &read_surface::SignParams {
+                    handle: Some(handle.raw),
+                    credential_id: None,
+                    payload_b64: base64::engine::general_purpose::STANDARD
+                        .encode(b"handle-authorized bytes"),
+                },
+            )
+            .await
+            .expect("the same handle must still sign");
+        assert!(!signature.signature_b64.is_empty());
+        assert_eq!(signature.key_id, public.key_id);
+    }
+
+    /// `get_many` currently delegates every item to `get`; this pins that structural
+    /// property so a future batch-query optimization cannot reopen signing-key payload
+    /// reads while a refusal-only test still passes by rejecting the entire batch.
+    #[tokio::test]
+    async fn get_many_delegates_signing_key_refusal_without_blocking_other_items() {
+        let (surface, store, _db) = tmp_surface_with_store(85);
+        let pem = test_ed25519_pem();
+        store
+            .create(
+                "signing:batch:private",
+                &VaultRecord::new_static(
+                    CredentialKind::SigningKey,
+                    "test",
+                    pem.into_bytes(),
+                    None,
+                ),
+            )
+            .expect("create signing key");
+        store
+            .create(
+                "apikey:batch:ordinary",
+                &VaultRecord::new_static(
+                    CredentialKind::ApiKey,
+                    "test",
+                    b"ordinary payload".to_vec(),
+                    None,
+                ),
+            )
+            .expect("create ordinary credential");
+        let signing_handle = credentials_core::store::mint_handle().expect("mint signing handle");
+        store
+            .put_handle_hash(
+                &signing_handle.hash,
+                "signing:batch:private",
+                AuditCtx::admin(AuditOp::MintHandle),
+            )
+            .expect("store signing handle");
+        let ordinary_handle = credentials_core::store::mint_handle().expect("mint ordinary handle");
+        store
+            .put_handle_hash(
+                &ordinary_handle.hash,
+                "apikey:batch:ordinary",
+                AuditCtx::admin(AuditOp::MintHandle),
+            )
+            .expect("store ordinary handle");
+
+        let outcomes = surface
+            .get_many(
+                85,
+                &GetManyParams {
+                    items: vec![
+                        GetParams {
+                            handle: signing_handle.raw,
+                            min_ttl_ms: None,
+                            force_refresh: false,
+                        },
+                        GetParams {
+                            handle: ordinary_handle.raw,
+                            min_ttl_ms: None,
+                            force_refresh: false,
+                        },
+                    ],
+                },
+            )
+            .await;
+        let read_surface::GetOutcome::Err { error } = &outcomes[0] else {
+            panic!("a SigningKey batch item must refuse");
+        };
+        assert_eq!(error.code, read_surface::ReadError::NotFound);
+        assert_eq!(error.class, read_surface::ErrorClass::Permanent);
+        let read_surface::GetOutcome::Ok(result) = &outcomes[1] else {
+            panic!("a non-signing batch item must still serve");
+        };
+        assert_eq!(result.payload, b"ordinary payload");
+    }
+
+    #[tokio::test]
+    async fn read_grant_does_not_authorize_scoped_signing() {
+        use base64::Engine as _;
+
+        let (surface, admin, store) = scoped_rig(82);
+        let credential_id = "signing:operations:read-only";
+        store
+            .create(
+                credential_id,
+                &VaultRecord::new_static(
+                    CredentialKind::SigningKey,
+                    "test",
+                    test_ed25519_pem().into_bytes(),
+                    None,
+                ),
+            )
+            .expect("create signing key");
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "prefrontal-core",
+                "signing:operations:",
+                GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .expect("create read grant");
+        admin.record_bind(
+            82,
+            subc_protocol::Principal::Reserved {
+                module_id: "prefrontal-core".into(),
+            },
+        );
+
+        let refused = scoped_sign_request(
+            &surface,
+            &admin,
+            82,
+            credential_id,
+            &base64::engine::general_purpose::STANDARD.encode(b"must not sign"),
+        )
+        .await;
+        assert_scoped_not_found(&refused);
+        let event = store
+            .recent_auth_events(1)
+            .expect("read auth events")
+            .remove(0);
+        assert_eq!(event.kind, "scoped_read_refusal");
+        assert_eq!(event.detail.as_deref(), Some("no_grant"));
+    }
+
+    #[tokio::test]
+    async fn sign_grant_does_not_authorize_scoped_get() {
+        let (surface, admin, store) = scoped_rig(83);
+        let credential_id = "apikey:operations:sign-only";
+        store
+            .create(
+                credential_id,
+                &VaultRecord::new_static(CredentialKind::ApiKey, "test", b"key".to_vec(), None),
+            )
+            .expect("create api key");
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "prefrontal-core",
+                "apikey:operations:",
+                GrantOperation::Sign,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .expect("create sign grant");
+        admin.record_bind(
+            83,
+            subc_protocol::Principal::Reserved {
+                module_id: "prefrontal-core".into(),
+            },
+        );
+
+        let refused = scoped_request(&surface, &admin, 83, credential_id).await;
+        assert_scoped_not_found(&refused);
+        let event = store
+            .recent_auth_events(1)
+            .expect("read auth events")
+            .remove(0);
+        assert_eq!(event.kind, "scoped_read_refusal");
+        assert_eq!(event.detail.as_deref(), Some("no_grant"));
+    }
+
+    #[tokio::test]
+    async fn sign_grant_signs_signing_keys_but_not_other_kinds() {
+        use base64::Engine as _;
+
+        let (surface, admin, store) = scoped_rig(84);
+        let pem = test_ed25519_pem();
+        store
+            .create(
+                "signing:operations:real",
+                &VaultRecord::new_static(
+                    CredentialKind::SigningKey,
+                    "test",
+                    pem.as_bytes().to_vec(),
+                    None,
+                ),
+            )
+            .expect("create signing key");
+        store
+            .create(
+                "signing:operations:impostor",
+                &VaultRecord::new_static(CredentialKind::ApiKey, "test", pem.into_bytes(), None),
+            )
+            .expect("create non-signing credential");
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "prefrontal-core",
+                "signing:operations:",
+                GrantOperation::Sign,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .expect("create sign grant");
+        admin.record_bind(
+            84,
+            subc_protocol::Principal::Reserved {
+                module_id: "prefrontal-core".into(),
+            },
+        );
+        let payload = base64::engine::general_purpose::STANDARD.encode(b"granted bytes");
+
+        let signed =
+            scoped_sign_request(&surface, &admin, 84, "signing:operations:real", &payload).await;
+        assert!(
+            signed["result"]["signature_b64"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty()),
+            "a sign grant must authorize a SigningKey record"
+        );
+
+        let refused = scoped_sign_request(
+            &surface,
+            &admin,
+            84,
+            "signing:operations:impostor",
+            &payload,
+        )
+        .await;
+        assert_eq!(refused["result"]["error"]["code"], "kind_not_signable");
+        assert_eq!(refused["result"]["error"]["class"], "permanent");
+    }
+
     /// The signing fence: a signing-key credential signs, and EVERY other kind is
     /// refused with a permanent `kind_not_signable`.
     ///
@@ -2325,8 +2736,10 @@ mod tests {
         let ok = surface
             .sign(
                 1,
+                None,
                 &read_surface::SignParams {
-                    handle: h_sign.raw.clone(),
+                    handle: Some(h_sign.raw.clone()),
+                    credential_id: None,
                     payload_b64: payload.clone(),
                 },
             )
@@ -2339,8 +2752,10 @@ mod tests {
         let err = surface
             .sign(
                 1,
+                None,
                 &read_surface::SignParams {
-                    handle: h_api.raw.clone(),
+                    handle: Some(h_api.raw.clone()),
+                    credential_id: None,
                     payload_b64: payload,
                 },
             )
@@ -2471,8 +2886,10 @@ mod tests {
         let signature = surface
             .sign(
                 1,
+                None,
                 &read_surface::SignParams {
-                    handle: signer_handle.raw,
+                    handle: Some(signer_handle.raw),
+                    credential_id: None,
                     payload_b64: base64::engine::general_purpose::STANDARD.encode(payload),
                 },
             )

@@ -41,7 +41,7 @@ use credentials_core::credential_id::{default_refresh_adapter, parse_credential_
 use credentials_core::engine::{EngineError, RefreshEngine};
 use credentials_core::health::VaultHealth;
 use credentials_core::refresh_adapters::RefreshError;
-use credentials_core::store::{ScopedReadRefusal, StoreOpError};
+use credentials_core::store::{GrantOperation, ScopedReadRefusal, StoreOpError};
 use subc_protocol::Principal;
 
 use crate::limiter::{Admission, FetchLimiter, GET_MANY_MAX};
@@ -66,6 +66,11 @@ pub struct GetScopedParams {
 
 /// A `credential.sign` request: sign exact bytes with a signing-key credential.
 ///
+/// A capability handle and a principal-scoped credential id are deliberately
+/// separate authorization forms. Exactly one must be present: a handle keeps the
+/// operator ceremony intact, while a credential id is authorized by a route-bound
+/// principal's sign grant.
+///
 /// The payload is base64 because JSON cannot carry raw bytes, and the SIGNATURE
 /// COVERS THE DECODED BYTES -- not the base64 text. A verifier that signed the
 /// encoded form would break the moment a caller re-encoded with a different
@@ -73,9 +78,31 @@ pub struct GetScopedParams {
 /// avoids by carrying exact bytes.
 #[derive(Debug, Deserialize)]
 pub struct SignParams {
-    pub handle: String,
+    #[serde(default)]
+    pub handle: Option<String>,
+    #[serde(default)]
+    pub credential_id: Option<String>,
     /// The exact bytes to sign, base64 (standard alphabet).
     pub payload_b64: String,
+}
+
+enum SignAuthorization<'a> {
+    Handle(&'a str),
+    Scoped(&'a str),
+}
+
+impl SignParams {
+    pub(crate) fn has_exactly_one_authorization(&self) -> bool {
+        self.authorization().is_some()
+    }
+
+    fn authorization(&self) -> Option<SignAuthorization<'_>> {
+        match (self.handle.as_deref(), self.credential_id.as_deref()) {
+            (Some(handle), None) => Some(SignAuthorization::Handle(handle)),
+            (None, Some(credential_id)) => Some(SignAuthorization::Scoped(credential_id)),
+            (None, None) | (Some(_), Some(_)) => None,
+        }
+    }
 }
 
 /// A `credential.sign` result: a detached signature and the key that made it.
@@ -429,48 +456,59 @@ impl ReadSurface {
     /// Sign exact bytes with a signing-key credential. THE KEY NEVER LEAVES THIS
     /// PROCESS.
     ///
-    /// The vault exercises the key rather than serving it, which adds no authority --
-    /// a handle that can READ a key is already signing power, since whoever holds the
-    /// bytes can sign with any Ed25519 library -- while removing the window in which a
-    /// second process holds the material.
+    /// A handle retains the operator-driven signing ceremony. A principal-scoped
+    /// credential id instead requires an operation-specific sign grant; a read grant
+    /// never reaches this path as signing authority.
     ///
     /// FENCED ON KIND. Only `CredentialKind::SigningKey` records are signable;
-    /// everything else refuses `KindNotSignable`. Without that fence a handle for any
-    /// stored secret could produce signatures under it.
+    /// everything else refuses `KindNotSignable`. Without that fence a grant or handle
+    /// for any stored secret could produce signatures under it.
     ///
     /// Deliberately does NOT force-refresh: a signing key is static material with no
     /// refresh adapter, so a get here reads what is stored and nothing is minted.
     pub async fn sign(
         &self,
         connection_id: u64,
+        principal: Option<&Principal>,
         params: &SignParams,
     ) -> Result<SignResult, ReadError> {
-        // Same limiter, same position as `get`: BEFORE resolution and keyed by the
-        // presented handle, so a sweep of unknown handles trips the detector here too
-        // rather than only on the get path.
-        self.check_limiter(connection_id, &params.handle).await;
-
-        let payload = base64::engine::general_purpose::STANDARD
-            .decode(params.payload_b64.as_bytes())
-            .map_err(|_| ReadError::SignPayloadTooLarge)?;
-
-        let credential_id = match self.engine.store().resolve_handle(&params.handle) {
-            Ok(id) => id,
-            Err(StoreOpError::NotFound) => return Err(ReadError::NotFound),
-            Err(e) => return Err(map_store_error(&e)),
+        let authorization = params.authorization().ok_or(ReadError::NotFound)?;
+        let credential_id = match authorization {
+            SignAuthorization::Handle(handle) => {
+                // Same limiter, same position as `get`: BEFORE resolution and keyed by the
+                // presented handle, so a sweep of unknown handles trips the detector here too
+                // rather than only on the get path.
+                self.check_limiter(connection_id, handle).await;
+                match self.engine.store().resolve_handle(handle) {
+                    Ok(id) => id,
+                    Err(StoreOpError::NotFound) => return Err(ReadError::NotFound),
+                    Err(e) => return Err(map_store_error(&e)),
+                }
+            }
+            SignAuthorization::Scoped(credential_id) => {
+                self.authorize_scoped(principal, credential_id, GrantOperation::Sign)?;
+                credential_id.to_string()
+            }
         };
 
         let record = match self.engine.store().get(&credential_id) {
             Ok(r) => r,
+            Err(StoreOpError::NotFound) if params.credential_id.is_some() => {
+                self.record_scoped_refusal(principal, &credential_id, ScopedReadRefusal::NotFound);
+                return Err(ReadError::NotFound);
+            }
             Err(e) => return Err(map_store_error(&e)),
         };
 
-        // The fence, checked BEFORE the payload is looked at, so a non-signing
+        // The fence is checked before the payload is decoded, so a non-signing
         // credential refuses identically whatever bytes were presented.
         if record.kind != credentials_core::record::CredentialKind::SigningKey {
             return Err(ReadError::KindNotSignable);
         }
 
+        let payload = base64::engine::general_purpose::STANDARD
+            .decode(params.payload_b64.as_bytes())
+            .map_err(|_| ReadError::SignPayloadTooLarge)?;
         let pem = std::str::from_utf8(&record.payload).map_err(|_| ReadError::Corrupt)?;
         match credentials_core::signing::sign_ed25519(pem, &payload) {
             Ok(sig) => Ok(SignResult {
@@ -557,6 +595,12 @@ impl ReadSurface {
             .await
         {
             Ok(record) => {
+                if record.kind == credentials_core::record::CredentialKind::SigningKey {
+                    // A signing-key handle also authorizes `sign` and `public_key`, but
+                    // its payload is PKCS#8 private material. No read consumer needs it,
+                    // so serving it would let every same-uid handle holder extract the key.
+                    return err(ReadError::NotFound);
+                }
                 if record.payload.is_empty() {
                     // A successful zero-byte credential is a corrupt producer state, not
                     // an authentication token. Quarantine only the version we inspected:
@@ -629,20 +673,45 @@ impl ReadSurface {
             .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
-    /// Serve a credential-id read after the route layer captures the bind's principal.
-    /// An uncovered principal is rejected before the credential lookup, so it cannot
-    /// turn this operation into a vault inventory oracle.
-    pub async fn get_scoped(
+    fn scoped_principal_identity(principal: Option<&Principal>) -> (&str, Option<&str>) {
+        match principal {
+            Some(Principal::Reserved { module_id }) => ("reserved", Some(module_id.as_str())),
+            Some(Principal::Direct) => ("direct", None),
+            Some(Principal::Unverified) | None => ("unverified", None),
+        }
+    }
+
+    fn record_scoped_refusal(
         &self,
         principal: Option<&Principal>,
-        params: &GetScopedParams,
-    ) -> GetOutcome {
-        let (principal_kind, principal_id, grant_coverage) = match principal {
+        credential_id: &str,
+        refusal: ScopedReadRefusal,
+    ) {
+        let (principal_kind, principal_id) = Self::scoped_principal_identity(principal);
+        let _ = self.engine.store().record_scoped_read_refusal(
+            credential_id,
+            principal_kind,
+            principal_id,
+            refusal,
+        );
+    }
+
+    /// Check one principal-scoped operation grant before loading the credential. This
+    /// keeps missing coverage and a missing record wire-identical while `auth_events`
+    /// retains the distinction for the operator.
+    fn authorize_scoped(
+        &self,
+        principal: Option<&Principal>,
+        credential_id: &str,
+        operation: GrantOperation,
+    ) -> Result<(), ReadError> {
+        let grant_coverage = match principal {
             Some(Principal::Reserved { module_id }) => {
                 let coverage = self.engine.store().read_grant_covers(
                     "reserved",
                     module_id,
-                    &params.credential_id,
+                    credential_id,
+                    operation,
                 );
                 #[cfg(test)]
                 let coverage = if self
@@ -655,10 +724,9 @@ impl ReadSurface {
                 } else {
                     coverage
                 };
-                ("reserved", Some(module_id.as_str()), coverage)
+                coverage
             }
-            Some(Principal::Direct) => ("direct", None, Ok(false)),
-            Some(Principal::Unverified) | None => ("unverified", None, Ok(false)),
+            Some(Principal::Direct) | Some(Principal::Unverified) | None => Ok(false),
         };
         let refusal = match grant_coverage {
             Ok(true) => None,
@@ -671,17 +739,34 @@ impl ReadSurface {
             }
         };
         if let Some(refusal) = refusal {
-            let _ = self.engine.store().record_scoped_read_refusal(
-                &params.credential_id,
-                principal_kind,
-                principal_id,
-                refusal,
-            );
-            return err(ReadError::NotFound);
+            self.record_scoped_refusal(principal, credential_id, refusal);
+            return Err(ReadError::NotFound);
+        }
+        Ok(())
+    }
+
+    /// Serve a credential-id read after the route layer captures the bind's principal.
+    /// An uncovered principal is rejected before the credential lookup, so it cannot
+    /// turn this operation into a vault inventory oracle.
+    pub async fn get_scoped(
+        &self,
+        principal: Option<&Principal>,
+        params: &GetScopedParams,
+    ) -> GetOutcome {
+        if let Err(code) =
+            self.authorize_scoped(principal, &params.credential_id, GrantOperation::Read)
+        {
+            return err(code);
         }
 
         match self.engine.get(&params.credential_id, None, false).await {
             Ok(record) => {
+                if record.kind == credentials_core::record::CredentialKind::SigningKey {
+                    // A signing-key handle also authorizes `sign` and `public_key`, but
+                    // its payload is PKCS#8 private material. No read consumer needs it,
+                    // so serving it would let every same-uid handle holder extract the key.
+                    return err(ReadError::NotFound);
+                }
                 if record.payload.is_empty() {
                     match self
                         .engine
@@ -726,10 +811,9 @@ impl ReadSurface {
                 })
             }
             Err(EngineError::Store(StoreOpError::NotFound)) => {
-                let _ = self.engine.store().record_scoped_read_refusal(
+                self.record_scoped_refusal(
+                    principal,
                     &params.credential_id,
-                    principal_kind,
-                    principal_id,
                     ScopedReadRefusal::NotFound,
                 );
                 err(ReadError::NotFound)

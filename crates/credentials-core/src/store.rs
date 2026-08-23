@@ -200,6 +200,26 @@ const MIGRATIONS: &[Migration] = &[
         version: 5,
         statements: "ALTER TABLE credentials ADD COLUMN stale_pending INTEGER NOT NULL DEFAULT 0;",
     },
+    // Grants are operation-scoped. Rebuild the table so one principal/prefix can hold
+    // independent read and sign authorities, then visibly classify every legacy row as
+    // read rather than silently relying on a default that could widen an old grant.
+    Migration {
+        version: 6,
+        statements: "CREATE TABLE read_grants_v6 (\
+                         principal_kind    TEXT NOT NULL, \
+                         principal_id      TEXT NOT NULL, \
+                         credential_prefix TEXT NOT NULL, \
+                         operation         TEXT NOT NULL CHECK(operation IN ('read', 'sign')), \
+                         created_at_ms     INTEGER NOT NULL, \
+                         PRIMARY KEY (principal_kind, principal_id, credential_prefix, operation)\
+                     ); \
+                     INSERT INTO read_grants_v6 \
+                         (principal_kind, principal_id, credential_prefix, operation, created_at_ms) \
+                     SELECT principal_kind, principal_id, credential_prefix, 'read', created_at_ms \
+                     FROM read_grants; \
+                     DROP TABLE read_grants; \
+                     ALTER TABLE read_grants_v6 RENAME TO read_grants;",
+    },
 ];
 
 /// The `vault_secrets` row name for the audit-chain HMAC key. The audit key is a
@@ -259,12 +279,44 @@ pub struct RecordMeta {
     pub stale_pending: bool,
 }
 
-/// One durable principal-scoped credential-prefix read grant.
+/// The operation a principal-scoped credential-prefix grant permits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GrantOperation {
+    Read,
+    Sign,
+}
+
+impl GrantOperation {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Sign => "sign",
+        }
+    }
+}
+
+impl std::str::FromStr for GrantOperation {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "read" => Ok(Self::Read),
+            "sign" => Ok(Self::Sign),
+            _ => Err(format!(
+                "unknown grant operation '{value}' (expected read or sign)"
+            )),
+        }
+    }
+}
+
+/// One durable principal-scoped credential-prefix grant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadGrant {
     pub principal_kind: String,
     pub principal_id: String,
     pub credential_prefix: String,
+    pub operation: GrantOperation,
     pub created_at_ms: i64,
 }
 
@@ -653,36 +705,45 @@ impl EncryptedStore {
             .map_err(StoreOpError::from)
     }
 
-    // ---- principal-scoped read grants -----------------------------------
+    // ---- principal-scoped operation grants ------------------------------
 
-    /// Create one reserved-principal grant and append its audit transition in the
-    /// same fenced transaction. A duplicate names an existing authority and is
+    /// Create one reserved-principal operation grant and append its audit transition
+    /// in the same fenced transaction. A duplicate names an existing authority and is
     /// refused rather than silently accepted as a fresh reviewable change.
     pub fn create_read_grant_audited(
         &self,
         principal_kind: &str,
         principal_id: &str,
         credential_prefix: &str,
+        operation: GrantOperation,
         ctx: AuditCtx<'_>,
     ) -> Result<(), StoreOpError> {
         if principal_kind != "reserved" || principal_id.is_empty() || credential_prefix.is_empty() {
             return Err(StoreOpError::Encode(
-                "read grants require a reserved principal and non-empty prefix".into(),
+                "grants require a reserved principal and non-empty prefix".into(),
             ));
         }
         let now = now_ms();
         let audit_key = self.audit_key.clone();
         // The HMAC transcript has no grant-specific columns (adding one would break
-        // verification of historical entries), so preserve the exact grant target in
-        // its existing non-secret target field.
-        let audit_target =
-            format!("read_grant:{principal_kind}:{principal_id}:{credential_prefix}");
+        // verification of historical entries), so preserve the full authority target
+        // in its existing non-secret target field.
+        let audit_target = format!(
+            "grant:{}:{principal_kind}:{principal_id}:{credential_prefix}",
+            operation.as_str()
+        );
         let changed = self.fenced_write(|tx| {
             let changed = tx.execute(
                 "INSERT INTO read_grants \
-                 (principal_kind, principal_id, credential_prefix, created_at_ms) \
-                 VALUES (?1, ?2, ?3, ?4) ON CONFLICT DO NOTHING",
-                rusqlite::params![principal_kind, principal_id, credential_prefix, now],
+                 (principal_kind, principal_id, credential_prefix, operation, created_at_ms) \
+                 VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT DO NOTHING",
+                rusqlite::params![
+                    principal_kind,
+                    principal_id,
+                    credential_prefix,
+                    operation.as_str(),
+                    now
+                ],
             )?;
             if changed > 0 {
                 append_audit_tx(
@@ -705,31 +766,40 @@ impl EncryptedStore {
         Ok(())
     }
 
-    /// Revoke one reserved-principal grant and append the revocation in the same
-    /// fenced transaction. An absent row is not a transition, so it is refused rather
+    /// Revoke one reserved-principal operation grant and append the revocation in the
+    /// same fenced transaction. An absent row is not a transition, so it is refused rather
     /// than producing an audit entry that claims access changed when it did not.
     pub fn revoke_read_grant_audited(
         &self,
         principal_kind: &str,
         principal_id: &str,
         credential_prefix: &str,
+        operation: GrantOperation,
         ctx: AuditCtx<'_>,
     ) -> Result<(), StoreOpError> {
         if principal_kind != "reserved" || principal_id.is_empty() || credential_prefix.is_empty() {
             return Err(StoreOpError::Encode(
-                "read grants require a reserved principal and non-empty prefix".into(),
+                "grants require a reserved principal and non-empty prefix".into(),
             ));
         }
         let audit_key = self.audit_key.clone();
         // See creation: the historical HMAC transcript cannot gain grant columns, so
         // this stable target string makes a later revocation attributable.
-        let audit_target =
-            format!("read_grant:{principal_kind}:{principal_id}:{credential_prefix}");
+        let audit_target = format!(
+            "grant:{}:{principal_kind}:{principal_id}:{credential_prefix}",
+            operation.as_str()
+        );
         let changed = self.fenced_write(|tx| {
             let changed = tx.execute(
                 "DELETE FROM read_grants \
-                 WHERE principal_kind = ?1 AND principal_id = ?2 AND credential_prefix = ?3",
-                rusqlite::params![principal_kind, principal_id, credential_prefix],
+                 WHERE principal_kind = ?1 AND principal_id = ?2 \
+                   AND credential_prefix = ?3 AND operation = ?4",
+                rusqlite::params![
+                    principal_kind,
+                    principal_id,
+                    credential_prefix,
+                    operation.as_str()
+                ],
             )?;
             if changed > 0 {
                 append_audit_tx(
@@ -752,25 +822,26 @@ impl EncryptedStore {
         Ok(())
     }
 
-    /// Whether a literal credential-id prefix grant covers this request. Prefixes are
-    /// compared in Rust rather than SQL `LIKE`, whose `%` and `_` metacharacters would
-    /// silently widen a grant stored as ordinary text.
+    /// Whether an operation-specific literal credential-id prefix grant covers this
+    /// request. Prefixes are compared in Rust rather than SQL `LIKE`, whose `%` and `_`
+    /// metacharacters would silently widen a grant stored as ordinary text.
     pub fn read_grant_covers(
         &self,
         principal_kind: &str,
         principal_id: &str,
         credential_id: &str,
+        operation: GrantOperation,
     ) -> Result<bool, StoreOpError> {
         self.store
             .with_conn(|c| {
                 let mut stmt = c.prepare(
                     "SELECT credential_prefix FROM read_grants \
-                     WHERE principal_kind = ?1 AND principal_id = ?2",
+                     WHERE principal_kind = ?1 AND principal_id = ?2 AND operation = ?3",
                 )?;
-                let mut prefixes = stmt
-                    .query_map(rusqlite::params![principal_kind, principal_id], |row| {
-                        row.get::<_, String>(0)
-                    })?;
+                let mut prefixes = stmt.query_map(
+                    rusqlite::params![principal_kind, principal_id, operation.as_str()],
+                    |row| row.get::<_, String>(0),
+                )?;
                 prefixes.try_fold(false, |covered, prefix| {
                     Ok(covered || credential_id.starts_with(&prefix?))
                 })
@@ -778,21 +849,29 @@ impl EncryptedStore {
             .map_err(StoreOpError::from)
     }
 
-    /// List every grant in deterministic principal/prefix order for admin status.
+    /// List every grant in deterministic principal/operation/prefix order for admin status.
     pub fn list_read_grants(&self) -> Result<Vec<ReadGrant>, StoreOpError> {
         self.store
             .with_conn(|c| {
                 let mut stmt = c.prepare(
-                    "SELECT principal_kind, principal_id, credential_prefix, created_at_ms \
+                    "SELECT principal_kind, principal_id, credential_prefix, operation, created_at_ms \
                      FROM read_grants \
-                     ORDER BY principal_kind, principal_id, credential_prefix",
+                     ORDER BY principal_kind, principal_id, operation, credential_prefix",
                 )?;
                 let rows = stmt.query_map([], |row| {
+                    let operation = row.get::<_, String>(3)?.parse().map_err(|message: String| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            3,
+                            rusqlite::types::Type::Text,
+                            Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, message)),
+                        )
+                    })?;
                     Ok(ReadGrant {
                         principal_kind: row.get(0)?,
                         principal_id: row.get(1)?,
                         credential_prefix: row.get(2)?,
-                        created_at_ms: row.get(3)?,
+                        operation,
+                        created_at_ms: row.get(4)?,
                     })
                 })?;
                 rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -2934,6 +3013,70 @@ mod tests {
         (root, EncryptedStore::open(store, key).expect("open vault"))
     }
 
+    /// Migration 6 must make old grants explicitly read-only while allowing a new
+    /// sign grant for the same principal and prefix. Both facts are needed: a default
+    /// can hide the backfill, and the old primary key would otherwise collapse the two
+    /// independent authorities into one row.
+    #[test]
+    fn migration_six_backfills_existing_read_grants_without_blocking_sign_grants() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open sqlite");
+        conn.execute_batch(
+            "CREATE TABLE read_grants (\
+                 principal_kind TEXT NOT NULL, \
+                 principal_id TEXT NOT NULL, \
+                 credential_prefix TEXT NOT NULL, \
+                 created_at_ms INTEGER NOT NULL, \
+                 PRIMARY KEY (principal_kind, principal_id, credential_prefix)\
+             );",
+        )
+        .expect("create v5 grant table");
+        for prefix in ["github_app:", "signing:agent-assertion:"] {
+            conn.execute(
+                "INSERT INTO read_grants \
+                 (principal_kind, principal_id, credential_prefix, created_at_ms) \
+                 VALUES ('reserved', 'prefrontal-core', ?1, 1)",
+                [prefix],
+            )
+            .expect("seed legacy read grant");
+        }
+
+        let migration = MIGRATIONS
+            .iter()
+            .find(|migration| migration.version == 6)
+            .expect("migration 6 exists");
+        conn.execute_batch(migration.statements)
+            .expect("apply migration 6");
+
+        let mut statement = conn
+            .prepare(
+                "SELECT credential_prefix, operation FROM read_grants \
+                 ORDER BY credential_prefix",
+            )
+            .expect("prepare backfill query");
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .expect("query backfill rows")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("decode backfill rows");
+        assert_eq!(
+            rows,
+            [
+                ("github_app:".to_string(), "read".to_string()),
+                ("signing:agent-assertion:".to_string(), "read".to_string()),
+            ],
+            "every legacy grant must remain a read grant after migration"
+        );
+        conn.execute(
+            "INSERT INTO read_grants \
+             (principal_kind, principal_id, credential_prefix, operation, created_at_ms) \
+             VALUES ('reserved', 'prefrontal-core', 'signing:agent-assertion:', 'sign', 2)",
+            [],
+        )
+        .expect("read and sign grants must coexist for one prefix");
+    }
+
     /// EVERY write path refuses an empty non-OAuth payload, not merely the one that
     /// happens to be covered elsewhere.
     ///
@@ -4541,19 +4684,30 @@ mod tests {
                 "reserved",
                 "prefrontal-core",
                 "github%_app:",
+                GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
             )
             .expect("create grant");
 
         assert!(
             store
-                .read_grant_covers("reserved", "prefrontal-core", "github%_app:agent")
+                .read_grant_covers(
+                    "reserved",
+                    "prefrontal-core",
+                    "github%_app:agent",
+                    GrantOperation::Read,
+                )
                 .expect("check literal prefix"),
             "the exact literal prefix must cover its family"
         );
         assert!(
             !store
-                .read_grant_covers("reserved", "prefrontal-core", "githubZZapp:agent")
+                .read_grant_covers(
+                    "reserved",
+                    "prefrontal-core",
+                    "githubZZapp:agent",
+                    GrantOperation::Read,
+                )
                 .expect("check unrelated id"),
             "percent and underscore in a grant must not widen it as SQL LIKE wildcards"
         );

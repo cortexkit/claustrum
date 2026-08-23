@@ -2036,6 +2036,7 @@ mod tests {
                     record_version: 1,
                     key_id_hex: "00".repeat(8),
                     state,
+                    stale_pending: false,
                 },
             )
         }
@@ -2893,8 +2894,8 @@ mod tests {
         );
     }
 
-    /// `report_auth_failure` invalidates ONLY on 401/403, and ONLY at the record version
-    /// the reporting consumer was actually served.
+    /// A static record keeps the terminal report-auth-failure behavior: it invalidates
+    /// ONLY on 401/403, and ONLY at the record version the consumer was served.
     ///
     /// This is the one read-surface op that MUTATES, and each arm is load-bearing.
     /// Without the accepted arm, an implementation ignoring every report would pass;
@@ -2977,6 +2978,16 @@ mod tests {
             RecordState::NeedsReauth,
             "a 401 at the served version must stop the vault serving that token"
         );
+        assert!(
+            !store.meta("apikey:active").expect("meta").stale_pending,
+            "a non-refreshable record must latch rather than setting a useless stale marker"
+        );
+        let events = store.recent_auth_events(10).expect("events");
+        assert_eq!(events[0].kind, "consumer_report_latch");
+        assert!(
+            events[0].applied,
+            "the current static report must be recorded as applied"
+        );
 
         // An unknown handle gets the same refusal as a revoked one, so a caller cannot
         // use this endpoint to discover which handles exist.
@@ -2993,6 +3004,139 @@ mod tests {
         assert!(
             matches!(unknown, Err(read_surface::ReadError::NotFound)),
             "an unknown handle must be a uniform not_found, got {unknown:?}"
+        );
+    }
+
+    /// A refreshable report keeps the credential active and schedules its existing
+    /// refresh-on-read path instead of terminally latching it.
+    #[tokio::test]
+    async fn report_auth_failure_marks_a_refreshable_record_stale() {
+        use credentials_core::oauth::OAuthCredential;
+        use credentials_core::store::RecordState;
+
+        let (surface, store, _db) = tmp_surface_with_store(85);
+        store
+            .create(
+                "oauth:stub",
+                &VaultRecord::new_oauth(
+                    "stub",
+                    "stub",
+                    OAuthCredential {
+                        access_token: "still-locally-valid".into(),
+                        refresh_token: "refresh".into(),
+                        expires_at_ms: Some(i64::MAX),
+                        token_url: "https://example.invalid/token".into(),
+                        client_id: None,
+                        scopes: Vec::new(),
+                    },
+                    b"still-locally-valid".to_vec(),
+                ),
+            )
+            .expect("create refreshable record");
+        let handle = credentials_core::store::mint_handle().expect("mint handle");
+        store
+            .put_handle_hash(
+                &handle.hash,
+                "oauth:stub",
+                AuditCtx::admin(AuditOp::MintHandle),
+            )
+            .expect("bind handle");
+
+        surface
+            .report_auth_failure(
+                8,
+                &read_surface::ReportAuthFailureParams {
+                    handle: handle.raw,
+                    provider_status: 401,
+                    record_version: 1,
+                },
+            )
+            .await
+            .expect("report succeeds with its existing wire reply");
+
+        let meta = store.meta("oauth:stub").expect("meta");
+        assert_eq!(meta.state, RecordState::Active);
+        assert!(
+            meta.stale_pending,
+            "the next get must be driven through refresh"
+        );
+        assert_eq!(
+            meta.record_version, 1,
+            "a local stale marker must not move the version"
+        );
+        let events = store.recent_auth_events(10).expect("events");
+        assert_eq!(events[0].kind, "consumer_report_stale");
+        assert!(
+            events[0].applied,
+            "the current refreshable report must apply"
+        );
+    }
+
+    /// An `oauth:` spelling does not make a static record refreshable. The report first
+    /// reaches the ID-derived stale arm, then the engine must use the opened record's
+    /// authoritative predicate and terminally latch it rather than serving it again.
+    #[tokio::test]
+    async fn report_on_a_static_oauth_shaped_id_latches_on_the_next_get() {
+        use credentials_core::store::RecordState;
+
+        let (surface, store, _db) = tmp_surface_with_store(86);
+        store
+            .create(
+                "oauth:anthropic",
+                &VaultRecord::new_static(
+                    CredentialKind::ApiKey,
+                    "put",
+                    b"static-key".to_vec(),
+                    None,
+                ),
+            )
+            .expect("put static record with oauth-shaped id");
+        let handle = credentials_core::store::mint_handle().expect("mint handle");
+        store
+            .put_handle_hash(
+                &handle.hash,
+                "oauth:anthropic",
+                AuditCtx::admin(AuditOp::MintHandle),
+            )
+            .expect("bind handle");
+
+        surface
+            .report_auth_failure(
+                9,
+                &read_surface::ReportAuthFailureParams {
+                    handle: handle.raw.clone(),
+                    provider_status: 401,
+                    record_version: 1,
+                },
+            )
+            .await
+            .expect("report succeeds");
+        assert!(
+            store.meta("oauth:anthropic").expect("meta").stale_pending,
+            "the ID-derived report arm sets the marker before the engine opens the record"
+        );
+
+        let result = surface
+            .get(
+                9,
+                &read_surface::GetParams {
+                    handle: handle.raw,
+                    min_ttl_ms: None,
+                    force_refresh: false,
+                },
+            )
+            .await;
+        let read_surface::GetOutcome::Err { error } = result else {
+            panic!("a reported static record must not be served again");
+        };
+        assert_eq!(error.code, read_surface::ReadError::NeedsReauth);
+        let meta = store.meta("oauth:anthropic").expect("meta");
+        assert_eq!(meta.state, RecordState::NeedsReauth);
+        let events = store.recent_auth_events(10).expect("events");
+        assert_eq!(events[0].kind, "stale_nonrefreshable_latch");
+        assert!(
+            events[0].applied,
+            "the engine backstop must make the terminal transition"
         );
     }
 

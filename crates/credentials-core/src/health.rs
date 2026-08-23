@@ -193,6 +193,7 @@ mod tests {
                 record_version: 1,
                 key_id_hex: "deadbeef".to_string(),
                 state,
+                stale_pending: false,
             },
         )
     }

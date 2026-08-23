@@ -18,7 +18,7 @@ use crate::record::VaultRecord;
 use crate::refresh_adapters::{
     HttpTransport, RefreshAdapter, RefreshError, RefreshedTokens, ValidityOutcome,
 };
-use crate::store::{EncryptedStore, StoreOpError};
+use crate::store::{AuthObservation, EncryptedStore, StoreOpError};
 use cortexkit_store::{open_sqlite, Isolation, StorageBackend, StorageDescriptor};
 
 /// A stub adapter that counts refresh calls and returns a fixed rotated token, with
@@ -400,6 +400,86 @@ async fn a_refresh_commit_preserves_the_client_id_the_next_refresh_needs() {
     assert!(
         !after.payload.is_empty(),
         "a committed refresh left an empty payload, which the read surface quarantines"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A reported but locally unexpired token must reach the real refresh failure path.
+///
+/// This begins with `stale_pending`, not expiry, so an implementation that ignores the
+/// report marker serves the old token and never reaches the InvalidGrant transition.
+#[tokio::test]
+async fn report_stale_then_invalid_grant_latches_needs_reauth() {
+    let (root, d) = tmp_descriptor();
+    let store = open_store(&d, 83);
+    let mut record = stale_oauth_record();
+    record.oauth.as_mut().expect("oauth").expires_at_ms = Some(now_ms() + 3_600_000);
+    store.create("id", &record).expect("create");
+    store
+        .mark_stale_if_version_reported(
+            "id",
+            1,
+            AuditCtx::vault(AuditOp::ReportAuthFailure),
+            AuthObservation {
+                kind: "consumer_report_stale",
+                provider_status: Some(401),
+                detail: None,
+            },
+        )
+        .expect("report marks the current token stale");
+    let mut adapter = StubAdapter::new("stub");
+    adapter.fail = Some("invalid_grant");
+    let (eng, calls) = engine(store, adapter);
+
+    let err = eng.get("id", None, false).await.expect_err("must fail");
+    assert!(matches!(
+        err,
+        EngineError::RefreshFailed(RefreshError::InvalidGrant(_))
+    ));
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "the stale marker must force one refresh"
+    );
+    match eng.store().get("id") {
+        Err(StoreOpError::NeedsReauth) => {}
+        other => panic!("invalid_grant after a stale report must latch NeedsReauth, got {other:?}"),
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A successful forced refresh consumes the marker, otherwise every later get would
+/// exchange an already-fresh token again.
+#[tokio::test]
+async fn stale_pending_clears_in_the_refresh_commit() {
+    let (root, d) = tmp_descriptor();
+    let store = open_store(&d, 84);
+    let mut record = stale_oauth_record();
+    record.oauth.as_mut().expect("oauth").expires_at_ms = Some(now_ms() + 3_600_000);
+    store.create("id", &record).expect("create");
+    store
+        .mark_stale_if_version_reported(
+            "id",
+            1,
+            AuditCtx::vault(AuditOp::ReportAuthFailure),
+            AuthObservation {
+                kind: "consumer_report_stale",
+                provider_status: Some(401),
+                detail: None,
+            },
+        )
+        .expect("report marks the current token stale");
+    let (eng, calls) = engine(store, StubAdapter::new("stub"));
+
+    let refreshed = eng.get("id", None, false).await.expect("refresh succeeds");
+    assert_eq!(refreshed.record_version, 2);
+    assert!(!eng.store().meta("id").expect("meta").stale_pending);
+    let served_again = eng.get("id", None, false).await.expect("fresh get");
+    assert_eq!(served_again.record_version, 2);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "the cleared marker must not re-refresh"
     );
     let _ = std::fs::remove_dir_all(&root);
 }

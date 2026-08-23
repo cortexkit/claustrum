@@ -19,6 +19,8 @@
 //! - `state` (plaintext) — `active` | `needs_reauth` | `corrupt`. A row that fails
 //!   to decrypt is quarantined here (per-record), never panics, and never takes
 //!   down the rest of the vault.
+//! - `stale_pending` (plaintext) — a consumer-reported refusal that forces the next
+//!   refreshable read to exchange the token before serving it; it is not provider TTL.
 //! - `envelope` (BLOB) — the sealed record (the only place plaintext fields live,
 //!   and only in encrypted form).
 //! - `updated_at_ms` — last-write wall clock (diagnostics only).
@@ -190,6 +192,14 @@ const MIGRATIONS: &[Migration] = &[
                      ALTER TABLE auth_events ADD COLUMN principal_kind TEXT; \
                      ALTER TABLE auth_events ADD COLUMN principal_id TEXT;",
     },
+    // A consumer can prove that the access token it received was refused, but cannot
+    // prove that the durable refresh grant is dead. Keep that local assertion outside
+    // the sealed provider facts so it can force the next read to refresh without
+    // rewriting the envelope or moving its version fence.
+    Migration {
+        version: 5,
+        statements: "ALTER TABLE credentials ADD COLUMN stale_pending INTEGER NOT NULL DEFAULT 0;",
+    },
 ];
 
 /// The `vault_secrets` row name for the audit-chain HMAC key. The audit key is a
@@ -205,8 +215,8 @@ const AUDIT_KEY_RECORD_VERSION: u64 = 0;
 pub enum RecordState {
     /// Decryptable and serveable.
     Active,
-    /// Authoritatively invalidated (logout / revoke / a reported auth failure):
-    /// the credential is present but must not be served until re-auth.
+    /// Authoritatively invalidated (logout / revoke / a static-record report): the
+    /// credential is present but must not be served until re-auth.
     NeedsReauth,
     /// Undecryptable / corrupt: quarantined so a `get` fails closed for this id
     /// while the rest of the vault keeps serving.
@@ -244,6 +254,9 @@ pub struct RecordMeta {
     pub key_id_hex: String,
     /// The row's lifecycle state.
     pub state: RecordState,
+    /// A consumer reported the current access token as refused, so the next read must
+    /// refresh before serving it. This local assertion is not a provider expiry fact.
+    pub stale_pending: bool,
 }
 
 /// One durable principal-scoped credential-prefix read grant.
@@ -584,13 +597,14 @@ impl EncryptedStore {
         self.store
             .with_conn(|c| {
                 c.query_row(
-                    "SELECT record_version, key_id, state FROM credentials WHERE credential_id = ?1",
+                    "SELECT record_version, key_id, state, stale_pending FROM credentials WHERE credential_id = ?1",
                     rusqlite::params![credential_id],
                     |row| {
                         let version: i64 = row.get(0)?;
                         let key_id_hex: String = row.get(1)?;
                         let state: String = row.get(2)?;
-                        Ok((version, key_id_hex, state))
+                        let stale_pending: i64 = row.get(3)?;
+                        Ok((version, key_id_hex, state, stale_pending))
                     },
                 )
                 .map(Some)
@@ -600,10 +614,11 @@ impl EncryptedStore {
                 })
             })
             .map_err(StoreOpError::from)?
-            .map(|(version, key_id_hex, state)| RecordMeta {
+            .map(|(version, key_id_hex, state, stale_pending)| RecordMeta {
                 record_version: version as u64,
                 key_id_hex,
                 state: RecordState::from_str(&state),
+                stale_pending: stale_pending != 0,
             })
             .ok_or(StoreOpError::NotFound)
     }
@@ -614,7 +629,7 @@ impl EncryptedStore {
         self.store
             .with_conn(|c| {
                 let mut stmt = c.prepare(
-                    "SELECT credential_id, record_version, key_id, state FROM credentials \
+                    "SELECT credential_id, record_version, key_id, state, stale_pending FROM credentials \
                      ORDER BY credential_id",
                 )?;
                 let rows = stmt.query_map([], |row| {
@@ -622,12 +637,14 @@ impl EncryptedStore {
                     let version: i64 = row.get(1)?;
                     let key_id_hex: String = row.get(2)?;
                     let state: String = row.get(3)?;
+                    let stale_pending: i64 = row.get(4)?;
                     Ok((
                         id,
                         RecordMeta {
                             record_version: version as u64,
                             key_id_hex,
                             state: RecordState::from_str(&state),
+                            stale_pending: stale_pending != 0,
                         },
                     ))
                 })?;
@@ -903,8 +920,8 @@ impl EncryptedStore {
         let changed = self.fenced_write(|tx| {
             let n = tx.execute(
                 "UPDATE credentials \
-                 SET record_version = ?2, key_id = ?3, state = 'active', envelope = ?4, \
-                     updated_at_ms = ?5 \
+                  SET record_version = ?2, key_id = ?3, state = 'active', stale_pending = 0, \
+                      envelope = ?4, updated_at_ms = ?5 \
                  WHERE credential_id = ?1 AND record_version = ?6",
                 rusqlite::params![
                     credential_id,
@@ -996,8 +1013,8 @@ impl EncryptedStore {
 
             let n = tx.execute(
                 "UPDATE credentials \
-                 SET record_version = ?2, key_id = ?3, state = 'active', envelope = ?4, \
-                     updated_at_ms = ?5 \
+                  SET record_version = ?2, key_id = ?3, state = 'active', stale_pending = 0, \
+                      envelope = ?4, updated_at_ms = ?5 \
                  WHERE credential_id = ?1 AND record_version = ?6",
                 rusqlite::params![
                     credential_id,
@@ -1053,18 +1070,31 @@ impl EncryptedStore {
     /// QUARANTINED (its state flipped to `corrupt`) and returned as a typed error.
     /// Never panics, never returns plaintext on failure.
     pub fn get(&self, credential_id: &str) -> Result<VaultRecord, StoreOpError> {
+        self.get_with_stale_pending(credential_id)
+            .map(|(record, _)| record)
+    }
+
+    /// Read a record with the local stale marker that was observed beside its state.
+    ///
+    /// This stays crate-private because `stale_pending` is a refresh instruction for
+    /// the engine, not credential metadata for callers to interpret.
+    pub(crate) fn get_with_stale_pending(
+        &self,
+        credential_id: &str,
+    ) -> Result<(VaultRecord, bool), StoreOpError> {
         let row = self
             .store
             .with_conn(|c| {
                 c.query_row(
-                    "SELECT record_version, state, envelope FROM credentials \
+                    "SELECT record_version, state, stale_pending, envelope FROM credentials \
                      WHERE credential_id = ?1",
                     rusqlite::params![credential_id],
                     |r| {
                         let version: i64 = r.get(0)?;
                         let state: String = r.get(1)?;
-                        let blob: Vec<u8> = r.get(2)?;
-                        Ok((version, state, blob))
+                        let stale_pending: i64 = r.get(2)?;
+                        let blob: Vec<u8> = r.get(3)?;
+                        Ok((version, state, stale_pending, blob))
                     },
                 )
                 .map(Some)
@@ -1075,7 +1105,7 @@ impl EncryptedStore {
             })
             .map_err(StoreOpError::from)?;
 
-        let (version, state, blob) = row.ok_or(StoreOpError::NotFound)?;
+        let (version, state, stale_pending, blob) = row.ok_or(StoreOpError::NotFound)?;
         match RecordState::from_str(&state) {
             RecordState::Corrupt => return Err(StoreOpError::Quarantined),
             RecordState::NeedsReauth => return Err(StoreOpError::NeedsReauth),
@@ -1097,7 +1127,7 @@ impl EncryptedStore {
             }
         };
         match VaultRecord::decode(&plaintext) {
-            Ok(record) => Ok(record),
+            Ok(record) => Ok((record, stale_pending != 0)),
             Err(e) => {
                 let _ = self.quarantine(credential_id);
                 Err(StoreOpError::Corrupt(e.to_string()))
@@ -1199,6 +1229,56 @@ impl EncryptedStore {
                     // Same version still current: this is an authoritative revoke, so clear
                     // any dangling intent and audit it, exactly like invalidate_audited.
                     clear_intent_tx(tx, credential_id)?;
+                    append_audit_tx(
+                        tx,
+                        &audit_key,
+                        &AuditRecord {
+                            op: ctx.op,
+                            credential_id: Some(credential_id.to_string()),
+                            payload_hash: None,
+                            actor: ctx.actor.to_string(),
+                            alarm: ctx.alarm,
+                        },
+                    )?;
+                }
+                Ok(n)
+            })
+            .map_err(StoreOpError::from)?;
+        Ok(changed > 0)
+    }
+
+    /// Mark only the current token stale after a consumer reports it refused.
+    ///
+    /// The version fence protects a token freshly replaced by a concurrent refresh:
+    /// a report for version N cannot set the local marker on version N+1. The marker
+    /// deliberately stays outside the envelope and does not advance `record_version`,
+    /// because it is a local refresh instruction rather than a changed provider fact.
+    pub fn mark_stale_if_version_reported(
+        &self,
+        credential_id: &str,
+        expected_version: u64,
+        ctx: AuditCtx<'_>,
+        observation: AuthObservation<'_>,
+    ) -> Result<bool, StoreOpError> {
+        let audit_key = self.audit_key.clone();
+        let changed = self
+            .fenced_write(|tx| {
+                // A repeated report for the same version has already instructed the
+                // next read to refresh. Treat it as no new state transition so the
+                // append-only audit chain remains bounded; auth_events still records it.
+                let n = tx.execute(
+                    "UPDATE credentials SET stale_pending = 1 \
+                     WHERE credential_id = ?1 AND record_version = ?2 AND stale_pending = 0",
+                    rusqlite::params![credential_id, expected_version as i64],
+                )?;
+                append_auth_event_tx(
+                    tx,
+                    credential_id,
+                    &observation,
+                    Some(expected_version),
+                    n > 0,
+                )?;
+                if n > 0 {
                     append_audit_tx(
                         tx,
                         &audit_key,
@@ -1707,8 +1787,8 @@ impl EncryptedStore {
         let changed = self.fenced_write(|tx| {
             let n = tx.execute(
                 "UPDATE credentials \
-                 SET record_version = ?2, key_id = ?3, state = 'active', envelope = ?4, \
-                     updated_at_ms = ?5 \
+                  SET record_version = ?2, key_id = ?3, state = 'active', stale_pending = 0, \
+                      envelope = ?4, updated_at_ms = ?5 \
                  WHERE credential_id = ?1 AND record_version = ?6",
                 rusqlite::params![
                     credential_id,
@@ -3975,6 +4055,48 @@ mod tests {
             .filter(|e| e.op == "report_auth_failure")
             .count();
         assert_eq!(reports, 0, "a stale version-CAS no-op audits nothing");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A report for the replaced version must not schedule an unnecessary second refresh.
+    #[test]
+    fn report_for_stale_version_does_not_re_stale_the_fresh_token() {
+        let (root, store) = tmp_store(64);
+        store.create("id", &oauth_record()).expect("create");
+        store
+            .overwrite_unconditional_audited(
+                "id",
+                &oauth_record(),
+                AuditCtx::vault(AuditOp::RefreshCommit),
+            )
+            .expect("replace v1 with fresh v2");
+
+        let changed = store
+            .mark_stale_if_version_reported(
+                "id",
+                1,
+                AuditCtx::vault(AuditOp::ReportAuthFailure),
+                AuthObservation {
+                    kind: "consumer_report_stale",
+                    provider_status: Some(401),
+                    detail: None,
+                },
+            )
+            .expect("stale report is accepted");
+        assert!(!changed, "the v1 report must not match the v2 row");
+        let meta = store.meta("id").expect("fresh metadata");
+        assert_eq!(meta.record_version, 2);
+        assert!(matches!(meta.state, RecordState::Active));
+        assert!(
+            !meta.stale_pending,
+            "a stale report must not set the marker on the fresh token"
+        );
+        let events = store.recent_auth_events(10).expect("events");
+        assert_eq!(events[0].kind, "consumer_report_stale");
+        assert!(
+            !events[0].applied,
+            "the stale report must be diagnostic-only"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

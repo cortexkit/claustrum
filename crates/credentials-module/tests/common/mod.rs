@@ -217,6 +217,37 @@ pub async fn credential_get(
     .await
 }
 
+/// `credential.report_auth_failure { handle, provider_status, record_version }`.
+///
+/// Exists so a deploy's reachability probe can drive the report arm against a STAGED
+/// binary before placement. Nothing else in this suite reported over the wire, which
+/// meant the one behaviour a stale-not-dead deploy changes had no end-to-end driver:
+/// the difference between a binary that latches and one that marks stale is invisible
+/// to every other leg of the acceptance ladder.
+pub async fn credential_report_auth_failure(
+    stream: &mut TcpStream,
+    route: Route,
+    corr: u64,
+    handle: &str,
+    provider_status: u16,
+    record_version: u64,
+) -> Value {
+    raw_route_request(
+        stream,
+        route,
+        corr,
+        serde_json::json!({
+            "method": "credential.report_auth_failure",
+            "params": {
+                "handle": handle,
+                "provider_status": provider_status,
+                "record_version": record_version,
+            },
+        }),
+    )
+    .await
+}
+
 /// `credential.get_many { items: [{handle}, ...] }` on the route channel.
 pub async fn credential_get_many(
     stream: &mut TcpStream,

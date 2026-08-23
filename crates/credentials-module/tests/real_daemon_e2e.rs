@@ -31,8 +31,9 @@ use std::{
 use tokio::process::{Child, Command};
 
 use common::{
-    connect_consumer, count_alarm_rows, credential_get, credential_get_many, raw_route_request,
-    route_open, unique_temp_dir, wait_for_catalog, MODULE_ID, SETUP_TIMEOUT,
+    connect_consumer, count_alarm_rows, credential_get, credential_get_many,
+    credential_report_auth_failure, raw_route_request, route_open, unique_temp_dir,
+    wait_for_catalog, MODULE_ID, SETUP_TIMEOUT,
 };
 use cortexkit_store::{open_sqlite, Isolation, StorageBackend, StorageDescriptor};
 use credentials_core::resolver::{KeySource, ResolverConfig};
@@ -522,6 +523,125 @@ async fn real_subc_core_supervises_vault_and_serves_credential_get() {
     assert_eq!(
         bytes, seeded.payload,
         "served the seeded credential payload"
+    );
+
+    let _ = std::fs::remove_dir_all(&project_root);
+}
+
+/// THE DEPLOY REACHABILITY PROBE for stale-not-dead: a report against a REFRESHABLE
+/// credential must leave it ACTIVE, not latch it.
+///
+/// This is the one leg of the acceptance ladder that can tell the new binary from the
+/// old one. Every other leg — staged-equals-deployed digests, pinned codesign
+/// identifiers, running-image inode, serving count, fenced write round trip — asks
+/// whether the right BYTES are in the right place, and answers identically for a
+/// binary that latches and one that marks stale.
+///
+/// The failure it catches is SILENT: an old binary latching a reported credential
+/// looks exactly like a healthy vault correctly reporting a dead one. There is no
+/// error, no alarm, and no missing row — only a credential that went dark when it did
+/// not have to.
+///
+/// Run it against a STAGED binary before placement:
+///     CRED_REQUIRE_DAEMON=1 \
+///     CRED_DAEMON_BIN=target/staged/<rev>/ck-claustrum \
+///     CRED_CLI_BIN=target/staged/<rev>/ck-auth \
+///     cargo test -p credentials-module --test real_daemon_e2e -- --ignored
+///
+/// WHAT THIS DELIBERATELY DOES NOT ASSERT: that the next `get` returns fresh bytes at
+/// a bumped version. That needs a real upstream token exchange, which a disposable
+/// vault cannot perform, and a probe that cannot run is worse than a narrower one that
+/// can. The refresh-attempt half is covered by the merged unit and engine tests; what
+/// only a live binary can answer is whether the report still latches, and that is what
+/// this asserts.
+#[tokio::test]
+#[ignore = "builds subc-core in ../subconscious and binds loopback ports"]
+async fn a_report_leaves_a_refreshable_credential_active_rather_than_latching() {
+    // Seed a REFRESHABLE record. `put --client-id` builds the OAuth-shaped github_app
+    // record whose durable half is the key and whose access token starts empty, which
+    // is the shape the stale arm exists for. A static `put` would take the latch arm
+    // and prove nothing about this change.
+    let seeded = match start_vault_with_seed(|ctx| {
+        let pem = std::path::Path::new(&ctx.data_dir).join("probe-key.pem");
+        std::fs::write(
+            &pem,
+            "-----BEGIN RSA PRIVATE KEY-----\nprobe\n-----END RSA PRIVATE KEY-----\n",
+        )
+        .unwrap();
+        run_cli(&[
+            "put",
+            "--id",
+            "github_app:deploy-probe",
+            "--payload-file",
+            pem.to_str().unwrap(),
+            "--client-id",
+            "Iv1.deployprobe",
+            "--data-dir",
+            &ctx.data_dir,
+            "--key-path",
+            &ctx.key_path,
+        ]);
+        ("github_app:deploy-probe".to_string(), Vec::new())
+    })
+    .await
+    {
+        Some(v) => v,
+        None => return,
+    };
+
+    let mut consumer = connect_consumer(&seeded.daemon.connection_file).await;
+    wait_for_catalog(&mut consumer, MODULE_ID, SETUP_TIMEOUT).await;
+    let project_root = unique_temp_dir("cred-stale-probe-project");
+    std::fs::create_dir_all(&project_root).unwrap();
+    let route = route_open(&mut consumer, &project_root, 1).await;
+
+    // Report at the CURRENT version: the arm that used to latch.
+    let response =
+        credential_report_auth_failure(&mut consumer, route, 2, &seeded.handle, 401, 1).await;
+    assert!(
+        response.get("error").is_none(),
+        "the report itself must succeed: {response}"
+    );
+
+    // THE DISCRIMINATOR. An old binary leaves this credential needs_reauth.
+    // `--subc` deliberately: the daemon holds the single-writer lease while it runs,
+    // so the offline path refuses. This routes the query through the live module,
+    // which is also the honest thing for a probe — it asks the RUNNING binary.
+    let conn = seeded.daemon.connection_file.to_str().unwrap().to_string();
+    let listing = run_cli(&[
+        "list",
+        "--subc",
+        &conn,
+        "--data-dir",
+        &seeded.data_dir,
+        "--key-path",
+        &seeded.key_path,
+    ]);
+    // Assert on the credential's OWN LINE rather than a contiguous substring: `list`
+    // pads state and version into columns, so "active <id>" is never adjacent and a
+    // naive contains() fails against a perfectly correct vault.
+    let row = listing
+        .lines()
+        .find(|l| l.contains("github_app:deploy-probe"))
+        .unwrap_or("<the seeded credential is missing from the listing entirely>");
+    assert!(
+        row.contains("active"),
+        "a reported REFRESHABLE credential must stay active for the next get to \
+         refresh it; a latch here means the deployed binary predates stale-not-dead. \
+         row was: {row}"
+    );
+
+    // And the positive half: the stale arm ran, rather than nothing happening at all.
+    let events = run_cli(&[
+        "events",
+        "--data-dir",
+        &seeded.data_dir,
+        "--key-path",
+        &seeded.key_path,
+    ]);
+    assert!(
+        events.contains("consumer_report_stale"),
+        "auth_events must name the stale arm, not the latch arm. events were:\n{events}"
     );
 
     let _ = std::fs::remove_dir_all(&project_root);

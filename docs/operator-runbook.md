@@ -496,6 +496,50 @@ evict another's history — which matters, since those are the rows being read d
 the incident that caused the flood. A credential showing exactly 64 events has had at
 least that many, not exactly that many.
 
+### A 401 report no longer kills a refreshable credential (since `b977878`)
+
+A consumer reporting a 401 at the **current** `record_version` against a **refreshable**
+credential marks its token stale and leaves the record `active`. The next `get`
+refreshes it. `invalid_grant` still latches `needs_reauth` through the path that
+already existed. **Static credentials are unchanged** — they have no recovery path, so
+a report still latches immediately.
+
+The three sentences below are the measurement, run by the plexus seat against the live
+vault on 2026-08-23 and reproduced verbatim. **They are observations, not predictions:**
+
+> 1. A refreshable credential marked stale by a 401 report recovers inside the next
+>    call that resolves it: measured end-to-end 1.5-1.8s per governed dispatch, of
+>    which the vault's mark-to-committed-refresh is 1.1-1.3s; the remainder is client
+>    overhead and the vendor round trip. The stale state adds no observable penalty to
+>    that call versus a normal one.
+>
+> 2. On a host with active plexus connections, no attached credential waits for
+>    deliberate traffic: the plexus health probe resolves every active connection's
+>    credential roughly every 60 seconds, so ambient recovery completes within about
+>    one probe cycle of the mark. Observed range 5.5-38.1s across three runs, uniform
+>    in probe phase; the three recoveries landed exactly one probe period apart, which
+>    is the probe's signature. The range is an observation, not a bound — the mechanism
+>    (probe cadence + one refresh) is the bound.
+>
+> 3. The pre-revision behavior — a refreshable credential dead until an operator
+>    re-ingests it — is no longer reachable from a 401 at current version.
+>    `invalid_grant` still latches `needs_reauth` terminally, and the non-refreshable
+>    backstop has never fired (0 events, all time).
+
+**What this replaced, so the gain is legible:** `oauth:xai` went dark for **seven
+hours** on 2026-08-21 in exactly this situation — latched by a report 93 minutes after
+the vault had refreshed it successfully, and recovered only when a human re-
+authenticated. The same event now costs about 1.2 seconds on the next call.
+
+**The attribution the audit chain does NOT record.** `refresh_commit` carries
+`actor=vault`, because the vault performs the refresh; nothing records which caller's
+`get` triggered it. Sentence 2's mechanism was established without it — the three
+ambient recoveries landed 60.2s and 61.1s apart while their marks were 76.9s and 77.1s
+apart, so the recovering `get` ticks on a fixed cadence that the marks do not, which is
+the probe's signature and not incidental traffic. **A timing signature can identify a
+caller that a log field does not**, and that is worth reaching for before adding a
+field.
+
 ### A consumer report put a credential in `needs_reauth`. Try `reactivate` first.
 
 **Before re-authenticating, check whether the vault's own refreshes were healthy.** A

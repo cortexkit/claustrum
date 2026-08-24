@@ -8,8 +8,9 @@
 //! Operations:
 //! - `credential.get { handle, min_ttl_ms?, force_refresh? }` → the opaque payload,
 //!   refreshed first if stale (single-flight, vault-owned).
-//! - `credential.public_key { handle }` → public Ed25519 material for a signing key;
-//!   never the private payload.
+//! - `credential.public_key { handle }` or `{ credential_id }` → public Ed25519 material
+//!   for a signing key; a credential id requires a route-bound principal's read grant and
+//!   never serves the private payload.
 //! - `credential.get_scoped { credential_id }` → the same ordinary payload body, only
 //!   for a route-bound reserved principal with a literal-prefix read grant.
 //! - `credential.get_many { items: [...] }` → capped at [`limiter::GET_MANY_MAX`].
@@ -115,9 +116,36 @@ pub struct SignResult {
 }
 
 /// A `credential.public_key` request.
+///
+/// A capability handle and a principal-scoped credential id are deliberately separate
+/// authorization forms. Exactly one must be present: a handle retains the operator
+/// ceremony, while a credential id is authorized by a route-bound principal's read
+/// grant because the returned material is public.
 #[derive(Debug, Deserialize)]
 pub struct PublicKeyParams {
-    pub handle: String,
+    #[serde(default)]
+    pub handle: Option<String>,
+    #[serde(default)]
+    pub credential_id: Option<String>,
+}
+
+enum PublicKeyAuthorization<'a> {
+    Handle(&'a str),
+    Scoped(&'a str),
+}
+
+impl PublicKeyParams {
+    pub(crate) fn has_exactly_one_authorization(&self) -> bool {
+        self.authorization().is_some()
+    }
+
+    fn authorization(&self) -> Option<PublicKeyAuthorization<'_>> {
+        match (self.handle.as_deref(), self.credential_id.as_deref()) {
+            (Some(handle), None) => Some(PublicKeyAuthorization::Handle(handle)),
+            (None, Some(credential_id)) => Some(PublicKeyAuthorization::Scoped(credential_id)),
+            (None, None) | (Some(_), Some(_)) => None,
+        }
+    }
 }
 
 /// The public material of an Ed25519 signing key.
@@ -528,34 +556,58 @@ impl ReadSurface {
     /// Return the public half of a signing-key record without ever serving its private
     /// payload.
     ///
-    /// This has the same limiter placement and kind fence as `sign`: a public-key
-    /// lookup is still capability-handle traffic, and accepting any other credential
-    /// kind would turn this operation into a misleading parser for arbitrary secrets.
-    /// It performs no write or audit append because publication can run in a consumer
-    /// loop and must not grow the untrimmable audit chain.
+    /// A handle retains the existing limiter placement. A credential id instead uses a
+    /// route-bound principal's read grant: publishing a verifier key must not require the
+    /// authority to create signatures. Both forms retain the signing-key kind fence, and
+    /// credential-id refusals leave trimmable operator diagnostics without changing their
+    /// wire bodies or appending to the untrimmable audit chain.
     pub async fn public_key(
         &self,
         connection_id: u64,
+        principal: Option<&Principal>,
         params: &PublicKeyParams,
     ) -> Result<PublicKeyResult, ReadError> {
-        // Match `get` and `sign`: rate-limit the presented handle before resolving it,
-        // so unknown-handle sweeps are visible to the same detector as valid traffic.
-        self.check_limiter(connection_id, &params.handle).await;
-
-        let credential_id = match self.engine.store().resolve_handle(&params.handle) {
-            Ok(id) => id,
-            Err(StoreOpError::NotFound) => return Err(ReadError::NotFound),
-            Err(e) => return Err(map_store_error(&e)),
+        let authorization = params.authorization().ok_or(ReadError::NotFound)?;
+        let credential_id = match authorization {
+            PublicKeyAuthorization::Handle(handle) => {
+                // Match `get` and `sign`: rate-limit the presented handle before resolving
+                // it, so unknown-handle sweeps reach the same detector as valid traffic.
+                self.check_limiter(connection_id, handle).await;
+                match self.engine.store().resolve_handle(handle) {
+                    Ok(id) => id,
+                    Err(StoreOpError::NotFound) => return Err(ReadError::NotFound),
+                    Err(e) => return Err(map_store_error(&e)),
+                }
+            }
+            PublicKeyAuthorization::Scoped(credential_id) => {
+                self.authorize_scoped(principal, credential_id, GrantOperation::Read)?;
+                credential_id.to_string()
+            }
         };
 
         let record = match self.engine.store().get(&credential_id) {
             Ok(record) => record,
+            Err(StoreOpError::NotFound) if params.credential_id.is_some() => {
+                self.record_scoped_refusal(principal, &credential_id, ScopedReadRefusal::NotFound);
+                return Err(ReadError::NotFound);
+            }
+            Err(e) if params.credential_id.is_some() => {
+                self.record_scoped_refusal(
+                    principal,
+                    &credential_id,
+                    ScopedReadRefusal::StoreError,
+                );
+                return Err(map_store_error(&e));
+            }
             Err(e) => return Err(map_store_error(&e)),
         };
 
         // Check the kind before parsing bytes so non-signing records receive the
         // same permanent refusal regardless of the secret they carry.
         if record.kind != credentials_core::record::CredentialKind::SigningKey {
+            if params.credential_id.is_some() {
+                self.record_scoped_refusal(principal, &credential_id, ScopedReadRefusal::WrongKind);
+            }
             return Err(ReadError::KindNotSignable);
         }
 

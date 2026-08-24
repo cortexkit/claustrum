@@ -6,8 +6,8 @@
 //! a reserved `ManagementSurface` — echoing the `SUBC_LAUNCH_NONCE` the supervisor
 //! injected so only the spawned process can claim the `claustrum` id
 //! (closing the vault-impersonation hole). It serves the capability-handle read
-//! surface plus separate principal-scoped `credential.get_scoped` and `credential.sign`
-//! route operations.
+//! surface plus principal-scoped `credential.get_scoped`, `credential.sign`, and
+//! `credential.public_key` route operations.
 //! There is deliberately NO unauthenticated write op on this channel — writes live in
 //! the admin surface, gated by master-key possession + the single-writer lease.
 //!
@@ -896,12 +896,28 @@ async fn handle_read_request(
             }
         },
         OP_PUBLIC_KEY => match serde_json::from_value::<PublicKeyParams>(request.params) {
-            Ok(p) => match surface.public_key(connection_id, &p).await {
-                Ok(r) => json!({ "result": r }),
-                Err(code) => json!({
-                    "result": { "error": read_surface::ErrorBody { code, class: code.class() } }
-                }),
-            },
+            Ok(p) if p.has_exactly_one_authorization() => {
+                match surface
+                    .public_key(connection_id, principal.as_ref(), &p)
+                    .await
+                {
+                    Ok(r) => json!({ "result": r }),
+                    Err(code) => json!({
+                        "result": { "error": read_surface::ErrorBody { code, class: code.class() } }
+                    }),
+                }
+            }
+            Ok(_) => {
+                return invalid_params(
+                    writer,
+                    ver,
+                    channel,
+                    epoch,
+                    corr,
+                    "credential.public_key requires exactly one of handle or credential_id",
+                )
+                .await
+            }
             Err(e) => {
                 return invalid_params(writer, ver, channel, epoch, corr, &e.to_string()).await
             }
@@ -1533,6 +1549,22 @@ mod tests {
             channel,
             OP_SIGN,
             json!({ "credential_id": credential_id, "payload_b64": payload_b64 }),
+        )
+        .await
+    }
+
+    async fn scoped_public_key_request(
+        surface: &Arc<ReadSurface>,
+        admin: &Arc<admin_surface::AdminSurface>,
+        channel: u16,
+        credential_id: &str,
+    ) -> serde_json::Value {
+        scoped_route_request(
+            surface,
+            admin,
+            channel,
+            OP_PUBLIC_KEY,
+            json!({ "credential_id": credential_id }),
         )
         .await
     }
@@ -2472,8 +2504,10 @@ mod tests {
         let public = surface
             .public_key(
                 81,
+                None,
                 &read_surface::PublicKeyParams {
-                    handle: handle.raw.clone(),
+                    handle: Some(handle.raw.clone()),
+                    credential_id: None,
                 },
             )
             .await
@@ -2719,6 +2753,279 @@ mod tests {
         assert_eq!(refused["result"]["error"]["class"], "permanent");
     }
 
+    #[tokio::test]
+    async fn read_grant_authorizes_scoped_public_key() {
+        let (surface, admin, store) = scoped_rig(86);
+        let credential_id = "signing:public-key:read-granted";
+        store
+            .create(
+                credential_id,
+                &VaultRecord::new_static(
+                    CredentialKind::SigningKey,
+                    "test",
+                    test_ed25519_pem().into_bytes(),
+                    None,
+                ),
+            )
+            .expect("create signing key");
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "prefrontal-core",
+                "signing:public-key:",
+                GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .expect("create read grant");
+        admin.record_bind(
+            86,
+            subc_protocol::Principal::Reserved {
+                module_id: "prefrontal-core".into(),
+            },
+        );
+
+        let published = scoped_public_key_request(&surface, &admin, 86, credential_id).await;
+        assert_eq!(published["result"]["algorithm"], "ed25519");
+        assert!(
+            published["result"]["public_key_hex"]
+                .as_str()
+                .is_some_and(|key| !key.is_empty()),
+            "a read grant must publish the signing key's public material"
+        );
+        assert!(
+            store
+                .recent_auth_events(10)
+                .expect("read auth events")
+                .is_empty(),
+            "a grant-authorized public-key request must not record a refusal"
+        );
+    }
+
+    #[tokio::test]
+    async fn sign_grant_does_not_authorize_scoped_public_key() {
+        let (surface, admin, store) = scoped_rig(87);
+        let credential_id = "signing:public-key:sign-only";
+        store
+            .create(
+                credential_id,
+                &VaultRecord::new_static(
+                    CredentialKind::SigningKey,
+                    "test",
+                    test_ed25519_pem().into_bytes(),
+                    None,
+                ),
+            )
+            .expect("create signing key");
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "prefrontal-core",
+                "signing:public-key:",
+                GrantOperation::Sign,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .expect("create sign grant");
+        admin.record_bind(
+            87,
+            subc_protocol::Principal::Reserved {
+                module_id: "prefrontal-core".into(),
+            },
+        );
+
+        let refused = scoped_public_key_request(&surface, &admin, 87, credential_id).await;
+        assert_scoped_not_found(&refused);
+        let event = store
+            .recent_auth_events(1)
+            .expect("read auth events")
+            .remove(0);
+        assert_eq!(event.credential_id, credential_id);
+        assert_eq!(event.detail.as_deref(), Some("no_grant"));
+    }
+
+    #[tokio::test]
+    async fn public_key_handle_authorization_remains_available() {
+        let (surface, admin, store) = scoped_rig(88);
+        let credential_id = "signing:public-key:handle";
+        store
+            .create(
+                credential_id,
+                &VaultRecord::new_static(
+                    CredentialKind::SigningKey,
+                    "test",
+                    test_ed25519_pem().into_bytes(),
+                    None,
+                ),
+            )
+            .expect("create signing key");
+        let handle = credentials_core::store::mint_handle().expect("mint handle");
+        store
+            .put_handle_hash(
+                &handle.hash,
+                credential_id,
+                AuditCtx::admin(AuditOp::MintHandle),
+            )
+            .expect("store handle");
+
+        let published = scoped_route_request(
+            &surface,
+            &admin,
+            88,
+            OP_PUBLIC_KEY,
+            json!({ "handle": handle.raw }),
+        )
+        .await;
+        assert_eq!(published["result"]["algorithm"], "ed25519");
+        assert!(
+            published["result"]["key_id"]
+                .as_str()
+                .is_some_and(|key_id| !key_id.is_empty()),
+            "the existing handle form must still publish public key material"
+        );
+    }
+
+    #[tokio::test]
+    async fn scoped_public_key_fences_non_signing_records() {
+        let (surface, admin, store) = scoped_rig(89);
+        let credential_id = "apikey:public-key:impostor";
+        store
+            .create(
+                credential_id,
+                &VaultRecord::new_static(
+                    CredentialKind::ApiKey,
+                    "test",
+                    test_ed25519_pem().into_bytes(),
+                    None,
+                ),
+            )
+            .expect("create non-signing credential");
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "prefrontal-core",
+                "apikey:public-key:",
+                GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .expect("create read grant");
+        admin.record_bind(
+            89,
+            subc_protocol::Principal::Reserved {
+                module_id: "prefrontal-core".into(),
+            },
+        );
+
+        let refused = scoped_public_key_request(&surface, &admin, 89, credential_id).await;
+        assert_eq!(refused["result"]["error"]["code"], "kind_not_signable");
+        assert_eq!(refused["result"]["error"]["class"], "permanent");
+        let event = store
+            .recent_auth_events(1)
+            .expect("read auth events")
+            .remove(0);
+        assert_eq!(event.credential_id, credential_id);
+        assert_eq!(event.detail.as_deref(), Some("wrong_kind"));
+        assert_eq!(event.principal_kind.as_deref(), Some("reserved"));
+        assert_eq!(event.principal_id.as_deref(), Some("prefrontal-core"));
+    }
+
+    #[tokio::test]
+    async fn scoped_public_key_refusals_record_auth_events_behind_uniform_wire_bodies() {
+        let (surface, admin, store) = scoped_rig(90);
+        let uncovered_id = "apikey:public-key:uncovered";
+        let unknown_id = "signing:public-key:missing";
+        store
+            .create(
+                uncovered_id,
+                &VaultRecord::new_static(
+                    CredentialKind::SigningKey,
+                    "test",
+                    test_ed25519_pem().into_bytes(),
+                    None,
+                ),
+            )
+            .expect("create uncovered signing key");
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "prefrontal-core",
+                "signing:public-key:",
+                GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .expect("create read grant");
+        admin.record_bind(
+            90,
+            subc_protocol::Principal::Reserved {
+                module_id: "prefrontal-core".into(),
+            },
+        );
+
+        let no_grant = scoped_public_key_request(&surface, &admin, 90, uncovered_id).await;
+        let not_found = scoped_public_key_request(&surface, &admin, 90, unknown_id).await;
+        assert_eq!(
+            no_grant, not_found,
+            "an uncovered credential and an absent credential must have the same wire body"
+        );
+        let events = store.recent_auth_events(10).expect("read auth events");
+        assert_eq!(
+            events.len(),
+            2,
+            "each refused public-key request needs a row"
+        );
+        assert_eq!(events[0].credential_id, unknown_id);
+        assert_eq!(events[0].detail.as_deref(), Some("not_found"));
+        assert_eq!(events[1].credential_id, uncovered_id);
+        assert_eq!(events[1].detail.as_deref(), Some("no_grant"));
+        for event in events {
+            assert_eq!(event.kind, "scoped_read_refusal");
+            assert_eq!(event.principal_kind.as_deref(), Some("reserved"));
+            assert_eq!(event.principal_id.as_deref(), Some("prefrontal-core"));
+        }
+    }
+
+    #[tokio::test]
+    async fn scoped_public_key_grant_lookup_failure_records_store_error() {
+        let (surface, admin, store) = scoped_rig(91);
+        let credential_id = "signing:public-key:store-error";
+        store
+            .create(
+                credential_id,
+                &VaultRecord::new_static(
+                    CredentialKind::SigningKey,
+                    "test",
+                    test_ed25519_pem().into_bytes(),
+                    None,
+                ),
+            )
+            .expect("create signing key");
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "prefrontal-core",
+                "signing:public-key:",
+                GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .expect("create read grant");
+        admin.record_bind(
+            91,
+            subc_protocol::Principal::Reserved {
+                module_id: "prefrontal-core".into(),
+            },
+        );
+
+        surface.force_scoped_grant_lookup_error_for_test();
+        let refused = scoped_public_key_request(&surface, &admin, 91, credential_id).await;
+        assert_scoped_not_found(&refused);
+        let event = store
+            .recent_auth_events(1)
+            .expect("read auth events")
+            .remove(0);
+        assert_eq!(event.credential_id, credential_id);
+        assert_eq!(event.detail.as_deref(), Some("store_error"));
+        assert_eq!(event.principal_kind.as_deref(), Some("reserved"));
+        assert_eq!(event.principal_id.as_deref(), Some("prefrontal-core"));
+    }
+
     /// The signing fence: a signing-key credential signs, and EVERY other kind is
     /// refused with a permanent `kind_not_signable`.
     ///
@@ -2903,8 +3210,10 @@ mod tests {
         let public = surface
             .public_key(
                 1,
+                None,
                 &read_surface::PublicKeyParams {
-                    handle: signer_handle.raw.clone(),
+                    handle: Some(signer_handle.raw.clone()),
+                    credential_id: None,
                 },
             )
             .await
@@ -2955,8 +3264,10 @@ mod tests {
         let err = surface
             .public_key(
                 1,
+                None,
                 &read_surface::PublicKeyParams {
-                    handle: non_signer_handle.raw,
+                    handle: Some(non_signer_handle.raw),
+                    credential_id: None,
                 },
             )
             .await

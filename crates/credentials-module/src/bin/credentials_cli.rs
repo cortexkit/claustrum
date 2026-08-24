@@ -2297,6 +2297,30 @@ fn print_inventory(rows: &[(String, u64, String)]) {
     for (state, version, id) in rows {
         println!("{state:<14} v{version:<4} {id}");
     }
+
+    // SAY WHAT `active` DOES NOT MEAN, because the word claims more than the column
+    // knows. This inventory is built from plaintext metadata with no decrypt and no
+    // provider call, so `active` means ONLY "nothing has reported this dead". A
+    // credential nobody has called in a month and one serving perfectly render as the
+    // same row, and the vault cannot tell them apart -- it learns a credential is dead
+    // when a refresh is refused or a consumer reports it, and neither happens to a
+    // credential nobody uses.
+    //
+    // An external operator reached the adjacent conclusion on 2026-08-24 while reading
+    // elapsed time as evidence of durability, and named the general form better than
+    // this comment could: UNTESTED IS NOT THE SAME AS PROVEN. A credential that has not
+    // been exercised has demonstrated nothing, and no gauge computed from metadata can
+    // close that gap -- only a call can.
+    //
+    // One line, unconditional. A caveat that only prints in the interesting case is one
+    // an operator has never seen when they need it.
+    if !rows.is_empty() {
+        println!(
+            "\n(`active` = nothing has reported it dead. Not a check that the provider \
+             still accepts it;\n that costs a real call. `ck auth usable` opens the \
+             envelopes; only a get proves service.)"
+        );
+    }
 }
 
 /// Render the server's sorted grant set instead of asking an operator to mentally

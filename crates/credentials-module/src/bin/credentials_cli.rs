@@ -2160,8 +2160,29 @@ fn cmd_logout(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     let intent_cleared = result["intent_cleared"].as_bool().unwrap_or(false);
 
     if state_changed || intent_cleared || revoked > 0 {
+        // SAY THAT IT STAYS LISTED, on the branch an operator actually reaches.
+        //
+        // The already-logged-out branch below explains this fully; this one — the
+        // COMMON one — said only "reversible", which does not answer the question a
+        // user asks next: why is the thing I just logged out still in `list`, and
+        // still counted as needing attention?
+        //
+        // That gap cost real time. An operator logged out a credential whose
+        // subscription had ended, the vault reported itself DEGRADED because
+        // `needs_reauth` is a health input, and another seat read the degraded line as
+        // a fault and attached it to unrelated failures as their cause. A deliberate
+        // retirement produced an alarm that was then misdiagnosed as an incident.
+        //
+        // Until an intentionally-retired state exists that health does not count,
+        // the CLI has to close that gap in words, at the moment of the action.
         println!("logged out {id}: stopped serving, revoked {revoked} handle(s)");
-        println!("(reversible: `login --provider <p> --replace` restores it; the record and audit chain are kept)");
+        println!(
+            "  reversible: `login --provider <p> --replace` restores it without a new ceremony."
+        );
+        println!("  IT STAYS LISTED as needs_reauth, and the vault reports degraded while it is;");
+        println!("  that is how a credential awaiting re-login looks, by design.");
+        println!("  retiring it for good? `ck auth remove --id {id}` deletes the row and");
+        println!("  clears the health signal. The audit history survives either way.");
     } else {
         // SAY THAT NOTHING CHANGED, and name the verb that does what the operator is
         // probably after. Reporting plain success here is what makes logout read as

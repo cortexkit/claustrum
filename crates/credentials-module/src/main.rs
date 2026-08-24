@@ -1114,11 +1114,26 @@ fn resolver_config_from_env(data_dir: PathBuf) -> ResolverConfig {
 /// `reserved: true` binding lives in the daemon's subc.jsonc config, not here; the
 /// module proves its reserved identity by echoing the launch nonce in HELLO.
 fn manifest(module_id: &str) -> ModuleManifest {
+    // `capabilities: None` is DELIBERATE, not an unfilled field.
+    //
+    // The protocol defines it as `Option<CapabilityDeclarations>` and states that
+    // omitting the block preserves the manifest contract used before capability
+    // grammar existed. A present block is static discovery metadata the daemon
+    // validates before accepting a HELLO, so declaring one is an opt-in that changes
+    // what the supervisor checks about this module. That should be a decision, not a
+    // field filled in to clear a compile error.
+    //
+    // WHAT WOULD MAKE IT WORTH DECLARING: a consumer that must discover this vault's
+    // route surface statically, before binding, instead of learning it from a refusal.
+    // Nothing does today. Every consumer here is configured with the credential ids or
+    // handles it needs, and the read surface is deliberately anonymous, so a discovery
+    // block would publish a menu no caller asked for.
     ModuleManifest {
         module_id: module_id.to_string(),
         module_version: env!("CARGO_PKG_VERSION").to_string(),
         protocol_ver: PROTOCOL_VERSION,
         trust_tier: TrustTier::FirstParty,
+        capabilities: None,
         provides: vec![ProviderRole::ManagementSurface {
             // ModuleManaged, and this is a claim about observed behaviour rather than
             // the value that compiles. All three would.

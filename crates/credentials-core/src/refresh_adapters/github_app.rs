@@ -504,34 +504,55 @@ mod tests {
     /// mirrored, and a fixture-shaped key must keep working.
     #[test]
     fn both_pem_containers_parse_because_github_issues_the_one_openssl_does_not_default_to() {
-        let pkcs1 = std::process::Command::new("openssl")
-            .args(["genrsa", "2048"])
-            .output()
-            .expect("openssl genrsa");
-        let pkcs1 = String::from_utf8(pkcs1.stdout).expect("pem is utf8");
+        // BOTH FIXTURES ARE VENDORED, and the previous version of this test is why.
+        //
+        // It generated its PKCS#1 fixture by shelling out to `openssl genrsa 2048` and
+        // asserting the container BEFORE reaching the parser. On OpenSSL 3.x `genrsa`
+        // emits PKCS#8 (`-traditional` was added in 3.0 precisely because the default
+        // flipped), so that assertion was a statement about the local toolchain, not
+        // about the code under test.
+        //
+        // The consequence was worse than a red arm: the assertion died three lines
+        // before `private_key_der_from_pem` was first called, so on every OpenSSL 3.x
+        // host the PKCS#1 path — THE FORMAT GITHUB ACTUALLY ISSUES — had zero coverage
+        // while the suite reported an openssl problem. It ran green on the author's
+        // LibreSSL box and red on both CI platforms for days.
+        //
+        // The irony is the lesson: this test's own docstring says the format GitHub
+        // issues must sign, "not merely the one our fixtures were generated with" —
+        // and its fixture GENERATION step was itself toolchain-dependent. A fixture
+        // built by the machine running the test agrees with that machine.
+        let pkcs1 = include_str!("../../tests/fixtures/github_app/test_private_key_pkcs1.pem");
         assert!(
             pkcs1.contains("BEGIN RSA PRIVATE KEY"),
-            "openssl genrsa should emit PKCS#1; got: {}",
-            pkcs1.lines().next().unwrap_or("")
+            "the vendored PKCS#1 fixture must actually be PKCS#1"
         );
-        let (encoding, der) = private_key_der_from_pem(&pkcs1).expect("PKCS#1 must decode");
+        let (encoding, der) = private_key_der_from_pem(pkcs1).expect("PKCS#1 must decode");
         assert_eq!(encoding, KeyEncoding::Pkcs1);
-        signature::RsaKeyPair::from_der(&der).expect("PKCS#1 DER must load as a signing key");
+        let from_pkcs1 =
+            signature::RsaKeyPair::from_der(&der).expect("PKCS#1 DER must load as a signing key");
 
-        let pkcs8 = std::process::Command::new("openssl")
-            .args([
-                "genpkey",
-                "-algorithm",
-                "RSA",
-                "-pkeyopt",
-                "rsa_keygen_bits:2048",
-            ])
-            .output()
-            .expect("openssl genpkey");
-        let pkcs8 = String::from_utf8(pkcs8.stdout).expect("pem is utf8");
-        let (encoding, der) = private_key_der_from_pem(&pkcs8).expect("PKCS#8 must decode");
+        // Vendored for the same reason, before `genpkey` earns its own incident: its
+        // default is PKCS#8 today, and a default nobody promised is not a fixture.
+        let pkcs8 = include_str!("../../tests/fixtures/github_app/test_private_key.pem");
+        assert!(
+            pkcs8.contains("BEGIN PRIVATE KEY"),
+            "the vendored PKCS#8 fixture must actually be PKCS#8"
+        );
+        let (encoding, der) = private_key_der_from_pem(pkcs8).expect("PKCS#8 must decode");
         assert_eq!(encoding, KeyEncoding::Pkcs8);
-        signature::RsaKeyPair::from_pkcs8(&der).expect("PKCS#8 DER must load as a signing key");
+        let from_pkcs8 =
+            signature::RsaKeyPair::from_pkcs8(&der).expect("PKCS#8 DER must load as a signing key");
+
+        // THE PROPERTY WORTH ASSERTING, which the shell-out version could not: the two
+        // fixtures are the SAME KEY in different containers, so a parser that accepted
+        // both formats while decoding one of them WRONG would still pass every check
+        // above. Container is presentation; the key is identity.
+        assert_eq!(
+            from_pkcs1.public().as_ref(),
+            from_pkcs8.public().as_ref(),
+            "both containers hold one key, so both must decode to one public key"
+        );
 
         // A key that is neither must name what it found, so an EC or encrypted key pasted
         // here is diagnosable rather than a generic refusal.

@@ -1,0 +1,20 @@
+# SIGNED AND HASHED ARTIFACTS MUST NEVER BE LINE-ENDING TRANSLATED.
+#
+# Git's autocrlf translates LF to CRLF on Windows checkout. For an ordinary source
+# file that is invisible. For a file whose BYTES are the thing under test, it silently
+# changes the artifact between the machine that signed it and the machine that reads
+# it — and the failure surfaces as a signature or digest mismatch on one platform,
+# which reads as a broken test rather than a mangled file.
+#
+# Found the hard way: `the_envelope_carries_the_manifest_file_verbatim` passed on macOS
+# and Linux and failed only on Windows CI, because the vendored manifest on disk had
+# CRLF while the signed bytes in the envelope had LF. The test was telling the truth —
+# on that host the distributed file genuinely was not the file that was signed, and a
+# consumer fetching it would have computed a different hash.
+#
+# `-text` disables all translation, so these check out byte-identical on every
+# platform. Any future vendored fixture whose CONTENT is asserted — a golden file, a
+# signed payload, a digest source — belongs in this list.
+*.pem -text
+crates/credentials-core/tests/fixtures/** -text
+crates/credentials-module/tests/fixtures/** -text

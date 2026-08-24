@@ -98,7 +98,8 @@ fn the_envelope_carries_the_manifest_file_verbatim() {
 
     assert_eq!(
         carried, on_disk,
-        "the envelope's manifest_bytes must be the published file verbatim -- any \
-         difference means the signature covers something nobody distributes"
+        "the envelope's manifest_bytes must be the published file verbatim -- any difference means the signature covers something nobody distributes.\nIF THE ONLY DIFFERENCE IS CRLF vs LF, the file was line-ending translated on checkout and .gitattributes has stopped covering it: on-disk has {} CR bytes, the signed envelope has {}.",
+        on_disk.matches('\r').count(),
+        carried.matches('\r').count()
     );
 }

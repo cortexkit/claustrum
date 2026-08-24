@@ -52,6 +52,32 @@ use subc_protocol::Principal;
 use crate::limiter::{Admission, FetchLimiter, GET_MANY_MAX};
 
 /// A `credential.get` request.
+///
+/// TWO PARAMETERS REACH THE UPSTREAM EXCHANGE, NOT ONE, and only one of them looks
+/// like it does. `force_refresh` is the obvious lever and its unboundedness is
+/// documented with its trade-off at `check_limiter`. `min_ttl_ms` reaches the SAME
+/// exchange through `is_stale`, is caller-supplied, and is clamped nowhere between
+/// this struct and that evaluation — so a demand larger than the token's own lifetime
+/// makes EVERY get refresh. That is `force_refresh` with no boolean to grep for, and
+/// it is why the audit performed on one path had not been performed on the other: an
+/// external contributor found it on 2026-08-24, not a reviewer of this file.
+///
+/// The failure it produces is a footgun aimed at a careful caller rather than an
+/// attack. A consumer asking for a comfortable margin gets permanent refresh,
+/// silently, and nothing in the response says so.
+///
+/// WHY THE OBVIOUS CLAMP IS UNSOUND, so it is not re-proposed: the nearest available
+/// lifetime proxy is `expires_at_ms - updated_at_ms`, and `updated_at_ms` is the last
+/// record WRITE, not the token's issue time. For an imported token those differ by
+/// however long the token had already lived, so the computed lifetime underestimates
+/// and the clamp would refuse satisfiable requests. The sound form is post-refresh: a
+/// freshly minted token that STILL fails the caller's demand proves the demand is
+/// unsatisfiable for this credential, with no proxy involved. Not built — the shape of
+/// the answer is being settled on issue #9 before it lands.
+///
+/// Reachable only through a capability handle. [`GetScopedParams`] deliberately
+/// carries no refresh controls, so the principal-scoped grant path cannot express
+/// either lever.
 #[derive(Debug, Deserialize)]
 pub struct GetParams {
     pub handle: String,
@@ -1186,7 +1212,9 @@ impl ReadSurface {
         // An alarm a human can read is recoverable; a refusal is an outage.
         //
         // WHAT THAT LEAVES UNBOUNDED, so nobody meets it as a surprise: a GRANTED
-        // consumer can drive `force_refresh` without limit, and each one is a real
+        // consumer can drive `force_refresh` -- OR an oversized `min_ttl_ms`, which
+        // reaches the same exchange through `is_stale` and is documented at
+        // [`GetParams`] -- without limit, and each one is a real
         // upstream token exchange. For a `github_app` record that is a mint against a
         // vendor with its own rate limits, so one looping consumer can exhaust a budget
         // shared by every other holder of that App. The only bound today is an audit

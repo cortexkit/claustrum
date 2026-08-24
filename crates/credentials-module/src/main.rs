@@ -1286,6 +1286,36 @@ impl std::error::Error for ModuleError {}
 
 #[cfg(test)]
 mod tests {
+    /// This daemon declares NO consumer role, and that is a security property rather
+    /// than an empty field nobody filled in.
+    ///
+    /// `consumes: Vec::new()` is the machine-checkable half of a boundary held with
+    /// cerebellum: nothing pushes plaintext into their context, because this module
+    /// never initiates an outbound call at all. It is also why this seat is immune to
+    /// the retained-dead-connection class the supervisor censused in August — with no
+    /// requester role there is no reply-deadline to expire and no connection object to
+    /// retain past one.
+    ///
+    /// THE GUARANTEE ENDS SILENTLY THE DAY THIS DAEMON GAINS ITS FIRST OUTBOUND CALL,
+    /// with nothing in the diff looking like a boundary change: a consumer role added
+    /// for an unrelated feature would quietly falsify both properties at once. The
+    /// capability grammar cannot assert this yet, so the pin lives here until it can.
+    ///
+    /// If you are adding a consumer role deliberately: this test failing is the
+    /// intended alarm. Read the two properties above, decide whether they still hold,
+    /// and tell the cerebellum and supervisor seats before changing the expectation.
+    #[test]
+    fn the_manifest_declares_no_consumer_role_because_nothing_may_be_pushed_outward() {
+        let manifest = super::manifest("claustrum");
+        assert!(
+            manifest.consumes.is_empty(),
+            "claustrum must consume no roles: an outbound call would break both the \
+             no-plaintext-outward boundary with cerebellum and the immune-by-role-shape \
+             property the supervisor's connection census depends on. Found: {:?}",
+            manifest.consumes
+        );
+    }
+
     use super::*;
     use cortexkit_store::{Isolation, StorageBackend};
     use credentials_core::audit::{AuditCtx, AuditOp};

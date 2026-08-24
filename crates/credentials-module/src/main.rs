@@ -1205,18 +1205,22 @@ fn manifest(module_id: &str) -> ModuleManifest {
             operations: vec![
                 ManagementOperation {
                     name: OP_GET.to_string(),
+                    description: Some("Serve a credential's secret bytes to the holder of a capability handle. Refuses signing keys.".to_string()),
                     kind: ManagementOperationKind::Query,
                 },
                 ManagementOperation {
                     name: OP_GET_SCOPED.to_string(),
+                    description: Some("Serve a credential's secret bytes by id to a reserved principal holding a read grant. Refuses signing keys.".to_string()),
                     kind: ManagementOperationKind::Query,
                 },
                 ManagementOperation {
                     name: OP_GET_MANY.to_string(),
+                    description: Some("Serve a capped batch of handle-addressed credentials, refusing the whole batch past the cap.".to_string()),
                     kind: ManagementOperationKind::Query,
                 },
                 ManagementOperation {
                     name: OP_STATUS.to_string(),
+                    description: Some("Report a credential's non-secret readiness and record version. Never returns bytes.".to_string()),
                     kind: ManagementOperationKind::Query,
                 },
                 // Query rather than Mutation: signing reads a stored key and returns a
@@ -1226,6 +1230,7 @@ fn manifest(module_id: &str) -> ModuleManifest {
                 // the manifest kind describes the second.
                 ManagementOperation {
                     name: OP_SIGN.to_string(),
+                    description: Some("Sign caller-supplied bytes with a stored signing key. The key never leaves the vault.".to_string()),
                     kind: ManagementOperationKind::Query,
                 },
                 // Query rather than Mutation for the same reason as `credential.sign`:
@@ -1233,10 +1238,12 @@ fn manifest(module_id: &str) -> ModuleManifest {
                 // or appending to the audit chain, so callers may publish on demand.
                 ManagementOperation {
                     name: OP_PUBLIC_KEY.to_string(),
+                    description: Some("Return a signing key's public half. Never returns private material.".to_string()),
                     kind: ManagementOperationKind::Query,
                 },
                 ManagementOperation {
                     name: OP_REPORT_AUTH_FAILURE.to_string(),
+                    description: Some("Accept a consumer's report that a served token was refused, at the version it was served.".to_string()),
                     kind: ManagementOperationKind::Mutate,
                 },
             ],

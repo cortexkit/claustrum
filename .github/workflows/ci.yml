@@ -134,6 +134,9 @@ jobs:
         shell: bash
         run: python3 scripts/check-path-rendering.py
 
+      - name: Design doc status claims
+        run: python3 scripts/check-doc-status.py
+
       - name: Threshold boundary controls
         # Bash-pinned to match its siblings. NOTE the path rendering is handled in
         # the script via as_posix(), not by this pin: the separator comes from

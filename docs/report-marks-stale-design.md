@@ -1,8 +1,12 @@
 # A consumer report marks the token stale, it does not declare the credential dead
 
-**Status: DESIGNED, NOT BUILT (2026-08-22).** No code implements this. The shipped
-behaviour is still that a report at the current version latches `needs_reauth`
-immediately. Read this as what is intended, not as what happens.
+**Status: SHIPPED (`b977878`, deployed 2026-08-23). Measured in production
+2026-08-24.** This header said DESIGNED, NOT BUILT for a day after the code shipped,
+and an external operator reasoned from it — the safeguard against "detail reads as
+existence" became, unmaintained, a claim in the opposite direction. **A status line is
+an assertion that ages, and this one had no mechanism to age it.** See
+`scripts/check-doc-status.py`, added because writing the convention down was not
+enough the first time.
 
 Consumer consultation is COMPLETE: BROCA, plexus and prefrontal-core have each
 answered at source and cleared it. Two tests are co-signed as requirements, in §5.

@@ -16,7 +16,11 @@
 //! - `credential.get_many { items: [...] }` → capped at [`limiter::GET_MANY_MAX`].
 //! - `credential.status { handle? }` → non-secret health, never bytes.
 //! - `credential.report_auth_failure { handle, provider_status, record_version }` →
-//!   marks the credential needs_reauth so the next get does not serve a dead token.
+//!   marks the token STALE on a refreshable credential so the next get REFRESHES it,
+//!   and latches `needs_reauth` only for a non-refreshable one. A refresh that then
+//!   returns `invalid_grant` latches through the path that already existed. Measured
+//!   in production 2026-08-24: a report declined to kill a live credential, the vault
+//!   attempted recovery, the provider refused, and only then did it latch.
 //!   `record_version` is the version the consumer was SERVED, and the mark only lands
 //!   if the store still holds it: a report about a version the vault has already
 //!   replaced is a silent no-op, so a slow consumer's stale 401 cannot invalidate a

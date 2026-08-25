@@ -463,6 +463,25 @@ pub struct StatusResult {
     /// would defeat itself by moving the version it matched on). So a stable version
     /// with `ready: false` is a normal reading, not a stuck cursor.
     ///
+    /// WHAT `status` DELIBERATELY DOES NOT PUBLISH: `stale_pending`. For the whole
+    /// window between a version-matched report and the next `get`, this surface reports
+    /// a healthy credential while the store has already recorded the mark. Measured by
+    /// an external contributor on 2026-08-25: twelve samples over five minutes, all
+    /// `ready: true`, with the chain row already written.
+    ///
+    /// That is correct for what `ready` MEANS -- "would a get succeed" -- and it stays
+    /// true, because the mark exists precisely so the next get refreshes rather than
+    /// refusing. A get-path consumer receives the entire benefit without ever needing to
+    /// see the flag, which is why no consumer has asked for it.
+    ///
+    /// The gap is real for a consumer that POLLS status as its health surface: it cannot
+    /// learn a mark is outstanding, so it cannot distinguish "healthy" from "healthy,
+    /// with a repair pending". Not published today because no such consumer exists, and
+    /// a field added for a hypothetical caller is machinery nobody can test against a
+    /// real requirement. Revisit when one arrives -- the disclosure cost is small
+    /// (`ready: false` already tells a handle holder that someone observed a failure),
+    /// so the decision is about usefulness rather than safety.
+    ///
     /// AND IT DOES NOT CATCH EVERY REPAIR -- read `ready`, not this, to answer "is it
     /// usable now". `reactivate` clears a wrong `needs_reauth` verdict WITHOUT touching
     /// the stored material, so a credential goes unusable-to-usable with this field

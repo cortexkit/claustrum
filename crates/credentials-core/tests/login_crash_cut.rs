@@ -30,6 +30,8 @@ use cortexkit_store::{open_sqlite, Isolation, StorageBackend, StorageDescriptor}
 use credentials_core::resolver::{self, KeySource, ResolverConfig};
 use credentials_core::store::EncryptedStore;
 
+mod common;
+
 const OLD_REFRESH: &str = "OLD-REFRESH-TOKEN-do-not-lose";
 const NEW_REFRESH: &str = "NEW-INDEPENDENT-REFRESH-TOKEN";
 
@@ -46,7 +48,7 @@ fn kill_at_cut(cut: &str) -> PathBuf {
     let db_path = data_dir.join("store.db");
     let marker = root.join("ready.marker");
 
-    let helper = env!("CARGO_BIN_EXE_login_cut_helper");
+    let helper = common::warmed(env!("CARGO_BIN_EXE_login_cut_helper"));
     let mut child = std::process::Command::new(helper)
         .arg(db_path.to_string_lossy().to_string())
         .arg(key_dir.to_string_lossy().to_string())

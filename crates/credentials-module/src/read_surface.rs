@@ -72,8 +72,41 @@ use crate::limiter::{Admission, FetchLimiter, GET_MANY_MAX};
 /// however long the token had already lived, so the computed lifetime underestimates
 /// and the clamp would refuse satisfiable requests. The sound form is post-refresh: a
 /// freshly minted token that STILL fails the caller's demand proves the demand is
-/// unsatisfiable for this credential, with no proxy involved. Not built — the shape of
-/// the answer is being settled on issue #9 before it lands.
+/// unsatisfiable for this credential, with no proxy involved.
+///
+/// SHAPE SETTLED ON ISSUE #9 (2026-08-25), NOT BUILT. The reporter withdrew the
+/// pre-refresh clamp on the objection above — it fails in the direction a caller
+/// cannot route around, refusing requests that were satisfiable — and took the
+/// post-refresh form. What remains open is the consumer-visible half: after one
+/// exchange, a demand the fresh token cannot meet is PROVEN unsatisfiable, and the
+/// caller should learn that instead of receiving a token that silently fails their
+/// stated requirement while every subsequent get burns another exchange. That is a new
+/// refusal on this surface, so it is gated on the same consultation the
+/// report-marks-stale change was: three consumers answering at source about what they
+/// actually pass here.
+///
+/// TWO CONSULTATION RESULTS ARE ALREADY BINDING ON THE SHAPE, recorded here because
+/// they are constraints a later implementer would not re-derive:
+///
+/// 1. THE REFUSAL MAY FIRE ONLY WHEN A DEMAND IS PRESENT ON THE REQUEST. No default,
+///    no implicit floor when `min_ttl_ms` is absent. A caller that states no demand
+///    cannot have one unsatisfied, and that is what makes this change invisible to
+///    every consumer today. plexus named the shape that would break the fleet: their
+///    `github_app` installation tokens live ONE HOUR, so an implicit 30-minute floor
+///    would refuse half their gets on timing luck alone.
+///
+/// 2. THE CLASS IS `context_overflow`, NOT `permanent`, and this surface already has
+///    the precedent: `TooManyItems` (a `get_many` over the cap) is the same shape --
+///    the caller asked for more than the request bounds allow and must lower the ask.
+///    plexus preferred `permanent` on the reasoning that "this record can never satisfy
+///    the demand" is a decision rather than a fault. True, and the class still misfits,
+///    because `permanent` on this surface has only ever been a statement about the
+///    CREDENTIAL -- not_found, corrupt, refresh_unsupported. Their own wildcard arm
+///    shows the cost: an unknown `permanent` code maps to NotFound and the holder
+///    treats the handle as dead. Here the handle is fine, the credential is fine and
+///    serving other callers, and the only wrong thing is one number in the caller's
+///    request. A class that invites re-login or handle-reaping as the repair points at
+///    the wrong remedy entirely.
 ///
 /// Reachable only through a capability handle. [`GetScopedParams`] deliberately
 /// carries no refresh controls, so the principal-scoped grant path cannot express
@@ -361,6 +394,22 @@ impl ReadError {
             // Over the `get_many` cap, or over the signing-payload cap: reduce and
             // retry. Both are bounds on ONE request rather than statements about the
             // credential, which is what separates them from the permanent arm.
+            //
+            // REDUCE-AND-RETRY, NEVER WAIT-AND-RETRY, and consumers do file this in the
+            // transient family by reflex. Measured 2026-08-25: a careful consumer
+            // mapped `context_overflow` into a retry-with-backoff arm, describing both
+            // codes below as "transient load shapes". They are not -- each is a
+            // compile-time constant, so an identical request retried after any backoff
+            // fails identically forever. The name invites the misreading; the contract
+            // ("exceeds request bounds, requiring a reduced batch size before retrying")
+            // does not.
+            //
+            // It stops being merely a spin the moment a code under this class costs
+            // something to evaluate. The planned `ttl_unsatisfiable` refuses only after
+            // a real token exchange has PROVEN the demand unsatisfiable, so a backoff
+            // loop on it buys one upstream mint per attempt -- reproducing the exact
+            // amplification the refusal exists to prevent, against a vendor budget
+            // shared with every other holder of that App.
             ReadError::TooManyItems | ReadError::SignPayloadTooLarge => ErrorClass::ContextOverflow,
         }
     }

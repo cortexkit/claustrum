@@ -29,6 +29,8 @@ use credentials_core::key::MasterKey;
 use credentials_core::resolver::{self, KeySlot, KeySource, MasterKeyError, ResolverConfig};
 use credentials_core::store::{EncryptedStore, StoreOpError};
 
+mod common;
+
 /// Spawn the helper at one cut point, wait for it to park, SIGKILL it, and return
 /// the rig dir so the caller can re-open the vault from the killed-at-cut state.
 fn kill_at_cut(cut: &str) -> PathBuf {
@@ -52,7 +54,7 @@ fn kill_at_cut(cut: &str) -> PathBuf {
     let db_path = data_dir.join("store.db");
     let marker = root.join("ready.marker");
 
-    let helper = env!("CARGO_BIN_EXE_rotate_cut_helper");
+    let helper = common::warmed(env!("CARGO_BIN_EXE_rotate_cut_helper"));
     let mut child = std::process::Command::new(helper)
         .arg(db_path.to_string_lossy().to_string())
         .arg(key_dir.to_string_lossy().to_string())

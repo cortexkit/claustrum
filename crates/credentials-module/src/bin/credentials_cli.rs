@@ -566,7 +566,21 @@ fn help_verb(verb: &str) -> String {
              \n\
              Verify the audit-chain integrity end to end. Reads LEASE-FREE, so it is\n\
              safe against a running daemon -- do not stop the vault for this. Fails if\n\
-             any entry was edited, reordered, or inserted."
+             any entry was edited, reordered, or inserted.\n\
+             \n\
+             DOES NOT DETECT TRUNCATION OF THE NEWEST ENTRIES, at any depth. Every\n\
+             entry binds its predecessor, so a chain with its tail removed is a SHORTER\n\
+             VALID CHAIN and verifies clean -- there is no in-band record of expected\n\
+             length. Forging an entry still needs the audit key; deleting a suffix does\n\
+             not. So 'intact' means the recorded history was not ALTERED, never that it\n\
+             is ALL of the history.\n\
+             \n\
+             Consequence worth knowing before you rely on it: absence of rows is not\n\
+             evidence. 'The vault wrote nothing' reads identically to 'the vault's rows\n\
+             were deleted', so it cannot separate a credential the vault never\n\
+             adjudicated from one whose verdict was erased. Detecting that needs a tip\n\
+             (last seq + entry_mac) recorded OUTSIDE this database and compared for\n\
+             monotonicity -- see docs/operator-runbook.md."
         }
         "rotate-master-key" => {
             "ck auth rotate-master-key\n\

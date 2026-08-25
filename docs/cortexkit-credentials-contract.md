@@ -536,3 +536,44 @@ gate, not a nice-to-have):
 | T1 refresh reconciliation | "probe/refresh; on success clear intent" (could clear on a still-valid old access token; could call a rotating endpoint) | default `needs_reauth`; clear ONLY via a NON-mutating validity check; never call a rotating endpoint in recovery |
 | T2 admin gate | "master-key possession" (an unlocked vault could authorize) | explicit caller-held master-key PROOF (offline-CLI-while-stopped OR challenge/HMAC); headless key root-owned/LoadCredential, not same-UID-readable |
 | T3 module_id reservation | reserve the name | bind to supervisor launch via one-time launch nonce (a bare name check is race-able on restart); generic `reserved:true` mechanism |
+
+## A daemon restart is silent on the route plane, so a long-lived consumer needs a deadline
+
+**Every consumer holding a route binding across a restart of this module must impose a
+per-call deadline.** Without one it hangs forever, and the hang is invisible to both
+sides.
+
+The mechanism, stated because the obligation is not guessable from the wire spec. Wire
+v2 validates every nonzero-channel frame against a per-slot binding epoch installed at
+`route.bind`. When this daemon restarts, a consumer that reuses its cached binding is
+carrying a **pre-restart epoch**, and every frame it sends fails that check and is
+**silently dropped** — never an Error frame, because a module-emitted error would inject
+into the correlation space of whatever legitimately holds that channel now.
+
+So the consumer receives nothing. Not a refusal, not a close, not an error: silence,
+indistinguishable from a dead network by design.
+
+**Measured composition, 2026-08-25.** A consumer with a correct rebind-on-error arm hung
+for 30+ minutes across a restart of this module. Its client cleared the cached
+connection on any retryable error and reconnected — but no error ever arrived, so the
+arm never fired, and an async mutex serialized every subsequent call behind the first
+hung await. Downstream, governed bot-speech refused for the whole window while this
+vault's `auth_events` stayed empty, because no refusal had occurred.
+
+**The rebind arm is necessary and not sufficient.** Correct error handling does not help
+against an absence of errors. The deadline is what converts silence into an event the
+existing arm can act on:
+
+```
+per-call deadline expires  ->  classify as retryable
+                           ->  clear the cached binding
+                           ->  reconnect and re-bind
+                           ->  the restart heals in one call
+```
+
+**What this vault's ledger can and cannot tell you during such a window.** Every refusal
+on the scoped-read path writes to `auth_events` — not-found, no-grant, wrong-kind — so
+an empty table proves no scoped read reached a refusal point. It does **not** prove the
+call was served: a frame dropped at the epoch check never reaches the read surface at
+all. Empty means *arrived-and-succeeded* or *never-arrived*, and only the consumer's
+side distinguishes them.

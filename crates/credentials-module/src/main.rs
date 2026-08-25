@@ -167,7 +167,12 @@ struct Egress {
 /// Error frame (only the daemon's relay emits `unknown_channel`), because erroring
 /// would inject into the slot's NEW binding's corr space.
 #[derive(Default)]
-struct RouteEpochs(std::sync::Mutex<std::collections::HashMap<u16, u32>>);
+struct RouteEpochs(
+    std::sync::Mutex<std::collections::HashMap<u16, u32>>,
+    /// `(channel, epoch)` pairs already reported as dropped, so a repeat is bounded by
+    /// its absence from the log rather than adding another line.
+    std::sync::Mutex<std::collections::HashSet<(u16, u32)>>,
+);
 
 impl RouteEpochs {
     fn install(&self, channel: u16, epoch: u32) {
@@ -179,6 +184,34 @@ impl RouteEpochs {
     fn matches(&self, channel: u16, epoch: u32) -> bool {
         let map = self.0.lock().unwrap_or_else(|p| p.into_inner());
         map.get(&channel) == Some(&epoch)
+    }
+
+    /// The epoch this module holds for `channel`, for naming what a drop expected.
+    fn expected(&self, channel: u16) -> Option<u32> {
+        let map = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        map.get(&channel).copied()
+    }
+
+    /// Record a dropped frame ONCE per `(channel, epoch)`, returning whether this was
+    /// the first — so a drop can be named without letting a looping sender drive
+    /// unbounded log volume on the ingress path.
+    ///
+    /// SILENT ON THE WIRE IS A SECURITY PROPERTY; SILENT IN MY OWN DIAGNOSTICS WAS JUST
+    /// A HOLE. The wire silence is settled and correct — a module-emitted Error would
+    /// inject into the corr space of the slot's next tenant. But this check also wrote
+    /// nothing ANYWHERE, so when a consumer hung for 30+ minutes across the 2026-08-25
+    /// restart and the supervisor seat asked for the `(channel, epoch)` of the frames I
+    /// had dropped, I COULD NOT ANSWER: I had never written them down. The comparison
+    /// that would have decided the incident — dropped epoch against the live census —
+    /// was unavailable because of this gap, not because of the silence.
+    ///
+    /// Third instance of one shape in a week (an unlogged drain happy-path, this, and an
+    /// announcement with no join to its wire): ABSENCE OF A RECORD READ AS ABSENCE OF AN
+    /// EVENT. The vault's `auth_events` emptiness is honest because every refusal path
+    /// there provably writes. This emptiness was not.
+    fn note_drop(&self, channel: u16, epoch: u32) -> bool {
+        let mut seen = self.1.lock().unwrap_or_else(|p| p.into_inner());
+        seen.insert((channel, epoch))
     }
 
     fn remove(&self, channel: u16) {
@@ -615,6 +648,22 @@ async fn handle_frame(
     // unknown_channel; a module-emitted Error would inject into the corr space of
     // the slot's next tenant, the exact confusion the epoch exists to prevent).
     if frame.header.channel != 0 && !routes.matches(frame.header.channel, frame.header.epoch) {
+        // Loud here, silent on the wire. First occurrence per (channel, epoch) only: a
+        // stale sender loops, and an unbounded write on the ingress path is a lever.
+        if routes.note_drop(frame.header.channel, frame.header.epoch) {
+            let expected = routes
+                .expected(frame.header.channel)
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "unknown-slot".to_string());
+            eprintln!(
+                "route-epoch drop: channel={} arrived_epoch={} expected={} \
+                 (frames for a binding this module does not hold; compare with the \
+                 supervisor's live route census -- equal to the live epoch means the \
+                 census moved under this check, lower means the sender predates its \
+                 own re-bind)",
+                frame.header.channel, frame.header.epoch, expected,
+            );
+        }
         return Ok(true);
     }
     match frame.header.ty {
@@ -2022,6 +2071,44 @@ mod tests {
     /// `auditSeq` is unprefixed where `auditTipMac` is not, which looks careless and is
     /// deliberate: there is exactly one audit sequence so `auditSeq` cannot be misread,
     /// while `entryMac` never said WHICH entry and the chain holds thousands.
+    /// A dropped frame names itself ONCE per (channel, epoch), and a repeat is quiet.
+    ///
+    /// Both halves matter and they pull opposite ways. Without the first, a stale
+    /// binding is invisible and the incident that produced this code is undiagnosable
+    /// from my side. Without the second, a looping sender turns the ingress path into a
+    /// log-volume lever -- the same "granted party misbehaving" shape the fetch limiter
+    /// answers with alarm-once rather than refuse.
+    #[test]
+    fn an_epoch_drop_is_recorded_once_per_pair_and_a_repeat_is_quiet() {
+        let routes = RouteEpochs::default();
+        routes.install(7, 3);
+
+        assert!(!routes.matches(7, 2), "a stale epoch must not match");
+        assert!(
+            routes.note_drop(7, 2),
+            "the first drop of a (channel, epoch) must be reportable"
+        );
+        assert!(
+            !routes.note_drop(7, 2),
+            "a repeat of the SAME pair must be quiet, or a looping sender drives \
+             unbounded writes on the ingress path"
+        );
+        assert!(
+            routes.note_drop(7, 1),
+            "a DIFFERENT stale epoch on the same channel is a different event"
+        );
+        assert_eq!(
+            routes.expected(7),
+            Some(3),
+            "the drop record must be able to name what this module actually holds"
+        );
+        assert_eq!(
+            routes.expected(9),
+            None,
+            "an unheld channel reports no expectation rather than a stale one"
+        );
+    }
+
     #[test]
     fn the_health_wire_key_set_is_a_contract_and_a_rename_obliges_an_announcement() {
         let health = credentials_core::health::VaultHealth {

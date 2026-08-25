@@ -138,10 +138,38 @@ run_expect() {
     printf '%s\n' "$out" | grep 'SKIPPING' >&2
     fail "$label skipped an arm — it reported ok without running"
   fi
+  # COULD-NOT-COUNT IS NOT ZERO, and conflating them made this gate lie for two weeks.
+  #
+  # This summed through `bc`, with `2>/dev/null || echo 0` behind it. On a host without
+  # `bc` -- an undeclared dependency, and the only tool in this pipeline that is not
+  # POSIX-guaranteed -- the pipeline failed, its reason was discarded, and the fallback
+  # substituted a value that MEANS SOMETHING SPECIFIC AND FALSE. The gate then failed
+  # closed (correct) while announcing "ran 0 tests, expected at least 402" (false),
+  # about a suite in which all 402 had just passed.
+  #
+  # It stayed invisible from 2026-08-11 until an external contributor hit it on Arch,
+  # because the count check only runs after the test command exits 0 -- so every green
+  # run on a host WITH `bc` walked straight past it, and every host without one saw a
+  # sentence about the test suite instead of about the missing tool.
+  #
+  # A FALLBACK VALUE THAT IS A VALID READING OF THE MEASUREMENT YOU FAILED TO MAKE IS
+  # WORSE THAN AN ERROR. "0" is a legitimate test count, so it sends a reader hunting a
+  # vanished suite. `awk` removes the undeclared dependency; the shape check below
+  # names a counting failure as itself rather than dressing it as a measurement.
+  #
+  # The `|| passed=""` is load-bearing under `set -euo pipefail`, and dropping it looks
+  # like tidying. Without it a failed summation aborts the whole script at the shell's
+  # exit 127 BEFORE the check below can speak -- honest, since the shell names the
+  # missing tool, but the operator gets a bare "command not found" with no indication
+  # that the GATE decided nothing. Measured both ways.
   local passed
   passed="$(printf '%s\n' "$out" | grep -oE '^test result: ok\. [0-9]+ passed' \
-    | grep -oE '[0-9]+' | paste -sd+ - | bc 2>/dev/null || echo 0)"
-  [ -n "$passed" ] || passed=0
+    | grep -oE '[0-9]+' | awk '{ s += $1 } END { print s + 0 }')" || passed=""
+  if ! printf '%s' "$passed" | grep -qE '^[0-9]+$'; then
+    fail "$label: COULD NOT COUNT the tests (summation produced '$passed') -- this is a
+  broken instrument, not a result. Do not read it as a test count; the arm's own
+  'test result:' lines are printed above."
+  fi
   if [ "$passed" -lt "$min" ]; then
     fail "$label ran $passed tests, expected at least $min — a suite that shrank is indistinguishable from one that passed"
   fi

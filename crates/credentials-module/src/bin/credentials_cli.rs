@@ -580,7 +580,14 @@ fn help_verb(verb: &str) -> String {
              were deleted', so it cannot separate a credential the vault never\n\
              adjudicated from one whose verdict was erased. Detecting that needs a tip\n\
              (last seq + entry_mac) recorded OUTSIDE this database and compared for\n\
-             monotonicity -- see docs/operator-runbook.md."
+             monotonicity -- see docs/operator-runbook.md.\n\
+             \n\
+             The running daemon publishes that tip in its health body as auditSeq and\n\
+             auditTipMac, so a witness can record it without database access. The check\n\
+             is NOT 'the sequence never decreases': a truncation followed by fresh\n\
+             legitimate appends returns the sequence to its old value, and only the mac\n\
+             at that sequence differs. The mac observed at a given sequence must be\n\
+             stable forever."
         }
         "rotate-master-key" => {
             "ck auth rotate-master-key\n\

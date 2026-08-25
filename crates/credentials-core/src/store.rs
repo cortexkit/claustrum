@@ -2033,8 +2033,36 @@ impl EncryptedStore {
     /// already-revoked handle is a no-op success). The update AND a `RevokeHandle`
     /// audit entry commit in ONE fenced transaction, so a revocation — the most
     /// security-relevant handle action — is always tamper-evidently recorded. The
-    /// audit entry is keyed by the handle hash (the raw handle is never stored), not a
-    /// credential id, since revoke-by-handle does not name the credential.
+    /// audit entry is keyed by the handle hash (the raw handle is never stored) AND, when
+    /// the handle resolves, by the credential that lost a door.
+    ///
+    /// THAT SECOND HALF WAS MISSING AND THE COMMENT HERE DEFENDED THE GAP. It said
+    /// revoke-by-handle "does not name the credential" -- true of the CALLER'S INPUT and
+    /// false about the transaction, which looks the row up by hash and therefore knows
+    /// the owner. A limitation of an argument was written down as a limitation of the
+    /// operation, and it read as a decision for two months.
+    ///
+    /// The cost was measured by an external contributor on 2026-08-25: a five-credential
+    /// rotation produced revocations that the chain could not attribute, two of them
+    /// sharing a timestamp to the second and therefore indistinguishable. The chain
+    /// answered "a handle was revoked" and could not answer the question an incident
+    /// actually asks -- WHICH CREDENTIALS LOST ACCESS, AND WHEN. Recovery by correlating
+    /// against the `handles` table works only while the row survives and only if exactly
+    /// one revocation landed in that second.
+    ///
+    /// No secrecy cost: `mint_handle` already records `credential_id`, and both values
+    /// are non-secret by construction (the handle is hashed server-side, so neither is a
+    /// bearer token). A census across the whole op vocabulary on a live chain found this
+    /// was the ONLY genuine gap -- `fetch_anomaly` is also credential-less and that is
+    /// correct, since an enumeration sweep is about the connection and its probed handles
+    /// may match no credential at all.
+    ///
+    /// A NULL HERE NOW MEANS SOMETHING, which partly answers the note below: for entries
+    /// written after this change, an absent credential id means the handle did not
+    /// resolve, so the revocation moved no rows. A populated one means a real door
+    /// closed. That does not fully separate attempt from effect -- an already-revoked
+    /// handle still resolves -- but it distinguishes the case that changed nothing at all
+    /// from the case that did.
     ///
     /// THERE IS DELIBERATELY NO UN-REVOKE, AND THE ABSENCE IS THE POINT. Written down
     /// because an absent mechanism cannot be found by reading code: there is no symbol,
@@ -2068,6 +2096,15 @@ impl EncryptedStore {
         let h = handle_hash(raw_handle);
         let audit_key = self.audit_key.clone();
         self.fenced_write(|tx| {
+            // Read the owner INSIDE the same transaction, before the update. One indexed
+            // lookup on an admin-gated path, and it is what makes the entry attributable.
+            let owner: Option<String> = tx
+                .query_row(
+                    "SELECT credential_id FROM handles WHERE handle_hash = ?1",
+                    rusqlite::params![h],
+                    |row| row.get(0),
+                )
+                .optional()?;
             tx.execute(
                 "UPDATE handles SET revoked = 1 WHERE handle_hash = ?1",
                 rusqlite::params![h],
@@ -2077,7 +2114,7 @@ impl EncryptedStore {
                 &audit_key,
                 &AuditRecord {
                     op: AuditOp::RevokeHandle,
-                    credential_id: None,
+                    credential_id: owner,
                     payload_hash: Some(h.clone()),
                     actor: ctx.actor.to_string(),
                     alarm: ctx.alarm,
@@ -3830,6 +3867,53 @@ mod tests {
 
     /// A sequence-only witness cannot see a tail truncation when fresh legitimate
     /// appends reuse the deleted sequence. The tip MAC makes the replacement visible.
+    /// A revocation names the credential that lost a door, and names nothing when the
+    /// handle does not resolve.
+    ///
+    /// Both arms are the point. Without the first, the chain answers "a handle was
+    /// revoked" and cannot answer the question an incident asks -- WHICH credentials lost
+    /// access -- which is exactly what an external contributor measured on a
+    /// five-credential rotation where two revocations shared a timestamp to the second.
+    ///
+    /// Without the second, a NULL would be meaningless and the entry could not
+    /// distinguish a revocation that closed a real door from one that found nothing.
+    #[test]
+    fn a_revocation_names_the_credential_that_lost_a_door() {
+        let (_root, store) = tmp_store(41);
+        let ctx = AuditCtx::vault(AuditOp::MintHandle);
+        store.create("attrib", &oauth_record()).expect("create");
+        let h = mint_handle().expect("mint");
+        store.put_handle_hash(&h.hash, "attrib", ctx).expect("mint");
+
+        store
+            .revoke_handle(&h.raw, AuditCtx::vault(AuditOp::RevokeHandle))
+            .expect("revoke");
+        let entries = store.read_audit(None).expect("read chain");
+        let revoked: Vec<_> = entries.iter().filter(|e| e.op == "revoke_handle").collect();
+        assert_eq!(revoked.len(), 1, "one revocation recorded");
+        assert_eq!(
+            revoked[0].credential_id.as_deref(),
+            Some("attrib"),
+            "the chain must name which credential lost access; without it a rotation's \
+             blast radius is not reconstructable from the chain alone"
+        );
+
+        store
+            .revoke_handle(
+                "ckh_this-handle-never-existed",
+                AuditCtx::vault(AuditOp::RevokeHandle),
+            )
+            .expect("idempotent on an unknown handle");
+        let entries = store.read_audit(None).expect("read chain");
+        let revoked: Vec<_> = entries.iter().filter(|e| e.op == "revoke_handle").collect();
+        assert_eq!(revoked.len(), 2, "the no-op attempt is still recorded");
+        assert_eq!(
+            revoked[1].credential_id, None,
+            "an unresolvable handle must name NO credential, so a NULL means the \
+             revocation moved no rows rather than meaning the field was never filled"
+        );
+    }
+
     #[test]
     fn audit_tip_pair_exposes_tail_truncation_with_reused_sequence() {
         let (root, store) = tmp_store(21);

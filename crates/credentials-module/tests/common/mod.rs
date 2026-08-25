@@ -28,10 +28,26 @@ pub const READ_TIMEOUT: Duration = Duration::from_secs(15);
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// A process-unique temp path under the OS temp dir (no collision across tests).
+/// A temp path unique across PROCESSES, not merely within one.
+///
+/// The doc comment here used to promise "no collision across tests", which the
+/// mechanism did not deliver: `pid + counter` is unique within one process and
+/// collides between processes as soon as the OS recycles a PID. Windows does that from
+/// a small pool, and the seam CI step runs several `cargo test` invocations in
+/// sequence, so an inherited path hands a later test an earlier one's leftover vault --
+/// a store sealed under one master key beside a key file holding another. A stronger
+/// claim than the code supports is worse than none, because it stops the next reader
+/// checking.
+///
+/// Callers here create the directory themselves, so this cannot refuse a collision the
+/// way `cli_admin::tmp_root` does; the nanosecond component is what prevents one.
 pub fn unique_temp_dir(label: &str) -> PathBuf {
     let n = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!("{label}-{}-{n}", process::id()))
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    std::env::temp_dir().join(format!("{label}-{}-{n}-{nanos:09}", process::id()))
 }
 
 /// Connect to a daemon from its connection file and complete the client HMAC

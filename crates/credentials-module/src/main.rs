@@ -795,10 +795,10 @@ fn health_report(health: &credentials_core::health::VaultHealth) -> ModuleContro
         // The witness needs the sequence and the row MAC as one atomic observation.
         // Omitting either half would let a sequence-only comparison miss a truncated
         // tail that was replaced by fresh legitimate appends at the same sequence.
-        if let (Some(seq), Some(entry_mac)) = (&health.audit_seq, &health.entry_mac) {
+        if let (Some(seq), Some(entry_mac)) = (&health.audit_seq, &health.audit_tip_mac) {
             if let Some(target) = metrics.as_object_mut() {
                 target.insert("auditSeq".to_string(), json!(seq));
-                target.insert("entryMac".to_string(), json!(entry_mac));
+                target.insert("auditTipMac".to_string(), json!(entry_mac));
             }
         }
     }
@@ -2000,6 +2000,68 @@ mod tests {
     /// Drive the REAL channel-0 control handler with a `health.check` Request and
     /// assert it answers with a well-formed `HealthCheck` Response carrying the
     /// domain metrics. Exercises the actual arm + surface + mapper, not a mock.
+    /// The health wire key set is a CONTRACT, pinned so a rename cannot reach a
+    /// consumer silently.
+    ///
+    /// This exists because one did. The audit-tip pair shipped on 2026-08-25 with its
+    /// mac keyed `entryMac`, while the consumer-impact announcement I sent the
+    /// supervisor seat said `auditTipMac`. Both artifacts were authored carefully and
+    /// neither was checked against the other, because THERE IS NO MECHANICAL JOIN
+    /// BETWEEN AN ANNOUNCEMENT AND THE BYTES IT DESCRIBES. Their own absent-arm check
+    /// caught it on the first post-deploy read -- a good outcome, one deploy late.
+    ///
+    /// The keys here are HAND-TYPED STRING LITERALS with no compiler relationship to
+    /// the Rust field names, which is exactly why the divergence was invisible:
+    /// renaming the struct field does not touch the wire, and renaming the literal does
+    /// not touch the field. Nothing but this test observes the wire.
+    ///
+    /// Its failure means a consumer's decoder is about to break. Announce the delta,
+    /// then update this list -- and if a key disagrees with what was announced, THE
+    /// ANNOUNCEMENT IS THE CONTRACT.
+    ///
+    /// `auditSeq` is unprefixed where `auditTipMac` is not, which looks careless and is
+    /// deliberate: there is exactly one audit sequence so `auditSeq` cannot be misread,
+    /// while `entryMac` never said WHICH entry and the chain holds thousands.
+    #[test]
+    fn the_health_wire_key_set_is_a_contract_and_a_rename_obliges_an_announcement() {
+        let health = credentials_core::health::VaultHealth {
+            audit_seq: Some(7),
+            audit_tip_mac: Some("deadbeef".to_string()),
+            ..credentials_core::health::VaultHealth::summarize(&[], 0, false)
+        };
+        let ModuleControlResponse::HealthCheck { metrics, .. } = health_report(&health) else {
+            panic!("health_report must produce a HealthCheck");
+        };
+        let metrics = metrics.expect("metrics present");
+        let metrics = metrics.as_object().expect("metrics object");
+
+        let mut keys: Vec<&str> = metrics.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+
+        let mut expected = vec![
+            "active",
+            "auditSeq",
+            "auditTipMac",
+            "corrupt",
+            "corruptIds",
+            "credentialsTotal",
+            "fencedOut",
+            "needsReauth",
+            "needsReauthIds",
+            "openIntents",
+            "refresherStalled",
+            "storeReadable",
+        ];
+        expected.sort_unstable();
+
+        assert_eq!(
+            keys, expected,
+            "the health metrics key set changed. Consumers decode these BY NAME, so this \
+             is a consumer-impact change rather than a refactor: announce the delta to \
+             the supervisor seat, then update this list."
+        );
+    }
+
     #[tokio::test]
     async fn health_check_control_request_returns_domain_report() {
         let surface = tmp_surface(7);
@@ -2061,7 +2123,10 @@ mod tests {
         let snapshot = surface.health_snapshot();
 
         assert_eq!(snapshot.audit_seq, Some(expected_seq));
-        assert_eq!(snapshot.entry_mac.as_deref(), Some(expected_mac.as_str()));
+        assert_eq!(
+            snapshot.audit_tip_mac.as_deref(),
+            Some(expected_mac.as_str())
+        );
     }
 
     /// A refresh after an audit append must replace both cached halves of the tip.
@@ -2090,7 +2155,7 @@ mod tests {
             "refresh must move the sequence tip"
         );
         assert_ne!(
-            after.entry_mac, before.entry_mac,
+            after.audit_tip_mac, before.audit_tip_mac,
             "refresh must move the MAC paired with the new sequence"
         );
     }
@@ -2261,14 +2326,14 @@ mod tests {
         // A non-empty readable chain emits both halves of the witness observation.
         let mut with_tip = VaultHealth::summarize(&[], 0, false);
         with_tip.audit_seq = Some(7);
-        with_tip.entry_mac = Some("mac-7".to_string());
+        with_tip.audit_tip_mac = Some("mac-7".to_string());
         let ModuleControlResponse::HealthCheck { metrics, .. } = health_report(&with_tip) else {
             panic!("expected HealthCheck");
         };
         let metrics = metrics.expect("health report carries metrics");
         assert_eq!(metrics.get("auditSeq").and_then(|v| v.as_i64()), Some(7));
         assert_eq!(
-            metrics.get("entryMac").and_then(|v| v.as_str()),
+            metrics.get("auditTipMac").and_then(|v| v.as_str()),
             Some("mac-7")
         );
     }

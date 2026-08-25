@@ -1228,7 +1228,7 @@ impl ReadSurface {
         // turn an unreadable audit table into false witness data.
         if let Some((seq, entry_mac)) = audit_tip {
             health.audit_seq = Some(seq);
-            health.entry_mac = Some(entry_mac);
+            health.audit_tip_mac = Some(entry_mac);
         }
         health
     }

@@ -95,7 +95,7 @@ pub struct VaultHealth {
     /// must retain both values: the MAC observed at a sequence must remain stable
     /// forever, because a sequence-only witness cannot detect tail truncation followed
     /// by fresh legitimate appends that reuse the old sequence number.
-    pub entry_mac: Option<String>,
+    pub audit_tip_mac: Option<String>,
 }
 
 impl VaultHealth {
@@ -115,7 +115,7 @@ impl VaultHealth {
             corrupt_ids: Vec::new(),
             open_intents: 0,
             audit_seq: None,
-            entry_mac: None,
+            audit_tip_mac: None,
         }
     }
 
@@ -185,7 +185,7 @@ impl VaultHealth {
             corrupt_ids,
             open_intents,
             audit_seq: None,
-            entry_mac: None,
+            audit_tip_mac: None,
         }
     }
 }

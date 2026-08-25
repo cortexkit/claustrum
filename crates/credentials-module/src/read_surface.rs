@@ -1221,7 +1221,16 @@ impl ReadSurface {
         // refresh holds one open), so a scan failure here must not flip serving
         // health — default to 0 rather than masking a readable store as failing.
         let open_intents = store.list_intents().map(|i| i.len()).unwrap_or(0);
-        VaultHealth::summarize(&metas, open_intents, store.is_fenced_out())
+        let audit_tip = store.audit_tip().ok().flatten();
+        let mut health = VaultHealth::summarize(&metas, open_intents, store.is_fenced_out());
+        // The tip is optional because a failed tip query cannot provide a truthful
+        // observation. Never substitute zero or a previously cached value: either would
+        // turn an unreadable audit table into false witness data.
+        if let Some((seq, entry_mac)) = audit_tip {
+            health.audit_seq = Some(seq);
+            health.entry_mac = Some(entry_mac);
+        }
+        health
     }
 
     /// Run the per-connection limiter for one probe, keyed by `probe_key` (the

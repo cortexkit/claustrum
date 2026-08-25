@@ -2131,6 +2131,25 @@ impl EncryptedStore {
             .map_err(StoreOpError::from)
     }
 
+    /// Read the current audit-chain tip without scanning the chain.
+    ///
+    /// The sequence and entry MAC are returned together because the MAC binds the row at
+    /// that sequence. A witness that records only the sequence cannot detect a truncated
+    /// tail followed by fresh legitimate appends that reuse the same sequence number.
+    /// Returns `None` when the audit chain is empty.
+    pub fn audit_tip(&self) -> Result<Option<(i64, String)>, StoreOpError> {
+        self.store
+            .with_conn(|c| {
+                c.query_row(
+                    "SELECT seq, entry_mac FROM audit_log ORDER BY seq DESC LIMIT 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+            })
+            .map_err(StoreOpError::from)
+    }
+
     /// Read the audit chain (oldest first), capped at `limit` most-recent entries
     /// when `limit` is `Some`. Used by status/monitoring to surface alarms and by
     /// the integrity check.
@@ -3806,6 +3825,61 @@ mod tests {
         assert_eq!(all.len(), 2);
         assert_eq!(all[0].seq, 1);
         assert_eq!(all[1].seq, 2);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A sequence-only witness cannot see a tail truncation when fresh legitimate
+    /// appends reuse the deleted sequence. The tip MAC makes the replacement visible.
+    #[test]
+    fn audit_tip_pair_exposes_tail_truncation_with_reused_sequence() {
+        let (root, store) = tmp_store(21);
+        store
+            .append_audit(&AuditRecord {
+                op: crate::audit::AuditOp::Put,
+                credential_id: Some("id".into()),
+                payload_hash: Some("first".into()),
+                actor: "offline-cli".into(),
+                alarm: None,
+            })
+            .expect("append first");
+        let tail = store
+            .append_audit(&AuditRecord {
+                op: crate::audit::AuditOp::Overwrite,
+                credential_id: Some("id".into()),
+                payload_hash: Some("original-tail".into()),
+                actor: "offline-cli".into(),
+                alarm: None,
+            })
+            .expect("append original tail");
+        let observed = (tail.seq, tail.entry_mac.clone());
+
+        let conn = rusqlite::Connection::open(root.join("store.db")).expect("open raw store");
+        conn.execute("DELETE FROM audit_log WHERE seq = ?1", [tail.seq])
+            .expect("delete tail");
+        drop(conn);
+
+        let replacement = store
+            .append_audit(&AuditRecord {
+                op: crate::audit::AuditOp::Overwrite,
+                credential_id: Some("id".into()),
+                payload_hash: Some("replacement-tail".into()),
+                actor: "fresh-legitimate-writer".into(),
+                alarm: None,
+            })
+            .expect("append replacement tail");
+
+        assert_eq!(
+            replacement.seq, observed.0,
+            "deletion plus a fresh append can return the sequence to its old value"
+        );
+        assert_ne!(
+            replacement.entry_mac, observed.1,
+            "the MAC at a reused sequence must reveal that the row bytes changed"
+        );
+        assert_eq!(
+            store.audit_tip().expect("read tip").expect("tip exists"),
+            (replacement.seq, replacement.entry_mac)
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

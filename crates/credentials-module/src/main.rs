@@ -792,6 +792,15 @@ fn health_report(health: &credentials_core::health::VaultHealth) -> ModuleContro
                 target.insert(k.clone(), v.clone());
             }
         }
+        // The witness needs the sequence and the row MAC as one atomic observation.
+        // Omitting either half would let a sequence-only comparison miss a truncated
+        // tail that was replaced by fresh legitimate appends at the same sequence.
+        if let (Some(seq), Some(entry_mac)) = (&health.audit_seq, &health.entry_mac) {
+            if let Some(target) = metrics.as_object_mut() {
+                target.insert("auditSeq".to_string(), json!(seq));
+                target.insert("entryMac".to_string(), json!(entry_mac));
+            }
+        }
     }
     ModuleControlResponse::HealthCheck {
         status,
@@ -1341,7 +1350,7 @@ mod tests {
 
     use super::*;
     use cortexkit_store::{Isolation, StorageBackend};
-    use credentials_core::audit::{AuditCtx, AuditOp};
+    use credentials_core::audit::{AuditCtx, AuditOp, AuditRecord};
     use credentials_core::key::{MasterKey, MASTER_KEY_LEN};
     use credentials_core::record::{CredentialKind, VaultRecord};
     use credentials_core::store::GrantOperation;
@@ -2039,6 +2048,53 @@ mod tests {
         assert_eq!(obj["needsReauthIds"], serde_json::json!(["apikey:dead"]));
     }
 
+    /// The first cached snapshot must expose exactly the same tip pair as the store.
+    /// This proves the health path emits the current entry MAC rather than only a
+    /// convenient sequence count.
+    #[tokio::test]
+    async fn health_snapshot_audit_tip_matches_store_tip_pair() {
+        let (surface, store, _db) = tmp_surface_with_store(10);
+        let (expected_seq, expected_mac) = store
+            .audit_tip()
+            .expect("read audit tip")
+            .expect("seeded store has an audit tip");
+        let snapshot = surface.health_snapshot();
+
+        assert_eq!(snapshot.audit_seq, Some(expected_seq));
+        assert_eq!(snapshot.entry_mac.as_deref(), Some(expected_mac.as_str()));
+    }
+
+    /// A refresh after an audit append must replace both cached halves of the tip.
+    /// Keeping the original pair would make the health witness miss a legitimate row
+    /// change even though the store itself has advanced.
+    #[tokio::test]
+    async fn health_refresh_recomputes_audit_tip_after_append() {
+        let (surface, store, _db) = tmp_surface_with_store(12);
+        let before = surface.health_snapshot();
+        store
+            .append_audit(&AuditRecord {
+                op: AuditOp::FetchAnomaly,
+                credential_id: None,
+                payload_hash: None,
+                actor: "health-test".into(),
+                alarm: None,
+            })
+            .expect("append audit entry");
+
+        surface.refresh_health();
+        let after = surface.health_snapshot();
+
+        assert_eq!(
+            after.audit_seq,
+            before.audit_seq.map(|seq| seq + 1),
+            "refresh must move the sequence tip"
+        );
+        assert_ne!(
+            after.entry_mac, before.entry_mac,
+            "refresh must move the MAC paired with the new sequence"
+        );
+    }
+
     /// The load-bearing property of the cached-snapshot fix: the probe reply is
     /// served from the in-memory snapshot and does NOT do a live store read. Prove
     /// it non-vacuously — mutate the store AFTER construction and assert the probe
@@ -2142,6 +2198,7 @@ mod tests {
             "corruptIds",
             "openIntents",
         ];
+        const AUDIT_TIP: [&str; 2] = ["auditSeq", "entryMac"];
 
         let unreadable = health_report(&VaultHealth::unreadable());
         let ModuleControlResponse::HealthCheck { metrics, .. } = unreadable else {
@@ -2155,6 +2212,13 @@ mod tests {
                 "{field} must be ABSENT when the store is unreadable: reporting 0 is what an \
                  empty vault reports, so a consumer plotting it cannot tell 'none' from \
                  'could not count'"
+            );
+        }
+        for field in AUDIT_TIP {
+            assert!(
+                metrics.get(field).is_none(),
+                "{field} must be ABSENT when the store is unreadable: a zero or stale audit \
+                 tip would be false witness data"
             );
         }
         // The flags describe the daemon rather than the store, so they survive.
@@ -2185,6 +2249,27 @@ mod tests {
             metrics.get("active").and_then(|v| v.as_u64()),
             Some(0),
             "an empty but readable vault reports a real zero"
+        );
+        // An empty readable chain has no tip, so both optional fields remain absent.
+        for field in AUDIT_TIP {
+            assert!(
+                metrics.get(field).is_none(),
+                "{field} must be absent when the audit chain is empty"
+            );
+        }
+
+        // A non-empty readable chain emits both halves of the witness observation.
+        let mut with_tip = VaultHealth::summarize(&[], 0, false);
+        with_tip.audit_seq = Some(7);
+        with_tip.entry_mac = Some("mac-7".to_string());
+        let ModuleControlResponse::HealthCheck { metrics, .. } = health_report(&with_tip) else {
+            panic!("expected HealthCheck");
+        };
+        let metrics = metrics.expect("health report carries metrics");
+        assert_eq!(metrics.get("auditSeq").and_then(|v| v.as_i64()), Some(7));
+        assert_eq!(
+            metrics.get("entryMac").and_then(|v| v.as_str()),
+            Some("mac-7")
         );
     }
 

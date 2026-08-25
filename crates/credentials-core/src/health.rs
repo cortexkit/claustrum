@@ -88,6 +88,14 @@ pub struct VaultHealth {
     /// in-flight refresh holds an intent open transiently (txn1 opens it, txn2
     /// clears it), so it would false-positive a degraded state on every serve.
     pub open_intents: usize,
+    /// The sequence number of the newest audit entry, when the chain is non-empty.
+    /// This is informational and never contributes to the health status.
+    pub audit_seq: Option<i64>,
+    /// The MAC of the newest audit entry, paired with [`Self::audit_seq`]. A witness
+    /// must retain both values: the MAC observed at a sequence must remain stable
+    /// forever, because a sequence-only witness cannot detect tail truncation followed
+    /// by fresh legitimate appends that reuse the old sequence number.
+    pub entry_mac: Option<String>,
 }
 
 impl VaultHealth {
@@ -106,6 +114,8 @@ impl VaultHealth {
             needs_reauth_ids: Vec::new(),
             corrupt_ids: Vec::new(),
             open_intents: 0,
+            audit_seq: None,
+            entry_mac: None,
         }
     }
 
@@ -174,6 +184,8 @@ impl VaultHealth {
             needs_reauth_ids,
             corrupt_ids,
             open_intents,
+            audit_seq: None,
+            entry_mac: None,
         }
     }
 }

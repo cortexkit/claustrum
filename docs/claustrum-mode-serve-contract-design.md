@@ -866,18 +866,100 @@ discovery.
 
 #### The pattern, stated once
 
-This is the third instance tonight of one shape: **the vault holds the fact and the
-surface does not publish it.**
+This is the third instance of one shape: **the vault holds the fact and the surface does
+not publish it.**
 
-1. `record_version` — not on the consumer wire, so a consumer cannot distinguish a
-   latch from a recovery (§4.3).
+1. ~~`record_version` — not on the consumer wire~~ — **RETRACTED, this entry was wrong.**
+   `record_version` IS on the consumer wire: `get` has always returned it and `status`
+   returns it too. Corrected below — the real defect is different and sharper.
 2. `module_id` — arriving at route-bind, discarded by the report path, so attribution
    fails (§5A.3).
 3. Refresh outcomes — recorded in `auth_events`, absent from the read surface (here).
+4. **`stale_pending` — measured, and the cleanest specimen of the shape** (§5A.10.1).
 
-Each was invisible while there was one consumer. **A second consumer converts all
-three from unused to load-bearing at once**, which is why they should be decided
-together rather than one incident at a time.
+Each was invisible while there was one consumer. **A second consumer converts them from
+unused to load-bearing at once**, which is why they should be decided together rather than
+one incident at a time.
+
+#### 5A.10.1 Measured: what `credential.status` publishes across a real episode
+
+Everything above was reasoning about the surface. This is a reading of it — taken 2026-08-25
+during a real treadmill episode with a probe built for the purpose, because
+`credential.status` had **no caller anywhere on the box**: no CLI verb, and the only in-repo
+references were the route constant, one e2e test, and the module's own health poll. A claim
+about what a consumer would see had no way to be checked.
+
+```
+vault-side truth              what credential.status publishes
+active       stale=0    ->    ready=true   err=null            v=43
+active       stale=1    ->    ready=true   err=null            v=43   <- 12 samples, 5 min
+needs_reauth stale=1    ->    ready=false  err="needs_reauth"   v=43
+active       stale=0    ->    ready=true   err=null            v=44   (after re-seal)
+```
+
+**The verdict IS published.** `ready:false` + a typed `last_error_code` land within one
+sample of the chain row. Any consumer polling `status` learns a latch happened.
+
+**`stale_pending` is NOT published.** For the entire five-minute stale window the surface
+reports a healthy credential while the vault has already recorded a consumer's 401 and
+marked the record stale. `StatusResult` has no field for it.
+
+Defensible in isolation — `ready` answers *"would a get succeed"*, and that is still true
+until the forced refresh is attempted. The consequence is structural: **a second consumer,
+or the same one after a restart, cannot learn that a stale mark is outstanding.**
+
+And the reason it has never been reported is the part worth carrying into any
+"does this matter" conversation. The current consumer calls only `credential.get`, and
+report-marks-stale keeps the record ACTIVE *precisely so the next `get` forces the refresh* —
+so a `get`-path consumer receives the stale mark's entire benefit without ever needing to see
+it. The gap bites only consumers that poll `status` to DECIDE.
+
+> **The missing representation is invisible to the consumer whose path makes it
+> unnecessary — and that consumer is the one who will be asked whether the gap matters.**
+> Asked from its own vantage it would answer "no impact", be right about itself, and wrong
+> about the surface. (Established by the insula seat checking my claim against its own code
+> rather than accepting it.)
+
+A claustrum-mode plugin is exactly a `status`-polling consumer for its health surface, so
+this moves from theoretical to load-bearing the moment §1 ships.
+
+#### 5A.10.2 `record_version` is exposed — and is not a state cursor
+
+Correcting the retracted entry above, since the correction matters more than the error.
+
+The field is published on both `get` and `status`. But per `read_surface.rs:412-428`, and
+confirmed by the measurement above:
+
+```
+bumps on    refresh, replace
+NOT on      invalidate   -- a version-GATED compare-and-set would defeat itself by
+                            moving the version it matched on
+NOT on      reactivate   -- clears a wrong verdict WITHOUT touching stored material
+```
+
+Measured: **the version stayed at 43 across the entire death and latch**, moving only on the
+re-seal. So the original entry's *conclusion* survives its wrong premise — a consumer cannot
+distinguish a latch from a recovery by the version — but for the opposite reason. The field
+is there; it does not move.
+
+> **Join on `record_version`. Decide on `ready`.**
+
+The failure mode of getting this wrong is unusually quiet: a version-only poller keeps a
+`reactivate`-repaired credential marked dead **indefinitely**, and it does so while
+observing a *stable* value. Nothing errors. The consumer sees an unchanging number and
+concludes nothing changed — true about the material, false about the verdict.
+
+This is a real constraint rather than an oversight: `record_version` is bound into the
+envelope's AAD, so moving it means re-sealing the record, and re-sealing on the **repair**
+path would put a decrypt-and-encrypt cycle on the one route that exists to recover from a
+wrong verdict — with a halfway failure leaving a corrupt record where a recoverable one
+stood. The version tracks the MATERIAL; `ready` tracks the VERDICT; a repair can move either
+alone.
+
+**Bearing on the maintainer's Q13 answer** (claustrum#9), which recommends `record_version`
+as the clock-free join key a consumer should log: that advice is right for *"which serve
+produced these bytes"* and silent on this. Both halves belong together, or the join key gets
+adopted as a state cursor by the next reader.
 
 ### 5A.11 The fourth bucket: plugin state keyed on token VALUES
 

@@ -41,6 +41,7 @@ use credentials_core::store::EncryptedStore;
 use serde::Deserialize;
 use serde_json::json;
 use subc_protocol::manifest::Concurrency;
+use subc_protocol::manifest::ManifestProvenance;
 use subc_protocol::{
     manifest::{
         Bindings, IdentityBinding, ManagementOperation, ManagementOperationKind, ModuleManifest,
@@ -1226,6 +1227,39 @@ fn manifest(module_id: &str) -> ModuleManifest {
         protocol_ver: PROTOCOL_VERSION,
         trust_tier: TrustTier::FirstParty,
         capabilities: None,
+        // `provenance` carries the ONE fact this build actually knows about itself.
+        //
+        // The protocol's four fields are build_git_sha, build_lock_digest,
+        // wire_crate_version and store_schema_version, each optional, validated for shape
+        // only (non-empty, <=128 bytes, printable ASCII). So the constraint on filling
+        // them is honesty rather than syntax, and a value invented to look complete is
+        // worse than an absent one: a supervisor comparing provenance across a fleet
+        // treats a present field as a claim.
+        //
+        // WHAT IS DECLARED: build_git_sha, from the same `BUILD_REV` that `--version`
+        // reports. `scripts/release-build.sh` stamps CK_BUILD_REV from a clean tree; an
+        // unstamped development build reports "unknown" and is therefore OMITTED rather
+        // than published as a fact, because "unknown" is a placeholder wearing the shape
+        // of a sha.
+        //
+        // WHAT IS NOT, and why each is absent rather than forgotten:
+        //   build_lock_digest    nothing hashes Cargo.lock at build time today. Adding
+        //                        it is a release-script change, not a manifest one.
+        //   wire_crate_version   no compile-time constant names the subc-protocol
+        //                        version from inside this crate; `module_version` above
+        //                        already carries this module's own version.
+        //   store_schema_version the migration list is private to credentials-core with
+        //                        no public accessor. Exporting one to fill a manifest
+        //                        field would publish an internal number as a contract.
+        provenance: {
+            let rev = credentials_core::contract::BUILD_REV;
+            (rev != "unknown").then(|| ManifestProvenance {
+                build_git_sha: Some(rev.to_string()),
+                build_lock_digest: None,
+                wire_crate_version: None,
+                store_schema_version: None,
+            })
+        },
         provides: vec![ProviderRole::ManagementSurface {
             // ModuleManaged, and this is a claim about observed behaviour rather than
             // the value that compiles. All three would.
@@ -2415,6 +2449,54 @@ mod tests {
             routes.expected(9),
             None,
             "an unheld channel reports no expectation rather than a stale one"
+        );
+    }
+
+    /// Provenance never publishes a placeholder as a build fact.
+    ///
+    /// `BUILD_REV` is "unknown" on any build the release script did not stamp, and the
+    /// protocol validates provenance for SHAPE ONLY -- non-empty, <=128 bytes, printable
+    /// -- so "unknown" would sail through as a perfectly well-formed claim. A supervisor
+    /// comparing provenance across a fleet treats a present field as an assertion about
+    /// the binary, and a placeholder shaped like a sha is worse than an absent field:
+    /// absence says "this build does not know", while "unknown" says "this build's sha
+    /// is the string unknown".
+    ///
+    /// This test holds under BOTH build modes, which is what makes it worth having: on a
+    /// dev build it asserts the block is absent, and on a stamped release build it
+    /// asserts the sha is real. A future change that fills the field unconditionally
+    /// fails here rather than in a fleet provenance comparison.
+    #[test]
+    fn provenance_never_publishes_a_placeholder_as_a_build_fact() {
+        let m = manifest("claustrum");
+        match &m.provenance {
+            None => assert_eq!(
+                credentials_core::contract::BUILD_REV,
+                "unknown",
+                "provenance is only omitted when this build genuinely has no stamped \
+                 revision; a stamped build must publish it"
+            ),
+            Some(p) => {
+                let sha = p
+                    .build_git_sha
+                    .as_deref()
+                    .expect("a present provenance block declares the one fact it has");
+                assert_ne!(
+                    sha, "unknown",
+                    "a placeholder must never be published as a build fact: the protocol \
+                     validates shape only, so `unknown` is a well-formed lie"
+                );
+                assert_eq!(
+                    sha,
+                    credentials_core::contract::BUILD_REV,
+                    "the manifest must report the same revision as --version, or two \
+                     surfaces disagree about which binary this is"
+                );
+            }
+        }
+        assert!(
+            m.provenance.as_ref().is_none_or(|p| p.validate().is_ok()),
+            "whatever is declared must satisfy the protocol's own validator"
         );
     }
 

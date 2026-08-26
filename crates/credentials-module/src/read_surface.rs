@@ -82,6 +82,28 @@ use crate::limiter::{Admission, FetchLimiter, GET_MANY_MAX};
 ///    with a smaller demand. The wrong value is one request field, so retrying the
 ///    identical request is futile but re-login or handle reaping is the wrong remedy.
 ///
+/// WHAT THIS REFUSAL STILL CANNOT SEE, recorded because a consumer named it and the
+/// boundary is not obvious. A demand that is SATISFIABLE but tight -- say 9 minutes
+/// against a 10-minute token -- refreshes on almost every get while never once being
+/// unsatisfiable, so it never reaches this arm. That is the same upstream cost as the
+/// pathology this refuses, wearing a legal demand.
+///
+/// The split on who could detect it, since neither side can alone:
+///   VISIBLE HERE      the numerator. A credential refreshing far above its own token
+///                     lifetime shows as an elevated `refresh_commit` rate in the chain.
+///   NOT VISIBLE HERE  the denominator. THIS VAULT DOES NOT RECORD READS, only
+///                     refreshes, so refreshes-per-read -- the ratio that actually names
+///                     the pathology -- is not computable from this side at any cost
+///                     short of writing a row per read on the hot path.
+///   NOT VISIBLE HERE  attribution. `refresh_commit` records `actor=vault` because the
+///                     vault performs the refresh; nothing names the triggering caller.
+///
+/// So it is detectable per-credential as a rate anomaly and not attributable to a
+/// consumer. Deliberately not built: no consumer has exhibited it (the one with the
+/// highest volume -- 1,114 admissions in 24h, one get each -- passes a 10-minute const
+/// against multi-hour tokens), and building a detector whose denominator does not exist
+/// would mean deciding to log every read first. That is a different argument.
+///
 /// Reachable only through a capability handle. [`GetScopedParams`] deliberately carries
 /// no refresh controls, so the principal-scoped grant path cannot express either lever.
 #[derive(Debug, Deserialize)]

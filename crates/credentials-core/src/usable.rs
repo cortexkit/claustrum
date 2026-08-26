@@ -79,8 +79,8 @@ pub enum Usability {
 #[derive(Debug, Clone)]
 pub struct RecordUsability {
     pub credential_id: String,
-    /// The stored lifecycle state (`active` / `needs_reauth` / `corrupt`), carried
-    /// verbatim so the caller need not re-read the column.
+    /// The stored lifecycle state (`active` / `needs_reauth` / `retired` / `corrupt`),
+    /// carried verbatim so the caller need not re-read the column.
     pub state: String,
     pub usability: Usability,
     /// True when the record claims an identity that resolves nothing -- an email with

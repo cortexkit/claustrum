@@ -39,7 +39,12 @@ pub enum AdminOpBody {
     },
     #[serde(rename = "admin.invalidate")]
     Invalidate { v: u32, id: String },
-    /// Clear `needs_reauth` back to active WITHOUT replacing the stored material: the
+    /// Reversibly stop serving a credential because an operator intentionally retired
+    /// it. This is the only admin operation that writes `retired`; all discovery paths
+    /// continue to use `needs_reauth` or `corrupt`.
+    #[serde(rename = "admin.logout")]
+    Logout { v: u32, id: String },
+    /// Clear `needs_reauth` or `retired` back to active WITHOUT replacing the stored material: the
     /// operator asserting the credential was marked dead in error.
     ///
     /// The counterpart to `Invalidate`, and NOT a substitute for `Store` -- it changes
@@ -92,6 +97,7 @@ impl AdminOpBody {
         match self {
             AdminOpBody::Store { v, .. }
             | AdminOpBody::Invalidate { v, .. }
+            | AdminOpBody::Logout { v, .. }
             | AdminOpBody::Reactivate { v, .. }
             | AdminOpBody::Remove { v, .. }
             | AdminOpBody::MintHandle { v, .. }
@@ -110,6 +116,7 @@ impl AdminOpBody {
         match self {
             AdminOpBody::Store { id, .. }
             | AdminOpBody::Invalidate { id, .. }
+            | AdminOpBody::Logout { id, .. }
             | AdminOpBody::Reactivate { id, .. }
             | AdminOpBody::Remove { id, .. }
             | AdminOpBody::MintHandle { id, .. }
@@ -194,6 +201,18 @@ pub fn apply(
             // `state_changed` rides the wire so the CLI can tell an operator whether
             // this call did anything. `handles_revoked` alone cannot: a credential
             // with no handles reports zero whether it was live or already dead.
+            Ok(serde_json::json!({
+                "handles_revoked": outcome.handles_revoked,
+                "state_changed": outcome.state_changed,
+                "intent_cleared": outcome.intent_cleared,
+            }))
+        }
+        AdminOpBody::Logout { id, .. } => {
+            // Keep the established `invalidate` audit label. Historic rows are
+            // intentionally not reclassified, and the current lifecycle state carries
+            // the operator's retirement intent without changing that chain vocabulary.
+            let ctx = AuditCtx::route_admin(AuditOp::Invalidate, actor);
+            let outcome = store.retire_and_revoke_all_audited(&id, ctx)?;
             Ok(serde_json::json!({
                 "handles_revoked": outcome.handles_revoked,
                 "state_changed": outcome.state_changed,
@@ -319,8 +338,10 @@ pub fn apply(
                 "credentials_total": health.credentials_total,
                 "active": health.active,
                 "needs_reauth": health.needs_reauth,
+                "retired": health.retired,
                 "corrupt": health.corrupt,
                 "needs_reauth_ids": health.needs_reauth_ids,
+                "retired_ids": health.retired_ids,
                 "corrupt_ids": health.corrupt_ids,
                 "open_intents": health.open_intents,
                 "fenced_out": health.fenced_out,

@@ -19,16 +19,18 @@
 //!   but must not keep serving as the authority). The detail distinguishes them
 //!   because the operator action differs: unreadable ⇒ check disk/lease; fenced
 //!   ⇒ find the newer writer.
-//! - `Degraded` — the store serves, but ≥1 credential needs operator action
-//!   (`needs_reauth` or `corrupt`). An expired token is a degraded DETAIL, never
-//!   `failing`: we must not let one credential needing re-auth trigger a daemon
-//!   restart of an otherwise-healthy vault.
-//! - `Ok` — the store is readable, not fenced out, and every record is Active.
+//! - `Degraded` — the store serves, but ≥1 credential needs operator action because
+//!   it is `needs_reauth` or `corrupt`. `retired` is intentionally excluded: it records
+//!   an operator decision, not an alarm. An expired token is a degraded DETAIL, never
+//!   `failing`: we must not let one credential needing re-auth trigger a daemon restart
+//!   of an otherwise-healthy vault.
+//! - `Ok` — the store is readable, not fenced out, and every record is Active or
+//!   intentionally Retired.
 
 use crate::store::{RecordMeta, RecordState};
 
 /// Cap on how many affected credential ids the snapshot carries per bucket. The
-/// counts (`needs_reauth`/`corrupt`) remain the true totals; the id lists are a
+/// counts (`needs_reauth`/`retired`/`corrupt`) remain the true totals; the id lists are a
 /// bounded sample so the health metrics stay well under the prober's 16 KiB cap
 /// even on a pathologically large vault. For a real credential vault (dozens of
 /// records) this always lists every affected id.
@@ -74,6 +76,7 @@ pub struct VaultHealth {
     pub credentials_total: usize,
     pub active: usize,
     pub needs_reauth: usize,
+    pub retired: usize,
     pub corrupt: usize,
     /// The ids of credentials in `needs_reauth` (capped at [`MAX_LISTED_IDS`]) so
     /// the report NAMES which credential to re-import, not just how many. Credential
@@ -81,6 +84,9 @@ pub struct VaultHealth {
     /// health lane is authenticated-clients-only, so listing them turns an alert
     /// into a one-read action.
     pub needs_reauth_ids: Vec<String>,
+    /// The ids of intentionally `retired` credentials, same cap and rationale. This
+    /// keeps parked credentials visible without treating them as an alarm.
+    pub retired_ids: Vec<String>,
     /// The ids of `corrupt` (quarantined) credentials, same cap and rationale.
     pub corrupt_ids: Vec<String>,
     /// Open refresh-intent rows at snapshot time. Carried as an opaque metric
@@ -110,8 +116,10 @@ impl VaultHealth {
             credentials_total: 0,
             active: 0,
             needs_reauth: 0,
+            retired: 0,
             corrupt: 0,
             needs_reauth_ids: Vec::new(),
+            retired_ids: Vec::new(),
             corrupt_ids: Vec::new(),
             open_intents: 0,
             audit_seq: None,
@@ -141,8 +149,10 @@ impl VaultHealth {
     ) -> Self {
         let mut active = 0;
         let mut needs_reauth = 0;
+        let mut retired = 0;
         let mut corrupt = 0;
         let mut needs_reauth_ids = Vec::new();
+        let mut retired_ids = Vec::new();
         let mut corrupt_ids = Vec::new();
         for (id, meta) in metas {
             match meta.state {
@@ -151,6 +161,12 @@ impl VaultHealth {
                     needs_reauth += 1;
                     if needs_reauth_ids.len() < MAX_LISTED_IDS {
                         needs_reauth_ids.push(id.clone());
+                    }
+                }
+                RecordState::Retired => {
+                    retired += 1;
+                    if retired_ids.len() < MAX_LISTED_IDS {
+                        retired_ids.push(id.clone());
                     }
                 }
                 RecordState::Corrupt => {
@@ -180,8 +196,10 @@ impl VaultHealth {
             credentials_total: metas.len(),
             active,
             needs_reauth,
+            retired,
             corrupt,
             needs_reauth_ids,
+            retired_ids,
             corrupt_ids,
             open_intents,
             audit_seq: None,
@@ -240,6 +258,21 @@ mod tests {
         assert_eq!(h.needs_reauth, 1);
         // And it NAMES which credential, so the alert is actionable in one read.
         assert_eq!(h.needs_reauth_ids, vec!["oauth:google".to_string()]);
+        assert!(h.corrupt_ids.is_empty());
+    }
+
+    #[test]
+    fn a_retired_credential_is_visible_without_degrading_health() {
+        let metas = vec![
+            meta_id("apikey:active", RecordState::Active),
+            meta_id("apikey:parked", RecordState::Retired),
+        ];
+        let h = VaultHealth::summarize(&metas, 0, false);
+        assert_eq!(h.status, VaultHealthStatus::Ok);
+        assert_eq!(h.active, 1);
+        assert_eq!(h.retired, 1);
+        assert_eq!(h.retired_ids, vec!["apikey:parked".to_string()]);
+        assert!(h.needs_reauth_ids.is_empty());
         assert!(h.corrupt_ids.is_empty());
     }
 

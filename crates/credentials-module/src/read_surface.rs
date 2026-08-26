@@ -1151,7 +1151,8 @@ impl ReadSurface {
                     ready: !fenced_out
                         && matches!(meta.state, credentials_core::store::RecordState::Active),
                     last_error_code: match meta.state {
-                        credentials_core::store::RecordState::NeedsReauth => {
+                        credentials_core::store::RecordState::NeedsReauth
+                        | credentials_core::store::RecordState::Retired => {
                             Some(ReadError::NeedsReauth)
                         }
                         credentials_core::store::RecordState::Corrupt => Some(ReadError::Corrupt),

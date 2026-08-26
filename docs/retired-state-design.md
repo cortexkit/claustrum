@@ -2,9 +2,9 @@
 
 <!-- built-when: crates/credentials-core/src/record.rs::Retired -->
 
-**Status: DESIGNED, NOT BUILT (2026-08-25).** No code implements this. `logout` still
-writes `NeedsReauth` and the vault still reports `Degraded` while a retired credential
-sits in the store. Read this as what is intended, not as what happens.
+**Status: BUILT (2026-08-26).** `logout` writes `Retired`; health keeps intentionally
+parked credentials visible without treating them as `Degraded`. The transition table
+and deliberately excluded changes below describe the shipped behavior.
 
 ## The defect, with its field instance
 

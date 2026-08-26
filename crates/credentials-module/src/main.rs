@@ -209,6 +209,22 @@ impl RouteEpochs {
     /// announcement with no join to its wire): ABSENCE OF A RECORD READ AS ABSENCE OF AN
     /// EVENT. The vault's `auth_events` emptiness is honest because every refusal path
     /// there provably writes. This emptiness was not.
+    ///
+    /// WHAT A CLEAN DROP RECORD DOES NOT PROVE, learned by over-reading one on
+    /// 2026-08-26 and worth stating before someone repeats it: it does NOT mean no
+    /// consumer held a stale binding. It means no stale frame REACHED THIS CHECK.
+    ///
+    /// The daemon relay sits below this code and refuses a frame for a channel it no
+    /// longer holds with a class-less `unknown_channel`. Those frames never arrive here,
+    /// so this record stays empty while a stale-binding outage is in progress one layer
+    /// down. During a fleet speech outage I read an empty record and concluded "the
+    /// stale-binding hypothesis is dead"; the cause was a stale binding, refused by the
+    /// relay after a restart of this module. The operational answer (not custody, not
+    /// this wire) was right and the mechanical one was wrong.
+    ///
+    /// So this instrument answers exactly one question: did a frame reach MY endpoint
+    /// carrying an epoch I do not hold. A consumer-visible stall with a clean record
+    /// here points DOWN to the relay, not away from stale bindings.
     fn note_drop(&self, channel: u16, epoch: u32) -> bool {
         let mut seen = self.1.lock().unwrap_or_else(|p| p.into_inner());
         seen.insert((channel, epoch))

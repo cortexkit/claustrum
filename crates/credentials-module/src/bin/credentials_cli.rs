@@ -65,6 +65,29 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("error: {e}");
+            // RESTATE A USAGE REFUSAL AFTER THE HELP PAGE, because the help page is
+            // longer than the refusal and buries it.
+            //
+            // A usage error prints `error: <what was wrong>` and then the verb's whole
+            // help text, so the LAST thing on screen is a global-flags footer that looks
+            // like ordinary help output. Transcripts are routinely captured with `tail`,
+            // and a reader seeing only the tail cannot tell a refusal from a successful
+            // run followed by a hint.
+            //
+            // Measured 2026-08-25: the supervisor seat ran two wrong flag shapes during a
+            // deploy probe (`logout <id>` positionally, and `remove --id <id> --yes` with
+            // a flag that does not exist). Both correctly exited 1 with the error on
+            // stderr and nothing on stdout -- the CLI fails closed and that part is
+            // right. What caught them was asserting on the EFFECT (list state, serving
+            // count) rather than the command output, and they said plainly they could not
+            // tell from their transcript whether the commands had run.
+            //
+            // So the exit code was always honest and the rendering was not. One line at
+            // the end costs nothing and makes a tailed transcript self-describing.
+            if let CliError::Usage(m) = &e {
+                let first = m.lines().next().unwrap_or("invalid usage");
+                eprintln!("\nerror: {first} — nothing ran, nothing changed.");
+            }
             e.exit_code()
         }
     }

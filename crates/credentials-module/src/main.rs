@@ -1547,6 +1547,297 @@ mod tests {
         (surface, store, db_path)
     }
 
+    /// A deterministic refresh adapter for minimum-TTL read tests. Its counter proves
+    /// the read path performed one exchange, not merely that a stored version changed.
+    struct TtlFixtureAdapter {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        fresh_ttl_ms: i64,
+    }
+
+    #[async_trait::async_trait]
+    impl credentials_core::refresh_adapters::RefreshAdapter for TtlFixtureAdapter {
+        fn name(&self) -> &str {
+            "ttl-fixture"
+        }
+
+        async fn refresh(
+            &self,
+            credential: &credentials_core::oauth::OAuthCredential,
+            _http: &dyn credentials_core::refresh_adapters::HttpTransport,
+        ) -> Result<
+            credentials_core::refresh_adapters::RefreshedTokens,
+            credentials_core::refresh_adapters::RefreshError,
+        > {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(credentials_core::refresh_adapters::RefreshedTokens {
+                access_token: "fresh-after-ttl-check".into(),
+                refresh_token: credential.refresh_token.clone(),
+                expires_at_ms: Some(test_now_ms().saturating_add(self.fresh_ttl_ms)),
+            })
+        }
+    }
+
+    fn test_now_ms() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as i64)
+            .unwrap_or(0)
+    }
+
+    fn ttl_surface(
+        seed: u8,
+        fresh_ttl_ms: i64,
+    ) -> (
+        Arc<ReadSurface>,
+        Arc<EncryptedStore>,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        let (_unused_surface, store, _db_path) = tmp_surface_with_store(seed);
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let adapter = TtlFixtureAdapter {
+            calls: Arc::clone(&calls),
+            fresh_ttl_ms,
+        };
+        let http = Arc::new(ReqwestTransport::new().expect("http"));
+        let engine = Arc::new(RefreshEngine::new(
+            Arc::clone(&store),
+            vec![Arc::new(adapter)],
+            http,
+        ));
+        let surface = Arc::new(ReadSurface::new(engine, FetchLimiter::new(Caps::default())));
+        (surface, store, calls)
+    }
+
+    fn seed_ttl_refreshable(
+        store: &EncryptedStore,
+        credential_id: &str,
+        initial_ttl_ms: i64,
+    ) -> String {
+        store
+            .create(
+                credential_id,
+                &VaultRecord::new_oauth(
+                    "test",
+                    "ttl-fixture",
+                    credentials_core::oauth::OAuthCredential {
+                        access_token: "stored-before-refresh".into(),
+                        refresh_token: "refresh-token".into(),
+                        expires_at_ms: Some(test_now_ms().saturating_add(initial_ttl_ms)),
+                        token_url: "https://example.invalid/token".into(),
+                        client_id: None,
+                        scopes: Vec::new(),
+                    },
+                    b"stored-before-refresh".to_vec(),
+                ),
+            )
+            .expect("seed refreshable credential");
+        let handle = credentials_core::store::mint_handle().expect("mint handle");
+        store
+            .put_handle_hash(
+                &handle.hash,
+                credential_id,
+                AuditCtx::admin(AuditOp::MintHandle),
+            )
+            .expect("bind handle");
+        handle.raw
+    }
+
+    fn seed_ttl_static(store: &EncryptedStore, credential_id: &str) -> String {
+        store
+            .create(
+                credential_id,
+                &VaultRecord::new_static(
+                    CredentialKind::ApiKey,
+                    "test",
+                    b"static-before-refresh".to_vec(),
+                    Some(test_now_ms().saturating_add(10 * 60 * 1000)),
+                ),
+            )
+            .expect("seed static credential");
+        let handle = credentials_core::store::mint_handle().expect("mint handle");
+        store
+            .put_handle_hash(
+                &handle.hash,
+                credential_id,
+                AuditCtx::admin(AuditOp::MintHandle),
+            )
+            .expect("bind handle");
+        handle.raw
+    }
+
+    /// A post-refresh lifetime that still misses the caller's demand is a request bound,
+    /// not a dead credential. The counter makes a second exchange observable: a retry loop
+    /// would return the same refusal but increment it twice.
+    #[tokio::test]
+    async fn impossible_min_ttl_refuses_after_one_exchange_with_paired_wire_error() {
+        const INITIAL_TTL_MS: i64 = 10 * 60 * 1000;
+        const FRESH_TTL_MS: i64 = 60 * 60 * 1000;
+        const DEMAND_MS: i64 = 2 * 60 * 60 * 1000;
+
+        let (surface, store, calls) = ttl_surface(91, FRESH_TTL_MS);
+        let handle = seed_ttl_refreshable(&store, "oauth:ttl-unsatisfiable", INITIAL_TTL_MS);
+        let outcome = surface
+            .get(
+                91,
+                &GetParams {
+                    handle,
+                    min_ttl_ms: Some(DEMAND_MS),
+                    force_refresh: false,
+                },
+            )
+            .await;
+
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "an unsatisfiable demand must make exactly one upstream exchange"
+        );
+        assert_eq!(
+            serde_json::to_value(&outcome).expect("serialize refusal"),
+            serde_json::json!({
+                "error": {
+                    "code": "ttl_unsatisfiable",
+                    "class": "context_overflow",
+                }
+            }),
+            "the wire must carry the refusal detail and class together"
+        );
+        let read_surface::GetOutcome::Err { error } = outcome else {
+            panic!("a fresh token shorter than the demand must refuse");
+        };
+        assert_eq!(error.code, read_surface::ReadError::TtlUnsatisfiable);
+        assert_eq!(error.class, read_surface::ErrorClass::ContextOverflow);
+    }
+
+    /// A missing `min_ttl_ms` states no requirement. This is intentionally the same
+    /// credential shape as the refusal test so a default floor cannot hide behind a
+    /// different record type or expiry.
+    #[tokio::test]
+    async fn absent_min_ttl_does_not_apply_a_default_floor() {
+        let (surface, store, calls) = ttl_surface(92, 60 * 60 * 1000);
+        let handle = seed_ttl_refreshable(&store, "oauth:ttl-absent", 10 * 60 * 1000);
+        let outcome = surface
+            .get(
+                92,
+                &GetParams {
+                    handle,
+                    min_ttl_ms: None,
+                    force_refresh: false,
+                },
+            )
+            .await;
+
+        let read_surface::GetOutcome::Ok(result) = outcome else {
+            panic!("a request without a demand must serve the stored token");
+        };
+        assert_eq!(result.payload, b"stored-before-refresh");
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "an absent demand must not supply an implicit refresh floor"
+        );
+    }
+
+    #[tokio::test]
+    async fn satisfiable_min_ttl_serves_the_fresh_token() {
+        let (surface, store, calls) = ttl_surface(93, 60 * 60 * 1000);
+        let handle = seed_ttl_refreshable(&store, "oauth:ttl-satisfiable", 10 * 60 * 1000);
+        let outcome = surface
+            .get(
+                93,
+                &GetParams {
+                    handle,
+                    min_ttl_ms: Some(30 * 60 * 1000),
+                    force_refresh: false,
+                },
+            )
+            .await;
+
+        let read_surface::GetOutcome::Ok(result) = outcome else {
+            panic!("a fresh token that meets the demand must be served");
+        };
+        assert_eq!(result.payload, b"fresh-after-ttl-check");
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the caller's minimum-TTL demand must trigger one refresh"
+        );
+    }
+
+    /// A static record cannot produce the required fresh-token proof. Even a huge demand
+    /// must therefore retain the read surface's existing serve-as-stored behavior.
+    #[tokio::test]
+    async fn static_credential_with_oversized_min_ttl_is_served_without_a_refusal() {
+        let (surface, store, calls) = ttl_surface(94, 60 * 60 * 1000);
+        let handle = seed_ttl_static(&store, "apikey:ttl-static");
+        let outcome = surface
+            .get(
+                94,
+                &GetParams {
+                    handle,
+                    min_ttl_ms: Some(2 * 60 * 60 * 1000),
+                    force_refresh: false,
+                },
+            )
+            .await;
+
+        let read_surface::GetOutcome::Ok(result) = outcome else {
+            panic!("a static credential must not refuse without an exchange");
+        };
+        assert_eq!(result.payload, b"static-before-refresh");
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a static credential has no exchange path to prove the demand impossible"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_many_keeps_a_ttl_refusal_in_its_item_position() {
+        let (surface, store, calls) = ttl_surface(95, 60 * 60 * 1000);
+        let short_lived = seed_ttl_refreshable(&store, "oauth:ttl-batch", 10 * 60 * 1000);
+        let ordinary = seed_ttl_static(&store, "apikey:ttl-batch");
+        let outcomes = surface
+            .get_many(
+                95,
+                &GetManyParams {
+                    items: vec![
+                        GetParams {
+                            handle: short_lived,
+                            min_ttl_ms: Some(2 * 60 * 60 * 1000),
+                            force_refresh: false,
+                        },
+                        GetParams {
+                            handle: ordinary,
+                            min_ttl_ms: None,
+                            force_refresh: false,
+                        },
+                    ],
+                },
+            )
+            .await;
+
+        assert_eq!(
+            outcomes.len(),
+            2,
+            "one item refusal must not collapse the batch"
+        );
+        let read_surface::GetOutcome::Err { error } = &outcomes[0] else {
+            panic!("the first item must retain its TTL refusal");
+        };
+        assert_eq!(error.code, read_surface::ReadError::TtlUnsatisfiable);
+        assert_eq!(error.class, read_surface::ErrorClass::ContextOverflow);
+        let read_surface::GetOutcome::Ok(result) = &outcomes[1] else {
+            panic!("the later ordinary item must keep its position and serve");
+        };
+        assert_eq!(result.payload, b"static-before-refresh");
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "only the short-lived batch item may exchange"
+        );
+    }
+
     /// Build a scoped-read rig whose route-bind registry and read surface share one
     /// store. The route helper below drives the real request dispatcher rather than
     /// calling `get_scoped` directly, so the principal snapshot is part of the proof.

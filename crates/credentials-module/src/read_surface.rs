@@ -53,64 +53,37 @@ use crate::limiter::{Admission, FetchLimiter, GET_MANY_MAX};
 
 /// A `credential.get` request.
 ///
-/// TWO PARAMETERS REACH THE UPSTREAM EXCHANGE, NOT ONE, and only one of them looks
-/// like it does. `force_refresh` is the obvious lever and its unboundedness is
-/// documented with its trade-off at `check_limiter`. `min_ttl_ms` reaches the SAME
-/// exchange through `is_stale`, is caller-supplied, and is clamped nowhere between
-/// this struct and that evaluation — so a demand larger than the token's own lifetime
-/// makes EVERY get refresh. That is `force_refresh` with no boolean to grep for, and
-/// it is why the audit performed on one path had not been performed on the other: an
-/// external contributor found it on 2026-08-24, not a reviewer of this file.
+/// `force_refresh` and `min_ttl_ms` can both reach the upstream exchange. The latter is
+/// caller-supplied and deliberately unclamped: a demand larger than a token's lifetime
+/// otherwise behaves like `force_refresh` on every get, silently consuming a shared
+/// provider budget.
 ///
-/// The failure it produces is a footgun aimed at a careful caller rather than an
-/// attack. A consumer asking for a comfortable margin gets permanent refresh,
-/// silently, and nothing in the response says so.
+/// A pre-refresh lifetime clamp is unsound. The only available proxy,
+/// `expires_at_ms - updated_at_ms`, mistakes the last record write for the token issue
+/// time. Imported tokens can have lived for a while before that write, so the proxy
+/// underestimates their lifetime and can refuse satisfiable requests.
 ///
-/// WHY THE OBVIOUS CLAMP IS UNSOUND, so it is not re-proposed: the nearest available
-/// lifetime proxy is `expires_at_ms - updated_at_ms`, and `updated_at_ms` is the last
-/// record WRITE, not the token's issue time. For an imported token those differ by
-/// however long the token had already lived, so the computed lifetime underestimates
-/// and the clamp would refuse satisfiable requests. The sound form is post-refresh: a
-/// freshly minted token that STILL fails the caller's demand proves the demand is
-/// unsatisfiable for this credential, with no proxy involved.
+/// Shipped behavior is therefore post-refresh. When this request's supplied
+/// `min_ttl_ms` performs one exchange and the fresh token still misses that demand,
+/// `credential.get` returns `ttl_unsatisfiable` / `context_overflow`. It evaluates once
+/// after the exchange, never before it or in a retry loop. If no exchange occurred,
+/// including for a static credential, there is no fresh-token proof and the read is
+/// served as before.
 ///
-/// SHAPE SETTLED ON ISSUE #9 (2026-08-25), NOT BUILT. The reporter withdrew the
-/// pre-refresh clamp on the objection above — it fails in the direction a caller
-/// cannot route around, refusing requests that were satisfiable — and took the
-/// post-refresh form. What remains open is the consumer-visible half: after one
-/// exchange, a demand the fresh token cannot meet is PROVEN unsatisfiable, and the
-/// caller should learn that instead of receiving a token that silently fails their
-/// stated requirement while every subsequent get burns another exchange. That is a new
-/// refusal on this surface, so it is gated on the same consultation the
-/// report-marks-stale change was: three consumers answering at source about what they
-/// actually pass here.
+/// TWO CONSULTATION RESULTS ARE BINDING ON THE WIRE SHAPE:
 ///
-/// TWO CONSULTATION RESULTS ARE ALREADY BINDING ON THE SHAPE, recorded here because
-/// they are constraints a later implementer would not re-derive:
+/// 1. The refusal fires only when `min_ttl_ms` is present. There is no default or
+///    implicit floor: a caller without a demand cannot have one unsatisfied. In
+///    particular, `github_app` installation tokens live one hour, so an implicit
+///    30-minute floor would make otherwise ordinary gets timing-dependent.
 ///
-/// 1. THE REFUSAL MAY FIRE ONLY WHEN A DEMAND IS PRESENT ON THE REQUEST. No default,
-///    no implicit floor when `min_ttl_ms` is absent. A caller that states no demand
-///    cannot have one unsatisfied, and that is what makes this change invisible to
-///    every consumer today. plexus named the shape that would break the fleet: their
-///    `github_app` installation tokens live ONE HOUR, so an implicit 30-minute floor
-///    would refuse half their gets on timing luck alone.
+/// 2. The class is `context_overflow`, not `permanent`. `permanent` describes a
+///    credential that cannot serve, while this credential remains usable for callers
+///    with a smaller demand. The wrong value is one request field, so retrying the
+///    identical request is futile but re-login or handle reaping is the wrong remedy.
 ///
-/// 2. THE CLASS IS `context_overflow`, NOT `permanent`, and this surface already has
-///    the precedent: `TooManyItems` (a `get_many` over the cap) is the same shape --
-///    the caller asked for more than the request bounds allow and must lower the ask.
-///    plexus preferred `permanent` on the reasoning that "this record can never satisfy
-///    the demand" is a decision rather than a fault. True, and the class still misfits,
-///    because `permanent` on this surface has only ever been a statement about the
-///    CREDENTIAL -- not_found, corrupt, refresh_unsupported. Their own wildcard arm
-///    shows the cost: an unknown `permanent` code maps to NotFound and the holder
-///    treats the handle as dead. Here the handle is fine, the credential is fine and
-///    serving other callers, and the only wrong thing is one number in the caller's
-///    request. A class that invites re-login or handle-reaping as the repair points at
-///    the wrong remedy entirely.
-///
-/// Reachable only through a capability handle. [`GetScopedParams`] deliberately
-/// carries no refresh controls, so the principal-scoped grant path cannot express
-/// either lever.
+/// Reachable only through a capability handle. [`GetScopedParams`] deliberately carries
+/// no refresh controls, so the principal-scoped grant path cannot express either lever.
 #[derive(Debug, Deserialize)]
 pub struct GetParams {
     pub handle: String,
@@ -295,6 +268,9 @@ pub enum ReadError {
     Corrupt,
     /// `get_many` exceeded the cap.
     TooManyItems,
+    /// A fresh token minted for this request still misses its supplied `min_ttl_ms`.
+    /// The credential remains usable for callers that ask for less time.
+    TtlUnsatisfiable,
     /// `credential.sign` was asked to sign with a credential that is not a signing
     /// key. THE FENCE, not a diagnostic: without it a handle for any stored secret
     /// could produce signatures under it and this module would be a general signing
@@ -391,9 +367,10 @@ impl ReadError {
             // A refresh attempt failed (provider may recover) or the master key is
             // unresolvable right now (keychain/lease may recover).
             ReadError::RefreshFailed | ReadError::VaultLocked => ErrorClass::Transient,
-            // Over the `get_many` cap, or over the signing-payload cap: reduce and
-            // retry. Both are bounds on ONE request rather than statements about the
-            // credential, which is what separates them from the permanent arm.
+            // Over the `get_many` cap, over the signing-payload cap, or a minimum-TTL
+            // demand a fresh token cannot meet: reduce the request and retry. All are
+            // bounds on ONE request rather than statements about the credential, which
+            // separates them from the permanent arm.
             //
             // REDUCE-AND-RETRY, NEVER WAIT-AND-RETRY, and consumers do file this in the
             // transient family by reflex. Measured 2026-08-25: a careful consumer
@@ -405,12 +382,14 @@ impl ReadError {
             // does not.
             //
             // It stops being merely a spin the moment a code under this class costs
-            // something to evaluate. The planned `ttl_unsatisfiable` refuses only after
-            // a real token exchange has PROVEN the demand unsatisfiable, so a backoff
-            // loop on it buys one upstream mint per attempt -- reproducing the exact
-            // amplification the refusal exists to prevent, against a vendor budget
-            // shared with every other holder of that App.
-            ReadError::TooManyItems | ReadError::SignPayloadTooLarge => ErrorClass::ContextOverflow,
+            // something to evaluate. `ttl_unsatisfiable` refuses only after a real token
+            // exchange has PROVEN the demand unsatisfiable, so a backoff loop on it buys
+            // one upstream mint per attempt -- reproducing the exact amplification the
+            // refusal exists to prevent, against a vendor budget shared with every other
+            // holder of that App.
+            ReadError::TooManyItems
+            | ReadError::SignPayloadTooLarge
+            | ReadError::TtlUnsatisfiable => ErrorClass::ContextOverflow,
         }
     }
 }
@@ -561,6 +540,16 @@ fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+/// A known expiry meets the caller's demand only when its remaining lifetime is strictly
+/// greater than the threshold. An absent expiry is not proof of a short lifetime, so it
+/// cannot prove the demand unsatisfiable.
+fn meets_min_ttl(record: &credentials_core::record::VaultRecord, min_ttl_ms: i64) -> bool {
+    record
+        .expires_at_ms
+        .map(|expires_at_ms| now_ms().saturating_add(min_ttl_ms) < expires_at_ms)
+        .unwrap_or(true)
 }
 
 impl ReadSurface {
@@ -741,10 +730,22 @@ impl ReadSurface {
 
         match self
             .engine
-            .get(&credential_id, params.min_ttl_ms, params.force_refresh)
+            .get_with_refresh_status(&credential_id, params.min_ttl_ms, params.force_refresh)
             .await
         {
-            Ok(record) => {
+            Ok(refreshed) => {
+                // A refusal is sound only after THIS request minted once for its stated
+                // demand. The status excludes static reads and a single-flight follower
+                // that merely observed another writer's newer version, neither of which
+                // can prove a fresh token fails this caller's request.
+                if refreshed.refreshed_for_min_ttl
+                    && params
+                        .min_ttl_ms
+                        .is_some_and(|min_ttl_ms| !meets_min_ttl(&refreshed.record, min_ttl_ms))
+                {
+                    return err(ReadError::TtlUnsatisfiable);
+                }
+                let record = refreshed.record;
                 if record.kind == credentials_core::record::CredentialKind::SigningKey {
                     // A signing-key handle also authorizes `sign` and `public_key`, but
                     // its payload is PKCS#8 private material. No read consumer needs it,
@@ -1467,6 +1468,10 @@ mod error_class_tests {
         assert_eq!(ReadError::RefreshFailed.class(), ErrorClass::Transient);
         assert_eq!(ReadError::VaultLocked.class(), ErrorClass::Transient);
         assert_eq!(ReadError::TooManyItems.class(), ErrorClass::ContextOverflow);
+        assert_eq!(
+            ReadError::TtlUnsatisfiable.class(),
+            ErrorClass::ContextOverflow
+        );
     }
 
     /// The wire body carries BOTH the producer detail (`code`) and the produced class,
@@ -1474,14 +1479,14 @@ mod error_class_tests {
     /// decision the vault would make.
     #[test]
     fn error_body_carries_consistent_class() {
-        let out = err(ReadError::NeedsReauth);
+        let out = err(ReadError::TtlUnsatisfiable);
         let json = serde_json::to_string(&out).expect("serialize outcome");
         assert!(
-            json.contains("\"code\":\"needs_reauth\""),
+            json.contains("\"code\":\"ttl_unsatisfiable\""),
             "detail code missing: {json}"
         );
         assert!(
-            json.contains("\"class\":\"auth_required\""),
+            json.contains("\"class\":\"context_overflow\""),
             "class tag missing: {json}"
         );
     }

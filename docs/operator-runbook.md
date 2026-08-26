@@ -997,3 +997,37 @@ it identifies a *(commit, path, toolchain)* triple. That is exactly what a deplo
 needs — both sides are in hand — and useless in an incident, where only the running
 binary is. Rebuilding candidate commits until a UUID matches does not work either,
 for the same reason. Ask `--version` instead.
+
+## A refresh-rate anomaly: ask for the denominator before building one
+
+A credential refreshing far above its own token lifetime is the signature of a caller
+whose `min_ttl_ms` demand is close to that lifetime — satisfiable, so it never trips
+`ttl_unsatisfiable`, while forcing an upstream mint on nearly every get.
+
+**The vault sees half of this and cannot see the other half.** It records refreshes and
+NOT reads, so refreshes-per-read — the ratio that actually names the pathology — is not
+computable here. `refresh_commit` also records `actor=vault`, so nothing names the
+triggering caller.
+
+**Do not respond by adding read recording.** That is a row per read on the hot path, and
+it is the expensive fix that will look necessary in the moment. Ask the consumer
+instead: a consumer that exports anything per admission already keeps the denominator
+durably, for its own reasons, and can answer per-credential in one query.
+
+Worked example, measured 2026-08-26 on the two credentials this vault shares with broca:
+
+```
+oauth:anthropic    3 refreshes/24h    35.1 reads/day    ratio 0.09
+oauth:xai          4 refreshes/24h    55.4 reads/day    ratio 0.07
+```
+
+A tight demand drives that ratio toward 1.0. Both are an order of magnitude below it.
+
+Two caveats that came with the numbers and matter for reading them later:
+
+- **Take the ratio as of today, not the raw rates.** Consumer volume moves with fleet
+  activity, so a stale denominator makes a healthy credential look sick.
+- **This only works for consumers that keep a durable per-admission record.** It holds
+  for broca because billing forces it. A consumer that reads credentials without
+  exporting anything has no denominator to offer, and for those the anomaly stays
+  detectable-but-unattributable.

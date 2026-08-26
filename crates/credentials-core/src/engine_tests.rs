@@ -206,6 +206,50 @@ async fn refresh_on_stale_commits_new_tokens_and_bumps_version() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// The read surface may refuse a TTL demand only when this status says its own demand
+/// caused the exchange. A returned record version alone would also change after an admin
+/// write or another reader's single-flight leader, neither of which proves this request.
+#[tokio::test]
+async fn refresh_status_marks_only_an_exchange_triggered_by_min_ttl() {
+    let (root, d) = tmp_descriptor();
+    let store = open_store(&d, 47);
+    let mut record = stale_oauth_record();
+    let initial_expiry = now_ms().saturating_add(10 * 60 * 1000);
+    record.expires_at_ms = Some(initial_expiry);
+    record.oauth.as_mut().expect("oauth record").expires_at_ms = Some(initial_expiry);
+    store.create("id", &record).unwrap();
+    let (eng, calls) = engine(store, StubAdapter::new("stub"));
+
+    let demand_refresh = eng
+        .get_with_refresh_status("id", Some(2 * 60 * 60 * 1000), false)
+        .await
+        .expect("refresh for demand");
+    assert!(
+        demand_refresh.refreshed_for_min_ttl,
+        "the engine must report the actual exchange that a too-short minimum triggered"
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "the demand path must exchange exactly once"
+    );
+
+    let forced_without_demand = eng
+        .get_with_refresh_status("id", None, true)
+        .await
+        .expect("forced refresh");
+    assert!(
+        !forced_without_demand.refreshed_for_min_ttl,
+        "a refresh with no TTL demand cannot prove an absent request requirement"
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "the forced read is distinct from the one demand-triggered exchange"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[tokio::test]
 async fn empty_refresh_success_clears_intent_without_committing() {
     let (root, d) = tmp_descriptor();

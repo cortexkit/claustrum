@@ -117,6 +117,18 @@ pub enum EngineError {
     RefreshFailed(RefreshError),
 }
 
+/// A credential served by [`RefreshEngine::get_with_refresh_status`].
+///
+/// `refreshed_for_min_ttl` is true only when THIS read completed one upstream exchange
+/// after its supplied minimum-TTL demand found the old token too short. A caller must not
+/// infer a fresh mint from a record version alone: another request or an admin write can
+/// move the version without this read proving why the replacement exists.
+#[derive(Debug)]
+pub struct GetWithRefreshStatus {
+    pub record: VaultRecord,
+    pub refreshed_for_min_ttl: bool,
+}
+
 impl std::fmt::Display for EngineError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -209,6 +221,21 @@ impl RefreshEngine {
         min_ttl_ms: Option<i64>,
         force_refresh: bool,
     ) -> Result<VaultRecord, EngineError> {
+        self.get_with_refresh_status(credential_id, min_ttl_ms, force_refresh)
+            .await
+            .map(|result| result.record)
+    }
+
+    /// Read a credential and report whether this read itself completed an exchange for
+    /// its minimum-TTL demand. The status is deliberately narrower than "the version
+    /// changed": a concurrent refresh or admin write is not proof that this request
+    /// minted a token against its demand.
+    pub async fn get_with_refresh_status(
+        &self,
+        credential_id: &str,
+        min_ttl_ms: Option<i64>,
+        force_refresh: bool,
+    ) -> Result<GetWithRefreshStatus, EngineError> {
         let (initial, stale_pending) = self.store.get_with_stale_pending(credential_id)?;
         if stale_pending && !initial.is_refreshable() {
             // A stale marker means a consumer already refused this exact token. A
@@ -226,12 +253,19 @@ impl RefreshEngine {
             )?;
             // If a concurrent write moved the version, return the replacement rather
             // than incorrectly refusing the record this get did not inspect.
-            return Ok(self.store.get(credential_id)?);
+            return Ok(GetWithRefreshStatus {
+                record: self.store.get(credential_id)?,
+                refreshed_for_min_ttl: false,
+            });
         }
 
+        let refresh_requested_by_min_ttl = self.is_below_min_ttl(&initial, min_ttl_ms);
         let wants_refresh = force_refresh || stale_pending || self.is_stale(&initial, min_ttl_ms);
         if !wants_refresh || !initial.is_refreshable() {
-            return Ok(initial);
+            return Ok(GetWithRefreshStatus {
+                record: initial,
+                refreshed_for_min_ttl: false,
+            });
         }
 
         // Single-flight: serialize refreshes for this credential.
@@ -241,14 +275,21 @@ impl RefreshEngine {
         // Re-read under the lock: a prior holder may have already refreshed. If the
         // version moved, that holder did the upstream call — return their result
         // without a second one (this is what makes N concurrent gets ⇒ 1 call, and
-        // it is correct even under force_refresh).
+        // it is correct even under force_refresh). It also means this request has no
+        // exchange proof of its own for a later TTL refusal.
         let (current, _) = self.store.get_with_stale_pending(credential_id)?;
         if current.record_version != initial.record_version {
-            return Ok(current);
+            return Ok(GetWithRefreshStatus {
+                record: current,
+                refreshed_for_min_ttl: false,
+            });
         }
 
         self.do_refresh(credential_id, &current).await?;
-        Ok(self.store.get(credential_id)?)
+        Ok(GetWithRefreshStatus {
+            record: self.store.get(credential_id)?,
+            refreshed_for_min_ttl: refresh_requested_by_min_ttl,
+        })
     }
 
     /// Whether a record's access token is stale: empty, expired (within skew), or
@@ -274,10 +315,20 @@ impl RefreshEngine {
         if oauth.is_access_expired(now, self.skew_ms) {
             return true;
         }
-        if let (Some(min_ttl), Some(exp)) = (min_ttl_ms, oauth.expires_at_ms) {
-            return now.saturating_add(min_ttl) >= exp;
-        }
-        false
+        self.is_below_min_ttl(record, min_ttl_ms)
+    }
+
+    /// Whether a known expiry is at or below the caller's stated minimum. Credentials
+    /// without an expiry do not make this claim: their lifetime is unknown, not proven
+    /// too short.
+    fn is_below_min_ttl(&self, record: &VaultRecord, min_ttl_ms: Option<i64>) -> bool {
+        let Some(oauth) = record.oauth.as_ref() else {
+            return false;
+        };
+        let (Some(min_ttl), Some(expires_at_ms)) = (min_ttl_ms, oauth.expires_at_ms) else {
+            return false;
+        };
+        now_ms().saturating_add(min_ttl) >= expires_at_ms
     }
 
     /// Run ONE refresh (the leader path): txn1 intent → adapter call → txn2 commit.

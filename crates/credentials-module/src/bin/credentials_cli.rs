@@ -2101,10 +2101,12 @@ fn cmd_invalidate(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> 
     Ok(())
 }
 
-/// `reactivate` = clear `needs_reauth` back to active WITHOUT replacing the secret.
+/// `reactivate` = clear `needs_reauth` or `retired` back to active WITHOUT replacing
+/// the secret.
 ///
-/// The repair for a verdict that was wrong rather than for a credential that is. It
-/// exists because that state was otherwise unrecoverable for material the vault holds
+/// The repair is for a wrong lifecycle verdict, not for a credential whose stored
+/// material is damaged. It exists because that state was otherwise unrecoverable for
+/// material the vault holds
 /// the only copy of: a GitHub App key is shredded after deposit by custody rule, so
 /// `put --replace` has no PEM to read and no login flow can re-mint one, and a mistaken
 /// consumer report could force an operator back to a browser to repair bytes that were
@@ -2122,21 +2124,21 @@ fn cmd_reactivate(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> 
         },
     )?;
     if result["state_changed"].as_bool().unwrap_or(false) {
-        println!("reactivated {id}: needs_reauth cleared, material untouched");
+        println!("reactivated {id}: serving verdict cleared, material untouched");
         println!("  the next use verifies it; if the credential really is dead it returns to");
         println!("  needs_reauth on its own, so a wrong call costs one failed request.");
     } else {
         // A no-op has two causes and the operator needs to know WHICH, because one is
         // benign and the other means they reached for the wrong verb.
-        println!("reactivated nothing: {id} was not in needs_reauth");
+        println!("reactivated nothing: {id} was not in needs_reauth or retired");
         println!("  already active, unknown, or corrupt. Corrupt is refused here because the");
         println!("  bytes themselves failed, and only a re-deposit fixes that.");
     }
     Ok(())
 }
 
-/// `logout` = stop serving a credential, reversibly: invalidate + revoke all its
-/// handles (the compound atomic op), keeping the row and its audit chain. Re-login
+/// `logout` = stop serving a credential, reversibly: retire + revoke all its handles
+/// (the compound atomic op), keeping the row and its audit chain. Re-login
 /// restores it (`login --provider <p> --replace`). Deliberately NOT a delete — a
 /// logout must never destroy an audit trail. `--provider <p>` resolves to the same
 /// default id `login --provider <p>` writes; `--id` names any credential directly.
@@ -2169,51 +2171,29 @@ fn cmd_logout(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     };
     let result = commit_admin(
         global,
-        AdminOpBody::Invalidate {
+        AdminOpBody::Logout {
             v: ADMIN_OP_SCHEMA_V1,
             id: id.clone(),
         },
     )?;
     let revoked = result["handles_revoked"].as_u64().unwrap_or(0);
-    // Absent on a daemon older than the field: treat that as "changed", which keeps
-    // the pre-existing message rather than claiming a no-op we cannot observe.
     let state_changed = result["state_changed"].as_bool().unwrap_or(true);
     let intent_cleared = result["intent_cleared"].as_bool().unwrap_or(false);
 
-    if state_changed || intent_cleared || revoked > 0 {
-        // SAY THAT IT STAYS LISTED, on the branch an operator actually reaches.
-        //
-        // The already-logged-out branch below explains this fully; this one — the
-        // COMMON one — said only "reversible", which does not answer the question a
-        // user asks next: why is the thing I just logged out still in `list`, and
-        // still counted as needing attention?
-        //
-        // That gap cost real time. An operator logged out a credential whose
-        // subscription had ended, the vault reported itself DEGRADED because
-        // `needs_reauth` is a health input, and another seat read the degraded line as
-        // a fault and attached it to unrelated failures as their cause. A deliberate
-        // retirement produced an alarm that was then misdiagnosed as an incident.
-        //
-        // Until an intentionally-retired state exists that health does not count,
-        // the CLI has to close that gap in words, at the moment of the action.
-        println!("logged out {id}: stopped serving, revoked {revoked} handle(s)");
+    if state_changed {
+        println!("logged out {id}: retired, stopped serving, revoked {revoked} handle(s)");
         println!(
-            "  reversible: `login --provider <p> --replace` restores it without a new ceremony."
+            "  reversible: `login --provider <p> --replace` or `reactivate --id {id}` restores it."
         );
-        println!("  IT STAYS LISTED as needs_reauth, and the vault reports degraded while it is;");
-        println!("  that is how a credential awaiting re-login looks, by design.");
-        println!("  retiring it for good? `ck auth remove --id {id}` deletes the row and");
-        println!("  clears the health signal. The audit history survives either way.");
+        println!("  it stays listed as retired, but is not counted as a degraded health signal.");
+    } else if intent_cleared || revoked > 0 {
+        println!("logged out {id}: stopped serving, revoked {revoked} handle(s)");
+        println!("  its lifecycle state did not change; inspect `ck auth status` for the recorded state.");
     } else {
-        // SAY THAT NOTHING CHANGED, and name the verb that does what the operator is
-        // probably after. Reporting plain success here is what makes logout read as
-        // broken: the credential was already dead, the listing is identical
-        // afterwards, and running it again produces the same success. Observed live
-        // -- three consecutive logouts, three identical successes, no change.
-        println!("{id} was already logged out: nothing changed");
-        println!("  state was already needs_reauth and no live handles remained.");
-        println!("  it stays listed because logout is REVERSIBLE and keeps the record;");
-        println!("  to delete it for good: `ck auth remove --id {id}`");
+        println!("{id} was already retired, absent, or corrupt: nothing changed");
+        println!(
+            "  retired rows stay listed because logout is reversible; remove deletes the row."
+        );
     }
     Ok(())
 }
@@ -2285,7 +2265,7 @@ fn parse_inventory(result: &serde_json::Value) -> Result<Vec<(String, u64, Strin
             let state = row
                 .get("state")
                 .and_then(serde_json::Value::as_str)
-                .filter(|state| matches!(*state, "active" | "needs_reauth" | "corrupt"))
+                .filter(|state| matches!(*state, "active" | "needs_reauth" | "retired" | "corrupt"))
                 .ok_or_else(|| {
                     CliError::RouteRefused(format!(
                         "admin.status returned an invalid state at credential row {index}"
@@ -2475,6 +2455,17 @@ fn cmd_status(global: &GlobalArgs) -> Result<(), CliError> {
         println!(
             "needs re-login: {} (fix: `login --provider <p> --replace`, or `import --replace`)",
             needs.join(", ")
+        );
+    }
+    let retired: Vec<&str> = result["retired_ids"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+    if !retired.is_empty() {
+        println!();
+        println!(
+            "retired: {} (intentionally not serving; not counted as degraded)",
+            retired.join(", ")
         );
     }
     Ok(())

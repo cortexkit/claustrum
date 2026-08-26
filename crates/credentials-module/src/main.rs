@@ -831,8 +831,10 @@ fn health_report(health: &credentials_core::health::VaultHealth) -> ModuleContro
             "credentialsTotal": health.credentials_total,
             "active": health.active,
             "needsReauth": health.needs_reauth,
+            "retired": health.retired,
             "corrupt": health.corrupt,
             "needsReauthIds": health.needs_reauth_ids,
+            "retiredIds": health.retired_ids,
             "corruptIds": health.corrupt_ids,
             "openIntents": health.open_intents,
         });
@@ -2136,6 +2138,8 @@ mod tests {
             "needsReauth",
             "needsReauthIds",
             "openIntents",
+            "retired",
+            "retiredIds",
             "refresherStalled",
             "storeReadable",
         ];
@@ -2341,12 +2345,14 @@ mod tests {
 
         // The counted fields. Each is a measurement OF THE STORE, so none of them has a
         // meaning when the store could not be read.
-        const COUNTED: [&str; 7] = [
+        const COUNTED: [&str; 9] = [
             "credentialsTotal",
             "active",
             "needsReauth",
+            "retired",
             "corrupt",
             "needsReauthIds",
+            "retiredIds",
             "corruptIds",
             "openIntents",
         ];
@@ -3911,6 +3917,78 @@ mod tests {
         );
     }
 
+    /// A retired credential is not served, but it uses the same consumer-visible
+    /// `auth_required` refusal as `needs_reauth`. The distinction is operational state
+    /// for the admin surface, not a recovery branch for consumers.
+    #[tokio::test]
+    async fn retired_reads_use_the_same_auth_required_refusal_as_needs_reauth() {
+        let (surface, store, _db) = tmp_surface_with_store(21);
+        store
+            .create(
+                "apikey:retired",
+                &VaultRecord::new_static(CredentialKind::ApiKey, "test", b"k".to_vec(), None),
+            )
+            .expect("create retired credential");
+        store
+            .retire_and_revoke_all_audited("apikey:retired", AuditCtx::admin(AuditOp::Invalidate))
+            .expect("retire credential");
+
+        let mint_for = |id: &str| {
+            let handle = credentials_core::store::mint_handle().expect("mint handle");
+            store
+                .put_handle_hash(&handle.hash, id, AuditCtx::admin(AuditOp::MintHandle))
+                .expect("store handle");
+            handle.raw
+        };
+        let needs_reauth_handle = mint_for("apikey:dead");
+        let retired_handle = mint_for("apikey:retired");
+
+        let needs_reauth = surface
+            .get(
+                51,
+                &read_surface::GetParams {
+                    handle: needs_reauth_handle,
+                    min_ttl_ms: None,
+                    force_refresh: false,
+                },
+            )
+            .await;
+        let read_surface::GetOutcome::Err {
+            error: needs_reauth_error,
+        } = needs_reauth
+        else {
+            panic!("needs_reauth credential must refuse reads");
+        };
+
+        let retired = surface
+            .get(
+                52,
+                &read_surface::GetParams {
+                    handle: retired_handle,
+                    min_ttl_ms: None,
+                    force_refresh: false,
+                },
+            )
+            .await;
+        let read_surface::GetOutcome::Err {
+            error: retired_error,
+        } = retired
+        else {
+            panic!("retired credential must refuse reads");
+        };
+
+        assert_eq!(
+            needs_reauth_error.code,
+            read_surface::ReadError::NeedsReauth
+        );
+        assert_eq!(
+            needs_reauth_error.class,
+            read_surface::ErrorClass::AuthRequired
+        );
+        assert_eq!(retired_error.code, needs_reauth_error.code);
+        assert_eq!(retired_error.class, needs_reauth_error.class);
+    }
+
     /// A static record keeps the terminal report-auth-failure behavior: it invalidates
     /// ONLY on 401/403, and ONLY at the record version the consumer was served.
     ///
@@ -3998,6 +4076,16 @@ mod tests {
         assert!(
             !store.meta("apikey:active").expect("meta").stale_pending,
             "a non-refreshable record must latch rather than setting a useless stale marker"
+        );
+        let health = credentials_core::health::VaultHealth::summarize(
+            &store.list_meta().expect("list reported credential"),
+            0,
+            false,
+        );
+        assert_eq!(
+            health.status,
+            credentials_core::health::VaultHealthStatus::Degraded,
+            "a consumer-discovered failure must remain an alarm, not become retired"
         );
         let events = store.recent_auth_events(10).expect("events");
         assert_eq!(events[0].kind, "consumer_report_latch");

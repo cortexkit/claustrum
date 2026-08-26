@@ -528,10 +528,11 @@ fn version_reports_the_built_cli_without_configuration() {
     }
 }
 
-/// `logout` stops serving reversibly (invalidate + revoke handles, row + audit
-/// kept), and `status` reports the resulting degraded state with the affected id.
+/// `logout` stops serving reversibly (retire + revoke handles, row + audit kept).
+/// `list` and `status` keep the parked row visible without turning it into a health
+/// alarm.
 #[test]
-fn logout_is_reversible_stop_serving_and_status_reports_it() {
+fn logout_retires_reversibly_without_degrading_health() {
     let root = tmp_root("logout");
     let data_dir = root.join("data");
     let key_dir = root.join("secrets");
@@ -588,24 +589,37 @@ fn logout_is_reversible_stop_serving_and_status_reports_it() {
         "logout revokes the handle: {s}"
     );
 
-    // status after: degraded, the id is named as needing re-login, and the ROW
-    // SURVIVES (needs_reauth, not deleted) — logout is reversible by design.
+    // status after: ok, the id is named as retired, and the ROW SURVIVES (not
+    // deleted) — logout is reversible by design.
     let mut c = cli();
     c.arg("status");
     global(&mut c);
     let out = c.output().expect("run status after");
     let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("vault: ok (0/1 serving)"), "post-logout: {s}");
     assert!(
-        s.contains("vault: degraded (0/1 serving)"),
-        "post-logout: {s}"
+        s.contains("retired") && s.contains("apikey:x"),
+        "the logged-out row survives as retired: {s}"
     );
     assert!(
-        s.contains("needs_reauth") && s.contains("apikey:x"),
-        "the logged-out row survives as needs_reauth: {s}"
+        s.contains("retired: apikey:x"),
+        "status names the intentionally parked id: {s}"
+    );
+
+    // `list` renders the retirement distinctly as well as `status`.
+    let mut c = cli();
+    c.arg("list");
+    global(&mut c);
+    let out = c.output().expect("run list after logout");
+    let list = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "list: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
     assert!(
-        s.contains("needs re-login: apikey:x"),
-        "status names the actionable id: {s}"
+        list.contains("retired") && list.contains("apikey:x"),
+        "list distinguishes the retired row: {list}"
     );
 
     // The audit chain survives and stays intact (logout appended, destroyed nothing).

@@ -62,6 +62,45 @@ pub enum CredentialKind {
     SigningKey,
 }
 
+/// The non-secret lifecycle state of a stored record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordState {
+    /// Decryptable and serveable.
+    Active,
+    /// Authoritatively invalidated (revoke / a static-record report): the credential
+    /// is present but must not be served until re-auth.
+    NeedsReauth,
+    /// Intentionally withdrawn by an operator through `logout`. Retired credentials
+    /// remain unreadable to consumers, but are not a health alarm.
+    Retired,
+    /// Undecryptable / corrupt: quarantined so a `get` fails closed for this id
+    /// while the rest of the vault keeps serving.
+    Corrupt,
+}
+
+impl RecordState {
+    /// The stable lowercase wire/display form (also what the `state` column stores).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RecordState::Active => "active",
+            RecordState::NeedsReauth => "needs_reauth",
+            RecordState::Retired => "retired",
+            RecordState::Corrupt => "corrupt",
+        }
+    }
+
+    pub(crate) fn from_str(s: &str) -> RecordState {
+        match s {
+            "active" => RecordState::Active,
+            "needs_reauth" => RecordState::NeedsReauth,
+            "retired" => RecordState::Retired,
+            // `corrupt` and ANY unrecognized value fail closed to Corrupt: an
+            // unknown lifecycle string must never be served as if active.
+            _ => RecordState::Corrupt,
+        }
+    }
+}
+
 /// NON-SECRET provider account identity, captured once at login from the token
 /// exchange response (Anthropic returns it inline; OpenAI carries it in id_token
 /// claims). Stored because some providers' access tokens are opaque (Anthropic), so

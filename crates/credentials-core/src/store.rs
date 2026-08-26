@@ -16,8 +16,8 @@
 //!   ciphertext always move together in one fenced transaction.
 //! - `key_id` (plaintext hex) — which master key sealed this row, so a rotation
 //!   scan finds old-key rows without decrypting them.
-//! - `state` (plaintext) — `active` | `needs_reauth` | `corrupt`. A row that fails
-//!   to decrypt is quarantined here (per-record), never panics, and never takes
+//! - `state` (plaintext) — `active` | `needs_reauth` | `retired` | `corrupt`. A row
+//!   that fails to decrypt is quarantined here (per-record), never panics, and never takes
 //!   down the rest of the vault.
 //! - `stale_pending` (plaintext) — a consumer-reported refusal that forces the next
 //!   refreshable read to exchange the token before serving it; it is not provider TTL.
@@ -42,6 +42,7 @@ use zeroize::Zeroizing;
 use crate::audit::{self, AlarmReason, AuditCtx, AuditEntry, AuditOp, AuditRecord};
 use crate::envelope::{self, EnvelopeError, RecordBinding};
 use crate::key::{KeyId, MasterKey};
+pub use crate::record::RecordState;
 use crate::record::{CredentialKind, VaultRecord};
 
 /// The schema namespace for the credential vault's migrations (independent of any
@@ -229,40 +230,6 @@ const MIGRATIONS: &[Migration] = &[
 /// envelope uses this fixed pseudo-id and version 0 as the AAD binding.
 pub const AUDIT_KEY_SECRET_NAME: &str = "__vault_audit_key__";
 const AUDIT_KEY_RECORD_VERSION: u64 = 0;
-
-/// The non-secret lifecycle state of a stored record.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RecordState {
-    /// Decryptable and serveable.
-    Active,
-    /// Authoritatively invalidated (logout / revoke / a static-record report): the
-    /// credential is present but must not be served until re-auth.
-    NeedsReauth,
-    /// Undecryptable / corrupt: quarantined so a `get` fails closed for this id
-    /// while the rest of the vault keeps serving.
-    Corrupt,
-}
-
-impl RecordState {
-    /// The stable lowercase wire/display form (also what the `state` column stores).
-    pub fn as_str(self) -> &'static str {
-        match self {
-            RecordState::Active => "active",
-            RecordState::NeedsReauth => "needs_reauth",
-            RecordState::Corrupt => "corrupt",
-        }
-    }
-
-    fn from_str(s: &str) -> RecordState {
-        match s {
-            "active" => RecordState::Active,
-            "needs_reauth" => RecordState::NeedsReauth,
-            // `corrupt` and ANY unrecognized value fail closed to Corrupt: an
-            // unknown lifecycle string must never be served as if active.
-            _ => RecordState::Corrupt,
-        }
-    }
-}
 
 /// The non-secret metadata of a stored record, readable WITHOUT decrypting (the
 /// plaintext columns). Used by rotation scans, status, and CAS pre-checks.
@@ -1144,8 +1111,9 @@ impl EncryptedStore {
     }
 
     /// Read and decrypt a record. Fails closed: a quarantined (`corrupt`) row is
-    /// [`StoreOpError::Quarantined`]; a `needs_reauth` row is
-    /// [`StoreOpError::NeedsReauth`]; a row that fails to decrypt or parse is
+    /// [`StoreOpError::Quarantined`]; `needs_reauth` and `retired` rows are both
+    /// [`StoreOpError::NeedsReauth`] so consumers need no new recovery branch; a row
+    /// that fails to decrypt or parse is
     /// QUARANTINED (its state flipped to `corrupt`) and returned as a typed error.
     /// Never panics, never returns plaintext on failure.
     pub fn get(&self, credential_id: &str) -> Result<VaultRecord, StoreOpError> {
@@ -1187,7 +1155,9 @@ impl EncryptedStore {
         let (version, state, stale_pending, blob) = row.ok_or(StoreOpError::NotFound)?;
         match RecordState::from_str(&state) {
             RecordState::Corrupt => return Err(StoreOpError::Quarantined),
-            RecordState::NeedsReauth => return Err(StoreOpError::NeedsReauth),
+            RecordState::NeedsReauth | RecordState::Retired => {
+                return Err(StoreOpError::NeedsReauth)
+            }
             RecordState::Active => {}
         }
 
@@ -1452,6 +1422,74 @@ impl EncryptedStore {
         self.invalidate_audited(credential_id, AuditCtx::vault(AuditOp::Invalidate))
     }
 
+    /// Retire a credential only from the operator's logout path: mark an `active` or
+    /// `needs_reauth` record `retired`, clear any dangling refresh intent, and revoke
+    /// every live handle in one fenced transaction.
+    ///
+    /// A retirement is an operator acknowledgement, not a discovery of bad material.
+    /// `Corrupt` is therefore deliberately excluded: clearing its health contribution
+    /// would hide a vault-observed integrity failure. `Retired` is likewise a no-op so
+    /// repeated logout requests do not grow the untrimmable audit chain.
+    pub fn retire_and_revoke_all_audited(
+        &self,
+        credential_id: &str,
+        ctx: AuditCtx<'_>,
+    ) -> Result<InvalidateOutcome, StoreOpError> {
+        let now = now_ms();
+        let audit_key = self.audit_key.clone();
+        self.fenced_write(|tx| {
+            let state_changed = tx.execute(
+                "UPDATE credentials SET state = ?2, updated_at_ms = ?3 \
+                 WHERE credential_id = ?1 AND state IN (?4, ?5)",
+                rusqlite::params![
+                    credential_id,
+                    RecordState::Retired.as_str(),
+                    now,
+                    RecordState::Active.as_str(),
+                    RecordState::NeedsReauth.as_str(),
+                ],
+            )? > 0;
+            let intent_cleared = clear_intent_tx(tx, credential_id)? > 0;
+            let revoked = tx.execute(
+                "UPDATE handles SET revoked = 1 \
+                 WHERE credential_id = ?1 AND revoked = 0",
+                rusqlite::params![credential_id],
+            )?;
+            if state_changed || intent_cleared {
+                append_audit_tx(
+                    tx,
+                    &audit_key,
+                    &AuditRecord {
+                        op: ctx.op,
+                        credential_id: Some(credential_id.to_string()),
+                        payload_hash: None,
+                        actor: ctx.actor.to_string(),
+                        alarm: ctx.alarm,
+                    },
+                )?;
+            }
+            if revoked > 0 {
+                append_audit_tx(
+                    tx,
+                    &audit_key,
+                    &AuditRecord {
+                        op: AuditOp::RevokeHandle,
+                        credential_id: Some(credential_id.to_string()),
+                        payload_hash: None,
+                        actor: ctx.actor.to_string(),
+                        alarm: ctx.alarm,
+                    },
+                )?;
+            }
+            Ok(InvalidateOutcome {
+                state_changed,
+                intent_cleared,
+                handles_revoked: revoked,
+            })
+        })
+        .map_err(StoreOpError::from)
+    }
+
     /// The COMPOUND authoritative invalidate: mark `needs_reauth`, clear any
     /// dangling refresh intent, AND revoke every live handle for the credential —
     /// all in ONE fenced transaction, with both audit entries (`Invalidate` and,
@@ -1468,13 +1506,13 @@ impl EncryptedStore {
     /// already-invalidated credential rewrote the same state, revoked nothing, and
     /// appended an `Invalidate` audit entry recording that nothing happened. An
     /// operator seeing an unchanged listing after a success message reasonably
-    /// concludes the command is broken — observed live, three consecutive logouts
+    /// concludes the command is broken — observed live, three consecutive invalidations
     /// against one already-dead credential, three identical successes.
     ///
     /// Suppressing the no-op audit entry matters on its own: the chain is
     /// tamper-evident and therefore UNTRIMMABLE, so an operator (or a script)
-    /// repeating a logout would grow it without bound with entries that record no
-    /// mutation. The same guard was added to the consumer-driven path for the same
+    /// repeating an invalidation would grow it without bound with entries that record
+    /// no mutation. The same guard was added to the consumer-driven path for the same
     /// reason; this is the operator-driven half of it.
     pub fn invalidate_and_revoke_all_audited(
         &self,
@@ -1498,9 +1536,9 @@ impl EncryptedStore {
                  WHERE credential_id = ?1 AND revoked = 0",
                 rusqlite::params![credential_id],
             )?;
-            // Audit the mutation, not the request. A logout that finds the
-            // credential already dead with no live handles mutated nothing, and an
-            // audit entry claiming otherwise is a false record in a chain whose
+            // Audit the mutation, not the request. An invalidation that finds the
+            // credential already dead with no live handles mutated nothing, and an audit
+            // entry claiming otherwise is a false record in a chain whose
             // whole value is that its entries are true.
             if state_changed || intent_cleared {
                 append_audit_tx(
@@ -1542,7 +1580,7 @@ impl EncryptedStore {
     /// The audit chain keeps the credential's full history (append-only; removal is
     /// itself an entry), so this deletes serving state, never forensics. For retiring
     /// an account or cleaning up a mistaken id; a temporary stop is `logout`
-    /// (invalidate + revoke, reversible). Returns [`StoreOpError::NotFound`] when the
+    /// (retire + revoke, reversible). Returns [`StoreOpError::NotFound`] when the
     /// id has no row, so a typo'd remove is loud instead of a silent no-op.
     /// Returns how many handle rows were deleted, because a consumer holding one
     /// cannot be told by the vault. Handles are bearer capabilities: nothing records
@@ -1554,8 +1592,8 @@ impl EncryptedStore {
     /// THERE IS NO UN-REMOVE, AND UNLIKE `reactivate` THAT IS IMPOSSIBLE RATHER THAN
     /// DECLINED. The distinction matters to a reader deciding whether to add one.
     ///
-    /// `reactivate` exists because `invalidate` only changed a VERDICT while the sealed
-    /// material stayed on disk, so the verdict could be contradicted. This DELETEs the
+    /// `reactivate` exists because `needs_reauth` and `retired` only change a VERDICT
+    /// while the sealed material stays on disk, so the verdict can be contradicted. This DELETEs the
     /// credentials row, and the sealed envelope is the only copy of the secret the vault
     /// ever had -- for a `github_app` key, the only copy anywhere, since the PEM is
     /// shredded after deposit by custody rule. After this commits there is nothing left
@@ -1563,8 +1601,8 @@ impl EncryptedStore {
     ///
     /// So the repair for a mistaken `remove` is a fresh deposit of fresh material, which
     /// for a platform-issued key means an operator ceremony. That is the cost of the verb
-    /// and it is why `logout`/`invalidate` is the reversible sibling an operator should
-    /// reach for first -- stated here because now that ONE inverse exists in this file,
+    /// and it is why `logout` or `invalidate` is the reversible sibling an operator
+    /// should reach for first -- stated here because now that ONE inverse exists in this file,
     /// an absent one stops looking deliberate.
     pub fn remove_audited(
         &self,
@@ -1686,7 +1724,8 @@ impl EncryptedStore {
         self.set_state(credential_id, RecordState::NeedsReauth, false, None)
     }
 
-    /// Clear `needs_reauth` back to active WITHOUT touching the stored material.
+    /// Clear `needs_reauth` or `retired` back to active WITHOUT touching the stored
+    /// material.
     ///
     /// THE REPAIR PATH FOR A VERDICT THAT WAS WRONG. `needs_reauth` is a claim about the
     /// OUTSIDE WORLD -- a provider rejected us, or a consumer said one did -- and the
@@ -1701,8 +1740,9 @@ impl EncryptedStore {
     /// intact would have required a fresh key from GitHub and an operator at a browser.
     /// A consumer's mistaken report could force a human ceremony.
     ///
-    /// ONLY FROM `NeedsReauth`, never from `Corrupt`, and the distinction is the whole
-    /// safety argument. Corrupt is a claim about OUR OWN BYTES -- they failed to decrypt,
+    /// ONLY FROM `NeedsReauth` OR `Retired`, never from `Corrupt`, and the distinction is
+    /// the whole safety argument. Both allowed states are verdicts about serving, while
+    /// Corrupt is a claim about OUR OWN BYTES -- they failed to decrypt,
     /// or the payload was empty -- which this vault verified itself and which clearing
     /// cannot fix; it would only put known-broken bytes back into service. Reactivating a
     /// corrupt record is refused rather than silently ignored.
@@ -1728,12 +1768,13 @@ impl EncryptedStore {
             // concurrent writer between a read and a write.
             let n = tx.execute(
                 "UPDATE credentials SET state = ?2, updated_at_ms = ?3 \
-                 WHERE credential_id = ?1 AND state = ?4",
+                 WHERE credential_id = ?1 AND state IN (?4, ?5)",
                 rusqlite::params![
                     credential_id,
                     RecordState::Active.as_str(),
                     now,
-                    RecordState::NeedsReauth.as_str()
+                    RecordState::NeedsReauth.as_str(),
+                    RecordState::Retired.as_str(),
                 ],
             )?;
             if n > 0 {
@@ -2792,7 +2833,7 @@ fn auth_event_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<AuthEvent> {
     })
 }
 
-/// What a compound invalidate actually changed.
+/// What a compound lifecycle transition and handle revocation actually changed.
 ///
 /// Three separate facts rather than one boolean, because they drive different
 /// operator advice: a credential that was already dead needs a DIFFERENT next step
@@ -2801,7 +2842,8 @@ fn auth_event_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<AuthEvent> {
 /// both cases.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InvalidateOutcome {
-    /// The state moved to `needs_reauth`. False when it was already there.
+    /// The lifecycle state moved. False when it was already at the target or the
+    /// transition deliberately refuses its current state.
     pub state_changed: bool,
     /// A dangling refresh intent was cleared.
     pub intent_cleared: bool,
@@ -3286,9 +3328,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// `invalidate_and_revoke_all_audited` is the compound behind `ck auth logout`:
-    /// mark `needs_reauth`, clear any dangling intent, and revoke EVERY live handle,
-    /// all in one fenced transaction with both audit entries inside it.
+    /// `retire_and_revoke_all_audited` is the compound behind `ck auth logout`:
+    /// mark `retired`, clear any dangling intent, and revoke EVERY live handle, all in
+    /// one fenced transaction with both audit entries inside it.
     ///
     /// The compound exists because doing it as two calls is crash-partial: a crash
     /// between them leaves a dead credential still resolvable by handle — a token the
@@ -3296,7 +3338,7 @@ mod tests {
     /// pin all four effects TOGETHER, plus the reversibility that distinguishes logout
     /// from `remove`: the row and its audit history survive.
     #[test]
-    fn logout_invalidates_clears_intent_and_revokes_every_handle_atomically() {
+    fn logout_retires_clears_intent_and_revokes_every_handle_atomically() {
         let (root, store) = tmp_store(2);
         store.create("out", &oauth_record()).expect("create out");
         store.create("keep", &oauth_record()).expect("create keep");
@@ -3318,7 +3360,7 @@ mod tests {
         store.open_intent("out", 1, "rhash").expect("open intent");
 
         let outcome = store
-            .invalidate_and_revoke_all_audited("out", AuditCtx::admin(AuditOp::Invalidate))
+            .retire_and_revoke_all_audited("out", AuditCtx::admin(AuditOp::Invalidate))
             .expect("logout");
         assert_eq!(
             outcome.handles_revoked, 2,
@@ -3332,8 +3374,8 @@ mod tests {
         // All four effects, together.
         assert_eq!(
             store.meta("out").expect("meta").state,
-            RecordState::NeedsReauth,
-            "the credential must stop serving"
+            RecordState::Retired,
+            "logout must record an intentional retirement rather than a failure"
         );
         assert!(
             store.read_intent("out").expect("read intent").is_none(),
@@ -3381,6 +3423,43 @@ mod tests {
             "logout must be reversible"
         );
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Retiring a failed credential is an operator acknowledgement that clears the
+    /// health alarm without deleting the stored material.
+    #[test]
+    fn logout_retires_needs_reauth_and_clears_its_health_alarm() {
+        let (root, store) = tmp_store(4);
+        store.create("retire-me", &oauth_record()).expect("create");
+        store.invalidate("retire-me").expect("invalidate");
+
+        let before = crate::health::VaultHealth::summarize(
+            &store.list_meta().expect("list before retirement"),
+            0,
+            false,
+        );
+        assert_eq!(before.status, crate::health::VaultHealthStatus::Degraded);
+
+        let outcome = store
+            .retire_and_revoke_all_audited("retire-me", AuditCtx::admin(AuditOp::Invalidate))
+            .expect("retire needs_reauth");
+        assert!(
+            outcome.state_changed,
+            "needs_reauth must transition to retired"
+        );
+        assert_eq!(
+            store.meta("retire-me").expect("retired meta").state,
+            RecordState::Retired
+        );
+
+        let after = crate::health::VaultHealth::summarize(
+            &store.list_meta().expect("list after retirement"),
+            0,
+            false,
+        );
+        assert_eq!(after.status, crate::health::VaultHealthStatus::Ok);
+        assert_eq!(after.retired_ids, vec!["retire-me".to_string()]);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -4170,18 +4249,20 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Reactivate clears needs_reauth, leaves the SECRET alone, and refuses corrupt.
+    /// Reactivate clears needs_reauth or retired, leaves the SECRET alone, and refuses
+    /// corrupt.
     ///
     /// Three properties in one test because they are one guarantee: this verb contradicts
     /// a VERDICT, it never repairs BYTES. Corrupt is excluded precisely because it IS a
     /// claim about our own bytes -- clearing it would return known-broken material to
     /// service, and no operator assertion makes an undecryptable envelope decrypt.
     #[test]
-    fn reactivate_clears_needs_reauth_without_touching_the_secret_and_refuses_corrupt() {
+    fn reactivate_clears_needs_reauth_or_retired_without_touching_the_secret_and_refuses_corrupt() {
         let (root, store) = tmp_store(7);
         let rec =
             VaultRecord::new_static(CredentialKind::ApiKey, "test", b"the-secret".to_vec(), None);
         store.create("live", &rec).expect("create");
+        store.create("retired", &rec).expect("create retired");
         store.create("broken", &rec).expect("create broken");
 
         store
@@ -4205,6 +4286,18 @@ mod tests {
             b"the-secret".to_vec(),
             "reactivate must not disturb the stored material"
         );
+
+        store
+            .retire_and_revoke_all_audited("retired", AuditCtx::admin(AuditOp::Invalidate))
+            .expect("retire");
+        let retired_changed = store
+            .reactivate_audited("retired", AuditCtx::admin(AuditOp::Reactivate))
+            .expect("reactivate retired");
+        assert!(retired_changed, "a retired credential must reactivate");
+        assert!(matches!(
+            store.meta("retired").expect("retired meta").state,
+            RecordState::Active
+        ));
 
         // A TRANSITION, not a repeatable write: a retry loop must not append to the
         // untrimmable audit chain.

@@ -1,4 +1,19 @@
-# cortexkit-credentials — build charter
+# claustrum — build charter (historical)
+
+> **What this is, for a reader who did not write it.** This is the original build
+> plan, written as instructions to the agent that implemented the vault, and it is
+> preserved rather than tidied because source comments cite it as the origin of
+> specific design decisions. It is addressed to "you" and describes a build
+> sequence that is long finished, so read it as a record of intent, not as current
+> documentation. The system as it actually stands is described by the contract and
+> the operator runbook; where this charter and the shipped code disagree, the code
+> is right and this file is history.
+>
+> The repo and module were named `cortexkit-credentials` when this was written and
+> are now `claustrum`. Some identifiers below keep the old spelling on purpose:
+> the keychain service prefix, the envelope AAD, and the admin transcript domains
+> are cryptographic domain separators, and renaming a domain separator would fail
+> to open an existing vault.
 
 You own the `cortexkit-credentials` repo: a subc-supervised module that holds
 credentials (OAuth tokens, API keys, DSNs) **encrypted at rest** and serves each

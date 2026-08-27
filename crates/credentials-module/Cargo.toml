@@ -3,12 +3,14 @@ name = "credentials-module"
 version = "0.1.0"
 edition = "2021"
 publish = false
-description = "The cortexkit-credentials subc module: registers a reserved ManagementSurface, serves the anonymous read surface (credential.get/status/report_auth_failure) over the subc wire, and runs the master-key-gated admin surface (put/import/invalidate/rotate_master_key) off the runtime channel."
+license = "MIT"
+description = "The claustrum subc module: registers a reserved ManagementSurface, serves the anonymous read surface (credential.get/status/report_auth_failure) over the subc wire, and runs the master-key-gated admin surface (put/import/invalidate/rotate_master_key) off the runtime channel."
 
 # The supervised daemon exe. Named with the fleet-wide `ck-*` prefix (Activity
-# Monitor grouping); the package stays `credentials-module` and the module_id
-# stays `cortexkit-credentials`, so the keychain scope, lease, and storage are
-# untouched — only the built executable's filename changes.
+# Monitor grouping). The package name stays `credentials-module` while the
+# module_id is `claustrum` — and the module_id is the load-bearing one: it derives
+# the data directory, the keychain service, the single-writer lease key, and the
+# admin-transcript vault id. The executable's filename derives nothing.
 [[bin]]
 name = "ck-claustrum"
 path = "src/main.rs"

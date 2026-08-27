@@ -28,3 +28,7 @@ store.db
 *.vault
 /secrets
 gate-evidence/
+
+# The public-flip audit trail and any triaged-private docs. Nested git repo:
+# versioned, never pushed to the public remote.
+docs/private/

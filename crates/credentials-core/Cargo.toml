@@ -3,7 +3,8 @@ name = "credentials-core"
 version = "0.1.0"
 edition = "2021"
 publish = false
-description = "Credential custody logic for the cortexkit-credentials subc module: typed VaultRecord, canonical OAuthCredential, value-level encryption envelope, bounded refresh adapters, crash-safe refresh state machine, master-key resolution. Pure logic, wire-agnostic."
+license = "MIT"
+description = "Credential custody logic for the claustrum subc module: typed VaultRecord, canonical OAuthCredential, value-level encryption envelope, bounded refresh adapters, crash-safe refresh state machine, master-key resolution. Pure logic, wire-agnostic."
 
 [features]
 # Compiles a test-only pre-commit seam INTO the refresh engine: a hook that fires

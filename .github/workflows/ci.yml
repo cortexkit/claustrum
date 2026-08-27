@@ -39,11 +39,18 @@ jobs:
   # local macOS/Linux). macOS is intentionally not in CI: it is the dev platform
   # (continuously tested locally) and is where the keychain path is developed.
   #
-  # Runners are Blacksmith, not GitHub-hosted: this repo is owned by a free-plan
-  # org, where GitHub blocks private-repo Actions jobs at the zero spending limit.
-  # Blacksmith third-party runners do not consume GitHub's included minutes, so CI
-  # runs without an org billing change. Revert to GitHub-hosted labels (and re-add
-  # macOS) if the repo becomes public.
+    # Runners are GitHub-hosted. They were Blacksmith while this repo was private:
+    # the org is on the free plan, where GitHub blocks private-repo Actions jobs at
+    # the zero spending limit, and third-party runners do not consume the included
+    # minutes. Public repos get GitHub-hosted minutes for free, so the workaround
+    # retired with the repo's visibility on 2026-08-27.
+    #
+    # macOS is still absent, and the earlier note here ("re-add macOS if public")
+    # oversimplified. Two facts pull in opposite directions: the keychain path is
+    # macOS-only and has NO CI coverage at all, which is a real gap; but the macOS
+    # leg has never run green here, and coupling an unproven leg to a visibility
+    # flip risks reddening CI at the worst possible moment. It goes in as its own
+    # change, proven on its own, rather than riding this one.
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.runner }}
@@ -51,10 +58,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu
-            runner: blacksmith-2vcpu-ubuntu-2404
-          - os: windows
-            runner: blacksmith-4vcpu-windows-2025
+            - os: ubuntu
+              runner: ubuntu-latest
+            - os: windows
+              runner: windows-latest
     defaults:
       run:
         working-directory: claustrum

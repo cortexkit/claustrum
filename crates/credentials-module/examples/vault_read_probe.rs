@@ -39,6 +39,7 @@ async fn main() {
     let mut show_account_id = false;
     let mut show_claims = false;
     let mut report_auth_failure = false;
+    let mut status = false;
     let mut sign_payload: Option<String> = None;
     let mut sign_payload_bytes: Option<Vec<u8>> = None;
     let mut public_key = false;
@@ -100,6 +101,7 @@ async fn main() {
             // surfaces had never been called once. `scripts/accept-deploy.sh` says so
             // itself -- it asks whether the right bytes are in the right place, never
             // whether a behaviour is reachable.
+            "--status" => status = true,
             "--sign" => sign_payload = args.next(),
             // SIGN THE FILE'S EXACT BYTES, never a shell-quoted copy of them.
             //
@@ -184,11 +186,19 @@ async fn main() {
         return;
     }
 
-    if public_key || sign_payload.is_some() || sign_payload_bytes.is_some() {
+    if public_key || status || sign_payload.is_some() || sign_payload_bytes.is_some() {
         // Both halves in one run when both are asked for, because the useful assertion
         // is that they AGREE: a signature that verifies under the returned key proves
         // the two ops name the same keypair. Either alone proves only that an op
         // answered, which is the weaker claim that let this gap exist.
+        if status {
+            let body = credential_status(&mut stream, route_channel, route_epoch, &handle).await;
+            let parsed: Value = serde_json::from_slice(&body.body).unwrap_or(Value::Null);
+            eprintln!(
+                "[probe] status -> {}",
+                serde_json::to_string(&parsed).unwrap_or_default()
+            );
+        }
         if public_key {
             let body =
                 credential_public_key(&mut stream, route_channel, route_epoch, &handle).await;
@@ -233,6 +243,46 @@ async fn main() {
 /// verbatim, and for a signing-key record that payload IS the private PKCS#8. A
 /// consumer that wants to publish a verifier key must have a route that cannot carry
 /// private bytes, and this is it.
+/// Ask `credential.status` about a handle.
+///
+/// THE PROBE COULD NOT REACH THIS OP AT ALL until 2026-08-27, which is the same
+/// instrument gap found that morning for `sign` and `public_key`: an op with no CLI
+/// verb is one nothing an operator runs ever touches, so it goes unexercised while
+/// every surface reachable from a terminal gets proven on every deploy.
+///
+/// It exists here specifically to compare `status` against the VERB on the same handle.
+/// A status surface that disagrees with the operation it describes is worse than no
+/// status surface — it tells a caller the thing will work and the call then refuses.
+async fn credential_status(
+    stream: &mut TcpStream,
+    route_channel: u16,
+    route_epoch: u32,
+    handle: &str,
+) -> Frame {
+    let frame = Frame::build(
+        FrameType::Request,
+        Flags::new(false, Priority::Interactive, false),
+        route_channel,
+        route_epoch,
+        12,
+        serde_json::to_vec(&json!({
+            "method": "credential.status",
+            "params": { "handle": handle },
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    write_frame(stream, &frame).await.unwrap();
+    loop {
+        let frame = read_frame_timeout(stream).await;
+        if frame.header.corr == 12
+            && matches!(frame.header.ty, FrameType::Response | FrameType::Error)
+        {
+            return frame;
+        }
+    }
+}
+
 async fn credential_public_key(
     stream: &mut TcpStream,
     route_channel: u16,

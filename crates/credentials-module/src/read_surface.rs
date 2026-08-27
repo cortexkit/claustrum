@@ -1146,6 +1146,35 @@ impl ReadSurface {
     /// of always claiming a healthy lease. A handle probe runs the per-connection limiter
     /// FIRST (keyed by the presented handle, like `get`), so a status-based enumeration
     /// sweep of unknown handles trips the same anomaly alarm rather than slipping past it.
+    /// KNOWN DIVERGENCE FROM THE VERB IT DESCRIBES, measured 2026-08-27 and not yet
+    /// fixed. On a `SigningKey` record this reports `ready: true` while `credential.get`
+    /// on the SAME HANDLE at the same instant refuses:
+    ///
+    ///   status -> {"ready":true,"last_error_code":null,"record_version":1}
+    ///   get    -> {"class":"permanent","code":"not_found"}
+    ///
+    /// `ready` is computed from `meta.state` alone. The kind fence that makes `get`
+    /// refuse a signing key lives on the DECRYPTED record, and `kind` is not a plaintext
+    /// column — it is inside the sealed envelope. So this no-decrypt path cannot see it,
+    /// and a status surface that decrypted would stop being the cheap read it exists to
+    /// be.
+    ///
+    /// THE CLASS, named by the supervisor seat the same day after their own status
+    /// surface reported a manifest valid seconds before the governed verb refused its
+    /// key: A STATUS FIELD MUST DERIVE FROM THE ENFORCEMENT PATH, NOT A PARALLEL ARM.
+    /// Two readers of one field is better than two validators and still not the same
+    /// predicate — `get` gates on state AND kind, this gates on state.
+    ///
+    /// NOT FIXED YET, and the reason is scope rather than judgement: the honest fix is a
+    /// plaintext `kind` column (migration + a backfill that must decrypt every existing
+    /// envelope with the master key, so an offline pass). Deriving kind from the
+    /// credential-id prefix is NOT acceptable — the same reasoning that made the
+    /// refresh-adapter prefix non-authoritative applies, a record's stored kind is the
+    /// only truth.
+    ///
+    /// Blast radius today is zero and that is measured, not assumed: no consumer reads
+    /// `credential.status` at all (all three answered at source on 2026-08-25). It is
+    /// recorded here so the first consumer to poll status does not discover it.
     pub async fn status(&self, connection_id: u64, params: &StatusParams) -> StatusResult {
         let fenced_out = self.engine.store().is_fenced_out();
         let lease_held = !fenced_out;

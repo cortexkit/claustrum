@@ -33,6 +33,7 @@ const READ_TIMEOUT: Duration = Duration::from_secs(15);
 async fn main() {
     let mut subc: Option<PathBuf> = None;
     let mut handle: Option<String> = None;
+    let mut handle_file: Option<PathBuf> = None;
     let mut root = std::env::temp_dir();
     let mut force_refresh = false;
     let mut min_ttl_ms: Option<i64> = None;
@@ -51,6 +52,13 @@ async fn main() {
         match arg.as_str() {
             "--subc" => subc = args.next().map(PathBuf::from),
             "--handle" => handle = args.next(),
+            // Read the handle from a file instead of the command line. A capability handle
+            // is a bearer secret: `--handle ckh_...` puts it in argv, which means shell
+            // history, `ps` output for any local user, CI logs, and -- when an agent runs
+            // the probe -- the tool transcript, which leaves the machine. The file form
+            // keeps it in a mode-600 file the process reads itself, so the secret never
+            // appears in a place that is copied by default.
+            "--handle-file" => handle_file = args.next().map(PathBuf::from),
             "--root" => {
                 if let Some(value) = args.next() {
                     root = PathBuf::from(value);
@@ -134,10 +142,45 @@ async fn main() {
         eprintln!("vault_read_probe: --subc <connection-file> is required");
         std::process::exit(2);
     });
-    let handle = handle.unwrap_or_else(|| {
-        eprintln!("vault_read_probe: --handle <ckh_...> is required");
+    // Reject both rather than picking a winner: a caller who passes both has one of the
+    // two wrong, and silently preferring either can send a handle the caller did not mean
+    // -- against a vault, an unintended credential read.
+    if handle.is_some() && handle_file.is_some() {
+        eprintln!("vault_read_probe: pass --handle OR --handle-file, not both");
         std::process::exit(2);
-    });
+    }
+    let handle = match (handle, handle_file) {
+        (Some(value), _) => value,
+        (None, Some(path)) => {
+            let raw = std::fs::read_to_string(&path).unwrap_or_else(|err| {
+                // Fail loud. An empty or unreadable handle file must not fall through to
+                // an empty handle, which the vault answers with the same uniform
+                // `not_found` it uses for a revoked one -- indistinguishable from a real
+                // authorization result, and the probe would report a vault verdict for
+                // what is actually a local file error.
+                eprintln!(
+                    "vault_read_probe: cannot read --handle-file {}: {err}",
+                    path.display()
+                );
+                std::process::exit(2);
+            });
+            // Trim: a handle written with `> file` or by an editor carries a trailing
+            // newline, and a handle with a newline in it is simply a different string.
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                eprintln!(
+                    "vault_read_probe: --handle-file {} is empty",
+                    path.display()
+                );
+                std::process::exit(2);
+            }
+            trimmed.to_string()
+        }
+        (None, None) => {
+            eprintln!("vault_read_probe: --handle <ckh_...> or --handle-file <path> is required");
+            std::process::exit(2);
+        }
+    };
 
     let conn = connection_file::read(&subc).expect("read connection file");
     let endpoint = conn

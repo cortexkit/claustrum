@@ -71,8 +71,21 @@ pub enum ValidityOutcome {
 /// A refresh adapter failure.
 #[derive(Debug)]
 pub enum RefreshError {
-    /// The provider rejected the refresh (e.g. 400 `invalid_grant`): the refresh
-    /// token is dead → the credential needs re-auth.
+    /// THE DISPOSITION IS "UNSERVICEABLE UNTIL A HUMAN ACTS", not the OAuth error its
+    /// name is borrowed from. Routing here latches `needs_reauth`, which is the correct
+    /// destination for any cause a retry cannot fix.
+    ///
+    /// The obvious case is a provider rejecting the refresh (400 `invalid_grant`): the
+    /// refresh token is dead. The non-obvious one, and the reason this doc is worded by
+    /// disposition, is a GitHub App with no installation — the key is fine and the JWT
+    /// authenticates, and it still cannot serve until an operator installs the App. That
+    /// case was classified `Decode` (wire class `transient`) until 2026-08-27, so
+    /// consumers doing the correct thing for a transient error retried forever, one App
+    /// JWT mint per attempt.
+    ///
+    /// The test when adding a variant here: does a retry have any chance of succeeding
+    /// without someone taking an action outside this process? If not, it belongs here
+    /// whatever the provider called it.
     InvalidGrant(String),
     /// A transport/HTTP error reaching the provider (retryable).
     Transport(String),

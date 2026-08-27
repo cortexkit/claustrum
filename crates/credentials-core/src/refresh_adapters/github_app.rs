@@ -179,7 +179,28 @@ impl GithubAppAdapter {
             .find(|installation| installation.client_id == client_id)
             .map(|installation| installation.id)
             .ok_or_else(|| {
-                RefreshError::Decode(
+                // INVALID_GRANT, NOT DECODE, and the distinction is the difference
+                // between a retry loop and a repair.
+                //
+                // GitHub authenticated the App JWT and returned a well-formed
+                // installations list; none of them is this App. So the App is not
+                // installed anywhere, or the stored client_id belongs to a different
+                // App. Either way NO RETRY CAN SUCCEED — a human must install it in org
+                // settings — and every attempt costs a real App JWT mint against a
+                // vendor budget shared by every holder of that App.
+                //
+                // It was `Decode`, which maps to wire class `transient`, so a consumer
+                // doing the correct thing for a transient error retried forever and
+                // spent a mint each time. Found on 2026-08-27 while proving installation
+                // coverage before a fleet rollout: one of 23 Apps failed exactly here,
+                // and the class told its caller to keep trying.
+                //
+                // `InvalidGrant` is the disposition variant rather than an OAuth-specific
+                // one: it means UNSERVICEABLE UNTIL A HUMAN ACTS. Routing here latches
+                // `needs_reauth`, so an uninstalled App becomes visible in `ck auth list`
+                // and in health instead of being discovered at rollout time, and the
+                // repair after installing is `ck auth reactivate`.
+                RefreshError::InvalidGrant(
                     "GitHub returned no installation for this App client_id".into(),
                 )
             })
@@ -447,6 +468,43 @@ mod tests {
     }
 
     /// Discovery chooses the recorded installation and keeps its id out of the durable credential.
+    /// An App with no matching installation is UNSERVICEABLE UNTIL A HUMAN ACTS, and
+    /// must not be reported as something a retry can fix.
+    ///
+    /// GitHub authenticates the App JWT and returns a well-formed installations list
+    /// that does not contain this App. No retry can change that — someone has to install
+    /// it in org settings — and every attempt costs a real App JWT mint against a vendor
+    /// budget shared by every holder of that App.
+    ///
+    /// This was `Decode` (wire class `transient`) until 2026-08-27, so a consumer doing
+    /// the CORRECT thing for a transient error retried forever. Found while proving
+    /// installation coverage across 23 Apps before a fleet rollout: one failed exactly
+    /// here, and its class told the caller to keep trying.
+    ///
+    /// Asserting the VARIANT rather than the message is the point. The message was
+    /// already right and carried no disposition; the variant is what decides whether the
+    /// engine latches `needs_reauth` (making it visible in `ck auth list` and health) or
+    /// hands the caller a retry instruction.
+    #[tokio::test]
+    async fn an_app_with_no_installation_needs_a_human_rather_than_a_retry() {
+        let adapter = GithubAppAdapter::new();
+        // A well-formed list that simply does not contain this App: the shape GitHub
+        // returns for an App that exists and is installed nowhere.
+        let transport = fixture_transport(vec![(200, b"[]")]);
+        let error = adapter
+            .refresh(&credential(), &transport)
+            .await
+            .expect_err("an App with no installation cannot mint");
+
+        assert!(
+            matches!(error, RefreshError::InvalidGrant(_)),
+            "no-installation must route to the needs-a-human disposition so the engine \
+             latches needs_reauth; got {error:?}. Decode/Transport here means wire class \
+             `transient`, and a consumer retrying a permanently uninstallable App spends \
+             one App JWT mint per attempt forever"
+        );
+    }
+
     #[tokio::test]
     async fn installation_discovery_is_cached_in_memory_without_replacing_the_private_key() {
         let cred = credential();

@@ -1,5 +1,9 @@
 # Serving a harness hot-path consumer: the claustrum-mode serve contract
 
+<!-- built-when: EXTERNAL anthropic-auth plugin seat -- the implementing half is not in
+     this repository, so no symbol here can disprove the claim; verify against that
+     plugin and against the running module, per the note below -->
+
 **Status: DESIGN HALF, NOT BUILT (2026-08-24).** No code implements this. This is the
 vault-side half of a two-part design; the plugin-side half (detection, migration,
 cache behaviour) belongs to the anthropic-auth seat. Neither half is a contract until

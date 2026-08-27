@@ -53,6 +53,28 @@ NOT_BUILT = re.compile(
 )
 MARKER = re.compile(r"<!--\s*built-when:\s*(?P<path>[^:]+)::(?P<symbol>[^\s]+)\s*-->")
 
+# THE CROSS-REPO CASE, met the first time a design doc arrived through a PR rather
+# than from this seat: the contributor's serve-contract design is the VAULT-SIDE HALF
+# of a two-part design whose implementing half lives in another repository. No symbol
+# in this tree can falsify it, so demanding one would have forced a marker pointing at
+# a plausible-looking local symbol that does not govern the claim -- a guard that fires
+# on the wrong event is worse than an absent one, because it reads as coverage.
+#
+# The escape is deliberately NOT silent. A doc may declare that its falsifier is
+# external, but it must say WHERE, and this script COUNTS AND PRINTS those separately
+# on every run. The guard's purpose is that a doc cannot silently outlive its claim;
+# for a cross-repo claim no local mechanism can enforce that, so the honest substitute
+# is to keep the unguarded ones VISIBLE rather than to pretend they are covered.
+#
+#     <!-- built-when: EXTERNAL anthropic-auth plugin -- the implementing half is not
+#          in this repository, so no local symbol can disprove this -->
+# `.*?` with DOTALL rather than `[^\n]*?`: the first version could not cross a newline,
+# so it silently failed to match the very marker it was written for -- a multi-line one,
+# which is the shape any honest destination-plus-reason takes -- and the doc came back
+# as "names no falsifier". A regex that only matches the one-line case would have let
+# the terse, least informative markers through and refused the useful ones.
+EXTERNAL = re.compile(r"<!--\s*built-when:\s*EXTERNAL\s+(?P<where>.*?)\s*-->", re.DOTALL)
+
 
 def main() -> int:
     if not DOCS.is_dir():
@@ -67,11 +89,27 @@ def main() -> int:
         return 2
 
     failures: list[str] = []
+    externals: list[str] = []
     checked = 0
 
     for doc in docs:
         text = doc.read_text(encoding="utf-8", errors="replace")
         if not NOT_BUILT.search(text):
+            continue
+
+        external = EXTERNAL.search(text)
+        if external:
+            where = " ".join(external.group("where").split())
+            # A bare EXTERNAL with no destination is the hole this escape must not be:
+            # it would let any doc opt out of the guard by typing one word.
+            if len(where) < 12:
+                failures.append(
+                    f"{doc.as_posix()} declares its falsifier EXTERNAL but does not say\n"
+                    f"    where. Name the repository or component that would disprove the\n"
+                    f"    claim, so a reader can go and check it."
+                )
+            else:
+                externals.append(f"{doc.as_posix()} -> {where}")
             continue
 
         marker = MARKER.search(text)
@@ -109,6 +147,13 @@ def main() -> int:
         return 1
 
     print(f"doc status: {checked} NOT-BUILT claim(s) checked against their falsifier, all honest")
+    if externals:
+        # Printed unconditionally, not hidden behind a verbose flag: these are the
+        # claims this gate CANNOT check, and a reader of the output should see the
+        # boundary of what was actually verified.
+        print(f"doc status: {len(externals)} claim(s) declared EXTERNAL and NOT guarded here:")
+        for e in externals:
+            print(f"  {e}")
     return 0
 
 

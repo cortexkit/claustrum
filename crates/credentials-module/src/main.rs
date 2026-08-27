@@ -51,7 +51,7 @@ use subc_protocol::{
         HealthStatus, ModuleControlRequest, ModuleControlResponse, MODULE_CONTROL_OP_HEALTH_CHECK,
     },
     ErrorBody, Flags, Frame, FrameType, ModuleHelloAckBody, ModuleHelloBody, Priority,
-    PROTOCOL_VERSION, SUBC_LAUNCH_NONCE_ENV, SUBC_MODULE_ID_ENV,
+    PROTOCOL_VERSION, SUBC_LAUNCH_NONCE_ENV, SUBC_MODULE_ID_ENV, SUBC_PROTOCOL_CRATE_VERSION,
 };
 use subc_transport::{authenticate_client, connection_file, read_frame, write_frame};
 use tokio::{
@@ -1236,27 +1236,40 @@ fn manifest(module_id: &str) -> ModuleManifest {
         // worse than an absent one: a supervisor comparing provenance across a fleet
         // treats a present field as a claim.
         //
-        // WHAT IS DECLARED: build_git_sha, from the same `BUILD_REV` that `--version`
-        // reports. `scripts/release-build.sh` stamps CK_BUILD_REV from a clean tree; an
-        // unstamped development build reports "unknown" and is therefore OMITTED rather
-        // than published as a fact, because "unknown" is a placeholder wearing the shape
-        // of a sha.
+        // WHAT IS DECLARED:
+        //   build_git_sha        from the same `BUILD_REV` that `--version` reports.
+        //                        `scripts/release-build.sh` stamps CK_BUILD_REV from a
+        //                        clean tree; an unstamped development build reports
+        //                        "unknown", and the block is omitted rather than publish
+        //                        a placeholder wearing the shape of a sha.
+        //   wire_crate_version   `SUBC_PROTOCOL_CRATE_VERSION`, which subc-protocol bakes
+        //                        in from its own `env!("CARGO_PKG_VERSION")`
+        //                        (subc-protocol/src/lib.rs:133). It names the wire crate
+        //                        compiled INTO this binary, so unlike a hand-copied string
+        //                        it cannot drift from what it names. Distinct from
+        //                        `module_version` above, which is this module's own
+        //                        version and says nothing about the wire it speaks.
         //
         // WHAT IS NOT, and why each is absent rather than forgotten:
         //   build_lock_digest    nothing hashes Cargo.lock at build time today. Adding
         //                        it is a release-script change, not a manifest one.
-        //   wire_crate_version   no compile-time constant names the subc-protocol
-        //                        version from inside this crate; `module_version` above
-        //                        already carries this module's own version.
-        //   store_schema_version the migration list is private to credentials-core with
-        //                        no public accessor. Exporting one to fill a manifest
-        //                        field would publish an internal number as a contract.
+        //   store_schema_version the contract asks for the newest MIGRATION version
+        //                        (manifest.rs: "any module with a migration list can state
+        //                        its newest migration as fact"), and `MIGRATIONS` is
+        //                        private to credentials-core with no public accessor.
+        //                        `RECORD_SCHEMA_VERSION` IS public and tempting, but it
+        //                        names the encrypted record BODY schema -- a different
+        //                        domain that currently reads 1 while the newest migration
+        //                        is 6. Filling the field from it would be a WELL-FORMED
+        //                        value from the WRONG DOMAIN: shape validation cannot
+        //                        catch it, and it is worse than absence because a present
+        //                        field stops the reader asking.
         provenance: {
             let rev = credentials_core::contract::BUILD_REV;
             (rev != "unknown").then(|| ManifestProvenance {
                 build_git_sha: Some(rev.to_string()),
                 build_lock_digest: None,
-                wire_crate_version: None,
+                wire_crate_version: Some(SUBC_PROTOCOL_CRATE_VERSION.to_string()),
                 store_schema_version: None,
             })
         },

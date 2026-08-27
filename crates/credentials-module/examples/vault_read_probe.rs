@@ -40,6 +40,7 @@ async fn main() {
     let mut show_claims = false;
     let mut report_auth_failure = false;
     let mut sign_payload: Option<String> = None;
+    let mut sign_payload_bytes: Option<Vec<u8>> = None;
     let mut public_key = false;
     let mut provider_status: u16 = 401;
     let mut record_version: Option<u64> = None;
@@ -100,6 +101,19 @@ async fn main() {
             // itself -- it asks whether the right bytes are in the right place, never
             // whether a behaviour is reachable.
             "--sign" => sign_payload = args.next(),
+            // SIGN THE FILE'S EXACT BYTES, never a shell-quoted copy of them.
+            //
+            // `--sign` takes its payload through argv, which is a one-byte mutation
+            // channel: quoting, escaping and newline handling all sit between the file an
+            // approver hashed and the bytes the vault signs. For a 4872-byte JSON
+            // manifest that is not theoretical, and it defeats the SHA gate the ceremony
+            // opens with — the approval would bind bytes H while the signature covers
+            // something else, and both would look correct.
+            "--sign-file" => {
+                let path = args.next().expect("--sign-file needs a path");
+                let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+                sign_payload_bytes = Some(bytes);
+            }
             "--public-key" => public_key = true,
             "--provider-status" => {
                 provider_status = args.next().and_then(|v| v.parse().ok()).unwrap_or(401);
@@ -170,7 +184,7 @@ async fn main() {
         return;
     }
 
-    if public_key || sign_payload.is_some() {
+    if public_key || sign_payload.is_some() || sign_payload_bytes.is_some() {
         // Both halves in one run when both are asked for, because the useful assertion
         // is that they AGREE: a signature that verifies under the returned key proves
         // the two ops name the same keypair. Either alone proves only that an op
@@ -184,15 +198,13 @@ async fn main() {
                 serde_json::to_string(&parsed).unwrap_or_default()
             );
         }
-        if let Some(payload) = sign_payload {
-            let body = credential_sign(
-                &mut stream,
-                route_channel,
-                route_epoch,
-                &handle,
-                payload.as_bytes(),
-            )
-            .await;
+        // File bytes take precedence and are used VERBATIM; the argv string keeps its
+        // existing behaviour for short ad-hoc payloads.
+        let to_sign: Option<Vec<u8>> =
+            sign_payload_bytes.or_else(|| sign_payload.map(|p| p.into_bytes()));
+        if let Some(payload) = to_sign {
+            let body =
+                credential_sign(&mut stream, route_channel, route_epoch, &handle, &payload).await;
             let parsed: Value = serde_json::from_slice(&body.body).unwrap_or(Value::Null);
             eprintln!(
                 "[probe] sign({} bytes) -> {}",

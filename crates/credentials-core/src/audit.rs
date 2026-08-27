@@ -68,6 +68,28 @@ pub enum AuditOp {
     GrantCreate,
     /// A principal-scoped credential-prefix read grant was revoked.
     GrantRevoke,
+    /// A named approver approved a specific artifact, identified by the SHA-256 of its
+    /// EXACT BYTES, before a signing window was opened for it.
+    ///
+    /// NOT A MUTATION OF ANY CREDENTIAL, and deliberately in the chain anyway. Signing
+    /// itself writes nothing — `credential.sign` is a route operation reachable in a
+    /// loop by any handle holder, and a durable write per call would let one grow the
+    /// untrimmable chain without bound. So the ordering evidence lives here instead:
+    ///
+    ///   approval        payload_hash = SHA-256(artifact bytes), actor = approver
+    ///   mint_handle     opens the signing window
+    ///     ... signatures happen here, unrecorded and unbounded ...
+    ///   revoke_handle   closes it
+    ///
+    /// The approval and the published signature MEET AT THE HASH: the chain proves who
+    /// approved bytes H before the key was reachable, and the signature proves the key
+    /// signed bytes H. A signature whose hash has no approval entry is then visible as
+    /// an ABSENCE rather than merely undocumented.
+    ///
+    /// What it deliberately does not prove: that exactly one signature happened inside
+    /// the window. An unrevoked handle is that gap, which is why a mint with no matching
+    /// revoke is an unfinished ceremony rather than a harmless leftover.
+    Approval,
 }
 
 impl AuditOp {
@@ -89,6 +111,7 @@ impl AuditOp {
             AuditOp::FetchAnomaly => "fetch_anomaly",
             AuditOp::GrantCreate => "grant_create",
             AuditOp::GrantRevoke => "grant_revoke",
+            AuditOp::Approval => "approval",
         }
     }
 }

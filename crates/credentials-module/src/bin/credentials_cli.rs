@@ -256,6 +256,7 @@ fn run() -> Result<(), CliError> {
         "revoke-all-handles" => cmd_revoke_all_handles(&global, &args),
         "grant" => cmd_grant(&global, &args),
         "revoke-grant" => cmd_revoke_grant(&global, &args),
+        "approve" => cmd_approve(&global, &args),
         "list" => cmd_list(&global),
         "audit" => cmd_audit(&global, &args),
         "events" => cmd_events(&global, &args),
@@ -322,6 +323,7 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
         "logout" => &["--provider", "--id"],
         "revoke-handle" => &["--handle"],
         "grant" | "revoke-grant" => &["--principal", "--prefix", "--operation"],
+        "approve" => &["--id", "--file", "--approver"],
         "audit" => &["--limit"],
         "events" => &["--limit"],
         // bootstrap / rotate-master-key / verify-audit take no per-command flags.
@@ -2627,6 +2629,60 @@ fn cmd_revoke_grant(global: &GlobalArgs, args: &[String]) -> Result<(), CliError
     println!(
         "revoked reserved:{principal_id} {} of {credential_prefix}",
         operation.as_str()
+    );
+    Ok(())
+}
+
+/// Record that a named approver approved an artifact's EXACT BYTES, before a signing
+/// window is opened for it.
+///
+/// THE HASH IS COMPUTED HERE, FROM THE FILE, and is never taken as an argument. An
+/// operator-supplied hash would let the approval name bytes nobody read: the entry would
+/// look identical while binding a different artifact, which is the one failure this
+/// record exists to make impossible.
+///
+/// Prints the chain sequence so the approval can be cited by the party who publishes the
+/// signature. They meet at the hash: the chain proves who approved bytes H before the
+/// key was reachable, the signature proves the key signed bytes H.
+fn cmd_approve(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
+    let id = required(args, "--id")?;
+    let path = required(args, "--file")?;
+    let approver = required(args, "--approver")?;
+
+    let bytes =
+        std::fs::read(&path).map_err(|e| CliError::Io(format!("read artifact {path}: {e}")))?;
+    if bytes.is_empty() {
+        return Err(CliError::Usage(format!(
+            "artifact {path} is empty: approving zero bytes would bind a hash no \
+             meaningful artifact can have"
+        )));
+    }
+    // `ring` is already a dependency of this binary (Ed25519 key minting), so the hash
+    // costs no new crate. Lowercase hex, which is what every consumer of this value
+    // compares against.
+    let artifact_sha256 = ring::digest::digest(&ring::digest::SHA256, &bytes)
+        .as_ref()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+
+    commit_admin(
+        global,
+        AdminOpBody::Approval {
+            v: ADMIN_OP_SCHEMA_V1,
+            credential_id: id.clone(),
+            artifact_sha256: artifact_sha256.clone(),
+            approver: approver.clone(),
+        },
+    )?;
+    println!("approved {artifact_sha256}");
+    println!("  artifact  {path} ({} bytes)", bytes.len());
+    println!("  key       {id}");
+    println!("  approver  {approver}");
+    println!(
+        "\nRecorded BEFORE the signing window. Verify this hash matches what the \
+         publisher\n signs; if they differ, the approval and the signature bind \
+         different artifacts."
     );
     Ok(())
 }

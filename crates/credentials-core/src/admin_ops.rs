@@ -14,6 +14,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::audit::AuditRecord;
 use crate::audit::{AuditCtx, AuditOp};
 use crate::record::VaultRecord;
 use crate::store::{mint_handle, EncryptedStore, GrantOperation, StoreOpError};
@@ -82,6 +83,29 @@ pub enum AdminOpBody {
         credential_prefix: String,
         operation: GrantOperation,
     },
+    /// Record that a NAMED APPROVER approved a specific artifact, identified by the
+    /// SHA-256 of its exact bytes, before a signing window is opened for it.
+    ///
+    /// Master-key-gated like every other admin op, and that is the point rather than
+    /// uniformity: an approval a route caller could forge would prove nothing about who
+    /// approved. The signing itself is NOT gated this way — `credential.sign` needs only
+    /// a handle — so the gate is deliberately on the record of intent rather than on the
+    /// act, which is the asymmetry the ceremony rests on.
+    #[serde(rename = "admin.approval")]
+    Approval {
+        v: u32,
+        /// The signing credential the window will open on, so the entry names WHICH key
+        /// was approved for use and not merely that something was approved.
+        credential_id: String,
+        /// Lowercase hex SHA-256 of the exact artifact bytes. Never a rendering, never a
+        /// canonicalized form: the verifier verifies received bytes, so the approver
+        /// must approve those same bytes or the two meet at nothing.
+        artifact_sha256: String,
+        /// Who approved. Free text by design — the vault cannot authenticate a human,
+        /// and pretending otherwise by constraining the field would imply a check that
+        /// does not exist.
+        approver: String,
+    },
     /// An authenticated READ: the no-decrypt credential inventory + health summary.
     /// A read, but master-key-gated like every other admin op, because the full
     /// per-credential id/state list is not an anonymous enumeration surface (the
@@ -105,6 +129,7 @@ impl AdminOpBody {
             | AdminOpBody::RevokeAllHandles { v, .. }
             | AdminOpBody::GrantCreate { v, .. }
             | AdminOpBody::GrantRevoke { v, .. }
+            | AdminOpBody::Approval { v, .. }
             | AdminOpBody::Status { v } => *v,
         }
     }
@@ -114,7 +139,13 @@ impl AdminOpBody {
     /// which therefore takes no per-id lock.
     pub fn lock_id(&self) -> Option<&str> {
         match self {
-            AdminOpBody::Store { id, .. }
+            // An approval takes the signing credential's lock: it is the record whose
+            // window is about to open, so an approval racing an admin mutation of that
+            // same key should serialize rather than interleave.
+            AdminOpBody::Approval {
+                credential_id: id, ..
+            }
+            | AdminOpBody::Store { id, .. }
             | AdminOpBody::Invalidate { id, .. }
             | AdminOpBody::Logout { id, .. }
             | AdminOpBody::Reactivate { id, .. }
@@ -174,6 +205,31 @@ pub fn apply(
     actor: &str,
 ) -> Result<serde_json::Value, StoreOpError> {
     match op {
+        AdminOpBody::Approval {
+            credential_id,
+            artifact_sha256,
+            approver,
+            ..
+        } => {
+            // The approver is recorded as the ACTOR rather than folded into a message,
+            // so the chain answers "who approved" with a field instead of prose a later
+            // reader has to parse.
+            //
+            // The route actor (`route-admin`) is deliberately NOT used here: it names the
+            // path, and this entry exists to name the person.
+            store.append_audit(&AuditRecord {
+                op: AuditOp::Approval,
+                credential_id: Some(credential_id.clone()),
+                payload_hash: Some(artifact_sha256.clone()),
+                actor: approver.clone(),
+                alarm: None,
+            })?;
+            Ok(serde_json::json!({
+                "approved": artifact_sha256,
+                "credential_id": credential_id,
+                "approver": approver,
+            }))
+        }
         AdminOpBody::Store {
             id,
             record,

@@ -5,7 +5,7 @@
 //! and exchanges that assertion for the installation token a consumer may use. The PEM
 //! is never copied into an HTTP request or returned as the credential payload.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -59,6 +59,21 @@ struct Installation {
 struct InstallationTokenResponse {
     token: String,
     expires_at: String,
+    /// GitHub omits this on some valid token responses. It is diagnostic metadata, so
+    /// preserve the token-serving parse even when this field is absent or malformed.
+    #[serde(default)]
+    permissions: Option<serde_json::Value>,
+}
+
+/// Decode GitHub's permission object into a map whose ordered keys make equality
+/// independent of the response object's wire order. Any shape outside string scopes and
+/// string levels is deliberately not observed: the minted token remains authoritative.
+fn canonical_permissions(value: Option<&serde_json::Value>) -> Option<BTreeMap<String, String>> {
+    value?
+        .as_object()?
+        .iter()
+        .map(|(scope, level)| Some((scope.clone(), level.as_str()?.to_owned())))
+        .collect()
 }
 
 /// Mints GitHub App installation tokens from vaulted PKCS#8 RSA private keys.
@@ -282,11 +297,13 @@ impl RefreshAdapter for GithubAppAdapter {
         let expires_at_ms = chrono::DateTime::parse_from_rfc3339(&parsed.expires_at)
             .map_err(|error| RefreshError::Decode(format!("invalid GitHub token expiry: {error}")))?
             .timestamp_millis();
+        let github_app_permissions = canonical_permissions(parsed.permissions.as_ref());
         Ok(RefreshedTokens {
             access_token: parsed.token,
             // An installation-token exchange never rotates the App private key.
             refresh_token: cred.refresh_token.clone(),
             expires_at_ms: Some(expires_at_ms),
+            github_app_permissions,
         })
     }
 }
@@ -720,6 +737,41 @@ mod tests {
             "installation tokens are header-safe ASCII"
         );
         assert_eq!(tokens.expires_at_ms, Some(RECORDED_EXPIRY_MS));
+        assert_eq!(
+            tokens.github_app_permissions,
+            Some(BTreeMap::from([
+                ("contents".to_string(), "read".to_string()),
+                ("issues".to_string(), "write".to_string()),
+                ("metadata".to_string(), "read".to_string()),
+                ("pull_requests".to_string(), "write".to_string()),
+            ])),
+            "the recorded grant is canonicalized before the store compares it"
+        );
+    }
+
+    /// A missing grant is a valid GitHub response, so diagnostic parsing cannot become
+    /// part of the token-serving contract. Making `permissions` strict makes this test
+    /// fail before a token is returned.
+    #[tokio::test]
+    async fn a_missing_permissions_key_still_mints_an_installation_token() {
+        let http = fixture_transport(vec![
+            (200, RECORDED_INSTALLATIONS),
+            (
+                201,
+                br#"{"token":"ghs_without_permissions","expires_at":"2026-08-17T10:18:57Z"}"#,
+            ),
+        ]);
+
+        let tokens = GithubAppAdapter::new()
+            .refresh(&credential(), &http)
+            .await
+            .expect("an absent diagnostic field must not discard a valid installation token");
+        assert_eq!(tokens.access_token, "ghs_without_permissions");
+        assert_eq!(tokens.expires_at_ms, Some(RECORDED_EXPIRY_MS));
+        assert!(
+            tokens.github_app_permissions.is_none(),
+            "an absent field is unobserved rather than a synthetic empty grant"
+        );
     }
 
     /// The recorded mint body has no inline repository list, so parsing must not require one.

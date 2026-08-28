@@ -66,6 +66,7 @@ impl RefreshAdapter for GithubCopilotAdapter {
                     access_token: parsed.token,
                     refresh_token: cred.refresh_token.clone(),
                     expires_at_ms: Some(parsed.expires_at.saturating_mul(1000)),
+                    github_app_permissions: None,
                 })
             }
             401 | 403 => Err(RefreshError::InvalidGrant(

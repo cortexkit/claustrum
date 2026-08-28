@@ -202,6 +202,7 @@ impl RefreshAdapter for KimiAdapter {
                 .refresh_token
                 .unwrap_or_else(|| cred.refresh_token.clone()),
             expires_at_ms,
+            github_app_permissions: None,
         })
     }
 }

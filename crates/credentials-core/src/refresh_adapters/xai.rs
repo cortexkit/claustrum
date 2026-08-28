@@ -153,6 +153,7 @@ impl RefreshAdapter for XaiAdapter {
                     access_token: parsed.access_token,
                     refresh_token,
                     expires_at_ms,
+                    github_app_permissions: None,
                 })
             }
             // A dead/revoked refresh token is signalled by status (no reliable body

@@ -24,6 +24,9 @@
 //! - `envelope` (BLOB) — the sealed record (the only place plaintext fields live,
 //!   and only in encrypted form).
 //! - `updated_at_ms` — last-write wall clock (diagnostics only).
+//! - `last_github_app_permissions` (plaintext) — the most recent canonical GitHub App
+//!   installation grant. It is diagnostic metadata, not a token claim, and is only
+//!   updated after a successful GitHub App mint.
 //!
 //! ## Fail-closed, never-panic
 //!
@@ -32,6 +35,7 @@
 //! the per-record quarantine the availability contract requires (NOT a whole-DB
 //! reset — auto-wiping on perceived corruption is itself a data-loss/DoS vector).
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use cortexkit_store::{Migration, SqliteStore, StoreError};
@@ -220,6 +224,13 @@ const MIGRATIONS: &[Migration] = &[
                      FROM read_grants; \
                      DROP TABLE read_grants; \
                      ALTER TABLE read_grants_v6 RENAME TO read_grants;",
+    },
+    // GitHub installation-token permissions are non-secret diagnostic metadata. Keep
+    // only the latest observation on the credential row so repeated mints cannot grow
+    // a table, while leaving historical audit-log MAC transcripts untouched.
+    Migration {
+        version: 7,
+        statements: "ALTER TABLE credentials ADD COLUMN last_github_app_permissions TEXT;",
     },
 ];
 
@@ -1944,6 +1955,65 @@ impl EncryptedStore {
         Ok(next_version)
     }
 
+    /// Persist the last observed GitHub App installation grant after its token commit.
+    ///
+    /// This is deliberately best-effort inside the store rather than an error returned
+    /// to the refresh engine: permission history explains a successful mint, but can
+    /// never make that token unavailable. The post-commit version guard prevents an
+    /// older owner from replacing a newer mint's observation after a lease handover.
+    pub(crate) fn observe_github_app_permissions(
+        &self,
+        credential_id: &str,
+        record_version: u64,
+        permissions: &BTreeMap<String, String>,
+    ) {
+        let Ok(current_json) = serde_json::to_string(permissions) else {
+            return;
+        };
+        let _ = self.store.with_conn(|c| {
+            let tx = c.unchecked_transaction()?;
+            let previous_json: Option<Option<String>> = tx
+                .query_row(
+                    "SELECT last_github_app_permissions FROM credentials \
+                     WHERE credential_id = ?1 AND record_version = ?2",
+                    rusqlite::params![credential_id, record_version as i64],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let Some(previous_json) = previous_json else {
+                tx.commit()?;
+                return Ok(());
+            };
+
+            let updated = tx.execute(
+                "UPDATE credentials SET last_github_app_permissions = ?3 \
+                 WHERE credential_id = ?1 AND record_version = ?2",
+                rusqlite::params![credential_id, record_version as i64, current_json],
+            )?;
+            if updated > 0 {
+                if let Some(previous) = previous_json
+                    .as_deref()
+                    .and_then(|json| serde_json::from_str::<BTreeMap<String, String>>(json).ok())
+                    .filter(|previous| previous != permissions)
+                {
+                    let detail = github_app_permissions_change_detail(&previous, permissions);
+                    append_auth_event_tx(
+                        &tx,
+                        credential_id,
+                        &AuthObservation {
+                            kind: "github_app_permissions_changed",
+                            provider_status: None,
+                            detail: Some(&detail),
+                        },
+                        Some(record_version),
+                        true,
+                    )?;
+                }
+            }
+            tx.commit()
+        });
+    }
+
     /// Read the dangling intent for one credential, if any (reconciliation + the
     /// boot gate's never-serve-dangling check).
     pub fn read_intent(&self, credential_id: &str) -> Result<Option<RefreshIntent>, StoreOpError> {
@@ -2920,19 +2990,44 @@ impl ScopedReadRefusal {
 /// table explains an incident; the chain counts them.
 pub const AUTH_EVENTS_PER_CREDENTIAL: u32 = 64;
 
+/// Render a changed GitHub installation grant as two ordered entitlement sets. A scope
+/// whose level changed appears in both sets, so the direction is visible without asking
+/// an operator to reconstruct it from whole JSON blobs.
+fn github_app_permissions_change_detail(
+    previous: &BTreeMap<String, String>,
+    current: &BTreeMap<String, String>,
+) -> String {
+    let removed: BTreeSet<String> = previous
+        .iter()
+        .filter(|(scope, level)| current.get(*scope) != Some(*level))
+        .map(|(scope, level)| format!("{scope}:{level}"))
+        .collect();
+    let added: BTreeSet<String> = current
+        .iter()
+        .filter(|(scope, level)| previous.get(*scope) != Some(*level))
+        .map(|(scope, level)| format!("{scope}:{level}"))
+        .collect();
+    format!(
+        "added=[{}]; removed=[{}]",
+        added.into_iter().collect::<Vec<_>>().join(","),
+        removed.into_iter().collect::<Vec<_>>().join(",")
+    )
+}
+
 /// What a caller observed about a credential's authentication, for `auth_events`.
 ///
-/// `detail` must be a TYPED VARIANT NAME (`invalid_grant`, `transport`, `status`),
-/// never provider response text: adapters carry raw bodies in their error values, and
-/// an OAuth error body can echo submitted parameters, so writing one here would risk
-/// putting token material in a plaintext column.
+/// `detail` is either a typed variant name (`invalid_grant`, `transport`, `status`)
+/// or a locally rendered diagnostic such as a GitHub grant diff. It must never be
+/// provider response text: adapters carry raw bodies in their error values, and an OAuth
+/// error body can echo submitted parameters, so writing one here would risk putting token
+/// material in a plaintext column.
 #[derive(Debug, Clone, Copy)]
 pub struct AuthObservation<'a> {
     /// What kind of event this was, e.g. `consumer_report` or `refresh_failed`.
     pub kind: &'a str,
     /// The provider's HTTP status, when there was one.
     pub provider_status: Option<u16>,
-    /// A typed variant name. Never response text.
+    /// A typed variant or locally rendered safe metadata. Never response text.
     pub detail: Option<&'a str>,
 }
 
@@ -3175,6 +3270,139 @@ mod tests {
             [],
         )
         .expect("read and sign grants must coexist for one prefix");
+    }
+
+    /// Migration 7 adds only a nullable diagnostic column. In particular, it must not
+    /// rewrite any audit transcript: audit MACs cover historical fixed fields and remain
+    /// evidence for rows created before permission observations existed.
+    #[test]
+    fn migration_seven_preserves_existing_rows_and_audit_macs() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open sqlite");
+        conn.execute_batch(
+            "CREATE TABLE credentials (\
+                 credential_id TEXT PRIMARY KEY, \
+                 record_version INTEGER NOT NULL, \
+                 key_id TEXT NOT NULL, \
+                 state TEXT NOT NULL, \
+                 envelope BLOB NOT NULL, \
+                 updated_at_ms INTEGER NOT NULL, \
+                 stale_pending INTEGER NOT NULL DEFAULT 0\
+             ); \
+             CREATE TABLE audit_log (\
+                 seq INTEGER PRIMARY KEY AUTOINCREMENT, \
+                 ts_ms INTEGER NOT NULL, \
+                 op TEXT NOT NULL, \
+                 credential_id TEXT, \
+                 payload_hash TEXT, \
+                 actor TEXT NOT NULL, \
+                 alarm INTEGER NOT NULL DEFAULT 0, \
+                 alarm_reason TEXT, \
+                 prev_mac TEXT NOT NULL, \
+                 entry_mac TEXT NOT NULL\
+             );",
+        )
+        .expect("create v6 tables");
+        conn.execute(
+            "INSERT INTO credentials \
+                 (credential_id, record_version, key_id, state, envelope, updated_at_ms, stale_pending) \
+             VALUES ('github-app', 4, 'old-key', 'active', X'010203', 99, 1)",
+            [],
+        )
+        .expect("seed legacy credential");
+        for (seq, mac) in [(1, "mac-before"), (2, "mac-after")] {
+            conn.execute(
+                "INSERT INTO audit_log \
+                     (seq, ts_ms, op, credential_id, payload_hash, actor, alarm, alarm_reason, prev_mac, entry_mac) \
+                 VALUES (?1, 7, 'put', 'github-app', 'hash', 'vault', 0, NULL, 'previous', ?2)",
+                rusqlite::params![seq, mac],
+            )
+            .expect("seed historical audit entry");
+        }
+        let credential_before: (i64, String, String, Vec<u8>, i64, i64) = conn
+            .query_row(
+                "SELECT record_version, key_id, state, envelope, updated_at_ms, stale_pending \
+                 FROM credentials WHERE credential_id = 'github-app'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .expect("read legacy credential");
+        let macs_before = conn
+            .prepare("SELECT entry_mac FROM audit_log ORDER BY seq")
+            .expect("prepare audit MAC read")
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("read audit MACs")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("decode audit MACs");
+
+        let migration = MIGRATIONS
+            .iter()
+            .find(|migration| migration.version == 7)
+            .expect("migration 7 exists");
+        conn.execute_batch(migration.statements)
+            .expect("apply migration 7 to a populated v6 store");
+
+        let credential_after: (i64, String, String, Vec<u8>, i64, i64, Option<String>) = conn
+            .query_row(
+                "SELECT record_version, key_id, state, envelope, updated_at_ms, stale_pending, \
+                        last_github_app_permissions \
+                 FROM credentials WHERE credential_id = 'github-app'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
+            )
+            .expect("read migrated credential");
+        assert_eq!(
+            (
+                &credential_after.0,
+                &credential_after.1,
+                &credential_after.2,
+                &credential_after.3,
+                &credential_after.4,
+                &credential_after.5,
+            ),
+            (
+                &credential_before.0,
+                &credential_before.1,
+                &credential_before.2,
+                &credential_before.3,
+                &credential_before.4,
+                &credential_before.5,
+            ),
+            "adding diagnostic metadata must not alter an existing credential row"
+        );
+        assert!(
+            credential_after.6.is_none(),
+            "a legacy credential has no synthetic first observation"
+        );
+        let macs_after = conn
+            .prepare("SELECT entry_mac FROM audit_log ORDER BY seq")
+            .expect("prepare post-migration audit MAC read")
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("read post-migration audit MACs")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("decode post-migration audit MACs");
+        assert_eq!(
+            macs_after, macs_before,
+            "migration 7 must leave every historical audit MAC byte-identical"
+        );
     }
 
     /// EVERY write path refuses an empty non-OAuth payload, not merely the one that

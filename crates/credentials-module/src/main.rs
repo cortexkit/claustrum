@@ -1620,6 +1620,7 @@ mod tests {
                 access_token: "fresh-after-ttl-check".into(),
                 refresh_token: credential.refresh_token.clone(),
                 expires_at_ms: Some(test_now_ms().saturating_add(self.fresh_ttl_ms)),
+                github_app_permissions: None,
             })
         }
     }

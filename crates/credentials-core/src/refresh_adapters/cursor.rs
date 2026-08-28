@@ -290,6 +290,7 @@ impl RefreshAdapter for CursorAdapter {
                         .refresh_token
                         .unwrap_or_else(|| cred.refresh_token.clone()),
                     access_token: parsed.access_token,
+                    github_app_permissions: None,
                 })
             }
             401 | 403 => Err(RefreshError::InvalidGrant(

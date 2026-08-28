@@ -178,6 +178,7 @@ impl RefreshAdapter for OpenAiAdapter {
             access_token: parsed.access_token,
             refresh_token,
             expires_at_ms,
+            github_app_permissions: None,
         })
     }
 }

@@ -5,8 +5,9 @@
 //! visible). The REAL kill-9 SIGKILL harness lives in a separate, feature-gated
 //! integration test; this file proves the logic deterministically in-process.
 
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
@@ -77,6 +78,7 @@ impl RefreshAdapter for StubAdapter {
             access_token: self.access_token.into(),
             refresh_token: "rotated-refresh".into(),
             expires_at_ms: Some(now_ms() + 3_600_000),
+            github_app_permissions: None,
         })
     }
 
@@ -187,6 +189,229 @@ fn engine(store: EncryptedStore, adapter: StubAdapter) -> (RefreshEngine, Arc<At
     let calls = adapter.calls.clone();
     let eng = RefreshEngine::new(Arc::new(store), vec![Arc::new(adapter)], Arc::new(NoHttp));
     (eng, calls)
+}
+
+/// A GitHub App fixture that returns queued grants so each forced read is one distinct
+/// mint. It exercises the engine-to-store observation path rather than testing the
+/// metadata helper in isolation.
+struct GithubPermissionsAdapter {
+    grants: Mutex<VecDeque<BTreeMap<String, String>>>,
+}
+
+impl GithubPermissionsAdapter {
+    fn new(grants: Vec<BTreeMap<String, String>>) -> Self {
+        Self {
+            grants: Mutex::new(grants.into()),
+        }
+    }
+}
+
+#[async_trait]
+impl RefreshAdapter for GithubPermissionsAdapter {
+    fn name(&self) -> &str {
+        crate::refresh_adapters::github_app::ADAPTER_NAME
+    }
+
+    async fn refresh(
+        &self,
+        cred: &OAuthCredential,
+        _http: &dyn HttpTransport,
+    ) -> Result<RefreshedTokens, RefreshError> {
+        let grant = self
+            .grants
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .pop_front()
+            .expect("test configured one GitHub grant for each expected mint");
+        Ok(RefreshedTokens {
+            access_token: "github-app-access".into(),
+            refresh_token: cred.refresh_token.clone(),
+            expires_at_ms: Some(now_ms() + 3_600_000),
+            github_app_permissions: Some(grant),
+        })
+    }
+}
+
+fn permission_map(entries: &[(&str, &str)]) -> BTreeMap<String, String> {
+    entries
+        .iter()
+        .map(|(scope, level)| ((*scope).to_string(), (*level).to_string()))
+        .collect()
+}
+
+fn github_app_record() -> VaultRecord {
+    let mut record = stale_oauth_record();
+    record.refresh_adapter = Some(crate::refresh_adapters::github_app::ADAPTER_NAME.into());
+    record
+}
+
+fn github_permissions_engine(
+    store: EncryptedStore,
+    grants: Vec<BTreeMap<String, String>>,
+) -> RefreshEngine {
+    RefreshEngine::new(
+        Arc::new(store),
+        vec![Arc::new(GithubPermissionsAdapter::new(grants))],
+        Arc::new(NoHttp),
+    )
+}
+
+fn stored_github_permissions(
+    store: &EncryptedStore,
+    credential_id: &str,
+) -> Option<BTreeMap<String, String>> {
+    let json: Option<String> = store
+        .with_raw_conn(|conn| {
+            conn.query_row(
+                "SELECT last_github_app_permissions FROM credentials WHERE credential_id = ?1",
+                [credential_id],
+                |row| row.get(0),
+            )
+        })
+        .expect("read plaintext GitHub permission metadata");
+    json.map(|json| serde_json::from_str(&json).expect("stored canonical permission map"))
+}
+
+/// The initial grant is a baseline, not evidence that authority moved. Emitting an
+/// event here would create one false alarm for every existing GitHub App after deploy.
+#[tokio::test]
+async fn github_app_first_permission_observation_writes_metadata_without_an_event() {
+    let (root, descriptor) = tmp_descriptor();
+    let store = open_store(&descriptor, 91);
+    let initial = permission_map(&[("contents", "read"), ("issues", "write")]);
+    store
+        .create("github-app", &github_app_record())
+        .expect("create GitHub App record");
+    let engine = github_permissions_engine(store, vec![initial.clone()]);
+
+    engine
+        .get("github-app", None, false)
+        .await
+        .expect("first GitHub App mint");
+
+    assert_eq!(
+        stored_github_permissions(engine.store(), "github-app"),
+        Some(initial),
+        "the first observation is retained in plaintext metadata"
+    );
+    assert!(
+        engine
+            .store()
+            .recent_auth_events(10)
+            .expect("read diagnostics")
+            .is_empty(),
+        "the first observation establishes a baseline and must not alarm"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The entries arrive in reverse order on the second mint. Raw JSON-string comparison
+/// would make this an hourly event stream; canonical map equality must keep it quiet.
+#[tokio::test]
+async fn github_app_identical_permission_grants_ignore_response_key_order() {
+    let (root, descriptor) = tmp_descriptor();
+    let store = open_store(&descriptor, 92);
+    let first = permission_map(&[("contents", "read"), ("issues", "write")]);
+    let same_grant_shuffled = permission_map(&[("issues", "write"), ("contents", "read")]);
+    store
+        .create("github-app", &github_app_record())
+        .expect("create GitHub App record");
+    let engine = github_permissions_engine(store, vec![first, same_grant_shuffled]);
+
+    engine
+        .get("github-app", None, false)
+        .await
+        .expect("first GitHub App mint");
+    engine
+        .get("github-app", None, true)
+        .await
+        .expect("second GitHub App mint");
+
+    assert!(
+        engine
+            .store()
+            .recent_auth_events(10)
+            .expect("read diagnostics")
+            .is_empty(),
+        "identical grants must not become a per-mint event log"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn github_app_narrowed_grant_records_the_removed_scope() {
+    let (root, descriptor) = tmp_descriptor();
+    let store = open_store(&descriptor, 93);
+    store
+        .create("github-app", &github_app_record())
+        .expect("create GitHub App record");
+    let engine = github_permissions_engine(
+        store,
+        vec![
+            permission_map(&[("contents", "read"), ("issues", "write")]),
+            permission_map(&[("contents", "read")]),
+        ],
+    );
+
+    engine
+        .get("github-app", None, false)
+        .await
+        .expect("baseline GitHub App mint");
+    engine
+        .get("github-app", None, true)
+        .await
+        .expect("narrowed GitHub App mint");
+
+    let events = engine
+        .store()
+        .recent_auth_events(10)
+        .expect("read diagnostics");
+    assert_eq!(events.len(), 1, "one actual grant change records one event");
+    assert_eq!(events[0].kind, "github_app_permissions_changed");
+    assert_eq!(
+        events[0].detail.as_deref(),
+        Some("added=[]; removed=[issues:write]"),
+        "the diagnostic names the scope that disappeared"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn github_app_widened_grant_records_the_added_scope() {
+    let (root, descriptor) = tmp_descriptor();
+    let store = open_store(&descriptor, 94);
+    store
+        .create("github-app", &github_app_record())
+        .expect("create GitHub App record");
+    let engine = github_permissions_engine(
+        store,
+        vec![
+            permission_map(&[("contents", "read")]),
+            permission_map(&[("contents", "read"), ("issues", "write")]),
+        ],
+    );
+
+    engine
+        .get("github-app", None, false)
+        .await
+        .expect("baseline GitHub App mint");
+    engine
+        .get("github-app", None, true)
+        .await
+        .expect("widened GitHub App mint");
+
+    let events = engine
+        .store()
+        .recent_auth_events(10)
+        .expect("read diagnostics");
+    assert_eq!(events.len(), 1, "one actual grant change records one event");
+    assert_eq!(events[0].kind, "github_app_permissions_changed");
+    assert_eq!(
+        events[0].detail.as_deref(),
+        Some("added=[issues:write]; removed=[]"),
+        "the diagnostic names the scope that appeared"
+    );
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[tokio::test]

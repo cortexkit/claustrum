@@ -108,6 +108,7 @@ impl RefreshAdapter for DevinAdapter {
             access_token: cred.access_token.clone(),
             refresh_token: cred.refresh_token.clone(),
             expires_at_ms: Some(now_ms().saturating_add(TOKEN_TTL_MS)),
+            github_app_permissions: None,
         })
     }
 }

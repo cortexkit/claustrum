@@ -44,6 +44,7 @@ impl RefreshAdapter for StubAdapter {
             access_token: "STAGED-TOKEN-MUST-NEVER-BE-COMMITTED".into(),
             refresh_token: "STAGED-ROTATED-REFRESH".into(),
             expires_at_ms: Some(i64::MAX),
+            github_app_permissions: None,
         })
     }
 }

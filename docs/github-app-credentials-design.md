@@ -6,7 +6,7 @@ As of 2026-08-20 it mints for 21 fleet Apps and has been proven end to end: a re
 reaction posted on a public issue, attributed to an agent's own bot identity, from
 a token minted on demand.
 
-<!-- built-when: crates/credentials-core/src/refresh_adapters/github_app.rs::permissions -->
+<!-- built-when: crates/credentials-core/src/refresh_adapters/github_app.rs::SCOPED_MINT_REQUEST -->
 
 ## What is NOT built: SCOPED minting
 

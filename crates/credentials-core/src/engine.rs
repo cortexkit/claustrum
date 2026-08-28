@@ -368,6 +368,12 @@ impl RefreshEngine {
                 )))
             }
             Ok(tokens) => {
+                // Only GitHub App mints return this vendor-specific diagnostic. Keep the
+                // field out of every other refresh path even if an adapter is miswired.
+                let github_app_permissions = (adapter_name
+                    == crate::refresh_adapters::github_app::ADAPTER_NAME)
+                    .then(|| tokens.github_app_permissions.clone())
+                    .flatten();
                 let new_record = apply_refreshed(record, oauth, tokens);
 
                 // Test-only crash seam: the intent is durably committed and the new
@@ -386,7 +392,19 @@ impl RefreshEngine {
                     .store
                     .commit_refresh(credential_id, record.record_version, &new_record)
                 {
-                    Ok(_) => Ok(()),
+                    Ok(record_version) => {
+                        if let Some(permissions) = github_app_permissions.as_ref() {
+                            // Diagnostic persistence is deliberately non-fallible: a valid
+                            // token has already committed and must be served even if this
+                            // extra observation cannot be recorded.
+                            self.store.observe_github_app_permissions(
+                                credential_id,
+                                record_version,
+                                permissions,
+                            );
+                        }
+                        Ok(())
+                    }
                     // Lease handover fenced our commit: the new lease owner will
                     // reconcile the still-dangling intent. Discard the staged tokens,
                     // do NOT retry, do NOT serve them. (The staged `new_record` drops

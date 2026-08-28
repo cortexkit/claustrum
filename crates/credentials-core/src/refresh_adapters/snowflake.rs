@@ -197,6 +197,7 @@ impl RefreshAdapter for SnowflakeAdapter {
                     expires_at_ms: Some(
                         now_ms().saturating_add(parsed.expires_in.saturating_mul(1000)),
                     ),
+                    github_app_permissions: None,
                 })
             }
             400 | 401 => Err(RefreshError::InvalidGrant(

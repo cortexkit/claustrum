@@ -22,6 +22,8 @@
 //! accepted, rare re-login residual). The seam exists for correctness and for
 //! future providers that do expose introspection.
 
+use std::collections::BTreeMap;
+
 use async_trait::async_trait;
 
 use crate::oauth::OAuthCredential;
@@ -55,6 +57,9 @@ pub struct RefreshedTokens {
     pub refresh_token: String,
     /// New access-token expiry (Unix ms), when the provider returns one.
     pub expires_at_ms: Option<i64>,
+    /// The GitHub App installation grant returned alongside a minted token. Only the
+    /// GitHub App adapter sets this; every other provider leaves it absent.
+    pub github_app_permissions: Option<BTreeMap<String, String>>,
 }
 
 /// The outcome of a non-mutating validity check (the recovery probe).

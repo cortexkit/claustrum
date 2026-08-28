@@ -193,6 +193,7 @@ impl RefreshAdapter for GoogleAdapter {
             // Google does not rotate; carry the existing refresh token forward.
             refresh_token: cred.refresh_token.clone(),
             expires_at_ms,
+            github_app_permissions: None,
         })
     }
 }

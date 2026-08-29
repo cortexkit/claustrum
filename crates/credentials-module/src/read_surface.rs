@@ -1502,6 +1502,59 @@ mod error_class_tests {
         );
     }
 
+    /// Golden conformance for the FRAME SHAPE, which the class-string test above does
+    /// not cover and cannot: it pins the four `class` values while saying nothing about
+    /// the envelope they arrive in. Rename `class` to `error_class`, move the error a
+    /// level, or drop `class` from the body entirely, and that test stays green while
+    /// every consumer breaks.
+    ///
+    /// WHY THIS EXISTS AT ALL: a consumer typed a decoder from the published contract,
+    /// parsed a real error frame SUCCESSFULLY, and silently discarded `class` — serde
+    /// drops unknown fields without complaint, so a decoder that ignores the field it
+    /// was told to branch on looks identical to one that honours it. They then branched
+    /// on `code` through a closed enum, which turns the first added code into a parse
+    /// failure rather than an unknown-code branch. Neither is reachable from this side;
+    /// what IS reachable is guaranteeing the bytes never move under them.
+    ///
+    /// Serialized through the REAL producer type rather than a hand-built `json!`, so
+    /// this pins what the wire actually carries. A reconstruction would only pin the
+    /// reconstruction — the frame could drift and this would still pass.
+    ///
+    /// The literal is the exact frame captured from a live daemon and handed to that
+    /// consumer, who pinned it in their tree. Both directions now go red on drift.
+    #[test]
+    fn error_frame_shape_is_pinned() {
+        let frame = GetOutcome::Err {
+            error: ErrorBody {
+                code: ReadError::NotFound,
+                class: ErrorClass::Permanent,
+            },
+        };
+        let got: serde_json::Value =
+            serde_json::to_value(&frame).expect("serialize the error outcome");
+
+        // ORDER IS LOAD-BEARING, and this is the second version. Written with the
+        // equality first, the specific check below never ran: `assert_eq!` panics on any
+        // difference, so dropping `class` reported "the frame shape drifted" and left the
+        // reader to diff two blobs. The diagnostic existed only for the case it could not
+        // reach. A cheap, specific assertion must precede a broad one that subsumes it,
+        // or it is decoration.
+        assert!(
+            got["error"].get("class").is_some(),
+            "`class` vanished from the error body — the contract's branch-on-class rule \
+             becomes unfollowable and consumers silently fall back to branching on `code`"
+        );
+
+        let want = serde_json::json!({
+            "error": { "code": "not_found", "class": "permanent" }
+        });
+
+        assert_eq!(
+            got, want,
+            "the error frame shape drifted — consumers branch on these exact keys"
+        );
+    }
+
     /// An UNMAPPED store error degrades to a TRANSIENT code, never a permanent one.
     ///
     /// This is the property a cross-repo consumer's destructive behaviour rests on,

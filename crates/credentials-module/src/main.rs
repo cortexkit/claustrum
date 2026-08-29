@@ -2266,6 +2266,17 @@ mod tests {
             "test",
         )
         .expect("create sign grant");
+        credentials_core::admin_ops::apply(
+            &store,
+            credentials_core::admin_ops::AdminOpBody::GrantCreate {
+                v: credentials_core::admin_ops::ADMIN_OP_SCHEMA_V1,
+                principal_id: "prefrontal-core".into(),
+                credential_prefix: "apikey:".into(),
+                operation: GrantOperation::Sign,
+            },
+            "test",
+        )
+        .expect("create apikey sign grant");
         let status = credentials_core::admin_ops::apply(
             &store,
             credentials_core::admin_ops::AdminOpBody::Status {
@@ -2295,6 +2306,13 @@ mod tests {
                 "principal_id": "prefrontal-core",
                 "credential_prefix": "apikey:",
                 "operation": "read",
+                "covered_credential_ids": ["apikey:active", "apikey:dead"],
+            },
+            {
+                "principal_kind": "reserved",
+                "principal_id": "prefrontal-core",
+                "credential_prefix": "apikey:",
+                "operation": "sign",
                 "covered_credential_ids": ["apikey:active", "apikey:dead"],
             },
             {

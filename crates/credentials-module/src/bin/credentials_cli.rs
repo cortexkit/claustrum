@@ -29,6 +29,7 @@
 //!   revoke-all-handles --id <id>
 //!   grant --principal <module-id> --prefix <credential-prefix> --operation <read|sign>
 //!   revoke-grant --principal <module-id> --prefix <credential-prefix> --operation <read|sign>
+//!   grants
 //!   audit [--limit N] | verify-audit
 //!
 //! Storage location is resolved the same way the daemon resolves it; for the CLI
@@ -258,6 +259,7 @@ fn run() -> Result<(), CliError> {
         "revoke-grant" => cmd_revoke_grant(&global, &args),
         "approve" => cmd_approve(&global, &args),
         "list" => cmd_list(&global),
+        "grants" => cmd_grants(&global),
         "audit" => cmd_audit(&global, &args),
         "events" => cmd_events(&global, &args),
         "usable" => cmd_usable(&global),
@@ -372,6 +374,7 @@ fn usage_short() -> String {
        remove              permanently delete a credential\n\
        status              vault health + credential inventory (no secrets)\n\
        list                credential ids + lifecycle state (no secrets)\n\
+       grants              principal-scoped grants (no secrets)\n\
         put                 ingest an api key / opaque secret\n\
         mint-signing-key    generate and custody a new Ed25519 signing key\n\
         import              import from opencode/pi/gemini-cli/antigravity\n\
@@ -454,6 +457,14 @@ fn help_verb(verb: &str) -> String {
              \n\
              Print each credential's id + lifecycle state + version (no secrets), e.g.\n\
              to find which credential a health probe flagged needs_reauth."
+        }
+        "grants" => {
+            "ck auth grants\n\
+             \n\
+             Print every principal-scoped grant as one stable row: principal kind, principal\n\
+             id, credential prefix, operation, and creation time. Read-only; it uses the\n\
+             authenticated admin.status path, reading the running daemon when available and\n\
+             the offline lease path otherwise. An empty grant table prints `no grants`."
         }
         "mint-signing-key" => {
             "ck auth mint-signing-key --id signing:<provider>[:<generation>] [--replace]\n\
@@ -2349,26 +2360,23 @@ fn print_inventory(rows: &[(String, u64, String)]) {
     }
 }
 
-/// Render the server's sorted grant set instead of asking an operator to mentally
-/// expand prefixes. A newly covered id is a security-relevant status diff.
-fn print_read_grants(result: &serde_json::Value) -> Result<(), CliError> {
-    let Some(grants) = result.get("read_grants") else {
-        // An older daemon cannot have created a grant, so there is no access set to
-        // hide while a newly upgraded CLI is still talking to it.
-        return Ok(());
-    };
-    let grants = grants.as_array().ok_or_else(|| {
-        CliError::RouteRefused("admin.status returned malformed read grants".into())
-    })?;
-    println!();
-    if grants.is_empty() {
-        println!("read grants: none");
-        return Ok(());
-    }
-    println!("read grants:");
-    let mut prior_grant: Option<(String, String, String, String)> = None;
-    for (index, grant) in grants.iter().enumerate() {
-        let kind = grant
+#[derive(Debug)]
+struct GrantRow {
+    principal_kind: String,
+    principal_id: String,
+    credential_prefix: String,
+    operation: String,
+    created_at_ms: i64,
+}
+
+fn parse_grants(result: &serde_json::Value) -> Result<Vec<GrantRow>, CliError> {
+    let rows = result
+        .get("read_grants")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| CliError::RouteRefused("admin.status omitted grant inventory".into()))?;
+    let mut grants = Vec::with_capacity(rows.len());
+    for (index, grant) in rows.iter().enumerate() {
+        let principal_kind = grant
             .get("principal_kind")
             .and_then(serde_json::Value::as_str)
             .filter(|kind| *kind == "reserved")
@@ -2386,7 +2394,7 @@ fn print_read_grants(result: &serde_json::Value) -> Result<(), CliError> {
                     "admin.status returned an invalid grant principal at row {index}"
                 ))
             })?;
-        let prefix = grant
+        let credential_prefix = grant
             .get("credential_prefix")
             .and_then(serde_json::Value::as_str)
             .filter(|prefix| !prefix.is_empty())
@@ -2404,22 +2412,85 @@ fn print_read_grants(result: &serde_json::Value) -> Result<(), CliError> {
                     "admin.status returned an invalid grant operation at row {index}"
                 ))
             })?;
+        let created_at_ms = grant
+            .get("created_at_ms")
+            .and_then(serde_json::Value::as_i64)
+            .ok_or_else(|| {
+                CliError::RouteRefused(format!(
+                    "admin.status returned an invalid grant creation time at row {index}"
+                ))
+            })?;
+        grants.push(GrantRow {
+            principal_kind: principal_kind.to_string(),
+            principal_id: principal_id.to_string(),
+            credential_prefix: credential_prefix.to_string(),
+            operation: operation.to_string(),
+            created_at_ms,
+        });
+    }
+
+    let mut prior: Option<(String, String, String, String)> = None;
+    for grant in &grants {
         let order_key = (
-            kind.to_string(),
-            principal_id.to_string(),
-            operation.to_string(),
-            prefix.to_string(),
+            grant.principal_kind.clone(),
+            grant.principal_id.clone(),
+            grant.credential_prefix.clone(),
+            grant.operation.clone(),
         );
-        if prior_grant
+        if prior
             .as_ref()
-            .is_some_and(|prior| prior >= &order_key)
+            .is_some_and(|previous| previous >= &order_key)
         {
             return Err(CliError::RouteRefused(
                 "admin.status returned grants out of stable order".into(),
             ));
         }
-        prior_grant = Some(order_key);
-        let covered = grant
+        prior = Some(order_key);
+    }
+    Ok(grants)
+}
+
+/// Print one stable row per principal-scoped grant, including the creation time.
+fn print_grants(result: &serde_json::Value) -> Result<(), CliError> {
+    let grants = parse_grants(result)?;
+    if grants.is_empty() {
+        println!("no grants");
+        return Ok(());
+    }
+    for grant in grants {
+        println!(
+            "{:<14} {:<24} {:<24} {:<10} {}",
+            grant.principal_kind,
+            grant.principal_id,
+            grant.credential_prefix,
+            grant.operation,
+            format_ts_ms(grant.created_at_ms)
+        );
+    }
+    Ok(())
+}
+
+/// Render the server's sorted grant set instead of asking an operator to mentally
+/// expand prefixes. A newly covered id is a security-relevant status diff.
+fn print_read_grants(result: &serde_json::Value) -> Result<(), CliError> {
+    let Some(raw_grants) = result.get("read_grants") else {
+        // An older daemon cannot have created a grant, so there is no access set to
+        // hide while a newly upgraded CLI is still talking to it.
+        return Ok(());
+    };
+    let raw_grants = raw_grants.as_array().ok_or_else(|| {
+        CliError::RouteRefused("admin.status returned malformed read grants".into())
+    })?;
+    let grants = parse_grants(result)?;
+    println!();
+    if grants.is_empty() {
+        println!("read grants: none");
+        return Ok(());
+    }
+    println!("read grants:");
+    for (index, grant) in grants.iter().enumerate() {
+        let raw_grant = &raw_grants[index];
+        let covered = raw_grant
             .get("covered_credential_ids")
             .and_then(serde_json::Value::as_array)
             .ok_or_else(|| {
@@ -2427,7 +2498,10 @@ fn print_read_grants(result: &serde_json::Value) -> Result<(), CliError> {
                     "admin.status omitted covered credentials at grant row {index}"
                 ))
             })?;
-        println!("  {kind}:{principal_id} {operation} {prefix}");
+        println!(
+            "  {}:{} {} {}",
+            grant.principal_kind, grant.principal_id, grant.operation, grant.credential_prefix
+        );
         let mut prior_id: Option<&str> = None;
         for (covered_index, id) in covered.iter().enumerate() {
             let id = id.as_str().filter(|id| !id.is_empty()).ok_or_else(|| {
@@ -2435,7 +2509,7 @@ fn print_read_grants(result: &serde_json::Value) -> Result<(), CliError> {
                     "admin.status returned an invalid covered credential at grant row {index}, row {covered_index}"
                 ))
             })?;
-            if !id.starts_with(prefix) {
+            if !id.starts_with(&grant.credential_prefix) {
                 return Err(CliError::RouteRefused(format!(
                     "admin.status listed a credential outside its grant prefix at grant row {index}"
                 )));
@@ -2925,6 +2999,14 @@ fn cmd_list(global: &GlobalArgs) -> Result<(), CliError> {
     let rows = parse_inventory(&result)?;
     print_inventory(&rows);
     Ok(())
+}
+
+fn cmd_grants(global: &GlobalArgs) -> Result<(), CliError> {
+    // Grant inventory is part of the same authenticated admin.status response as the
+    // credential inventory. This deliberately follows `ck auth list`: a discovered
+    // daemon is queried online, otherwise the shared helper takes the offline lease.
+    let result = request_admin_status(global)?;
+    print_grants(&result)
 }
 
 /// Report whether each credential still holds material the engine can work with.

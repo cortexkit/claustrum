@@ -369,7 +369,9 @@ pub fn apply(
                 })
                 .collect();
             // Both source lists are SQL-sorted, and the filter retains credential order.
-            // Stable covered-set output makes an added credential under an existing prefix
+            // Grants are ordered by principal, prefix, then operation so the complete
+            // authority set is stable across repeated status reads. Stable covered-set
+            // output makes an added credential under an existing prefix
             // visible in a status diff instead of silently widening access.
             let read_grants: Vec<serde_json::Value> = grants
                 .iter()

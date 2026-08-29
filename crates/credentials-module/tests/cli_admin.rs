@@ -247,6 +247,204 @@ fn tmp_root(tag: &str) -> PathBuf {
     d
 }
 
+struct GrantCliVault {
+    root: PathBuf,
+    data_dir: PathBuf,
+    key_path: PathBuf,
+}
+
+impl GrantCliVault {
+    fn new(tag: &str) -> Self {
+        let root = tmp_root(tag);
+        let data_dir = root.join("vault");
+        let key_path = root.join("master.key");
+        std::fs::create_dir_all(&data_dir).expect("vault directory");
+        Self {
+            root,
+            data_dir,
+            key_path,
+        }
+    }
+
+    fn run(&self, args: &[&str]) -> std::process::Output {
+        cli()
+            .args(args)
+            .arg("--data-dir")
+            .arg(&self.data_dir)
+            .arg("--key-path")
+            .arg(&self.key_path)
+            .output()
+            .expect("run ck-auth")
+    }
+
+    fn bootstrap(&self) {
+        let out = self.run(&["bootstrap"]);
+        assert!(
+            out.status.success(),
+            "bootstrap failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+impl Drop for GrantCliVault {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+fn grant_row_fields<'a>(stdout: &'a str, credential_prefix: &str) -> Vec<&'a str> {
+    stdout
+        .lines()
+        .find(|line| line.contains(credential_prefix))
+        .unwrap_or_else(|| panic!("grant row for {credential_prefix} missing from:\n{stdout}"))
+        .split_whitespace()
+        .collect()
+}
+
+#[test]
+fn grants_help_describes_the_read_only_inventory() {
+    let out = cli()
+        .args(["help", "grants"])
+        .output()
+        .expect("run grants help");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("ck auth grants"));
+    assert!(stdout.contains("principal kind"));
+    assert!(stdout.contains("creation time"));
+    assert!(stdout.contains("no grants"));
+}
+
+#[test]
+fn offline_grants_lists_a_newly_minted_grant_with_creation_time() {
+    let vault = GrantCliVault::new("grants-created");
+    vault.bootstrap();
+
+    let created = vault.run(&[
+        "grant",
+        "--principal",
+        "agent",
+        "--prefix",
+        "operator:",
+        "--operation",
+        "read",
+    ]);
+    assert!(
+        created.status.success(),
+        "grant failed: {}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+
+    let listed = vault.run(&["grants"]);
+    let stdout = String::from_utf8_lossy(&listed.stdout);
+    assert!(listed.status.success(), "grants failed: {stdout}");
+    let fields = grant_row_fields(&stdout, "operator:");
+    assert_eq!(
+        &fields[..4],
+        &["reserved", "agent", "operator:", "read"],
+        "grant rows must expose each requested column: {stdout}"
+    );
+    assert_eq!(fields.len(), 6, "timestamp should be two formatted columns");
+    assert!(
+        fields[4].len() == 10 && fields[4].as_bytes()[4] == b'-' && fields[4].as_bytes()[7] == b'-',
+        "creation date must use the CLI time-column format: {stdout}"
+    );
+    assert!(
+        fields[5].len() == 8 && fields[5].as_bytes()[2] == b':' && fields[5].as_bytes()[5] == b':',
+        "creation time must use the CLI time-column format: {stdout}"
+    );
+}
+
+#[test]
+fn grants_keep_read_and_sign_rows_separate_and_sort_by_prefix_then_operation() {
+    let vault = GrantCliVault::new("grants-operations");
+    vault.bootstrap();
+
+    for (prefix, operation) in [("z:", "sign"), ("z:", "read"), ("a:", "sign")] {
+        let created = vault.run(&[
+            "grant",
+            "--principal",
+            "agent",
+            "--prefix",
+            prefix,
+            "--operation",
+            operation,
+        ]);
+        assert!(
+            created.status.success(),
+            "grant {prefix} {operation} failed: {}",
+            String::from_utf8_lossy(&created.stderr)
+        );
+    }
+
+    let listed = vault.run(&["grants"]);
+    let stdout = String::from_utf8_lossy(&listed.stdout);
+    assert!(listed.status.success(), "grants failed: {stdout}");
+    let rows: Vec<Vec<&str>> = stdout
+        .lines()
+        .filter(|line| line.contains("reserved"))
+        .map(|line| line.split_whitespace().collect())
+        .collect();
+    assert_eq!(rows.len(), 3, "every grant needs its own row: {stdout}");
+    assert_eq!(&rows[0][..4], &["reserved", "agent", "a:", "sign"]);
+    assert_eq!(&rows[1][..4], &["reserved", "agent", "z:", "read"]);
+    assert_eq!(&rows[2][..4], &["reserved", "agent", "z:", "sign"]);
+}
+
+#[test]
+fn revoked_grant_disappears_from_the_grants_listing() {
+    let vault = GrantCliVault::new("grants-revoked");
+    vault.bootstrap();
+    let created = vault.run(&[
+        "grant",
+        "--principal",
+        "agent",
+        "--prefix",
+        "operator:",
+        "--operation",
+        "read",
+    ]);
+    assert!(created.status.success());
+    assert!(String::from_utf8_lossy(&vault.run(&["grants"]).stdout).contains("operator:"));
+
+    let revoked = vault.run(&[
+        "revoke-grant",
+        "--principal",
+        "agent",
+        "--prefix",
+        "operator:",
+        "--operation",
+        "read",
+    ]);
+    assert!(
+        revoked.status.success(),
+        "revoke failed: {}",
+        String::from_utf8_lossy(&revoked.stderr)
+    );
+    let listed = vault.run(&["grants"]);
+    assert!(listed.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&listed.stdout).trim(),
+        "no grants",
+        "a revoked grant must no longer be listed"
+    );
+}
+
+#[test]
+fn empty_grants_prints_an_explicit_no_grants_line() {
+    let vault = GrantCliVault::new("grants-empty");
+    vault.bootstrap();
+
+    let listed = vault.run(&["grants"]);
+    assert!(listed.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&listed.stdout).trim(),
+        "no grants",
+        "an empty grant table must not be silent"
+    );
+}
+
 #[test]
 fn bootstrap_put_mint_audit_end_to_end() {
     let root = tmp_root("e2e");

@@ -333,10 +333,11 @@ invalidating a credential that has already been repaired.
 ```sh
 ck auth status   # health ladder + inventory
 ck auth list     # one row per credential: <state> v<version> <credential_id>
+ck auth grants   # one row per principal-scoped grant
 ```
 
-Neither prints a secret. Both read the running daemon when one is up and fall back
-to the store directly when it is not.
+None of these commands prints a secret. All read the running daemon when one is up and
+fall back to the store directly when it is not.
 
 `status` is the one to run when something is wrong. It reports the same health the
 supervisor probes:
@@ -376,6 +377,12 @@ To repair a flagged credential, re-login it and keep its handles:
 ```sh
 ck auth login --provider <name> --replace
 ```
+
+`grants` is read-only and lists the complete authority set. Each row contains the
+principal kind and id, credential prefix, operation (`read` or `sign`), and creation
+time. The rows are sorted by principal, prefix, then operation, so repeated runs are
+stable and a grant differing only by operation remains visible. An empty table prints
+`no grants` rather than silently producing no output.
 
 Two verbs express intent that `--replace` does not:
 

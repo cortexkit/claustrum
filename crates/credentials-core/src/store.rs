@@ -827,14 +827,14 @@ impl EncryptedStore {
             .map_err(StoreOpError::from)
     }
 
-    /// List every grant in deterministic principal/operation/prefix order for admin status.
+    /// List every grant in deterministic principal/prefix/operation order for admin status.
     pub fn list_read_grants(&self) -> Result<Vec<ReadGrant>, StoreOpError> {
         self.store
             .with_conn(|c| {
                 let mut stmt = c.prepare(
                     "SELECT principal_kind, principal_id, credential_prefix, operation, created_at_ms \
                      FROM read_grants \
-                     ORDER BY principal_kind, principal_id, operation, credential_prefix",
+                     ORDER BY principal_kind, principal_id, credential_prefix, operation",
                 )?;
                 let rows = stmt.query_map([], |row| {
                     let operation = row.get::<_, String>(3)?.parse().map_err(|message: String| {

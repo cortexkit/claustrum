@@ -655,7 +655,7 @@ async fn a_report_leaves_a_refreshable_credential_active_rather_than_latching() 
 #[tokio::test]
 #[ignore = "builds subc-core in ../subconscious and binds loopback ports"]
 async fn real_daemon_admin_op_over_route_while_offline_refused() {
-    let seeded = seeded_or_skip!();
+    let mut seeded = seeded_or_skip!();
     let conn = seeded.daemon.connection_file.to_string_lossy().to_string();
 
     // Wait until the vault module is catalog-live BEFORE asserting the offline
@@ -665,7 +665,42 @@ async fn real_daemon_admin_op_over_route_while_offline_refused() {
     let mut consumer = connect_consumer(&seeded.daemon.connection_file).await;
     wait_for_catalog(&mut consumer, MODULE_ID, SETUP_TIMEOUT).await;
 
-    // 1) The online list uses authenticated admin.status rather than trying to open
+    // 1) A grant is created and listed through the running daemon. Both commands use
+    //    the real CLI binary, so this proves the route carries the additive admin.status
+    //    grant inventory rather than only exercising the store helper directly.
+    run_cli(&[
+        "grant",
+        "--principal",
+        "prefrontal-core",
+        "--prefix",
+        "operator:",
+        "--operation",
+        "read",
+        "--data-dir",
+        &seeded.data_dir,
+        "--key-path",
+        &seeded.key_path,
+        "--subc",
+        &conn,
+    ]);
+    let online_grants = run_cli(&[
+        "grants",
+        "--data-dir",
+        &seeded.data_dir,
+        "--key-path",
+        &seeded.key_path,
+        "--subc",
+        &conn,
+    ]);
+    assert!(
+        online_grants.contains("reserved")
+            && online_grants.contains("prefrontal-core")
+            && online_grants.contains("operator:")
+            && online_grants.contains("read"),
+        "online grants must list the grant just minted: {online_grants}"
+    );
+
+    // 2) The online list uses authenticated admin.status rather than trying to open
     //    the database itself. If cmd_list regresses to open_for_admin this command exits
     //    3 while the daemon owns the lease, so this is a non-vacuous route-path proof.
     let listed = run_cli(&[
@@ -741,6 +776,22 @@ async fn real_daemon_admin_op_over_route_while_offline_refused() {
     );
 
     let _ = std::fs::remove_dir_all(&project_root);
+
+    // Once the daemon is stopped, the same read follows the offline lease path. The
+    // bytes printed must remain identical: routing changes where admin.status runs, not
+    // the grant rows an operator sees.
+    seeded.stop_daemon().await;
+    let offline_grants = run_cli(&[
+        "grants",
+        "--data-dir",
+        &seeded.data_dir,
+        "--key-path",
+        &seeded.key_path,
+    ]);
+    assert_eq!(
+        offline_grants, online_grants,
+        "online and offline grants listings must match for identical state"
+    );
 }
 
 /// An UNKNOWN handle returns a fail-closed not_found through the real daemon.

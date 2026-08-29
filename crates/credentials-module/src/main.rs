@@ -950,8 +950,8 @@ async fn handle_read_request(
             Ok(p) if p.has_exactly_one_authorization() => {
                 match surface.sign(connection_id, principal.as_ref(), &p).await {
                     Ok(r) => json!({ "result": r }),
-                    // Same { code, class } shape every other op uses, so a consumer
-                    // branches on the produced class here too.
+                    // Keep the same { code, class } shape every other op uses: the class
+                    // gives retry policy and the code names the request-specific remedy.
                     Err(code) => json!({
                         "result": { "error": read_surface::ErrorBody { code, class: code.class() } }
                     }),
@@ -1009,9 +1009,9 @@ async fn handle_read_request(
             match serde_json::from_value::<ReportAuthFailureParams>(request.params) {
                 Ok(p) => match surface.report_auth_failure(connection_id, &p).await {
                     Ok(()) => json!({ "result": { "accepted": true } }),
-                    // Carry the produced error CLASS alongside the code (error-class
-                    // contract), the same { code, class } shape get/get_many use, so a
-                    // consumer branches on the class here too rather than on the code.
+                    // Carry the produced error class alongside the code, in the same
+                    // { code, class } shape get/get_many use: class gives retry policy and
+                    // code names the request-specific remedy.
                     Err(code) => json!({
                         "result": {
                             "accepted": false,
@@ -1992,8 +1992,11 @@ mod tests {
     }
 
     fn assert_scoped_not_found(body: &serde_json::Value) {
-        assert_eq!(body["result"]["error"]["code"], "not_found");
-        assert_eq!(body["result"]["error"]["class"], "permanent");
+        assert_eq!(
+            body["result"]["error"],
+            json!({ "code": "not_found", "class": "permanent" }),
+            "the route frame must carry the complete uniform absence pair"
+        );
     }
 
     #[tokio::test]
@@ -3239,6 +3242,11 @@ mod tests {
 
     /// A capability handle authorizes signing and public-key publication for a signing
     /// key, but must never serve the private PKCS#8 payload through any read operation.
+    ///
+    /// The three assertions protect distinct refusal behavior. Changing the resolved
+    /// signing-key `get` error to `NotFound` fails the resolved-key assertion; changing either
+    /// the unknown-handle or revoked-handle error to `KindNotGettable` fails its own
+    /// `not_found` assertion.
     #[tokio::test]
     async fn signing_key_handle_cannot_get_but_can_sign_and_publish() {
         use base64::Engine as _;
@@ -3265,58 +3273,62 @@ mod tests {
                 AuditCtx::admin(AuditOp::MintHandle),
             )
             .expect("store handle");
-        store
-            .create_read_grant_audited(
-                "reserved",
-                "prefrontal-core",
-                "signing:agent-assertion:",
-                GrantOperation::Read,
-                AuditCtx::admin(AuditOp::GrantCreate),
-            )
-            .expect("create read grant");
-        admin.record_bind(
+
+        // Drive the real request dispatcher so this checks the exact { code, class } pair a
+        // consumer receives, rather than a reconstructed error body.
+        let get = scoped_route_request(
+            &surface,
+            &admin,
             81,
-            subc_protocol::Principal::Reserved {
-                module_id: "prefrontal-core".into(),
-            },
+            OP_GET,
+            json!({ "handle": handle.raw.clone() }),
+        )
+        .await;
+        assert_eq!(
+            get["result"]["error"],
+            json!({ "code": "kind_not_gettable", "class": "permanent" }),
+            "a resolved signing key must tell a consumer to use another verb"
         );
 
-        let get = serde_json::to_value(
-            surface
-                .get(
-                    81,
-                    &GetParams {
-                        handle: handle.raw.clone(),
-                        min_ttl_ms: None,
-                        force_refresh: false,
-                    },
-                )
-                .await,
+        // The resolved-record code must not escape the two non-resolution arms. An unknown
+        // handle and a revoked handle remain indistinguishable to a probing caller.
+        let unknown = scoped_route_request(
+            &surface,
+            &admin,
+            81,
+            OP_GET,
+            json!({ "handle": "ckh_not_a_real_handle" }),
         )
-        .expect("encode get outcome");
-        assert_eq!(get["error"]["code"], "not_found");
-        assert_eq!(get["error"]["class"], "permanent");
-
-        let many = serde_json::to_value(
-            surface
-                .get_many(
-                    81,
-                    &GetManyParams {
-                        items: vec![GetParams {
-                            handle: handle.raw.clone(),
-                            min_ttl_ms: None,
-                            force_refresh: false,
-                        }],
-                    },
-                )
-                .await,
+        .await;
+        assert_eq!(
+            unknown["result"]["error"],
+            json!({ "code": "not_found", "class": "permanent" }),
+            "an unknown handle must stay uniformly absent"
+        );
+        let revoked = credentials_core::store::mint_handle().expect("mint revoked handle");
+        store
+            .put_handle_hash(
+                &revoked.hash,
+                credential_id,
+                AuditCtx::admin(AuditOp::MintHandle),
+            )
+            .expect("store revoked handle");
+        store
+            .revoke_handle(&revoked.raw, AuditCtx::admin(AuditOp::RevokeHandle))
+            .expect("revoke handle");
+        let revoked = scoped_route_request(
+            &surface,
+            &admin,
+            81,
+            OP_GET,
+            json!({ "handle": revoked.raw }),
         )
-        .expect("encode get_many outcomes");
-        assert_eq!(many[0]["error"]["code"], "not_found");
-        assert_eq!(many[0]["error"]["class"], "permanent");
-
-        let scoped = scoped_request(&surface, &admin, 81, credential_id).await;
-        assert_scoped_not_found(&scoped);
+        .await;
+        assert_eq!(
+            revoked["result"]["error"],
+            json!({ "code": "not_found", "class": "permanent" }),
+            "a revoked handle must remain indistinguishable from an unknown handle"
+        );
 
         let public = surface
             .public_key(
@@ -3347,9 +3359,59 @@ mod tests {
         assert_eq!(signature.key_id, public.key_id);
     }
 
-    /// `get_many` currently delegates every item to `get`; this pins that structural
-    /// property so a future batch-query optimization cannot reopen signing-key payload
-    /// reads while a refusal-only test still passes by rejecting the entire batch.
+    /// A scoped read reveals the signing-key-specific remedy only after it proves the
+    /// caller's read grant covers the credential.
+    ///
+    /// The paired assertions enforce that ordering. Classifying before `authorize_scoped`, or
+    /// returning `KindNotGettable` without a read grant, fails the no-grant assertion.
+    /// Returning `NotFound` after a valid grant fails the granted-read assertion.
+    #[tokio::test]
+    async fn scoped_get_reveals_signing_kind_only_after_read_grant() {
+        let (surface, admin, store) = scoped_rig(86);
+        let credential_id = "signing:scoped:grant-order";
+        store
+            .create(
+                credential_id,
+                &VaultRecord::new_static(
+                    CredentialKind::SigningKey,
+                    "test",
+                    b"private key bytes".to_vec(),
+                    None,
+                ),
+            )
+            .expect("create signing key");
+        admin.record_bind(
+            86,
+            subc_protocol::Principal::Reserved {
+                module_id: "prefrontal-core".into(),
+            },
+        );
+
+        let no_grant = scoped_request(&surface, &admin, 86, credential_id).await;
+        assert_scoped_not_found(&no_grant);
+
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "prefrontal-core",
+                "signing:scoped:",
+                GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .expect("create read grant");
+        let granted = scoped_request(&surface, &admin, 86, credential_id).await;
+        assert_eq!(
+            granted["result"]["error"],
+            json!({ "code": "kind_not_gettable", "class": "permanent" }),
+            "a granted caller must learn to use the signing verb, not that the credential is gone"
+        );
+    }
+
+    /// `get_many` delegates every item to `get`; each response, including each refusal,
+    /// stays at its input position.
+    ///
+    /// The indexed assertions reject a batch-level refusal, omitted failed items, or a
+    /// signing-key refusal associated with the following input.
     #[tokio::test]
     async fn get_many_delegates_signing_key_refusal_without_blocking_other_items() {
         let (surface, store, _db) = tmp_surface_with_store(85);
@@ -3365,33 +3427,36 @@ mod tests {
                 ),
             )
             .expect("create signing key");
-        store
-            .create(
-                "apikey:batch:ordinary",
-                &VaultRecord::new_static(
-                    CredentialKind::ApiKey,
-                    "test",
-                    b"ordinary payload".to_vec(),
-                    None,
-                ),
-            )
-            .expect("create ordinary credential");
-        let signing_handle = credentials_core::store::mint_handle().expect("mint signing handle");
-        store
-            .put_handle_hash(
-                &signing_handle.hash,
-                "signing:batch:private",
-                AuditCtx::admin(AuditOp::MintHandle),
-            )
-            .expect("store signing handle");
-        let ordinary_handle = credentials_core::store::mint_handle().expect("mint ordinary handle");
-        store
-            .put_handle_hash(
-                &ordinary_handle.hash,
-                "apikey:batch:ordinary",
-                AuditCtx::admin(AuditOp::MintHandle),
-            )
-            .expect("store ordinary handle");
+        for (credential_id, payload) in [
+            ("apikey:batch:before", b"before signing refusal".as_slice()),
+            ("apikey:batch:after", b"after unknown refusal".as_slice()),
+        ] {
+            store
+                .create(
+                    credential_id,
+                    &VaultRecord::new_static(
+                        CredentialKind::ApiKey,
+                        "test",
+                        payload.to_vec(),
+                        None,
+                    ),
+                )
+                .expect("create ordinary credential");
+        }
+        let mint_for = |credential_id: &str| {
+            let handle = credentials_core::store::mint_handle().expect("mint handle");
+            store
+                .put_handle_hash(
+                    &handle.hash,
+                    credential_id,
+                    AuditCtx::admin(AuditOp::MintHandle),
+                )
+                .expect("store handle");
+            handle.raw
+        };
+        let before_handle = mint_for("apikey:batch:before");
+        let signing_handle = mint_for("signing:batch:private");
+        let after_handle = mint_for("apikey:batch:after");
 
         let outcomes = surface
             .get_many(
@@ -3399,12 +3464,22 @@ mod tests {
                 &GetManyParams {
                     items: vec![
                         GetParams {
-                            handle: signing_handle.raw,
+                            handle: before_handle,
                             min_ttl_ms: None,
                             force_refresh: false,
                         },
                         GetParams {
-                            handle: ordinary_handle.raw,
+                            handle: signing_handle,
+                            min_ttl_ms: None,
+                            force_refresh: false,
+                        },
+                        GetParams {
+                            handle: "ckh_not_a_real_handle".to_string(),
+                            min_ttl_ms: None,
+                            force_refresh: false,
+                        },
+                        GetParams {
+                            handle: after_handle,
                             min_ttl_ms: None,
                             force_refresh: false,
                         },
@@ -3412,15 +3487,30 @@ mod tests {
                 },
             )
             .await;
-        let read_surface::GetOutcome::Err { error } = &outcomes[0] else {
-            panic!("a SigningKey batch item must refuse");
+
+        assert_eq!(
+            outcomes.len(),
+            4,
+            "each input needs an outcome even when neighbouring items refuse"
+        );
+        let read_surface::GetOutcome::Ok(before) = &outcomes[0] else {
+            panic!("the item before a refusal must serve at index zero");
+        };
+        assert_eq!(before.payload, b"before signing refusal");
+        let read_surface::GetOutcome::Err { error } = &outcomes[1] else {
+            panic!("the signing-key item must refuse at index one");
+        };
+        assert_eq!(error.code, read_surface::ReadError::KindNotGettable);
+        assert_eq!(error.class, read_surface::ErrorClass::Permanent);
+        let read_surface::GetOutcome::Err { error } = &outcomes[2] else {
+            panic!("the unknown-handle item must refuse at index two");
         };
         assert_eq!(error.code, read_surface::ReadError::NotFound);
         assert_eq!(error.class, read_surface::ErrorClass::Permanent);
-        let read_surface::GetOutcome::Ok(result) = &outcomes[1] else {
-            panic!("a non-signing batch item must still serve");
+        let read_surface::GetOutcome::Ok(after) = &outcomes[3] else {
+            panic!("the item after two refusals must serve at index three");
         };
-        assert_eq!(result.payload, b"ordinary payload");
+        assert_eq!(after.payload, b"after unknown refusal");
     }
 
     #[tokio::test]

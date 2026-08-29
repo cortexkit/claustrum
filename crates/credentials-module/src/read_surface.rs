@@ -293,6 +293,13 @@ pub enum ReadError {
     /// A fresh token minted for this request still misses its supplied `min_ttl_ms`.
     /// The credential remains usable for callers that ask for less time.
     TtlUnsatisfiable,
+    /// `credential.get` resolved a signing key. Use `credential.sign` for private-key
+    /// operations or `credential.public_key` for its public half; no retry can make the
+    /// private PKCS#8 payload safe to return through `get`.
+    ///
+    /// This is emitted only after a handle resolves or a scoped read grant authorizes the
+    /// credential, so it cannot distinguish an unknown or unauthorized capability.
+    KindNotGettable,
     /// `credential.sign` was asked to sign with a credential that is not a signing
     /// key. THE FENCE, not a diagnostic: without it a handle for any stored secret
     /// could produce signatures under it and this module would be a general signing
@@ -303,10 +310,9 @@ pub enum ReadError {
 }
 
 /// The fleet-wide error-class vocabulary (error-class contract, ratified 2026-07-08;
-/// normative doc: llm-runner/docs/error-class-contract.md). Classification is PRODUCED
-/// here at the source —
-/// a consumer branches on this tag, never on which `ReadError` code it happens to know
-/// is permanent. The wire set is closed and pinned: see `ERROR_CLASS_WIRE_SET`.
+/// normative doc: llm-runner/docs/error-class-contract.md). Classification is produced
+/// here at the source. The class carries retry policy; the `ReadError` code carries the
+/// request-specific remedy. The wire set is closed and pinned: see `ERROR_CLASS_WIRE_SET`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorClass {
@@ -334,55 +340,26 @@ pub const ERROR_CLASS_WIRE_SET: [&str; 4] = [
 ];
 
 impl ReadError {
-    /// The produced classification for each fail-closed category.
+    /// The produced retry classification for each fail-closed category.
     ///
-    /// NO REFUSAL HERE EVER MEANS "GONE FOREVER, DESTROY YOUR STATE", and a consumer
-    /// must not invent one. Neighbouring fleet surfaces split permanent refusals two
-    /// ways -- refuse-but-keep-state, versus proof-of-death that authorises deleting a
-    /// route or registration (callosum's push submit does exactly this: 400
-    /// BadDeviceToken keeps the route, 410 destroys it). THIS SURFACE HAS ONLY THE
-    /// FIRST KIND.
+    /// The class answers whether repeating this request can succeed; the code names the
+    /// request-specific remedy. A resolved signing key rejected by `credential.get` is
+    /// therefore `KindNotGettable`/`permanent`: retrying cannot reveal its private material,
+    /// but `credential.sign` still serves the credential.
     ///
-    /// It is forced rather than unfinished. Handle resolution answers identically for
-    /// a REVOKED handle and one that never existed, because distinguishing them is an
-    /// enumeration oracle. That same indistinguishability denies the consumer the
-    /// difference between "my grant was withdrawn" and "my config holds the wrong
-    /// string" -- so no refusal can license destroying configuration, since the typo
-    /// case would turn one bad character into a self-sustaining outage.
-    ///
-    /// Consumer rule: on `permanent`, refuse the operation, account it, surface it to
-    /// an operator, and CHANGE NOTHING. Do not retry (nothing about the world changed)
-    /// and do not reap (you cannot tell which case you are in).
-    ///
-    /// DO NOT EXPORT THIS SILENCE AS A FLEET RULE. It is right here for one reason and
-    /// that reason does not travel: A CAPABILITY HANDLE IS A BEARER TOKEN, so the
-    /// caller may be a stranger, and any refusal that distinguishes revoked from
-    /// unknown is an enumeration oracle for one. Withholding the reason is the security
-    /// property, not a house style.
-    ///
-    /// On a surface whose caller is ALREADY AUTHENTICATED TO THE SCOPE it is asking
-    /// about, the same posture is just a worse error message -- it withholds something
-    /// the caller could obtain by asking correctly, and buys nothing. Callosum's device
-    /// read is the worked example: its caller holds an account credential and can
-    /// enumerate that account's devices legitimately, so when a lookup misses it names
-    /// WHY (a supplied value that is actually one of the account's sealing keys returns
-    /// a `wrong_key_field` reason) instead of a bare not-found. Correct there, and it
-    /// would be a defect here.
-    ///
-    /// SILENCE IS MANDATORY ONLY WHEN THE CALLER COULD BE A STRANGER. The discriminator
-    /// is the caller's identity, never the refusal's shape -- which is why two fleet
-    /// surfaces reach opposite answers and both are right. A reader who ports this
-    /// comment's conclusion to an authenticated surface will believe they are
-    /// hardening a leak while removing a diagnostic; a reader who ports callosum's to
-    /// this one opens the oracle.
+    /// This distinction does not weaken anti-enumeration. `get` reaches the signing-key
+    /// guard only after resolving the handle, and `get_scoped` checks the caller's grant
+    /// before looking up the record. Unknown or revoked handles and uncovered scoped callers
+    /// still receive the uniform `NotFound` refusal.
     pub fn class(self) -> ErrorClass {
         match self {
-            // Handle revoked/unknown, record quarantined, a static credential with
-            // no refresh path, or a sign request against a non-signing credential:
+            // A missing/revoked handle, corrupt record, unsupported refresh, a signing key
+            // addressed through `get`, or a non-signing record addressed through `sign`:
             // nothing a retry can change.
             ReadError::NotFound
             | ReadError::Corrupt
             | ReadError::RefreshUnsupported
+            | ReadError::KindNotGettable
             | ReadError::KindNotSignable => ErrorClass::Permanent,
             // The refresh token is dead; a human must run a fresh login.
             ReadError::NeedsReauth => ErrorClass::AuthRequired,
@@ -428,7 +405,7 @@ pub enum GetOutcome {
 pub struct ErrorBody {
     pub code: ReadError,
     /// The produced error class (error-class contract). Always consistent with
-    /// `code.class()`; consumers branch on this, `code` is the producer detail.
+    /// `code.class()`; it gives retry policy while `code` gives the remedy.
     pub class: ErrorClass,
 }
 
@@ -798,10 +775,10 @@ impl ReadSurface {
                 }
                 let record = refreshed.record;
                 if record.kind == credentials_core::record::CredentialKind::SigningKey {
-                    // A signing-key handle also authorizes `sign` and `public_key`, but
-                    // its payload is PKCS#8 private material. No read consumer needs it,
-                    // so serving it would let every same-uid handle holder extract the key.
-                    return err(ReadError::NotFound);
+                    // The handle resolved, so this is not an absence verdict: the signing key
+                    // remains serviceable through `sign` and `public_key`, but its private
+                    // PKCS#8 payload must never be served through `get`.
+                    return err(ReadError::KindNotGettable);
                 }
                 if record.payload.is_empty() {
                     // A successful zero-byte credential is a corrupt producer state, not
@@ -964,10 +941,10 @@ impl ReadSurface {
         match self.engine.get(&params.credential_id, None, false).await {
             Ok(record) => {
                 if record.kind == credentials_core::record::CredentialKind::SigningKey {
-                    // A signing-key handle also authorizes `sign` and `public_key`, but
-                    // its payload is PKCS#8 private material. No read consumer needs it,
-                    // so serving it would let every same-uid handle holder extract the key.
-                    return err(ReadError::NotFound);
+                    // The caller's read grant already authorized this record, so this is not
+                    // an absence verdict: the signing key remains serviceable through `sign`
+                    // and `public_key`, but its private PKCS#8 payload never leaves `get`.
+                    return err(ReadError::KindNotGettable);
                 }
                 if record.payload.is_empty() {
                     match self
@@ -1610,6 +1587,7 @@ mod error_class_tests {
         assert_eq!(ReadError::NotFound.class(), ErrorClass::Permanent);
         assert_eq!(ReadError::Corrupt.class(), ErrorClass::Permanent);
         assert_eq!(ReadError::RefreshUnsupported.class(), ErrorClass::Permanent);
+        assert_eq!(ReadError::KindNotGettable.class(), ErrorClass::Permanent);
         assert_eq!(ReadError::NeedsReauth.class(), ErrorClass::AuthRequired);
         assert_eq!(ReadError::RefreshFailed.class(), ErrorClass::Transient);
         assert_eq!(ReadError::VaultLocked.class(), ErrorClass::Transient);
@@ -1620,9 +1598,8 @@ mod error_class_tests {
         );
     }
 
-    /// The wire body carries BOTH the producer detail (`code`) and the produced class,
-    /// and they are consistent — a consumer branching on `class` alone gets the same
-    /// decision the vault would make.
+    /// The wire body carries BOTH the producer detail (`code`) and the produced class.
+    /// The class gives retry policy; the code remains available for the request-specific remedy.
     #[test]
     fn error_body_carries_consistent_class() {
         let out = err(ReadError::TtlUnsatisfiable);

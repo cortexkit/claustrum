@@ -103,10 +103,19 @@ for bin in ck-claustrum ck-auth; do
   # Pin the identifier. NEVER re-sign at the destination: a pin is not sticky, and one
   # `codesign --force --sign -` at placement reverts it to the derived form.
   codesign --force --sign - --identifier "$bin" "$STAGE/$bin"
+  # WRITE the digest beside the artifact, do not merely print it. A hash that exists
+  # only in this script's output is a hash that reaches the placer as a CLAIM IN A
+  # MESSAGE -- retyped, quotable, and unverifiable against anything at rest. The placer
+  # needs a fact sitting next to the bytes it is about, which is the same reason a
+  # manifest's rationale rides its signed row rather than a design doc.
+  #
+  # POSTSIGN, deliberately: codesign rewrites the Mach-O, so a digest taken before this
+  # line describes a file that no longer exists on disk.
+  shasum -a 256 "$STAGE/$bin" | cut -d' ' -f1 > "$STAGE/$bin.sha256"
   printf '%-14s rev=%s sha256=%s\n' \
     "$bin" \
     "$("$STAGE/$bin" --version | sed -E 's/.*\((.*)\)/\1/')" \
-    "$(shasum -a 256 "$STAGE/$bin" | cut -d' ' -f1)"
+    "$(cat "$STAGE/$bin.sha256")"
 done
 
 # EXERCISE THE STAGED FILE, not the source it came from.

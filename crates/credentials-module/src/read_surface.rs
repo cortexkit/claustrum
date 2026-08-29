@@ -1525,10 +1525,9 @@ mod error_class_tests {
     /// the bytes never move under them.
     ///
     /// Serialized through the REAL producer type rather than a hand-built `json!`, then
-    /// wrapped with the same `result` key `handle_read_request` puts around every route
-    /// reply — so this pins the full on-wire frame `{"result":{"error":{...}}}`, not just
-    /// the inner body. A reconstruction would only pin the reconstruction — the frame
-    /// could drift and this would still pass.
+    /// wrapped through the same route-serialization helper used by `handle_read_request`
+    /// for `credential.get` replies — so this pins the full on-wire frame
+    /// `{"result":{"error":{...}}}`, not just the inner body.
     ///
     /// The literal below is the on-wire frame captured from a live daemon and handed to
     /// that consumer, who pinned it in their tree. Both directions now go red on drift.
@@ -1543,7 +1542,7 @@ mod error_class_tests {
             },
         };
         let inner_value = serde_json::to_value(&inner).expect("serialize the error outcome");
-        let got = serde_json::json!({ "result": inner_value });
+        let got = crate::wrap_result(inner_value);
 
         // ORDER IS LOAD-BEARING, and this is the second version. Written with the
         // equality first, the specific checks below never ran: `assert_eq!` panics on any

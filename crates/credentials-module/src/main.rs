@@ -23,6 +23,8 @@
 mod admin_surface;
 mod limiter;
 mod read_surface;
+#[cfg(test)]
+mod test_support;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -104,6 +106,10 @@ const OP_PUBLIC_KEY: &str = "credential.public_key";
 /// authenticated op body + tag.
 const OP_ADMIN_CHALLENGE: &str = "admin.challenge";
 const OP_ADMIN_OP: &str = "admin.op";
+
+pub(crate) fn wrap_result<T: serde::Serialize>(value: T) -> serde_json::Value {
+    json!({ "result": value })
+}
 
 #[tokio::main]
 async fn main() -> Result<(), ModuleError> {
@@ -932,7 +938,7 @@ async fn handle_read_request(
 
     let result = match request.method.as_str() {
         OP_GET => match serde_json::from_value::<GetParams>(request.params) {
-            Ok(p) => json!({ "result": surface.get(connection_id, &p).await }),
+            Ok(p) => wrap_result(surface.get(connection_id, &p).await),
             Err(e) => {
                 return invalid_params(writer, ver, channel, epoch, corr, &e.to_string()).await
             }
@@ -955,9 +961,9 @@ async fn handle_read_request(
                     Ok(r) => json!({ "result": r }),
                     // Keep the same { code, class } shape every other op uses: the class
                     // gives retry policy and the code names the request-specific remedy.
-                    Err(code) => json!({
-                        "result": { "error": read_surface::ErrorBody { code, class: code.class() } }
-                    }),
+                    Err(code) => wrap_result(json!({
+                        "error": read_surface::ErrorBody { code, class: code.class() }
+                    })),
                 }
             }
             Ok(_) => {
@@ -982,9 +988,9 @@ async fn handle_read_request(
                     .await
                 {
                     Ok(r) => json!({ "result": r }),
-                    Err(code) => json!({
-                        "result": { "error": read_surface::ErrorBody { code, class: code.class() } }
-                    }),
+                    Err(code) => wrap_result(json!({
+                        "error": read_surface::ErrorBody { code, class: code.class() }
+                    })),
                 }
             }
             Ok(_) => {
@@ -1549,61 +1555,6 @@ mod tests {
     use credentials_core::store::{GrantOperation, RecordState};
     use read_surface::ReadSurface;
 
-    /// A transport that cannot reach the network, used by every rig in this module.
-    ///
-    /// These rigs previously built a real `ReqwestTransport`. None of them ever sent a
-    /// request through it: four construct the engine with an EMPTY adapter list, and the
-    /// fifth passes `TtlFixtureAdapter`, which ignores the transport it is handed. So the
-    /// suite made no outbound calls -- but that was a property of the ARGUMENTS at each
-    /// call site, never of the type. Adding a real adapter to any rig, or a fixture that
-    /// forwards, would silently turn a unit test into a live token exchange.
-    ///
-    /// Two sibling repos found exactly that on 2026-08-29. One suite had been issuing 30
-    /// real token-exchange requests per run against a vendor endpoint with fabricated
-    /// credentials, and one of its tests passed only because the remote service rejected
-    /// them -- the assertion was reading the provider's live response instead of the code
-    /// under test. The traffic is not the defect. A remote service supplying a test's
-    /// precondition is.
-    ///
-    /// Verified here by running the suite inside a network namespace with egress dropped,
-    /// which passed -- but that proves TODAY's arguments, and has to be re-run to keep
-    /// meaning anything. This makes it structural instead: no adapter added later can
-    /// reach outward, because the transport it would be handed has no outward. Returning
-    /// `RefreshError::Transport` also names the cause at the point of use rather than
-    /// leaving someone to read a timeout.
-    struct NoHttp;
-
-    #[async_trait::async_trait]
-    impl credentials_core::refresh_adapters::HttpTransport for NoHttp {
-        async fn post(
-            &self,
-            _url: &str,
-            _headers: &[(&str, &str)],
-            _content_type: &str,
-            _body: Vec<u8>,
-        ) -> Result<
-            credentials_core::refresh_adapters::HttpResponse,
-            credentials_core::refresh_adapters::RefreshError,
-        > {
-            Err(credentials_core::refresh_adapters::RefreshError::Transport(
-                "main tests do not make network calls".into(),
-            ))
-        }
-
-        async fn get(
-            &self,
-            _url: &str,
-            _headers: &[(&str, &str)],
-        ) -> Result<
-            credentials_core::refresh_adapters::HttpResponse,
-            credentials_core::refresh_adapters::RefreshError,
-        > {
-            Err(credentials_core::refresh_adapters::RefreshError::Transport(
-                "main tests do not make network calls".into(),
-            ))
-        }
-    }
-
     fn tmp_surface(seed: u8) -> Arc<ReadSurface> {
         tmp_surface_with_store(seed).0
     }
@@ -1641,7 +1592,7 @@ mod tests {
             .open_intent("apikey:crashed", 1, &hash)
             .expect("open intent");
 
-        let http = Arc::new(NoHttp);
+        let http = Arc::new(crate::test_support::NoHttp);
         let engine = Arc::new(RefreshEngine::new(Arc::clone(&store), Vec::new(), http));
 
         // The daemon's own boot-gate sequence: reconcile, then record. Calls the same
@@ -1667,7 +1618,7 @@ mod tests {
     /// known master key (seed) so tests can derive the same MAC key caller-side.
     fn tmp_admin(seed: u8) -> (Arc<admin_surface::AdminSurface>, Arc<EncryptedStore>) {
         let (_, store, db_path) = tmp_surface_with_store(seed);
-        let http = Arc::new(NoHttp);
+        let http = Arc::new(crate::test_support::NoHttp);
         let engine = Arc::new(RefreshEngine::new(Arc::clone(&store), Vec::new(), http));
         let key = MasterKey::from_bytes([seed; MASTER_KEY_LEN]);
         let mac_key = credentials_core::admin_auth::AdminMacKey::derive(&key);
@@ -1722,7 +1673,7 @@ mod tests {
         store.invalidate("apikey:dead").expect("invalidate");
 
         let store = Arc::new(store);
-        let http = Arc::new(NoHttp);
+        let http = Arc::new(crate::test_support::NoHttp);
         let engine = Arc::new(RefreshEngine::new(Arc::clone(&store), Vec::new(), http));
         let surface = Arc::new(ReadSurface::new(engine, FetchLimiter::new(Caps::default())));
         (surface, store, db_path)
@@ -1780,7 +1731,7 @@ mod tests {
             calls: Arc::clone(&calls),
             fresh_ttl_ms,
         };
-        let http = Arc::new(NoHttp);
+        let http = Arc::new(crate::test_support::NoHttp);
         let engine = Arc::new(RefreshEngine::new(
             Arc::clone(&store),
             vec![Arc::new(adapter)],
@@ -2031,7 +1982,7 @@ mod tests {
         Arc<EncryptedStore>,
     ) {
         let (surface, store, db_path) = tmp_surface_with_store(seed);
-        let http = Arc::new(NoHttp);
+        let http = Arc::new(crate::test_support::NoHttp);
         let engine = Arc::new(RefreshEngine::new(Arc::clone(&store), Vec::new(), http));
         let key = MasterKey::from_bytes([seed; MASTER_KEY_LEN]);
         let mac_key = credentials_core::admin_auth::AdminMacKey::derive(&key);
@@ -4673,7 +4624,7 @@ mod tests {
     /// with `needs_reauth` without touching the network.
     ///
     /// The state is constructed through the production paths (public `report_auth_failure`
-    /// sets the mark, the same `store.invalidate` the engine uses after a failed refresh
+    /// sets the mark, then the engine's version-fenced invalidation after a failed refresh
     /// flips the state), so the test is a real reading of the buggy state rather than a
     /// hand-staged copy of it. A pure store-level construction would pass without ever
     /// proving the public route is part of the path that creates it.
@@ -4723,11 +4674,16 @@ mod tests {
             .expect("report accepted");
 
         // Production step 2: a forced refresh then fails and the engine latches the record
-        // to `needs_reauth`. The store call below is exactly what the engine reaches for
-        // at the failure site; the column `stale_pending` is deliberately not touched by
-        // any of the seven state-update paths, which is the bug we are pinning here.
+        // to `needs_reauth`. The version-fenced store call below is exactly what the engine
+        // reaches for at the failure site; the column `stale_pending` is deliberately not
+        // touched by any of the seven state-update paths, which is the bug pinned here.
         store
-            .invalidate("oauth:needs_reauth_after_stale")
+            .invalidate_if_version_reported(
+                "oauth:needs_reauth_after_stale",
+                1,
+                AuditCtx::vault(AuditOp::Invalidate),
+                None,
+            )
             .expect("engine-style invalidate after failed refresh");
 
         // Precondition checks: the construction actually reproduced the live shape, so a

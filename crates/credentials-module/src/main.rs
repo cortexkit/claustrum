@@ -2574,6 +2574,152 @@ mod tests {
         );
     }
 
+    /// `credential.status` is a wire contract, not merely an internal struct serialization.
+    ///
+    /// This drives the real route handler, so the response is produced by `StatusResult` and
+    /// serialized through the same `{ "result": ... }` path consumers receive. The resolved
+    /// and unresolved shapes are pinned separately: when a handle cannot be resolved, there is
+    /// no credential record to describe, so `record_version` and `stale_pending` are omitted
+    /// rather than filled with defaults.
+    ///
+    /// The `credential.status` fields use `snake_case`; the separate `health.check` metrics use
+    /// `camelCase` (`auditTipMac`, `storeReadable`). These are established wire conventions, so
+    /// changing either would break consumers.
+    #[tokio::test]
+    async fn the_status_wire_key_set_is_a_contract_and_a_rename_obliges_an_announcement() {
+        async fn status_wire(
+            surface: &Arc<ReadSurface>,
+            admin: &Arc<admin_surface::AdminSurface>,
+            params: serde_json::Value,
+            corr: u64,
+        ) -> serde_json::Value {
+            let (tx, mut rx) = mpsc::channel(1);
+            let frame = Frame::build_with_version(
+                PROTOCOL_VERSION,
+                FrameType::Request,
+                Flags::new(false, Priority::Interactive, false),
+                1,
+                1,
+                corr,
+                serde_json::to_vec(&json!({
+                    "method": OP_STATUS,
+                    "params": params,
+                }))
+                .expect("serialize status request"),
+            )
+            .expect("build status request frame");
+
+            // The response is produced by handle_read_request, not reconstructed from a
+            // hand-written object, so this observes the actual producer and wire serializer.
+            handle_read_request(frame, &tx, surface, admin, None)
+                .await
+                .expect("status request must be handled");
+            let response = rx.recv().await.expect("status response must be sent");
+            assert_eq!(response.header.ty, FrameType::Response);
+            serde_json::from_slice(&response.body).expect("decode status response")
+        }
+
+        fn assert_exact_keys(body: &serde_json::Value, expected: &[&str], shape: &str) {
+            let result = body
+                .get("result")
+                .and_then(serde_json::Value::as_object)
+                .unwrap_or_else(|| panic!("{shape}: status result must be a JSON object"));
+
+            // Check for both missing and unexpected keys so adding or removing a field fails
+            // this contract test.
+            for key in expected {
+                assert!(
+                    result.contains_key(*key),
+                    "the credential.status response key set changed. Consumers decode these BY NAME, so this is a consumer-impact change rather than a refactor: announce the delta to the supervisor seat, then update this list. {shape}: missing `{key}`"
+                );
+            }
+            for key in result.keys() {
+                assert!(
+                    expected.iter().any(|expected_key| *expected_key == key),
+                    "the credential.status response key set changed. Consumers decode these BY NAME, so this is a consumer-impact change rather than a refactor: announce the delta to the supervisor seat, then update this list. {shape}: unexpected `{key}`"
+                );
+            }
+
+            let mut actual: Vec<&str> = result.keys().map(String::as_str).collect();
+            actual.sort_unstable();
+            let mut expected = expected.to_vec();
+            expected.sort_unstable();
+            assert_eq!(
+                actual,
+                expected,
+                "the credential.status response key set changed. Consumers decode these BY NAME, so this is a consumer-impact change rather than a refactor: announce the delta to the supervisor seat, then update this list."
+            );
+        }
+
+        let (surface, store, _db) = tmp_surface_with_store(92);
+        let (admin, _admin_store) = tmp_admin(92);
+        let handle = credentials_core::store::mint_handle().expect("mint handle");
+        store
+            .put_handle_hash(
+                &handle.hash,
+                "apikey:active",
+                AuditCtx::admin(AuditOp::MintHandle),
+            )
+            .expect("bind handle");
+
+        let resolved = status_wire(&surface, &admin, json!({ "handle": handle.raw }), 1).await;
+        assert_exact_keys(
+            &resolved,
+            &[
+                "ready",
+                "last_error_code",
+                "lease_held",
+                "record_version",
+                "stale_pending",
+            ],
+            "resolved handle",
+        );
+
+        let unresolved = status_wire(
+            &surface,
+            &admin,
+            json!({ "handle": "ckh_status_wire_unknown" }),
+            2,
+        )
+        .await;
+        let unresolved_result = unresolved
+            .get("result")
+            .and_then(serde_json::Value::as_object)
+            .expect("unresolved status result must be an object");
+        assert!(
+            !unresolved_result.contains_key("record_version"),
+            "the credential.status response key set changed. Consumers decode these BY NAME, so this is a consumer-impact change rather than a refactor: announce the delta to the supervisor seat, then update this list. An unresolved handle must omit `record_version`, not send null for a record this path could not resolve"
+        );
+        assert!(
+            !unresolved_result.contains_key("stale_pending"),
+            "the credential.status response key set changed. Consumers decode these BY NAME, so this is a consumer-impact change rather than a refactor: announce the delta to the supervisor seat, then update this list. An unresolved handle must omit `stale_pending`, not send null for a record this path could not resolve"
+        );
+        assert_exact_keys(
+            &unresolved,
+            &["ready", "last_error_code", "lease_held"],
+            "unresolved handle",
+        );
+
+        let overall = status_wire(&surface, &admin, json!({}), 3).await;
+        let overall_result = overall
+            .get("result")
+            .and_then(serde_json::Value::as_object)
+            .expect("overall status result must be an object");
+        assert!(
+            !overall_result.contains_key("record_version"),
+            "the credential.status response key set changed. Consumers decode these BY NAME, so this is a consumer-impact change rather than a refactor: announce the delta to the supervisor seat, then update this list. Overall readiness must omit `record_version` because it names no record"
+        );
+        assert!(
+            !overall_result.contains_key("stale_pending"),
+            "the credential.status response key set changed. Consumers decode these BY NAME, so this is a consumer-impact change rather than a refactor: announce the delta to the supervisor seat, then update this list. Overall readiness must omit `stale_pending` because it names no record"
+        );
+        assert_exact_keys(
+            &overall,
+            &["ready", "last_error_code", "lease_held"],
+            "overall status",
+        );
+    }
+
     #[tokio::test]
     async fn health_check_control_request_returns_domain_report() {
         let surface = tmp_surface(7);

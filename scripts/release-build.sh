@@ -33,6 +33,8 @@ if [ -n "$(git status --porcelain)" ]; then
   exit 1
 fi
 
+bash scripts/mutation-check.sh
+
 REV="$(git rev-parse --short=7 HEAD)"
 echo "building at ${REV}"
 

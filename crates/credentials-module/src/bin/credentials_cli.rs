@@ -20,6 +20,8 @@
 //! Commands:
 //!   bootstrap                                  provision a new master key
 //!   put       --id <id> --payload <bytes> [--kind api_key|dsn|opaque] [--expires-ms N] [--replace]
+//!             cookie:<domain> records are always `CredentialKind::Cookie`, preserve
+//!             `--payload-file` bytes exactly, and do not accept `--expires-ms`.
 //!   mint-signing-key --id signing:<provider>[:<generation>] [--replace]
 //!   import    --source opencode|pi|antigravity --id <id> --json <file>
 //!   invalidate --id <id>
@@ -375,7 +377,7 @@ fn usage_short() -> String {
        status              vault health + credential inventory (no secrets)\n\
        list                credential ids + lifecycle state (no secrets)\n\
        grants              principal-scoped grants (no secrets)\n\
-        put                 ingest an api key / opaque secret\n\
+        put                 ingest an api key, session cookie, or opaque secret\n\
         mint-signing-key    generate and custody a new Ed25519 signing key\n\
         import              import from opencode/pi/gemini-cli/antigravity\n\
        mint-handle         mint a capability handle for a credential\n\
@@ -485,7 +487,9 @@ fn help_verb(verb: &str) -> String {
              Ingest a non-OAuth secret (an api_key, dsn, or opaque blob). Create-only by\n\
              default; --replace rotates it unconditionally (bumps record_version so\n\
              consumers re-fetch; keeps handles); --expected-hash is a concurrency-safe\n\
-             CAS overwrite. --payload-file keeps the secret out of argv."
+             CAS overwrite. A cookie:<domain> id always creates a session-cookie record:\n\
+             its payload-file bytes are preserved exactly and --expires-ms is refused.\n\
+             --payload-file keeps the secret out of argv."
         }
         "import" => {
             "ck auth import --source <opencode|pi|gemini-cli|antigravity> --id <id> \
@@ -798,15 +802,16 @@ fn pem_wrap_private_key(pkcs8: &[u8]) -> String {
 
 fn cmd_put(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     let id = required(args, "--id")?;
-    if matches!(parse_credential_id(&id).method, Some(AuthMethod::Signing)) {
+    let parsed = parse_credential_id(&id);
+    if matches!(parsed.method, Some(AuthMethod::Signing)) {
         return Err(CliError::Usage(
             "signing keys must be generated with mint-signing-key, not put".to_string(),
         ));
     }
-    // Payload from EITHER --payload <value> (exact bytes) OR --payload-file <path>
-    // (the file's bytes, trailing whitespace stripped). --payload-file keeps a real
-    // secret OUT of argv (process list / shell history) — the right way to ingest a
-    // bare key file like ~/.config/openai.key.
+    // Payload from EITHER --payload <value> (exact bytes) OR --payload-file <path>.
+    // Ordinary key files drop their terminal line ending, but a cookie header is sent
+    // verbatim upstream, so its file bytes cannot be trimmed or normalized.
+    // --payload-file keeps a real secret OUT of argv (process list / shell history).
     let payload = match (
         optional(args, "--payload"),
         optional(args, "--payload-file"),
@@ -817,6 +822,9 @@ fn cmd_put(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             ))
         }
         (Some(p), None) => p.into_bytes(),
+        (None, Some(path)) if matches!(parsed.method, Some(AuthMethod::Cookie)) => {
+            std::fs::read(&path).map_err(|e| CliError::Io(format!("reading {path}: {e}")))?
+        }
         (None, Some(path)) => {
             let raw = std::fs::read_to_string(&path)
                 .map_err(|e| CliError::Io(format!("reading {path}: {e}")))?;
@@ -859,20 +867,38 @@ fn cmd_put(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
         _ => {}
     }
 
-    let kind = match optional(args, "--kind").as_deref() {
-        None | Some("api_key") => CredentialKind::ApiKey,
-        Some("dsn") => CredentialKind::Dsn,
-        Some("opaque") => CredentialKind::Opaque,
-        Some(other) => {
-            return Err(CliError::Usage(format!(
+    let kind = if matches!(parsed.method, Some(AuthMethod::Cookie)) {
+        if optional(args, "--kind").is_some() {
+            return Err(CliError::Usage(
+                "cookie:<domain> determines the cookie kind; do not pass --kind".to_string(),
+            ));
+        }
+        CredentialKind::Cookie
+    } else {
+        match optional(args, "--kind").as_deref() {
+            None | Some("api_key") => CredentialKind::ApiKey,
+            Some("dsn") => CredentialKind::Dsn,
+            Some("opaque") => CredentialKind::Opaque,
+            Some(other) => {
+                return Err(CliError::Usage(format!(
                 "--kind must be api_key|dsn|opaque (oauth records come via import), got '{other}'"
             )))
+            }
         }
     };
-    let expires_at_ms = optional(args, "--expires-ms")
-        .map(|s| s.parse::<i64>())
-        .transpose()
-        .map_err(|e| CliError::Usage(format!("--expires-ms not an integer: {e}")))?;
+    let expires_at_ms = if matches!(parsed.method, Some(AuthMethod::Cookie)) {
+        if optional(args, "--expires-ms").is_some() {
+            return Err(CliError::Usage(
+                "cookie credentials do not carry an expiry; omit --expires-ms".to_string(),
+            ));
+        }
+        None
+    } else {
+        optional(args, "--expires-ms")
+            .map(|s| s.parse::<i64>())
+            .transpose()
+            .map_err(|e| CliError::Usage(format!("--expires-ms not an integer: {e}")))?
+    };
 
     let record = match client_id {
         Some(client_id) => {
@@ -896,6 +922,7 @@ fn cmd_put(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             };
             VaultRecord::new_oauth("operator", "github_app", oauth, Vec::new())
         }
+        None if kind == CredentialKind::Cookie => VaultRecord::new_cookie("operator", payload),
         None => VaultRecord::new_static(kind, "operator", payload, expires_at_ms),
     };
     // CREATE-ONLY by default. An overwrite is either an explicit --expected-hash CAS
@@ -3091,14 +3118,6 @@ fn cmd_usable(global: &GlobalArgs) -> Result<(), CliError> {
                 // elapsed time since it is exactly "how long since a human last put
                 // this". It says nothing about whether the provider still honours the
                 // credential, and deliberately does not try to.
-                //
-                // Reported because a declared TTL is undeclarable for the class that
-                // needs this most: an external contributor's live data on two cookie
-                // providers gave 14+ and 5+ days still-alive with NO expiry event ever
-                // observed, both right-censored at n=1. Their argument, which I could
-                // not improve on: regularity is a property of a distribution, and there
-                // is no distribution -- so a declared TTL there would be a guess
-                // wearing the costume of a measurement. Age is a fact.
                 let age_days = (now - written_at_ms) / 86_400_000;
                 // A declared expiry is the ONLY forward-looking signal a
                 // non-refreshable credential can carry, and it is the operator's own
@@ -3126,6 +3145,15 @@ fn cmd_usable(global: &GlobalArgs) -> Result<(), CliError> {
                     );
                     serviceable += 1;
                 }
+            }
+            Usability::Cookie { written_at_ms } => {
+                let age_days = (now - written_at_ms) / 86_400_000;
+                println!(
+                    "  {id:34} cookie  {}  session cookie captured {age_days}d ago; \
+                     age is a staleness signal, re-capture after provider rejection",
+                    row.state
+                );
+                serviceable += 1;
             }
             Usability::Serviceable { expires_at_ms } => {
                 // Expiry is printed as context and never scored: an expired access

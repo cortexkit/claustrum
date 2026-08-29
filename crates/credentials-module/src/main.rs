@@ -4280,6 +4280,53 @@ mod tests {
         assert_eq!(answered.header.corr, 52);
     }
 
+    /// A cookie header is an opaque request artifact. The storage and read paths must
+    /// preserve every byte rather than treating its separators or spaces as structure.
+    #[tokio::test]
+    async fn cookie_record_round_trips_byte_exact_through_seal_and_serve() {
+        let (surface, store, _db) = tmp_surface_with_store(74);
+        let payload = b" session=abc=123; preference=space value; ending=%".to_vec();
+        store
+            .create(
+                "cookie:opencode.ai",
+                &VaultRecord::new_cookie("operator", payload.clone()),
+            )
+            .expect("seal cookie record");
+        let handle = credentials_core::store::mint_handle().expect("mint handle");
+        store
+            .put_handle_hash(
+                &handle.hash,
+                "cookie:opencode.ai",
+                AuditCtx::admin(AuditOp::MintHandle),
+            )
+            .expect("bind handle");
+
+        let outcome = surface
+            .get(
+                78,
+                &read_surface::GetParams {
+                    handle: handle.raw,
+                    min_ttl_ms: None,
+                    force_refresh: false,
+                },
+            )
+            .await;
+        let read_surface::GetOutcome::Ok(result) = outcome else {
+            panic!("a stored cookie must serve through credential.get");
+        };
+        assert_eq!(
+            result.payload, payload,
+            "cookie bytes must survive seal and serve"
+        );
+        assert_eq!(
+            result.expires_at_ms, None,
+            "cookies carry no declared expiry"
+        );
+        assert_eq!(result.account_id, None, "cookies do not disclose identity");
+        assert_eq!(result.email, None, "cookies do not disclose identity");
+        assert_eq!(result.org_name, None, "cookies do not disclose identity");
+    }
+
     /// A legacy malformed row must never become a successful zero-byte credential.
     /// The fixture uses an OAuth-kind record with no refresh state so the current store
     /// can represent the historical bad row without bypassing the new static-write

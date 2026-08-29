@@ -1265,6 +1265,168 @@ fn put_replace_rotates_a_static_key_bumping_version_and_keeping_the_handle() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// Cookie repair uses the same replacement machinery as static-key rotation, but the
+/// captured header comes from a file and must remain a Cookie record with no expiry.
+#[test]
+fn cookie_put_replace_bumps_version_and_keeps_the_handle_live() {
+    let root = tmp_root("cookie-replace");
+    let data_dir = root.join("data");
+    let key_dir = root.join("secrets");
+    let key_path = key_dir.join("master.key");
+    std::fs::create_dir_all(&data_dir).expect("data dir");
+    std::fs::create_dir_all(&key_dir).expect("key dir");
+    let global = |command: &mut Command| {
+        command
+            .arg("--data-dir")
+            .arg(&data_dir)
+            .arg("--key-path")
+            .arg(&key_path);
+    };
+
+    let mut bootstrap = cli();
+    bootstrap.arg("bootstrap");
+    global(&mut bootstrap);
+    assert!(bootstrap.output().expect("bootstrap").status.success());
+
+    let payload_file = root.join("cookie.txt");
+    std::fs::write(
+        &payload_file,
+        b" session=old=1; preference=space value; ending=%",
+    )
+    .expect("write captured cookie");
+    let mut put = cli();
+    put.arg("put")
+        .arg("--id")
+        .arg("cookie:qwencloud.com:work")
+        .arg("--payload-file")
+        .arg(&payload_file);
+    global(&mut put);
+    let output = put.output().expect("put cookie");
+    assert!(
+        output.status.success(),
+        "cookie deposit: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let mut mint = cli();
+    mint.arg("mint-handle")
+        .arg("--id")
+        .arg("cookie:qwencloud.com:work");
+    global(&mut mint);
+    assert!(mint.output().expect("mint handle").status.success());
+
+    std::fs::write(
+        &payload_file,
+        b" session=new=2; preference=space value; ending=%",
+    )
+    .expect("write replacement cookie");
+    let mut replace = cli();
+    replace
+        .arg("put")
+        .arg("--id")
+        .arg("cookie:qwencloud.com:work")
+        .arg("--payload-file")
+        .arg(&payload_file)
+        .arg("--replace");
+    global(&mut replace);
+    let output = replace.output().expect("replace cookie");
+    assert!(
+        output.status.success(),
+        "cookie replace: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let mut list = cli();
+    list.arg("list");
+    global(&mut list);
+    let rows = String::from_utf8_lossy(&list.output().expect("list").stdout).into_owned();
+    assert!(
+        rows.contains("active         v2    cookie:qwencloud.com:work"),
+        "replacement must bump the record version: {rows}"
+    );
+
+    // A cookie has no declarable expiry: the raw request header holds no Set-Cookie
+    // attributes, so a timestamp here would be invented rather than captured.
+    let mut expired = cli();
+    expired
+        .arg("put")
+        .arg("--id")
+        .arg("cookie:qwencloud.com:work")
+        .arg("--payload-file")
+        .arg(&payload_file)
+        .arg("--expires-ms")
+        .arg("1")
+        .arg("--replace");
+    global(&mut expired);
+    let output = expired.output().expect("reject cookie expiry");
+    assert!(
+        !output.status.success()
+            && String::from_utf8_lossy(&output.stderr).contains("do not carry an expiry"),
+        "cookie expiry must be refused: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // `revoke-all-handles` reports the real count, unlike idempotent `revoke-handle`.
+    // Revoking the original handle proves replacement kept that handle live.
+    let mut revoke = cli();
+    revoke
+        .arg("revoke-all-handles")
+        .arg("--id")
+        .arg("cookie:qwencloud.com:work");
+    global(&mut revoke);
+    let output = revoke.output().expect("revoke handles");
+    assert!(output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("revoked 1 handle"),
+        "replacement must retain the minted handle"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// An empty manual capture must fail during the `put` operation rather than being
+/// stored as a successful-but-useless credential response.
+#[test]
+fn cookie_put_refuses_a_zero_byte_payload_file() {
+    let root = tmp_root("cookie-empty");
+    let data_dir = root.join("data");
+    let key_dir = root.join("secrets");
+    let key_path = key_dir.join("master.key");
+    std::fs::create_dir_all(&data_dir).expect("data dir");
+    std::fs::create_dir_all(&key_dir).expect("key dir");
+    let global = |command: &mut Command| {
+        command
+            .arg("--data-dir")
+            .arg(&data_dir)
+            .arg("--key-path")
+            .arg(&key_path);
+    };
+
+    let mut bootstrap = cli();
+    bootstrap.arg("bootstrap");
+    global(&mut bootstrap);
+    assert!(bootstrap.output().expect("bootstrap").status.success());
+    let payload_file = root.join("empty-cookie.txt");
+    std::fs::write(&payload_file, []).expect("write empty capture");
+
+    let mut put = cli();
+    put.arg("put")
+        .arg("--id")
+        .arg("cookie:cursor.com")
+        .arg("--payload-file")
+        .arg(&payload_file);
+    global(&mut put);
+    let output = put.output().expect("put empty cookie");
+    assert!(
+        !output.status.success()
+            && String::from_utf8_lossy(&output.stderr).contains("payload must not be empty"),
+        "zero-byte capture must be refused: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[test]
 fn admin_write_refused_while_lease_held() {
     // The structural "while stopped" proof: hold the single-writer lease (as the
@@ -2348,4 +2510,83 @@ fn usable_reports_a_static_records_age_from_the_stores_own_timestamp() {
          scan read the wrong column -- record_version is also i64, and as a millisecond \
          timestamp it lands in 1970. Got: {line}"
     );
+}
+
+/// Equal write ages have opposite operational meanings for an API key and a session
+/// cookie. The cookie row must make that staleness interpretation visible without
+/// inventing a lifetime threshold.
+#[test]
+fn usable_distinguishes_a_cookie_age_from_an_api_key_age() {
+    let root = tmp_root("cookie-usable");
+    let data = root.join("vault");
+    let key = root.join("master.key");
+    std::fs::create_dir_all(&data).expect("data dir");
+
+    let run = |args: &[&str]| -> std::process::Output {
+        let mut command = cli();
+        command
+            .args(args)
+            .arg("--data-dir")
+            .arg(&data)
+            .arg("--key-path")
+            .arg(&key)
+            .output()
+            .expect("run ck-auth")
+    };
+
+    assert!(run(&["bootstrap"]).status.success(), "bootstrap");
+    assert!(
+        run(&["put", "--id", "apikey:age-compare", "--payload", "same-age"])
+            .status
+            .success(),
+        "put API key"
+    );
+    let cookie_file = root.join("cookie.txt");
+    std::fs::write(&cookie_file, b"session=same-age; ending=%").expect("write cookie");
+    assert!(
+        run(&[
+            "put",
+            "--id",
+            "cookie:cursor.com",
+            "--payload-file",
+            cookie_file.to_str().expect("utf8 path"),
+        ])
+        .status
+        .success(),
+        "put cookie"
+    );
+
+    let out = run(&["usable"]);
+    assert!(
+        out.status.success(),
+        "usable: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    let api = text
+        .lines()
+        .find(|line| line.contains("apikey:age-compare"))
+        .unwrap_or_else(|| panic!("missing API-key row in:\n{text}"));
+    let cookie = text
+        .lines()
+        .find(|line| line.contains("cookie:cursor.com"))
+        .unwrap_or_else(|| panic!("missing cookie row in:\n{text}"));
+
+    assert!(
+        api.contains("static") && api.contains("written 0d ago"),
+        "API-key age is neutral inventory: {api}"
+    );
+    assert!(
+        cookie.contains("cookie")
+            && cookie.contains("session cookie")
+            && cookie.contains("captured 0d ago")
+            && cookie.contains("staleness signal"),
+        "cookie age must be rendered as a staleness signal: {cookie}"
+    );
+    assert_ne!(
+        api, cookie,
+        "identical ages must render as different credential kinds"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
 }

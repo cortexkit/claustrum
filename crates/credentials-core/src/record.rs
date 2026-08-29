@@ -40,6 +40,9 @@ pub enum CredentialKind {
     ApiKey,
     /// A database connection string.
     Dsn,
+    /// A manually captured session-cookie header. The payload remains opaque, has no
+    /// declared expiry, and is never refreshable.
+    Cookie,
     /// Opaque bytes with no vault-understood structure (no refresh).
     Opaque,
     /// A private signing key the vault EXERCISES on behalf of a caller rather than
@@ -241,7 +244,7 @@ impl VaultRecord {
     }
 
     /// Construct a static (non-refreshable) record at version 1: an API key, DSN,
-    /// or opaque blob. No OAuth, no refresh adapter.
+    /// session cookie, or opaque blob. No OAuth, no refresh adapter.
     pub fn new_static(
         kind: CredentialKind,
         source: impl Into<String>,
@@ -263,6 +266,13 @@ impl VaultRecord {
             payload,
             identity: RecordIdentity::default(),
         }
+    }
+
+    /// Construct a manually captured session-cookie record. Cookie headers cannot
+    /// carry `Set-Cookie` expiry attributes, so their expiry stays absent and provider
+    /// rejection is reported through the normal auth-failure path.
+    pub fn new_cookie(source: impl Into<String>, payload: Vec<u8>) -> Self {
+        Self::new_static(CredentialKind::Cookie, source, payload, None)
     }
 
     /// Whether this record's credential is refreshable (OAuth with an adapter).
@@ -406,8 +416,62 @@ mod tests {
     }
 
     #[test]
+    fn cookie_record_preserves_opaque_bytes_without_expiry_or_identity() {
+        let payload = b" session=abc=123; preference=space value; ending=%".to_vec();
+        let record = VaultRecord::new_cookie("operator", payload.clone());
+
+        assert_eq!(record.kind, CredentialKind::Cookie);
+        assert_eq!(record.payload, payload);
+        assert_eq!(record.expires_at_ms, None);
+        assert_eq!(record.identity, RecordIdentity::default());
+        assert!(!record.is_refreshable());
+        assert_eq!(
+            VaultRecord::decode(&record.encode().unwrap()).unwrap(),
+            record
+        );
+    }
+
+    /// Pre-cookie record bodies used only the enum strings below. Seal those exact old
+    /// plaintexts, then reopen and decode them to prove the additive enum variant does
+    /// not make a persisted record of any pre-existing kind unreadable.
+    #[test]
+    fn existing_sealed_record_bodies_decode_after_adding_cookie_kind() {
+        use crate::envelope::{open, seal, RecordBinding};
+        use crate::key::{MasterKey, MASTER_KEY_LEN};
+
+        let old_records: &[(CredentialKind, &[u8])] = &[
+            (
+                CredentialKind::Oauth,
+                br#"{"schema_version":1,"kind":"oauth","source":"old","record_version":1,"expires_at_ms":123,"refresh_adapter":"old","oauth":{"access_token":"a","refresh_token":"r","expires_at_ms":123,"token_url":"https://example.invalid/token","client_id":null,"scopes":[]},"payload":[111,108,100]}"#,
+            ),
+            (CredentialKind::ApiKey, br#"{"schema_version":1,"kind":"api_key","source":"old","record_version":1,"expires_at_ms":null,"refresh_adapter":null,"oauth":null,"payload":[111,108,100]}"#),
+            (CredentialKind::Dsn, br#"{"schema_version":1,"kind":"dsn","source":"old","record_version":1,"expires_at_ms":null,"refresh_adapter":null,"oauth":null,"payload":[111,108,100]}"#),
+            (CredentialKind::Opaque, br#"{"schema_version":1,"kind":"opaque","source":"old","record_version":1,"expires_at_ms":null,"refresh_adapter":null,"oauth":null,"payload":[111,108,100]}"#),
+            (CredentialKind::SigningKey, br#"{"schema_version":1,"kind":"signing_key","source":"old","record_version":1,"expires_at_ms":null,"refresh_adapter":null,"oauth":null,"payload":[111,108,100]}"#),
+        ];
+        let key = MasterKey::from_bytes([42; MASTER_KEY_LEN]);
+
+        for (index, (expected_kind, old_body)) in old_records.iter().enumerate() {
+            let id = format!("old:{index}");
+            let binding = RecordBinding {
+                credential_id: &id,
+                record_version: 1,
+            };
+            let sealed = seal(&key, old_body, &binding).expect("seal historic body");
+            let reopened = open(&key, &sealed, &binding).expect("open historic body");
+            let record = VaultRecord::decode(&reopened).expect("decode historic body");
+            assert_eq!(record.kind, *expected_kind, "historic {id} kind survives");
+            assert_eq!(record.payload, b"old");
+        }
+    }
+
+    #[test]
     fn kind_serializes_snake_case() {
         let json = serde_json::to_string(&CredentialKind::ApiKey).unwrap();
         assert_eq!(json, "\"api_key\"");
+        assert_eq!(
+            serde_json::to_string(&CredentialKind::Cookie).unwrap(),
+            "\"cookie\""
+        );
     }
 }

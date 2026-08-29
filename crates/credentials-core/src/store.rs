@@ -2455,6 +2455,14 @@ impl EncryptedStore {
                 "non-OAuth credential payload must not be empty".into(),
             ));
         }
+        // `Cookie` is a request header captured after the browser consumed Set-Cookie
+        // attributes. It cannot disclose an expiry, so accepting a supplied timestamp
+        // would persist an invented lifetime rather than an observed fact.
+        if record.kind == CredentialKind::Cookie && record.expires_at_ms.is_some() {
+            return Err(StoreOpError::Encode(
+                "cookie credentials must not declare an expiry".into(),
+            ));
+        }
         let body = record
             .encode()
             .map_err(|e| StoreOpError::Encode(e.to_string()))?;

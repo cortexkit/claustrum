@@ -2,7 +2,7 @@
 //!
 //! A credential id names WHAT a consumer wants. The v1 scheme is
 //! `<method>:<provider>[:<account>]` (e.g. `oauth:anthropic`, `apikey:deepseek`,
-//! `antigravity:google`, `signing:agent-assertion:7`). A provider can hold several
+//! `cookie:cursor.com`, `antigravity:google`, `signing:agent-assertion:7`). A provider can hold several
 //! credentials (different methods, and eventually different accounts), each its own
 //! record + handle.
 //!
@@ -25,6 +25,9 @@ pub enum AuthMethod {
     Oauth,
     /// A static API key (no refresh, `CredentialKind::ApiKey`).
     ApiKey,
+    /// A manually captured browser session cookie (no refresh,
+    /// `CredentialKind::Cookie`).
+    Cookie,
     /// Google Code-Assist OAuth (the `antigravity` adapter).
     Antigravity,
     /// OpenAI ChatGPT-subscription OAuth. Refreshed by the `openai` adapter (same
@@ -47,6 +50,7 @@ impl AuthMethod {
         match seg {
             "oauth" => Some(AuthMethod::Oauth),
             "apikey" => Some(AuthMethod::ApiKey),
+            "cookie" => Some(AuthMethod::Cookie),
             "antigravity" => Some(AuthMethod::Antigravity),
             "chatgpt" => Some(AuthMethod::Chatgpt),
             "copilot" => Some(AuthMethod::Copilot),
@@ -61,6 +65,7 @@ impl AuthMethod {
         match self {
             AuthMethod::Oauth => "oauth",
             AuthMethod::ApiKey => "apikey",
+            AuthMethod::Cookie => "cookie",
             AuthMethod::Antigravity => "antigravity",
             AuthMethod::Chatgpt => "chatgpt",
             AuthMethod::Copilot => "copilot",
@@ -77,6 +82,7 @@ impl AuthMethod {
     pub fn credential_kind(&self) -> crate::record::CredentialKind {
         match self {
             AuthMethod::ApiKey => crate::record::CredentialKind::ApiKey,
+            AuthMethod::Cookie => crate::record::CredentialKind::Cookie,
             AuthMethod::Signing => crate::record::CredentialKind::SigningKey,
             AuthMethod::Oauth
             | AuthMethod::Antigravity
@@ -123,7 +129,7 @@ pub fn parse_credential_id(id: &str) -> ParsedCredentialId {
 }
 
 /// The refresh-adapter name to STORE for a credential, given its method and provider,
-/// or `None` for a static api-key or signing-key record (no adapter, no refresh).
+/// or `None` for a static api-key, cookie, or signing-key record (no adapter, no refresh).
 ///
 /// # Retirement consequence of returning `None`
 ///
@@ -160,6 +166,7 @@ pub fn parse_credential_id(id: &str) -> ParsedCredentialId {
 /// - antigravity → `antigravity`
 /// - chatgpt → `openai` (refreshed via the openai token endpoint)
 /// - apikey → `None` (static)
+/// - cookie → `None` (manually captured session cookie)
 /// - signing → `None` (static signing key)
 /// - github_app → `github_app` (App assertion to installation-token exchange)
 pub fn default_refresh_adapter(method: Option<AuthMethod>, provider: &str) -> Option<String> {
@@ -169,7 +176,7 @@ pub fn default_refresh_adapter(method: Option<AuthMethod>, provider: &str) -> Op
         Some(AuthMethod::Chatgpt) => Some("openai".to_string()),
         Some(AuthMethod::Copilot) => Some("github-copilot".to_string()),
         Some(AuthMethod::GithubApp) => Some("github_app".to_string()),
-        Some(AuthMethod::ApiKey) | Some(AuthMethod::Signing) => None,
+        Some(AuthMethod::ApiKey) | Some(AuthMethod::Cookie) | Some(AuthMethod::Signing) => None,
     }
 }
 
@@ -230,6 +237,26 @@ mod tests {
         assert_eq!(
             parsed.method.map(|method| method.credential_kind()),
             Some(crate::record::CredentialKind::SigningKey)
+        );
+    }
+
+    /// Cookie ids are domain-keyed and support the same optional account label as
+    /// other credentials, but never select a refresh adapter.
+    #[test]
+    fn cookie_method_is_non_refreshable_and_preserves_domain_account_grammar() {
+        let parsed = parse_credential_id("cookie:qwencloud.com:work");
+
+        assert_eq!(parsed.method, Some(AuthMethod::Cookie));
+        assert_eq!(parsed.provider, "qwencloud.com");
+        assert_eq!(parsed.account.as_deref(), Some("work"));
+        assert_eq!(
+            parsed.method.map(|method| method.credential_kind()),
+            Some(crate::record::CredentialKind::Cookie)
+        );
+        assert_eq!(
+            default_refresh_adapter(parsed.method, &parsed.provider),
+            None,
+            "a manually captured session cookie cannot refresh"
         );
     }
 

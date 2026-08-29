@@ -34,7 +34,7 @@
 use crate::envelope::{open as envelope_open, RecordBinding};
 use crate::key::{KeyId, MasterKey};
 use crate::oauth::OAuthCredential;
-use crate::record::VaultRecord;
+use crate::record::{CredentialKind, VaultRecord};
 use rusqlite::{Connection, OpenFlags};
 use std::path::Path;
 
@@ -65,6 +65,9 @@ pub enum Usability {
         expires_at_ms: Option<i64>,
         written_at_ms: i64,
     },
+    /// A manually captured session cookie. Its capture age is a staleness signal, not
+    /// an expiry claim: session lifetime is not present in a request `Cookie` header.
+    Cookie { written_at_ms: i64 },
     /// OAuth with material the engine can serve or refresh from. `expires_at_ms` is
     /// carried for display and deliberately not scored.
     Serviceable { expires_at_ms: Option<i64> },
@@ -270,8 +273,13 @@ pub fn scan(conn: &Connection, key: &MasterKey) -> Result<Vec<RecordUsability>, 
             Usability::Stranded
         } else {
             match oauth {
-                // The record's own expiry field, not an oauth one: for a static record
-                // this is the only place a declared lifetime lives.
+                // A request Cookie header has no expiry attributes; the browser consumed
+                // them from Set-Cookie before capture. Age is the only honest signal here.
+                None if record.kind == CredentialKind::Cookie => {
+                    Usability::Cookie { written_at_ms }
+                }
+                // The record's own expiry field, not an oauth one: for another static
+                // record this is the only place a declared lifetime lives.
                 None => Usability::Static {
                     expires_at_ms: record.expires_at_ms,
                     written_at_ms,

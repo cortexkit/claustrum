@@ -1024,3 +1024,33 @@ async fn lease_handover_fences_commit_and_converges_to_needs_reauth() {
     // The staged token was never, at any point, visible.
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// A cookie may look stale to a caller that requests a forced refresh, but its only
+/// repair path is replacement after the consumer reports authentication failure. The
+/// adapter counter proves this branch does not merely return a record after an exchange.
+#[tokio::test]
+async fn cookie_record_is_never_selected_for_refresh() {
+    let (root, descriptor) = tmp_descriptor();
+    let store = open_store(&descriptor, 73);
+    let payload = b" session=abc=123; preference=space value; ending=%".to_vec();
+    store
+        .create(
+            "cookie:cursor.com",
+            &VaultRecord::new_cookie("operator", payload.clone()),
+        )
+        .expect("create cookie record");
+    let (engine, calls) = engine(store, StubAdapter::new("stub"));
+
+    let served = engine
+        .get("cookie:cursor.com", None, true)
+        .await
+        .expect("serve cookie without refresh");
+    assert_eq!(served.payload, payload, "the cookie is served verbatim");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "no adapter call for a cookie"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}

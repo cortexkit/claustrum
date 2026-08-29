@@ -131,6 +131,42 @@ run_check "clippy (seam features)" \
 run_expect() {
   local min="$1" label="$2"; shift 2
   printf '\n=== %s ===\n' "$label"
+
+  # THE SKIP CHECK BELOW DEPENDS ON A FLAG IT DOES NOT CONTROL, so enforce the
+  # dependency here rather than describing it in a comment and hoping. `--nocapture`
+  # is what makes a skip notice visible to this function; without it the guard reads
+  # an empty stream, finds no notice, and reports the arm clean -- identical to a run
+  # where nothing skipped. Nothing about the green says which happened. That flag is
+  # exactly what a later tidy-up deletes: it is noisy, it looks like debug residue,
+  # and removing it breaks no test. It silently disarms the guard instead.
+  #
+  # WHICH ARMS NEED IT IS DERIVED FROM SOURCE, NOT ASSUMED. The first version of this
+  # check keyed on `--ignored` and was WRONG -- it fired on the release-artifact arm,
+  # which is `#[ignore]` because it builds a release binary, not because it can skip.
+  # `--ignored` conflates "can skip at runtime" with "expensive, run explicitly", and
+  # only the first needs the flag. A guard keyed on the wrong property fails the build
+  # for arms that were never at risk, which is how a correct-sounding guard gets
+  # deleted wholesale instead of fixed.
+  #
+  # The real discriminator is whether the target's source can EMIT a skip notice, so
+  # ask the source. A new skip path in any test file arms this automatically; a
+  # removed one disarms it. Neither requires anyone to remember this function exists.
+  local a want_target=0 target="" has_nocapture=0
+  for a in "$@"; do
+    [ "$a" = "--nocapture" ] && has_nocapture=1
+    [ "$want_target" = "1" ] && { target="$a"; want_target=0; }
+    [ "$a" = "--test" ] && want_target=1
+  done
+  if [ -n "$target" ] && [ "$has_nocapture" = "0" ]; then
+    local src
+    src="$(find crates -path "*/tests/${target}.rs" -print -quit 2>/dev/null || true)"
+    if [ -n "$src" ] && grep -q 'SKIPPING' "$src"; then
+      fail "$label targets ${target}, whose source can print a skip notice, but omits \
+--nocapture. cargo captures that notice, so the skip check below would read an empty \
+stream and pass the arm without ever seeing it skip."
+    fi
+  fi
+
   local out
   out="$("$@" 2>&1)" || { printf '%s\n' "$out"; fail "$label"; }
   printf '%s\n' "$out" | grep -E '^test result:' || true
@@ -211,7 +247,15 @@ run_expect 442 "workspace unit + integration" \
 # what needs capturing is the SUPERVISOR's own stderr at that moment -- the arm
 # reports only that the file never appeared, which is an absence and says nothing
 # about why. Do not let this comment become a claim that the flag settled it.
-CRED_REQUIRE_DAEMON=1 run_expect 8 "real-daemon e2e (ship gate)" \
+# THE FLOOR MUST MATCH THE POPULATION, and this one had drifted under it. It read 8
+# against 9 live arms, so the ninth could vanish -- deleted, renamed out of the
+# harness, gated behind an absent feature -- and the gate would still pass, because
+# 8 of 9 clears a floor of 8. A floor below its population silently stops being a
+# floor for the difference.
+#
+# Raise this WITH the arm count. A floor that trails is worse than no floor: it
+# reports a bound it is not enforcing, and the gap is invisible from a green run.
+CRED_REQUIRE_DAEMON=1 run_expect 9 "real-daemon e2e (ship gate)" \
   cargo test --locked -p credentials-module --test real_daemon_e2e -- \
     --ignored --nocapture --test-threads=1
 

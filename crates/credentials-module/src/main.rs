@@ -41,7 +41,10 @@ use credentials_core::store::EncryptedStore;
 use serde::Deserialize;
 use serde_json::json;
 use subc_protocol::manifest::Concurrency;
-use subc_protocol::manifest::ManifestProvenance;
+use subc_protocol::manifest::{
+    ManifestProvenance, SelfSignalDeclaration, SelfSignalEffect, SelfSignalKind, SignalAnchor,
+    SignalCadence,
+};
 use subc_protocol::{
     manifest::{
         Bindings, IdentityBinding, ManagementOperation, ManagementOperationKind, ModuleManifest,
@@ -1253,26 +1256,63 @@ fn manifest(module_id: &str) -> ModuleManifest {
         // WHAT IS NOT, and why each is absent rather than forgotten:
         //   build_lock_digest    nothing hashes Cargo.lock at build time today. Adding
         //                        it is a release-script change, not a manifest one.
-        //   store_schema_version the contract asks for the newest MIGRATION version
-        //                        (manifest.rs: "any module with a migration list can state
-        //                        its newest migration as fact"), and `MIGRATIONS` is
-        //                        private to credentials-core with no public accessor.
-        //                        `RECORD_SCHEMA_VERSION` IS public and tempting, but it
-        //                        names the encrypted record BODY schema -- a different
-        //                        domain that currently reads 1 while the newest migration
-        //                        is 6. Filling the field from it would be a WELL-FORMED
-        //                        value from the WRONG DOMAIN: shape validation cannot
-        //                        catch it, and it is worse than absence because a present
-        //                        field stops the reader asking.
+        //
+        // store_schema_version is DERIVED, never typed. `newest_migration_version()`
+        // reads the migration list, so this declaration cannot drift from the schema it
+        // describes -- and drift was the live hazard, not a hypothetical: the issue
+        // asking for the accessor cited 6, this comment used to say 6, and the list
+        // already held 7. Both were true when written.
+        //
+        // DO NOT fill it from `RECORD_SCHEMA_VERSION`. That constant is public, is a
+        // compile-time integer, and names the encrypted record BODY schema -- a
+        // different domain that reads 1. It would be a WELL-FORMED value from the WRONG
+        // DOMAIN, which every check on this path (non-empty, <=128 bytes, printable
+        // ASCII) accepts, and which is worse than absence because a present field stops
+        // the reader asking.
         provenance: {
             let rev = credentials_core::contract::BUILD_REV;
             (rev != "unknown").then(|| ManifestProvenance {
                 build_git_sha: Some(rev.to_string()),
                 build_lock_digest: None,
                 wire_crate_version: Some(SUBC_PROTOCOL_CRATE_VERSION.to_string()),
-                store_schema_version: None,
+                store_schema_version: Some(
+                    credentials_core::store::newest_migration_version().to_string(),
+                ),
             })
         },
+        // ONE periodic behaviour exists in this daemon, and the list is exhaustive by
+        // inspection rather than recollection: every `interval`/`sleep` outside
+        // `#[cfg(test)]` was enumerated, and the only non-test tick is the health
+        // refresher. The per-connection spawn is event-driven, not periodic.
+        //
+        // `Some(vec![..])` NOT `None`, and the difference is the whole value: an
+        // exhaustive list also states what is ABSENT. This module generates NO periodic
+        // traffic against any provider -- refresh is strictly demand-driven, dispatched
+        // by a caller's `credential.get` and never by a timer of mine. An analyst seeing
+        // rhythmic token traffic attributed to this vault is looking at a consumer's
+        // poll; `None` would leave that question open.
+        self_signals: Some(vec![SelfSignalDeclaration {
+            name: "health_snapshot_refresh".to_string(),
+            kind: SelfSignalKind::Poller,
+            // Observe is load-bearing here: this task runs a no-decrypt metadata scan,
+            // an open-intent count and the audit-tip read. It writes nothing.
+            effect: SelfSignalEffect::Observe,
+            anchored_to: SignalAnchor::FixedInterval,
+            // DERIVED from the constant the ticker actually uses, so the declaration
+            // cannot drift from the cadence in force.
+            cadence: Some(SignalCadence::Literal {
+                interval_ms: HEALTH_REFRESH_INTERVAL.as_millis() as u64,
+            }),
+            domain: Some("vault-store".to_string()),
+            // The composition is what an operator gets wrong: worst-case staleness of a
+            // served snapshot is THIS interval plus the supervisor's probe cadence, not
+            // either alone.
+            note: Some(
+                "recomputes the cached health snapshot off the probe path, so a \
+                 HealthCheck reply touches no database"
+                    .to_string(),
+            ),
+        }]),
         provides: vec![ProviderRole::ManagementSurface {
             // ModuleManaged, and this is a claim about observed behaviour rather than
             // the value that compiles. All three would.
@@ -1450,6 +1490,44 @@ mod tests {
     /// If you are adding a consumer role deliberately: this test failing is the
     /// intended alarm. Read the two properties above, decide whether they still hold,
     /// and tell the cerebellum and supervisor seats before changing the expectation.
+    /// The self-signal declaration is a claim about RUNTIME BEHAVIOUR, and the two
+    /// halves that can silently become false are pinned here.
+    ///
+    /// `Observe` is the load-bearing one. A later refactor that gives the refresher a
+    /// write -- a lazy backfill on the health path is the tempting shape, and was
+    /// explicitly rejected once already -- turns this declaration into a lie that
+    /// nothing else in the repo would catch.
+    #[test]
+    fn the_self_signal_declaration_matches_what_the_refresher_actually_does() {
+        let m = manifest("claustrum");
+        let signals = m.self_signals.as_ref().expect(
+            "self_signals must be Some: an exhaustive list also states that no \
+                     PERIODIC provider traffic exists, which None leaves open",
+        );
+
+        assert_eq!(
+            signals.len(),
+            1,
+            "one periodic behaviour was enumerated by inspection"
+        );
+        let s = &signals[0];
+        assert_eq!(s.name, "health_snapshot_refresh");
+        assert_eq!(
+            s.effect,
+            SelfSignalEffect::Observe,
+            "the refresher must not write. If it now does, the DECLARATION is what \
+             misleads an analyst -- fix the declaration or the behaviour, not this test"
+        );
+        assert_eq!(s.anchored_to, SignalAnchor::FixedInterval);
+        assert_eq!(
+            s.cadence,
+            Some(SignalCadence::Literal {
+                interval_ms: HEALTH_REFRESH_INTERVAL.as_millis() as u64
+            }),
+            "cadence must stay derived from the constant the ticker uses"
+        );
+    }
+
     #[test]
     fn the_manifest_declares_no_consumer_role_because_nothing_may_be_pushed_outward() {
         let manifest = super::manifest("claustrum");

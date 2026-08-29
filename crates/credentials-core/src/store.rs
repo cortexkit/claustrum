@@ -234,6 +234,38 @@ const MIGRATIONS: &[Migration] = &[
     },
 ];
 
+/// The newest store migration THIS BINARY knows how to apply.
+///
+/// Published so the module manifest can declare `store_schema_version` as a derived
+/// fact. The number is not an implementation detail: it is a COMPATIBILITY MARKER,
+/// monotone by construction, and the supervisor contract already treats it as a
+/// fleet-visible value that modules are asked to state.
+///
+/// DERIVED FROM THE LIST, NEVER HAND-TYPED. A literal here would decay exactly the way
+/// every other written-down count in this repo has: the issue asking for this accessor
+/// cited 6 while the list already held 7, and the manifest comment beside the field
+/// said 6 as well. Both were true when written. Deriving makes the drift impossible
+/// rather than merely discouraged.
+///
+/// WHAT DECLARING IT BUYS, precisely, because it is easy to overstate: `run_migrations`
+/// SKIPS every migration at or below the store's current version and returns `Ok`, so a
+/// binary older than the store it opens proceeds silently -- there is no store-level
+/// refusal to back this up. Declaring the number does not add one. It makes the
+/// mismatch VISIBLE to a supervisor that compares declared against actual, which is the
+/// right granularity: refusing outright would break binary rollback, and rollback is a
+/// property this project deliberately preserves at every deploy.
+pub const fn newest_migration_version() -> u32 {
+    let mut newest = 0;
+    let mut i = 0;
+    while i < MIGRATIONS.len() {
+        if MIGRATIONS[i].version > newest {
+            newest = MIGRATIONS[i].version;
+        }
+        i += 1;
+    }
+    newest
+}
+
 /// The `vault_secrets` row name for the audit-chain HMAC key. The audit key is a
 /// CSPRNG secret created once and SEALED under the master key (so the audit log is
 /// unforgeable without the master key), re-sealed on master-key rotation but never
@@ -5201,5 +5233,36 @@ mod tests {
             "percent and underscore in a grant must not widen it as SQL LIKE wildcards"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// PINS THE LITERAL, deliberately, so adding a migration REDDENS rather than
+    /// silently changing what this binary declares to the supervisor.
+    ///
+    /// The manifest publishes this number, so a new migration is a change to a
+    /// fleet-visible declaration and not only to the schema. A relationship assertion
+    /// (`== MIGRATIONS.iter().max()`) would move with the list and prove nothing about
+    /// the value; the literal is what makes the author look at the manifest.
+    #[test]
+    fn the_newest_migration_version_is_pinned_because_the_manifest_declares_it() {
+        assert_eq!(
+            newest_migration_version(),
+            7,
+            "the newest migration changed. This value is DECLARED in the module manifest \
+             as store_schema_version, so a supervisor comparing declared-against-actual \
+             sees it. Update the literal, and note the manifest consequence."
+        );
+
+        // Semantics, not just the value: `newest` must be the MAXIMUM, not the last
+        // element. They agree while the list stays sorted, and diverge the first time
+        // someone inserts out of order -- which is exactly when a silent wrong answer
+        // would be least expected.
+        for m in MIGRATIONS {
+            assert!(
+                m.version <= newest_migration_version(),
+                "migration {} exceeds the reported newest -- newest_migration_version is \
+                 returning a position rather than a maximum",
+                m.version
+            );
+        }
     }
 }

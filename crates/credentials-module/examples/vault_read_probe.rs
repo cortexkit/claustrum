@@ -182,7 +182,36 @@ async fn main() {
         }
     };
 
-    let conn = connection_file::read(&subc).expect("read connection file");
+    // Name the candidate locations rather than panicking with the path we were handed.
+    // An empty or wrong `--subc` produced `Io { op: "stat", path: "" }`, which tells the
+    // operator nothing about where the file actually lives -- and there are three
+    // possible homes depending on how the supervisor was started, so guessing is the
+    // expected failure rather than a careless one.
+    if subc.as_os_str().is_empty() {
+        eprintln!(
+            "vault_read_probe: --subc <connection-file> was empty.\n\
+             The supervisor writes it to one of:\n\
+             \x20 $XDG_RUNTIME_DIR/subc-connection.json   (unset on stock macOS)\n\
+             \x20 ~/.local/share/cortexkit/run/subc-connection.json\n\
+             \x20 <temp>/subc-<user-token>.connection.json  (the macOS default)"
+        );
+        std::process::exit(2);
+    }
+    let conn = match connection_file::read(&subc) {
+        Ok(conn) => conn,
+        Err(err) => {
+            eprintln!(
+                "vault_read_probe: cannot read connection file {}: {err}",
+                subc.display()
+            );
+            eprintln!(
+                "  If the daemon is running, the file is most likely at\n\
+                 \x20 ~/.local/share/cortexkit/run/subc-connection.json\n\
+                 \x20 or <temp>/subc-<user-token>.connection.json"
+            );
+            std::process::exit(2);
+        }
+    };
     let endpoint = conn
         .endpoints
         .first()

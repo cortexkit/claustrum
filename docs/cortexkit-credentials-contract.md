@@ -280,6 +280,23 @@ can tell those apart from the wire, and a consumer that needs to know must ask a
 operator: there is no read that answers it, and adding one would answer it for a
 sweep too.
 
+**`context_overflow` means reduce-and-retry, never wait-and-retry.** The name reads
+like a load state and it is not one. Every code under it — an over-cap batch, an
+oversized signing payload, an unsatisfiable minimum-TTL demand — is a bound on **one
+request**, and every bound is a compile-time constant. So an identical request retried
+after any backoff fails identically forever. The remedy is to lower the ask: fewer
+items, a smaller payload, a lower `min_ttl_ms`. Retrying unchanged is not merely
+futile; for the TTL case each attempt buys a real upstream token exchange against a
+provider budget shared with every other holder of that credential, which is the
+amplification the refusal exists to prevent.
+
+This is written down because two careful consumers filed it into a retry-with-backoff
+family within one month, both describing the codes as transient load shapes, with the
+contract sentence correct and unread beside them. A class name is read faster than the
+sentence next to it, and the name wins. If a consumer's arm is keyed on the class
+rather than on the individual codes, it is already right and will stay right as codes
+are added.
+
 ---
 
 ## 8. Vault-owned OAuth refresh + crash-safety — closes B2

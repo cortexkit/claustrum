@@ -4158,6 +4158,105 @@ mod tests {
         );
     }
 
+    /// The mark that predicts a SLOW get on a record every other field calls healthy.
+    ///
+    /// Pins the exact reading that was invisible before this field existed: `ready:
+    /// true`, `last_error_code: null`, and the next `get` about to buy an upstream token
+    /// exchange. A consumer sizing a startup bound cannot get that from `ready`, because
+    /// `ready` is genuinely TRUE -- the mark exists so the next get refreshes rather than
+    /// refusing.
+    #[tokio::test]
+    async fn status_publishes_the_stale_mark_without_calling_the_credential_unhealthy() {
+        let (surface, store, _db) = tmp_surface_with_store(16);
+        let handle = credentials_core::store::mint_handle().expect("mint handle");
+        store
+            .put_handle_hash(
+                &handle.hash,
+                "apikey:active",
+                AuditCtx::admin(AuditOp::MintHandle),
+            )
+            .expect("put handle");
+
+        let clean = surface
+            .status(
+                1,
+                &crate::read_surface::StatusParams {
+                    handle: Some(handle.raw.clone()),
+                },
+            )
+            .await;
+        assert_eq!(
+            clean.stale_pending,
+            Some(false),
+            "a resolved handle must report the mark explicitly, not by omission"
+        );
+        assert!(clean.ready, "precondition: the record starts healthy");
+
+        // Exactly what a consumer's 401 report does, at the version it was served.
+        let served = clean
+            .record_version
+            .expect("resolved handle reports version");
+        store
+            .mark_stale_if_version_reported(
+                "apikey:active",
+                served,
+                AuditCtx::admin(AuditOp::ReportAuthFailure),
+                credentials_core::store::AuthObservation {
+                    kind: "consumer_report_stale",
+                    provider_status: Some(401),
+                    detail: None,
+                },
+            )
+            .expect("mark stale");
+
+        let marked = surface
+            .status(
+                1,
+                &crate::read_surface::StatusParams {
+                    handle: Some(handle.raw.clone()),
+                },
+            )
+            .await;
+        assert_eq!(
+            marked.stale_pending,
+            Some(true),
+            "the mark must be visible WITHOUT calling get -- the whole point is to avoid \
+             the call whose cost is in question"
+        );
+        // The load-bearing half. If this ever flips to false, the field has been folded
+        // into health and a consumer will start treating a usable credential as broken.
+        assert!(
+            marked.ready,
+            "a stale-marked record is still USABLE -- expensive is not unhealthy"
+        );
+        assert!(
+            marked.last_error_code.is_none(),
+            "a pending repair is not an error that has occurred"
+        );
+
+        // ABSENT, never defaulted false: claiming "no repair pending" for a record this
+        // path could not read would be an assertion with no basis behind it.
+        let overall = surface
+            .status(1, &crate::read_surface::StatusParams { handle: None })
+            .await;
+        assert!(
+            overall.stale_pending.is_none(),
+            "overall readiness names no credential, so it can report no mark"
+        );
+        let unknown = surface
+            .status(
+                2,
+                &crate::read_surface::StatusParams {
+                    handle: Some("ckh_definitely-not-a-handle".to_string()),
+                },
+            )
+            .await;
+        assert!(
+            unknown.stale_pending.is_none(),
+            "an unresolvable handle must not assert anything about a record"
+        );
+    }
+
     #[tokio::test]
     async fn status_handle_probe_runs_the_limiter() {
         let (surface, store, _db) = tmp_surface_with_store(15);

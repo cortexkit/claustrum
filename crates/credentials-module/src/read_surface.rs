@@ -464,24 +464,9 @@ pub struct StatusResult {
     /// would defeat itself by moving the version it matched on). So a stable version
     /// with `ready: false` is a normal reading, not a stuck cursor.
     ///
-    /// WHAT `status` DELIBERATELY DOES NOT PUBLISH: `stale_pending`. For the whole
-    /// window between a version-matched report and the next `get`, this surface reports
-    /// a healthy credential while the store has already recorded the mark. Measured by
-    /// an external contributor on 2026-08-25: twelve samples over five minutes, all
-    /// `ready: true`, with the chain row already written.
-    ///
-    /// That is correct for what `ready` MEANS -- "would a get succeed" -- and it stays
-    /// true, because the mark exists precisely so the next get refreshes rather than
-    /// refusing. A get-path consumer receives the entire benefit without ever needing to
-    /// see the flag, which is why no consumer has asked for it.
-    ///
-    /// The gap is real for a consumer that POLLS status as its health surface: it cannot
-    /// learn a mark is outstanding, so it cannot distinguish "healthy" from "healthy,
-    /// with a repair pending". Not published today because no such consumer exists, and
-    /// a field added for a hypothetical caller is machinery nobody can test against a
-    /// real requirement. Revisit when one arrives -- the disclosure cost is small
-    /// (`ready: false` already tells a handle holder that someone observed a failure),
-    /// so the decision is about usefulness rather than safety.
+    /// See [`StatusResult::stale_pending`] for the mark that predicts a SLOW get on an
+    /// otherwise healthy record -- the two fields answer different questions and a
+    /// consumer sizing a timeout needs the other one.
     ///
     /// AND IT DOES NOT CATCH EVERY REPAIR -- read `ready`, not this, to answer "is it
     /// usable now". `reactivate` clears a wrong `needs_reauth` verdict WITHOUT touching
@@ -497,6 +482,50 @@ pub struct StatusResult {
     /// tracks the MATERIAL; `ready` tracks the VERDICT; a repair can move either alone.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub record_version: Option<u64>,
+
+    /// A consumer reported the current token refused, so the NEXT `get` must refresh
+    /// before serving. Present only when a handle resolved.
+    ///
+    /// THIS IS A LATENCY PREDICTOR, NOT A HEALTH FIELD, and it exists because the two
+    /// are not the same question. `ready` answers "would a get succeed" -- and on a
+    /// stale-marked record the honest answer is YES, because the mark exists precisely
+    /// so the next get refreshes rather than refusing. What `ready` cannot say is what
+    /// that get will COST:
+    ///
+    ///   state=active, stale_pending=false  -> local read, sub-millisecond
+    ///   state=active, stale_pending=TRUE   -> forces an upstream exchange, seconds
+    ///   state=needs_reauth                 -> fails fast, no upstream call
+    ///
+    /// So a record can read healthy on every other field while the next call is three
+    /// orders of magnitude slower than the one before it. Measured 2026-08-25 before
+    /// this field existed: twelve status samples over five minutes, every one
+    /// `ready: true, last_error_code: null`, with the mark already written to the store
+    /// and its chain row committed. Nothing on the wire distinguished them.
+    ///
+    /// WHY IT IS PUBLISHED NOW rather than earlier: the field was withheld deliberately
+    /// while no consumer polled this surface, on the grounds that a field added for a
+    /// hypothetical caller is machinery nobody can test against a real requirement. That
+    /// condition ended -- the first vault consumer warms a credential cache at startup
+    /// and needs to SKIP the accounts that would overrun its bound, rather than
+    /// discovering them by timing out. Skipping requires seeing the mark; the only other
+    /// way to observe it was `credential.get`, which is the very call whose cost is in
+    /// question.
+    ///
+    /// FREE TO SERVE, which is the whole reason this is a field and not a new verb:
+    /// `stale_pending` is a PLAINTEXT column, `store::meta()` already selects it, and
+    /// [`RecordMeta`] already carries it. This path was fetching the value and
+    /// discarding it before serialization -- exactly the state `record_version` was in
+    /// before it was published. No decrypt, no master key, no extra query.
+    ///
+    /// NO NEW DISCLOSURE: `ready: false` already tells a handle holder that someone
+    /// observed a failure on this credential. This says only that a repair is pending on
+    /// one that still works.
+    ///
+    /// ABSENT rather than `false` when no handle was presented or the handle did not
+    /// resolve -- a defaulted `false` would read as "no repair pending" for a revoked
+    /// handle, which is an assertion this path has no basis to make.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stale_pending: Option<bool>,
 }
 
 /// The read surface: the engine (for refresh-on-read), the per-connection limiter,
@@ -1188,6 +1217,10 @@ impl ReadSurface {
                     last_error_code: None,
                     lease_held,
                     record_version: None,
+                    // No handle means no record, so there is no mark to report. Absent
+                    // rather than false: this is overall daemon readiness, not a claim
+                    // about any credential.
+                    stale_pending: None,
                 };
             }
             Some(h) => h,
@@ -1202,6 +1235,9 @@ impl ReadSurface {
                     // A fenced-out daemon is not ready even for an Active credential.
                     ready: !fenced_out
                         && matches!(meta.state, credentials_core::store::RecordState::Active),
+                    // Deliberately NOT folded into `ready`: a stale-marked record is
+                    // still usable, it is merely expensive on the next read.
+                    stale_pending: Some(meta.stale_pending),
                     last_error_code: match meta.state {
                         credentials_core::store::RecordState::NeedsReauth
                         | credentials_core::store::RecordState::Retired => {
@@ -1213,18 +1249,24 @@ impl ReadSurface {
                     lease_held,
                     record_version: Some(meta.record_version),
                 },
+                // Meta unreadable: absent, not false. Reporting "no repair pending" for
+                // a record we could not read would be an assertion with no basis.
                 Err(_) => StatusResult {
                     ready: false,
                     last_error_code: Some(ReadError::NotFound),
                     lease_held,
                     record_version: None,
+                    stale_pending: None,
                 },
             },
+            // Unresolvable handle -- uniform not_found, and no claim about a record that
+            // may not exist.
             Err(_) => StatusResult {
                 ready: false,
                 last_error_code: Some(ReadError::NotFound),
                 lease_held,
                 record_version: None,
+                stale_pending: None,
             },
         }
     }

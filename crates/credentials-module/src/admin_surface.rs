@@ -356,11 +356,60 @@ mod tests {
     use super::*;
     use cortexkit_store::{open_sqlite, Isolation, StorageBackend, StorageDescriptor};
     use credentials_core::audit::{AuditCtx, AuditOp};
-    use credentials_core::http::ReqwestTransport;
     use credentials_core::key::{MasterKey, MASTER_KEY_LEN};
     use credentials_core::record::{CredentialKind, VaultRecord};
     use credentials_core::store::{mint_handle, EncryptedStore};
     use credentials_core::vault_id_for;
+
+    /// A transport that cannot reach the network, used everywhere in this module.
+    ///
+    /// These rigs previously built a real `ReqwestTransport`. Nothing here ever sent a
+    /// request through it -- the engine is constructed with an EMPTY adapter list, so no
+    /// refresh can dispatch -- but that is a property of the arguments at each call site,
+    /// not of the type. Adding one adapter to any of these rigs would silently turn an
+    /// admin test into a live token exchange against a provider.
+    ///
+    /// Two sibling repos discovered exactly that on 2026-08-29: one suite was issuing 30
+    /// real token-exchange requests per run with fabricated credentials, and its
+    /// assertions had been reading the provider's live rejection rather than their own
+    /// code. The defect is not the traffic, it is that a remote service was supplying a
+    /// test's precondition.
+    ///
+    /// This makes the guarantee structural: no adapter added later can reach outward,
+    /// because the transport it would be handed has no outward. `RefreshError::Transport`
+    /// on use also names the cause at the failure rather than producing a timeout.
+    struct NoHttp;
+
+    #[async_trait::async_trait]
+    impl credentials_core::refresh_adapters::HttpTransport for NoHttp {
+        async fn post(
+            &self,
+            _url: &str,
+            _headers: &[(&str, &str)],
+            _content_type: &str,
+            _body: Vec<u8>,
+        ) -> Result<
+            credentials_core::refresh_adapters::HttpResponse,
+            credentials_core::refresh_adapters::RefreshError,
+        > {
+            Err(credentials_core::refresh_adapters::RefreshError::Transport(
+                "admin_surface tests do not make network calls".into(),
+            ))
+        }
+
+        async fn get(
+            &self,
+            _url: &str,
+            _headers: &[(&str, &str)],
+        ) -> Result<
+            credentials_core::refresh_adapters::HttpResponse,
+            credentials_core::refresh_adapters::RefreshError,
+        > {
+            Err(credentials_core::refresh_adapters::RefreshError::Transport(
+                "admin_surface tests do not make network calls".into(),
+            ))
+        }
+    }
 
     /// A test rig: the AdminSurface plus everything a caller-side signer needs
     /// (the same MAC key derivation the CLI would perform from the keychain key).
@@ -397,7 +446,7 @@ mod tests {
         let key_id = key.key_id();
         let vault_id = vault_id_for(&root).expect("vault id");
         let store = Arc::new(EncryptedStore::open(store, key).expect("open vault"));
-        let http = Arc::new(ReqwestTransport::new().expect("http"));
+        let http = Arc::new(NoHttp);
         let engine = Arc::new(RefreshEngine::new(Arc::clone(&store), Vec::new(), http));
         Rig {
             admin: AdminSurface::new(engine, mac_key, vault_id, key_id),

@@ -1475,7 +1475,14 @@ mod error_class_tests {
         pinned.sort_unstable();
         assert_eq!(
             emitted, pinned,
-            "ErrorClass wire strings drifted from the pinned contract set"
+            "ErrorClass wire strings drifted from the pinned contract set.\n\
+             THIS CHANGE OBLIGES A CONSUMER-IMPACT ANNOUNCEMENT BEFORE IT SHIPS, for the \
+             same reason the wire-key pins do, and the reason is sharper here: consumers \
+             branch on CLASS and not on code, so the class set IS their control flow. A \
+             conforming client handles an unknown class conservatively -- pausing rather \
+             than rejecting -- which is the right failure but the WRONG BEHAVIOUR for any \
+             new class whose remedy is reject-fast. They stay wrong until told. Announce \
+             the class, its remedy, and whether it is retryable, THEN update this set."
         );
     }
 

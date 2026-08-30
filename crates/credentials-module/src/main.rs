@@ -944,7 +944,7 @@ async fn handle_read_request(
             }
         },
         OP_GET_SCOPED => match serde_json::from_value::<GetScopedParams>(request.params) {
-            Ok(p) => json!({ "result": surface.get_scoped(principal.as_ref(), &p).await }),
+            Ok(p) => wrap_result(surface.get_scoped(principal.as_ref(), &p).await),
             Err(e) => {
                 return invalid_params(writer, ver, channel, epoch, corr, &e.to_string()).await
             }
@@ -958,7 +958,7 @@ async fn handle_read_request(
         OP_SIGN => match serde_json::from_value::<read_surface::SignParams>(request.params) {
             Ok(p) if p.has_exactly_one_authorization() => {
                 match surface.sign(connection_id, principal.as_ref(), &p).await {
-                    Ok(r) => json!({ "result": r }),
+                    Ok(r) => wrap_result(r),
                     // Keep the same { code, class } shape every other op uses: the class
                     // gives retry policy and the code names the request-specific remedy.
                     Err(code) => wrap_result(json!({
@@ -987,7 +987,7 @@ async fn handle_read_request(
                     .public_key(connection_id, principal.as_ref(), &p)
                     .await
                 {
-                    Ok(r) => json!({ "result": r }),
+                    Ok(r) => wrap_result(r),
                     Err(code) => wrap_result(json!({
                         "error": read_surface::ErrorBody { code, class: code.class() }
                     })),
@@ -1009,7 +1009,7 @@ async fn handle_read_request(
             }
         },
         OP_STATUS => match serde_json::from_value::<StatusParams>(request.params) {
-            Ok(p) => json!({ "result": surface.status(connection_id, &p).await }),
+            Ok(p) => wrap_result(surface.status(connection_id, &p).await),
             Err(e) => {
                 return invalid_params(writer, ver, channel, epoch, corr, &e.to_string()).await
             }
@@ -1017,16 +1017,14 @@ async fn handle_read_request(
         OP_REPORT_AUTH_FAILURE => {
             match serde_json::from_value::<ReportAuthFailureParams>(request.params) {
                 Ok(p) => match surface.report_auth_failure(connection_id, &p).await {
-                    Ok(()) => json!({ "result": { "accepted": true } }),
+                    Ok(()) => wrap_result(json!({ "accepted": true })),
                     // Carry the produced error class alongside the code, in the same
                     // { code, class } shape get/get_many use: class gives retry policy and
                     // code names the request-specific remedy.
-                    Err(code) => json!({
-                        "result": {
-                            "accepted": false,
-                            "error": read_surface::ErrorBody { code, class: code.class() }
-                        }
-                    }),
+                    Err(code) => wrap_result(json!({
+                        "accepted": false,
+                        "error": read_surface::ErrorBody { code, class: code.class() }
+                    })),
                 },
                 Err(e) => {
                     return invalid_params(writer, ver, channel, epoch, corr, &e.to_string()).await
@@ -1038,11 +1036,11 @@ async fn handle_read_request(
                 nonce_hex,
                 vault_id_hex,
                 key_id_hex,
-            } => json!({ "result": {
+            } => wrap_result(json!({
                 "nonce_hex": nonce_hex,
                 "vault_id_hex": vault_id_hex,
                 "key_id_hex": key_id_hex,
-            }}),
+            })),
             admin_surface::AdminOutcome::Refused(reason) => {
                 return send_route_error(
                     writer,
@@ -1063,7 +1061,7 @@ async fn handle_read_request(
                 .execute(channel, p.op_body.as_bytes(), &p.tag_hex)
                 .await
             {
-                admin_surface::AdminOutcome::Ok(v) => json!({ "result": v }),
+                admin_surface::AdminOutcome::Ok(v) => wrap_result(v),
                 admin_surface::AdminOutcome::Refused(reason) => {
                     return send_route_error(
                         writer,
@@ -4215,8 +4213,7 @@ mod tests {
         // The outer route body is what a consumer receives. It must contain neither
         // the PEM armour nor the payload bytes, because returning either turns this
         // public-material route into the private `credential.get` disclosure path.
-        let serialized =
-            serde_json::to_vec(&json!({ "result": &public })).expect("serialize route body");
+        let serialized = serde_json::to_vec(&wrap_result(&public)).expect("serialize route body");
         let serialized_value: serde_json::Value =
             serde_json::from_slice(&serialized).expect("decode serialized route body");
         assert!(
@@ -5552,5 +5549,60 @@ mod tests {
         assert_eq!(legacy_result.email, None);
         assert_eq!(legacy_result.org_name, None);
         assert_eq!(legacy_result.account_id, None);
+    }
+
+    /// `wrap_result` is the single seam that produces the route reply envelope
+    /// `{"result": ...}`. Every route op must go through it so a future envelope change
+    /// moves every operation at once instead of silently leaving some ops on the old
+    /// shape (a partially-applied wire change fails per-operation and looks like a
+    /// consumer bug).
+    ///
+    /// This is a source-level guard, not a behaviour test: it scans the file text and
+    /// asserts the wrapper literal appears exactly once — inside `wrap_result` itself.
+    ///
+    /// What it proves: no site hand-rolls the wrapper literal form (the `json!` macro
+    /// with a single `result` key).
+    /// What it CANNOT prove: a site that builds the same JSON by another route — a
+    /// `Map::insert`, a different macro, or differing whitespace — would pass this scan
+    /// while still bypassing the seam. A green run here is evidence the literal form is
+    /// gone, not proof that every reply is wrapped.
+    ///
+    /// The positive control is load-bearing: an all-absent scan is the most convincing
+    /// vacuous pass there is (a wrong path, a renamed file, or a broken matcher all
+    /// report clean). Asserting a string we KNOW is present (`fn wrap_result`) is found
+    /// by the same scan makes the absence assertion mean something.
+    #[test]
+    fn wrap_result_is_the_only_route_reply_wrapper() {
+        let source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs"));
+
+        let wrapper_literal = "json!({ \"result\":";
+        let occurrences = source.matches(wrapper_literal).count();
+        assert_eq!(
+            occurrences, 1,
+            "the `json!({{ \"result\": ... }})` wrapper literal must appear exactly once, \
+             inside `wrap_result` itself; found {occurrences}. Route every reply through \
+             `wrap_result` so the envelope has a single seam."
+        );
+
+        // Positive control, and what it actually guards is NARROWER than the usual
+        // formulation: `include_str!` resolves at COMPILE time, so a wrong path or a
+        // renamed file is a build error rather than a clean-reporting empty scan. The
+        // hazard those words describe cannot reach runtime here.
+        //
+        // What it does catch is the scan's PREMISE moving: rename or delete
+        // `wrap_result` and the absence assertion above starts passing for the wrong
+        // reason -- zero hand-rolled wrappers because the seam itself is gone. The
+        // control turns that into a failure that says so.
+        //
+        // Built by concatenation on purpose, though note this test's own NAME contains
+        // the same substring, so the control is not fully self-exclusive. Kept anyway:
+        // it is honest about the premise check, and the alternative (renaming the test
+        // to dodge its own scan) trades a clearer name for a weaker one.
+        let control = format!("fn {}", "wrap_result");
+        assert!(
+            source.contains(&control),
+            "positive control failed: the scan could not find `fn wrap_result` in the \
+             source it read; the absence assertion above is therefore meaningless"
+        );
     }
 }

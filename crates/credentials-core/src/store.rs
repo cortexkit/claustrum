@@ -43,7 +43,7 @@ use rusqlite::OptionalExtension;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
-use crate::audit::{self, AlarmReason, AuditCtx, AuditEntry, AuditOp, AuditRecord};
+use crate::audit::{self, AlarmReason, AuditCtx, AuditEntry, AuditOp, AuditRecord, AuthEventKind};
 use crate::envelope::{self, EnvelopeError, RecordBinding};
 use crate::key::{KeyId, MasterKey};
 pub use crate::record::RecordState;
@@ -1432,11 +1432,12 @@ impl EncryptedStore {
                 tx.execute(
                     "INSERT INTO auth_events \
                      (ts_ms, credential_id, kind, provider_status, detail, record_version, applied, principal_kind, principal_id) \
-                     VALUES (?1, ?2, 'scoped_read_refusal', NULL, ?3, NULL, 0, ?4, ?5)",
-                    rusqlite::params![
-                        now_ms(),
-                        credential_id,
-                        refusal.as_str(),
+                     VALUES (?1, ?2, ?3, NULL, ?4, NULL, 0, ?5, ?6)",
+                     rusqlite::params![
+                         now_ms(),
+                         credential_id,
+                         AuthEventKind::ScopedReadRefusal.as_str(),
+                         refusal.as_str(),
                         principal_kind,
                         principal_id,
                     ],
@@ -2033,7 +2034,7 @@ impl EncryptedStore {
                         &tx,
                         credential_id,
                         &AuthObservation {
-                            kind: "github_app_permissions_changed",
+                            kind: AuthEventKind::GithubAppPermissionsChanged.as_str(),
                             provider_status: None,
                             detail: Some(&detail),
                         },
@@ -3063,7 +3064,8 @@ fn github_app_permissions_change_detail(
 /// material in a plaintext column.
 #[derive(Debug, Clone, Copy)]
 pub struct AuthObservation<'a> {
-    /// What kind of event this was, e.g. `consumer_report` or `refresh_failed`.
+    /// What kind of event this was, normally from [`AuthEventKind::as_str`]. Test
+    /// fixtures may use a raw value to model legacy or unknown rows.
     pub kind: &'a str,
     /// The provider's HTTP status, when there was one.
     pub provider_status: Option<u16>,

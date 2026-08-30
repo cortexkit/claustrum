@@ -226,13 +226,14 @@ stream and pass the arm without ever seeing it skip."
 # at a time (a misplaced #[test] attribute silently unregisters the function that
 # follows it), and any gap between the floor and the real count is how many can go
 # before anyone is told. Measured 402 across the workspace's suites at the time of
-# writing; an earlier floor of 200 left a third of them free to disappear. The
-# current measured total is 443 after adding a source-level test that enforces every
-# route reply is produced through the single `wrap_result` wrapper function.
+# writing; an earlier floor of 200 left a third of them free to disappear.
+# The current measured total is 449 after adding source-level tests that ensure each
+# variant of the three diagnostic enums (AuthEventKind, AuditOp, AlarmReason) is listed
+# in its documentation section.
 #
 # Raise this when tests are added. A failure here is normally that, not a defect --
 # but it should be a deliberate edit rather than a number nobody revisits.
-run_expect 443 "workspace unit + integration" \
+run_expect 449 "workspace unit + integration" \
   cargo test --locked --workspace
 
 # Two independent defences, because each catches what the other misses:

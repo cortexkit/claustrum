@@ -588,6 +588,93 @@ it did not exist for the first incident.
 If `reactivate` is followed within minutes by another report at the new version, the
 credential is genuinely dead and `login --replace` is the repair.
 
+### The three diagnostic string vocabularies
+
+The vault has three separate string vocabularies that are easy to confuse. They live in
+**different tables and columns**:
+
+#### `audit_log.op`
+
+**Table:** `audit_log`
+
+**Column:** `op` (TEXT)
+
+These values come from the closed `AuditOp` enum and name the mutation or chain event:
+
+| Value | Meaning |
+| --- | --- |
+| `put` | Create a new credential without replacing an existing row. |
+| `import` | Import a credential from an external source format. |
+| `login` | Mint a vault-native first-party OAuth credential. |
+| `overwrite` | Replace a credential under an unconditional or compare-and-set write path. |
+| `invalidate` | Mark a credential as needing re-authentication. |
+| `rotate_master_key` | Re-wrap the vault under a new master key. |
+| `refresh_commit` | Commit new tokens from a vault-owned refresh. |
+| `report_auth_failure` | Record a consumer report that changes credential state. |
+| `remove` | Permanently remove a credential row while retaining its audit history. |
+| `reactivate` | Clear `needs_reauth` without changing the stored secret. |
+| `mint_handle` | Mint a capability handle for a credential. |
+| `revoke_handle` | Revoke one or all capability handles for a credential. |
+| `fetch_anomaly` | Record a read-surface fetch-rate or enumeration anomaly. |
+| `grant_create` | Create a principal-scoped credential-prefix read grant. |
+| `grant_revoke` | Revoke a principal-scoped credential-prefix read grant. |
+| `approval` | Record an approver's approval of the exact artifact bytes identified by a hash. |
+
+#### `audit_log.alarm`
+
+**Table:** `audit_log`
+
+**Column:** `alarm_reason` (TEXT), paired with the `alarm` (INTEGER 0/1) flag
+
+The `op` and `alarm` vocabularies are **different columns**. `op` says what the audit
+entry records; an alarm reason says why that entry was flagged. In the schema, the
+`alarm` column is only the presence flag, so the strings below are stored in
+`alarm_reason` and come from the closed `AlarmReason` enum. Do not combine this list
+with the `op` list when querying the audit log:
+
+| Value | Meaning |
+| --- | --- |
+| `overwrite_without_cas` | An existing credential was overwritten without a compare-and-set guard. |
+| `fetch_rate_anomaly` | A connection's credential-fetch rate or spread crossed the anomaly threshold. |
+| `admin_write` | An administrative write occurred; admin activity is always flagged. |
+| `reconcile_hash_mismatch` | Startup reconciliation found a stored refresh token hash that disagreed with its dangling intent. |
+
+#### `auth_events.kind`
+
+**Table:** `auth_events`
+
+**Column:** `kind` (TEXT)
+
+These values come from the `AuthEventKind` enum. This table is a separate, prunable
+diagnostics table, not the tamper-evident audit chain:
+
+| Value | Meaning |
+| --- | --- |
+| `refresh_failed` | A provider refresh attempt failed without producing a committed replacement. |
+| `stale_nonrefreshable_latch` | A stale report on a non-refreshable credential was latched as `needs_reauth`. |
+| `consumer_report_stale` | A consumer report marked a refreshable credential stale for its next read. |
+| `consumer_report_latch` | A consumer report immediately latched a non-refreshable credential. |
+| `scoped_read_refusal` | A principal-scoped read was refused; `detail` names the internal refusal reason. |
+| `reconcile_needs_reauth` | Startup reconciliation forced a credential to `needs_reauth`. |
+| `github_app_permissions_changed` | A successful GitHub App mint observed changed installation permissions. |
+
+**Retired values you will still meet in the data.** The table above documents what the
+CODE WRITES; the table on disk also holds what OLDER binaries wrote, and this table is
+not rewritten:
+
+| Retired value | What it was |
+| --- | --- |
+| `consumer_report` | The single kind that preceded the stale/latch split. A consumer report of an auth failure, before the vault distinguished "mark stale so the next read refreshes" from "latch immediately". Superseded by `consumer_report_stale` and `consumer_report_latch`. |
+
+That one is named rather than left to the general disclaimer because it is not
+hypothetical: this vault holds 24 such rows, last written 2026-08-21. An operator who
+meets a kind in `ck auth events` and cannot find it here has no way to tell a retired
+value from a corrupt one.
+
+Other unknown kinds may still appear (a future retirement, a fixture from a test
+harness). Treat them as diagnostics, never as audit-log operations or alarm reasons --
+the three vocabularies are separate and a value from one is not a value from another.
+
 ### Reading the chain directly
 
 The verbs above need the daemon stopped. To inspect a **running** vault — or to answer

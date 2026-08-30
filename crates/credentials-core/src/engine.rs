@@ -37,7 +37,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use crate::audit::{AlarmReason, AuditCtx, AuditOp};
+use crate::audit::{AlarmReason, AuditCtx, AuditOp, AuthEventKind};
 use crate::oauth::OAuthCredential;
 use crate::record::VaultRecord;
 use crate::refresh_adapters::{HttpTransport, RefreshAdapter, RefreshError, ValidityOutcome};
@@ -246,7 +246,7 @@ impl RefreshEngine {
                 initial.record_version,
                 AuditCtx::vault(AuditOp::Invalidate),
                 Some(AuthObservation {
-                    kind: "stale_nonrefreshable_latch",
+                    kind: AuthEventKind::StaleNonrefreshableLatch.as_str(),
                     provider_status: None,
                     detail: None,
                 }),
@@ -432,7 +432,7 @@ impl RefreshEngine {
                     record.record_version,
                     AuditCtx::vault(AuditOp::Invalidate),
                     Some(AuthObservation {
-                        kind: "refresh_failed",
+                        kind: AuthEventKind::RefreshFailed.as_str(),
                         provider_status: None,
                         detail: Some(e.variant_name()),
                     }),
@@ -456,7 +456,7 @@ impl RefreshEngine {
                 let _ = self.store.record_auth_event(
                     credential_id,
                     AuthObservation {
-                        kind: "refresh_failed",
+                        kind: AuthEventKind::RefreshFailed.as_str(),
                         provider_status: other.provider_status(),
                         detail: Some(other.variant_name()),
                     },

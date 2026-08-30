@@ -41,7 +41,7 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-use credentials_core::audit::{AlarmReason, AuditCtx, AuditOp, AuditRecord};
+use credentials_core::audit::{AlarmReason, AuditCtx, AuditOp, AuditRecord, AuthEventKind};
 use credentials_core::credential_id::{default_refresh_adapter, parse_credential_id};
 use credentials_core::engine::{EngineError, RefreshEngine};
 use credentials_core::health::VaultHealth;
@@ -1112,9 +1112,9 @@ impl ReadSurface {
             // remains diagnostic detail: 401 and 403 carry different provider facts.
             let observation = credentials_core::store::AuthObservation {
                 kind: if refreshable {
-                    "consumer_report_stale"
+                    AuthEventKind::ConsumerReportStale.as_str()
                 } else {
-                    "consumer_report_latch"
+                    AuthEventKind::ConsumerReportLatch.as_str()
                 },
                 provider_status: Some(params.provider_status),
                 detail: None,

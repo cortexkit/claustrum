@@ -116,6 +116,44 @@ impl AuditOp {
     }
 }
 
+/// The stable diagnostic kind stored in `auth_events.kind`.
+///
+/// Unlike [`AuditOp`] and [`AlarmReason`], these observations are not part of the
+/// tamper-evident audit chain. They explain authentication failures and refusals in a
+/// separate, prunable diagnostics table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthEventKind {
+    /// A provider refresh attempt failed without producing a committed replacement.
+    RefreshFailed,
+    /// A stale report on a non-refreshable credential was latched as `needs_reauth`.
+    StaleNonrefreshableLatch,
+    /// A consumer report marked a refreshable credential stale for its next read.
+    ConsumerReportStale,
+    /// A consumer report immediately latched a non-refreshable credential.
+    ConsumerReportLatch,
+    /// A principal-scoped read was refused; the detail names the internal reason.
+    ScopedReadRefusal,
+    /// Startup reconciliation forced a credential to `needs_reauth`.
+    ReconcileNeedsReauth,
+    /// A successful GitHub App mint observed changed installation permissions.
+    GithubAppPermissionsChanged,
+}
+
+impl AuthEventKind {
+    /// The stable storage string for this authentication diagnostic kind.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AuthEventKind::RefreshFailed => "refresh_failed",
+            AuthEventKind::StaleNonrefreshableLatch => "stale_nonrefreshable_latch",
+            AuthEventKind::ConsumerReportStale => "consumer_report_stale",
+            AuthEventKind::ConsumerReportLatch => "consumer_report_latch",
+            AuthEventKind::ScopedReadRefusal => "scoped_read_refusal",
+            AuthEventKind::ReconcileNeedsReauth => "reconcile_needs_reauth",
+            AuthEventKind::GithubAppPermissionsChanged => "github_app_permissions_changed",
+        }
+    }
+}
+
 /// Why an audit entry is flagged as an alarm (a detected anomaly). `None` for a
 /// normal entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -460,5 +498,173 @@ mod tests {
         );
         let without = compute_entry_mac(&ak, "p", &base);
         assert_ne!(with, without, "absent != empty-present");
+    }
+}
+
+#[cfg(test)]
+mod vocabulary_documentation_tests {
+    use super::{AlarmReason, AuditOp, AuthEventKind};
+
+    const RUNBOOK: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/operator-runbook.md"
+    ));
+
+    // These tests pin membership and spelling only. Finding a value somewhere in its
+    // subsection cannot verify that the accompanying one-line meaning is correct.
+    fn documented_subsection(heading: &str, positive_control: &str) -> &'static str {
+        let start = RUNBOOK
+            .find(heading)
+            .unwrap_or_else(|| panic!("operator runbook is missing {heading}"));
+        let after_heading = &RUNBOOK[start + heading.len()..];
+        let end = after_heading
+            .find("\n#### ")
+            .or_else(|| after_heading.find("\n### "))
+            .or_else(|| after_heading.find("\n## "))
+            .unwrap_or(after_heading.len());
+        let section = &after_heading[..end];
+        assert!(
+            section.contains(positive_control),
+            "positive control {positive_control:?} is absent from {heading}; the doc scan would be vacuous"
+        );
+        section
+    }
+
+    fn assert_documented(section: &str, vocabulary: &str, value: &'static str) {
+        assert!(
+            section.contains(value),
+            "{vocabulary} value {value:?} is missing from its documented runbook section"
+        );
+    }
+
+    #[test]
+    fn audit_op_values_are_documented() {
+        let section = documented_subsection("#### `audit_log.op`", "**Table:** `audit_log`");
+
+        fn value(op: AuditOp) -> &'static str {
+            match op {
+                AuditOp::Put => AuditOp::Put.as_str(),
+                AuditOp::Import => AuditOp::Import.as_str(),
+                AuditOp::Login => AuditOp::Login.as_str(),
+                AuditOp::Overwrite => AuditOp::Overwrite.as_str(),
+                AuditOp::Invalidate => AuditOp::Invalidate.as_str(),
+                AuditOp::RotateMasterKey => AuditOp::RotateMasterKey.as_str(),
+                AuditOp::RefreshCommit => AuditOp::RefreshCommit.as_str(),
+                AuditOp::ReportAuthFailure => AuditOp::ReportAuthFailure.as_str(),
+                AuditOp::Remove => AuditOp::Remove.as_str(),
+                AuditOp::Reactivate => AuditOp::Reactivate.as_str(),
+                AuditOp::MintHandle => AuditOp::MintHandle.as_str(),
+                AuditOp::RevokeHandle => AuditOp::RevokeHandle.as_str(),
+                AuditOp::FetchAnomaly => AuditOp::FetchAnomaly.as_str(),
+                AuditOp::GrantCreate => AuditOp::GrantCreate.as_str(),
+                AuditOp::GrantRevoke => AuditOp::GrantRevoke.as_str(),
+                AuditOp::Approval => AuditOp::Approval.as_str(),
+            }
+        }
+
+        assert_documented(section, "audit_log.op", value(AuditOp::Put));
+        assert_documented(section, "audit_log.op", value(AuditOp::Import));
+        assert_documented(section, "audit_log.op", value(AuditOp::Login));
+        assert_documented(section, "audit_log.op", value(AuditOp::Overwrite));
+        assert_documented(section, "audit_log.op", value(AuditOp::Invalidate));
+        assert_documented(section, "audit_log.op", value(AuditOp::RotateMasterKey));
+        assert_documented(section, "audit_log.op", value(AuditOp::RefreshCommit));
+        assert_documented(section, "audit_log.op", value(AuditOp::ReportAuthFailure));
+        assert_documented(section, "audit_log.op", value(AuditOp::Remove));
+        assert_documented(section, "audit_log.op", value(AuditOp::Reactivate));
+        assert_documented(section, "audit_log.op", value(AuditOp::MintHandle));
+        assert_documented(section, "audit_log.op", value(AuditOp::RevokeHandle));
+        assert_documented(section, "audit_log.op", value(AuditOp::FetchAnomaly));
+        assert_documented(section, "audit_log.op", value(AuditOp::GrantCreate));
+        assert_documented(section, "audit_log.op", value(AuditOp::GrantRevoke));
+        assert_documented(section, "audit_log.op", value(AuditOp::Approval));
+    }
+
+    #[test]
+    fn alarm_reason_values_are_documented() {
+        let section = documented_subsection("#### `audit_log.alarm`", "**Table:** `audit_log`");
+
+        fn value(reason: AlarmReason) -> &'static str {
+            match reason {
+                AlarmReason::OverwriteWithoutCas => AlarmReason::OverwriteWithoutCas.as_str(),
+                AlarmReason::FetchRateAnomaly => AlarmReason::FetchRateAnomaly.as_str(),
+                AlarmReason::AdminWrite => AlarmReason::AdminWrite.as_str(),
+                AlarmReason::ReconcileHashMismatch => AlarmReason::ReconcileHashMismatch.as_str(),
+            }
+        }
+
+        assert_documented(
+            section,
+            "audit_log.alarm",
+            value(AlarmReason::OverwriteWithoutCas),
+        );
+        assert_documented(
+            section,
+            "audit_log.alarm",
+            value(AlarmReason::FetchRateAnomaly),
+        );
+        assert_documented(section, "audit_log.alarm", value(AlarmReason::AdminWrite));
+        assert_documented(
+            section,
+            "audit_log.alarm",
+            value(AlarmReason::ReconcileHashMismatch),
+        );
+    }
+
+    #[test]
+    fn auth_event_kind_values_are_documented() {
+        let section = documented_subsection("#### `auth_events.kind`", "**Table:** `auth_events`");
+
+        fn value(kind: AuthEventKind) -> &'static str {
+            match kind {
+                AuthEventKind::RefreshFailed => AuthEventKind::RefreshFailed.as_str(),
+                AuthEventKind::StaleNonrefreshableLatch => {
+                    AuthEventKind::StaleNonrefreshableLatch.as_str()
+                }
+                AuthEventKind::ConsumerReportStale => AuthEventKind::ConsumerReportStale.as_str(),
+                AuthEventKind::ConsumerReportLatch => AuthEventKind::ConsumerReportLatch.as_str(),
+                AuthEventKind::ScopedReadRefusal => AuthEventKind::ScopedReadRefusal.as_str(),
+                AuthEventKind::ReconcileNeedsReauth => AuthEventKind::ReconcileNeedsReauth.as_str(),
+                AuthEventKind::GithubAppPermissionsChanged => {
+                    AuthEventKind::GithubAppPermissionsChanged.as_str()
+                }
+            }
+        }
+
+        assert_documented(
+            section,
+            "auth_events.kind",
+            value(AuthEventKind::RefreshFailed),
+        );
+        assert_documented(
+            section,
+            "auth_events.kind",
+            value(AuthEventKind::StaleNonrefreshableLatch),
+        );
+        assert_documented(
+            section,
+            "auth_events.kind",
+            value(AuthEventKind::ConsumerReportStale),
+        );
+        assert_documented(
+            section,
+            "auth_events.kind",
+            value(AuthEventKind::ConsumerReportLatch),
+        );
+        assert_documented(
+            section,
+            "auth_events.kind",
+            value(AuthEventKind::ScopedReadRefusal),
+        );
+        assert_documented(
+            section,
+            "auth_events.kind",
+            value(AuthEventKind::ReconcileNeedsReauth),
+        );
+        assert_documented(
+            section,
+            "auth_events.kind",
+            value(AuthEventKind::GithubAppPermissionsChanged),
+        );
     }
 }

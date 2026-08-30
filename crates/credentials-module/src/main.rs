@@ -30,6 +30,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use cortexkit_store::{open_sqlite, StorageDescriptor};
+use credentials_core::audit::AuthEventKind;
 use credentials_core::engine::RefreshEngine;
 use credentials_core::http::ReqwestTransport;
 use credentials_core::refresh_adapters::{
@@ -521,7 +522,7 @@ fn record_reconciliation_reasons(
             let _ = engine.store().record_auth_event(
                 credential_id,
                 credentials_core::store::AuthObservation {
-                    kind: "reconcile_needs_reauth",
+                    kind: AuthEventKind::ReconcileNeedsReauth.as_str(),
                     provider_status: None,
                     detail: Some(reason.as_str()),
                 },

@@ -4744,6 +4744,35 @@ mod tests {
             "the forced refresh must fail through the engine: {err:?}"
         );
 
+        // The observation, asserted rather than advertised. The comment above claims the
+        // engine writes a diagnostic no direct store call produces -- and until this
+        // assertion existed that was a claim in prose with nothing behind it, which is the
+        // same defect as a guard whose coverage is invisible from its green result. The
+        // audit chain records a generic `invalidate` here; only this row says the provider
+        // was reached and what it answered.
+        let events = store.recent_auth_events(10).expect("read events");
+        let refresh_failed: Vec<_> = events
+            .iter()
+            .filter(|e| e.kind == "refresh_failed")
+            .collect();
+        assert_eq!(
+            refresh_failed.len(),
+            1,
+            "the engine's invalid_grant arm must leave exactly one refresh_failed row; \
+             got {events:?}"
+        );
+        assert_eq!(
+            refresh_failed[0].credential_id, "oauth:needs_reauth_after_stale",
+            "the row must name the credential the refresh was attempted for"
+        );
+        assert_eq!(
+            refresh_failed[0].detail.as_deref(),
+            Some("invalid_grant"),
+            "the row must carry WHICH provider verdict was seen -- a `refresh_failed` with \
+             no detail cannot distinguish a terminal invalid_grant from a transient \
+             transport failure, and only the terminal one latches"
+        );
+
         // Precondition checks: the construction actually reproduced the live shape, so a
         // green fix can be trusted to mean the fix is real and not a different test
         // passing for a different reason.

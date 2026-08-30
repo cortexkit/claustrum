@@ -1680,6 +1680,35 @@ mod tests {
 
     /// A deterministic refresh adapter for minimum-TTL read tests. Its counter proves
     /// the read path performed one exchange, not merely that a stored version changed.
+    /// Fails every refresh with `invalid_grant`, which is the ONE provider verdict the
+    /// engine treats as terminal: it latches the record to `needs_reauth` and writes a
+    /// `refresh_failed` observation. Any other error (transport, decode, unexpected
+    /// status) takes the engine's transient arm, which clears the intent and leaves the
+    /// record ACTIVE -- so a stub that merely fails cannot reproduce a latch.
+    struct InvalidGrantAdapter;
+
+    #[async_trait::async_trait]
+    impl credentials_core::refresh_adapters::RefreshAdapter for InvalidGrantAdapter {
+        fn name(&self) -> &str {
+            "invalid-grant-fixture"
+        }
+
+        async fn refresh(
+            &self,
+            _credential: &credentials_core::oauth::OAuthCredential,
+            _http: &dyn credentials_core::refresh_adapters::HttpTransport,
+        ) -> Result<
+            credentials_core::refresh_adapters::RefreshedTokens,
+            credentials_core::refresh_adapters::RefreshError,
+        > {
+            Err(
+                credentials_core::refresh_adapters::RefreshError::InvalidGrant(
+                    "fixture: the provider refused the refresh token".into(),
+                ),
+            )
+        }
+    }
+
     struct TtlFixtureAdapter {
         calls: Arc<std::sync::atomic::AtomicUsize>,
         fresh_ttl_ms: i64,
@@ -4628,13 +4657,24 @@ mod tests {
     /// proving the public route is part of the path that creates it.
     #[tokio::test]
     async fn status_does_not_publish_a_stale_pending_mark_on_a_non_active_record() {
-        let (surface, store, _db) = tmp_surface_with_store(17);
+        // The surface's engine must HOLD the failing adapter -- `tmp_surface_with_store`
+        // builds one with an empty adapter list, and a forced refresh against it answers
+        // `refresh_unsupported` without ever reaching a provider.
+        let (_unused, store, _db) = tmp_surface_with_store(17);
+        let surface = Arc::new(ReadSurface::new(
+            Arc::new(RefreshEngine::new(
+                Arc::clone(&store),
+                vec![Arc::new(InvalidGrantAdapter)],
+                Arc::new(crate::test_support::NoHttp),
+            )),
+            FetchLimiter::new(Caps::default()),
+        ));
         store
             .create(
                 "oauth:needs_reauth_after_stale",
                 &VaultRecord::new_oauth(
                     "test",
-                    "stub",
+                    "invalid-grant-fixture",
                     OAuthCredential {
                         access_token: "locally-valid".into(),
                         refresh_token: "rt".into(),
@@ -4671,18 +4711,38 @@ mod tests {
             .await
             .expect("report accepted");
 
-        // Production step 2: a forced refresh then fails and the engine latches the record
-        // to `needs_reauth`. The version-fenced store call below is exactly what the engine
-        // reaches for at the failure site; the column `stale_pending` is deliberately not
-        // touched by any of the seven state-update paths, which is the bug pinned here.
-        store
-            .invalidate_if_version_reported(
-                "oauth:needs_reauth_after_stale",
-                1,
-                AuditCtx::vault(AuditOp::Invalidate),
-                None,
+        // Production step 2: the next get sees `stale_pending` and forces a refresh, the
+        // provider refuses with invalid_grant, and the ENGINE latches the record. This runs
+        // the real failure path rather than reproducing its outcome: two earlier versions of
+        // this test called the store directly -- first unversioned, then version-fenced --
+        // and both would have stayed green if the engine's failure arm changed, which is the
+        // whole defect they were written to pin. The engine also writes a `refresh_failed`
+        // observation here that no direct store call produces.
+        let err = surface
+            .get(
+                11,
+                &read_surface::GetParams {
+                    handle: raw.raw.clone(),
+                    min_ttl_ms: None,
+                    // FALSE deliberately. The refresh under test must be driven by the
+                    // `stale_pending` mark the report left behind; forcing it here would
+                    // make the test pass on a path the consumer never takes.
+                    force_refresh: false,
+                },
             )
-            .expect("engine-style invalidate after failed refresh");
+            .await;
+        assert!(
+            matches!(
+                err,
+                read_surface::GetOutcome::Err {
+                    error: read_surface::ErrorBody {
+                        code: read_surface::ReadError::NeedsReauth,
+                        ..
+                    }
+                }
+            ),
+            "the forced refresh must fail through the engine: {err:?}"
+        );
 
         // Precondition checks: the construction actually reproduced the live shape, so a
         // green fix can be trusted to mean the fix is real and not a different test

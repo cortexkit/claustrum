@@ -1582,7 +1582,7 @@ fn validation_bypass_is_absent_from_a_release_build() {
 fn api_key_login_flow_integration() {
     if std::env::var_os(CLI_BIN_ENV).is_some() {
         eprintln!(
-            "skipping api_key_login_flow_integration: {CLI_BIN_ENV} is set, and this arm \
+            "SKIPPING api_key_login_flow_integration: {CLI_BIN_ENV} is set, and this arm \
              needs the debug-only validation bypass that release builds omit"
         );
         return;

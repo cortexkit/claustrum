@@ -148,14 +148,24 @@ run_expect() {
   # for arms that were never at risk, which is how a correct-sounding guard gets
   # deleted wholesale instead of fixed.
   #
-  # The real discriminator is whether the target's source can EMIT a skip notice, so
-  # ask the source. A new skip path in any test file arms this automatically; a
-  # removed one disarms it. Neither requires anyone to remember this function exists.
-  local a want_target=0 target="" has_nocapture=0
+  # The source probe enforces one repository convention: a test-file skip notice uses
+  # the literal `SKIPPING` token. It does not discover arbitrary skip paths, and it does
+  # not inspect test-name filters; an arm is required to pass --nocapture when its target
+  # file follows that convention. The output check below enforces the same token.
+  local a want_target=0 target="" has_nocapture=0 before_separator=1
   for a in "$@"; do
     [ "$a" = "--nocapture" ] && has_nocapture=1
-    [ "$want_target" = "1" ] && { target="$a"; want_target=0; }
-    [ "$a" = "--test" ] && want_target=1
+    if [ "$before_separator" = "1" ]; then
+      if [ "$a" = "--" ]; then
+        before_separator=0
+        want_target=0
+      elif [ "$want_target" = "1" ]; then
+        target="$a"
+        want_target=0
+      elif [ "$a" = "--test" ]; then
+        want_target=1
+      fi
+    fi
   done
   if [ -n "$target" ] && [ "$has_nocapture" = "0" ]; then
     local src
@@ -280,7 +290,7 @@ run_expect 1 "migration tools" \
 # because it builds one.
 run_expect 1 "release artifact (bypass absent)" \
   cargo test --locked -p credentials-module --test cli_admin \
-  validation_bypass_is_absent -- --ignored
+  validation_bypass_is_absent -- --ignored --nocapture
 
 # PROVE the scope claim rather than asserting it. "Every check CI runs" rots the
 # moment CI grows an arm, and that is exactly how it broke: CI gained an inbound

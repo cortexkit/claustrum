@@ -2491,6 +2491,31 @@ impl EncryptedStore {
         // `Cookie` is a request header captured after the browser consumed Set-Cookie
         // attributes. It cannot disclose an expiry, so accepting a supplied timestamp
         // would persist an invented lifetime rather than an observed fact.
+        //
+        // IF YOU ARE HERE TO RELAX THIS REFUSAL, READ THE NEXT PARAGRAPH FIRST. There is
+        // one capture path that makes a cookie expiry real -- a browser extension, where
+        // `chrome.cookies.getAll` returns `expirationDate` uniformly on every platform
+        // instead of being refused by App-Bound Encryption on Windows. If the desktop
+        // surface adopts it, deleting this check is correct.
+        //
+        // WHAT MUST NOT FOLLOW: the field reaching a fetch or serve decision. A browser
+        // `expirationDate` is an UPPER BOUND -- a session can be revoked server-side long
+        // before it, and can outlive a conservative value -- so refusing on a passed
+        // declaration takes a possibly-working session dark on the strength of metadata,
+        // manufacturing an outage from a hint. The authoritative test is the request and
+        // the authoritative answer is the provider's 401.
+        //
+        // A passed bound is strong evidence of death; a future bound rules re-capture out
+        // as the likely fix; NEITHER proves the session is alive. That asymmetry is the
+        // whole value, and it is diagnostic value: it sharpens what an operator is told
+        // after a 401, and gates nothing. insula holds the mirror of this rule at its
+        // consumption site (agreed with QTA 2026-08-28).
+        //
+        // The drift is a WELL-MEANING one, which is why it is written here rather than
+        // left as an understanding between two seats: an implementer sees a stored expiry
+        // and a request about to go out with an apparently-dead cookie, and adds the check
+        // as an obvious improvement. Nothing fails. The operator quietly loses sessions
+        // that were still working.
         if record.kind == CredentialKind::Cookie && record.expires_at_ms.is_some() {
             return Err(StoreOpError::Encode(
                 "cookie credentials must not declare an expiry".into(),

@@ -90,7 +90,7 @@ around it.
 ### Step 3 — `credentials-module` (the binary): the two surfaces + resilience
 - **Read surface** (anonymous, over the route channel — §4): `credential.get
   {handle, min_ttl_ms?, force_refresh?}`, `get_many` (CAPPED ≤ 8 handles/call),
-  `credential.status {handle?}` (non-secret health, never bytes),
+  `credential.status {handle? | credential_id?}` (non-secret health, never bytes),
   `credential.report_auth_failure {handle, provider_status}` (rate-limited
   revocation feedback). READ-ONLY — no write op on this channel.
 - **Admin surface** (master-key-gated, OFF the runtime channel — §4 + T2):

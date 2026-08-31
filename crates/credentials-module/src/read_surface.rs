@@ -14,7 +14,7 @@
 //! - `credential.get_scoped { credential_id }` → the same ordinary payload body, only
 //!   for a route-bound reserved principal with a literal-prefix read grant.
 //! - `credential.get_many { items: [...] }` → capped at [`limiter::GET_MANY_MAX`].
-//! - `credential.status { handle? }` → non-secret health, never bytes.
+//! - `credential.status { handle? | credential_id? }` → non-secret health, never bytes.
 //! - `credential.report_auth_failure { handle, provider_status, record_version, reporter_source? }` →
 //!   marks the token STALE on a refreshable credential so the next get REFRESHES it,
 //!   and latches `needs_reauth` only for a non-refreshable one. A refresh that then
@@ -226,11 +226,22 @@ pub struct GetManyParams {
     pub items: Vec<GetParams>,
 }
 
-/// A `credential.status` request (an absent handle = overall vault health).
+/// A `credential.status` request. An absent address means overall vault health.
+///
+/// A capability handle and a principal-scoped credential id are separate addressing forms.
+/// They must not be combined because the two forms use different authorization paths.
 #[derive(Debug, Deserialize)]
 pub struct StatusParams {
     #[serde(default)]
     pub handle: Option<String>,
+    #[serde(default)]
+    pub credential_id: Option<String>,
+}
+
+impl StatusParams {
+    pub(crate) fn has_mutually_exclusive_addressing(&self) -> bool {
+        self.handle.is_none() || self.credential_id.is_none()
+    }
 }
 
 /// A `credential.report_auth_failure` request.
@@ -1155,7 +1166,7 @@ impl ReadSurface {
         Ok(())
     }
 
-    /// Non-secret status: per-handle health, or overall readiness when no handle.
+    /// Non-secret status: per-credential health, or overall readiness when unaddressed.
     ///
     /// `lease_held`/`ready` reflect the fenced-out latch: a daemon that has lost the
     /// single-writer lease to a newer instance (`is_fenced_out`) reports `lease_held =
@@ -1163,6 +1174,7 @@ impl ReadSurface {
     /// of always claiming a healthy lease. A handle probe runs the per-connection limiter
     /// FIRST (keyed by the presented handle, like `get`), so a status-based enumeration
     /// sweep of unknown handles trips the same anomaly alarm rather than slipping past it.
+    /// A credential-id probe instead requires a route-bound principal's read grant.
     /// KNOWN DIVERGENCE FROM THE VERB IT DESCRIBES, measured 2026-08-27 and not yet
     /// fixed. On a `SigningKey` record this reports `ready: true` while `credential.get`
     /// on the SAME HANDLE at the same instant refuses:
@@ -1192,90 +1204,110 @@ impl ReadSurface {
     /// Blast radius today is zero and that is measured, not assumed: no consumer reads
     /// `credential.status` at all (all three answered at source on 2026-08-25). It is
     /// recorded here so the first consumer to poll status does not discover it.
-    pub async fn status(&self, connection_id: u64, params: &StatusParams) -> StatusResult {
+    pub async fn status(
+        &self,
+        connection_id: u64,
+        principal: Option<&Principal>,
+        params: &StatusParams,
+    ) -> StatusResult {
         let fenced_out = self.engine.store().is_fenced_out();
         let lease_held = !fenced_out;
+        let unavailable = || StatusResult {
+            ready: false,
+            last_error_code: Some(ReadError::NotFound),
+            lease_held,
+            record_version: None,
+            stale_pending: None,
+        };
 
-        let handle = match &params.handle {
-            // Overall readiness: ready iff we still hold write authority. No handle to
-            // key the limiter on, and nothing to enumerate, so no limiter run here.
-            None => {
+        let (credential_id, scoped) = match (&params.handle, &params.credential_id) {
+            // Overall readiness: ready iff we still hold write authority. No address to
+            // authorize or rate-limit, and nothing to enumerate, so no lookup runs here.
+            (None, None) => {
                 return StatusResult {
                     ready: !fenced_out,
                     last_error_code: None,
                     lease_held,
                     record_version: None,
-                    // No handle means no record, so there is no mark to report. Absent
+                    // No address means no record, so there is no mark to report. Absent
                     // rather than false: this is overall daemon readiness, not a claim
                     // about any credential.
                     stale_pending: None,
                 };
             }
-            Some(h) => h,
+            (Some(handle), None) => {
+                // Rate-limit the handle probe before resolution (enumeration-sweep guard).
+                self.check_limiter(connection_id, handle).await;
+                let Ok(credential_id) = self.engine.store().resolve_handle(handle) else {
+                    return unavailable();
+                };
+                (credential_id, false)
+            }
+            (None, Some(credential_id)) => {
+                if self
+                    .authorize_scoped(principal, credential_id, GrantOperation::Read)
+                    .is_err()
+                {
+                    return unavailable();
+                }
+                (credential_id.clone(), true)
+            }
+            // The route rejects a request with both addressing forms as `invalid_params`.
+            // Preserve the non-enumerating status shape for direct callers of this surface.
+            (Some(_), Some(_)) => return unavailable(),
         };
 
-        // Rate-limit the handle probe before resolution (enumeration-sweep guard).
-        self.check_limiter(connection_id, handle).await;
-
-        match self.engine.store().resolve_handle(handle) {
-            Ok(credential_id) => match self.engine.store().meta(&credential_id) {
-                Ok(meta) => {
-                    // The field is a LATENCY PREDICTOR for the next get, and the
-                    // prediction only has meaning when the next get will actually run.
-                    // None of the seven `UPDATE credentials SET state = ...` paths in the
-                    // store clear `stale_pending`, so a record that was marked stale by a
-                    // consumer 401 and then latched to `needs_reauth` (or quarantined) by
-                    // a failed refresh still carries `stale_pending = 1` on the column.
-                    // Publishing that as the prediction would say "next get pays seconds"
-                    // for a call that fails fast without an upstream exchange -- measured
-                    // live on 2026-08-27, every four hours for ~five minutes, until the
-                    // re-seal writes state = 'active' and stale_pending = 0 together.
-                    //
-                    // Non-Active => the next get performs no upstream exchange => FALSE.
-                    // Absent stays reserved for "this path could not see the record" and
-                    // is unchanged on the resolve and meta-fail arms below.
-                    let is_active =
-                        matches!(meta.state, credentials_core::store::RecordState::Active);
-                    StatusResult {
-                        // A fenced-out daemon is not ready even for an Active credential.
-                        ready: !fenced_out && is_active,
-                        // Deliberately NOT folded into `ready`: a stale-marked record is
-                        // still usable, it is merely expensive on the next read. Published
-                        // only when Active; see the comment above for the bug this gates.
-                        stale_pending: Some(if is_active { meta.stale_pending } else { false }),
-                        last_error_code: match meta.state {
-                            credentials_core::store::RecordState::NeedsReauth
-                            | credentials_core::store::RecordState::Retired => {
-                                Some(ReadError::NeedsReauth)
-                            }
-                            credentials_core::store::RecordState::Corrupt => {
-                                Some(ReadError::Corrupt)
-                            }
-                            credentials_core::store::RecordState::Active => None,
-                        },
-                        lease_held,
-                        record_version: Some(meta.record_version),
-                    }
-                }
-                // Meta unreadable: absent, not false. Reporting "no repair pending" for
-                // a record we could not read would be an assertion with no basis.
-                Err(_) => StatusResult {
-                    ready: false,
-                    last_error_code: Some(ReadError::NotFound),
+        match self.engine.store().meta(&credential_id) {
+            Ok(meta) => {
+                // The field is a LATENCY PREDICTOR for the next get, and the prediction
+                // only has meaning when the next get will actually run. None of the seven
+                // `UPDATE credentials SET state = ...` paths in the store clear
+                // `stale_pending`, so a record that was marked stale by a consumer 401 and
+                // then latched to `needs_reauth` (or quarantined) by a failed refresh still
+                // carries `stale_pending = 1` on the column. Publishing that as the
+                // prediction would say "next get pays seconds" for a call that fails fast
+                // without an upstream exchange -- measured live on 2026-08-27, every four
+                // hours for ~five minutes, until the re-seal writes state = 'active' and
+                // stale_pending = 0 together.
+                //
+                // Non-Active => the next get performs no upstream exchange => FALSE.
+                // Absent stays reserved for "this path could not see the record" and is
+                // unchanged on the resolve and meta-fail arms below.
+                let is_active = matches!(meta.state, credentials_core::store::RecordState::Active);
+                StatusResult {
+                    // A fenced-out daemon is not ready even for an Active credential.
+                    ready: !fenced_out && is_active,
+                    // Deliberately NOT folded into `ready`: a stale-marked record is still
+                    // usable, it is merely expensive on the next read. Published only when
+                    // Active; see the comment above for the bug this gates.
+                    stale_pending: Some(if is_active { meta.stale_pending } else { false }),
+                    last_error_code: match meta.state {
+                        credentials_core::store::RecordState::NeedsReauth
+                        | credentials_core::store::RecordState::Retired => {
+                            Some(ReadError::NeedsReauth)
+                        }
+                        credentials_core::store::RecordState::Corrupt => Some(ReadError::Corrupt),
+                        credentials_core::store::RecordState::Active => None,
+                    },
                     lease_held,
-                    record_version: None,
-                    stale_pending: None,
-                },
-            },
-            // Unresolvable handle -- uniform not_found, and no claim about a record that
-            // may not exist.
-            Err(_) => StatusResult {
-                ready: false,
-                last_error_code: Some(ReadError::NotFound),
-                lease_held,
-                record_version: None,
-                stale_pending: None,
-            },
+                    record_version: Some(meta.record_version),
+                }
+            }
+            // A credential-id request records the local reason while keeping its reply
+            // indistinguishable from an uncovered principal's request.
+            Err(error) => {
+                if scoped {
+                    self.record_scoped_refusal(
+                        principal,
+                        &credential_id,
+                        match error {
+                            StoreOpError::NotFound => ScopedReadRefusal::NotFound,
+                            _ => ScopedReadRefusal::StoreError,
+                        },
+                    );
+                }
+                unavailable()
+            }
         }
     }
 

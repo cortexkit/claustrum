@@ -131,7 +131,7 @@ credential.get { handle, min_ttl_ms?, force_refresh? }
                    project_id?, account_id?, email?, org_name? } }
     |  { result: { error: { code, class } } }
 credential.get_many { items: [{ handle, ... }] }       (CAPPED — see §6)
-credential.status { handle? }
+credential.status { handle? | credential_id? }
     →  { result: { ready, last_error_code?, lease_held } }  (non-secret health, never bytes)
 credential.report_auth_failure { handle, provider_status, record_version, reporter_source? }
     →  { result: { accepted: true } }                   (version-CAS feedback — §7)
@@ -144,8 +144,12 @@ must repeat the exact `record_version` returned by the get that supplied the rej
 credential. A stale report is an accepted silent no-op, so it cannot invalidate a newer
 refresh or replacement.
 
-Reads take a **capability handle**, not a public alias (§6). Reads are READ-ONLY —
-no write op exists on this channel.
+Reads take a **capability handle**, not a public alias (§6). `credential.status` also
+accepts one principal-scoped `credential_id`: it requires a route-bound reserved
+principal's literal-prefix `Read` grant, and rejects a request carrying both addressing
+forms. With neither address it remains the overall vault-health probe. An uncovered or
+unknown credential id returns the same non-record status shape, while the vault records
+the refusal reason locally. Reads are READ-ONLY — no write op exists on this channel.
 
 **A handle survives repair of the credential it names.** An operator repairing a
 dead credential (`login --replace`, `put --replace`) resets it to `active` and bumps

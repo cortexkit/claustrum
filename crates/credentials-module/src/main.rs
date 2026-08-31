@@ -6,8 +6,8 @@
 //! a reserved `ManagementSurface` — echoing the `SUBC_LAUNCH_NONCE` the supervisor
 //! injected so only the spawned process can claim the `claustrum` id
 //! (closing the vault-impersonation hole). It serves the capability-handle read
-//! surface plus principal-scoped `credential.get_scoped`, `credential.sign`, and
-//! `credential.public_key` route operations.
+//! surface plus principal-scoped `credential.get_scoped`, `credential.status`,
+//! `credential.sign`, and `credential.public_key` route operations.
 //! There is deliberately NO unauthenticated write op on this channel — writes live in
 //! the admin surface, gated by master-key possession + the single-writer lease.
 //!
@@ -1011,7 +1011,20 @@ async fn handle_read_request(
             }
         },
         OP_STATUS => match serde_json::from_value::<StatusParams>(request.params) {
-            Ok(p) => wrap_result(surface.status(connection_id, &p).await),
+            Ok(p) if p.has_mutually_exclusive_addressing() => {
+                wrap_result(surface.status(connection_id, principal.as_ref(), &p).await)
+            }
+            Ok(_) => {
+                return invalid_params(
+                    writer,
+                    ver,
+                    channel,
+                    epoch,
+                    corr,
+                    "credential.status accepts at most one of handle or credential_id",
+                )
+                .await
+            }
             Err(e) => {
                 return invalid_params(writer, ver, channel, epoch, corr, &e.to_string()).await
             }
@@ -2092,6 +2105,22 @@ mod tests {
         .await
     }
 
+    async fn scoped_status_request(
+        surface: &Arc<ReadSurface>,
+        admin: &Arc<admin_surface::AdminSurface>,
+        channel: u16,
+        credential_id: &str,
+    ) -> serde_json::Value {
+        scoped_route_request(
+            surface,
+            admin,
+            channel,
+            OP_STATUS,
+            json!({ "credential_id": credential_id }),
+        )
+        .await
+    }
+
     async fn scoped_sign_request(
         surface: &Arc<ReadSurface>,
         admin: &Arc<admin_surface::AdminSurface>,
@@ -2365,6 +2394,321 @@ mod tests {
         assert_eq!(events[0].detail.as_deref(), Some("store_error"));
         assert_eq!(events[0].principal_kind.as_deref(), Some("reserved"));
         assert_eq!(events[0].principal_id.as_deref(), Some("prefrontal-core"));
+        assert_eq!(events[1].detail.as_deref(), Some("no_grant"));
+    }
+
+    #[tokio::test]
+    async fn scoped_status_read_grant_returns_the_same_body_as_a_handle() {
+        let (surface, admin, store) = scoped_rig(78);
+        let credential_id = "github_app:status-covered";
+        store
+            .create(
+                credential_id,
+                &VaultRecord::new_static(CredentialKind::ApiKey, "test", b"key".to_vec(), None),
+            )
+            .expect("create credential");
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "prefrontal-core",
+                "github_app:",
+                GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .expect("create read grant");
+        let handle = credentials_core::store::mint_handle().expect("mint handle");
+        store
+            .put_handle_hash(
+                &handle.hash,
+                credential_id,
+                AuditCtx::admin(AuditOp::MintHandle),
+            )
+            .expect("bind handle");
+        admin.record_bind(
+            51,
+            subc_protocol::Principal::Reserved {
+                module_id: "prefrontal-core".into(),
+            },
+        );
+
+        let handle_status = serde_json::to_value(
+            surface
+                .status(
+                    52,
+                    None,
+                    &StatusParams {
+                        handle: Some(handle.raw),
+                        credential_id: None,
+                    },
+                )
+                .await,
+        )
+        .expect("encode handle status");
+        let scoped_status = scoped_status_request(&surface, &admin, 51, credential_id).await;
+        assert_eq!(
+            scoped_status["result"], handle_status,
+            "a matching Read grant must return the same status body as the capability handle"
+        );
+    }
+
+    #[tokio::test]
+    async fn scoped_status_no_grant_is_uniform_and_records_the_principal() {
+        let (surface, admin, store) = scoped_rig(79);
+        let credential_id = "apikey:status-uncovered";
+        store
+            .create(
+                credential_id,
+                &VaultRecord::new_static(CredentialKind::ApiKey, "test", b"key".to_vec(), None),
+            )
+            .expect("create uncovered credential");
+        admin.record_bind(
+            53,
+            subc_protocol::Principal::Reserved {
+                module_id: "prefrontal-core".into(),
+            },
+        );
+
+        let refusal = scoped_status_request(&surface, &admin, 53, credential_id).await;
+        let result = refusal["result"]
+            .as_object()
+            .expect("refused status must be a result object");
+        assert_eq!(result.get("ready"), Some(&json!(false)));
+        assert!(
+            !result.contains_key("record_version"),
+            "a principal with no grant must not learn that the credential has a record"
+        );
+        assert!(
+            !result.contains_key("stale_pending"),
+            "an unreachable credential must omit its next-get latency prediction"
+        );
+        let events = store.recent_auth_events(1).expect("read refusal event");
+        let event = events
+            .first()
+            .expect("a refused scoped status needs an event");
+        assert_eq!(event.kind, "scoped_read_refusal");
+        assert_eq!(event.detail.as_deref(), Some("no_grant"));
+        assert_eq!(event.principal_kind.as_deref(), Some("reserved"));
+        assert_eq!(event.principal_id.as_deref(), Some("prefrontal-core"));
+    }
+
+    #[tokio::test]
+    async fn scoped_status_grant_lookup_failure_is_uniform_and_records_store_error() {
+        let (surface, admin, store) = scoped_rig(80);
+        let credential_id = "github_app:status-store-error";
+        store
+            .create(
+                credential_id,
+                &VaultRecord::new_static(CredentialKind::ApiKey, "test", b"key".to_vec(), None),
+            )
+            .expect("create credential");
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "prefrontal-core",
+                "github_app:",
+                GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .expect("create read grant");
+        admin.record_bind(54, subc_protocol::Principal::Direct);
+        let ordinary_refusal = scoped_status_request(&surface, &admin, 54, credential_id).await;
+        admin.record_bind(
+            55,
+            subc_protocol::Principal::Reserved {
+                module_id: "prefrontal-core".into(),
+            },
+        );
+        surface.force_scoped_grant_lookup_error_for_test();
+        let store_refusal = scoped_status_request(&surface, &admin, 55, credential_id).await;
+
+        assert_eq!(
+            store_refusal, ordinary_refusal,
+            "a grant lookup failure must remain indistinguishable from ordinary missing coverage"
+        );
+        let events = store.recent_auth_events(2).expect("read refusal events");
+        assert_eq!(events[0].detail.as_deref(), Some("store_error"));
+        assert_eq!(events[0].principal_kind.as_deref(), Some("reserved"));
+        assert_eq!(events[0].principal_id.as_deref(), Some("prefrontal-core"));
+        assert_eq!(events[1].detail.as_deref(), Some("no_grant"));
+    }
+
+    #[tokio::test]
+    async fn sign_only_grant_does_not_authorize_scoped_status() {
+        let (surface, admin, store) = scoped_rig(80);
+        let credential_id = "apikey:status-sign-only";
+        store
+            .create(
+                credential_id,
+                &VaultRecord::new_static(CredentialKind::ApiKey, "test", b"key".to_vec(), None),
+            )
+            .expect("create sign-only credential");
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "prefrontal-core",
+                "apikey:status-",
+                GrantOperation::Sign,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .expect("create Sign-only grant");
+        admin.record_bind(
+            54,
+            subc_protocol::Principal::Reserved {
+                module_id: "prefrontal-core".into(),
+            },
+        );
+
+        let refusal = scoped_status_request(&surface, &admin, 54, credential_id).await;
+        let result = refusal["result"]
+            .as_object()
+            .expect("Sign-only refusal must be a result object");
+        assert_eq!(result.get("ready"), Some(&json!(false)));
+        assert!(
+            !result.contains_key("record_version"),
+            "a Sign grant must not authorize read-shaped status metadata"
+        );
+        assert_eq!(
+            store.recent_auth_events(1).expect("read refusal event")[0]
+                .detail
+                .as_deref(),
+            Some("no_grant"),
+            "the refusal must be classified as missing Read coverage, not as a bad record"
+        );
+    }
+
+    #[tokio::test]
+    async fn wrong_principal_kind_is_refused_by_scoped_status() {
+        let (surface, admin, store) = scoped_rig(81);
+        let credential_id = "github_app:status-direct";
+        store
+            .create(
+                credential_id,
+                &VaultRecord::new_static(CredentialKind::ApiKey, "test", b"key".to_vec(), None),
+            )
+            .expect("create credential");
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "prefrontal-core",
+                "github_app:",
+                GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .expect("create read grant");
+        admin.record_bind(55, subc_protocol::Principal::Direct);
+
+        let refusal = scoped_status_request(&surface, &admin, 55, credential_id).await;
+        let result = refusal["result"]
+            .as_object()
+            .expect("wrong-kind refusal must be a result object");
+        assert_eq!(result.get("ready"), Some(&json!(false)));
+        assert!(
+            !result.contains_key("record_version"),
+            "a Direct principal must not learn a covered reserved credential exists"
+        );
+        let event = store
+            .recent_auth_events(1)
+            .expect("read refusal event")
+            .pop()
+            .expect("wrong principal kind needs an event");
+        assert_eq!(event.detail.as_deref(), Some("no_grant"));
+        assert_eq!(event.principal_kind.as_deref(), Some("direct"));
+        assert_eq!(event.principal_id, None);
+    }
+
+    #[tokio::test]
+    async fn scoped_status_rejects_both_addressing_forms_as_invalid_params() {
+        let (surface, admin, _store) = scoped_rig(82);
+        let response = scoped_route_request(
+            &surface,
+            &admin,
+            56,
+            OP_STATUS,
+            json!({
+                "handle": "ckh_status_both_addresses",
+                "credential_id": "github_app:status-covered",
+            }),
+        )
+        .await;
+        assert_eq!(
+            response["code"],
+            json!("invalid_params"),
+            "credential.status must refuse ambiguous handle and credential_id addressing"
+        );
+    }
+
+    #[tokio::test]
+    async fn unaddressed_status_still_reports_overall_vault_health() {
+        let (surface, admin, _store) = scoped_rig(83);
+        let routed = scoped_route_request(&surface, &admin, 57, OP_STATUS, json!({})).await;
+        let direct = serde_json::to_value(
+            surface
+                .status(
+                    57,
+                    None,
+                    &StatusParams {
+                        handle: None,
+                        credential_id: None,
+                    },
+                )
+                .await,
+        )
+        .expect("encode direct overall status");
+        assert_eq!(
+            routed["result"], direct,
+            "neither address must retain credential.status overall-health behavior"
+        );
+        assert_eq!(
+            routed["result"]["ready"],
+            json!(true),
+            "a healthy unaddressed status must remain ready, not become a refused credential probe"
+        );
+        assert_eq!(
+            routed["result"]["last_error_code"],
+            serde_json::Value::Null,
+            "overall vault health must not report a credential lookup error"
+        );
+        assert!(
+            routed["result"].get("record_version").is_none(),
+            "overall vault health must not claim a record version"
+        );
+    }
+
+    #[tokio::test]
+    async fn scoped_status_unknown_and_no_grant_are_indistinguishable_on_the_wire() {
+        let (surface, admin, store) = scoped_rig(84);
+        let uncovered_id = "apikey:status-uncovered";
+        store
+            .create(
+                uncovered_id,
+                &VaultRecord::new_static(CredentialKind::ApiKey, "test", b"key".to_vec(), None),
+            )
+            .expect("create uncovered credential");
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "prefrontal-core",
+                "github_app:",
+                GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .expect("create read grant");
+        admin.record_bind(
+            58,
+            subc_protocol::Principal::Reserved {
+                module_id: "prefrontal-core".into(),
+            },
+        );
+
+        let no_grant = scoped_status_request(&surface, &admin, 58, uncovered_id).await;
+        let unknown =
+            scoped_status_request(&surface, &admin, 58, "github_app:status-missing").await;
+        assert_eq!(
+            no_grant, unknown,
+            "a valid grant for an unknown credential must be wire-identical to missing grant coverage"
+        );
+        let events = store.recent_auth_events(2).expect("read refusal events");
+        assert_eq!(events[0].detail.as_deref(), Some("not_found"));
         assert_eq!(events[1].detail.as_deref(), Some("no_grant"));
     }
 
@@ -3231,8 +3575,9 @@ mod tests {
 
         let params = StatusParams {
             handle: Some(handle.raw.clone()),
+            credential_id: None,
         };
-        let before = surface.status(1, &params).await;
+        let before = surface.status(1, None, &params).await;
         assert!(before.ready, "an active credential is ready before fencing");
         assert!(before.lease_held, "the lease is held before fencing");
 
@@ -3241,7 +3586,7 @@ mod tests {
         bump_fence_epoch(&db_path);
         let _ = store.invalidate("apikey:active"); // trigger the fenced write to latch
 
-        let after = surface.status(1, &params).await;
+        let after = surface.status(1, None, &params).await;
         assert!(
             !after.lease_held,
             "a fenced-out daemon does not hold the lease"
@@ -3252,7 +3597,16 @@ mod tests {
         );
 
         // The overall (no-handle) status also reflects the loss.
-        let overall = surface.status(1, &StatusParams { handle: None }).await;
+        let overall = surface
+            .status(
+                1,
+                None,
+                &StatusParams {
+                    handle: None,
+                    credential_id: None,
+                },
+            )
+            .await;
         assert!(!overall.ready);
         assert!(!overall.lease_held);
     }
@@ -3299,8 +3653,10 @@ mod tests {
         let ok = surface
             .status(
                 2,
+                None,
                 &StatusParams {
                     handle: Some(active),
+                    credential_id: None,
                 },
             )
             .await;
@@ -3311,7 +3667,14 @@ mod tests {
         );
 
         let reauth = surface
-            .status(2, &StatusParams { handle: Some(dead) })
+            .status(
+                2,
+                None,
+                &StatusParams {
+                    handle: Some(dead),
+                    credential_id: None,
+                },
+            )
             .await;
         assert!(!reauth.ready, "a needs_reauth credential is not ready");
         assert_eq!(
@@ -3323,8 +3686,10 @@ mod tests {
         let corrupt = surface
             .status(
                 2,
+                None,
                 &StatusParams {
                     handle: Some(broken),
+                    credential_id: None,
                 },
             )
             .await;
@@ -3341,8 +3706,10 @@ mod tests {
         let unknown = surface
             .status(
                 2,
+                None,
                 &StatusParams {
                     handle: Some("ckh_not_a_real_handle".to_string()),
+                    credential_id: None,
                 },
             )
             .await;
@@ -4349,8 +4716,9 @@ mod tests {
 
         let params = crate::read_surface::StatusParams {
             handle: Some(handle.raw.clone()),
+            credential_id: None,
         };
-        let before = surface.status(1, &params).await;
+        let before = surface.status(1, None, &params).await;
         assert!(before.ready, "seeded credential must start ready");
         let version_before = before
             .record_version
@@ -4422,8 +4790,10 @@ mod tests {
         let result = surface
             .status(
                 1,
+                None,
                 &crate::read_surface::StatusParams {
                     handle: Some(handle.raw.clone()),
+                    credential_id: None,
                 },
             )
             .await;
@@ -4470,8 +4840,10 @@ mod tests {
         let before = surface
             .status(
                 1,
+                None,
                 &crate::read_surface::StatusParams {
                     handle: Some(handle.raw.clone()),
+                    credential_id: None,
                 },
             )
             .await;
@@ -4492,8 +4864,10 @@ mod tests {
         let after = surface
             .status(
                 1,
+                None,
                 &crate::read_surface::StatusParams {
                     handle: Some(handle.raw.clone()),
+                    credential_id: None,
                 },
             )
             .await;
@@ -4507,7 +4881,14 @@ mod tests {
         // older than everything, so a poller would read a dead handle as a pending
         // change forever.
         let overall = surface
-            .status(1, &crate::read_surface::StatusParams { handle: None })
+            .status(
+                1,
+                None,
+                &crate::read_surface::StatusParams {
+                    handle: None,
+                    credential_id: None,
+                },
+            )
             .await;
         assert!(
             overall.record_version.is_none(),
@@ -4516,8 +4897,10 @@ mod tests {
         let unknown = surface
             .status(
                 2,
+                None,
                 &crate::read_surface::StatusParams {
                     handle: Some("ckh_definitely-not-a-handle".to_string()),
+                    credential_id: None,
                 },
             )
             .await;
@@ -4576,8 +4959,10 @@ mod tests {
         let clean = surface
             .status(
                 1,
+                None,
                 &crate::read_surface::StatusParams {
                     handle: Some(handle.raw.clone()),
+                    credential_id: None,
                 },
             )
             .await;
@@ -4609,8 +4994,10 @@ mod tests {
         let marked = surface
             .status(
                 1,
+                None,
                 &crate::read_surface::StatusParams {
                     handle: Some(handle.raw.clone()),
+                    credential_id: None,
                 },
             )
             .await;
@@ -4634,7 +5021,14 @@ mod tests {
         // ABSENT, never defaulted false: claiming "no repair pending" for a record this
         // path could not read would be an assertion with no basis behind it.
         let overall = surface
-            .status(1, &crate::read_surface::StatusParams { handle: None })
+            .status(
+                1,
+                None,
+                &crate::read_surface::StatusParams {
+                    handle: None,
+                    credential_id: None,
+                },
+            )
             .await;
         assert!(
             overall.stale_pending.is_none(),
@@ -4643,8 +5037,10 @@ mod tests {
         let unknown = surface
             .status(
                 2,
+                None,
                 &crate::read_surface::StatusParams {
                     handle: Some("ckh_definitely-not-a-handle".to_string()),
+                    credential_id: None,
                 },
             )
             .await;
@@ -4818,8 +5214,10 @@ mod tests {
         let got = surface
             .status(
                 11,
+                None,
                 &crate::read_surface::StatusParams {
                     handle: Some(raw.raw),
+                    credential_id: None,
                 },
             )
             .await;
@@ -4850,8 +5248,9 @@ mod tests {
         for i in 0..20 {
             let params = StatusParams {
                 handle: Some(format!("ckh_unknown_{i}")),
+                credential_id: None,
             };
-            let _ = surface.status(77, &params).await;
+            let _ = surface.status(77, None, &params).await;
         }
         let alarms = store
             .read_audit(None)

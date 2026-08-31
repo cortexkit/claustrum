@@ -249,6 +249,7 @@ impl RefreshEngine {
                     kind: AuthEventKind::StaleNonrefreshableLatch.as_str(),
                     provider_status: None,
                     detail: None,
+                    reporter_source: None,
                 }),
             )?;
             // If a concurrent write moved the version, return the replacement rather
@@ -435,6 +436,7 @@ impl RefreshEngine {
                         kind: AuthEventKind::RefreshFailed.as_str(),
                         provider_status: None,
                         detail: Some(e.variant_name()),
+                        reporter_source: None,
                     }),
                 )?;
                 Err(EngineError::RefreshFailed(e))
@@ -459,6 +461,7 @@ impl RefreshEngine {
                         kind: AuthEventKind::RefreshFailed.as_str(),
                         provider_status: other.provider_status(),
                         detail: Some(other.variant_name()),
+                        reporter_source: None,
                     },
                     Some(record.record_version),
                 );

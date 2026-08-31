@@ -525,6 +525,7 @@ fn record_reconciliation_reasons(
                     kind: AuthEventKind::ReconcileNeedsReauth.as_str(),
                     provider_status: None,
                     detail: Some(reason.as_str()),
+                    reporter_source: None,
                 },
                 None,
             );
@@ -4599,6 +4600,7 @@ mod tests {
                     handle: handle.raw.clone(),
                     provider_status: 401,
                     record_version: 1,
+                    reporter_source: None,
                 },
             )
             .await
@@ -4726,6 +4728,7 @@ mod tests {
                     handle: raw.raw.clone(),
                     provider_status: 401,
                     record_version: 1,
+                    reporter_source: None,
                 },
             )
             .await
@@ -5172,16 +5175,19 @@ mod tests {
                 .1
                 .state
         };
-        let params = |status: u16, version: u64| read_surface::ReportAuthFailureParams {
-            handle: handle.clone(),
-            provider_status: status,
-            record_version: version,
+        let params = |status: u16, version: u64, reporter_source: Option<&str>| {
+            read_surface::ReportAuthFailureParams {
+                handle: handle.clone(),
+                provider_status: status,
+                record_version: version,
+                reporter_source: reporter_source.map(str::to_owned),
+            }
         };
 
         // A NON-AUTH status must not invalidate: a provider 500 is a hiccup, not a dead
         // credential.
         surface
-            .report_auth_failure(7, &params(500, 1))
+            .report_auth_failure(7, &params(500, 1, None))
             .await
             .expect("a non-auth status is accepted");
         assert_eq!(
@@ -5200,7 +5206,7 @@ mod tests {
             )
             .expect("bump the record version");
         surface
-            .report_auth_failure(7, &params(401, 1))
+            .report_auth_failure(7, &params(401, 1, Some("relay_message_parse")))
             .await
             .expect("a stale report is accepted, not errored");
         assert_eq!(
@@ -5209,11 +5215,21 @@ mod tests {
             "a 401 for a version the vault has moved past must NOT invalidate: that \
              credential was already repaired"
         );
+        let events = store.recent_auth_events(10).expect("stale report event");
+        assert_eq!(events[0].kind, "consumer_report_latch");
+        assert_eq!(
+            events[0].reporter_source.as_deref(),
+            Some("relay_message_parse")
+        );
+        assert!(
+            !events[0].applied,
+            "a state no-op still records a diagnostic observation"
+        );
 
         // THE ACCEPTED ARM. Without it, an implementation that ignored every report
         // satisfies both assertions above.
         surface
-            .report_auth_failure(7, &params(401, 2))
+            .report_auth_failure(7, &params(401, 2, Some(&"a".repeat(40))))
             .await
             .expect("a current-version 401 is accepted");
         assert_eq!(
@@ -5237,6 +5253,21 @@ mod tests {
         );
         let events = store.recent_auth_events(10).expect("events");
         assert_eq!(events[0].kind, "consumer_report_latch");
+        assert_eq!(events[0].reporter_source.as_deref(), Some("unrecognised"));
+        let raw = "a".repeat(40);
+        assert!(
+            events.iter().all(|event| {
+                event.credential_id != raw
+                    && event.kind != raw
+                    && event.detail.as_deref() != Some(raw.as_str())
+                    && event.reporter_source.as_deref() != Some(raw.as_str())
+                    && event.principal_kind.as_deref() != Some(raw.as_str())
+                    && event.principal_id.as_deref() != Some(raw.as_str())
+            }),
+            "the raw reporter source must never appear in any string column of \
+             auth_events -- not merely mapped out of reporter_source itself, but not \
+             displaced into detail or the principal fields either"
+        );
         assert!(
             events[0].applied,
             "the current static report must be recorded as applied"
@@ -5251,6 +5282,7 @@ mod tests {
                     handle: "ckh_not_a_handle".to_string(),
                     provider_status: 401,
                     record_version: 1,
+                    reporter_source: None,
                 },
             )
             .await;
@@ -5302,6 +5334,7 @@ mod tests {
                     handle: handle.raw,
                     provider_status: 401,
                     record_version: 1,
+                    reporter_source: None,
                 },
             )
             .await
@@ -5360,6 +5393,7 @@ mod tests {
                     handle: handle.raw.clone(),
                     provider_status: 401,
                     record_version: 1,
+                    reporter_source: None,
                 },
             )
             .await

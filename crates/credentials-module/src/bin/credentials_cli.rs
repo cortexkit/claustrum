@@ -2955,8 +2955,15 @@ fn cmd_events(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             .record_version
             .map(|v| format!("v{v}"))
             .unwrap_or_else(|| "-".into());
+        // The consumer-asserted source rides at the end and only when present, so
+        // legacy NULL rows render exactly as before this column existed.
+        let source = e
+            .reporter_source
+            .as_deref()
+            .map(|s| format!(" src={s}"))
+            .unwrap_or_default();
         println!(
-            "{when}  {:34} {:16} {principal:24} {what:22} {version:6} applied={}",
+            "{when}  {:34} {:16} {principal:24} {what:22} {version:6} applied={}{source}",
             e.credential_id,
             e.kind,
             if e.applied { "yes" } else { "no" }

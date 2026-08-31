@@ -693,6 +693,7 @@ async fn report_stale_then_invalid_grant_latches_needs_reauth() {
                 kind: "consumer_report_stale",
                 provider_status: Some(401),
                 detail: None,
+                reporter_source: None,
             },
         )
         .expect("report marks the current token stale");
@@ -735,6 +736,7 @@ async fn stale_pending_clears_in_the_refresh_commit() {
                 kind: "consumer_report_stale",
                 provider_status: Some(401),
                 detail: None,
+                reporter_source: None,
             },
         )
         .expect("report marks the current token stale");

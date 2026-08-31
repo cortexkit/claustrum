@@ -298,8 +298,25 @@ run_expect 1 "release artifact (bypass absent)" \
 # contract check and a release-artifact assertion, this gate did not, and its
 # header still promised parity. A claim about another file has to be checked
 # against that file or it is a comment pretending to be a guarantee.
-ci_steps=$(grep -cE '^      - name:' .github/workflows/ci.yml)
+# COUNT THE `test` JOB ONLY. The workflow gained a second job (`fork-safe`) whose
+# steps re-run checks this gate ALREADY has, because a fork PR cannot mint the token
+# for the private sibling checkouts and so cannot run the real suite at all. Counting
+# every `- name:` in the file would read those duplicates as new CI coverage and
+# demand arms that already exist -- and the fix for that pressure is to widen the
+# bound, which is how this check stops checking. Bound the count to the job the claim
+# is about instead.
+ci_steps=$(awk '/^  test:/{j=1} /^  [a-z-]+:$/ && !/^  test:/{j=0} j && /^      - name:/{n++} END{print n+0}' \
+    .github/workflows/ci.yml)
 gate_arms=$(grep -cE '^run_(check|expect)' "$0")
+# A zero here means the awk stopped matching the job or step shape, not that CI has no
+# steps -- and it would sail under any gap bound. Refuse it: this is the same defect
+# as the test-count check that reported "ran 0 tests" when it could not count them.
+if [ "$ci_steps" -lt 5 ]; then
+    printf '\nREFUSING: counted %s steps in the ci.yml `test` job.\n' "$ci_steps" >&2
+    printf 'That is too few to be real, so the scan is broken rather than CI being\n' >&2
+    printf 'empty -- and a broken scan here passes the gap check below silently.\n' >&2
+    exit 1
+fi
 # CI has 4 setup steps (checkout x3, token mint) plus a build step that the gate
 # gets for free by running in the workspace. Anything beyond that gap is a check
 # CI runs and this gate does not.

@@ -53,6 +53,28 @@ jobs:
     # change, proven on its own, rather than riding this one.
   test:
     name: Test (${{ matrix.os }})
+    # A FORK PR CANNOT RUN THIS JOB, AND UNTIL 2026-08-31 IT FAILED ON EVERY ONE.
+    #
+    # The token step below needs `secrets.CK_CI_APP_PRIVATE_KEY`, and GitHub withholds
+    # secrets from workflows triggered by a pull request from a fork -- correctly, since
+    # the workflow runs the PR's own code. So the token cannot be minted, the private
+    # sibling checkouts fail, and cargo dies at manifest-load before a single test runs.
+    # That is inherent to private path-dependencies plus fork isolation, not a
+    # misconfiguration: no variable or permission setting fixes it.
+    #
+    # Measured: 11 of 11 fork-PR runs failed this way, across every contributor branch
+    # this repo has ever received. Two harms, and the second is the one that matters:
+    # a contributor sees red on everything they file and cannot tell whether it is
+    # their code, and A GENUINE CI FAILURE ON A FORK PR WAS INDISTINGUISHABLE FROM THIS
+    # SYSTEMIC ONE. An alarm that always fires is not an alarm.
+    #
+    # `pull_request_target` is the tempting fix and is REFUSED: it runs with secrets in
+    # scope while checking out untrusted code, which turns a red badge into a
+    # private-repo read token an attacker can exfiltrate. Skipping is honest; the
+    # fork-safe job below runs what can be run without the siblings.
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -214,3 +236,46 @@ jobs:
       - name: Release-artifact assertions (ship gate)
         if: matrix.os == 'ubuntu'
         run: cargo test --locked -p credentials-module --test cli_admin validation_bypass_is_absent -- --ignored
+
+  # WHAT A FORK PR CAN ACTUALLY BE TOLD, given that the job above cannot run for it.
+  #
+  # THE NAME IS THE CONTRACT. It says "no build, no tests" because a green check on a
+  # PR reads as "the suite passed", and a green that means less than it looks is worse
+  # than the red it replaces -- the contributor stops looking, and so do I. Everything
+  # here is a source scan; nothing compiles, nothing runs the vault.
+  #
+  # These four are the entire fork-safe set, and that is a measured claim rather than a
+  # convenient one: every other gate arm either shells to cargo (which loads the
+  # workspace manifest, which path-deps the private siblings, which a fork cannot check
+  # out) or reads ../subconscious directly, as the inbound-contract check does. Verified
+  # by reading each script for sibling references and cargo invocations -- 0 and 0 for
+  # all four.
+  #
+  # They are not token checks. Between them they catch a design doc whose NOT-BUILT
+  # claim the code contradicts, a threshold constant with no boundary test, an endpoint
+  # constant that drifted from its manifest, and a Windows-breaking path comparison --
+  # every one of which has fired here in the last fortnight.
+  fork-safe:
+    name: Fork-safe checks (no build, no tests)
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout claustrum
+        uses: actions/checkout@v5
+
+      - name: Source scans that need no build
+        run: |
+          python3 scripts/check-doc-status.py
+          python3 scripts/check-path-rendering.py
+          python3 scripts/threshold-controls.py
+          python3 scripts/endpoint-hosts.py
+
+      - name: State what this job did NOT check
+        run: |
+          echo "Source scans only. This job did NOT build, ran no test, and did not"
+          echo "exercise the vault. The full suite needs private sibling repositories"
+          echo "that a fork PR cannot check out, so a maintainer runs scripts/gate.sh"
+          echo "on the merge candidate before it lands. Green here is necessary and"
+          echo "nowhere near sufficient."

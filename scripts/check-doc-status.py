@@ -45,13 +45,44 @@ DOCS = Path("docs")
 # But scoping to Status lines ALONE reported "0 claims checked, all honest" while a
 # real unbuilt claim sat in a heading two files over -- the vacuous pass this script's
 # own empty-enumeration guard exists to prevent, reintroduced one narrowing later.
-# Both positions, and the refusal below fires when NEITHER is present in a repo that
-# should have some.
+# Hence both positions.
+#
+# THIS COMMENT USED TO END BY CLAIMING A REFUSAL FIRES "WHEN NEITHER IS PRESENT IN A
+# REPO THAT SHOULD HAVE SOME". No such refusal was ever written. The sentence read as
+# a mechanism for a week; EXTRACTOR_CONTROL below is the mechanism, added once the
+# claim was tested rather than re-read.
 NOT_BUILT = re.compile(
     r"^\s*(?:#{1,6}\s.*|(?:\*\*)?Status:.*)(?:NOT BUILT|NOT built|NONE OF THIS IS BUILT)",
     re.MULTILINE,
 )
 MARKER = re.compile(r"<!--\s*built-when:\s*(?P<path>[^:]+)::(?P<symbol>[^\s]+)\s*-->")
+
+# POSITIVE CONTROL FOR THE EXTRACTOR ITSELF, and the reason it is here rather than
+# assumed: a scan of a corpus reports ZERO for two different causes that print the same
+# number -- the corpus genuinely holds no unbuilt claim, or the pattern stopped matching
+# the shape it was written for. Only the first is a pass. Proved on 2026-08-31 by
+# breaking NOT_BUILT so it could match nothing at all; this script printed
+#
+#     doc status: 0 NOT-BUILT claim(s) checked against their falsifier, all honest
+#
+# and exited 0 -- a confident verification claim derived from zero measurements, which
+# is the same defect an external contributor filed against this repo's test-count check.
+# Worse, the comment above ALREADY CLAIMED this refusal existed ("the refusal below
+# fires when NEITHER is present"); it did not. A described guard reads as a present one.
+#
+# A population floor would be wrong here, unlike the threshold scan: a repo where every
+# design doc has shipped legitimately has zero claims. So the control runs against fixed
+# samples instead, which separates "the extractor works" from "the corpus has none".
+#
+# The negative arm is not decoration. This pattern has been narrowed twice for
+# over-matching prose, and a control that only proves it still FINDS things would pass a
+# version that matches every sentence containing the words.
+EXTRACTOR_CONTROL: tuple[tuple[str, str, bool], ...] = (
+    ("Status line", "**Status: DESIGNED, NOT BUILT (2026-01-01).** Nothing here exists.", True),
+    ("heading", "## Status: NOT BUILT", True),
+    ("shout form", "# NONE OF THIS IS BUILT", True),
+    ("prose", "This section explains why a NOT BUILT header went stale last month.", False),
+)
 
 # THE CROSS-REPO CASE, met the first time a design doc arrived through a PR rather
 # than from this seat: the contributor's serve-contract design is the VAULT-SIDE HALF
@@ -76,7 +107,29 @@ MARKER = re.compile(r"<!--\s*built-when:\s*(?P<path>[^:]+)::(?P<symbol>[^\s]+)\s
 EXTERNAL = re.compile(r"<!--\s*built-when:\s*EXTERNAL\s+(?P<where>.*?)\s*-->", re.DOTALL)
 
 
+def check_extractor() -> list[str]:
+    """Prove the pattern still sees each shape it claims to, and still ignores prose."""
+    broken: list[str] = []
+    for label, sample, should_match in EXTRACTOR_CONTROL:
+        if bool(NOT_BUILT.search(sample)) is not should_match:
+            verb = "no longer matches" if should_match else "now matches"
+            broken.append(f"{label}: the pattern {verb} {sample!r}")
+    return broken
+
+
 def main() -> int:
+    # Before believing any count this scan produces, including zero.
+    broken = check_extractor()
+    if broken:
+        print(
+            "REFUSING: the NOT-BUILT pattern no longer behaves as documented, so every\n"
+            "    count below would be about the pattern rather than about the docs:",
+            file=sys.stderr,
+        )
+        for b in broken:
+            print(f"  - {b}", file=sys.stderr)
+        return 2
+
     if not DOCS.is_dir():
         print(f"REFUSING: no {DOCS}/ directory — run from the repo root", file=sys.stderr)
         return 2
@@ -146,7 +199,19 @@ def main() -> int:
             print(f"  - {f}\n", file=sys.stderr)
         return 1
 
-    print(f"doc status: {checked} NOT-BUILT claim(s) checked against their falsifier, all honest")
+    # Worded so a zero reads as a zero. "all honest" over an empty set is a verdict
+    # about nothing, and it is the phrasing that made the vacuous pass unreadable.
+    if checked:
+        print(
+            f"doc status: {checked} NOT-BUILT claim(s) checked against their falsifier, "
+            f"all honest (extractor control: {len(EXTRACTOR_CONTROL)} shapes verified)"
+        )
+    else:
+        print(
+            f"doc status: no NOT-BUILT claim in {len(docs)} doc(s) — nothing to falsify "
+            f"(extractor control: {len(EXTRACTOR_CONTROL)} shapes verified, so this is an "
+            f"empty corpus rather than a blind scan)"
+        )
     if externals:
         # Printed unconditionally, not hidden behind a verbose flag: these are the
         # claims this gate CANNOT check, and a reader of the output should see the

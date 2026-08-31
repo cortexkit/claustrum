@@ -588,9 +588,9 @@ it did not exist for the first incident.
 If `reactivate` is followed within minutes by another report at the new version, the
 credential is genuinely dead and `login --replace` is the repair.
 
-### The three diagnostic string vocabularies
+### The four diagnostic string vocabularies
 
-The vault has three separate string vocabularies that are easy to confuse. They live in
+The vault has four separate string vocabularies that are easy to confuse. They live in
 **different tables and columns**:
 
 #### `audit_log.op`
@@ -673,7 +673,29 @@ value from a corrupt one.
 
 Other unknown kinds may still appear (a future retirement, a fixture from a test
 harness). Treat them as diagnostics, never as audit-log operations or alarm reasons --
-the three vocabularies are separate and a value from one is not a value from another.
+the vocabularies are separate and a value from one is not a value from another.
+
+#### `auth_events.reporter_source`
+
+**Table:** `auth_events`
+
+**Column:** `reporter_source` (TEXT, nullable)
+
+This is a consumer-asserted, unverified claim about where the reported failure was
+observed. It is structurally separate from `detail`, which records what the vault
+observed. The vault accepts only this closed vocabulary; any other wire string becomes
+`unrecognised`, and the original string is never stored:
+
+| Value | Meaning |
+| --- | --- |
+| `direct` | The consumer saw the provider status on a direct response. |
+| `relay_status_field` | The consumer read a structured status field from a relay error event. |
+| `relay_message_parse` | The consumer recovered the status by parsing relay message text. |
+| `unrecognised` | The consumer supplied a source outside the vault's named vocabulary. |
+
+`NULL` means the report predates this column or the consumer omitted the optional field;
+it is normal, not invalid data. This differs from `unrecognised`, which means the consumer
+sent a value that the vault refused to store.
 
 ### Reading the chain directly
 

@@ -43,7 +43,9 @@ use rusqlite::OptionalExtension;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
-use crate::audit::{self, AlarmReason, AuditCtx, AuditEntry, AuditOp, AuditRecord, AuthEventKind};
+use crate::audit::{
+    self, AlarmReason, AuditCtx, AuditEntry, AuditOp, AuditRecord, AuthEventKind, ReporterSource,
+};
 use crate::envelope::{self, EnvelopeError, RecordBinding};
 use crate::key::{KeyId, MasterKey};
 pub use crate::record::RecordState;
@@ -231,6 +233,10 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 7,
         statements: "ALTER TABLE credentials ADD COLUMN last_github_app_permissions TEXT;",
+    },
+    Migration {
+        version: 8,
+        statements: "ALTER TABLE auth_events ADD COLUMN reporter_source TEXT;",
     },
 ];
 
@@ -2037,6 +2043,7 @@ impl EncryptedStore {
                             kind: AuthEventKind::GithubAppPermissionsChanged.as_str(),
                             provider_status: None,
                             detail: Some(&detail),
+                            reporter_source: None,
                         },
                         Some(record_version),
                         true,
@@ -2928,15 +2935,20 @@ pub fn read_auth_events_read_only(
 /// are two readers (leased and lease-free), and duplicating the pair would mean two
 /// places that have to be changed together with nothing to catch a miss.
 const AUTH_EVENTS_SELECT: &str =
-    "SELECT ts_ms, credential_id, kind, provider_status, detail, record_version, applied, \
+    "SELECT ts_ms, credential_id, kind, provider_status, detail, reporter_source, record_version, applied, \
             principal_kind, principal_id \
      FROM auth_events ORDER BY seq DESC LIMIT ?1";
 
 // A read-only CLI can run before the daemon has restarted to apply migration 4. Keep
 // its existing diagnostics readable by projecting absent principal fields as NULL.
 const AUTH_EVENTS_SELECT_PRE_PRINCIPAL: &str =
-    "SELECT ts_ms, credential_id, kind, provider_status, detail, record_version, applied, \
+    "SELECT ts_ms, credential_id, kind, provider_status, detail, NULL AS reporter_source, record_version, applied, \
             NULL AS principal_kind, NULL AS principal_id \
+     FROM auth_events ORDER BY seq DESC LIMIT ?1";
+
+const AUTH_EVENTS_SELECT_PRE_REPORTER_SOURCE: &str =
+    "SELECT ts_ms, credential_id, kind, provider_status, detail, NULL AS reporter_source, record_version, applied, \
+            principal_kind, principal_id \
      FROM auth_events ORDER BY seq DESC LIMIT ?1";
 
 fn auth_events_select(conn: &rusqlite::Connection) -> rusqlite::Result<&'static str> {
@@ -2944,10 +2956,13 @@ fn auth_events_select(conn: &rusqlite::Connection) -> rusqlite::Result<&'static 
     let columns = stmt
         .query_map([], |row| row.get::<_, String>(1))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    if columns.iter().any(|column| column == "principal_kind")
-        && columns.iter().any(|column| column == "principal_id")
-    {
+    let has_principal = columns.iter().any(|column| column == "principal_kind")
+        && columns.iter().any(|column| column == "principal_id");
+    let has_reporter_source = columns.iter().any(|column| column == "reporter_source");
+    if has_principal && has_reporter_source {
         Ok(AUTH_EVENTS_SELECT)
+    } else if has_principal {
+        Ok(AUTH_EVENTS_SELECT_PRE_REPORTER_SOURCE)
     } else {
         Ok(AUTH_EVENTS_SELECT_PRE_PRINCIPAL)
     }
@@ -2962,10 +2977,11 @@ fn auth_event_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<AuthEvent> {
         kind: r.get(2)?,
         provider_status: r.get::<_, Option<i64>>(3)?.map(|s| s as u16),
         detail: r.get(4)?,
-        record_version: r.get::<_, Option<i64>>(5)?.map(|v| v as u64),
-        applied: r.get::<_, i64>(6)? != 0,
-        principal_kind: r.get(7)?,
-        principal_id: r.get(8)?,
+        reporter_source: r.get(5)?,
+        record_version: r.get::<_, Option<i64>>(6)?.map(|v| v as u64),
+        applied: r.get::<_, i64>(7)? != 0,
+        principal_kind: r.get(8)?,
+        principal_id: r.get(9)?,
     })
 }
 
@@ -3003,6 +3019,8 @@ pub struct AuthEvent {
     pub kind: String,
     pub provider_status: Option<u16>,
     pub detail: Option<String>,
+    /// Consumer-asserted, unverified; from `ReporterSource::as_str`, never raw consumer input.
+    pub reporter_source: Option<String>,
     pub record_version: Option<u64>,
     /// Whether this observation actually changed the credential. False for a report
     /// against a superseded version, and for events that authorise no change.
@@ -3096,6 +3114,8 @@ pub struct AuthObservation<'a> {
     pub provider_status: Option<u16>,
     /// A typed variant or locally rendered safe metadata. Never response text.
     pub detail: Option<&'a str>,
+    /// Consumer-asserted, unverified; raw consumer input is unrepresentable here.
+    pub reporter_source: Option<ReporterSource>,
 }
 
 /// Append one `auth_events` row. Diagnostics only: not MAC-chained, prunable, and
@@ -3113,14 +3133,15 @@ pub(crate) fn append_auth_event_tx(
 ) -> rusqlite::Result<()> {
     tx.execute(
         "INSERT INTO auth_events \
-             (ts_ms, credential_id, kind, provider_status, detail, record_version, applied) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             (ts_ms, credential_id, kind, provider_status, detail, reporter_source, record_version, applied) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         rusqlite::params![
             now_ms(),
             credential_id,
             obs.kind,
             obs.provider_status.map(|s| s as i64),
             obs.detail,
+            obs.reporter_source.map(ReporterSource::as_str),
             record_version.map(|v| v as i64),
             applied as i64,
         ],
@@ -3783,6 +3804,7 @@ mod tests {
                         kind: "consumer_report",
                         provider_status: Some(401),
                         detail: None,
+                        reporter_source: None,
                     },
                     Some(1),
                 )
@@ -4771,6 +4793,7 @@ mod tests {
                     kind: "consumer_report_stale",
                     provider_status: Some(401),
                     detail: None,
+                    reporter_source: None,
                 },
             )
             .expect("stale report is accepted");
@@ -4818,6 +4841,7 @@ mod tests {
             kind: "consumer_report",
             provider_status: Some(401),
             detail: None,
+            reporter_source: None,
         };
 
         // Stale report against v1 while the store holds v2.
@@ -5060,6 +5084,7 @@ mod tests {
             kind: "consumer_report",
             provider_status: Some(401),
             detail: None,
+            reporter_source: None,
         };
 
         // First report at the served version: a real transition.
@@ -5133,6 +5158,7 @@ mod tests {
                     kind: "refresh_failed",
                     provider_status: Some(503),
                     detail: Some("status"),
+                    reporter_source: None,
                 },
                 Some(1),
             )
@@ -5148,6 +5174,7 @@ mod tests {
                         kind: "consumer_report",
                         provider_status: Some(401),
                         detail: None,
+                        reporter_source: None,
                     },
                     Some(1),
                 )
@@ -5273,7 +5300,7 @@ mod tests {
     fn the_newest_migration_version_is_pinned_because_the_manifest_declares_it() {
         assert_eq!(
             newest_migration_version(),
-            7,
+            8,
             "the newest migration changed. This value is DECLARED in the module manifest \
              as store_schema_version, so a supervisor comparing declared-against-actual \
              sees it. Update the literal, and note the manifest consequence."

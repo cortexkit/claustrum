@@ -133,7 +133,7 @@ credential.get { handle, min_ttl_ms?, force_refresh? }
 credential.get_many { items: [{ handle, ... }] }       (CAPPED — see §6)
 credential.status { handle? }
     →  { result: { ready, last_error_code?, lease_held } }  (non-secret health, never bytes)
-credential.report_auth_failure { handle, provider_status, record_version }
+credential.report_auth_failure { handle, provider_status, record_version, reporter_source? }
     →  { result: { accepted: true } }                   (version-CAS feedback — §7)
 ```
 
@@ -253,9 +253,10 @@ v1 mechanisms, all buildable now:
 ## 7. Revocation propagation (HIGH)
 
 The vault must not serve a dead token until `expires_at_ms`:
-- **`credential.report_auth_failure { handle, provider_status, record_version }`**
+- **`credential.report_auth_failure { handle, provider_status, record_version, reporter_source? }`**
   (read-surface, rate-limited): a consumer that gets a provider 401/403 reports the
-  exact version it used. The vault marks the record `needs_reauth` and clears any
+  exact version it used. `reporter_source` optionally names the consumer's observation
+  path; it is unverified and unknown labels are stored as `unrecognised`. The vault marks the record `needs_reauth` and clears any
   dangling refresh intent only when that version still matches. If refresh or replace
   already advanced the record, the stale report is an accepted silent no-op. This CAS
   prevents a delayed 401 for version N from killing healthy version N+1. Consumers must

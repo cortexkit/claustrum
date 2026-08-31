@@ -139,6 +139,39 @@ pub enum AuthEventKind {
     GithubAppPermissionsChanged,
 }
 
+/// The consumer-asserted, unverified source of a reported authentication failure.
+///
+/// This is separate from vault-observed `AuthEventKind` and `detail`: the vault records
+/// what the reporter claims about its own path, without vouching for that claim. The
+/// closed set ensures consumer input can never become durable plaintext.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReporterSource {
+    Direct,
+    RelayStatusField,
+    RelayMessageParse,
+    Unrecognised,
+}
+
+impl ReporterSource {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::RelayStatusField => "relay_status_field",
+            Self::RelayMessageParse => "relay_message_parse",
+            Self::Unrecognised => "unrecognised",
+        }
+    }
+
+    pub fn from_wire(value: &str) -> Self {
+        match value {
+            "direct" => Self::Direct,
+            "relay_status_field" => Self::RelayStatusField,
+            "relay_message_parse" => Self::RelayMessageParse,
+            _ => Self::Unrecognised,
+        }
+    }
+}
+
 impl AuthEventKind {
     /// The stable storage string for this authentication diagnostic kind.
     pub fn as_str(self) -> &'static str {
@@ -503,7 +536,7 @@ mod tests {
 
 #[cfg(test)]
 mod vocabulary_documentation_tests {
-    use super::{AlarmReason, AuditOp, AuthEventKind};
+    use super::{AlarmReason, AuditOp, AuthEventKind, ReporterSource};
 
     const RUNBOOK: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -666,5 +699,39 @@ mod vocabulary_documentation_tests {
             "auth_events.kind",
             value(AuthEventKind::GithubAppPermissionsChanged),
         );
+    }
+
+    #[test]
+    fn reporter_source_rejects_unrecognised_wire_values() {
+        assert_eq!(
+            ReporterSource::from_wire(&"a".repeat(40)),
+            ReporterSource::Unrecognised
+        );
+    }
+
+    #[test]
+    fn reporter_source_values_are_documented() {
+        let section = documented_subsection(
+            "#### `auth_events.reporter_source`",
+            "**Table:** `auth_events`",
+        );
+
+        fn value(source: ReporterSource) -> &'static str {
+            match source {
+                ReporterSource::Direct => ReporterSource::Direct.as_str(),
+                ReporterSource::RelayStatusField => ReporterSource::RelayStatusField.as_str(),
+                ReporterSource::RelayMessageParse => ReporterSource::RelayMessageParse.as_str(),
+                ReporterSource::Unrecognised => ReporterSource::Unrecognised.as_str(),
+            }
+        }
+
+        for source in [
+            ReporterSource::Direct,
+            ReporterSource::RelayStatusField,
+            ReporterSource::RelayMessageParse,
+            ReporterSource::Unrecognised,
+        ] {
+            assert_documented(section, "auth_events.reporter_source", value(source));
+        }
     }
 }

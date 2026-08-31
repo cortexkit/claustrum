@@ -2159,6 +2159,7 @@ fn events_discloses_that_the_retention_cap_discarded_older_rows() {
                         kind: "consumer_report",
                         provider_status: Some(401),
                         detail: None,
+                        reporter_source: None,
                     },
                     Some(1),
                 )
@@ -2172,6 +2173,7 @@ fn events_discloses_that_the_retention_cap_discarded_older_rows() {
                         kind: "consumer_report",
                         provider_status: Some(401),
                         detail: None,
+                        reporter_source: None,
                     },
                     Some(1),
                 )

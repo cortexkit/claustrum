@@ -15,7 +15,7 @@
 //!   for a route-bound reserved principal with a literal-prefix read grant.
 //! - `credential.get_many { items: [...] }` → capped at [`limiter::GET_MANY_MAX`].
 //! - `credential.status { handle? }` → non-secret health, never bytes.
-//! - `credential.report_auth_failure { handle, provider_status, record_version }` →
+//! - `credential.report_auth_failure { handle, provider_status, record_version, reporter_source? }` →
 //!   marks the token STALE on a refreshable credential so the next get REFRESHES it,
 //!   and latches `needs_reauth` only for a non-refreshable one. A refresh that then
 //!   returns `invalid_grant` latches through the path that already existed. Measured
@@ -41,7 +41,9 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-use credentials_core::audit::{AlarmReason, AuditCtx, AuditOp, AuditRecord, AuthEventKind};
+use credentials_core::audit::{
+    AlarmReason, AuditCtx, AuditOp, AuditRecord, AuthEventKind, ReporterSource,
+};
 use credentials_core::credential_id::{default_refresh_adapter, parse_credential_id};
 use credentials_core::engine::{EngineError, RefreshEngine};
 use credentials_core::health::VaultHealth;
@@ -242,6 +244,11 @@ pub struct ReportAuthFailureParams {
     /// no-op instead of falsely killing the fresh token. A consumer that omits it is
     /// rejected (`invalid_params`) rather than silently invalidating whatever is current.
     pub record_version: u64,
+    /// Optional consumer-asserted observation-path label from the closed [`ReporterSource`]
+    /// vocabulary. Unknown labels are recorded as `unrecognised`, never stored raw; older
+    /// consumers may omit this field.
+    #[serde(default)]
+    pub reporter_source: Option<String>,
 }
 
 /// A successful `get` result. `payload` is opaque to the consumer.
@@ -1118,6 +1125,10 @@ impl ReadSurface {
                 },
                 provider_status: Some(params.provider_status),
                 detail: None,
+                reporter_source: params
+                    .reporter_source
+                    .as_deref()
+                    .map(ReporterSource::from_wire),
             };
             if refreshable {
                 self.engine
@@ -1471,6 +1482,17 @@ fn map_engine_error(e: &EngineError) -> ReadError {
 #[cfg(test)]
 mod error_class_tests {
     use super::*;
+
+    #[test]
+    fn report_auth_failure_params_default_missing_reporter_source() {
+        let params: ReportAuthFailureParams = serde_json::from_value(serde_json::json!({
+            "handle": "ckh_example",
+            "provider_status": 401,
+            "record_version": 1
+        }))
+        .expect("legacy report payload remains valid");
+        assert_eq!(params.reporter_source, None);
+    }
 
     /// Golden conformance: this producer's serde wire strings for `ErrorClass` match
     /// the pinned contract set exactly (order-independent, no extras, no misses). If a

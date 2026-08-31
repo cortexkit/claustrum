@@ -67,6 +67,35 @@ pub enum Usability {
     },
     /// A manually captured session cookie. Its capture age is a staleness signal, not
     /// an expiry claim: session lifetime is not present in a request `Cookie` header.
+    ///
+    /// NO `expires_at_ms` HERE, AND THE REASON IS THE CAPTURE MECHANISM RATHER THAN THE
+    /// CREDENTIAL CLASS -- which means a decision taken elsewhere can make this field
+    /// correct to add. Recorded so the next reader does not have to re-derive it:
+    ///
+    /// A pasted `Cookie:` request header carries no expiry at all (Expires and Max-Age
+    /// are `Set-Cookie` RESPONSE attributes; the browser consumed them). Reading the
+    /// browser's own store does yield them -- but Chrome's App-Bound Encryption refuses
+    /// any non-Chrome process on Windows BY DESIGN, and Windows is the platform this
+    /// credential class exists for. So a declared expiry would be present on macOS
+    /// captures and absent on Windows ones, with nothing in the record saying which.
+    ///
+    /// That is worse than uniform absence, and not merely ambiguous: missingness
+    /// CORRELATED WITH PLATFORM biases any aggregate computed over it rather than
+    /// leaving it incomplete, and the omitted population is exactly the one the feature
+    /// exists for.
+    ///
+    /// WHAT WOULD MAKE IT CORRECT TO ADD: a capture path that yields expiry UNIFORMLY on
+    /// every platform. A browser extension is that path -- `chrome.cookies.getAll`
+    /// returns `expirationDate` and is not subject to App-Bound Encryption, because it
+    /// asks Chrome's own API rather than reading its store. If the desktop surface
+    /// adopts the extension, this variant should carry `expires_at_ms: Option<i64>` and
+    /// `ck auth put --expires-ms` becomes honest for cookies.
+    ///
+    /// EVEN THEN IT IS AN UPPER BOUND, NOT A TRUTH: `expirationDate` is the browser's
+    /// expiry, and a session can be revoked server-side long before it. That is exactly
+    /// what an operator DECLARATION means on `Static` above, so the same honest framing
+    /// applies -- it states a lifetime, it does not promise the provider still honours
+    /// the session.
     Cookie { written_at_ms: i64 },
     /// OAuth with material the engine can serve or refresh from. `expires_at_ms` is
     /// carried for display and deliberately not scored.

@@ -1215,212 +1215,33 @@ fn resolver_config_from_env(data_dir: PathBuf) -> ResolverConfig {
 /// `reserved: true` binding lives in the daemon's subc.jsonc config, not here; the
 /// module proves its reserved identity by echoing the launch nonce in HELLO.
 fn manifest(module_id: &str) -> ModuleManifest {
-    // `capabilities: None` is DELIBERATE, not an unfilled field.
+    // BUILT THROUGH THE BUILDER, NOT A STRUCT LITERAL, because subc-protocol 0.16.0
+    // made `ModuleManifest` `#[non_exhaustive]`. That migration was compile-loud -- a
+    // literal simply stops compiling -- and the point of it is that FUTURE field
+    // additions upstream will not break this module at all.
     //
-    // The protocol defines it as `Option<CapabilityDeclarations>` and states that
-    // omitting the block preserves the manifest contract used before capability
-    // grammar existed. A present block is static discovery metadata the daemon
-    // validates before accepting a HELLO, so declaring one is an opt-in that changes
-    // what the supervisor checks about this module. That should be a decision, not a
-    // field filled in to clear a compile error.
+    // THE HAZARD THE BUILDER INTRODUCES, WHICH THE COMPILER CANNOT CATCH: every optional
+    // field defaults to `None`, so a setter dropped in a later edit is a SILENT semantic
+    // change rather than a build failure. `self_signals` is the one that matters --
+    // `Some(vec![..])` and `None` are different CLAIMS (see below), and dropping the call
+    // would quietly retract the stronger one while everything still compiled and passed.
+    // Pinned by `the_self_signal_declaration_matches_what_the_refresher_actually_does`,
+    // which `expect`s Some with the reason attached.
     //
-    // WHAT WOULD MAKE IT WORTH DECLARING: a consumer that must discover this vault's
-    // route surface statically, before binding, instead of learning it from a refusal.
-    // Nothing does today. Every consumer here is configured with the credential ids or
-    // handles it needs, and the read surface is deliberately anonymous, so a discovery
-    // block would publish a menu no caller asked for.
-    ModuleManifest {
-        module_id: module_id.to_string(),
-        module_version: env!("CARGO_PKG_VERSION").to_string(),
-        protocol_ver: PROTOCOL_VERSION,
-        trust_tier: TrustTier::FirstParty,
-        capabilities: None,
-        // `provenance` carries the ONE fact this build actually knows about itself.
-        //
-        // The protocol's four fields are build_git_sha, build_lock_digest,
-        // wire_crate_version and store_schema_version, each optional, validated for shape
-        // only (non-empty, <=128 bytes, printable ASCII). So the constraint on filling
-        // them is honesty rather than syntax, and a value invented to look complete is
-        // worse than an absent one: a supervisor comparing provenance across a fleet
-        // treats a present field as a claim.
-        //
-        // WHAT IS DECLARED:
-        //   build_git_sha        from the same `BUILD_REV` that `--version` reports.
-        //                        `scripts/release-build.sh` stamps CK_BUILD_REV from a
-        //                        clean tree; an unstamped development build reports
-        //                        "unknown", and the block is omitted rather than publish
-        //                        a placeholder wearing the shape of a sha.
-        //   wire_crate_version   `SUBC_PROTOCOL_CRATE_VERSION`, which subc-protocol bakes
-        //                        in from its own `env!("CARGO_PKG_VERSION")`
-        //                        (subc-protocol/src/lib.rs:133). It names the wire crate
-        //                        compiled INTO this binary, so unlike a hand-copied string
-        //                        it cannot drift from what it names. Distinct from
-        //                        `module_version` above, which is this module's own
-        //                        version and says nothing about the wire it speaks.
-        //
-        // WHAT IS NOT, and why each is absent rather than forgotten:
-        //   build_lock_digest    nothing hashes Cargo.lock at build time today. Adding
-        //                        it is a release-script change, not a manifest one.
-        //
-        // store_schema_version is DERIVED, never typed. `newest_migration_version()`
-        // reads the migration list, so this declaration cannot drift from the schema it
-        // describes -- and drift was the live hazard, not a hypothetical: the issue
-        // asking for the accessor cited 6, this comment used to say 6, and the list
-        // already held 7. Both were true when written.
-        //
-        // DO NOT fill it from `RECORD_SCHEMA_VERSION`. That constant is public, is a
-        // compile-time integer, and names the encrypted record BODY schema -- a
-        // different domain that reads 1. It would be a WELL-FORMED value from the WRONG
-        // DOMAIN, which every check on this path (non-empty, <=128 bytes, printable
-        // ASCII) accepts, and which is worse than absence because a present field stops
-        // the reader asking.
-        provenance: {
-            let rev = credentials_core::contract::BUILD_REV;
-            (rev != "unknown").then(|| ManifestProvenance {
-                build_git_sha: Some(rev.to_string()),
-                build_lock_digest: None,
-                wire_crate_version: Some(SUBC_PROTOCOL_CRATE_VERSION.to_string()),
-                store_schema_version: Some(
-                    credentials_core::store::newest_migration_version().to_string(),
-                ),
-            })
-        },
-        // ONE periodic behaviour exists in this daemon, and the list is exhaustive by
-        // inspection rather than recollection: every `interval`/`sleep` outside
-        // `#[cfg(test)]` was enumerated, and the only non-test tick is the health
-        // refresher. The per-connection spawn is event-driven, not periodic.
-        //
-        // `Some(vec![..])` NOT `None`, and the difference is the whole value: an
-        // exhaustive list also states what is ABSENT. This module generates NO periodic
-        // traffic against any provider -- refresh is strictly demand-driven, dispatched
-        // by a caller's `credential.get` and never by a timer of mine. An analyst seeing
-        // rhythmic token traffic attributed to this vault is looking at a consumer's
-        // poll; `None` would leave that question open.
-        self_signals: Some(vec![SelfSignalDeclaration {
-            name: "health_snapshot_refresh".to_string(),
-            kind: SelfSignalKind::Poller,
-            // Observe is load-bearing here: this task runs a no-decrypt metadata scan,
-            // an open-intent count and the audit-tip read. It writes nothing.
-            effect: SelfSignalEffect::Observe,
-            anchored_to: SignalAnchor::FixedInterval,
-            // DERIVED from the constant the ticker actually uses, so the declaration
-            // cannot drift from the cadence in force.
-            cadence: Some(SignalCadence::Literal {
-                interval_ms: HEALTH_REFRESH_INTERVAL.as_millis() as u64,
-            }),
-            domain: Some("vault-store".to_string()),
-            // The composition is what an operator gets wrong: worst-case staleness of a
-            // served snapshot is THIS interval plus the supervisor's probe cadence, not
-            // either alone.
-            note: Some(
-                "recomputes the cached health snapshot off the probe path, so a \
-                 HealthCheck reply touches no database"
-                    .to_string(),
-            ),
-        }]),
-        provides: vec![ProviderRole::ManagementSurface {
-            // ModuleManaged, and this is a claim about observed behaviour rather than
-            // the value that compiles. All three would.
-            //
-            // NOT Serial: one in-flight call at a time would be a lie and an
-            // expensive one. A `get` that triggers an OAuth refresh blocks on a
-            // provider's token endpoint for hundreds of milliseconds, and every other
-            // consumer's read of an unrelated credential would queue behind it.
-            //
-            // NOT StatelessParallel: this surface has ordering-sensitive state.
-            // Credential-scoped admin mutations serialize under
-            // RefreshEngine::with_admin_lock so they cannot interleave with a refresh
-            // of the same credential, and concurrent gets on one credential are
-            // coalesced by the engine's per-credential single-flight lock rather than
-            // each firing its own token exchange.
-            //
-            // ModuleManaged says exactly what is true: calls may arrive concurrently
-            // across channels, and THIS MODULE decides what may overlap -- which it
-            // does per credential id, not per connection.
-            //
-            // BOTH HALVES OF THE CLAIM REST ON TESTS RATHER THAN ON THIS COMMENT,
-            // in credentials-core/src/engine_tests.rs:
-            //
-            //   `concurrent_gets_single_flight_one_upstream_call` -- the module
-            //   schedules internally: concurrent gets on ONE credential produce
-            //   exactly ONE upstream token exchange. Delete the coalescing and each
-            //   caller fires its own refresh, so the module schedules nothing.
-            //
-            //   `refreshes_on_different_credentials_overlap_rather_than_serialising`
-            //   -- calls may overlap ACROSS credentials. Key the single-flight map
-            //   globally instead of per credential and this surface is secretly
-            //   Serial; the first test still passes, because it never touches a
-            //   second credential.
-            //
-            // The second test was missing until 2026-08-16, so half of this
-            // declaration was decoration. Both are proofs by construction: one counts
-            // upstream calls, the other blocks each refresh on a two-party barrier so
-            // a serialising engine HANGS rather than passing slowly.
-            //
-            // DECLARING IT EXPLICITLY CHANGES NOTHING ON THE WIRE TODAY, and that is
-            // worth knowing before someone treats a protocol bump as deploy pressure.
-            // `ManagementSurface.concurrency` carries `#[serde(default)]` upstream and
-            // `Default for Concurrency` is `ModuleManaged`, so a daemon built before the
-            // field existed registers with the same value this line states. Checked at
-            // source 2026-08-16 against subc-protocol 0.12 (ToolProvider has NO default
-            // -- new roles must declare it; only the pre-existing shape is defaulted).
-            //
-            // So an older deployed vault is safe across a supervisor upgrade: it neither
-            // fails to register nor gets a different concurrency contract. The value of
-            // saying it out loud is that the manifest stops depending on an upstream
-            // default staying what it is.
-            concurrency: Concurrency::ModuleManaged,
-            operations: vec![
-                ManagementOperation {
-                    name: OP_GET.to_string(),
-                    description: Some("Serve a credential's secret bytes to the holder of a capability handle. Refuses signing keys.".to_string()),
-                    kind: ManagementOperationKind::Query,
-                },
-                ManagementOperation {
-                    name: OP_GET_SCOPED.to_string(),
-                    description: Some("Serve a credential's secret bytes by id to a reserved principal holding a read grant. Refuses signing keys.".to_string()),
-                    kind: ManagementOperationKind::Query,
-                },
-                ManagementOperation {
-                    name: OP_GET_MANY.to_string(),
-                    description: Some("Serve a capped batch of handle-addressed credentials, refusing the whole batch past the cap.".to_string()),
-                    kind: ManagementOperationKind::Query,
-                },
-                ManagementOperation {
-                    name: OP_STATUS.to_string(),
-                    description: Some("Report a credential's non-secret readiness and record version. Never returns bytes.".to_string()),
-                    kind: ManagementOperationKind::Query,
-                },
-                // Query rather than Mutation: signing reads a stored key and returns a
-                // derived value, changing NO vault state -- no version bump, no audit
-                // mutation, nothing to reconcile after a crash. The authority it
-                // exercises is real, but authority and mutation are different axes and
-                // the manifest kind describes the second.
-                ManagementOperation {
-                    name: OP_SIGN.to_string(),
-                    description: Some("Sign caller-supplied bytes with a stored signing key. The key never leaves the vault.".to_string()),
-                    kind: ManagementOperationKind::Query,
-                },
-                // Query rather than Mutation for the same reason as `credential.sign`:
-                // this derives public bytes from a stored key without writing a record
-                // or appending to the audit chain, so callers may publish on demand.
-                ManagementOperation {
-                    name: OP_PUBLIC_KEY.to_string(),
-                    description: Some("Return a signing key's public half. Never returns private material.".to_string()),
-                    kind: ManagementOperationKind::Query,
-                },
-                ManagementOperation {
-                    name: OP_REPORT_AUTH_FAILURE.to_string(),
-                    description: Some("Accept a consumer's report that a served token was refused, at the version it was served.".to_string()),
-                    kind: ManagementOperationKind::Mutate,
-                },
-            ],
-            config_schema: json!({ "type": "object" }),
-            observability: Vec::new(),
-            identity_scope: Vec::new(),
-        }],
-        consumes: Vec::new(),
-        bindings: Bindings {
+    // So EVERY optional field is set EXPLICITLY below, including the one whose value
+    // equals the builder's default. A deliberate absence expressed by omission reads as
+    // an absence nobody considered, and it takes its explaining comment with it when it
+    // goes.
+    //
+    // `protocol_ver` is the deliberate exception: the builder bakes in the
+    // `PROTOCOL_VERSION` of the crate compiled into this binary, which is strictly better
+    // than restating it here, because a restatement is a second place that can disagree
+    // with the wire it names.
+    ModuleManifest::builder(
+        module_id.to_string(),
+        env!("CARGO_PKG_VERSION").to_string(),
+        TrustTier::FirstParty,
+        Bindings {
             storage: StorageBinding {
                 kind: StorageKind::Sqlite,
                 scope: StorageScope::Project,
@@ -1432,7 +1253,206 @@ fn manifest(module_id: &str) -> ModuleManifest {
                 optional: Vec::new(),
             },
         },
-    }
+    )
+    // `capabilities(None)` is DELIBERATE, not an unfilled field.
+    //
+    // The protocol defines it as `Option<CapabilityDeclarations>` and states that
+    // omitting the block preserves the manifest contract used before capability grammar
+    // existed. A present block is static discovery metadata the daemon validates before
+    // accepting a HELLO, so declaring one is an opt-in that changes what the supervisor
+    // checks about this module. That should be a decision, not a field filled in to clear
+    // a compile error.
+    //
+    // WHAT WOULD MAKE IT WORTH DECLARING: a consumer that must discover this vault's
+    // route surface statically, before binding, instead of learning it from a refusal.
+    // Nothing does today. Every consumer here is configured with the credential ids or
+    // handles it needs, and the read surface is deliberately anonymous, so a discovery
+    // block would publish a menu no caller asked for.
+    .capabilities(None)
+    // `provenance` carries the ONE fact this build actually knows about itself.
+    //
+    // The protocol's four fields are build_git_sha, build_lock_digest, wire_crate_version
+    // and store_schema_version, each optional, validated for shape only (non-empty, <=128
+    // bytes, printable ASCII). So the constraint on filling them is honesty rather than
+    // syntax, and a value invented to look complete is worse than an absent one: a
+    // supervisor comparing provenance across a fleet treats a present field as a claim.
+    //
+    // WHAT IS DECLARED:
+    //   build_git_sha        from the same `BUILD_REV` that `--version` reports.
+    //                        `scripts/release-build.sh` stamps CK_BUILD_REV from a clean
+    //                        tree; an unstamped development build reports "unknown", and
+    //                        the block is omitted rather than publish a placeholder
+    //                        wearing the shape of a sha.
+    //   wire_crate_version   `SUBC_PROTOCOL_CRATE_VERSION`, which subc-protocol bakes in
+    //                        from its own `env!("CARGO_PKG_VERSION")`. It names the wire
+    //                        crate compiled INTO this binary, so unlike a hand-copied
+    //                        string it cannot drift from what it names. Distinct from
+    //                        `module_version` above, which is this module's own version
+    //                        and says nothing about the wire it speaks.
+    //
+    // WHAT IS NOT, and why it is absent rather than forgotten:
+    //   build_lock_digest    nothing hashes Cargo.lock at build time today. Adding it is
+    //                        a release-script change, not a manifest one.
+    //
+    // store_schema_version is DERIVED, never typed. `newest_migration_version()` reads the
+    // migration list, so this declaration cannot drift from the schema it describes -- and
+    // drift was the live hazard, not a hypothetical: the issue asking for the accessor
+    // cited 6, this comment used to say 6, and the list already held 7. Both were true
+    // when written.
+    //
+    // DO NOT fill it from `RECORD_SCHEMA_VERSION`. That constant is public, is a
+    // compile-time integer, and names the encrypted record BODY schema -- a different
+    // domain that reads 1. It would be a WELL-FORMED value from the WRONG DOMAIN, which
+    // every check on this path (non-empty, <=128 bytes, printable ASCII) accepts, and
+    // which is worse than absence because a present field stops the reader asking.
+    .provenance({
+        let rev = credentials_core::contract::BUILD_REV;
+        (rev != "unknown").then(|| ManifestProvenance {
+            build_git_sha: Some(rev.to_string()),
+            build_lock_digest: None,
+            wire_crate_version: Some(SUBC_PROTOCOL_CRATE_VERSION.to_string()),
+            store_schema_version: Some(
+                credentials_core::store::newest_migration_version().to_string(),
+            ),
+        })
+    })
+    // ONE periodic behaviour exists in this daemon, and the list is exhaustive by
+    // inspection rather than recollection: every `interval`/`sleep` outside `#[cfg(test)]`
+    // was enumerated, and the only non-test tick is the health refresher. The
+    // per-connection spawn is event-driven, not periodic.
+    //
+    // `Some(vec![..])` NOT `None`, and the difference is the whole value: an exhaustive
+    // list also states what is ABSENT. This module generates NO periodic traffic against
+    // any provider -- refresh is strictly demand-driven, dispatched by a caller's
+    // `credential.get` and never by a timer of mine. An analyst seeing rhythmic token
+    // traffic attributed to this vault is looking at a consumer's poll; `None` would leave
+    // that question open.
+    .self_signals(Some(vec![SelfSignalDeclaration {
+        name: "health_snapshot_refresh".to_string(),
+        kind: SelfSignalKind::Poller,
+        // Observe is load-bearing here: this task runs a no-decrypt metadata scan, an
+        // open-intent count and the audit-tip read. It writes nothing.
+        effect: SelfSignalEffect::Observe,
+        anchored_to: SignalAnchor::FixedInterval,
+        // DERIVED from the constant the ticker actually uses, so the declaration cannot
+        // drift from the cadence in force.
+        cadence: Some(SignalCadence::Literal {
+            interval_ms: HEALTH_REFRESH_INTERVAL.as_millis() as u64,
+        }),
+        domain: Some("vault-store".to_string()),
+        // The composition is what an operator gets wrong: worst-case staleness of a served
+        // snapshot is THIS interval plus the supervisor's probe cadence, not either alone.
+        note: Some(
+            "recomputes the cached health snapshot off the probe path, so a \
+             HealthCheck reply touches no database"
+                .to_string(),
+        ),
+    }]))
+    .provides(vec![ProviderRole::ManagementSurface {
+        // ModuleManaged, and this is a claim about observed behaviour rather than the
+        // value that compiles. All three would.
+        //
+        // NOT Serial: one in-flight call at a time would be a lie and an expensive one. A
+        // `get` that triggers an OAuth refresh blocks on a provider's token endpoint for
+        // hundreds of milliseconds, and every other consumer's read of an unrelated
+        // credential would queue behind it.
+        //
+        // NOT StatelessParallel: this surface has ordering-sensitive state.
+        // Credential-scoped admin mutations serialize under
+        // RefreshEngine::with_admin_lock so they cannot interleave with a refresh of the
+        // same credential, and concurrent gets on one credential are coalesced by the
+        // engine's per-credential single-flight lock rather than each firing its own token
+        // exchange.
+        //
+        // ModuleManaged says exactly what is true: calls may arrive concurrently across
+        // channels, and THIS MODULE decides what may overlap -- which it does per
+        // credential id, not per connection.
+        //
+        // BOTH HALVES OF THE CLAIM REST ON TESTS RATHER THAN ON THIS COMMENT, in
+        // credentials-core/src/engine_tests.rs:
+        //
+        //   `concurrent_gets_single_flight_one_upstream_call` -- the module schedules
+        //   internally: concurrent gets on ONE credential produce exactly ONE upstream
+        //   token exchange. Delete the coalescing and each caller fires its own refresh,
+        //   so the module schedules nothing.
+        //
+        //   `refreshes_on_different_credentials_overlap_rather_than_serialising` -- calls
+        //   may overlap ACROSS credentials. Key the single-flight map globally instead of
+        //   per credential and this surface is secretly Serial; the first test still
+        //   passes, because it never touches a second credential.
+        //
+        // The second test was missing until 2026-08-16, so half of this declaration was
+        // decoration. Both are proofs by construction: one counts upstream calls, the
+        // other blocks each refresh on a two-party barrier so a serialising engine HANGS
+        // rather than passing slowly.
+        //
+        // DECLARING IT EXPLICITLY CHANGES NOTHING ON THE WIRE TODAY, and that is worth
+        // knowing before someone treats a protocol bump as deploy pressure.
+        // `ManagementSurface.concurrency` carries `#[serde(default)]` upstream and
+        // `Default for Concurrency` is `ModuleManaged`, so a daemon built before the field
+        // existed registers with the same value this line states. Checked at source
+        // 2026-08-16 against subc-protocol 0.12 (ToolProvider has NO default -- new roles
+        // must declare it; only the pre-existing shape is defaulted).
+        //
+        // So an older deployed vault is safe across a supervisor upgrade: it neither fails
+        // to register nor gets a different concurrency contract. The value of saying it
+        // out loud is that the manifest stops depending on an upstream default staying
+        // what it is.
+        concurrency: Concurrency::ModuleManaged,
+        operations: vec![
+            ManagementOperation {
+                name: OP_GET.to_string(),
+                description: Some("Serve a credential's secret bytes to the holder of a capability handle. Refuses signing keys.".to_string()),
+                kind: ManagementOperationKind::Query,
+            },
+            ManagementOperation {
+                name: OP_GET_SCOPED.to_string(),
+                description: Some("Serve a credential's secret bytes by id to a reserved principal holding a read grant. Refuses signing keys.".to_string()),
+                kind: ManagementOperationKind::Query,
+            },
+            ManagementOperation {
+                name: OP_GET_MANY.to_string(),
+                description: Some("Serve a capped batch of handle-addressed credentials, refusing the whole batch past the cap.".to_string()),
+                kind: ManagementOperationKind::Query,
+            },
+            ManagementOperation {
+                name: OP_STATUS.to_string(),
+                description: Some("Report a credential's non-secret readiness and record version. Never returns bytes.".to_string()),
+                kind: ManagementOperationKind::Query,
+            },
+            // Query rather than Mutation: signing reads a stored key and returns a derived
+            // value, changing NO vault state -- no version bump, no audit mutation,
+            // nothing to reconcile after a crash. The authority it exercises is real, but
+            // authority and mutation are different axes and the manifest kind describes
+            // the second.
+            ManagementOperation {
+                name: OP_SIGN.to_string(),
+                description: Some("Sign caller-supplied bytes with a stored signing key. The key never leaves the vault.".to_string()),
+                kind: ManagementOperationKind::Query,
+            },
+            // Query rather than Mutation for the same reason as `credential.sign`: this
+            // derives public bytes from a stored key without writing a record or appending
+            // to the audit chain, so callers may publish on demand.
+            ManagementOperation {
+                name: OP_PUBLIC_KEY.to_string(),
+                description: Some("Return a signing key's public half. Never returns private material.".to_string()),
+                kind: ManagementOperationKind::Query,
+            },
+            ManagementOperation {
+                name: OP_REPORT_AUTH_FAILURE.to_string(),
+                description: Some("Accept a consumer's report that a served token was refused, at the version it was served.".to_string()),
+                kind: ManagementOperationKind::Mutate,
+            },
+        ],
+        config_schema: json!({ "type": "object" }),
+        observability: Vec::new(),
+        identity_scope: Vec::new(),
+    }])
+    // Empty AND explicit. This module consumes no other module's surface, and an empty
+    // `consumes` is the tripwire that says so: a capability arriving here later has to
+    // pass through this line.
+    .consumes(Vec::new())
+    .build()
 }
 
 fn parse_subc_arg(

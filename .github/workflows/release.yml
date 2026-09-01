@@ -157,16 +157,21 @@ jobs:
               || { echo "REFUSING: $b did not take the pinned identifier"; exit 1; }
           done
 
-      # UNVERIFIED ON WINDOWS: this step and the verify step below use `zip`/`unzip` from
-      # the bash shim, and I have no evidence either way that they exist on the windows
-      # runner. I checked the runner image readme and found no mention -- then controlled
-      # that read and found it lists no shell utilities AT ALL (`tar`, `curl` and `zip`
-      # all read zero), so the absence was a fact about the document, not the runner.
+      # ANSWERED BY THE FIRST RUN: Git Bash on the windows runner has NO `zip`.
       #
-      # Shipping it anyway is a deliberate choice, not an oversight, and the draft
-      # mechanism is what makes it safe: if windows cannot archive, that leg fails, the
-      # publish job is skipped, and the release stays a draft nobody installs from. The
-      # first real run answers the question that no amount of reading will.
+      #   D:\a\_temp\....sh: line 7: zip: command not found   exit 127
+      #
+      # I had shipped this flagged as unverified, having tried to settle it by grepping
+      # the runner image readme -- which returned zero and meant nothing, because that
+      # readme lists no shell utilities at all (`tar`, `curl`, `zip` all read zero). The
+      # draft mechanism is what made shipping the unknown safe: windows failed, publish
+      # was skipped, and the release sat as a draft with 8 of 12 assets instead of
+      # publishing incomplete.
+      #
+      # The fix is tool DETECTION rather than a platform branch, because the platform is
+      # not the fact that matters -- the available archiver is. `pick_archiver` tries
+      # zip, then 7z (present on the windows image), then PowerShell's Compress-Archive,
+      # and REFUSES loudly if none exist rather than silently skipping the asset.
       #
       # The sidecar is the hex sha256 OF THE ZIP BYTES, written beside the zip under the
       # same stem. Computed after the zip exists and verified against it here rather than
@@ -176,12 +181,26 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # $1 = zip name, $2 = file, run from inside the directory holding both.
+          make_zip() {
+            if command -v zip >/dev/null 2>&1; then
+              zip -q "$1" "$2"
+            elif command -v 7z >/dev/null 2>&1; then
+              7z a -tzip -bso0 -bsp0 "$1" "$2" >/dev/null
+            elif command -v powershell >/dev/null 2>&1; then
+              powershell -NoProfile -NonInteractive -Command \
+                "Compress-Archive -Path '$2' -DestinationPath '$1' -Force"
+            else
+              echo "REFUSING: no archiver on this runner (tried zip, 7z, powershell)" >&2
+              exit 1
+            fi
+          }
           out="dist"; mkdir -p "$out"
           ext=""; [ "${{ matrix.asset_os }}" = "windows" ] && ext=".exe"
           for b in ck-claustrum ck-auth; do
             name="$b-${{ matrix.asset_os }}-${{ matrix.asset_arch }}"
             cp "target/release/$b$ext" "$out/$b$ext"
-            (cd "$out" && zip -q "$name.zip" "$b$ext" && rm -f "$b$ext")
+            (cd "$out" && make_zip "$name.zip" "$b$ext" && rm -f "$b$ext")
             if command -v shasum >/dev/null 2>&1; then
               (cd "$out" && shasum -a 256 "$name.zip" | awk '{print $1}' > "$name.zip.sha256")
             else
@@ -210,9 +229,23 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Same detection shape as packaging: the archiver, not the platform, is the fact.
+          extract() {
+            if command -v unzip >/dev/null 2>&1; then
+              unzip -qo "$1"
+            elif command -v 7z >/dev/null 2>&1; then
+              7z x -y -bso0 -bsp0 "$1" >/dev/null
+            elif command -v powershell >/dev/null 2>&1; then
+              powershell -NoProfile -NonInteractive -Command \
+                "Expand-Archive -Path '$1' -DestinationPath . -Force"
+            else
+              echo "REFUSING: no extractor on this runner (tried unzip, 7z, powershell)" >&2
+              exit 1
+            fi
+          }
           ext=""; [ "${{ matrix.asset_os }}" = "windows" ] && ext=".exe"
           t=$(mktemp -d); cp dist/*.zip "$t/"
-          (cd "$t" && for z in *.zip; do unzip -qo "$z"; done)
+          (cd "$t" && for z in *.zip; do extract "$z"; done)
           for b in ck-claustrum ck-auth; do
             v=$("$t/$b$ext" --version)
             echo "$b -> $v"

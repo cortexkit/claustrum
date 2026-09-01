@@ -41,6 +41,10 @@ async fn main() {
     let mut show_claims = false;
     let mut report_auth_failure = false;
     let mut status = false;
+    let mut reporter_source: Option<String> = None;
+    // Repeatable: `--status-id A --status-id B` compares two scoped answers in ONE bind,
+    // because the anti-enumeration property is about whether two bodies agree.
+    let mut status_ids: Option<Vec<String>> = None;
     let mut sign_payload: Option<String> = None;
     let mut sign_payload_bytes: Option<Vec<u8>> = None;
     let mut public_key = false;
@@ -110,6 +114,16 @@ async fn main() {
             // itself -- it asks whether the right bytes are in the right place, never
             // whether a behaviour is reachable.
             "--status" => status = true,
+            "--reporter-source" => {
+                reporter_source = args.next();
+            }
+            "--status-id" => {
+                let id = args.next().unwrap_or_else(|| {
+                    eprintln!("vault_read_probe: --status-id needs a credential id");
+                    std::process::exit(2);
+                });
+                status_ids.get_or_insert_with(Vec::new).push(id);
+            }
             "--sign" => sign_payload = args.next(),
             // SIGN THE FILE'S EXACT BYTES, never a shell-quoted copy of them.
             //
@@ -248,6 +262,7 @@ async fn main() {
             &handle,
             provider_status,
             version,
+            reporter_source.as_deref(),
         )
         .await;
         let parsed: Value = serde_json::from_slice(&body.body).unwrap_or(Value::Null);
@@ -258,18 +273,57 @@ async fn main() {
         return;
     }
 
-    if public_key || status || sign_payload.is_some() || sign_payload_bytes.is_some() {
+    if public_key
+        || status
+        || status_ids.is_some()
+        || sign_payload.is_some()
+        || sign_payload_bytes.is_some()
+    {
         // Both halves in one run when both are asked for, because the useful assertion
         // is that they AGREE: a signature that verifies under the returned key proves
         // the two ops name the same keypair. Either alone proves only that an op
         // answered, which is the weaker claim that let this gap exist.
         if status {
-            let body = credential_status(&mut stream, route_channel, route_epoch, &handle).await;
+            let body =
+                credential_status(&mut stream, route_channel, route_epoch, &handle, None, 12).await;
             let parsed: Value = serde_json::from_slice(&body.body).unwrap_or(Value::Null);
             eprintln!(
                 "[probe] status -> {}",
                 serde_json::to_string(&parsed).unwrap_or_default()
             );
+        }
+        // Two ids, one bind, printed together: the property is a COMPARISON, and a probe
+        // that printed one body per invocation would leave the operator eyeballing two
+        // runs for equality -- which is how a difference gets missed.
+        if let Some(ids) = status_ids.as_ref() {
+            let mut bodies: Vec<String> = Vec::new();
+            for (n, id) in ids.iter().enumerate() {
+                // Distinct correlation ids so the reply matcher cannot pair the second
+                // answer with the first frame -- which would make two different bodies
+                // read as identical, the exact way this comparison could lie.
+                let corr = 40u64 + n as u64;
+                let body = credential_status(
+                    &mut stream,
+                    route_channel,
+                    route_epoch,
+                    &handle,
+                    Some(id),
+                    corr,
+                )
+                .await;
+                let parsed: Value = serde_json::from_slice(&body.body).unwrap_or(Value::Null);
+                let rendered = serde_json::to_string(&parsed).unwrap_or_default();
+                eprintln!("[probe] status(id={id}) -> {rendered}");
+                bodies.push(rendered);
+            }
+            if bodies.len() >= 2 {
+                let identical = bodies.windows(2).all(|w| w[0] == w[1]);
+                eprintln!(
+                    "[probe] scoped-status bodies identical: {identical}  <- must be true \
+                     for ids this principal cannot reach; a difference is an enumeration \
+                     oracle, not a cosmetic one"
+                );
+            }
         }
         if public_key {
             let body =
@@ -325,21 +379,38 @@ async fn main() {
 /// It exists here specifically to compare `status` against the VERB on the same handle.
 /// A status surface that disagrees with the operation it describes is worse than no
 /// status surface — it tells a caller the thing will work and the call then refuses.
+/// `--status-id` addresses `status` the way `get_scoped` is addressed, and it exists
+/// because A NEW ADDRESSING NEEDS ITS PROBE ARM IN THE SAME CHANGE. Without it the
+/// deploy that shipped scoped status could not be acceptance-tested at all from an
+/// operator terminal -- the identical gap the comment above records for `sign` and
+/// `public_key`, reintroduced one addressing later.
+///
+/// From an UNGRANTED bind it exercises the anti-enumeration property rather than the
+/// happy path: an uncovered id and an unknown id must return BYTE-IDENTICAL bodies. If
+/// they ever differ, the surface has become an oracle for which credential ids exist,
+/// which is a stop-the-deploy finding rather than a cosmetic one. The happy path needs
+/// the granted principal and belongs to that consumer's seat.
 async fn credential_status(
     stream: &mut TcpStream,
     route_channel: u16,
     route_epoch: u32,
     handle: &str,
+    credential_id: Option<&str>,
+    corr: u64,
 ) -> Frame {
+    let params = match credential_id {
+        Some(id) => json!({ "credential_id": id }),
+        None => json!({ "handle": handle }),
+    };
     let frame = Frame::build(
         FrameType::Request,
         Flags::new(false, Priority::Interactive, false),
         route_channel,
         route_epoch,
-        12,
+        corr,
         serde_json::to_vec(&json!({
             "method": "credential.status",
-            "params": { "handle": handle },
+            "params": params,
         }))
         .unwrap(),
     )
@@ -347,7 +418,7 @@ async fn credential_status(
     write_frame(stream, &frame).await.unwrap();
     loop {
         let frame = read_frame_timeout(stream).await;
-        if frame.header.corr == 12
+        if frame.header.corr == corr
             && matches!(frame.header.ty, FrameType::Response | FrameType::Error)
         {
             return frame;
@@ -521,12 +592,19 @@ async fn credential_report_auth_failure(
     handle: &str,
     provider_status: u16,
     record_version: u64,
+    reporter_source: Option<&str>,
 ) -> Frame {
-    let params = json!({
+    let mut params = json!({
         "handle": handle,
         "provider_status": provider_status,
         "record_version": record_version,
     });
+    // Absent unless asked for, because ABSENT IS THE CONTRACT for every consumer that
+    // predates the field: a probe that always sent it would prove the accepting path
+    // and say nothing about whether omitting it still works.
+    if let Some(src) = reporter_source {
+        params["reporter_source"] = json!(src);
+    }
     let frame = Frame::build(
         FrameType::Request,
         Flags::new(false, Priority::Interactive, false),

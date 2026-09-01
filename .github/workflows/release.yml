@@ -1,0 +1,172 @@
+name: Release
+
+# TAG-TRIGGERED, AND THE ASSETS ARE BUILT ON THE PLATFORM THEY RUN ON. That is not a
+# convenience: this workspace links `ring`, whose x86-64 routines are hand-written
+# perlasm, and a cross-build from a darwin laptop failed at link with every one of those
+# symbols undefined (bn_mul_mont_nohw, bn_gather5, gcm_init_avx) after the C half had
+# already compiled cleanly through a zig shim. A native runner has no shim, no cross
+# toolchain, and no assembly question, because it IS the target.
+#
+# For a CREDENTIAL VAULT specifically that also removes the whole "it built on the
+# maintainer's laptop" class from the artifact anyone installs.
+on:
+  push:
+    tags:
+      - "v*"
+  # Manual, so a release can be re-cut when a tag already exists (a dropped webhook, or
+  # assets re-uploaded after a workflow fix) without inventing a throwaway tag.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and upload assets for"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  assets:
+    name: ${{ matrix.asset_os }}-${{ matrix.asset_arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      # NEVER fail-fast. One platform failing must not cancel the others: a release with
+      # two of three assets is incomplete and installable, while a release with zero is
+      # neither. The absent one reads as "not yet published for that platform", which the
+      # installer treats as temporal rather than as a failed install.
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            asset_os: darwin
+            asset_arch: arm64
+          - runner: ubuntu-latest
+            asset_os: linux
+            asset_arch: x64
+          - runner: windows-latest
+            asset_os: windows
+            asset_arch: x64
+    defaults:
+      run:
+        working-directory: claustrum
+    steps:
+      - name: Checkout claustrum
+        uses: actions/checkout@v5
+        with:
+          path: claustrum
+          ref: ${{ inputs.tag || github.ref }}
+
+      # Same private-sibling preamble as ci.yml: cargo loads the whole workspace manifest
+      # (including the path-deps on cortexkit/subconscious and cortexkit/commons) before
+      # resolving any package, so both must be present or the build dies at manifest-load.
+      # A tag push is never a fork event, so the secret is in scope here.
+      - name: Mint cross-repo read token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.CK_CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CK_CI_APP_PRIVATE_KEY }}
+          owner: cortexkit
+          repositories: subconscious,commons
+
+      - name: Checkout subconscious
+        uses: actions/checkout@v5
+        with:
+          repository: cortexkit/subconscious
+          path: subconscious
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Checkout commons
+        uses: actions/checkout@v5
+        with:
+          repository: cortexkit/commons
+          path: commons
+          token: ${{ steps.app-token.outputs.token }}
+
+      # CK_BUILD_REV IS THE POINT OF THIS STEP, and it is here because hand-building the
+      # first alpha assets without it produced two binaries that answered `--version` with
+      # "0.1.0 (unknown)". A vault that cannot name its own revision fails the first leg of
+      # every acceptance ladder, and the operator has no way to tell which build they hold.
+      # --locked so the published artifact resolves the committed lockfile, never a drifted one.
+      - name: Build release binaries
+        shell: bash
+        env:
+          CK_BUILD_REV: ${{ github.sha }}
+        run: cargo build --locked --release --bin ck-claustrum --bin ck-auth
+
+      # Ad-hoc signature with the PINNED identifier. Default ad-hoc signing derives an
+      # identifier containing the Mach-O LC_UUID, which changes on every link, and on this
+      # fleet that silently revokes macOS privacy grants keyed to the old identifier.
+      # Pinning it keeps one stable identity across builds.
+      #
+      # NOT NOTARIZED. Gatekeeper only assesses files carrying a quarantine xattr, which
+      # the `curl | sh` install path never applies (curl does not opt into quarantine, and
+      # CLI unzip propagates none) -- measured, with a positive control proving the checker
+      # can see the attribute when it is present. A BROWSER-downloaded zip is quarantined
+      # and will be refused until a Developer ID cert exists.
+      - name: Sign with pinned identifiers (macOS)
+        if: matrix.asset_os == 'darwin'
+        run: |
+          for b in ck-claustrum ck-auth; do
+            codesign --force --sign - --identifier "$b" "target/release/$b"
+            codesign -dv "target/release/$b" 2>&1 | grep -q "Identifier=$b" \
+              || { echo "REFUSING: $b did not take the pinned identifier"; exit 1; }
+          done
+
+      # The sidecar is the hex sha256 OF THE ZIP BYTES, written beside the zip under the
+      # same stem. Computed after the zip exists and verified against it here rather than
+      # trusted: a digest that does not describe its own artifact is worse than none,
+      # because the installer's integrity check would pass on the wrong file.
+      - name: Package assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="dist"; mkdir -p "$out"
+          ext=""; [ "${{ matrix.asset_os }}" = "windows" ] && ext=".exe"
+          for b in ck-claustrum ck-auth; do
+            name="$b-${{ matrix.asset_os }}-${{ matrix.asset_arch }}"
+            cp "target/release/$b$ext" "$out/$b$ext"
+            (cd "$out" && zip -q "$name.zip" "$b$ext" && rm -f "$b$ext")
+            if command -v shasum >/dev/null 2>&1; then
+              (cd "$out" && shasum -a 256 "$name.zip" | awk '{print $1}' > "$name.zip.sha256")
+            else
+              (cd "$out" && sha256sum "$name.zip" | awk '{print $1}' > "$name.zip.sha256")
+            fi
+            (cd "$out" && actual=$(if command -v shasum >/dev/null 2>&1; then
+                 shasum -a 256 "$name.zip" | awk '{print $1}'
+               else sha256sum "$name.zip" | awk '{print $1}'; fi)
+             [ "$actual" = "$(cat "$name.zip.sha256")" ] \
+               || { echo "REFUSING: $name.zip.sha256 does not describe $name.zip"; exit 1; })
+            echo "$name.zip  $(cat "$out/$name.zip.sha256")"
+          done
+
+      # THE ASSET MUST ANSWER FOR ITSELF, from the zip a user actually receives rather than
+      # from the build directory. This is the leg that caught "(unknown)" on the hand-built
+      # pair, and it runs everywhere except the cross-arch case it cannot honestly run in.
+      - name: Verify the packaged binary reports its revision
+        if: matrix.asset_os != 'windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          t=$(mktemp -d); cp dist/*.zip "$t/"
+          (cd "$t" && for z in *.zip; do unzip -qo "$z"; done)
+          for b in ck-claustrum ck-auth; do
+            v=$("$t/$b" --version)
+            echo "$b -> $v"
+            case "$v" in
+              *"unknown"*) echo "REFUSING: $b cannot name its own revision"; exit 1 ;;
+            esac
+            case "$v" in
+              *"$(echo "${{ github.sha }}" | cut -c1-7)"*) ;;
+              *) echo "REFUSING: $b reports a revision that is not this build"; exit 1 ;;
+            esac
+          done
+
+      - name: Upload to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: gh release upload "${{ inputs.tag || github.ref_name }}" dist/* --clobber
+        working-directory: claustrum

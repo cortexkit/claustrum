@@ -108,6 +108,7 @@ use crate::limiter::{Admission, FetchLimiter, GET_MANY_MAX};
 ///
 /// Reachable only through a capability handle. [`GetScopedParams`] deliberately carries
 /// no refresh controls, so the principal-scoped grant path cannot express either lever.
+#[cfg_attr(test, derive(Serialize))]
 #[derive(Debug, Deserialize)]
 pub struct GetParams {
     pub handle: String,
@@ -120,6 +121,7 @@ pub struct GetParams {
 /// A principal-scoped credential-id read. This deliberately has no refresh controls:
 /// a grant authorizes the same ordinary serving path as `credential.get`, not a mint
 /// or force-refresh capability.
+#[cfg_attr(test, derive(Serialize))]
 #[derive(Debug, Deserialize)]
 pub struct GetScopedParams {
     pub credential_id: String,
@@ -137,6 +139,7 @@ pub struct GetScopedParams {
 /// encoded form would break the moment a caller re-encoded with a different
 /// alphabet or padding, which is the canonicalization mismatch this whole design
 /// avoids by carrying exact bytes.
+#[cfg_attr(test, derive(Serialize))]
 #[derive(Debug, Deserialize)]
 pub struct SignParams {
     #[serde(default)]
@@ -181,6 +184,7 @@ pub struct SignResult {
 /// authorization forms. Exactly one must be present: a handle retains the operator
 /// ceremony, while a credential id is authorized by a route-bound principal's read
 /// grant because the returned material is public.
+#[cfg_attr(test, derive(Serialize))]
 #[derive(Debug, Deserialize)]
 pub struct PublicKeyParams {
     #[serde(default)]
@@ -221,6 +225,7 @@ pub struct PublicKeyResult {
 }
 
 /// A `credential.get_many` request: a capped batch of get items.
+#[cfg_attr(test, derive(Serialize))]
 #[derive(Debug, Deserialize)]
 pub struct GetManyParams {
     pub items: Vec<GetParams>,
@@ -230,6 +235,7 @@ pub struct GetManyParams {
 ///
 /// A capability handle and a principal-scoped credential id are separate addressing forms.
 /// They must not be combined because the two forms use different authorization paths.
+#[cfg_attr(test, derive(Serialize))]
 #[derive(Debug, Deserialize)]
 pub struct StatusParams {
     #[serde(default)]
@@ -245,6 +251,7 @@ impl StatusParams {
 }
 
 /// A `credential.report_auth_failure` request.
+#[cfg_attr(test, derive(Serialize))]
 #[derive(Debug, Deserialize)]
 pub struct ReportAuthFailureParams {
     pub handle: String,

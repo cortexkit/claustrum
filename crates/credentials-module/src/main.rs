@@ -3013,6 +3013,141 @@ mod tests {
         );
     }
 
+    /// The request pins below cover the parameter structs that exist for known route operations.
+    /// They catch a parameter added to a known op, but a wholly new op with a new struct still
+    /// depends on the person adding it to create a pin. This deliberately does not enumerate
+    /// operations dynamically: scanning `OP_` constants would measure mentions rather than
+    /// dispatch registrations and could falsely claim that the new surface was covered.
+    /// HOW THIS ACTUALLY FIRES, measured rather than assumed: adding a field to a params
+    /// struct is a COMPILE error first, not a named test failure. Rust struct literals are
+    /// exhaustive, so every fixture below stops building with `missing field ... in
+    /// initializer` and the message in this function never prints. That is a stronger
+    /// forcing function than a red test -- it cannot be skimmed past -- but it arrives in
+    /// two steps: fix the fixtures, THEN the key-set assertion fires and states the
+    /// obligations. Do not read the compile error as the whole signal.
+    ///
+    /// WHICH MAKES ONE REFACTOR SILENTLY FATAL HERE. If these fixtures are ever changed to
+    /// `..Default::default()`, the compile error disappears, and a newly added field that
+    /// carries `skip_serializing_if = "Option::is_none"` would default to None, serialize
+    /// away, and never reach either loop. The pin would then report a green, complete key
+    /// set for a struct that had grown a parameter -- blind in exactly the case it exists
+    /// for. The exhaustive literals are the mechanism, not verbosity to be tidied.
+    fn assert_request_key_set<T: serde::Serialize>(params: T, expected: &[&str], op: &str) {
+        let value = serde_json::to_value(params).expect("serialize request parameters");
+        let object = value
+            .as_object()
+            .unwrap_or_else(|| panic!("{op} request parameters must serialize as an object"));
+
+        // Check both directions so this fails for either a removed key or an added key.
+        for key in expected {
+            assert!(
+                object.contains_key(*key),
+                "the {op} accepted parameter set changed. Two obligations: announce the delta to consumers, and give `crates/credentials-module/examples/vault_read_probe.rs` a way to send the new parameter; a wire surface with no probe arm cannot be acceptance-tested on deploy. {op}: missing `{key}`"
+            );
+        }
+        for key in object.keys() {
+            assert!(
+                expected.iter().any(|expected_key| *expected_key == key),
+                "the {op} accepted parameter set changed. Two obligations: announce the delta to consumers, and give `crates/credentials-module/examples/vault_read_probe.rs` a way to send the new parameter; a wire surface with no probe arm cannot be acceptance-tested on deploy. {op}: unexpected `{key}`"
+            );
+        }
+    }
+
+    #[test]
+    fn credential_get_request_key_set_is_pinned() {
+        assert_request_key_set(
+            read_surface::GetParams {
+                handle: "ckh_request_shape".to_owned(),
+                min_ttl_ms: Some(30_000),
+                force_refresh: true,
+            },
+            &["handle", "min_ttl_ms", "force_refresh"],
+            "credential.get",
+        );
+    }
+
+    #[test]
+    fn credential_get_scoped_request_key_set_is_pinned() {
+        assert_request_key_set(
+            read_surface::GetScopedParams {
+                credential_id: "apikey:request-shape".to_owned(),
+            },
+            &["credential_id"],
+            "credential.get_scoped",
+        );
+    }
+
+    #[test]
+    fn credential_sign_request_key_set_is_pinned() {
+        assert_request_key_set(
+            read_surface::SignParams {
+                handle: Some("ckh_request_shape".to_owned()),
+                credential_id: Some("signing_key:request-shape".to_owned()),
+                payload_b64: "AQI=".to_owned(),
+            },
+            &["handle", "credential_id", "payload_b64"],
+            "credential.sign",
+        );
+    }
+
+    #[test]
+    fn credential_public_key_request_key_set_is_pinned() {
+        assert_request_key_set(
+            read_surface::PublicKeyParams {
+                handle: Some("ckh_request_shape".to_owned()),
+                credential_id: Some("signing_key:request-shape".to_owned()),
+            },
+            &["handle", "credential_id"],
+            "credential.public_key",
+        );
+    }
+
+    #[test]
+    fn credential_get_many_request_key_set_is_pinned() {
+        assert_request_key_set(
+            read_surface::GetManyParams {
+                items: vec![read_surface::GetParams {
+                    handle: "ckh_request_shape".to_owned(),
+                    min_ttl_ms: Some(30_000),
+                    force_refresh: true,
+                }],
+            },
+            &["items"],
+            "credential.get_many",
+        );
+    }
+
+    #[test]
+    fn credential_status_request_key_set_is_pinned() {
+        assert_request_key_set(
+            read_surface::StatusParams {
+                handle: Some("ckh_request_shape".to_owned()),
+                credential_id: Some("apikey:request-shape".to_owned()),
+            },
+            &["handle", "credential_id"],
+            "credential.status",
+        );
+    }
+
+    #[test]
+    fn credential_report_auth_failure_request_key_set_is_pinned() {
+        assert_request_key_set(
+            read_surface::ReportAuthFailureParams {
+                handle: "ckh_request_shape".to_owned(),
+                provider_status: 401,
+                record_version: 7,
+                reporter_source: Some("probe".to_owned()),
+            },
+            &[
+                "handle",
+                "provider_status",
+                "record_version",
+                "reporter_source",
+            ],
+            "credential.report_auth_failure",
+        );
+    }
+
     #[test]
     fn the_health_wire_key_set_is_a_contract_and_a_rename_obliges_an_announcement() {
         let health = credentials_core::health::VaultHealth {

@@ -127,6 +127,22 @@ jobs:
           path: commons
           token: ${{ steps.app-token.outputs.token }}
 
+      # THE STAMP MUST NAME THE COMMIT THAT WAS CHECKED OUT, WHICH IS NOT `github.sha`.
+      # On a workflow_dispatch for an existing tag, `github.sha` is the DISPATCHED ref
+      # (master) while the checkout above used `inputs.tag`. v0.1.0 shipped that way: the
+      # source was the tag and the stamp was master, so the published binaries reported a
+      # revision they were not built from. Harmless there only because the two commits
+      # differed by zero non-workflow files -- luck, not design. Dispatching for an older
+      # tag after code has moved would put a confidently wrong commit in a credential
+      # vault's --version, which is the value an operator uses to find the source they are
+      # running.
+      #
+      # `git rev-parse HEAD` in the checkout answers what was ACTUALLY built.
+      - name: Resolve the built revision
+        id: rev
+        shell: bash
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
       # CK_BUILD_REV IS THE POINT OF THIS STEP, and it is here because hand-building the
       # first alpha assets without it produced two binaries that answered `--version` with
       # "0.1.0 (unknown)". A vault that cannot name its own revision fails the first leg of
@@ -135,7 +151,7 @@ jobs:
       - name: Build release binaries
         shell: bash
         env:
-          CK_BUILD_REV: ${{ github.sha }}
+          CK_BUILD_REV: ${{ steps.rev.outputs.sha }}
         run: cargo build --locked --release --bin ck-claustrum --bin ck-auth
 
       # Ad-hoc signature with the PINNED identifier. Default ad-hoc signing derives an
@@ -252,9 +268,18 @@ jobs:
             case "$v" in
               *"unknown"*) echo "REFUSING: $b cannot name its own revision"; exit 1 ;;
             esac
+            # Compare against the revision resolved from the CHECKOUT, not against the
+            # same expression that produced the stamp. Checking a value against its own
+            # source is self-consistent by construction: the v0.1.0 run passed this leg
+            # while shipping a stamp that named the wrong commit, because both sides read
+            # `github.sha`. A verification that cannot disagree with what it verifies is
+            # not a verification.
             case "$v" in
-              *"$(echo "${{ github.sha }}" | cut -c1-7)"*) ;;
-              *) echo "REFUSING: $b reports a revision that is not this build"; exit 1 ;;
+              *"$(echo "${{ steps.rev.outputs.sha }}" | cut -c1-7)"*) ;;
+              *) echo "REFUSING: $b reports a revision that is not the checked-out source"
+                 echo "  reported: $v"
+                 echo "  built at: ${{ steps.rev.outputs.sha }}"
+                 exit 1 ;;
             esac
           done
 

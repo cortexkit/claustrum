@@ -35,7 +35,14 @@ fi
 
 bash scripts/mutation-check.sh
 
-REV="$(git rev-parse --short=7 HEAD)"
+# FULL 40-HEX, NOT --short. This value is stamped into CK_BUILD_REV and becomes the
+# manifest's build_git_sha, whose canonical form under subc-protocol 0.17 is 40 lowercase
+# hex -- a 7-char abbreviation is a ProvenanceFormError, so the constructor omits the
+# whole block rather than publish it. The CI release workflow already stamped the full
+# sha while this script stamped seven, which meant the SAME FIELD had two producers and
+# only one conformed: invisible from whichever you inspected, and the deployed daemon was
+# built by the nonconforming one.
+REV="$(git rev-parse HEAD)"
 echo "building at ${REV}"
 
 # --locked so the build cannot silently resolve a different dependency set than CI did.
@@ -97,6 +104,18 @@ find target/staged -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null \
         "$(basename "$STAGE")") continue ;;
         "${DEPLOYED_REV:-__none__}") continue ;;
       esac
+      # PREFIX MATCH BOTH WAYS, for the window where a 7-char deployed stamp coexists
+      # with 40-char stage names. Exact equality alone would fail to recognise the
+      # deployed stage during that transition and prune the one directory this guard
+      # exists to protect -- a correctness bug that only appears once, which is exactly
+      # the kind that ships.
+      base="$(basename "$old")"
+      if [ -n "${DEPLOYED_REV:-}" ] && {
+           case "$base" in "$DEPLOYED_REV"*) true ;; *) false ;; esac ||
+           case "$DEPLOYED_REV" in "$base"*) true ;; *) false ;; esac
+         }; then
+        continue
+      fi
       rm -rf "$old"
     done
 

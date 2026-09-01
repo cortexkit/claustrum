@@ -45,7 +45,7 @@ use serde::Deserialize;
 use serde_json::json;
 use subc_protocol::manifest::Concurrency;
 use subc_protocol::manifest::{
-    ManifestProvenance, SelfSignalDeclaration, SelfSignalEffect, SelfSignalKind, SignalAnchor,
+    build_provenance, SelfSignalDeclaration, SelfSignalEffect, SelfSignalKind, SignalAnchor,
     SignalCadence,
 };
 use subc_protocol::{
@@ -57,7 +57,7 @@ use subc_protocol::{
         HealthStatus, ModuleControlRequest, ModuleControlResponse, MODULE_CONTROL_OP_HEALTH_CHECK,
     },
     ErrorBody, Flags, Frame, FrameType, ModuleHelloAckBody, ModuleHelloBody, Priority,
-    PROTOCOL_VERSION, SUBC_LAUNCH_NONCE_ENV, SUBC_MODULE_ID_ENV, SUBC_PROTOCOL_CRATE_VERSION,
+    PROTOCOL_VERSION, SUBC_LAUNCH_NONCE_ENV, SUBC_MODULE_ID_ENV,
 };
 use subc_transport::{authenticate_client, connection_file, read_frame, write_frame};
 use tokio::{
@@ -1297,12 +1297,13 @@ fn manifest(module_id: &str) -> ModuleManifest {
     //                        tree; an unstamped development build reports "unknown", and
     //                        the block is omitted rather than publish a placeholder
     //                        wearing the shape of a sha.
-    //   wire_crate_version   `SUBC_PROTOCOL_CRATE_VERSION`, which subc-protocol bakes in
-    //                        from its own `env!("CARGO_PKG_VERSION")`. It names the wire
-    //                        crate compiled INTO this binary, so unlike a hand-copied
-    //                        string it cannot drift from what it names. Distinct from
-    //                        `module_version` above, which is this module's own version
-    //                        and says nothing about the wire it speaks.
+    //   wire_crate_version   filled BY `build_provenance()` from the subc-protocol linked
+    //                        into this binary. This module no longer names it at all --
+    //                        the constant is not even imported here any more, which is the
+    //                        mechanical evidence that the hand-copied path is gone rather
+    //                        than merely discouraged. Distinct from `module_version` above,
+    //                        which is this module's own version and says nothing about the
+    //                        wire it speaks.
     //
     // WHAT IS NOT, and why it is absent rather than forgotten:
     //   build_lock_digest    nothing hashes Cargo.lock at build time today. Adding it is
@@ -1319,16 +1320,35 @@ fn manifest(module_id: &str) -> ModuleManifest {
     // domain that reads 1. It would be a WELL-FORMED value from the WRONG DOMAIN, which
     // every check on this path (non-empty, <=128 bytes, printable ASCII) accepts, and
     // which is worse than absence because a present field stops the reader asking.
+    // BUILT THROUGH `build_provenance()` RATHER THAN AS A STRUCT LITERAL, and the reason
+    // is not the form validation it adds. The constructor takes three arguments and fills
+    // `wire_crate_version` ITSELF from the linked crate -- so the one field whose entire
+    // content is a referent to "the subc-protocol compiled into this binary" can no longer
+    // be passed by hand. The literal above passed it correctly, and passing it at all is
+    // the hand-copied-string failure mode the field's own doc warns about. Deleting the
+    // ability to get it wrong beats getting it right.
+    //
+    // ON `Err` THE WHOLE BLOCK IS OMITTED. A nonconforming fact is not repaired into a
+    // conforming one, and a partially-populated provenance would be a claim the census
+    // cannot distinguish from a complete one.
+    //
+    // The `!= "unknown"` guard is REDUNDANT -- `normalize_provenance_fact` filters
+    // "unknown", "unavailable" and "none" to omission before any form check. It stays
+    // because a reader of THIS file should see the omission decision where they are
+    // looking, without having to know a sentinel list that lives in another crate. Braces,
+    // documented as braces.
     .provenance({
         let rev = credentials_core::contract::BUILD_REV;
-        (rev != "unknown").then(|| ManifestProvenance {
-            build_git_sha: Some(rev.to_string()),
-            build_lock_digest: None,
-            wire_crate_version: Some(SUBC_PROTOCOL_CRATE_VERSION.to_string()),
-            store_schema_version: Some(
-                credentials_core::store::newest_migration_version().to_string(),
-            ),
-        })
+        (rev != "unknown")
+            .then(|| {
+                build_provenance(
+                    Some(rev),
+                    None,
+                    Some(&credentials_core::store::newest_migration_version().to_string()),
+                )
+                .ok()
+            })
+            .flatten()
     })
     // ONE periodic behaviour exists in this daemon, and the list is exhaustive by
     // inspection rather than recollection: every `interval`/`sleep` outside `#[cfg(test)]`
@@ -2979,15 +2999,33 @@ mod tests {
     /// dev build it asserts the block is absent, and on a stamped release build it
     /// asserts the sha is real. A future change that fills the field unconditionally
     /// fails here rather than in a fleet provenance comparison.
+    ///
+    /// THERE ARE THREE STATES, NOT TWO, AND THIS TEST CAUGHT ME LEARNING THAT. Adopting
+    /// `build_provenance()` added a stamped-but-NONCONFORMING case: subc-protocol 0.17
+    /// requires 40 lowercase hex, and my own release script stamped a 7-char abbreviation,
+    /// so a stamped build could legitimately omit the block. The old dichotomy --
+    /// "omitted implies unstamped" -- asserted something that had stopped being true, and
+    /// it failed by name under `CK_BUILD_REV=0cd42dc` before any of this shipped.
+    ///
+    /// The omission arm now accepts exactly two causes and NAMES WHICH ONE it saw, because
+    /// "no revision" and "a revision the wire will not accept" call for different actions:
+    /// the first is a dev build working as designed, the second means a release script is
+    /// producing a fact the fleet census will silently drop.
     #[test]
     fn provenance_never_publishes_a_placeholder_as_a_build_fact() {
         let m = manifest("claustrum");
+        let rev = credentials_core::contract::BUILD_REV;
+        // The canonical form the protocol enforces: 40 lowercase hex.
+        let conforming = rev.len() == 40
+            && rev
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase());
         match &m.provenance {
-            None => assert_eq!(
-                credentials_core::contract::BUILD_REV,
-                "unknown",
-                "provenance is only omitted when this build genuinely has no stamped \
-                 revision; a stamped build must publish it"
+            None => assert!(
+                rev == "unknown" || !conforming,
+                "provenance was omitted on a build whose revision ({rev}) IS conforming, \
+                 so neither cause applies: not an unstamped dev build, and not a form \
+                 the wire refuses. Something else is dropping the block."
             ),
             Some(p) => {
                 let sha = p

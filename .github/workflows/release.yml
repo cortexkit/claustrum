@@ -157,6 +157,17 @@ jobs:
               || { echo "REFUSING: $b did not take the pinned identifier"; exit 1; }
           done
 
+      # UNVERIFIED ON WINDOWS: this step and the verify step below use `zip`/`unzip` from
+      # the bash shim, and I have no evidence either way that they exist on the windows
+      # runner. I checked the runner image readme and found no mention -- then controlled
+      # that read and found it lists no shell utilities AT ALL (`tar`, `curl` and `zip`
+      # all read zero), so the absence was a fact about the document, not the runner.
+      #
+      # Shipping it anyway is a deliberate choice, not an oversight, and the draft
+      # mechanism is what makes it safe: if windows cannot archive, that leg fails, the
+      # publish job is skipped, and the release stays a draft nobody installs from. The
+      # first real run answers the question that no amount of reading will.
+      #
       # The sidecar is the hex sha256 OF THE ZIP BYTES, written beside the zip under the
       # same stem. Computed after the zip exists and verified against it here rather than
       # trusted: a digest that does not describe its own artifact is worse than none,
@@ -186,16 +197,24 @@ jobs:
 
       # THE ASSET MUST ANSWER FOR ITSELF, from the zip a user actually receives rather than
       # from the build directory. This is the leg that caught "(unknown)" on the hand-built
-      # pair, and it runs everywhere except the cross-arch case it cannot honestly run in.
+      # alpha pair, where CK_BUILD_REV was absent and both binaries could not name their
+      # own revision.
+      #
+      # IT RUNS ON ALL THREE PLATFORMS, INCLUDING WINDOWS. An earlier revision skipped
+      # windows with the stated reason "the cross-arch case it cannot honestly run in" --
+      # a reason that describes no leg of this matrix, since every runner builds for
+      # itself. The effect was that the ONE platform I cannot build locally was also the
+      # one shipping without its build-identity checked. A skip whose justification does
+      # not match the matrix is worse than no skip: it reads as considered.
       - name: Verify the packaged binary reports its revision
-        if: matrix.asset_os != 'windows'
         shell: bash
         run: |
           set -euo pipefail
+          ext=""; [ "${{ matrix.asset_os }}" = "windows" ] && ext=".exe"
           t=$(mktemp -d); cp dist/*.zip "$t/"
           (cd "$t" && for z in *.zip; do unzip -qo "$z"; done)
           for b in ck-claustrum ck-auth; do
-            v=$("$t/$b" --version)
+            v=$("$t/$b$ext" --version)
             echo "$b -> $v"
             case "$v" in
               *"unknown"*) echo "REFUSING: $b cannot name its own revision"; exit 1 ;;

@@ -217,17 +217,30 @@ jobs:
             name="$b-${{ matrix.asset_os }}-${{ matrix.asset_arch }}"
             cp "target/release/$b$ext" "$out/$b$ext"
             (cd "$out" && make_zip "$name.zip" "$b$ext" && rm -f "$b$ext")
+            # TWO-FIELD `shasum` FORMAT (hex, two spaces, filename), NOT bare hex.
+            # v0.1.0 shipped bare hex and I verified it against the installer's parser,
+            # which accepts both forms -- then concluded "nothing to fix". Wrong
+            # consumer. `shasum -c <sidecar>` is the obvious thing a careful user runs,
+            # and against bare hex it answers:
+            #
+            #   shasum: ...sha256: no properly formatted SHA checksum lines found
+            #
+            # A verification tool refusing to parse the digest file reads as a failed
+            # integrity check on a good download. Measured against the published v0.1.0
+            # asset, with a two-field control returning OK on the same bytes.
             if command -v shasum >/dev/null 2>&1; then
-              (cd "$out" && shasum -a 256 "$name.zip" | awk '{print $1}' > "$name.zip.sha256")
+              (cd "$out" && shasum -a 256 "$name.zip" > "$name.zip.sha256")
             else
-              (cd "$out" && sha256sum "$name.zip" | awk '{print $1}' > "$name.zip.sha256")
+              (cd "$out" && sha256sum "$name.zip" > "$name.zip.sha256")
             fi
-            (cd "$out" && actual=$(if command -v shasum >/dev/null 2>&1; then
-                 shasum -a 256 "$name.zip" | awk '{print $1}'
-               else sha256sum "$name.zip" | awk '{print $1}'; fi)
-             [ "$actual" = "$(cat "$name.zip.sha256")" ] \
-               || { echo "REFUSING: $name.zip.sha256 does not describe $name.zip"; exit 1; })
-            echo "$name.zip  $(cat "$out/$name.zip.sha256")"
+            # Verify by REPLAYING the consumer's own command rather than re-deriving a
+            # digest and string-comparing: `shasum -c` exercises the file's format as
+            # well as its contents, which is the half that shipped broken in v0.1.0.
+            (cd "$out" && if command -v shasum >/dev/null 2>&1; then
+                 shasum -c "$name.zip.sha256"
+               else sha256sum -c "$name.zip.sha256"; fi \
+               || { echo "REFUSING: $name.zip.sha256 does not verify $name.zip"; exit 1; })
+            echo "$name.zip  $(awk '{print $1}' "$out/$name.zip.sha256")"
           done
 
       # THE ASSET MUST ANSWER FOR ITSELF, from the zip a user actually receives rather than

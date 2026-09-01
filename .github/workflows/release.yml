@@ -28,8 +28,50 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # THE RELEASE MUST EXIST BEFORE ANY ASSET UPLOADS INTO IT, and `gh release upload`
+  # does NOT create one -- it resolves the tag to an existing release and fails if there
+  # is none. Without this job the whole workflow depends on a human having run
+  # `gh release create` first, in the right order, every time; get it backwards and three
+  # runners build perfectly and then all fail at the last step.
+  #
+  # It is a SEPARATE JOB rather than a step in the matrix because three runners starting
+  # together would race to create the same release, and two would fail. One job, once,
+  # then the matrix fans out behind `needs`.
+  #
+  # Draft, so a release cannot be seen with a partial asset set: the last job publishes it
+  # only after every platform has uploaded. A watcher polling for the release either does
+  # not see it or sees it complete.
+  prepare:
+    name: Ensure the release exists
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create the release if it does not exist
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release $TAG already exists; assets will be added to it"
+          else
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --title "$TAG" --draft --verify-tag \
+              --notes "Assets are built on the platform they run on. Each zip has a
+          .sha256 sidecar holding the hex digest of the zip bytes.
+
+          The macOS binaries are ad-hoc signed, not notarized: a browser-downloaded zip
+          carries a quarantine attribute and Gatekeeper will refuse it. Installing via
+          curl does not apply that attribute.
+
+          claustrum does not self-initialize. Run \`ck auth bootstrap\` before enabling
+          the module, or the daemon will exit with 'no master key has been provisioned'.
+          On Linux and Windows there is no keychain, so bootstrap with \`--key-path\` and
+          give the daemon the same path via CK_MASTER_KEY_PATH."
+          fi
+
   assets:
     name: ${{ matrix.asset_os }}-${{ matrix.asset_arch }}
+    needs: prepare
     runs-on: ${{ matrix.runner }}
     strategy:
       # NEVER fail-fast. One platform failing must not cancel the others: a release with
@@ -168,5 +210,39 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
-        run: gh release upload "${{ inputs.tag || github.ref_name }}" dist/* --clobber
+        run: |
+          gh release upload "${{ inputs.tag || github.ref_name }}" dist/* \
+            --repo "$GITHUB_REPOSITORY" --clobber
         working-directory: claustrum
+
+  # PUBLISH LAST, AND ONLY IF EVERY PLATFORM UPLOADED. `needs` on a matrix job waits for
+  # ALL legs and skips this job if any failed, so a partial build leaves the release in
+  # draft where nobody installs from it. That is deliberate: fail-fast is off so one
+  # platform's failure does not cancel the others, and this is what stops that tolerance
+  # from publishing an incomplete release.
+  #
+  # A draft that never publishes is a visible, fixable state. A published release missing
+  # a platform looks finished and installs as "not supported on your OS".
+  publish:
+    name: Publish once every platform is in
+    needs: assets
+    runs-on: ubuntu-latest
+    steps:
+      - name: Undraft the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          # Six files: a zip and a digest sidecar for each of two binaries, three
+          # platforms. Counted rather than assumed -- publishing is the irreversible
+          # step, and the count is the last chance to notice a leg that uploaded nothing.
+          n=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
+                --json assets --jq '.assets | length')
+          echo "assets present: $n"
+          if [ "$n" -lt 12 ]; then
+            echo "REFUSING to publish: expected 12 assets (2 binaries x 3 platforms x"
+            echo "zip+digest), found $n. Leaving the release in draft."
+            exit 1
+          fi
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false

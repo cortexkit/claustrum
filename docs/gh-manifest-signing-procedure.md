@@ -123,6 +123,45 @@ bytes H before the window opened, and the published signature proves the key sig
 bytes H. A signature whose hash has no approval entry is visible as an absence rather
 than merely undocumented.
 
+### What the approval row asserts, and the evidence it now requires
+
+An `approval` row is not a receipt for bytes received. It is **this seat's assertion
+that the artifact was worth activating**, written under the master-key gate, in a chain
+that cannot be edited afterwards. So the question before appending one is not "did the
+payload arrive intact" — the hash answers that — but "is there any reason to believe
+this will work when installed".
+
+**Measured 2026-09-03, on v12.** The payload was correct, the diff against retained v11
+held on every claim, the signature verified, and the consumer's own verifier accepted it
+at activation. The first governed operation then refused at the **holder** with `missing
+field action`: a wire-shape mismatch one layer below the classifier. Reproduced from
+this seat on an already-closed issue, so no state could change either way:
+
+```
+gh issue close 15 --reason completed    error: "missing field `action`"
+GH_SHIM_BYPASS=operator + same command  error: "missing field `action`"
+```
+
+The audited bypass lifts a **tier**; that refusal is downstream of authorization, so it
+does not help. Which makes the failed state fully blocking, and leaves a pressed seat
+one escape — raw upstream `gh`, skipping the shim entirely, with no classification, no
+audit row and no operator attribution. Strictly wider than the hole the tier existed to
+close.
+
+**Why the sequencing did not catch it:** the two parties were coordinated (signer,
+classifier) and the third was a precondition. The holder's readiness had been reported
+as *"LIVE, inode 1118660513"* — a **placement** fact. An inode proves which image is
+mapped and says nothing about whether it executes the tuple sent to it. That is the same
+distinction as `accept-deploy.sh` leg (d) versus the health probe, one layer up:
+placement is not service.
+
+**So before appending an approval row, require an EXECUTED ROUND TRIP through the
+holder** — one real operation per declared verb, on a scratch thread in a repo the seat
+owns — not a placed image and not a version string. Ask for it; do not infer it from a
+successful placement. Without it the chain asserts *"signed what was sent"* while
+reading as *"worth activating"*, and those come apart exactly when a capability is
+declared that nothing downstream can perform.
+
 ### The chain proves the fact and cannot replay the artifact
 
 `payload_hash` is a commitment to bytes, not a copy of them. So the chain answers *what

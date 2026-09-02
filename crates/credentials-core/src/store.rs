@@ -2516,9 +2516,18 @@ impl EncryptedStore {
         // as the likely fix; NEITHER proves the session is alive. That asymmetry is the
         // whole value, and it is diagnostic value: it sharpens what an operator is told
         // after a 401, and gates nothing. insula holds the mirror of this rule at its
-        // consumption site: `quota-core/src/grok.rs` asserts that a successful fetch keeps
-        // its result even when the stated expiry has passed (verified there 2026-09-02;
-        // originally agreed with QTA 2026-08-28).
+        // consumption site: `quota-core/src/grok.rs::expiry_never_overrides_a_successful_fetch`
+        // asserts that a successful fetch keeps its result even when the stated expiry has
+        // passed (verified there 2026-09-02; originally agreed with QTA 2026-08-28).
+        //
+        // THE SYMBOL AND NOT A LINE NUMBER, deliberately. A line in a repository this one
+        // does not control slides on any edit above it -- theirs, a formatter's, anyone's --
+        // and then points confidently at something else with nothing failing. A symbol name
+        // survives edits and reordering, and when it does break it breaks LOUDLY: a reader
+        // who greps for it and finds nothing knows the citation is stale, which is the
+        // signal a wrong line number denies them. Same rule as preferring a version anchor
+        // over a date: choose the reference whose failure the reader can detect.
+        // (QTA's correction; my first version cited a line, and it was one edit from lying.)
         //
         // THE CITATION REPLACED AN AGREEMENT, and the difference is not politeness. An
         // agreed claim about another repository reads exactly the same whether it is true

@@ -972,6 +972,41 @@ fn cmd_put(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
                 store_op(&id, record, AdminAuditOp::Put, StoreMode::Create),
             )?;
             println!("created {id}");
+            // SAID ONLY ON THE CREATE ARM, and only when nothing already reaches the id.
+            //
+            // A deposit is not a delivery. The vault now holds the material and no
+            // consumer can ask for it: a handle must be minted AND placed in whatever
+            // file that consumer reads, and the vault must never write that file --
+            // it does not own the path or the schema, and a credential store that edits
+            // its callers' config is a worse object than one that leaves a gap.
+            //
+            // So the operator is the only party who can close it, and this is the one
+            // moment they are standing in the flow.
+            //
+            // WHY A LINE HERE RATHER THAN A GAUGE IN `list` OR HEALTH: measured on the
+            // live vault, 4 of 4 credentials with no handle and no covering grant are
+            // DELIBERATELY unreachable -- a signing root whose handle exists only inside
+            // a ceremony window, and three deploy-time sources of record consumed by
+            // `wrangler secret put` and never over the route plane. A standing alarm
+            // would be wrong every time it fired, and the first thing anyone would do is
+            // stop reading it. A statement at the moment of the act is honest for those
+            // too: depositing the manifest root DOES leave it unreachable until a
+            // ceremony mints one.
+            //
+            // Create-only by construction: `StoreMode::Create` fails if the id exists,
+            // so there cannot be a surviving handle from a previous deposit. On the
+            // replace arms handles are deliberately kept, and printing this there would
+            // be false.
+            if !id_is_already_reachable(global, &id) {
+                println!(
+                    "  not reachable by any consumer yet: no capability handle and no \
+                     covering grant."
+                );
+                println!(
+                    "  mint one with `ck auth mint-handle --id {id}` and place it where \
+                     the consumer reads handles; the vault cannot write that file."
+                );
+            }
         }
     }
     Ok(())
@@ -2306,6 +2341,45 @@ fn cmd_remove(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
 /// probe computes. An authenticated admin READ — with --subc it reads the RUNNING
 /// module (master-key challenge-response, works exactly when the probe shows
 /// degraded); offline it takes the lease like `list`.
+/// Can any consumer reach `id` right now, by capability handle or covering grant?
+///
+/// FAILS OPEN, DELIBERATELY: every uncertain path returns `true` ("assume reachable"),
+/// so the caller stays silent. This function exists only to decide whether to print an
+/// advisory line, and the two errors are not symmetric — a missing hint costs an
+/// operator one puzzled minute, while a WRONG hint tells them to mint a handle for a
+/// credential that a grant already covers, which is a real instruction to widen access
+/// for no reason.
+///
+/// So an old daemon, an absent field, a refused read, or a shape this build does not
+/// understand all resolve to silence rather than to a claim.
+///
+/// `admin.status` carries the grant set with each grant's covered credential ids
+/// already computed by the store, so the grant half is a lookup rather than a
+/// re-implementation of prefix matching here — the store's own answer, not a second
+/// opinion that could drift from it.
+fn id_is_already_reachable(global: &GlobalArgs, id: &str) -> bool {
+    let Ok(status) = request_admin_status(global) else {
+        return true; // unreadable: say nothing
+    };
+    let Some(grants) = status["read_grants"].as_array() else {
+        return true; // field absent on this daemon: say nothing
+    };
+    let covered_by_grant = grants.iter().any(|g| {
+        g["covered_credential_ids"]
+            .as_array()
+            .map(|ids| ids.iter().any(|c| c.as_str() == Some(id)))
+            .unwrap_or(false)
+    });
+    if covered_by_grant {
+        return true;
+    }
+    // A freshly CREATED id cannot carry a handle from a previous deposit: `Create`
+    // refuses an existing id. Status does not publish per-credential handle counts, and
+    // this is the one call site where their absence costs nothing, because the create
+    // arm has already established the answer structurally.
+    false
+}
+
 fn request_admin_status(global: &GlobalArgs) -> Result<serde_json::Value, CliError> {
     commit_admin(
         global,

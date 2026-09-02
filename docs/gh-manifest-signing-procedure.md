@@ -123,6 +123,44 @@ bytes H before the window opened, and the published signature proves the key sig
 bytes H. A signature whose hash has no approval entry is visible as an absence rather
 than merely undocumented.
 
+### The chain proves the fact and cannot replay the artifact
+
+`payload_hash` is a commitment to bytes, not a copy of them. So the chain answers *what
+was approved* forever and **cannot answer *what did it say***. Those come apart the
+moment nobody holds the payload, and a signature over bytes nobody holds is
+unverifiable for the rest of time — not repudiated, just uncheckable, which is a worse
+position than an unsigned artifact because it reads as verified.
+
+**This already happened, and it is not recoverable.** Manifest v7 was approved at
+audit seq 4700 and signed; its bytes were never retained here, because this store did
+not exist until the consumer asked for canonical v10 bytes two ceremonies later. The
+consumer could not supply them either: its state directory keeps only the *current*
+signed artifact and overwrote each previous version in place. So both the signer and
+the consumer held a commitment to bytes that neither could produce.
+
+**Retention is therefore part of the ceremony, not housekeeping:**
+
+```
+<data_dir>/signed-payloads/gh-routing-manifest-v<N>.json   0600
+```
+
+admitted **only** when its SHA-256 equals the `payload_hash` of an `approval` row. That
+filter is the whole value: a store that accepted whatever was lying in `/tmp` would be
+worse than no store, because it would look like provenance.
+
+**Audit it in the direction that can find absence.** Scanning retained files against
+the chain is honest, complete, and structurally blind — it iterates what exists, so a
+missing artifact is not expressible. It returned a clean 5-of-5 while v7 was gone. The
+scan that finds the gap is the reverse one, chain against files:
+
+```sql
+SELECT seq, substr(payload_hash,1,16) FROM audit_log
+WHERE op='approval' AND credential_id='signing:gh-manifest-root:1' ORDER BY seq;
+```
+
+then check each hash has a file. The two scans read almost identically when written and
+answer different questions.
+
 What this deliberately does NOT give: proof that the number of signatures inside a
 window was one. An unrevoked handle is the gap, which is why step 4 is immediate and
 why **a mint with no matching revoke is an unfinished ceremony** rather than a

@@ -45,7 +45,41 @@
 #   after a completed placement: running-image inode == deploy-path inode, i.e. the
 #   window had closed.
 #
-#   (d) inode    NOT proven live. THE RECORDED REASON BELOW WAS WRONG AND IS
+#   (d) inode    *** PROVEN LIVE 2026-09-03, and in the strong direction. *** SUBC
+#                captured the window during a real ck-aft placement -- raw rows, no
+#                verdicts, because a summary cannot be re-read:
+#
+#                  pre-mv    stat deploy: 1111162444
+#                            lsof txt:   ... 76904816  1111162444 /...bin/ck-aft
+#                  window    lsof txt:   ... 76904816  1111162444 /...bin/ck-aft
+#                            stat deploy: 1120224361
+#                            health.check: "aft: ok / serving normally" -- ANSWERED
+#                  post      pid 6733, disk 1120224361 == proc 1120224361
+#
+#                THE DAEMON SERVED FROM THE UNLINKED PREDECESSOR. So this leg is a
+#                STALE-DEPLOY detector, not a corpse detector: without it, a
+#                placement that never restarted looks healthy AND every
+#                config-derived leg agrees with the new binary, because they all
+#                read the filesystem rather than the process.
+#
+#                AND THE INODE IS THE ONLY DATUM IN THAT ROW. lsof kept printing the
+#                DEPLOY PATH for the unlinked inode -- that column is lsof's name
+#                resolution, not evidence that the file now at that path is the one
+#                mapped. A guard comparing paths would see agreement and pass. The
+#                selector below matches the row BY path and reads $(NF-1), which
+#                works only because lsof resolves the old inode to the same name; a
+#                dependency this script had without knowing it until the capture.
+#                Verified the field arithmetic against SUBC's actual captured row
+#                rather than by eye: $(NF-1) -> 1111162444 (inode), $(NF-2) ->
+#                76904816 (size), $NF -> the path.
+#
+#                THE HISTORY BELOW IS KEPT DELIBERATELY: three failed manufacture
+#                attempts and a control that killed an invented mechanism. The
+#                fixture makes the leg proven; it does not make the reasoning that
+#                failed worthless, because the next unproven leg will fail the same
+#                ways.
+#
+#                THE RECORDED REASON BELOW WAS WRONG AND IS
 #                CORRECTED HERE: I wrote that these need production in the state
 #                they detect, which reads as unmanufacturable. What actually blocks
 #                (d) is narrower and was found by trying it 2026-09-02 -- a

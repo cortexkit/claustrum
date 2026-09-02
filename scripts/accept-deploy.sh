@@ -19,6 +19,32 @@
 #   (b) digest   proven -- run against a different staged dir, both refuse
 #   (c) identity proven -- a copy re-signed without --identifier reads as
 #                          ck-auth-55554944<LC_UUID>, which the equality rejects
+#   *** (a) AND (d) CATCH OPPOSITE READINGS OF THE SAME PAIR OF NUMBERS, and this
+#   list previously described only one of them. Named 2026-09-02 after a peer
+#   retracted an "already proven" claim and the retraction showed the two shapes
+#   had been collapsed:
+#
+#     built-is-not-placed    running == deploy-path == an OLD build, new build
+#                            sitting elsewhere. The REV leg catches it. The inode
+#                            leg is SILENT and correctly so -- nothing was unlinked.
+#                            Here a MATCH is the defect.
+#     placed-not-restarted   running != deploy-path; the process holds the mapped
+#                            predecessor, which Unix keeps alive after the entry is
+#                            replaced. Only the INODE leg catches it. Here a
+#                            MISMATCH is the defect.
+#
+#   Both were observed in the fleet; only the first was observed as an incident. A
+#   reader who proves (d) against the first case concludes the leg works and never
+#   exercises the case it exists for. ***
+#
+#   THE STATE IS NOT EXOTIC -- IT IS A STEP IN THE DEPLOY PROTOCOL. Placement is an
+#   atomic `mv` of a signed binary over the deploy path FOLLOWED by a restart, so
+#   between those two steps the daemon is serving from the unlinked inode by
+#   construction. Every placement this ladder has ever accepted passed through that
+#   window; it has only ever been observed from the far side. Measured on this host
+#   after a completed placement: running-image inode == deploy-path inode, i.e. the
+#   window had closed.
+#
 #   (d) inode    NOT proven live. THE RECORDED REASON BELOW WAS WRONG AND IS
 #                CORRECTED HERE: I wrote that these need production in the state
 #                they detect, which reads as unmanufacturable. What actually blocks

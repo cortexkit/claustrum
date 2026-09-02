@@ -19,7 +19,24 @@
 #   (b) digest   proven -- run against a different staged dir, both refuse
 #   (c) identity proven -- a copy re-signed without --identifier reads as
 #                          ck-auth-55554944<LC_UUID>, which the equality rejects
-#   (d) inode    NOT proven live: needs a daemon running an unlinked predecessor
+#   (d) inode    NOT proven live. THE RECORDED REASON BELOW WAS WRONG AND IS
+#                CORRECTED HERE: I wrote that these need production in the state
+#                they detect, which reads as unmanufacturable. What actually blocks
+#                (d) is narrower and was found by trying it 2026-09-02 -- a
+#                throwaway subject binary is needed, and a COPY OF A PLATFORM
+#                BINARY CANNOT BE THE SUBJECT: macOS SIGKILLs it on exec. Measured,
+#                with the control that disproved my first explanation:
+#                  replace the running image, then TERM -> "Killed: 9"
+#                  no replace at all,        then TERM -> "Killed: 9"
+#                Both arms die identically, so the death is code-signature
+#                enforcement on the copied binary and has NOTHING to do with the
+#                unlink. My first reading -- "mv over a running image gets it
+#                killed" -- was a mechanism invented to fit one observation, and
+#                the control killed it. Proving (d) needs a long-running subject
+#                that is ad-hoc signed by us rather than copied from /bin, or a
+#                fixture from a seat that has observed the state in the wild.
+#                Until then this leg's failure mode is unobserved, which is exactly
+#                what the note above it must keep saying.
 #   (e) store    NOT proven live: needs a daemon holding the wrong vault
 #   (f) serving  NOT proven live: needs a degraded vault
 #   (g) write    NOT proven live: needs a fenced-out daemon

@@ -25,7 +25,7 @@ pub const ADMIN_OP_SCHEMA_V1: u32 = 1;
 
 /// One authenticated admin operation. `#[serde(tag = "op")]` so the discriminator
 /// is an `op` string inside the same object the transcript covers.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "op")]
 pub enum AdminOpBody {
     #[serde(rename = "admin.store")]
@@ -113,6 +113,120 @@ pub enum AdminOpBody {
     /// status` against a RUNNING daemon.
     #[serde(rename = "admin.status")]
     Status { v: u32 },
+}
+
+/// Redacted `Debug`, hand-written rather than derived, and NOT only because of the
+/// boxed `VaultRecord` -- that one is fixed transitively now that `VaultRecord` redacts
+/// its own payload.
+///
+/// THE VARIANT THAT MADE THIS NECESSARY IS `RevokeHandle`. Its `handle` is the RAW
+/// `ckh_...` bearer, not a hash: `apply` passes it straight to `store.revoke_handle`,
+/// which hashes it there (`handle_hash(raw_handle)`). A capability handle in a log is
+/// strictly worse than an encrypted payload in one -- it needs no key, no decoding, and
+/// no vault access to use. Anyone who can read the line can read the credential it
+/// grants, until someone notices and revokes it.
+///
+/// A MANUAL IMPL RATHER THAN A REDACTING NEWTYPE, deliberately: this enum IS the MAC
+/// transcript, verified byte-for-byte on the admin route, so nothing that could perturb
+/// its serialization belongs anywhere near it. A `Debug` impl cannot; a serde-adjacent
+/// type change could.
+///
+/// The exhaustive match is the forcing function. A new variant carrying a new secret
+/// will not compile until someone has decided how it renders, which is the property a
+/// derive gives up.
+impl std::fmt::Debug for AdminOpBody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AdminOpBody::Store {
+                v,
+                id,
+                record,
+                audit_op,
+                mode,
+            } => f
+                .debug_struct("Store")
+                .field("v", v)
+                .field("id", id)
+                // VaultRecord redacts its own payload.
+                .field("record", record)
+                .field("audit_op", audit_op)
+                .field("mode", mode)
+                .finish(),
+            AdminOpBody::Invalidate { v, id } => f
+                .debug_struct("Invalidate")
+                .field("v", v)
+                .field("id", id)
+                .finish(),
+            AdminOpBody::Logout { v, id } => f
+                .debug_struct("Logout")
+                .field("v", v)
+                .field("id", id)
+                .finish(),
+            AdminOpBody::Reactivate { v, id } => f
+                .debug_struct("Reactivate")
+                .field("v", v)
+                .field("id", id)
+                .finish(),
+            AdminOpBody::Remove { v, id } => f
+                .debug_struct("Remove")
+                .field("v", v)
+                .field("id", id)
+                .finish(),
+            AdminOpBody::MintHandle { v, id } => f
+                .debug_struct("MintHandle")
+                .field("v", v)
+                .field("id", id)
+                .finish(),
+            // The one that matters: a live bearer token.
+            AdminOpBody::RevokeHandle { v, .. } => f
+                .debug_struct("RevokeHandle")
+                .field("v", v)
+                .field("handle", &"<redacted>")
+                .finish(),
+            AdminOpBody::RevokeAllHandles { v, id } => f
+                .debug_struct("RevokeAllHandles")
+                .field("v", v)
+                .field("id", id)
+                .finish(),
+            AdminOpBody::GrantCreate {
+                v,
+                principal_id,
+                credential_prefix,
+                operation,
+            } => f
+                .debug_struct("GrantCreate")
+                .field("v", v)
+                .field("principal_id", principal_id)
+                .field("credential_prefix", credential_prefix)
+                .field("operation", operation)
+                .finish(),
+            AdminOpBody::GrantRevoke {
+                v,
+                principal_id,
+                credential_prefix,
+                operation,
+            } => f
+                .debug_struct("GrantRevoke")
+                .field("v", v)
+                .field("principal_id", principal_id)
+                .field("credential_prefix", credential_prefix)
+                .field("operation", operation)
+                .finish(),
+            AdminOpBody::Approval {
+                v,
+                credential_id,
+                artifact_sha256,
+                approver,
+            } => f
+                .debug_struct("Approval")
+                .field("v", v)
+                .field("credential_id", credential_id)
+                .field("artifact_sha256", artifact_sha256)
+                .field("approver", approver)
+                .finish(),
+            AdminOpBody::Status { v } => f.debug_struct("Status").field("v", v).finish(),
+        }
+    }
 }
 
 impl AdminOpBody {
@@ -438,6 +552,64 @@ pub enum StoreMode {
 mod tests {
     use super::*;
     use crate::record::CredentialKind;
+
+    /// A capability handle never reaches a `Debug` rendering.
+    ///
+    /// `RevokeHandle.handle` is the RAW `ckh_...` bearer -- `apply` hands it to
+    /// `store.revoke_handle`, which hashes it there. Unlike an encrypted payload, a
+    /// handle in a log needs no key and no vault access: whoever reads the line holds
+    /// the credential it grants.
+    ///
+    /// Asserts the marker is present as well as the secret absent, so an impl that
+    /// rendered nothing cannot pass.
+    #[test]
+    fn debug_never_renders_a_capability_handle() {
+        let op = AdminOpBody::RevokeHandle {
+            v: 1,
+            handle: "ckh_LIVEBEARERTOKENVALUE".to_string(),
+        };
+        let rendered = format!("{op:?}");
+        assert!(
+            !rendered.contains("ckh_LIVEBEARERTOKENVALUE"),
+            "a live capability handle rendered into Debug output: {rendered}"
+        );
+        assert!(
+            rendered.contains("<redacted>"),
+            "the redaction marker must be present, or an empty rendering would pass: \
+             {rendered}"
+        );
+    }
+
+    /// The boxed record inside `Store` is redacted transitively.
+    ///
+    /// Pins the delegation rather than assuming it: if `VaultRecord` ever went back to a
+    /// derived `Debug`, this enum's careful impl would start leaking through a field it
+    /// does not itself redact.
+    #[test]
+    fn debug_of_store_does_not_render_the_boxed_records_payload() {
+        let record = VaultRecord::new_static(
+            CredentialKind::ApiKey,
+            "operator",
+            b"sk-INNER".to_vec(),
+            None,
+        );
+        let op = AdminOpBody::Store {
+            v: 1,
+            id: "apikey:x".to_string(),
+            record: Box::new(record),
+            audit_op: AdminAuditOp::Put,
+            mode: StoreMode::Create,
+        };
+        let rendered = format!("{op:?}");
+        assert!(
+            !rendered.contains("sk-INNER"),
+            "the boxed record's payload rendered as text: {rendered}"
+        );
+        assert!(
+            !rendered.contains("115, 107, 45, 73"),
+            "the boxed record's payload rendered as bytes: {rendered}"
+        );
+    }
 
     #[test]
     fn round_trips_through_bytes() {

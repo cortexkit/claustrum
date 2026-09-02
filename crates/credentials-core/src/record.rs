@@ -155,7 +155,7 @@ impl RecordIdentity {
 
 /// The vault's typed, at-rest view of one credential. Encrypted as one unit; only
 /// `payload` is ever returned to a consumer.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct VaultRecord {
     /// Schema version of this record body (see [`RECORD_SCHEMA_VERSION`]).
     pub schema_version: u32,
@@ -184,6 +184,54 @@ pub struct VaultRecord {
     /// evolution under the same `schema_version`, like any other optional field).
     #[serde(default, skip_serializing_if = "RecordIdentity::is_empty")]
     pub identity: RecordIdentity,
+}
+
+/// Redacted `Debug`, because the derived one printed the secret this struct exists to
+/// protect -- and printed it NEXT TO the same secret already redacted.
+///
+/// Measured on the derived impl before this replaced it, one record, one line:
+///
+/// ```text
+/// oauth: Some(OAuthCredential { access_token: "<redacted>", refresh_token: "<redacted>" })
+/// payload: [115, 107, 45, 83, 69, 67, 82, 69, 84, 45, 65, 67, 67, 69, 83, 83]
+/// ```
+///
+/// Those bytes are `sk-SECRET-ACCESS`: for an OAuth record the payload IS typically the
+/// access token, so `OAuthCredential`'s careful redaction was defeated by the field
+/// beside it. Two disclosure policies inside one struct, and the weaker one wins for any
+/// reader who formats the whole record.
+///
+/// A byte array is the worst possible shape for this. A reader skimming a log sees
+/// numeric noise rather than something secret-shaped, so it does not trigger the alarm a
+/// quoted token would -- while being trivially decodable by anyone who wants to.
+///
+/// No current call site formats a `VaultRecord`, so this is a latent hazard rather than a
+/// live leak. It is worth closing anyway: the whole value of a redaction convention is
+/// that a future `{:?}` added in a hurry is safe by default, and a convention with a hole
+/// in it teaches the wrong lesson to whoever reads it next.
+impl std::fmt::Debug for VaultRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VaultRecord")
+            .field("schema_version", &self.schema_version)
+            .field("kind", &self.kind)
+            .field("source", &self.source)
+            .field("record_version", &self.record_version)
+            .field("expires_at_ms", &self.expires_at_ms)
+            .field("refresh_adapter", &self.refresh_adapter)
+            // Delegates to OAuthCredential's own redacting impl.
+            .field("oauth", &self.oauth)
+            // LENGTH ONLY. It is non-secret, and it is the one fact a diagnostic
+            // actually needs here: the empty-payload quarantine path exists precisely
+            // because a zero-length payload is a real corruption mode.
+            .field(
+                "payload",
+                &format_args!("[{} bytes redacted]", self.payload.len()),
+            )
+            // Non-secret by design: email and org name are returned to consumers as
+            // display metadata on every `get`.
+            .field("identity", &self.identity)
+            .finish()
+    }
 }
 
 impl VaultRecord {
@@ -295,6 +343,47 @@ impl VaultRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The payload never reaches a `Debug` rendering, in EITHER shape it could take.
+    ///
+    /// THE OBVIOUS VERSION OF THIS TEST PASSES ON THE BROKEN IMPL, which is the whole
+    /// reason it is written this way. The derived `Debug` printed `payload: [115, 107,
+    /// 45, ...]`, so a test asserting the secret's TEXT is absent finds nothing and goes
+    /// green against the exact code it exists to reject. The leak and the assertion were
+    /// looking at different encodings of the same bytes.
+    ///
+    /// So it asserts on the byte rendering too, and asserts the redaction marker IS
+    /// present -- otherwise an impl that rendered nothing at all would also pass.
+    #[test]
+    fn debug_never_renders_payload_bytes_in_any_encoding() {
+        let secret = b"sk-SECRET-ACCESS";
+        let rec =
+            VaultRecord::new_static(CredentialKind::ApiKey, "operator", secret.to_vec(), None);
+        let rendered = format!("{rec:?}");
+
+        assert!(
+            !rendered.contains("sk-SECRET-ACCESS"),
+            "the payload rendered as text: {rendered}"
+        );
+        // The shape the DERIVED impl actually produced. Without this arm the test is
+        // green on the defect.
+        let as_bytes = secret
+            .iter()
+            .map(|b| b.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        assert!(
+            !rendered.contains(&as_bytes),
+            "the payload rendered as a byte array, which is the form the derived impl \
+             leaked and the form a reader mistakes for noise: {rendered}"
+        );
+        // Proves the rendering happened at all, and that the length -- the one fact a
+        // diagnostic needs -- survives.
+        assert!(
+            rendered.contains("16 bytes redacted"),
+            "the redaction marker and byte count must be present: {rendered}"
+        );
+    }
 
     /// The identity shape that looks captured and serves as though it was not.
     ///

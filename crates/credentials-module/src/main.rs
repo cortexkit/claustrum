@@ -336,7 +336,23 @@ where
     // configurable actions gate the other lane, where a module answers with a degraded
     // status. A deaf daemon rides the unconditional one.
     //
-    // The numbers, all compiled defaults this module's config does not override:
+    // The numbers, all compiled defaults this module's config does not override, READ
+    // FROM subc-core's supervise.rs AND LAST RE-DERIVED 2026-09-02 (DEFAULT_HEALTH_CADENCE,
+    // DEFAULT_HEALTH_DEADLINE, DEFAULT_HEALTH_FAILURE_THRESHOLD, DEFAULT_DRAIN_TIMEOUT,
+    // DEFAULT_MAX_RESTARTS -- named so a re-check is a grep rather than an archaeology):
+    //
+    // THE DATE IS THE POINT, not decoration. A borrowed constant that names its source but
+    // not when it was last true reads as current forever, and this block instructs a future
+    // reader NOT to add a liveness probe -- an instruction that survives the numbers being
+    // wrong. Attribution tells you whose fact it is; only a date is falsifiable by someone
+    // who knows the sibling has shipped since.
+    //
+    // WHEN RE-CHECKING, READ THE CONSTANT AND NOT A MATCH ON ITS NAME. A grep for
+    // `failure_threshold` in that file also hits a test fixture carrying the same value 3,
+    // so a wrong read and a right one are indistinguishable by their answer today, and
+    // would silently "confirm" this block against a number nothing ships if the fixture
+    // ever drifted from the default.
+    //
     // cadence 30s, deadline 5s, failure_threshold 3, drain 30s. So the dark window is
     // ~90s to Unresponsive plus up to 30s drain before SIGKILL. Acceptable because a
     // read failing for two minutes is a `transient` refusal every consumer retries.

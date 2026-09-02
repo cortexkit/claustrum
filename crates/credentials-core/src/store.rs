@@ -2516,7 +2516,18 @@ impl EncryptedStore {
         // as the likely fix; NEITHER proves the session is alive. That asymmetry is the
         // whole value, and it is diagnostic value: it sharpens what an operator is told
         // after a 401, and gates nothing. insula holds the mirror of this rule at its
-        // consumption site (agreed with QTA 2026-08-28).
+        // consumption site: `quota-core/src/grok.rs` asserts that a successful fetch keeps
+        // its result even when the stated expiry has passed (verified there 2026-09-02;
+        // originally agreed with QTA 2026-08-28).
+        //
+        // THE CITATION REPLACED AN AGREEMENT, and the difference is not politeness. An
+        // agreed claim about another repository reads exactly the same whether it is true
+        // or false -- its truth value is unknown to the person holding it, and stays
+        // unknown until someone opens the other tree. This one was true; a clause of mine
+        // that another seat committed as load-bearing justification the same week was
+        // false for as long as it sat there. Same provenance, same confidence, opposite
+        // truth value. A file and a symbol are openable by anyone with both checkouts; an
+        // agreement is not.
         //
         // The drift is a WELL-MEANING one, which is why it is written here rather than
         // left as an understanding between two seats: an implementer sees a stored expiry

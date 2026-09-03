@@ -1187,13 +1187,64 @@ deliberately, and none of them is free:
 Until one is chosen, **flag-off for a migrated main is a deliberate outage.** That is an
 acceptable answer; silently assuming a restore path is not.
 
+#### Q6 IS DECIDED: option 2. No export op. (2026-09-03)
+
+This sat open long enough to become load-bearing for someone else's plan — a consumer
+seat described the main-slot takeover as "frozen on the plugin side, not on yours" while
+its completion depended on this choice, unmade, here. An undecided fork that nobody is
+watching reads as a decided one from outside.
+
+**The ruling: flag-off for a migrated main ends in an interactive re-login, permanently
+and by design. `credential.export` will not be built.**
+
+This changes nothing mechanically — option 2 is already what the paragraph above
+describes as the state "until one is chosen". What changes is that it is now a decision
+with a reason attached rather than a default nobody owns, which is the difference
+between a consumer planning around it and a consumer discovering it during an incident.
+
+**Why not option 1.** An export route inverts the single property the vault exists to
+provide. Every other custody rule here — handles are read capabilities, `credential.get`
+on a `SigningKey` refuses, a compromised daemon cannot authorize a mutation — rests on
+refresh material being unable to leave. One route whose stated purpose is to hand it back
+out makes all of those conditional on that route's gate, and a gate that protects
+everything is the gate an attacker studies. The cost it buys is a re-login; the cost it
+risks is the vault's reason to exist.
+
+**Why not option 3.** A sealed escrow copy is a second custody holder wearing a
+promise. Dual custody on rotating credentials is the exact failure this module was built
+to end. Measured on `oauth:anthropic` in this store rather than recalled:
+
+```
+invalidations 2026-06-27 .. 2026-07-07   7    the dual-custody window
+invalidations since 2026-07-08           1    2026-08-17, actor=vault
+```
+
+Seven in the eleven days before vault-native login made the vault sole refresher, one in
+the seven weeks since — and that one was a genuine provider-side revocation, not a
+custody race. The rate fell by roughly thirty-fold; it did not fall to zero, and the
+honest claim is the first. Re-introducing a second holder to make rollback cheaper
+trades a measured recurring hazard for an occasional convenience.
+
+**What this costs, stated so nobody discovers it later.** A migrated main account cannot
+be rolled back by flipping a flag. Recovering it means an operator running an
+interactive login, which needs a human and a browser. That is a real cost and it is the
+price of the property; a consumer planning a takeover should plan the re-login, not a
+rollback.
+
+**What would reopen this.** A mechanism that returns custody without moving refresh
+material — for example a provider that supports minting a second independent grant for
+the same account, so the plugin obtains its own family rather than receiving ours. That
+is a provider capability, not a vault one, and none of the twelve shipped adapters has
+it today. If one appears, this ruling is worth re-reading; nothing else about it is
+likely to change.
+
 So a rollback plan that does not say which row it is talking about is not a rollback
 plan. Stated plainly:
 
 | row | flag-off cost |
 |---|---|
 | fallback accounts | free — plugin resumes reading its sidecar |
-| main account | **no mechanical rollback exists.** Either build a custody-de-escalating export op (Q6), or document flag-off as an outage ending in interactive re-login |
+| main account | **no mechanical rollback exists, and none will be built.** Q6 decided 2026-09-03: flag-off ends in an interactive re-login. See the ruling above for why an export op and a sealed-escrow model were both refused |
 
 ### 9.2 Migration is crash-safe but NOT race-safe
 

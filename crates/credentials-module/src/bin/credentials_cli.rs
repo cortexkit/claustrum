@@ -997,7 +997,7 @@ fn cmd_put(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             // so there cannot be a surviving handle from a previous deposit. On the
             // replace arms handles are deliberately kept, and printing this there would
             // be false.
-            if !id_is_already_reachable(global, &id) {
+            if !created_id_is_already_reachable(global, &id) {
                 println!(
                     "  not reachable by any consumer yet: no capability handle and no \
                      covering grant."
@@ -2341,7 +2341,26 @@ fn cmd_remove(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
 /// probe computes. An authenticated admin READ — with --subc it reads the RUNNING
 /// module (master-key challenge-response, works exactly when the probe shows
 /// degraded); offline it takes the lease like `list`.
-/// Can any consumer reach `id` right now, by capability handle or covering grant?
+/// Can any consumer reach a NEWLY CREATED `id`, by capability handle or covering grant?
+///
+/// *** SOUND ONLY ON THE CREATE ARM, AND THAT IS A PROPERTY OF THE CALLER RATHER THAN
+/// OF THIS FUNCTION. *** It reads the grant set and does NOT read handles: it concludes
+/// "no handle" structurally, because `StoreMode::Create` refuses an existing id, so a
+/// freshly created row cannot carry one from a previous deposit.
+///
+/// Call it from a replace arm and the handle half is silently wrong in the expensive
+/// direction: a credential WITH a live handle would be reported unreachable, and the
+/// caller would print exactly the false hint the fail-open design below exists to
+/// prevent -- telling an operator to mint and place a handle for a credential that is
+/// already reachable. Hence the name says CREATED, and the create-only precondition is
+/// stated rather than implied by where it happens to be called from today.
+///
+/// Found by applying a peer's refinement to this file (2026-09-03): reading a remedy
+/// string is not "is the remedy wrong" but "can it be reached from a state where
+/// following it changes nothing", which requires enumerating the paths that REACH the
+/// refusal rather than reading its text. Doing that here showed the doc comment claimed
+/// a general answer the body does not compute. One call site today; the claim was the
+/// defect, not the behaviour.
 ///
 /// FAILS OPEN, DELIBERATELY: every uncertain path returns `true` ("assume reachable"),
 /// so the caller stays silent. This function exists only to decide whether to print an
@@ -2357,7 +2376,7 @@ fn cmd_remove(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
 /// already computed by the store, so the grant half is a lookup rather than a
 /// re-implementation of prefix matching here — the store's own answer, not a second
 /// opinion that could drift from it.
-fn id_is_already_reachable(global: &GlobalArgs, id: &str) -> bool {
+fn created_id_is_already_reachable(global: &GlobalArgs, id: &str) -> bool {
     let Ok(status) = request_admin_status(global) else {
         return true; // unreadable: say nothing
     };

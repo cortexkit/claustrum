@@ -124,4 +124,13 @@ fi
 echo "$findings finding(s). A BYTES NOT RETAINED line is permanent if no copy survives"
 echo "anywhere -- the chain still proves what was approved, but the artifact cannot be"
 echo "replayed and the signature over it becomes uncheckable rather than repudiated."
+echo
+echo "KNOWN AND PERMANENT: seq 4700 (manifest v7, 2026-08-27) is unrecoverable -- never"
+echo "retained here, and the consumer overwrote its own copy in place, so neither the"
+echo "signer nor the consumer can produce bytes both committed to. From 2026-09-03 the"
+echo "consumer retains every accepted manifest independently (second copy, vault stays"
+echo "the authority), so this row is the ONLY one of its kind rather than the first of a"
+echo "series. IT IS LEFT AS A FINDING RATHER THAN ALLOWLISTED ON PURPOSE: an allowlist"
+echo "entry would make this script exit 0 on a permanent hole, and the next hole would"
+echo "arrive into the same silence."
 exit 1

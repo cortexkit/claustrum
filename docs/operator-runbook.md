@@ -1147,3 +1147,33 @@ Two caveats that came with the numbers and matter for reading them later:
   for broca because billing forces it. A consumer that reads credentials without
   exporting anything has no denominator to offer, and for those the anomaly stays
   detectable-but-unattributable.
+## Reviewing a contributor head: what "verified at source" cannot see
+
+**A squashed commit whose tree was built on an older base silently reverts everything
+that landed in between.** No conflict, no warning, and the gate stays green because the
+removed code's tests leave with it. Reading the head "at source" cannot detect it,
+because that reading examines what is PRESENT.
+
+Measured on this repo, 2026-09-02/03: PR #30's head `44d4446` was squashed with parent
+`a31a34b` while its tree was built on `0679dea`, so its diff reverted four upstream
+commits — including `3568159`, the create-time reachability advisory that was staged and
+deployed hours later. That head was reviewed here and reported "verified at source". The
+contributor found it on rebase; the review did not.
+
+**The cheap tell, and it is the one to use:** `git diff --stat <base>..<head>` listing
+files the PR has no business touching. On `44d4446` that was `store.rs` at −21 lines in a
+comment region — a PR about account identity has no reason to delete comment lines from
+the store. Read the file list before reading the diff.
+
+**A mechanical version was built and deleted, and the reason is worth keeping.** The
+obvious sweep is "lines upstream added between the base's recent history and the base,
+that the head removes". It fires correctly on the poisoned head — and it also reported
+~60 findings on two CORRECTLY rebased heads. That is not a tuning problem: after a
+rebase, a PR that legitimately EDITS recently-landed upstream code is indistinguishable,
+by line-set arithmetic, from one that reverts it. A short-line filter cut the noise by
+half and no further.
+
+So the check cannot be a gate. Sixty findings on clean input is the alarm-that-always-
+fires failure, and the first thing anyone does with such an alarm is stop reading it.
+The file-list anomaly is judgement-shaped and stays judgement-shaped.
+

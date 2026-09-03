@@ -841,6 +841,30 @@ impl EncryptedStore {
     /// Whether an operation-specific literal credential-id prefix grant covers this
     /// request. Prefixes are compared in Rust rather than SQL `LIKE`, whose `%` and `_`
     /// metacharacters would silently widen a grant stored as ordinary text.
+    ///
+    /// NO GRANT IS SELECTED, AND THAT IS LOAD-BEARING. This folds a boolean OR across
+    /// every covering prefix, so two grants that both cover an id (`github_app:` and
+    /// `github_app:qta-`) are not a conflict to resolve — either suffices. `operation`
+    /// is in the WHERE clause rather than checked afterwards, so a `read` grant is not
+    /// even a candidate for a `sign` request.
+    ///
+    /// *** THE IMMUNITY THAT BUYS IS A PROPERTY OF THE DATA MODEL, NOT OF THIS CODE. ***
+    /// A grant is exactly `(principal_kind, principal_id, credential_prefix,
+    /// operation)` with NO per-grant state — no expiry, no rate cap, no handle binding.
+    /// The fold is safe because there is nothing left to evaluate once a cover is found.
+    ///
+    /// So: A NEW PER-GRANT DIMENSION GOES IN THE WHERE CLAUSE OR INSIDE THE FOLD, NEVER
+    /// AFTER A SELECTION. Add an expiry and implement it as "find the covering grant,
+    /// then check its expiry" and you get a live defect a sibling module measured
+    /// (2026-09-03): with two valid grants the lower id always wins, so every action
+    /// under the other one is refused with a remedy the caller already followed — mint,
+    /// refuse, mint, refuse, while a satisfying grant sits beside the chosen one. If a
+    /// dimension cannot be expressed in either place, resolution must consider all
+    /// covering grants and succeed if ANY satisfies.
+    ///
+    /// The single-use replace authorization sketched on issue #32 would carry per-grant
+    /// state (a nonce and a spend flag) and belongs in its own table for exactly this
+    /// reason, resolved by its own rule rather than bolted onto this one.
     pub fn read_grant_covers(
         &self,
         principal_kind: &str,

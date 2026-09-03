@@ -1557,10 +1557,99 @@ fn validation_bypass_is_absent_from_a_release_build() {
          bypass check below would pass vacuously"
     );
 
+    // THE POPULATION IS DERIVED FROM SOURCE, NOT LISTED HERE. A hardcoded list is a
+    // guard that reads as covering what it has never looked at: it stays green for
+    // every hatch added after it was written, and the day it matters is the day
+    // someone added one. Reviewing a contributor's branch that introduced FOUR new
+    // seam env vars against this test's ONE asserted string is what exposed the
+    // shape -- the scan would have passed while shipping all four.
+    //
+    // Today the derived population is 1 and equals the old hardcoded string, so this
+    // changes nothing about what is checked NOW. That is the point: the property was
+    // holding by luck and now holds by construction.
+    let hatches = shipped_test_hatch_env_names();
+
+    // Floor: an extractor that silently matches nothing would make every assertion
+    // below vacuous, and "zero hatches found" is indistinguishable from "scan broken".
+    // The repo has had at least one since 2026-08-08 (c380352).
     assert!(
-        !find("CORTEXKIT_TEST_BYPASS_VALIDATION"),
-        "the validation bypass env var is present in the release ck-auth binary"
+        !hatches.is_empty(),
+        "derived zero test-hatch env names from source -- the extractor is broken, not \
+         the source clean; this repo has carried at least one since c380352"
     );
+    // Anchor: prove the extractor finds the instance we know about, so a pattern that
+    // matches nothing useful cannot pass the floor on unrelated hits.
+    assert!(
+        hatches
+            .iter()
+            .any(|h| h == "CORTEXKIT_TEST_BYPASS_VALIDATION"),
+        "the extractor missed the known hatch CORTEXKIT_TEST_BYPASS_VALIDATION; it is \
+         reading something other than the shipped source. Derived: {hatches:?}"
+    );
+
+    for hatch in &hatches {
+        assert!(
+            !find(hatch),
+            "test hatch {hatch} is present in the release ck-auth binary; it must be \
+             compiled out under #[cfg(debug_assertions)] rather than gated at runtime"
+        );
+    }
+}
+
+/// Every test-hatch env name in the SHIPPED source of the two crates.
+///
+/// WHAT THIS CAN AND CANNOT CLAIM, stated because a guard that implies completeness is
+/// worse than none: it finds every hatch whose name carries `TEST`, `BYPASS` or `SEAM`,
+/// which is this repo's convention. A hatch named outside that convention is invisible
+/// to it. The convention is therefore load-bearing, not cosmetic.
+///
+/// The scan is SHAPE-FREE -- it matches SCREAMING_CASE string literals rather than
+/// `env::var(...)` call sites. An earlier env-var census here was written call-shaped
+/// and returned a plausible six-name list that omitted `SUBC_LAUNCH_NONCE`, a name I had
+/// been writing about all week; the shape-free pass found the real thirteen. A scan that
+/// only sees one syntax reports honestly about that syntax and says nothing about the
+/// rest.
+///
+/// `src/` only: a hatch named in `tests/` is test code and never reaches a binary.
+fn shipped_test_hatch_env_names() -> Vec<String> {
+    fn walk(dir: &std::path::Path, out: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                let Ok(text) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                for token in text.split('"') {
+                    let looks_like_a_name = token.len() >= 4
+                        && token
+                            .chars()
+                            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+                        && token.starts_with(|c: char| c.is_ascii_uppercase());
+                    if looks_like_a_name
+                        && ["TEST", "BYPASS", "SEAM"].iter().any(|k| token.contains(k))
+                        && !out.iter().any(|existing| existing == token)
+                    {
+                        out.push(token.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("workspace root")
+        .to_path_buf();
+    let mut out = Vec::new();
+    walk(&workspace.join("crates/credentials-module/src"), &mut out);
+    walk(&workspace.join("crates/credentials-core/src"), &mut out);
+    out
 }
 
 /// NOT RUNNABLE AGAINST A STAGED RELEASE ARTIFACT, deliberately on both sides.

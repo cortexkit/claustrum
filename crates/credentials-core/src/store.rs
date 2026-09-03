@@ -393,6 +393,13 @@ pub enum StoreOpError {
         retained_account_id: String,
         incoming_account_id: String,
     },
+    /// An explicit supplied account label contradicts the provider claim in incoming
+    /// material. The token claim is authoritative for adapters that expose one.
+    SuppliedIdentityContradictsClaim {
+        credential_id: String,
+        supplied_account_id: String,
+        derived_account_id: String,
+    },
     /// The record is quarantined (`corrupt`) and cannot be served.
     Quarantined,
     /// The record is `needs_reauth` and must not be served until re-authenticated.
@@ -443,6 +450,14 @@ impl std::fmt::Display for StoreOpError {
                 f,
                 "incoming material names account '{incoming_account_id}', but identity preservation would retain account '{retained_account_id}'; pass `--account-id <new>` with '{incoming_account_id}' or `--clear-identity`; or afterwards: ck auth set-identity {credential_id} --account-id {incoming_account_id}"
             ),
+            StoreOpError::SuppliedIdentityContradictsClaim {
+                supplied_account_id,
+                derived_account_id,
+                ..
+            } => write!(
+                f,
+                "supplied identity names account '{supplied_account_id}', but incoming material names account '{derived_account_id}'; drop `--account-id`, or fix the export; the token's own claim is authoritative"
+            ),
             StoreOpError::Quarantined => f.write_str("credential is quarantined (corrupt)"),
             StoreOpError::NeedsReauth => f.write_str("credential needs re-authentication"),
             StoreOpError::Decrypt(e) => write!(f, "envelope decrypt failed: {e}"),
@@ -478,13 +493,20 @@ impl From<StoreError> for StoreOpError {
     }
 }
 
-fn normalize_and_validate_record_identity(
-    mut record: VaultRecord,
-) -> Result<VaultRecord, StoreOpError> {
+fn normalize_record_identity(mut record: VaultRecord) -> VaultRecord {
     let identity = record.identity.clone();
     record = record.with_identity(identity);
-    record.identity.validate().map_err(StoreOpError::Encode)?;
-    Ok(record)
+    record
+}
+
+fn validate_record_identity(record: &VaultRecord) -> Result<(), StoreOpError> {
+    record.identity.validate().map_err(StoreOpError::Encode)
+}
+
+fn derived_account_id(record: &VaultRecord) -> Option<String> {
+    let adapter = record.refresh_adapter.as_deref()?;
+    let access_token = record.oauth.as_ref()?.access_token.as_str();
+    crate::oauth_login::account_id_for_adapter(adapter, access_token)
 }
 
 /// SHA-256 of a record's opaque payload — the value an overwrite CAS compares
@@ -964,7 +986,21 @@ impl EncryptedStore {
         record: &VaultRecord,
         ctx: AuditCtx<'_>,
     ) -> Result<(), StoreOpError> {
-        let mut record = normalize_and_validate_record_identity(record.clone())?;
+        let mut record = normalize_record_identity(record.clone());
+        if let Some(derived_account_id) = derived_account_id(&record) {
+            match record.identity.account_id.as_deref() {
+                Some(supplied_account_id) if supplied_account_id != derived_account_id => {
+                    return Err(StoreOpError::SuppliedIdentityContradictsClaim {
+                        credential_id: credential_id.to_string(),
+                        supplied_account_id: supplied_account_id.to_string(),
+                        derived_account_id,
+                    });
+                }
+                None => record.identity.account_id = Some(derived_account_id),
+                Some(_) => {}
+            }
+        }
+        validate_record_identity(&record)?;
         record.record_version = 1;
         let blob = self.seal_record(credential_id, &record)?;
         let key_id_hex = self.key_id.to_hex();
@@ -1058,7 +1094,8 @@ impl EncryptedStore {
             return Err(StoreOpError::CasMismatch);
         }
         let next_version = current.record_version.saturating_add(1);
-        let mut record = normalize_and_validate_record_identity(record.clone())?;
+        let mut record = normalize_record_identity(record.clone());
+        validate_record_identity(&record)?;
         record.record_version = next_version;
         let blob = self.seal_record(credential_id, &record)?;
         let key_id_hex = self.key_id.to_hex();
@@ -1153,15 +1190,12 @@ impl EncryptedStore {
         preserve_existing_identity: bool,
         ctx: AuditCtx<'_>,
     ) -> Result<(), StoreOpError> {
-        let incoming = normalize_and_validate_record_identity(record.clone())?;
+        let incoming = normalize_record_identity(record.clone());
+        validate_record_identity(&incoming)?;
         let incoming_account_id = preserve_existing_identity
             .then_some(())
             .filter(|_| incoming.identity.is_empty())
-            .and_then(|_| {
-                let adapter = incoming.refresh_adapter.as_deref()?;
-                let access_token = incoming.oauth.as_ref()?.access_token.as_str();
-                crate::oauth_login::account_id_for_adapter(adapter, access_token)
-            });
+            .and_then(|_| derived_account_id(&incoming));
         let key_id_hex = self.key_id.to_hex();
         let now = now_ms();
         let audit_key = self.audit_key.clone();
@@ -3914,6 +3948,145 @@ mod tests {
             Err(StoreOpError::AlreadyExists) => {}
             other => panic!("expected AlreadyExists, got {other:?}"),
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn create_accepts_a_supplied_openai_identity_when_the_claim_agrees() {
+        use crate::record::RecordIdentity;
+
+        let (root, store) = tmp_store(60);
+        let record = openai_record("acct-same", b"token").with_identity(RecordIdentity {
+            account_id: Some("acct-same".to_string()),
+            email: Some("same@example.com".to_string()),
+            org_name: None,
+        });
+
+        store
+            .create("oauth:openai", &record)
+            .expect("matching identity creates");
+
+        assert_eq!(
+            store
+                .get("oauth:openai")
+                .expect("read created record")
+                .identity,
+            record.identity
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn create_refuses_a_supplied_openai_identity_when_the_claim_differs_without_writing() {
+        use crate::record::RecordIdentity;
+
+        let (root, store) = tmp_store(61);
+        let record = openai_record("acct-derived", b"token").with_identity(RecordIdentity {
+            account_id: Some("acct-supplied".to_string()),
+            email: Some("supplied@example.com".to_string()),
+            org_name: None,
+        });
+        let tip_before = store.audit_tip().expect("read initial audit tip");
+
+        let err = store
+            .create("oauth:openai", &record)
+            .expect_err("a supplied identity that contradicts the token claim must refuse");
+
+        assert!(matches!(
+            err,
+            StoreOpError::SuppliedIdentityContradictsClaim {
+                ref credential_id,
+                ref supplied_account_id,
+                ref derived_account_id,
+            } if credential_id == "oauth:openai"
+                && supplied_account_id == "acct-supplied"
+                && derived_account_id == "acct-derived"
+        ));
+        assert!(
+            err.to_string().contains("drop `--account-id`")
+                && err
+                    .to_string()
+                    .contains("the token's own claim is authoritative"),
+            "{err}"
+        );
+        assert!(matches!(
+            store.get("oauth:openai"),
+            Err(StoreOpError::NotFound)
+        ));
+        assert_eq!(
+            store.audit_tip().expect("read audit tip after refusal"),
+            tip_before,
+            "a refused create must not advance the audit chain"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn create_accepts_a_supplied_identity_for_an_adapter_without_a_claim() {
+        use crate::record::RecordIdentity;
+
+        let (root, store) = tmp_store(62);
+        let record = oauth_record().with_identity(RecordIdentity {
+            account_id: Some("acct-anthropic".to_string()),
+            email: Some("anthropic@example.com".to_string()),
+            org_name: None,
+        });
+
+        store
+            .create("oauth:anthropic", &record)
+            .expect("non-derivable adapter keeps supplied identity behavior");
+        assert_eq!(
+            store
+                .get("oauth:anthropic")
+                .expect("read created record")
+                .identity,
+            record.identity
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn create_attaches_a_derived_openai_identity_when_none_is_supplied() {
+        let (root, store) = tmp_store(63);
+        store
+            .create("oauth:openai", &openai_record("acct-derived", b"token"))
+            .expect("create with a derivable claim");
+
+        assert_eq!(
+            store
+                .get("oauth:openai")
+                .expect("read created record")
+                .identity
+                .account_id
+                .as_deref(),
+            Some("acct-derived")
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn create_refuses_a_control_character_in_a_derived_openai_identity_without_writing() {
+        let (root, store) = tmp_store(64);
+        let record = openai_record("acct-\u{0007}", b"token");
+        let tip_before = store.audit_tip().expect("read initial audit tip");
+
+        let err = store
+            .create("oauth:openai", &record)
+            .expect_err("a derived identity must be validated before it is sealed");
+
+        assert!(
+            matches!(err, StoreOpError::Encode(ref message) if message.contains("control")),
+            "expected identity validation error, got {err}"
+        );
+        assert!(matches!(
+            store.get("oauth:openai"),
+            Err(StoreOpError::NotFound)
+        ));
+        assert_eq!(
+            store.audit_tip().expect("read audit tip after refusal"),
+            tip_before,
+            "a refused create must not advance the audit chain"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

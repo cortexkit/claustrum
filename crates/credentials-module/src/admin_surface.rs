@@ -327,7 +327,8 @@ fn store_err(e: StoreOpError) -> AdminOutcome {
         StoreOpError::CasMismatch => "version/hash mismatch (concurrent change)".to_string(),
         StoreOpError::AlreadyExists => "credential already exists".to_string(),
         StoreOpError::Fenced { .. } => "fenced out by a newer writer".to_string(),
-        e @ StoreOpError::AccountIdentityMismatch { .. } => e.to_string(),
+        e @ (StoreOpError::AccountIdentityMismatch { .. }
+        | StoreOpError::SuppliedIdentityContradictsClaim { .. }) => e.to_string(),
         other => format!("store error: {other}"),
     };
     AdminOutcome::Refused(reason)
@@ -659,6 +660,39 @@ mod tests {
             message,
             "incoming material names account 'acct-incoming', but identity preservation would retain account 'acct-retained'; pass `--account-id <new>` with 'acct-incoming' or `--clear-identity`; or afterwards: ck auth set-identity oauth:openai --account-id acct-incoming"
         );
+    }
+
+    #[tokio::test]
+    async fn connected_create_identity_claim_refusal_renders_as_admin_refused() {
+        let r = rig(15);
+        r.admin.record_bind(5, Principal::Direct);
+        let op = AdminOpBody::Store {
+            v: ADMIN_OP_SCHEMA_V1,
+            id: "oauth:openai".to_string(),
+            record: Box::new(openai_record("acct-derived", b"new-token").with_identity(
+                RecordIdentity {
+                    account_id: Some("acct-supplied".to_string()),
+                    email: Some("supplied@example.com".to_string()),
+                    org_name: None,
+                },
+            )),
+            audit_op: credentials_core::admin_ops::AdminAuditOp::Import,
+            mode: credentials_core::admin_ops::StoreMode::Create,
+        };
+        let body = String::from_utf8(op.to_bytes().expect("encode op")).expect("UTF-8 JSON");
+        let (tag, _) = challenge_and_sign(&r, 5, &body);
+
+        let AdminOutcome::Refused(message) = r.admin.execute(5, body.as_bytes(), &tag).await else {
+            panic!("a contradictory create identity must surface as admin_refused");
+        };
+        assert_eq!(
+            message,
+            "supplied identity names account 'acct-supplied', but incoming material names account 'acct-derived'; drop `--account-id`, or fix the export; the token's own claim is authoritative"
+        );
+        assert!(matches!(
+            r.store.get("oauth:openai"),
+            Err(credentials_core::store::StoreOpError::NotFound)
+        ));
     }
 
     #[tokio::test]

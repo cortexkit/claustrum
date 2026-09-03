@@ -143,6 +143,39 @@ jobs:
         shell: bash
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
+      # THE TAG AND THE CRATE VERSION MUST AGREE, and this gate exists because they did
+      # not in v0.1.1 and it broke the installer for every new user on every platform.
+      #
+      # The release index derives an expected version from the tag (`v<ver>` -> `<ver>`)
+      # and `ck setup` then places the binary, runs `--version`, and REQUIRES that
+      # substring. v0.1.1 shipped binaries printing `0.1.0` because the crate version was
+      # never bumped, so acceptance refused and the placement rolled back -- a state
+      # strictly worse than the release it superseded, which at least matched its tag.
+      #
+      # I called that cosmetic when I shipped it. It was not: the version string is an
+      # INPUT to another repo's acceptance check, and a field one consumer parses is not
+      # decoration however much it looks like a label. Refusing here makes the mismatch
+      # unshippable rather than remembered.
+      - name: Refuse a tag that disagrees with the crate version
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ inputs.tag || github.ref_name }}"
+          want="${tag#v}"
+          have=$(cargo metadata --no-deps --format-version 1 \
+                 | python3 -c 'import json,sys; m=json.load(sys.stdin); \
+                   print(next(p["version"] for p in m["packages"] \
+                   if p["name"]=="credentials-module"))')
+          echo "tag wants $want; crate reports $have"
+          if [ "$want" != "$have" ]; then
+            echo "REFUSING: tag $tag implies version $want but the crate is $have."
+            echo "The release index derives the expected version from the tag and"
+            echo "\`ck setup\` requires it as a substring of --version, so these assets"
+            echo "would fail acceptance on every platform. Bump the crate versions to"
+            echo "$want, or tag v$have."
+            exit 1
+          fi
+
       # CK_BUILD_REV IS THE POINT OF THIS STEP, and it is here because hand-building the
       # first alpha assets without it produced two binaries that answered `--version` with
       # "0.1.0 (unknown)". A vault that cannot name its own revision fails the first leg of

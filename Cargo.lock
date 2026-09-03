@@ -281,7 +281,7 @@ dependencies = [
 
 [[package]]
 name = "credentials-core"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "base64",
@@ -308,7 +308,7 @@ dependencies = [
 
 [[package]]
 name = "credentials-module"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "base64",
@@ -1754,7 +1754,7 @@ dependencies = [
 
 [[package]]
 name = "subc-core"
-version = "0.17.2"
+version = "0.17.3"
 dependencies = [
  "base64",
  "cortexkit-paths 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",

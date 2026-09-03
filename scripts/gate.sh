@@ -227,13 +227,11 @@ stream and pass the arm without ever seeing it skip."
 # follows it), and any gap between the floor and the real count is how many can go
 # before anyone is told. Measured 402 across the workspace's suites at the time of
 # writing; an earlier floor of 200 left a third of them free to disappear.
-# The current measured total is 470 after adding redacted-Debug pins for VaultRecord and
-# AdminOpBody, on top of the request-shape pins for the read surface and the source-level
-# checks that keep diagnostic enum documentation complete.
+# The current measured total is 501 after adding the derived-claim validation test.
 #
 # Raise this when tests are added. A failure here is normally that, not a defect --
 # but it should be a deliberate edit rather than a number nobody revisits.
-  run_expect 470 "workspace unit + integration" \
+  run_expect 501 "workspace unit + integration" \
   cargo test --locked --workspace
 
 # Two independent defences, because each catches what the other misses:

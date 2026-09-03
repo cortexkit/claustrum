@@ -256,7 +256,13 @@ jobs:
   # constant that drifted from its manifest, and a Windows-breaking path comparison --
   # every one of which has fired here in the last fortnight.
   fork-safe:
-    name: Fork-safe checks (no build, no tests)
+    # THE RENDERED NAME IS THE CONTRACT, AND A PARENTHETICAL IS NOT PART OF IT.
+    # This read `Fork-safe checks (no build, no tests)` and GitHub renders it to a
+    # contributor as `Fork-safe checks   pass` -- measured on PR #28, 2026-09-03. The
+    # scope disclaimer was in the source and invisible on the surface where it mattered,
+    # so a green check read as "the suite passed" for the exact audience that cannot
+    # run the suite. Keep the scope in the leading words, where truncation cannot eat it.
+    name: Fork-safe checks only - suite not run
     if: >-
       github.event_name == 'pull_request' &&
       github.event.pull_request.head.repo.full_name != github.repository

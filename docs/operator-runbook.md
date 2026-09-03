@@ -1125,6 +1125,41 @@ needs — both sides are in hand — and useless in an incident, where only the 
 binary is. Rebuilding candidate commits until a UUID matches does not work either,
 for the same reason. Ask `--version` instead.
 
+## A lane's silence is only anomalous against its own fetch rate
+
+The mirror of the section below, and I got it wrong in a live incident before writing it.
+
+`credential.get` is demand-driven, so the vault mints only when a consumer asks. **Token
+lifetime says when a token expires; it says nothing about when a consumer asks.**
+Comparing "minutes since last mint" against the 60-minute installation-token lifetime
+therefore measures nothing — and it reads exactly like a finding.
+
+Measured 2026-09-03 while investigating three App lanes that looked stale:
+
+```
+lane                mints  own mean gap   own max gap   observed gap   verdict
+qta-alfonso            11        955 min      5723 min        167 min   normal
+oaiauth-alfonso        24         11 h          146 h           22 h    normal
+ckdesk-alfonso          1           -              -            7 d     never used
+subc-alfonso          283            -              -              -    hourly
+```
+
+All three were reported to me, or by me, as suspicious. **None is an anomaly.** I had
+told another seat that qta's 167 minutes "brackets the first 401 with no story needed" —
+it is one sixth of that lane's own mean interval.
+
+**The second trap is the comparison population.** "19 of 22 lanes minted in the last 15
+minutes while this one sat at 167" sounds decisive and compares a lane with 11 lifetime
+mints against lanes with 283. Those are different populations; a low-traffic lane is
+silent most of the time by construction.
+
+**What is actually evidence, and it needs no timing at all:** `auth_events` for the lane.
+A provider call that was made and refused writes a row on both failure arms in
+`engine.rs` — `InvalidGrant` through `invalidate_if_version_reported`, everything else
+through `record_auth_event`. So zero rows means no call was refused. Confirm the store
+was writable in the window (sibling lanes committing proves it), because the transient
+arm's diagnostics write is best-effort and can itself be lost.
+
 ## A refresh-rate anomaly: ask for the denominator before building one
 
 A credential refreshing far above its own token lifetime is the signature of a caller

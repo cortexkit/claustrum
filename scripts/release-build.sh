@@ -132,11 +132,30 @@ for bin in ck-claustrum ck-auth; do
   #
   # POSTSIGN, deliberately: codesign rewrites the Mach-O, so a digest taken before this
   # line describes a file that no longer exists on disk.
-  shasum -a 256 "$STAGE/$bin" | cut -d' ' -f1 > "$STAGE/$bin.sha256"
+  # SHASUM FORMAT, NOT BARE HEX -- `<hex>  <name>`, which is what `shasum -c` parses.
+  #
+  # This file had `| cut -d' ' -f1`, so it wrote a lone 64-hex line and `shasum -c`
+  # refused it with "no properly formatted SHA checksum lines found" -- which presents
+  # as a FAILED INTEGRITY CHECK on a good binary, aimed at whoever bothers to verify.
+  #
+  # I had already fixed exactly this in .github/workflows/release.yml (67a6f22) and left
+  # this producer alone. TWO PRODUCERS OF ONE ARTIFACT TYPE, one fixed: the same shape I
+  # corrected a sibling seat for (their sidecars were shasum-format on linux and bare hex
+  # on darwin) while carrying it here myself. When a fix lands on one emitter, the
+  # question is not whether it is correct -- it is who ELSE emits this.
+  (cd "$STAGE" && shasum -a 256 "$bin" > "$bin.sha256")
+  # VERIFY BY REPLAYING THE CONSUMER'S COMMAND rather than re-deriving the digest and
+  # string-comparing. Recomputing a hash twice only proves I can compute a hash twice; it
+  # never exercises the FILE'S FORMAT, which is how the bare-hex sidecars shipped past a
+  # green check in the first place.
+  (cd "$STAGE" && shasum -c "$bin.sha256" >/dev/null) || {
+    echo "REFUSING: $bin.sha256 is not parseable by the command a verifier runs" >&2
+    exit 1
+  }
   printf '%-14s rev=%s sha256=%s\n' \
     "$bin" \
     "$("$STAGE/$bin" --version | sed -E 's/.*\((.*)\)/\1/')" \
-    "$(cat "$STAGE/$bin.sha256")"
+    "$(awk '{print $1}' "$STAGE/$bin.sha256")"
 done
 
 # EXERCISE THE STAGED FILE, not the source it came from.

@@ -1067,14 +1067,19 @@ fn cmd_put(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             // so there cannot be a surviving handle from a previous deposit. On the
             // replace arms handles are deliberately kept, and printing this there would
             // be false.
+            // ADVICE ON STDERR, VERDICT ON STDOUT -- this file's existing convention,
+            // most closely the mint advisory ("(minted handle for …)"), which puts the
+            // datum on stdout and the note beside it on stderr.
+            //
+            // This was on stdout, so the LAST line of a successful put was advice and a
+            // caller had to tail past it to find `created <id>`. An operator reads both
+            // either way; a script capturing stdout now gets the verdict alone.
             if !created_id_is_already_reachable(global, &id) {
-                println!(
-                    "  not reachable by any consumer yet: no capability handle and no \
-                     covering grant."
-                );
-                println!(
-                    "  mint one with `ck auth mint-handle --id {id}` and place it where \
-                     the consumer reads handles; the vault cannot write that file."
+                eprintln!(
+                    "(not reachable by any consumer yet: no capability handle and no \
+                     covering grant; mint one with `ck auth mint-handle --id {id}` and \
+                     place it where the consumer reads handles — the vault cannot write \
+                     that file)"
                 );
             }
         }

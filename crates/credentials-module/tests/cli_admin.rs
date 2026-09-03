@@ -66,6 +66,80 @@ fn cli() -> Command {
 /// key material into an HTTP header fails before the wire. That is the failure plexus
 /// hit on 2026-08-17, and this asserts the SHAPE that prevents it rather than the CLI's
 /// success message -- "created" printed identically for the broken shape.
+/// Bootstrap is idempotent, and a real key-store failure is still a failure.
+///
+/// THE SECOND ARM IS THE POINT. Making a rerun succeed is easy and would be actively
+/// dangerous on its own: `CliError::MasterKey(_)` maps all 13 MasterKeyError variants to
+/// exit 4, so an installer that learns to tolerate 4 tolerates a LOCKED KEYCHAIN too and
+/// enables the module with no key. That is not hypothetical -- it was proposed as a
+/// repair on a fresh macOS VM over SSH, 2026-09-03, where the login keychain was locked.
+///
+/// So this pins the pair: rerun exits 0 AND names the same key_id (proving it is the
+/// existing key rather than a silently reprovisioned one), while an unusable key path
+/// still exits non-zero.
+#[test]
+fn bootstrap_is_idempotent_but_a_real_key_store_failure_is_not() {
+    let root = tmp_root("bootstrap-idem");
+    let data_dir = root.join("vault");
+    let key_path = root.join("keys").join("master.key");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    std::fs::create_dir_all(key_path.parent().unwrap()).unwrap();
+
+    let run = |dir: &std::path::Path, key: &std::path::Path| {
+        let mut c = cli();
+        c.arg("bootstrap")
+            .arg("--data-dir")
+            .arg(dir)
+            .arg("--key-path")
+            .arg(key);
+        c.output().expect("run ck-auth bootstrap")
+    };
+
+    let first = run(&data_dir, &key_path);
+    assert!(
+        first.status.success(),
+        "first bootstrap failed: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let first_out = String::from_utf8_lossy(&first.stdout).to_string();
+    let id = first_out
+        .split("key_id ")
+        .nth(1)
+        .and_then(|t| t.split(')').next())
+        .expect("first bootstrap names a key_id")
+        .to_string();
+
+    let second = run(&data_dir, &key_path);
+    let second_out = String::from_utf8_lossy(&second.stdout).to_string();
+    assert!(
+        second.status.success(),
+        "a rerun must succeed -- an already-provisioned vault IS bootstrap's \
+         postcondition: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert!(
+        second_out.contains("already provisioned"),
+        "the rerun must say it changed nothing: {second_out}"
+    );
+    assert!(
+        second_out.contains(&id),
+        "the rerun must name the SAME key_id ({id}), or it may have reprovisioned: \
+         {second_out}"
+    );
+
+    // The control: tolerance must not extend past the already-provisioned case.
+    let broken = run(
+        &root.join("v2"),
+        std::path::Path::new("/definitely/not/a/dir/key"),
+    );
+    assert!(
+        !broken.status.success(),
+        "an unusable key store must STILL fail; if this passes, an installer that \
+         tolerates bootstrap's exit code will enable a vault with no key: {}",
+        String::from_utf8_lossy(&broken.stdout)
+    );
+}
+
 #[test]
 fn a_github_app_deposit_lands_oauth_shaped_rather_than_static() {
     let rig = tmp_root("github-app-put");

@@ -166,7 +166,29 @@ impl std::fmt::Display for MasterKeyError {
             MasterKeyError::KeyAlreadyProvisioned(m) => {
                 write!(f, "a master key is already provisioned: {m}")
             }
-            MasterKeyError::KeyStoreUnwritable(m) => write!(f, "key store is not writable: {m}"),
+            // NAMES THE REMEDY FOR THE ONE CAUSE AN OPERATOR CAN FIX, and only when the
+            // platform message says so. On a headless or SSH macOS session the login
+            // keychain is locked and Security returns "User interaction is not allowed",
+            // which is recoverable in one command -- but the bare passthrough left the
+            // operator holding a platform string with no next step. Measured on a fresh
+            // macOS VM over SSH, 2026-09-03, where `ck setup claustrum` stopped here.
+            //
+            // Conditioned on the marker rather than appended always: suggesting an
+            // unlock for a genuine permissions or disk failure sends the operator down a
+            // path that cannot work, which is worse than saying nothing.
+            MasterKeyError::KeyStoreUnwritable(m) => {
+                if m.contains("User interaction is not allowed") {
+                    write!(
+                        f,
+                        "key store is not writable: {m}\n  the login keychain is locked \
+                         (typical over SSH or on a headless session); unlock it with \
+                         `security unlock-keychain ~/Library/Keychains/login.keychain-db` \
+                         and retry, or pass --key-path to use an operator key file instead"
+                    )
+                } else {
+                    write!(f, "key store is not writable: {m}")
+                }
+            }
             MasterKeyError::InvalidKeyMaterial(m) => {
                 write!(f, "stored key material is invalid: {m}")
             }
@@ -955,6 +977,37 @@ fn hex_val(c: u8) -> Result<u8, MasterKeyError> {
 
 #[cfg(test)]
 mod tests {
+
+    /// The locked-keychain remedy is attached to the case it can fix, and ONLY that case.
+    ///
+    /// Both arms matter. Without the first an operator on a headless macOS box holds a
+    /// platform string with no next step -- the state that stalled `ck setup claustrum`
+    /// on a fresh VM. Without the second, a genuine permissions or disk failure would
+    /// advise an unlock that cannot work, which costs more than silence.
+    #[test]
+    fn the_locked_keychain_message_names_its_remedy_and_only_then() {
+        let locked = MasterKeyError::KeyStoreUnwritable(
+            "SecItemAdd failed: User interaction is not allowed".to_string(),
+        );
+        let rendered = locked.to_string();
+        assert!(
+            rendered.contains("security unlock-keychain"),
+            "the locked-keychain case must name the command that fixes it: {rendered}"
+        );
+        assert!(
+            rendered.contains("--key-path"),
+            "and the headless alternative, since unlocking is not always possible: \
+             {rendered}"
+        );
+
+        let other = MasterKeyError::KeyStoreUnwritable("permission denied".to_string());
+        let rendered = other.to_string();
+        assert!(
+            !rendered.contains("unlock-keychain"),
+            "an unrelated write failure must NOT advise an unlock that cannot help it: \
+             {rendered}"
+        );
+    }
     use super::*;
 
     /// A platform with no keychain must SAY SO, and say what to do instead.

@@ -766,12 +766,49 @@ fn cmd_bootstrap(global: &GlobalArgs) -> Result<(), CliError> {
         },
         other => CliError::StoreOpen(other),
     })?;
-    let key = resolver::bootstrap(&resolver_config(global)).map_err(CliError::MasterKey)?;
-    println!(
-        "provisioned a new master key (key_id {})",
-        key.key_id().to_hex()
-    );
-    Ok(())
+    // IDEMPOTENT ON PURPOSE: an already-provisioned vault is bootstrap's POSTCONDITION,
+    // not a failure. Returning an error for a state that satisfies the goal is what made
+    // this dangerous -- `CliError::MasterKey(_)` maps every one of MasterKeyError's 13
+    // variants to exit 4, so "a key already exists" and "the keychain is locked and I
+    // cannot tell" are indistinguishable to a caller reading the code.
+    //
+    // MEASURED NEAR-MISS, 2026-09-03, on a fresh macOS VM over SSH: `ck setup claustrum`
+    // hit exit 4 from a LOCKED LOGIN KEYCHAIN ("User interaction is not allowed"), and a
+    // repair proposal then read exit 4 as "already provisioned" and moved on -- which
+    // would have enabled the module with NO KEY. The conflation did that, not the
+    // proposal: both readings of 4 were defensible.
+    //
+    // So the installer can now always run bootstrap: success means a key exists, and a
+    // non-zero exit means one does not. The key_id is printed either way, which is what
+    // lets an operator tell a fresh provision from a pre-existing vault -- the honest
+    // difference between the two cases, rather than an exit code carrying it.
+    match resolver::bootstrap(&resolver_config(global)) {
+        Ok(key) => {
+            println!(
+                "provisioned a new master key (key_id {})",
+                key.key_id().to_hex()
+            );
+            Ok(())
+        }
+        Err(MasterKeyError::KeyAlreadyProvisioned(_)) => {
+            // Read the existing key back so the line names WHICH key is in place. If that
+            // read fails we still exit 0: `KeyAlreadyProvisioned` already proved a key
+            // exists, which is the whole postcondition, and downgrading to a failure here
+            // would reintroduce the conflation this arm exists to remove.
+            match resolver::resolve(&resolver_config(global), None) {
+                Ok(key) => println!(
+                    "already provisioned (key_id {}); nothing to do",
+                    key.key_id().to_hex()
+                ),
+                Err(e) => println!(
+                    "already provisioned; nothing to do (the key is present but could not \
+                     be read back to name it: {e})"
+                ),
+            }
+            Ok(())
+        }
+        Err(other) => Err(CliError::MasterKey(other)),
+    }
 }
 
 /// Generate and store an Ed25519 signing key without creating a second copy outside

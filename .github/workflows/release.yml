@@ -176,6 +176,57 @@ jobs:
             exit 1
           fi
 
+      # ABSORB SIBLING VERSION BUMPS, THEN PROVE NO REGISTRY PIN MOVED.
+      #
+      # The v0.1.1 and v0.1.2 release builds BOTH failed on all three platforms with
+      # `--locked` refusing, minutes after CI passed green on the identical tree. Eight
+      # sibling bumps landed in one evening; a release cannot win that race by re-tagging.
+      #
+      # What `--locked` actually protects here, measured on this lockfile:
+      #
+      #   registry deps  254   pinned by source URL and checksum -- real reproducibility
+      #   path deps       11   version string ONLY, no source, no hash
+      #
+      # A path dependency's recorded version is not a reproducibility guarantee: the
+      # sibling is cloned at its own main either way, and an unbumped source edit compiles
+      # in silently regardless. So failing the release on a path VERSION STRING costs the
+      # release and buys nothing, while the 254 pins that do matter are unaffected.
+      #
+      # `cargo update -w` touches workspace and path members only -- verified: it moved
+      # exactly one path entry and disturbed zero registry pins. The assertion below is
+      # what makes that safe rather than assumed, and it fails the build if a registry
+      # pin ever moves here.
+      #
+      # CI on master still runs plain `--locked` and still fails on a stale lock. That is
+      # deliberate: there I WANT to be told, and it is how every one of tonight's bumps
+      # was caught. Here I want the release to build.
+      - name: Absorb sibling bumps without disturbing registry pins
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp Cargo.lock /tmp/lock.before
+          cargo update -w
+          python3 - <<'PY'
+          import re, sys
+          def pkgs(p):
+              s = open(p).read()
+              out = {}
+              for m in re.finditer(
+                  r'\[\[package\]\]\nname = "([^"]+)"\nversion = "([^"]+)"\n(source = "[^"]*"\n)?', s):
+                  out[m.group(1)] = (m.group(2), bool(m.group(3)))
+              return out
+          a, b = pkgs('/tmp/lock.before'), pkgs('Cargo.lock')
+          moved = [(k, a[k][0], b[k][0], a[k][1]) for k in b if k in a and a[k][0] != b[k][0]]
+          for k, x, y, isreg in moved:
+              print(f"  {k}: {x} -> {y}  {'REGISTRY' if isreg else 'path'}")
+          bad = [m for m in moved if m[3]]
+          if bad:
+              print("REFUSING: `cargo update -w` moved a REGISTRY pin, which it must never do.")
+              print("The release would not be reproducible from the committed lockfile.")
+              sys.exit(1)
+          print(f"absorbed {len(moved)} path bump(s); 0 registry pins disturbed")
+          PY
+
       # CK_BUILD_REV IS THE POINT OF THIS STEP, and it is here because hand-building the
       # first alpha assets without it produced two binaries that answered `--version` with
       # "0.1.0 (unknown)". A vault that cannot name its own revision fails the first leg of

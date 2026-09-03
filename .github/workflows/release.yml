@@ -204,7 +204,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cp Cargo.lock /tmp/lock.before
+          cp Cargo.lock ./lock.before
           cargo update -w
           python3 - <<'PY'
           import re, sys
@@ -215,7 +215,7 @@ jobs:
                   r'\[\[package\]\]\nname = "([^"]+)"\nversion = "([^"]+)"\n(source = "[^"]*"\n)?', s):
                   out[m.group(1)] = (m.group(2), bool(m.group(3)))
               return out
-          a, b = pkgs('/tmp/lock.before'), pkgs('Cargo.lock')
+          a, b = pkgs('lock.before'), pkgs('Cargo.lock')
           moved = [(k, a[k][0], b[k][0], a[k][1]) for k in b if k in a and a[k][0] != b[k][0]]
           for k, x, y, isreg in moved:
               print(f"  {k}: {x} -> {y}  {'REGISTRY' if isreg else 'path'}")
@@ -226,6 +226,11 @@ jobs:
               sys.exit(1)
           print(f"absorbed {len(moved)} path bump(s); 0 registry pins disturbed")
           PY
+          # RELATIVE, NOT /tmp: the windows runner has no /tmp, and this step failed
+          # there with FileNotFoundError while darwin and linux passed -- a hardcoded
+          # POSIX path, which is the class `scripts/check-path-rendering.py` exists to
+          # catch and does not scan for in workflow YAML.
+          rm -f ./lock.before
 
       # CK_BUILD_REV IS THE POINT OF THIS STEP, and it is here because hand-building the
       # first alpha assets without it produced two binaries that answered `--version` with

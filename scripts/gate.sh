@@ -352,6 +352,18 @@ if [ "$((ci_steps - gate_arms))" -gt 5 ]; then
     exit 1
 fi
 
+# HOW TO CHECK A PLATFORM THIS HOST IS NOT, when touching platform APIs. A full
+# `cargo check --target x86_64-pc-windows-msvc` does NOT work here -- ring's build
+# script needs the MSVC toolchain and fails before reaching our code. A narrower
+# probe does, and it caught the real defect on 2026-09-04:
+#
+#   extract the affected helpers into a standalone .rs, then
+#   rustc --edition 2021 --target x86_64-pc-windows-msvc --emit=metadata probe.rs
+#
+# ALWAYS WITH THE UNGATED VERSION AS A CONTROL. A passing probe is equally
+# consistent with a probe that checks nothing; the control must reproduce the CI
+# error (E0433 here) or the pass means nothing.
+
 # NAME THE LANE, not just the verdict. Two checkers whose success lines are
 # indistinguishable let a transcript from one be read as covering the other --
 # and the scope note in this header is read by whoever opens the file, never by
@@ -362,3 +374,6 @@ fi
 printf '\nGATE PASSED -- every check CI runs, on this working tree\n'
 printf '  NOT covered: cross-platform (CI also runs Windows), and whether a\n'
 printf '  deployed BINARY carries what you just built (scripts/accept-deploy.sh).\n'
+printf '  Two windows-only defects passed this gate on 2026-09-04: a fixture\n'
+printf '  setting TMPDIR (windows reads TEMP/TMP), and std::os::unix in a test\n'
+printf '  (macOS IS unix). Touching platform APIs? See the probe in this file.\n'

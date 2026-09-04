@@ -1,3 +1,6 @@
+import { appendFileSync, chmodSync, mkdirSync, renameSync, statSync } from "node:fs";
+import { dirname, join } from "node:path";
+
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
 export type CustodyLogEntry = {
@@ -23,6 +26,12 @@ export type CustodyLogger = {
   error(entry: Omit<CustodyLogEntry, "level">): void;
 };
 
+const FILE_LIMIT_BYTES = 5 * 1024 * 1024;
+const FILE_FIELDS: Array<keyof CustodyLogEntry> = [
+  "level", "provider", "label", "credentialId", "recordVersion", "state", "httpStatus",
+  "cooldownUntil", "errorClass", "errorCode",
+];
+
 function defaultSink(entry: CustodyLogEntry): void {
   const out = entry.level === "debug"
     ? console.debug
@@ -32,12 +41,78 @@ function defaultSink(entry: CustodyLogEntry): void {
   out(JSON.stringify(entry));
 }
 
-export function createLogger(sink: LogSink = defaultSink): CustodyLogger {
+export type FileLogSinkOptions = {
+  path?: string;
+  env?: NodeJS.ProcessEnv;
+  warn?: (message: string) => void;
+};
+
+function defaultFilePath(env: NodeJS.ProcessEnv): string {
+  const stateHome = env.XDG_STATE_HOME || (env.HOME ? join(env.HOME, ".local", "state") : ".local/state");
+  return join(stateHome, "cortexkit", "opencode-plugin", "custody.jsonl");
+}
+
+function fileEntry(entry: CustodyLogEntry): Record<string, unknown> {
+  const safe: Record<string, unknown> = {};
+  for (const field of FILE_FIELDS) {
+    if (entry[field] !== undefined) safe[field] = entry[field];
+  }
+  return { ...safe, ts: new Date().toISOString(), pid: process.pid };
+}
+
+export function createFileLogSink(options: FileLogSinkOptions = {}): LogSink {
+  const env = options.env ?? process.env;
+  if (options.path === undefined && ["off", "0", "false", "no"].includes(env.CLAUSTRUM_CUSTODY_LOG ?? "")) {
+    return () => {};
+  }
+  const path = options.path ?? env.CLAUSTRUM_CUSTODY_LOG ?? defaultFilePath(env);
+  const warn = options.warn ?? ((message: string) => console.error(JSON.stringify({
+    level: "warn",
+    errorCode: "custody_log_unavailable",
+    errorMessage: message,
+  })));
+  let unavailable = false;
+  let initialized = false;
+  const fail = () => {
+    if (unavailable) return;
+    unavailable = true;
+    warn("persistent custody log unavailable; continuing with console logging");
+  };
+  const rotateIfNeeded = () => {
+    try {
+      if (statSync(path).size > FILE_LIMIT_BYTES) renameSync(path, `${path}.1`);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  };
+  return (entry) => {
+    if (unavailable) return;
+    try {
+      if (!initialized) {
+        mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+        rotateIfNeeded();
+        initialized = true;
+      }
+      rotateIfNeeded();
+      appendFileSync(path, `${JSON.stringify(fileEntry(entry))}\n`, { mode: 0o600 });
+      chmodSync(path, 0o600);
+    } catch {
+      fail();
+    }
+  };
+}
+
+export function createLogger(sink?: LogSink): CustodyLogger {
+  const fileSink = sink ? undefined : createFileLogSink();
+  const output = sink ?? ((entry: CustodyLogEntry) => {
+    defaultSink(entry);
+    fileSink?.(entry);
+  });
   return {
-    debug: (entry) => sink({ level: "debug", ...entry }),
-    info: (entry) => sink({ level: "info", ...entry }),
-    warn: (entry) => sink({ level: "warn", ...entry }),
-    error: (entry) => sink({ level: "error", ...entry }),
+    debug: (entry) => output({ level: "debug", ...entry }),
+    info: (entry) => output({ level: "info", ...entry }),
+    warn: (entry) => output({ level: "warn", ...entry }),
+    error: (entry) => output({ level: "error", ...entry }),
   };
 }
 

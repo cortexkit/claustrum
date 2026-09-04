@@ -13,6 +13,8 @@ export {
   type ManifestHandleAccount,
   type ManifestHandleFile,
   type ManifestHandleProvider,
+  type ManifestLockError,
+  type ManifestLockErrorCode,
 } from './manifest-lock.js'
 export {
   ClaustrumCredentialError,

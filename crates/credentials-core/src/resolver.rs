@@ -703,7 +703,23 @@ fn classify_keychain_find(code: Option<i32>, stdout: &str, stderr: &str) -> Keyc
     }
     let haystack = stderr.to_ascii_lowercase();
     // A locked keychain (or any non-interactive denial) must fail closed.
-    if haystack.contains("interaction")
+    //
+    // EXIT 36 IS THE SAME CONDITION WITH NO STDERR AT ALL, which is how this arm missed
+    // it: every test here reads stderr text, and over SSH `security` said nothing.
+    // Observed on a real Mac over SSH, 2026-09-04, printing only "security exited with
+    // Some(36):" with an empty tail.
+    //
+    // 36 is not arbitrary, and the model is ALREADY LOAD-BEARING IN THIS FUNCTION
+    // WITHOUT HAVING BEEN STATED: an exit status is one byte, so a negative OSStatus
+    // arrives truncated to its low byte.
+    //
+    //   errSecItemNotFound          -25300 & 0xFF = 44   <- the arm below already relies
+    //   errSecInteractionNotAllowed -25308 & 0xFF = 36      on exactly this
+    //
+    // So the numeric and textual forms of -25308 are the same fact, and the string test
+    // below stays because a future macOS may print it rather than only returning it.
+    if code == Some(36)
+        || haystack.contains("interaction")
         || haystack.contains("locked")
         || haystack.contains("not allowed")
         || haystack.contains("-25308")
@@ -714,7 +730,19 @@ fn classify_keychain_find(code: Option<i32>, stdout: &str, stderr: &str) -> Keyc
     if code == Some(44) || haystack.contains("could not be found") {
         return KeychainFind::NotFound;
     }
-    KeychainFind::Error(format!("security exited with {code:?}: {}", stderr.trim()))
+    // NEVER `{code:?}`: that renders as `Some(36)` in an operator's line. The Option is
+    // an implementation detail of process exit (None = killed by a signal), and a reader
+    // hitting `Some(36)` learns the type of a Rust binding rather than what went wrong.
+    let how = match code {
+        Some(c) => format!("exited with {c}"),
+        None => "was killed by a signal".to_string(),
+    };
+    let tail = stderr.trim();
+    if tail.is_empty() {
+        KeychainFind::Error(format!("the `security` command {how} and said nothing"))
+    } else {
+        KeychainFind::Error(format!("the `security` command {how}: {tail}"))
+    }
 }
 
 /// Classify a failure to SPAWN the `security` binary.
@@ -977,6 +1005,65 @@ fn hex_val(c: u8) -> Result<u8, MasterKeyError> {
 
 #[cfg(test)]
 mod tests {
+
+    /// A locked keychain over SSH is exit 36 with NOTHING on stderr, and no operator
+    /// line renders a Rust `Option`.
+    ///
+    /// Both arms were real. The classifier tested only stderr TEXT, so the silent form
+    /// fell to the catch-all and printed `security exited with Some(36):` — a Debug
+    /// `Option` in an operator's terminal, teaching them the type of a binding rather
+    /// than what went wrong.
+    ///
+    /// 36 is `errSecInteractionNotAllowed (-25308) & 0xFF`. The truncation model was
+    /// already load-bearing here and unstated: the not-found arm keys on exit 44, which
+    /// is `errSecItemNotFound (-25300) & 0xFF`. Asserted below so the two arms stand or
+    /// fall together rather than one looking like a magic number.
+    #[test]
+    fn a_silent_exit_36_is_a_locked_keychain_and_no_option_reaches_the_operator() {
+        assert_eq!(
+            -25308i32 & 0xFF,
+            36,
+            "the locked arm's code is a truncated OSStatus"
+        );
+        assert_eq!(
+            -25300i32 & 0xFF,
+            44,
+            "and so is the not-found arm's, already shipped"
+        );
+
+        assert!(
+            matches!(
+                classify_keychain_find(Some(36), "", ""),
+                KeychainFind::Locked
+            ),
+            "exit 36 with no stderr is a locked keychain; falling through to Error is \
+             what printed a Debug Option at an operator"
+        );
+
+        // The catch-all still has to render SOMETHING, and it must not be a Debug Option.
+        let rendered = match classify_keychain_find(Some(99), "", "boom") {
+            KeychainFind::Error(m) => m,
+            other => panic!("an unclassified code must be an Error, got {other:?}"),
+        };
+        assert!(
+            !rendered.contains("Some("),
+            "no operator line may render a Rust Option: {rendered}"
+        );
+        assert!(
+            rendered.contains("99"),
+            "the code itself is the useful part and must survive: {rendered}"
+        );
+
+        // A signal death has no code at all; that must read as English, not `None`.
+        let killed = match classify_keychain_find(None, "", "") {
+            KeychainFind::Error(m) => m,
+            other => panic!("expected Error, got {other:?}"),
+        };
+        assert!(
+            !killed.contains("None") && killed.contains("signal"),
+            "a signal death must say so rather than printing None: {killed}"
+        );
+    }
 
     /// The locked-keychain remedy is attached to the case it can fix, and ONLY that case.
     ///

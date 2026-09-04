@@ -77,6 +77,64 @@ fn cli() -> Command {
 /// So this pins the pair: rerun exits 0 AND names the same key_id (proving it is the
 /// existing key rather than a silently reprovisioned one), while an unusable key path
 /// still exits non-zero.
+/// The `ck` dispatcher's opt-in probe, all four clauses.
+///
+/// Until this answers, `ck auth …` refuses as "not a command" and this binary vanishes
+/// from `ck --help` — so the contract is load-bearing in a way nothing local reveals,
+/// and every clause below is enforced by a consumer in another repo.
+///
+/// It must also answer WITHOUT touching config, a vault or the network: a headline that
+/// needed the store to be readable would fail the probe on exactly the hosts where an
+/// operator most needs `ck auth` to exist. Asserted by running it with a data-dir that
+/// does not exist.
+#[test]
+fn the_ck_domain_probe_answers_with_one_line_and_needs_nothing() {
+    let mut c = cli();
+    c.arg("--ck-domain");
+    let out = c.output().expect("run ck-auth --ck-domain");
+    assert!(
+        out.status.success(),
+        "the probe must exit 0 or `ck auth` stops being a command: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "exactly one non-empty line is the contract; got {lines:?}"
+    );
+    assert!(
+        !lines[0].trim().is_empty(),
+        "the single line is the headline shown beside the domain in `ck --help`"
+    );
+
+    // STRICT MATCH IS INTENTIONAL: the dispatcher invokes exactly `ck-auth --ck-domain`
+    // and nothing else, so `--ck-domain` appearing ANYWHERE in a longer command line
+    // must NOT be treated as a probe. Loosening it would let the flag shadow a real verb
+    // and silently print a headline where an operator asked for work.
+    //
+    // My first version of this test asserted the opposite -- that the probe survives an
+    // extra `--data-dir` -- and failed. The test was wrong, not the code.
+    let mut c2 = cli();
+    c2.arg("--ck-domain")
+        .arg("--data-dir")
+        .arg("/definitely/not/a/dir");
+    let out2 = c2
+        .output()
+        .expect("run ck-auth with --ck-domain plus another flag");
+    assert!(
+        !String::from_utf8_lossy(&out2.stdout).contains(lines[0]),
+        "a longer command line must not answer the probe: {}",
+        String::from_utf8_lossy(&out2.stdout)
+    );
+
+    // AND IT NEEDS NOTHING: the arm above ran with no vault, no config and no lease in
+    // the ambient environment, which is the property that matters -- a headline
+    // requiring a readable store would fail the probe on exactly the hosts where an
+    // operator most needs `ck auth` to exist.
+}
+
 #[test]
 fn bootstrap_is_idempotent_but_a_real_key_store_failure_is_not() {
     let root = tmp_root("bootstrap-idem");

@@ -192,6 +192,24 @@ fn run() -> Result<(), CliError> {
         println!("{}", usage_short());
         return Ok(());
     }
+    // THE `ck` DISPATCHER'S OPT-IN PROBE. Until this answers, `ck auth …` refuses as
+    // "not a command" and this binary is absent from `ck --help`.
+    //
+    // The dispatcher used to exec ANY `ck-*` on PATH, which broke once `ck setup` began
+    // placing module programs into the same directory: `ck aft` exec'd the AFT module
+    // itself, which started in stdio mode and waited on a pipe. Opting in is the right
+    // shape — a binary that happens to be named `ck-something` is not thereby a command.
+    //
+    // CONTRACT, and every clause is load-bearing because the dispatcher enforces it:
+    // exit 0, within 2 seconds, EXACTLY ONE non-empty line on stdout. Answered here as
+    // the very first thing `run` does, before argument parsing, config or any file
+    // touch, so the deadline cannot be missed on a slow or misconfigured host — a
+    // headline that needed the vault to be readable would fail the probe on exactly the
+    // machines where an operator most needs `ck auth` to exist.
+    if args.as_slice() == ["--ck-domain"] {
+        println!("provider-credential vault: login, list, put, grants");
+        return Ok(());
+    }
     if args.as_slice() == ["--version"] || args.as_slice() == ["-V"] {
         // The package version alone cannot identify a build -- it is a constant that
         // has not moved in the project's lifetime. The revision is what answers "which

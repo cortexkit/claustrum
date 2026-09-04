@@ -1533,6 +1533,45 @@ mod error_class_tests {
         assert_eq!(params.reporter_source, None);
     }
 
+    /// The consumer-facing wire contract names EVERY error class, and no others.
+    ///
+    /// A document describing a wire surface is a claim that drifts silently: the class
+    /// set is pinned in source by the test below, but a doc naming three of four
+    /// classes reads as complete to the consumer who vendors it, and nothing fails.
+    /// This joins the two — the doc's table cannot fall behind the enum, and a class
+    /// deleted from the enum cannot linger in the doc.
+    ///
+    /// It does NOT check the prose, the remedies, or the code table; those are
+    /// documentation and are checked by reading. It checks the one thing a consumer
+    /// branches on.
+    #[test]
+    fn the_wire_contract_doc_names_every_error_class() {
+        let doc = include_str!("../../../docs/wire-contract-v1.md");
+        for class in ERROR_CLASS_WIRE_SET {
+            assert!(
+                doc.contains(class),
+                "the wire contract doc does not name the `{class}` class, so a consumer \
+                 vendoring it would branch on an incomplete set"
+            );
+        }
+        // And the reverse: a class the doc names that the enum no longer emits would be
+        // a consumer branching on something that can never arrive.
+        for candidate in [
+            "transient",
+            "permanent",
+            "auth_required",
+            "context_overflow",
+        ] {
+            if doc.contains(&format!("| `{candidate}` |")) {
+                assert!(
+                    ERROR_CLASS_WIRE_SET.contains(&candidate),
+                    "the doc's table names `{candidate}`, which this producer no longer \
+                     emits — a consumer would carry a dead branch"
+                );
+            }
+        }
+    }
+
     /// Golden conformance: this producer's serde wire strings for `ErrorClass` match
     /// the pinned contract set exactly (order-independent, no extras, no misses). If a
     /// contract change ever alters the set, this fails loudly instead of drifting.

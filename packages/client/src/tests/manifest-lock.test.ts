@@ -12,6 +12,7 @@ import {
 
 const roots: string[] = []
 const handle = (letter: string) => `ckh_${letter.repeat(43)}`
+const sleep = async (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
 async function manifestPath(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), 'claustrum-manifest-lock-'))
@@ -354,9 +355,17 @@ describe('thrown errors carry a stable code', () => {
     expect(error).toBeInstanceOf(EnrollRefusal)
     expect((error as Error).message).toBe('identity mismatch')
     await expect(stat(`${path}.lock`)).rejects.toThrow()
-    // the consumer-visible consequence: the next claimant is not stalled for a TTL
+    // The consumer-visible consequence: the next claimant is not stalled for a TTL.
+    // Bounded by a race rather than by awaiting and measuring afterwards -- if release
+    // regressed, the await itself would block for the full 30s TTL and the suite would
+    // report a timeout with no attribution, which is indistinguishable from a slow box
+    // or a hang anywhere else. Failing fast with the property named beats hanging.
     const started = Date.now()
-    await withManifestLock(path, 'probe', async () => {})
+    const outcome = await Promise.race([
+      withManifestLock(path, 'probe', async () => 'reacquired' as const),
+      sleep(1_000).then(() => 'lock not released on throw: re-acquire exceeded 1000ms' as const),
+    ])
+    expect(outcome).toBe('reacquired')
     expect(Date.now() - started).toBeLessThan(1_000)
   })
 

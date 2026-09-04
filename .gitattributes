@@ -18,3 +18,10 @@
 *.pem -text
 crates/credentials-core/tests/fixtures/** -text
 crates/credentials-module/tests/fixtures/** -text
+packages/opencode/golden/** -text
+
+# THE LIST ABOVE IS NOW ENFORCED, because the instruction in this comment did not
+# survive contact with a new directory. `scripts/check-fixture-line-endings.py`
+# refuses if any `golden/` or `fixtures/` directory is missing from it, so the next
+# one cannot be added silently. A convention stated in a file is only followed by
+# people who open that file.

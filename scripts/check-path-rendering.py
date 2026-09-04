@@ -26,8 +26,10 @@ at the call site and is not what a comparison against a literal ever wants.
 
 from __future__ import annotations
 
+import io
 import re
 import sys
+import tokenize
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -43,6 +45,43 @@ BAD = re.compile(r"\bstr\(\s*(?:[A-Za-z_][A-Za-z0-9_]*)?(?:path|Path|_dir|file)\
 IMPLICIT = re.compile(r"relative_to\([^)]*\)\s*(?:==|!=|\bin\b)")
 
 
+
+def code_only(source: str, raw_lines: list[str]) -> list[str]:
+    """Blank out comments and string literals, keeping line numbers intact.
+
+    A LINE DESCRIBING THE DEFECT IS NOT THE DEFECT, and this used to be enforced
+    with `stripped.startswith("#")` -- which covers one of the two ways a line is
+    prose. A DOCSTRING is not a comment, so the module docstring of any script
+    explaining `str(Path)` was scanned as code. That fired on
+    `check-fixture-line-endings.py`, whose docstring explains why it calls
+    `.as_posix()` -- the checker penalising a file for documenting the rule it
+    follows.
+
+    `tokenize` is exact where a `startswith` is a guess: COMMENT and STRING tokens
+    are blanked, everything else is kept verbatim, so a real call is still matched
+    on its own line. On a file that will not tokenize (a syntax error) the raw
+    lines are returned rather than skipped -- refusing to scan a broken file would
+    make a parse error a way to smuggle a defect past this check.
+    """
+    blanked = list(raw_lines)
+    try:
+        tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        return blanked
+    for tok in tokens:
+        if tok.type not in (tokenize.COMMENT, tokenize.STRING):
+            continue
+        (srow, scol), (erow, ecol) = tok.start, tok.end
+        for row in range(srow, erow + 1):
+            if row - 1 >= len(blanked):
+                break
+            line = blanked[row - 1]
+            start = scol if row == srow else 0
+            end = ecol if row == erow else len(line)
+            blanked[row - 1] = line[:start] + " " * (end - start) + line[end:]
+    return blanked
+
+
 def main() -> int:
     files = sorted(SCRIPTS.glob("*.py"))
     if not files:
@@ -53,13 +92,11 @@ def main() -> int:
     for path in files:
         if path.name == Path(__file__).name:
             continue
-        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-            stripped = line.strip()
-            # A line describing the defect is not the defect. Comments are where the
-            # rule gets explained, and flagging them makes the checker unusable in
-            # exactly the files that document it.
-            if stripped.startswith("#"):
-                continue
+        source = path.read_text(encoding="utf-8")
+        raw_lines = source.splitlines()
+        code_lines = code_only(source, raw_lines)
+        for lineno, line in enumerate(code_lines, 1):
+            stripped = raw_lines[lineno - 1].strip()
             rel = path.relative_to(ROOT).as_posix()
             if BAD.search(line):
                 problems.append(

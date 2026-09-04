@@ -86,6 +86,7 @@ run_check "inbound contracts" bash scripts/check-inbound-contracts.sh
 run_check "endpoint hosts" python3 scripts/endpoint-hosts.py
 run_check "threshold controls" python3 scripts/threshold-controls.py
 run_check "path rendering" python3 scripts/check-path-rendering.py
+run_check "fixture line endings" python3 scripts/check-fixture-line-endings.py
 run_check "doc status" python3 scripts/check-doc-status.py
 # FORMAT IS SCOPED TO THIS REPO'S OWN CRATES, and that is a correctness fix rather
 # than a narrowing.

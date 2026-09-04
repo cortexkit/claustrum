@@ -209,6 +209,14 @@ jobs:
       - name: Design doc status claims
         run: python3 scripts/check-doc-status.py
 
+      - name: Fixture line endings
+        # Guards a defect only the Windows job can see: git rewrites LF to CRLF on
+        # checkout, so a byte-exact assertion against a fixture fails there and only
+        # there. Runs on every platform because the CHECK is about .gitattributes
+        # coverage, not about the running host.
+        shell: bash
+        run: python3 scripts/check-fixture-line-endings.py
+
       - name: Threshold boundary controls
         # Bash-pinned to match its siblings. NOTE the path rendering is handled in
         # the script via as_posix(), not by this pin: the separator comes from

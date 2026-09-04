@@ -1646,8 +1646,8 @@ mod tests {
             "test",
             "stub",
             credentials_core::oauth::OAuthCredential {
-                access_token: "at".into(),
-                refresh_token: "rt".into(),
+                access_token: "at".to_string().into(),
+                refresh_token: "rt".to_string().into(),
                 expires_at_ms: Some(0),
                 token_url: "https://example.invalid/token".into(),
                 client_id: None,
@@ -1800,7 +1800,7 @@ mod tests {
         > {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(credentials_core::refresh_adapters::RefreshedTokens {
-                access_token: "fresh-after-ttl-check".into(),
+                access_token: "fresh-after-ttl-check".to_string().into(),
                 refresh_token: credential.refresh_token.clone(),
                 expires_at_ms: Some(test_now_ms().saturating_add(self.fresh_ttl_ms)),
                 github_app_permissions: None,
@@ -1851,8 +1851,8 @@ mod tests {
                     "test",
                     "ttl-fixture",
                     credentials_core::oauth::OAuthCredential {
-                        access_token: "stored-before-refresh".into(),
-                        refresh_token: "refresh-token".into(),
+                        access_token: "stored-before-refresh".to_string().into(),
+                        refresh_token: "refresh-token".to_string().into(),
                         expires_at_ms: Some(test_now_ms().saturating_add(initial_ttl_ms)),
                         token_url: "https://example.invalid/token".into(),
                         client_id: None,
@@ -4958,8 +4958,8 @@ mod tests {
         // Stale: an OAuth record whose access token expired long ago. Reaching the
         // refresh path with no adapter registered cannot succeed.
         let oauth = credentials_core::oauth::OAuthCredential {
-            access_token: "expired".to_string(),
-            refresh_token: "rt".to_string(),
+            access_token: "expired".to_string().into(),
+            refresh_token: "rt".to_string().into(),
             expires_at_ms: Some(1),
             token_url: String::new(),
             client_id: None,
@@ -5125,8 +5125,8 @@ mod tests {
                     "test",
                     "stub",
                     OAuthCredential {
-                        access_token: "locally-valid".into(),
-                        refresh_token: "rt".into(),
+                        access_token: "locally-valid".to_string().into(),
+                        refresh_token: "rt".to_string().into(),
                         expires_at_ms: Some(i64::MAX),
                         token_url: "https://example.invalid/token".into(),
                         client_id: None,
@@ -5283,8 +5283,8 @@ mod tests {
                     "test",
                     "invalid-grant-fixture",
                     OAuthCredential {
-                        access_token: "locally-valid".into(),
-                        refresh_token: "rt".into(),
+                        access_token: "locally-valid".to_string().into(),
+                        refresh_token: "rt".to_string().into(),
                         expires_at_ms: Some(i64::MAX),
                         token_url: "https://example.invalid/token".into(),
                         client_id: None,
@@ -5611,8 +5611,8 @@ mod tests {
             "legacy-import",
             "legacy",
             credentials_core::oauth::OAuthCredential {
-                access_token: String::new(),
-                refresh_token: String::new(),
+                access_token: String::new().into(),
+                refresh_token: String::new().into(),
                 expires_at_ms: None,
                 token_url: String::new(),
                 client_id: None,
@@ -5895,8 +5895,8 @@ mod tests {
                     "stub",
                     "stub",
                     OAuthCredential {
-                        access_token: "still-locally-valid".into(),
-                        refresh_token: "refresh".into(),
+                        access_token: "still-locally-valid".to_string().into(),
+                        refresh_token: "refresh".to_string().into(),
                         expires_at_ms: Some(i64::MAX),
                         token_url: "https://example.invalid/token".into(),
                         client_id: None,
@@ -6109,8 +6109,8 @@ mod tests {
              eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdC1lMmUtNyJ9fQ.\
              sig";
         let oauth = OAuthCredential {
-            access_token: access_jwt.to_string(),
-            refresh_token: "ref".to_string(),
+            access_token: access_jwt.to_string().into(),
+            refresh_token: "ref".to_string().into(),
             // Far-future expiry so the record is not stale and `get` serves it as-is
             // (no refresh, no network) — isolating the account_id surfacing.
             expires_at_ms: Some(4_102_444_800_000),
@@ -6196,8 +6196,8 @@ mod tests {
         let oauth = OAuthCredential {
             // Opaque (non-JWT) access token — the live claim parse yields nothing,
             // so any served identity provably comes from the stored RecordIdentity.
-            access_token: "sk-ant-oat01-opaque".to_string(),
-            refresh_token: "ref".to_string(),
+            access_token: "sk-ant-oat01-opaque".to_string().into(),
+            refresh_token: "ref".to_string().into(),
             expires_at_ms: Some(4_102_444_800_000),
             token_url: "https://api.anthropic.com/v1/oauth/token".to_string(),
             client_id: Some("client".to_string()),
@@ -6290,8 +6290,8 @@ mod tests {
 
         let (surface, store, _db) = tmp_surface_with_store(31);
         let oauth = OAuthCredential {
-            access_token: "opaque-access".to_string(),
-            refresh_token: "refresh-secret".to_string(),
+            access_token: "opaque-access".to_string().into(),
+            refresh_token: "refresh-secret".to_string().into(),
             expires_at_ms: Some(4_102_444_800_000),
             token_url: "https://example.invalid/token".to_string(),
             client_id: None,

@@ -128,8 +128,8 @@ mod tests {
 
     fn cred() -> OAuthCredential {
         OAuthCredential {
-            access_token: "opaque-token".into(),
-            refresh_token: "opaque-token".into(),
+            access_token: "opaque-token".to_string().into(),
+            refresh_token: "opaque-token".to_string().into(),
             expires_at_ms: Some(0),
             token_url: TOKEN_URL.into(),
             client_id: None,
@@ -195,8 +195,8 @@ mod tests {
         let before = now_ms();
         let http = FixtureTransport::new(Vec::new());
         let result = DevinAdapter::new().refresh(&cred(), &http).await.unwrap();
-        assert_eq!(result.access_token, "opaque-token");
-        assert_eq!(result.refresh_token, "opaque-token");
+        assert_eq!(result.access_token.expose(), "opaque-token");
+        assert_eq!(result.refresh_token.expose(), "opaque-token");
         assert!(result.expires_at_ms.unwrap() >= before + TOKEN_TTL_MS);
         assert!(http.requests().is_empty(), "Devin has no refresh endpoint");
     }

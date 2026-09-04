@@ -137,8 +137,8 @@ pub fn cmd_login(
         None => tokens.refresh_token.clone(),
     };
     let oauth = credentials_core::oauth::OAuthCredential {
-        access_token: tokens.access_token.clone(),
-        refresh_token,
+        access_token: tokens.access_token.clone().into(),
+        refresh_token: refresh_token.into(),
         expires_at_ms: tokens.expires_at_ms,
         token_url: TOKEN_URL.to_string(),
         client_id: Some(client_id),

@@ -107,7 +107,7 @@ impl AnthropicAdapter {
         let client_id = cred.client_id.as_deref().unwrap_or(CLAUDE_CODE_CLIENT_ID);
         let body = serde_json::json!({
             "grant_type": "refresh_token",
-            "refresh_token": cred.refresh_token,
+            "refresh_token": cred.refresh_token.expose(),
             "client_id": client_id,
         });
         serde_json::to_vec(&body).expect("serializing a fixed-shape json body never fails")
@@ -166,10 +166,10 @@ impl RefreshAdapter for AnthropicAdapter {
         // field is optional on the wire).
         let refresh_token = parsed
             .refresh_token
-            .unwrap_or_else(|| cred.refresh_token.clone());
+            .unwrap_or_else(|| cred.refresh_token.expose().to_string());
         Ok(RefreshedTokens {
-            access_token: parsed.access_token,
-            refresh_token,
+            access_token: parsed.access_token.into(),
+            refresh_token: refresh_token.into(),
             expires_at_ms,
             github_app_permissions: None,
         })
@@ -191,8 +191,8 @@ mod tests {
 
     fn cred() -> OAuthCredential {
         OAuthCredential {
-            access_token: "old-access".into(),
-            refresh_token: "old-refresh".into(),
+            access_token: "old-access".to_string().into(),
+            refresh_token: "old-refresh".to_string().into(),
             expires_at_ms: Some(0),
             token_url: TOKEN_URL.into(),
             client_id: Some(CLAUDE_CODE_CLIENT_ID.into()),
@@ -218,9 +218,10 @@ mod tests {
             .refresh(&cred(), &http)
             .await
             .unwrap();
-        assert_eq!(tokens.access_token, "sk-ant-oat01-new-access");
+        assert_eq!(tokens.access_token.expose(), "sk-ant-oat01-new-access");
         assert_eq!(
-            tokens.refresh_token, "sk-ant-ort01-new-refresh",
+            tokens.refresh_token.expose(),
+            "sk-ant-ort01-new-refresh",
             "refresh token rotated"
         );
         let exp = tokens.expires_at_ms.unwrap();
@@ -237,9 +238,10 @@ mod tests {
             .refresh(&cred(), &http)
             .await
             .unwrap();
-        assert_eq!(tokens.access_token, "sk-ant-oat01-new");
+        assert_eq!(tokens.access_token.expose(), "sk-ant-oat01-new");
         assert_eq!(
-            tokens.refresh_token, "old-refresh",
+            tokens.refresh_token.expose(),
+            "old-refresh",
             "no rotation in response => existing refresh token reused, not dropped"
         );
     }

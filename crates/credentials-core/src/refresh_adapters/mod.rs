@@ -26,7 +26,7 @@ use std::collections::BTreeMap;
 
 use async_trait::async_trait;
 
-use crate::oauth::OAuthCredential;
+use crate::{oauth::OAuthCredential, secret::SecretString};
 
 pub mod anthropic;
 pub mod antigravity;
@@ -50,11 +50,11 @@ pub(crate) mod fixture;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RefreshedTokens {
     /// The new access token.
-    pub access_token: String,
+    pub access_token: SecretString,
     /// The refresh token to store going forward. For a rotating provider this is
     /// the NEW refresh token; for a non-rotating one the adapter echoes the
     /// existing refresh token so the stored credential stays complete.
-    pub refresh_token: String,
+    pub refresh_token: SecretString,
     /// New access-token expiry (Unix ms), when the provider returns one.
     pub expires_at_ms: Option<i64>,
     /// The GitHub App installation grant returned alongside a minted token. Only the

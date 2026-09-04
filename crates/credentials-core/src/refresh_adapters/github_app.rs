@@ -97,7 +97,7 @@ impl GithubAppAdapter {
             .as_deref()
             .filter(|id| !id.is_empty())
             .ok_or_else(|| RefreshError::Decode("GitHub App record has no client_id".into()))?;
-        let (encoding, der) = private_key_der_from_pem(&cred.refresh_token)?;
+        let (encoding, der) = private_key_der_from_pem(cred.refresh_token.expose())?;
         let key_pair = match encoding {
             KeyEncoding::Pkcs8 => signature::RsaKeyPair::from_pkcs8(&der),
             KeyEncoding::Pkcs1 => signature::RsaKeyPair::from_der(&der),
@@ -299,7 +299,7 @@ impl RefreshAdapter for GithubAppAdapter {
             .timestamp_millis();
         let github_app_permissions = canonical_permissions(parsed.permissions.as_ref());
         Ok(RefreshedTokens {
-            access_token: parsed.token,
+            access_token: parsed.token.into(),
             // An installation-token exchange never rotates the App private key.
             refresh_token: cred.refresh_token.clone(),
             expires_at_ms: Some(expires_at_ms),
@@ -402,8 +402,8 @@ mod tests {
 
     fn credential() -> OAuthCredential {
         OAuthCredential {
-            access_token: String::new(),
-            refresh_token: TEST_PRIVATE_KEY.into(),
+            access_token: String::new().into(),
+            refresh_token: TEST_PRIVATE_KEY.to_string().into(),
             expires_at_ms: Some(0),
             token_url: String::new(),
             client_id: Some(recorded_client_id()),
@@ -535,8 +535,8 @@ mod tests {
         let first = adapter.refresh(&cred, &http).await.unwrap();
         let second = adapter.refresh(&cred, &http).await.unwrap();
 
-        assert_eq!(first.refresh_token, TEST_PRIVATE_KEY);
-        assert_eq!(second.refresh_token, TEST_PRIVATE_KEY);
+        assert_eq!(first.refresh_token.expose(), TEST_PRIVATE_KEY);
+        assert_eq!(second.refresh_token.expose(), TEST_PRIVATE_KEY);
         let requests = http.requests();
         assert_eq!(
             requests.len(),
@@ -731,9 +731,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(tokens.access_token, "ghs_4617...MASKED_LIVE_TOKEN");
+        assert_eq!(tokens.access_token.expose(), "ghs_4617...MASKED_LIVE_TOKEN");
         assert!(
-            tokens.access_token.is_ascii(),
+            tokens.access_token.expose().is_ascii(),
             "installation tokens are header-safe ASCII"
         );
         assert_eq!(tokens.expires_at_ms, Some(RECORDED_EXPIRY_MS));
@@ -766,7 +766,7 @@ mod tests {
             .refresh(&credential(), &http)
             .await
             .expect("an absent diagnostic field must not discard a valid installation token");
-        assert_eq!(tokens.access_token, "ghs_without_permissions");
+        assert_eq!(tokens.access_token.expose(), "ghs_without_permissions");
         assert_eq!(tokens.expires_at_ms, Some(RECORDED_EXPIRY_MS));
         assert!(
             tokens.github_app_permissions.is_none(),

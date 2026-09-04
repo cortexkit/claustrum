@@ -1696,7 +1696,8 @@ fn the_opencode_account_add_imports_mints_and_appends_the_account() {
         store
             .get("apikey:deepseek:alt")
             .expect("alt record")
-            .payload,
+            .payload
+            .expose(),
         b"alt-secret"
     );
 }
@@ -1772,7 +1773,8 @@ fn the_opencode_account_add_key_file_stdin_does_not_echo_material() {
         open_vault(&rig)
             .get("apikey:deepseek:stdin")
             .expect("stdin record")
-            .payload,
+            .payload
+            .expose(),
         b"stdin-secret"
     );
 }
@@ -2026,7 +2028,8 @@ fn the_opencode_account_remove_revokes_the_handle_but_keeps_the_vault_record() {
         store
             .get("apikey:deepseek:alt")
             .expect("record remains")
-            .payload,
+            .payload
+            .expose(),
         b"alt-secret"
     );
 }

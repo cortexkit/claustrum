@@ -70,8 +70,8 @@ fn run_cursor(
     ))
     .map_err(|e| e.to_string())?;
     let oauth = OAuthCredential {
-        access_token: tokens.access_token.clone(),
-        refresh_token: tokens.refresh_token,
+        access_token: tokens.access_token.clone().into(),
+        refresh_token: tokens.refresh_token.into(),
         expires_at_ms: tokens.expires_at_ms,
         token_url: cursor::TOKEN_URL.to_string(),
         client_id: None,
@@ -130,8 +130,8 @@ fn run_devin(
     ))
     .map_err(|e| e.to_string())?;
     let oauth = OAuthCredential {
-        access_token: tokens.access_token.clone(),
-        refresh_token: tokens.refresh_token,
+        access_token: tokens.access_token.clone().into(),
+        refresh_token: tokens.refresh_token.into(),
         expires_at_ms: tokens.expires_at_ms,
         token_url: devin::TOKEN_URL.to_string(),
         client_id: None,
@@ -212,8 +212,8 @@ fn run_snowflake(
     ))
     .map_err(|e| e.to_string())?;
     let oauth = OAuthCredential {
-        access_token: tokens.access_token.clone(),
-        refresh_token: tokens.refresh_token,
+        access_token: tokens.access_token.clone().into(),
+        refresh_token: tokens.refresh_token.into(),
         expires_at_ms: tokens.expires_at_ms,
         token_url,
         client_id: Some(snowflake::CLIENT_ID.to_string()),
@@ -261,8 +261,8 @@ fn run_digitalocean(
     let tokens =
         digitalocean::parse_fragment_capture(&raw, &state, chrono::Utc::now().timestamp_millis())?;
     let oauth = OAuthCredential {
-        access_token: tokens.access_token.clone(),
-        refresh_token: tokens.refresh_token,
+        access_token: tokens.access_token.clone().into(),
+        refresh_token: tokens.refresh_token.into(),
         expires_at_ms: tokens.expires_at_ms,
         token_url: digitalocean::AUTHORIZE_URL.to_string(),
         client_id: Some(digitalocean::CLIENT_ID.to_string()),

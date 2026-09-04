@@ -125,7 +125,7 @@ fn fail_closed_corrupt_envelope_quarantines_not_panics() {
         other => panic!("expected a fail-closed corrupt error, got {other:?}"),
     }
     // Fault isolation: the healthy record still serves.
-    assert_eq!(store.get("good").unwrap().payload, b"good-secret");
+    assert_eq!(store.get("good").unwrap().payload.expose(), b"good-secret");
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -142,7 +142,7 @@ fn create_only_rejects_blind_overwrite() {
         other => panic!("expected AlreadyExists, got {other:?}"),
     }
     // The original is unchanged.
-    assert_eq!(store.get("id").unwrap().payload, b"v1");
+    assert_eq!(store.get("id").unwrap().payload.expose(), b"v1");
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -172,7 +172,7 @@ fn admin_overwrite_raises_audit_alarm_row() {
     let store = open(&root, 1);
     store.create("id", &api_key_record(b"v1")).unwrap();
     let cur = store.get("id").unwrap();
-    let expect = payload_hash(&cur.payload);
+    let expect = payload_hash(cur.payload.expose());
     store
         .overwrite_cas_audited(
             "id",
@@ -250,7 +250,10 @@ async fn concurrent_create_and_get_read_visibility() {
                 match store.get(&id) {
                     Ok(rec) => {
                         // If visible, it must be the COMPLETE record (no torn read).
-                        assert_eq!(rec.payload, format!("secret-{i}").into_bytes());
+                        assert_eq!(
+                            rec.payload.expose().as_slice(),
+                            format!("secret-{i}").as_bytes()
+                        );
                         return;
                     }
                     Err(StoreOpError::NotFound) => {
@@ -270,7 +273,10 @@ async fn concurrent_create_and_get_read_visibility() {
     // All 16 are present and complete after the writers finish.
     for i in 0..16u8 {
         let rec = store.get(&format!("cred-{i}")).expect("present");
-        assert_eq!(rec.payload, format!("secret-{i}").into_bytes());
+        assert_eq!(
+            rec.payload.expose().as_slice(),
+            format!("secret-{i}").as_bytes()
+        );
     }
     let _ = std::fs::remove_dir_all(&root);
 }

@@ -41,8 +41,8 @@ impl RefreshAdapter for StubAdapter {
         _http: &dyn HttpTransport,
     ) -> Result<RefreshedTokens, RefreshError> {
         Ok(RefreshedTokens {
-            access_token: "STAGED-TOKEN-MUST-NEVER-BE-COMMITTED".into(),
-            refresh_token: "STAGED-ROTATED-REFRESH".into(),
+            access_token: "STAGED-TOKEN-MUST-NEVER-BE-COMMITTED".to_string().into(),
+            refresh_token: "STAGED-ROTATED-REFRESH".to_string().into(),
             expires_at_ms: Some(i64::MAX),
             github_app_permissions: None,
         })
@@ -89,8 +89,8 @@ async fn main() {
         "opencode",
         "anthropic",
         OAuthCredential {
-            access_token: "old-access".into(),
-            refresh_token: "old-refresh".into(),
+            access_token: "old-access".to_string().into(),
+            refresh_token: "old-refresh".to_string().into(),
             expires_at_ms: Some(0),
             token_url: "https://t.test/token".into(),
             client_id: Some("c".into()),

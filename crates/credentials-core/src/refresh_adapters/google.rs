@@ -134,7 +134,7 @@ impl GoogleAdapter {
         form_urlencode(&[
             ("client_id", client_id),
             ("client_secret", &self.client_secret),
-            ("refresh_token", &cred.refresh_token),
+            ("refresh_token", cred.refresh_token.expose()),
             ("grant_type", "refresh_token"),
         ])
         .into_bytes()
@@ -189,7 +189,7 @@ impl RefreshAdapter for GoogleAdapter {
             serde_json::from_slice(&resp.body).map_err(|e| RefreshError::Decode(e.to_string()))?;
         let expires_at_ms = Some(now_ms() + parsed.expires_in.saturating_mul(1000));
         Ok(RefreshedTokens {
-            access_token: parsed.access_token,
+            access_token: parsed.access_token.into(),
             // Google does not rotate; carry the existing refresh token forward.
             refresh_token: cred.refresh_token.clone(),
             expires_at_ms,
@@ -213,8 +213,8 @@ mod tests {
 
     fn cred() -> OAuthCredential {
         OAuthCredential {
-            access_token: "old-access".into(),
-            refresh_token: "1//0refresh-token".into(),
+            access_token: "old-access".to_string().into(),
+            refresh_token: "1//0refresh-token".to_string().into(),
             expires_at_ms: Some(0),
             token_url: TOKEN_URL.into(),
             client_id: Some("client.apps.googleusercontent.com".into()),
@@ -233,9 +233,10 @@ mod tests {
             .refresh(&cred(), &http)
             .await
             .unwrap();
-        assert_eq!(tokens.access_token, "ya29.new-access");
+        assert_eq!(tokens.access_token.expose(), "ya29.new-access");
         assert_eq!(
-            tokens.refresh_token, "1//0refresh-token",
+            tokens.refresh_token.expose(),
+            "1//0refresh-token",
             "google does not rotate; existing refresh token reused"
         );
         assert!(tokens.expires_at_ms.unwrap() > now_ms());

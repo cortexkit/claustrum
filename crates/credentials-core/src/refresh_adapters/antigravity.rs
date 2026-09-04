@@ -193,7 +193,7 @@ impl RefreshAdapter for AntigravityAdapter {
         // The stored refresh token is packed `<refresh>|<projectId>|<managed>`; the
         // exchange uses only the bare first segment, and the result is re-packed with
         // the same project tail so the credential keeps its project binding.
-        let (bare_refresh, tail) = split_packed_refresh(&cred.refresh_token);
+        let (bare_refresh, tail) = split_packed_refresh(cred.refresh_token.expose());
         let body = self.request_body(bare_refresh);
         let resp = http
             .post(
@@ -224,12 +224,15 @@ impl RefreshAdapter for AntigravityAdapter {
         let expires_at_ms = Some(now_ms() + parsed.expires_in.saturating_mul(1000));
         // Re-pack: a rotated refresh token replaces the bare segment; an omitted one
         // reuses the existing bare token. The project tail is always preserved.
-        let new_bare = parsed
-            .refresh_token
-            .unwrap_or_else(|| bare_refresh.to_string());
-        let refresh_token = repack_refresh(&new_bare, tail);
+        let new_bare = crate::secret::SecretString::new(
+            parsed
+                .refresh_token
+                .unwrap_or_else(|| bare_refresh.to_string()),
+        );
+        let refresh_token =
+            crate::secret::SecretString::new(repack_refresh(new_bare.expose(), tail));
         Ok(RefreshedTokens {
-            access_token: parsed.access_token,
+            access_token: parsed.access_token.into(),
             refresh_token,
             expires_at_ms,
             github_app_permissions: None,
@@ -252,9 +255,9 @@ mod tests {
 
     fn packed_cred() -> OAuthCredential {
         OAuthCredential {
-            access_token: "old-access".into(),
+            access_token: "old-access".to_string().into(),
             // <refresh>|<projectId>|<managedProjectId>
-            refresh_token: "1//0refresh|my-project|managed-proj-123".into(),
+            refresh_token: "1//0refresh|my-project|managed-proj-123".to_string().into(),
             expires_at_ms: Some(0),
             token_url: TOKEN_URL.into(),
             client_id: None,
@@ -281,7 +284,7 @@ mod tests {
             .refresh(&packed_cred(), &http)
             .await
             .unwrap();
-        assert_eq!(tokens.access_token, "ya29.new-access");
+        assert_eq!(tokens.access_token.expose(), "ya29.new-access");
         // The POST body sent only the BARE refresh token, not the packed string.
         let body = String::from_utf8(http.requests()[0].body.clone()).unwrap();
         assert!(
@@ -294,7 +297,8 @@ mod tests {
         );
         // No rotation in the response → the bare token is reused, tail PRESERVED.
         assert_eq!(
-            tokens.refresh_token, "1//0refresh|my-project|managed-proj-123",
+            tokens.refresh_token.expose(),
+            "1//0refresh|my-project|managed-proj-123",
             "stored refresh re-packs the original project tail"
         );
     }
@@ -310,7 +314,7 @@ mod tests {
             .unwrap();
         // The NEW bare token, re-packed with the SAME project tail.
         assert_eq!(
-            tokens.refresh_token,
+            tokens.refresh_token.expose(),
             "1//0NEWrefresh|my-project|managed-proj-123"
         );
     }
@@ -318,13 +322,17 @@ mod tests {
     #[tokio::test]
     async fn bare_unpacked_refresh_token_works() {
         let mut cred = packed_cred();
-        cred.refresh_token = "1//0bareonly".into(); // no project tail
+        cred.refresh_token = "1//0bareonly".to_string().into(); // no project-specific suffix
         let http = FixtureTransport::ok(200, RECORDED_SUCCESS.as_bytes().to_vec());
         let tokens = AntigravityAdapter::with_client("c", "s")
             .refresh(&cred, &http)
             .await
             .unwrap();
-        assert_eq!(tokens.refresh_token, "1//0bareonly", "no tail to preserve");
+        assert_eq!(
+            tokens.refresh_token.expose(),
+            "1//0bareonly",
+            "no tail to preserve"
+        );
     }
 
     #[tokio::test]

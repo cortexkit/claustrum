@@ -75,8 +75,8 @@ impl RefreshAdapter for StubAdapter {
             };
         }
         Ok(RefreshedTokens {
-            access_token: self.access_token.into(),
-            refresh_token: "rotated-refresh".into(),
+            access_token: self.access_token.to_string().into(),
+            refresh_token: "rotated-refresh".to_string().into(),
             expires_at_ms: Some(now_ms() + 3_600_000),
             github_app_permissions: None,
         })
@@ -154,8 +154,8 @@ fn stale_oauth_record() -> VaultRecord {
         "opencode",
         "stub",
         OAuthCredential {
-            access_token: "old-access".into(),
-            refresh_token: "old-refresh".into(),
+            access_token: "old-access".to_string().into(),
+            refresh_token: "old-refresh".to_string().into(),
             // Already expired so a get() triggers a refresh.
             expires_at_ms: Some(0),
             token_url: "https://t.test/token".into(),
@@ -174,8 +174,8 @@ fn refresh_only_oauth_record() -> VaultRecord {
         "antigravity",
         "stub",
         OAuthCredential {
-            access_token: String::new(),
-            refresh_token: "live-refresh".into(),
+            access_token: String::new().into(),
+            refresh_token: "live-refresh".to_string().into(),
             expires_at_ms: None,
             token_url: String::new(),
             client_id: None,
@@ -224,7 +224,7 @@ impl RefreshAdapter for GithubPermissionsAdapter {
             .pop_front()
             .expect("test configured one GitHub grant for each expected mint");
         Ok(RefreshedTokens {
-            access_token: "github-app-access".into(),
+            access_token: "github-app-access".to_string().into(),
             refresh_token: cred.refresh_token.clone(),
             expires_at_ms: Some(now_ms() + 3_600_000),
             github_app_permissions: Some(grant),
@@ -422,9 +422,13 @@ async fn refresh_on_stale_commits_new_tokens_and_bumps_version() {
     let (eng, calls) = engine(store, StubAdapter::new("stub"));
 
     let got = eng.get("id", None, false).await.expect("get");
-    assert_eq!(got.payload, b"refreshed-access", "new access token served");
+    assert_eq!(
+        got.payload.expose(),
+        b"refreshed-access",
+        "new access token served"
+    );
     assert_eq!(got.record_version, 2, "version bumped by refresh");
-    assert_eq!(got.oauth.unwrap().refresh_token, "rotated-refresh");
+    assert_eq!(got.oauth.unwrap().refresh_token.expose(), "rotated-refresh");
     assert_eq!(calls.load(Ordering::SeqCst), 1, "exactly one upstream call");
     // The intent is cleared post-commit.
     assert!(eng.store().read_intent("id").unwrap().is_none());
@@ -538,10 +542,14 @@ async fn empty_access_token_refreshes_on_first_get_not_served_empty() {
     // has no expiry, so the ttl branch is never engaged).
     let got = eng.get("id", Some(600_000), false).await.expect("get");
     assert_eq!(
-        got.payload, b"refreshed-access",
+        got.payload.expose(),
+        b"refreshed-access",
         "empty-access record refreshed on first get, not served empty"
     );
-    assert!(!got.payload.is_empty(), "never serve a zero-byte token");
+    assert!(
+        !got.payload.expose().is_empty(),
+        "never serve a zero-byte token"
+    );
     assert_eq!(
         calls.load(Ordering::SeqCst),
         1,
@@ -567,7 +575,7 @@ async fn concurrent_gets_single_flight_one_upstream_call() {
     }
     for h in handles {
         let r = h.await.unwrap().expect("get ok");
-        assert_eq!(r.payload, b"refreshed-access");
+        assert_eq!(r.payload.expose(), b"refreshed-access");
     }
     assert_eq!(
         calls.load(Ordering::SeqCst),
@@ -653,7 +661,7 @@ async fn a_refresh_commit_preserves_the_client_id_the_next_refresh_needs() {
     let (eng, _calls) = engine(store, StubAdapter::new("stub"));
 
     let served = eng.get("id", None, false).await.expect("get ok");
-    assert_eq!(served.payload, b"refreshed-access");
+    assert_eq!(served.payload.expose(), b"refreshed-access");
 
     let after = eng.store().get("id").expect("record still readable");
     let oauth = after.oauth.as_ref().expect("still an oauth record");
@@ -667,7 +675,7 @@ async fn a_refresh_commit_preserves_the_client_id_the_next_refresh_needs() {
     // surface quarantines the record as corrupt on the very next get -- which does not
     // merely fail, it POISONS a healthy credential.
     assert!(
-        !after.payload.is_empty(),
+        !after.payload.expose().is_empty(),
         "a committed refresh left an empty payload, which the read surface quarantines"
     );
     let _ = std::fs::remove_dir_all(&root);
@@ -841,7 +849,7 @@ async fn reconcile_dangling_intent_no_check_is_needs_reauth() {
     let rec = stale_oauth_record();
     store.create("id", &rec).unwrap();
     // Open an intent and DON'T commit (simulates crash before txn2).
-    let old_hash = crate::store::refresh_token_hash(&rec.oauth.unwrap().refresh_token);
+    let old_hash = crate::store::refresh_token_hash(rec.oauth.unwrap().refresh_token.expose());
     store.open_intent("id", 1, &old_hash).unwrap();
     let (eng, _calls) = engine(store, StubAdapter::new("stub"));
 
@@ -871,7 +879,7 @@ async fn reconcile_with_valid_check_clears_intent_and_keeps_active() {
     let store = open_store(&d, 5);
     let rec = stale_oauth_record();
     store.create("id", &rec).unwrap();
-    let old_hash = crate::store::refresh_token_hash(&rec.oauth.unwrap().refresh_token);
+    let old_hash = crate::store::refresh_token_hash(rec.oauth.unwrap().refresh_token.expose());
     store.open_intent("id", 1, &old_hash).unwrap();
     let mut adapter = StubAdapter::new("stub");
     adapter.check = Some(Ok(ValidityOutcome::Valid));
@@ -921,14 +929,15 @@ async fn admin_overwrite_clears_dangling_intent() {
     let store = open_store(&d, 7);
     let rec = stale_oauth_record();
     store.create("id", &rec).unwrap();
-    let old_hash = crate::store::refresh_token_hash(&rec.oauth.as_ref().unwrap().refresh_token);
+    let old_hash =
+        crate::store::refresh_token_hash(rec.oauth.as_ref().unwrap().refresh_token.expose());
     store.open_intent("id", 1, &old_hash).unwrap();
     // Admin overwrite with fresh tokens (CAS on current payload).
     let cur = store.get("id").unwrap();
-    let expect = crate::store::payload_hash(&cur.payload);
+    let expect = crate::store::payload_hash(cur.payload.expose());
     let mut fresh = stale_oauth_record();
-    fresh.oauth.as_mut().unwrap().refresh_token = "freshly-relogged-in".into();
-    fresh.payload = b"fresh-access".to_vec();
+    fresh.oauth.as_mut().unwrap().refresh_token = "freshly-relogged-in".to_string().into();
+    fresh.payload = b"fresh-access".to_vec().into();
     store.overwrite_cas("id", &fresh, &expect).unwrap();
     // The intent must be gone.
     assert!(
@@ -955,7 +964,8 @@ async fn lease_handover_fences_commit_and_converges_to_needs_reauth() {
     let store = open_store(&d, 8); // store holds epoch 1
     let rec = stale_oauth_record();
     store.create("id", &rec).unwrap();
-    let old_hash = crate::store::refresh_token_hash(&rec.oauth.as_ref().unwrap().refresh_token);
+    let old_hash =
+        crate::store::refresh_token_hash(rec.oauth.as_ref().unwrap().refresh_token.expose());
 
     // Simulate a newer writer having claimed the database at a higher epoch: bump
     // the persisted fence epoch ABOVE this store's epoch. The next fenced write
@@ -974,8 +984,9 @@ async fn lease_handover_fences_commit_and_converges_to_needs_reauth() {
 
     // Now attempt the refresh commit (txn2): it must be Fenced, NOT applied.
     let mut refreshed = stale_oauth_record();
-    refreshed.oauth.as_mut().unwrap().access_token = "STAGED-must-never-be-served".into();
-    refreshed.payload = b"STAGED-must-never-be-served".to_vec();
+    refreshed.oauth.as_mut().unwrap().access_token =
+        "STAGED-must-never-be-served".to_string().into();
+    refreshed.payload = b"STAGED-must-never-be-served".to_vec().into();
     match store.commit_refresh("id", 1, &refreshed) {
         Err(StoreOpError::Fenced {
             holder_epoch,
@@ -994,7 +1005,11 @@ async fn lease_handover_fences_commit_and_converges_to_needs_reauth() {
     );
     let still = store.get("id").unwrap();
     assert_eq!(still.record_version, 1, "old version retained");
-    assert_eq!(still.payload, b"old-access", "staged token NOT visible");
+    assert_eq!(
+        still.payload.expose(),
+        b"old-access",
+        "staged token NOT visible"
+    );
 
     // Reconciliation resolves it identically to the crash case: needs_reauth, staged
     // token provably never served. (Reconcile writes go through the fence too, but
@@ -1047,7 +1062,11 @@ async fn cookie_record_is_never_selected_for_refresh() {
         .get("cookie:cursor.com", None, true)
         .await
         .expect("serve cookie without refresh");
-    assert_eq!(served.payload, payload, "the cookie is served verbatim");
+    assert_eq!(
+        served.payload.expose(),
+        &payload,
+        "the cookie is served verbatim"
+    );
     assert_eq!(
         calls.load(Ordering::SeqCst),
         0,

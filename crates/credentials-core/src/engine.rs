@@ -309,7 +309,7 @@ impl RefreshEngine {
         // token is served as-is. `get` still gates the actual refresh on
         // `is_refreshable()`. The read surface quarantines a legacy non-refreshable
         // empty record rather than returning a successful zero-byte credential.
-        if oauth.access_token.is_empty() {
+        if oauth.access_token.expose().is_empty() {
             return true;
         }
         let now = now_ms();
@@ -353,13 +353,13 @@ impl RefreshEngine {
             .ok_or_else(|| EngineError::UnknownAdapter(adapter_name.to_string()))?;
 
         // txn1: durably record the intent BEFORE any network call.
-        let old_hash = refresh_token_hash(&oauth.refresh_token);
+        let old_hash = refresh_token_hash(oauth.refresh_token.expose());
         self.store
             .open_intent(credential_id, record.record_version, &old_hash)?;
 
         // The provider call (rotating). Tokens are staged in memory only.
         match adapter.refresh(oauth, &*self.http).await {
-            Ok(tokens) if tokens.access_token.is_empty() => {
+            Ok(tokens) if tokens.access_token.expose().is_empty() => {
                 // A successful provider response with no access token is not a valid
                 // rotation. Clear txn1 while preserving the old record/version; otherwise
                 // the sealed record would later decrypt to a successful zero-byte read.
@@ -505,7 +505,7 @@ impl RefreshEngine {
         // intent's. A mismatch means a write landed without clearing the intent —
         // fail closed regardless of any adapter check.
         if let Some(oauth) = record.oauth.as_ref() {
-            let stored_hash = refresh_token_hash(&oauth.refresh_token);
+            let stored_hash = refresh_token_hash(oauth.refresh_token.expose());
             if stored_hash != intent.old_refresh_hash {
                 // A write landed without clearing the intent — the rogue-write /
                 // interrupted-rotation corruption guard. Invalidate AND record a loud,
@@ -617,8 +617,9 @@ fn apply_refreshed(
     old_oauth: &OAuthCredential,
     tokens: crate::refresh_adapters::RefreshedTokens,
 ) -> VaultRecord {
+    let payload = crate::secret::SecretBytes::new(tokens.access_token.expose().as_bytes().to_vec());
     let new_oauth = OAuthCredential {
-        access_token: tokens.access_token.clone(),
+        access_token: tokens.access_token,
         refresh_token: tokens.refresh_token,
         expires_at_ms: tokens.expires_at_ms,
         token_url: old_oauth.token_url.clone(),
@@ -627,7 +628,7 @@ fn apply_refreshed(
     };
     let mut new_record = record.clone();
     new_record.expires_at_ms = tokens.expires_at_ms;
-    new_record.payload = tokens.access_token.into_bytes();
+    new_record.payload = payload;
     new_record.oauth = Some(new_oauth);
     new_record
 }

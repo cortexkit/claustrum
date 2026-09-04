@@ -677,7 +677,7 @@ impl ReadSurface {
         let payload = base64::engine::general_purpose::STANDARD
             .decode(params.payload_b64.as_bytes())
             .map_err(|_| ReadError::SignPayloadTooLarge)?;
-        let pem = std::str::from_utf8(&record.payload).map_err(|_| ReadError::Corrupt)?;
+        let pem = std::str::from_utf8(record.payload.expose()).map_err(|_| ReadError::Corrupt)?;
         match credentials_core::signing::sign_ed25519(pem, &payload) {
             Ok(sig) => Ok(SignResult {
                 signature_b64: sig.signature_b64,
@@ -751,7 +751,7 @@ impl ReadSurface {
             return Err(ReadError::KindNotSignable);
         }
 
-        let pem = std::str::from_utf8(&record.payload).map_err(|_| ReadError::Corrupt)?;
+        let pem = std::str::from_utf8(record.payload.expose()).map_err(|_| ReadError::Corrupt)?;
         let public = credentials_core::signing::public_key_ed25519(pem).map_err(|_| {
             // A record typed as a signing key but holding unusable bytes is vault
             // corruption, not a caller request error, just as it is for `sign`.
@@ -805,7 +805,7 @@ impl ReadSurface {
                     // PKCS#8 payload must never be served through `get`.
                     return err(ReadError::KindNotGettable);
                 }
-                if record.payload.is_empty() {
+                if record.payload.expose().is_empty() {
                     // A successful zero-byte credential is a corrupt producer state, not
                     // an authentication token. Quarantine only the version we inspected:
                     // a concurrent refresh/login may already have repaired the record.
@@ -830,7 +830,7 @@ impl ReadSurface {
                 let project_id = if is_antigravity {
                     record.oauth.as_ref().and_then(|o| {
                         credentials_core::refresh_adapters::antigravity::effective_project_id(
-                            &o.refresh_token,
+                            o.refresh_token.expose(),
                         )
                     })
                 } else {
@@ -850,14 +850,14 @@ impl ReadSurface {
                     (Some(adapter), Some(o)) => {
                         credentials_core::oauth_login::account_id_for_adapter(
                             adapter,
-                            &o.access_token,
+                            o.access_token.expose(),
                         )
                     }
                     _ => None,
                 }
                 .or_else(|| record.identity.account_id.clone());
                 GetOutcome::Ok(GetResult {
-                    payload: record.payload,
+                    payload: record.payload.into_inner().to_vec(),
                     expires_at_ms: record.expires_at_ms,
                     record_version: record.record_version,
                     project_id,
@@ -971,7 +971,7 @@ impl ReadSurface {
                     // and `public_key`, but its private PKCS#8 payload never leaves `get`.
                     return err(ReadError::KindNotGettable);
                 }
-                if record.payload.is_empty() {
+                if record.payload.expose().is_empty() {
                     match self
                         .engine
                         .store()
@@ -988,7 +988,7 @@ impl ReadSurface {
                 let project_id = if is_antigravity {
                     record.oauth.as_ref().and_then(|o| {
                         credentials_core::refresh_adapters::antigravity::effective_project_id(
-                            &o.refresh_token,
+                            o.refresh_token.expose(),
                         )
                     })
                 } else {
@@ -998,14 +998,14 @@ impl ReadSurface {
                     (Some(adapter), Some(o)) => {
                         credentials_core::oauth_login::account_id_for_adapter(
                             adapter,
-                            &o.access_token,
+                            o.access_token.expose(),
                         )
                     }
                     _ => None,
                 }
                 .or_else(|| record.identity.account_id.clone());
                 GetOutcome::Ok(GetResult {
-                    payload: record.payload,
+                    payload: record.payload.into_inner().to_vec(),
                     expires_at_ms: record.expires_at_ms,
                     record_version: record.record_version,
                     project_id,

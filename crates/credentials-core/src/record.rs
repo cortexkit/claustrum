@@ -22,7 +22,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::oauth::OAuthCredential;
+use crate::{oauth::OAuthCredential, secret::SecretBytes};
 
 /// The current schema version of the encrypted record body. Bumped only when the
 /// record's PLAINTEXT structure changes in a way a decoder must branch on; it is
@@ -225,7 +225,7 @@ pub struct VaultRecord {
     /// The opaque bytes returned to a consumer verbatim by a `get`. For an OAuth
     /// credential this is typically the serialized form the consumer expects (e.g.
     /// the access token / an auth header value); the vault does not interpret it.
-    pub payload: Vec<u8>,
+    pub payload: SecretBytes,
     /// Non-secret account identity captured at login. `default` so records sealed
     /// before this field existed decode with an empty identity (additive schema
     /// evolution under the same `schema_version`, like any other optional field).
@@ -272,7 +272,7 @@ impl std::fmt::Debug for VaultRecord {
             // because a zero-length payload is a real corruption mode.
             .field(
                 "payload",
-                &format_args!("[{} bytes redacted]", self.payload.len()),
+                &format_args!("[{} bytes redacted]", self.payload.expose().len()),
             )
             // Non-secret by design: email and org name are returned to consumers as
             // display metadata on every `get`.
@@ -289,7 +289,7 @@ impl VaultRecord {
         source: impl Into<String>,
         refresh_adapter: impl Into<String>,
         oauth: OAuthCredential,
-        payload: Vec<u8>,
+        payload: impl Into<SecretBytes>,
     ) -> Self {
         let expires_at_ms = oauth.expires_at_ms;
         VaultRecord {
@@ -300,7 +300,7 @@ impl VaultRecord {
             expires_at_ms,
             refresh_adapter: Some(refresh_adapter.into()),
             oauth: Some(oauth),
-            payload,
+            payload: payload.into(),
             identity: RecordIdentity::default(),
         }
     }
@@ -350,7 +350,7 @@ impl VaultRecord {
             expires_at_ms,
             refresh_adapter: None,
             oauth: None,
-            payload,
+            payload: payload.into(),
             identity: RecordIdentity::default(),
         }
     }
@@ -511,8 +511,8 @@ mod tests {
 
     fn oauth_cred() -> OAuthCredential {
         OAuthCredential {
-            access_token: "a".into(),
-            refresh_token: "r".into(),
+            access_token: "a".to_string().into(),
+            refresh_token: "r".to_string().into(),
             expires_at_ms: Some(123),
             token_url: "https://t.test/token".into(),
             client_id: Some("c".into()),
@@ -549,7 +549,7 @@ mod tests {
         let record = VaultRecord::new_cookie("operator", payload.clone());
 
         assert_eq!(record.kind, CredentialKind::Cookie);
-        assert_eq!(record.payload, payload);
+        assert_eq!(record.payload.expose(), &payload);
         assert_eq!(record.expires_at_ms, None);
         assert_eq!(record.identity, RecordIdentity::default());
         assert!(!record.is_refreshable());
@@ -589,7 +589,7 @@ mod tests {
             let reopened = open(&key, &sealed, &binding).expect("open historic body");
             let record = VaultRecord::decode(&reopened).expect("decode historic body");
             assert_eq!(record.kind, *expected_kind, "historic {id} kind survives");
-            assert_eq!(record.payload, b"old");
+            assert_eq!(record.payload.expose(), b"old");
         }
     }
 

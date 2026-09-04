@@ -158,7 +158,9 @@ impl std::fmt::Display for ScanError {
 pub fn is_serviceable(oauth: Option<&OAuthCredential>) -> bool {
     match oauth {
         None => true,
-        Some(oauth) => !oauth.refresh_token.is_empty() || !oauth.access_token.is_empty(),
+        Some(oauth) => {
+            !oauth.refresh_token.expose().is_empty() || !oauth.access_token.expose().is_empty()
+        }
     }
 }
 
@@ -440,8 +442,8 @@ mod tests {
 
     fn creds(access: &str, refresh: &str) -> OAuthCredential {
         OAuthCredential {
-            access_token: access.to_string(),
-            refresh_token: refresh.to_string(),
+            access_token: access.to_string().into(),
+            refresh_token: refresh.to_string().into(),
             expires_at_ms: None,
             token_url: "https://example.invalid/token".to_string(),
             client_id: None,

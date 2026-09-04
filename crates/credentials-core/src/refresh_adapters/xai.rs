@@ -103,7 +103,7 @@ impl XaiAdapter {
         let client_id = cred.client_id.as_deref().unwrap_or(GROK_CLI_CLIENT_ID);
         form_urlencode(&[
             ("grant_type", "refresh_token"),
-            ("refresh_token", &cred.refresh_token),
+            ("refresh_token", cred.refresh_token.expose()),
             ("client_id", client_id),
         ])
         .into_bytes()
@@ -148,10 +148,10 @@ impl RefreshAdapter for XaiAdapter {
                     .map(|secs| now_ms() + secs.saturating_mul(1000));
                 let refresh_token = parsed
                     .refresh_token
-                    .unwrap_or_else(|| cred.refresh_token.clone());
+                    .unwrap_or_else(|| cred.refresh_token.expose().to_string());
                 Ok(RefreshedTokens {
-                    access_token: parsed.access_token,
-                    refresh_token,
+                    access_token: parsed.access_token.into(),
+                    refresh_token: refresh_token.into(),
                     expires_at_ms,
                     github_app_permissions: None,
                 })
@@ -192,8 +192,8 @@ mod tests {
 
     fn cred() -> OAuthCredential {
         OAuthCredential {
-            access_token: "old-access".into(),
-            refresh_token: "old-refresh".into(),
+            access_token: "old-access".to_string().into(),
+            refresh_token: "old-refresh".to_string().into(),
             expires_at_ms: Some(0),
             token_url: TOKEN_URL.into(),
             client_id: None, // exercise the default client id
@@ -207,8 +207,8 @@ mod tests {
     async fn refresh_parses_rotated_tokens() {
         let http = FixtureTransport::ok(200, RECORDED_SUCCESS.as_bytes().to_vec());
         let tokens = XaiAdapter::new().refresh(&cred(), &http).await.unwrap();
-        assert_eq!(tokens.access_token, "xai-new-access");
-        assert_eq!(tokens.refresh_token, "xai-new-refresh");
+        assert_eq!(tokens.access_token.expose(), "xai-new-access");
+        assert_eq!(tokens.refresh_token.expose(), "xai-new-refresh");
         assert!(tokens.expires_at_ms.unwrap() > now_ms());
     }
 
@@ -216,7 +216,7 @@ mod tests {
     async fn refresh_without_rotation_reuses_existing() {
         let http = FixtureTransport::ok(200, br#"{"access_token":"a","expires_in":60}"#.to_vec());
         let tokens = XaiAdapter::new().refresh(&cred(), &http).await.unwrap();
-        assert_eq!(tokens.refresh_token, "old-refresh");
+        assert_eq!(tokens.refresh_token.expose(), "old-refresh");
     }
 
     #[tokio::test]

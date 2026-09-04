@@ -267,7 +267,7 @@ impl RefreshAdapter for CursorAdapter {
         cred: &OAuthCredential,
         http: &dyn HttpTransport,
     ) -> Result<RefreshedTokens, RefreshError> {
-        let authorization = format!("Bearer {}", cred.refresh_token);
+        let authorization = format!("Bearer {}", cred.refresh_token.expose());
         let response = http
             .post(
                 if cred.token_url.is_empty() {
@@ -288,8 +288,9 @@ impl RefreshAdapter for CursorAdapter {
                     expires_at_ms: Some(access_token_expiry_ms(&parsed.access_token, now_ms())),
                     refresh_token: parsed
                         .refresh_token
+                        .map(Into::into)
                         .unwrap_or_else(|| cred.refresh_token.clone()),
-                    access_token: parsed.access_token,
+                    access_token: parsed.access_token.into(),
                     github_app_permissions: None,
                 })
             }
@@ -333,8 +334,8 @@ mod tests {
 
     fn cred() -> OAuthCredential {
         OAuthCredential {
-            access_token: "old".into(),
-            refresh_token: "old-refresh".into(),
+            access_token: "old".to_string().into(),
+            refresh_token: "old-refresh".to_string().into(),
             expires_at_ms: Some(0),
             token_url: TOKEN_URL.into(),
             client_id: None,
@@ -402,7 +403,7 @@ mod tests {
             br#"{"accessToken":"new-access","refreshToken":"new-refresh"}"#.to_vec(),
         );
         let tokens = CursorAdapter::new().refresh(&cred(), &http).await.unwrap();
-        assert_eq!(tokens.refresh_token, "new-refresh");
+        assert_eq!(tokens.refresh_token.expose(), "new-refresh");
         let request = &http.requests()[0];
         assert_eq!(request.url, TOKEN_URL);
         assert_eq!(request.content_type, "application/json");
@@ -417,7 +418,7 @@ mod tests {
     async fn refresh_without_rotation_reuses_refresh_token() {
         let http = FixtureTransport::ok(200, br#"{"accessToken":"new-access"}"#.to_vec());
         let tokens = CursorAdapter::new().refresh(&cred(), &http).await.unwrap();
-        assert_eq!(tokens.refresh_token, "old-refresh");
+        assert_eq!(tokens.refresh_token.expose(), "old-refresh");
     }
 
     #[tokio::test]

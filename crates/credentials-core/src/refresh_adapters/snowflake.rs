@@ -175,7 +175,7 @@ impl RefreshAdapter for SnowflakeAdapter {
         }
         let body = form_urlencode(&[
             ("grant_type", "refresh_token"),
-            ("refresh_token", &cred.refresh_token),
+            ("refresh_token", cred.refresh_token.expose()),
         ]);
         let response = http
             .post(
@@ -190,9 +190,10 @@ impl RefreshAdapter for SnowflakeAdapter {
                 let parsed: RefreshResponse = serde_json::from_slice(&response.body)
                     .map_err(|e| RefreshError::Decode(e.to_string()))?;
                 Ok(RefreshedTokens {
-                    access_token: parsed.access_token,
+                    access_token: parsed.access_token.into(),
                     refresh_token: parsed
                         .refresh_token
+                        .map(Into::into)
                         .unwrap_or_else(|| cred.refresh_token.clone()),
                     expires_at_ms: Some(
                         now_ms().saturating_add(parsed.expires_in.saturating_mul(1000)),
@@ -226,8 +227,8 @@ mod tests {
 
     fn cred() -> OAuthCredential {
         OAuthCredential {
-            access_token: "old-access".into(),
-            refresh_token: "old-refresh".into(),
+            access_token: "old-access".to_string().into(),
+            refresh_token: "old-refresh".to_string().into(),
             expires_at_ms: Some(0),
             token_url: token_url("acme").unwrap(),
             client_id: Some(CLIENT_ID.into()),
@@ -312,7 +313,7 @@ mod tests {
             .refresh(&cred(), &http)
             .await
             .unwrap();
-        assert_eq!(result.refresh_token, "old-refresh");
+        assert_eq!(result.refresh_token.expose(), "old-refresh");
         let request = &http.requests()[0];
         assert_eq!(request.url, token_url("acme").unwrap());
         assert_eq!(

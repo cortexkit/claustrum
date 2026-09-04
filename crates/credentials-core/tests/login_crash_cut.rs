@@ -141,7 +141,8 @@ fn crash_before_login_write_leaves_old_credential_intact_and_refreshable() {
     );
     let oauth = record.oauth.as_ref().expect("oauth credential present");
     assert_eq!(
-        oauth.refresh_token, OLD_REFRESH,
+        oauth.refresh_token.expose(),
+        OLD_REFRESH,
         "the ORIGINAL refresh token survived — the credential is not stranded"
     );
     // The handle minted for the old credential still resolves to it.
@@ -176,7 +177,8 @@ fn crash_after_login_write_commits_new_credential_and_keeps_handle() {
     assert_eq!(record.record_version, 2, "bumped to version+1 by the login");
     let oauth = record.oauth.as_ref().expect("oauth credential present");
     assert_eq!(
-        oauth.refresh_token, NEW_REFRESH,
+        oauth.refresh_token.expose(),
+        NEW_REFRESH,
         "the new independent refresh token is stored"
     );
     // The handle survived the replace (overwrite leaves the handles table untouched).

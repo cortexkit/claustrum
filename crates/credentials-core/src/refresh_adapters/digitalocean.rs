@@ -140,8 +140,8 @@ mod tests {
     async fn adapter_surfaces_relogin_and_never_networks() {
         let http = FixtureTransport::new(Vec::new());
         let cred = OAuthCredential {
-            access_token: "token".into(),
-            refresh_token: String::new(),
+            access_token: "token".to_string().into(),
+            refresh_token: String::new().into(),
             expires_at_ms: Some(0),
             token_url: String::new(),
             client_id: Some(CLIENT_ID.into()),

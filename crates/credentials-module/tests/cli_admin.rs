@@ -732,7 +732,7 @@ fn mint_signing_key_custodies_a_usable_key_and_prints_its_public_half() {
 
     let payload = b"canonical JSON bytes";
     let signature = credentials_core::signing::sign_ed25519(
-        std::str::from_utf8(&record.payload).expect("mint stores PEM"),
+        std::str::from_utf8(record.payload.expose()).expect("mint stores PEM"),
         payload,
     )
     .expect("the minted record must be usable by credential.sign");
@@ -1029,6 +1029,7 @@ fn an_antigravity_import_stores_a_resolvable_account_identity() {
             .as_ref()
             .unwrap()
             .refresh_token
+            .expose()
             .starts_with("1//0-bbb"),
         "sanity: the active account's credential was the one imported"
     );
@@ -1266,8 +1267,8 @@ fn import_and_set_identity_attach_sticky_account_metadata_without_replacing_secr
         "fixture",
         "anthropic",
         credentials_core::oauth::OAuthCredential {
-            access_token: "opaque-fixture-access".to_string(),
-            refresh_token: "fixture-refresh-secret".to_string(),
+            access_token: "opaque-fixture-access".to_string().into(),
+            refresh_token: "fixture-refresh-secret".to_string().into(),
             expires_at_ms: Some(4_102_444_800_000),
             token_url: "https://fixture.invalid/token".to_string(),
             client_id: Some("fixture-client".to_string()),
@@ -1357,11 +1358,11 @@ fn import_and_set_identity_attach_sticky_account_metadata_without_replacing_secr
         .expect("sticky identity");
     assert_eq!(sticky.identity.account_id.as_deref(), Some("acct-set"));
     assert_eq!(
-        sticky.oauth.as_ref().expect("OAuth").refresh_token,
+        sticky.oauth.as_ref().expect("OAuth").refresh_token.expose(),
         "refresh-rotated"
     );
     assert_eq!(
-        sticky.oauth.as_ref().expect("OAuth").access_token,
+        sticky.oauth.as_ref().expect("OAuth").access_token.expose(),
         "opaque-rotated"
     );
 
@@ -1389,11 +1390,21 @@ fn import_and_set_identity_attach_sticky_account_metadata_without_replacing_secr
         "--clear-identity must override sticky preservation"
     );
     assert_eq!(
-        cleared_record.oauth.as_ref().expect("OAuth").refresh_token,
+        cleared_record
+            .oauth
+            .as_ref()
+            .expect("OAuth")
+            .refresh_token
+            .expose(),
         "refresh-rotated"
     );
     assert_eq!(
-        cleared_record.oauth.as_ref().expect("OAuth").access_token,
+        cleared_record
+            .oauth
+            .as_ref()
+            .expect("OAuth")
+            .access_token
+            .expose(),
         "opaque-rotated"
     );
 
@@ -2870,8 +2881,8 @@ fn usable_does_not_promise_a_refresh_the_state_makes_unreachable() {
                 "test",
                 "anthropic",
                 credentials_core::oauth::OAuthCredential {
-                    access_token: "stale".into(),
-                    refresh_token: "live-refresh-material".into(),
+                    access_token: "stale".to_string().into(),
+                    refresh_token: "live-refresh-material".to_string().into(),
                     expires_at_ms: Some(expired_at),
                     token_url: "https://example.invalid/token".into(),
                     client_id: None,

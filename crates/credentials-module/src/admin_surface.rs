@@ -454,8 +454,8 @@ mod tests {
             "opencode",
             "openai",
             credentials_core::oauth::OAuthCredential {
-                access_token,
-                refresh_token: format!("refresh-{account_id}"),
+                access_token: access_token.into(),
+                refresh_token: format!("refresh-{account_id}").into(),
                 expires_at_ms: Some(4_102_444_800_000),
                 token_url: "https://example.invalid/token".to_string(),
                 client_id: Some("identity-test-client".to_string()),
@@ -476,7 +476,7 @@ mod tests {
         assert!(matches!(out, AdminOutcome::Ok(_)), "store should succeed");
         // The write is REAL: the record is in the store, audited as route-admin.
         let rec = r.store.get("apikey:new").expect("stored");
-        assert_eq!(rec.payload, b"sk-1");
+        assert_eq!(rec.payload.expose(), b"sk-1");
         let entries = r.store.read_audit(None).expect("audit");
         let last = entries.last().expect("an entry");
         assert_eq!(last.actor, "route-admin");
@@ -491,8 +491,8 @@ mod tests {
             "test",
             "anthropic",
             credentials_core::oauth::OAuthCredential {
-                access_token: "opaque-access".to_string(),
-                refresh_token: "refresh-secret".to_string(),
+                access_token: "opaque-access".to_string().into(),
+                refresh_token: "refresh-secret".to_string().into(),
                 expires_at_ms: Some(4_102_444_800_000),
                 token_url: "https://example.invalid/token".to_string(),
                 client_id: Some("identity-test-client".to_string()),
@@ -553,8 +553,8 @@ mod tests {
                     "test",
                     "anthropic",
                     credentials_core::oauth::OAuthCredential {
-                        access_token: "opaque-access".to_string(),
-                        refresh_token: "refresh-secret".to_string(),
+                        access_token: "opaque-access".to_string().into(),
+                        refresh_token: "refresh-secret".to_string().into(),
                         expires_at_ms: Some(4_102_444_800_000),
                         token_url: "https://example.invalid/token".to_string(),
                         client_id: Some("identity-test-client".to_string()),
@@ -599,8 +599,8 @@ mod tests {
             "import",
             "anthropic",
             credentials_core::oauth::OAuthCredential {
-                access_token: "opaque-access".to_string(),
-                refresh_token: "refresh-secret".to_string(),
+                access_token: "opaque-access".to_string().into(),
+                refresh_token: "refresh-secret".to_string().into(),
                 expires_at_ms: Some(4_102_444_800_000),
                 token_url: "https://example.invalid/token".to_string(),
                 client_id: Some("identity-test-client".to_string()),

@@ -48,7 +48,7 @@ impl RefreshAdapter for GithubCopilotAdapter {
         cred: &OAuthCredential,
         http: &dyn HttpTransport,
     ) -> Result<RefreshedTokens, RefreshError> {
-        let authorization = format!("token {}", cred.refresh_token);
+        let authorization = format!("token {}", cred.refresh_token.expose());
         let response = http
             .get(
                 TOKEN_URL,
@@ -63,7 +63,7 @@ impl RefreshAdapter for GithubCopilotAdapter {
                 let parsed: CopilotTokenResponse = serde_json::from_slice(&response.body)
                     .map_err(|error| RefreshError::Decode(error.to_string()))?;
                 Ok(RefreshedTokens {
-                    access_token: parsed.token,
+                    access_token: parsed.token.into(),
                     refresh_token: cred.refresh_token.clone(),
                     expires_at_ms: Some(parsed.expires_at.saturating_mul(1000)),
                     github_app_permissions: None,
@@ -87,8 +87,8 @@ mod tests {
 
     fn cred() -> OAuthCredential {
         OAuthCredential {
-            access_token: "old-copilot-token".into(),
-            refresh_token: "github-oauth-token".into(),
+            access_token: "old-copilot-token".to_string().into(),
+            refresh_token: "github-oauth-token".to_string().into(),
             expires_at_ms: Some(0),
             token_url: TOKEN_URL.into(),
             client_id: Some(CLIENT_ID.into()),
@@ -106,8 +106,8 @@ mod tests {
             .refresh(&cred(), &http)
             .await
             .unwrap();
-        assert_eq!(tokens.access_token, "copilot-bearer");
-        assert_eq!(tokens.refresh_token, "github-oauth-token");
+        assert_eq!(tokens.access_token.expose(), "copilot-bearer");
+        assert_eq!(tokens.refresh_token.expose(), "github-oauth-token");
         assert_eq!(tokens.expires_at_ms, Some(1_730_000_123_000));
 
         let requests = http.requests();

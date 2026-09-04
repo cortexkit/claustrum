@@ -45,8 +45,8 @@ const NEW_REFRESH: &str = "NEW-INDEPENDENT-REFRESH-TOKEN";
 
 fn oauth_record(refresh: &str, access: &str) -> VaultRecord {
     let oauth = OAuthCredential {
-        access_token: access.to_string(),
-        refresh_token: refresh.to_string(),
+        access_token: access.to_string().into(),
+        refresh_token: refresh.to_string().into(),
         expires_at_ms: Some(1),
         token_url: "https://platform.claude.com/v1/oauth/token".to_string(),
         client_id: Some("9d1c250a-e61b-44d9-88ed-5944d1962f5e".to_string()),

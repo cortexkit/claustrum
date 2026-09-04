@@ -505,8 +505,10 @@ fn validate_record_identity(record: &VaultRecord) -> Result<(), StoreOpError> {
 
 fn derived_account_id(record: &VaultRecord) -> Option<String> {
     let adapter = record.refresh_adapter.as_deref()?;
-    let access_token = record.oauth.as_ref()?.access_token.as_str();
-    crate::oauth_login::account_id_for_adapter(adapter, access_token)
+    crate::oauth_login::account_id_for_adapter(
+        adapter,
+        record.oauth.as_ref()?.access_token.expose(),
+    )
 }
 
 /// SHA-256 of a record's opaque payload — the value an overwrite CAS compares
@@ -1006,7 +1008,7 @@ impl EncryptedStore {
         let key_id_hex = self.key_id.to_hex();
         let now = now_ms();
         let audit_key = self.audit_key.clone();
-        let payload_hash_hex = hex32(&payload_hash(&record.payload));
+        let payload_hash_hex = hex32(&payload_hash(record.payload.expose()));
 
         // Create-only via INSERT ... ON CONFLICT DO NOTHING inside the fenced
         // transaction: an existing id leaves zero rows changed (atomic, no separate
@@ -1090,7 +1092,7 @@ impl EncryptedStore {
         // Read + decrypt the current record to verify the CAS precondition. A
         // decrypt failure here quarantines the id (handled by `get`).
         let current = self.get(credential_id)?;
-        if &payload_hash(&current.payload) != expected_payload_hash {
+        if &payload_hash(current.payload.expose()) != expected_payload_hash {
             return Err(StoreOpError::CasMismatch);
         }
         let next_version = current.record_version.saturating_add(1);
@@ -1101,7 +1103,7 @@ impl EncryptedStore {
         let key_id_hex = self.key_id.to_hex();
         let now = now_ms();
         let audit_key = self.audit_key.clone();
-        let payload_hash_hex = hex32(&payload_hash(&record.payload));
+        let payload_hash_hex = hex32(&payload_hash(record.payload.expose()));
 
         // The version in the WHERE makes the UPDATE itself a compare-and-set on the
         // version we read, so a concurrent writer that already bumped it leaves zero
@@ -1199,7 +1201,7 @@ impl EncryptedStore {
         let key_id_hex = self.key_id.to_hex();
         let now = now_ms();
         let audit_key = self.audit_key.clone();
-        let payload_hash_hex = hex32(&payload_hash(&record.payload));
+        let payload_hash_hex = hex32(&payload_hash(record.payload.expose()));
 
         // Read the current version, seal at version+1, and update — ALL inside the
         // one fenced transaction, gated on `WHERE record_version = <the version we
@@ -1359,7 +1361,7 @@ impl EncryptedStore {
             let next_version = (current_version as u64).saturating_add(1);
             let mut updated = record.with_identity(identity.clone());
             updated.record_version = next_version;
-            let payload_hash_hex = hex32(&payload_hash(&updated.payload));
+            let payload_hash_hex = hex32(&payload_hash(updated.payload.expose()));
             let blob = self
                 .seal_record(credential_id, &updated)
                 .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
@@ -2213,7 +2215,7 @@ impl EncryptedStore {
         let key_id_hex = self.key_id.to_hex();
         let now = now_ms();
         let audit_key = self.audit_key.clone();
-        let payload_hash_hex = hex32(&payload_hash(&new_record.payload));
+        let payload_hash_hex = hex32(&payload_hash(new_record.payload.expose()));
 
         let changed = self.fenced_write(|tx| {
             let n = tx.execute(
@@ -2363,7 +2365,7 @@ impl EncryptedStore {
             Ok(record) => Ok(record
                 .oauth
                 .as_ref()
-                .map(|o| refresh_token_hash(&o.refresh_token))),
+                .map(|o| refresh_token_hash(o.refresh_token.expose()))),
             Err(StoreOpError::NotFound) => Ok(None),
             Err(e) => Err(e),
         }
@@ -2751,7 +2753,7 @@ impl EncryptedStore {
         // refresh token; first use then refreshes it. Every non-OAuth credential is the
         // served payload itself, so sealing zero bytes would create a successful read
         // that downstreams can misdiagnose as an authentication failure.
-        if record.kind != CredentialKind::Oauth && record.payload.is_empty() {
+        if record.kind != CredentialKind::Oauth && record.payload.expose().is_empty() {
             return Err(StoreOpError::Encode(
                 "non-OAuth credential payload must not be empty".into(),
             ));
@@ -3824,8 +3826,8 @@ mod tests {
         // damaged the row on its way out would satisfy every assertion above.
         let loaded = store.get("apikey:one").expect("reload the seeded record");
         assert_eq!(
-            loaded.payload,
-            b"real".to_vec(),
+            loaded.payload.expose(),
+            b"real",
             "a refused write must leave the existing record untouched"
         );
     }
@@ -3835,8 +3837,8 @@ mod tests {
             "opencode",
             "anthropic",
             OAuthCredential {
-                access_token: "access".into(),
-                refresh_token: "refresh".into(),
+                access_token: "access".to_string().into(),
+                refresh_token: "refresh".to_string().into(),
                 expires_at_ms: Some(9_999),
                 token_url: "https://t.test/token".into(),
                 client_id: Some("c".into()),
@@ -3861,8 +3863,8 @@ mod tests {
             "opencode",
             "openai",
             OAuthCredential {
-                access_token,
-                refresh_token: format!("refresh-{account_id}"),
+                access_token: access_token.into(),
+                refresh_token: format!("refresh-{account_id}").into(),
                 expires_at_ms: Some(9_999),
                 token_url: "https://t.test/token".into(),
                 client_id: Some("c".into()),
@@ -3890,8 +3892,8 @@ mod tests {
         // and that no metadata read can see.
         let mut dead = oauth_record();
         if let Some(o) = dead.oauth.as_mut() {
-            o.access_token = String::new();
-            o.refresh_token = String::new();
+            o.access_token = String::new().into();
+            o.refresh_token = String::new().into();
         }
         store.create("dead:oauth", &dead).expect("create stranded");
 
@@ -3934,9 +3936,9 @@ mod tests {
             .create("opencode:anthropic", &oauth_record())
             .expect("create");
         let got = store.get("opencode:anthropic").expect("get");
-        assert_eq!(got.payload, b"payload-bytes");
+        assert_eq!(got.payload.expose(), b"payload-bytes");
         assert_eq!(got.record_version, 1);
-        assert_eq!(got.oauth.unwrap().access_token, "access");
+        assert_eq!(got.oauth.unwrap().access_token.expose(), "access");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -4462,7 +4464,7 @@ mod tests {
         });
         store.create("oauth:openai", &existing).expect("create");
         let mut incoming = openai_record("unused", b"opaque-new-token");
-        incoming.oauth.as_mut().expect("OAuth").access_token = "not-a-jwt".to_string();
+        incoming.oauth.as_mut().expect("OAuth").access_token = "not-a-jwt".to_string().into();
 
         store
             .overwrite_unconditional_audited(
@@ -4473,7 +4475,7 @@ mod tests {
             .expect("an undecodable incoming token cannot contradict the retained label");
 
         let after = store.get("oauth:openai").expect("read replacement");
-        assert_eq!(after.payload, b"opaque-new-token");
+        assert_eq!(after.payload.expose(), b"opaque-new-token");
         assert_eq!(after.identity, existing.identity);
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -4907,7 +4909,11 @@ mod tests {
         let audit_before_overwrites = store.read_audit(None).expect("audit seeded").len();
 
         assert!(store
-            .overwrite_cas("apikey:kept", &empty, &payload_hash(&before.payload),)
+            .overwrite_cas(
+                "apikey:kept",
+                &empty,
+                &payload_hash(before.payload.expose()),
+            )
             .is_err());
         let after_cas = store.get("apikey:kept").expect("read after CAS refusal");
         assert_eq!(after_cas.record_version, before.record_version);
@@ -4941,8 +4947,8 @@ mod tests {
             "import",
             "anthropic",
             OAuthCredential {
-                access_token: String::new(),
-                refresh_token: "refresh-only".into(),
+                access_token: String::new().into(),
+                refresh_token: "refresh-only".to_string().into(),
                 expires_at_ms: None,
                 token_url: "https://t.test/token".into(),
                 client_id: Some("c".into()),
@@ -4950,12 +4956,13 @@ mod tests {
             },
             Vec::new(),
         );
-        assert!(record.payload.is_empty());
+        assert!(record.payload.expose().is_empty());
         assert!(!record
             .oauth
             .as_ref()
             .expect("oauth")
             .refresh_token
+            .expose()
             .is_empty());
 
         store
@@ -4965,6 +4972,7 @@ mod tests {
             .get("oauth:refresh-only")
             .expect("read refresh-only")
             .payload
+            .expose()
             .is_empty());
     }
 
@@ -4993,7 +5001,7 @@ mod tests {
             .expect("stale quarantine CAS"));
         let kept = store.get("apikey:race").expect("replacement stays active");
         assert_eq!(kept.record_version, 2);
-        assert_eq!(kept.payload, b"replacement");
+        assert_eq!(kept.payload.expose(), b"replacement");
         assert!(store
             .quarantine_if_version("apikey:race", 2)
             .expect("current quarantine CAS"));
@@ -5018,12 +5026,12 @@ mod tests {
         let (root, store) = tmp_store(4);
         store.create("id", &oauth_record()).expect("create");
         let cur = store.get("id").expect("get");
-        let expect = payload_hash(&cur.payload);
+        let expect = payload_hash(cur.payload.expose());
         let mut next = oauth_record();
-        next.payload = b"new-payload".to_vec();
+        next.payload = b"new-payload".to_vec().into();
         store.overwrite_cas("id", &next, &expect).expect("cas ok");
         let got = store.get("id").expect("get after cas");
-        assert_eq!(got.payload, b"new-payload");
+        assert_eq!(got.payload.expose(), b"new-payload");
         assert_eq!(got.record_version, 2, "version bumped on overwrite");
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -5086,7 +5094,7 @@ mod tests {
             other => panic!("expected Quarantined on re-get, got {other:?}"),
         }
         assert_eq!(
-            store.get("good").unwrap().payload,
+            store.get("good").unwrap().payload.expose(),
             b"payload-bytes",
             "good still serves"
         );
@@ -5363,8 +5371,8 @@ mod tests {
         store.rotate_master_key(new_key).expect("rotate");
 
         // Records are still readable (re-wrapped under the new key), unchanged plaintext.
-        assert_eq!(store.get("a").unwrap().payload, b"payload-bytes");
-        assert_eq!(store.get("b").unwrap().payload, b"payload-bytes");
+        assert_eq!(store.get("a").unwrap().payload.expose(), b"payload-bytes");
+        assert_eq!(store.get("b").unwrap().payload.expose(), b"payload-bytes");
         // The key_id columns were swapped to the new fingerprint.
         assert_eq!(store.meta("a").unwrap().key_id_hex, new_key_id.to_hex());
         // The chain is STILL one continuously-verifiable sequence (stable audit key)
@@ -5420,7 +5428,7 @@ mod tests {
         // The NEW key opens it and the records are intact.
         let reopened = open_sqlite(&descriptor).unwrap();
         let store = EncryptedStore::open(reopened, new_key).expect("new key opens");
-        assert_eq!(store.get("a").unwrap().payload, b"payload-bytes");
+        assert_eq!(store.get("a").unwrap().payload.expose(), b"payload-bytes");
         assert_eq!(store.verify_audit_chain().unwrap(), None);
 
         // A ROTATION MUST NOT REVOKE ANYONE'S ACCESS. Handles are hashed, not sealed,
@@ -5541,7 +5549,7 @@ mod tests {
             matches!(meta.state, RecordState::Active),
             "replace must clear corrupt, or the doc comment is lying about the repair path"
         );
-        assert_eq!(store.get("id").expect("read back").payload, b"two".to_vec());
+        assert_eq!(store.get("id").expect("read back").payload.expose(), b"two");
         // The handle survives -- which is the whole reason replace beats remove here.
         assert_eq!(
             store.resolve_handle(&handle.raw).expect("resolve"),
@@ -5584,8 +5592,8 @@ mod tests {
             RecordState::Active
         ));
         assert_eq!(
-            store.get("live").expect("read back").payload,
-            b"the-secret".to_vec(),
+            store.get("live").expect("read back").payload.expose(),
+            b"the-secret",
             "reactivate must not disturb the stored material"
         );
 
@@ -6205,7 +6213,7 @@ mod tests {
         assert_eq!(store.meta("bad").unwrap().state, RecordState::Corrupt);
         // The good record re-wrapped under the new key and still reads.
         assert_eq!(
-            store.get("good").expect("good readable").payload,
+            store.get("good").expect("good readable").payload.expose(),
             b"payload-bytes"
         );
         let _ = std::fs::remove_dir_all(&root);

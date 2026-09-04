@@ -14,6 +14,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::secret::SecretString;
+
 pub const CUSTODY_TOMBSTONE_PREFIX: &str = "claustrum-tombstone:v1:";
 
 fn is_custody_tombstone(value: &str) -> bool {
@@ -27,11 +29,11 @@ fn is_custody_tombstone(value: &str) -> bool {
 pub struct OAuthCredential {
     /// The current access token (bearer credential handed to the provider API).
     /// Secret.
-    pub access_token: String,
+    pub access_token: SecretString,
     /// The current refresh token, exchanged at `token_url` for a new access token.
     /// Secret. Rotated by the provider on refresh for providers that follow
     /// RFC 9700 refresh-token rotation.
-    pub refresh_token: String,
+    pub refresh_token: SecretString,
     /// Access-token expiry as a Unix timestamp in milliseconds, if the source
     /// provides one. Used to decide when a `get` must trigger a refresh.
     pub expires_at_ms: Option<i64>,
@@ -139,8 +141,8 @@ impl OAuthCredential {
             .ok_or(ImportError::MissingField("refresh_token"))?;
         let access_token = creds.access_token.unwrap_or_default();
         Ok(OAuthCredential {
-            access_token,
-            refresh_token,
+            access_token: access_token.into(),
+            refresh_token: refresh_token.into(),
             expires_at_ms: creds.expiry_date,
             // The GoogleAdapter supplies the gemini-cli public client + token URL.
             token_url: String::new(),
@@ -172,8 +174,8 @@ impl OAuthCredential {
             return Err(ImportError::CustodyTombstone);
         }
         Ok(OAuthCredential {
-            access_token,
-            refresh_token,
+            access_token: access_token.into(),
+            refresh_token: refresh_token.into(),
             expires_at_ms: entry.expires,
             // The adapter supplies the provider's token URL / client id; the import
             // file does not carry them.
@@ -267,8 +269,8 @@ pub fn import_antigravity_account(
     };
     Ok(ImportedAntigravityAccount {
         oauth: OAuthCredential {
-            access_token: String::new(),
-            refresh_token: packed,
+            access_token: SecretString::new(String::new()),
+            refresh_token: packed.into(),
             expires_at_ms: None,
             token_url: String::new(),
             client_id: None,
@@ -394,8 +396,8 @@ mod tests {
 
     fn sample() -> OAuthCredential {
         OAuthCredential {
-            access_token: "access-abc".into(),
-            refresh_token: "refresh-xyz".into(),
+            access_token: "access-abc".to_string().into(),
+            refresh_token: "refresh-xyz".to_string().into(),
             expires_at_ms: Some(1_000_000),
             token_url: "https://example.test/oauth/token".into(),
             client_id: Some("client-1".into()),
@@ -428,8 +430,8 @@ mod tests {
     fn imports_auth_json_shape() {
         let raw = br#"{"refresh":"r-tok","access":"a-tok","expires":1700000000000}"#;
         let c = OAuthCredential::import("opencode", raw).expect("import");
-        assert_eq!(c.refresh_token, "r-tok");
-        assert_eq!(c.access_token, "a-tok");
+        assert_eq!(c.refresh_token.expose(), "r-tok");
+        assert_eq!(c.access_token.expose(), "a-tok");
         assert_eq!(c.expires_at_ms, Some(1_700_000_000_000));
         // The adapter fills token_url/client_id; the import file does not carry them.
         assert!(c.token_url.is_empty());
@@ -444,12 +446,12 @@ mod tests {
             "google":    {"refresh":"g-r","access":"","expires":0}
         }"#;
         let a = OAuthCredential::import_provider("opencode", raw, "anthropic").expect("anthropic");
-        assert_eq!(a.refresh_token, "a-r");
-        assert_eq!(a.access_token, "a-a");
+        assert_eq!(a.refresh_token.expose(), "a-r");
+        assert_eq!(a.access_token.expose(), "a-a");
         // Google's already-empty access token imports fine (refresh repopulates it).
         let g = OAuthCredential::import_provider("opencode", raw, "google").expect("google");
-        assert_eq!(g.refresh_token, "g-r");
-        assert!(g.access_token.is_empty());
+        assert_eq!(g.refresh_token.expose(), "g-r");
+        assert!(g.access_token.expose().is_empty());
         // A provider key not present is a typed error, not a silent empty import.
         assert!(matches!(
             OAuthCredential::import_provider("opencode", raw, "openai"),
@@ -510,17 +512,20 @@ mod tests {
         // activeIndex picks account[1].
         let c = import_antigravity_account(raw, None).expect("active account");
         assert_eq!(
-            c.oauth.refresh_token, "1//0-bbb||encouraging-env-qwp21",
+            c.oauth.refresh_token.expose(),
+            "1//0-bbb||encouraging-env-qwp21",
             "packs <refresh>||<managed> (empty plain project segment)"
         );
         assert!(
-            c.oauth.access_token.is_empty(),
+            c.oauth.access_token.expose().is_empty(),
             "antigravity store carries no access token"
         );
         // effective_project_id returns the managed id.
         assert_eq!(
-            crate::refresh_adapters::antigravity::effective_project_id(&c.oauth.refresh_token)
-                .as_deref(),
+            crate::refresh_adapters::antigravity::effective_project_id(
+                c.oauth.refresh_token.expose()
+            )
+            .as_deref(),
             Some("encouraging-env-qwp21")
         );
         // THE IDENTITY COMES BACK WITH THE SELECTED ACCOUNT, and it must be the
@@ -534,11 +539,11 @@ mod tests {
         );
         // Select a specific account by email (forward-compat multi-account).
         let a = import_antigravity_account(raw, Some("a@x.com")).expect("by email");
-        assert_eq!(a.oauth.refresh_token, "1//0-aaa||proj-a");
+        assert_eq!(a.oauth.refresh_token.expose(), "1//0-aaa||proj-a");
         assert_eq!(a.email.as_deref(), Some("a@x.com"), "tracks the selection");
         // Select by numeric index.
         let byidx = import_antigravity_account(raw, Some("0")).expect("by index");
-        assert_eq!(byidx.oauth.refresh_token, "1//0-aaa||proj-a");
+        assert_eq!(byidx.oauth.refresh_token.expose(), "1//0-aaa||proj-a");
         assert_eq!(byidx.email.as_deref(), Some("a@x.com"));
         // An account with NO email is None rather than an empty string, which would
         // present downstream as an account labelled with nothing.
@@ -548,7 +553,7 @@ mod tests {
         )
         .expect("account without an email");
         assert_eq!(no_email.email, None);
-        assert_eq!(no_email.oauth.refresh_token, "1//0-ccc|");
+        assert_eq!(no_email.oauth.refresh_token.expose(), "1//0-ccc|");
         // An unknown selector is a typed error; an empty store is rejected.
         assert!(matches!(
             import_antigravity_account(raw, Some("nope@x.com")),
@@ -565,8 +570,8 @@ mod tests {
         // The gemini-cli login file: distinct field names, expiry_date in epoch ms.
         let raw = br#"{"access_token":"ya29.live","refresh_token":"1//0g-refresh","expiry_date":1700000000000,"token_type":"Bearer"}"#;
         let c = OAuthCredential::import("gemini-cli", raw).expect("gemini import");
-        assert_eq!(c.refresh_token, "1//0g-refresh");
-        assert_eq!(c.access_token, "ya29.live");
+        assert_eq!(c.refresh_token.expose(), "1//0g-refresh");
+        assert_eq!(c.access_token.expose(), "ya29.live");
         assert_eq!(c.expires_at_ms, Some(1_700_000_000_000));
         assert!(
             c.token_url.is_empty(),

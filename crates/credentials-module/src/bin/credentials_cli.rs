@@ -1065,10 +1065,12 @@ fn cmd_put(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             // token_url stays empty because this adapter pins GitHub's endpoints as
             // constants rather than reading them off the record.
             let oauth = credentials_core::oauth::OAuthCredential {
-                access_token: String::new(),
-                refresh_token: String::from_utf8(payload).map_err(|_| {
-                    CliError::Usage("the App private key must be UTF-8 PEM text".to_string())
-                })?,
+                access_token: String::new().into(),
+                refresh_token: String::from_utf8(payload)
+                    .map_err(|_| {
+                        CliError::Usage("the App private key must be UTF-8 PEM text".to_string())
+                    })?
+                    .into(),
                 expires_at_ms: None,
                 token_url: String::new(),
                 client_id: Some(client_id),
@@ -1317,7 +1319,9 @@ fn cmd_import(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
                     "no refresh adapter for id '{id}'; pass --adapter <name>"
                 ))
             })?;
-        let payload = oauth.access_token.clone().into_bytes();
+        let payload = credentials_core::secret::SecretBytes::new(
+            oauth.access_token.expose().as_bytes().to_vec(),
+        );
         VaultRecord::new_oauth(source, adapter, oauth, payload)
     };
 
@@ -1925,8 +1929,8 @@ fn cmd_device_login(
 
     let (oauth, payload) = if matches!(wire.device, Some(DeviceKind::GithubCopilot)) {
         let github_credential = credentials_core::oauth::OAuthCredential {
-            access_token: String::new(),
-            refresh_token: tokens.access_token,
+            access_token: String::new().into(),
+            refresh_token: tokens.access_token.into(),
             expires_at_ms: None,
             token_url: github_copilot::TOKEN_URL.into(),
             client_id: Some(github_copilot::CLIENT_ID.into()),
@@ -1944,21 +1948,25 @@ fn cmd_device_login(
             client_id: Some(github_copilot::CLIENT_ID.into()),
             scopes: vec!["read:user".into()],
         };
-        let payload = oauth.access_token.clone().into_bytes();
+        let payload = credentials_core::secret::SecretBytes::new(
+            oauth.access_token.expose().as_bytes().to_vec(),
+        );
         (oauth, payload)
     } else {
         let refresh_token = tokens.refresh_token.ok_or_else(|| {
             CliError::Io(format!("{provider} device flow returned no refresh token"))
         })?;
         let oauth = credentials_core::oauth::OAuthCredential {
-            access_token: tokens.access_token.clone(),
-            refresh_token,
+            access_token: tokens.access_token.clone().into(),
+            refresh_token: refresh_token.into(),
             expires_at_ms: tokens.expires_at_ms,
             token_url: wire.token_url.to_string(),
             client_id: Some(wire.client_id.to_string()),
             scopes: wire.scopes.iter().map(|scope| scope.to_string()).collect(),
         };
-        let payload = oauth.access_token.clone().into_bytes();
+        let payload = credentials_core::secret::SecretBytes::new(
+            oauth.access_token.expose().as_bytes().to_vec(),
+        );
         (oauth, payload)
     };
 
@@ -2375,14 +2383,15 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     // stored on the record so the refresh path uses the same endpoint/client that
     // minted this token.
     let oauth = credentials_core::oauth::OAuthCredential {
-        access_token: tokens.access_token.clone(),
-        refresh_token: tokens.refresh_token.clone(),
+        access_token: tokens.access_token.clone().into(),
+        refresh_token: tokens.refresh_token.clone().into(),
         expires_at_ms,
         token_url: wire.token_url.to_string(),
         client_id: Some(wire.client_id.to_string()),
         scopes: wire.scopes.iter().map(|s| s.to_string()).collect(),
     };
-    let payload = tokens.access_token.clone().into_bytes();
+    let payload =
+        credentials_core::secret::SecretBytes::new(oauth.access_token.expose().as_bytes().to_vec());
     let record =
         VaultRecord::new_oauth("login", wire.adapter_name, oauth, payload).with_identity(identity);
 

@@ -142,7 +142,8 @@ fn assert_reopens_clean(root: &Path) -> String {
         store
             .get("cred")
             .expect("credential readable after crash")
-            .payload,
+            .payload
+            .expose(),
         b"secret",
         "the credential is intact after a crash at this cut"
     );

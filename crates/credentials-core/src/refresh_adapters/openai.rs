@@ -106,7 +106,7 @@ impl OpenAiAdapter {
         let body = serde_json::json!({
             "client_id": client_id,
             "grant_type": "refresh_token",
-            "refresh_token": cred.refresh_token,
+            "refresh_token": cred.refresh_token.expose(),
         });
         serde_json::to_vec(&body).expect("serializing a fixed-shape json body never fails")
     }
@@ -173,10 +173,10 @@ impl RefreshAdapter for OpenAiAdapter {
             .map(|secs| now_ms() + secs.saturating_mul(1000));
         let refresh_token = parsed
             .refresh_token
-            .unwrap_or_else(|| cred.refresh_token.clone());
+            .unwrap_or_else(|| cred.refresh_token.expose().to_string());
         Ok(RefreshedTokens {
-            access_token: parsed.access_token,
-            refresh_token,
+            access_token: parsed.access_token.into(),
+            refresh_token: refresh_token.into(),
             expires_at_ms,
             github_app_permissions: None,
         })
@@ -198,8 +198,8 @@ mod tests {
 
     fn cred() -> OAuthCredential {
         OAuthCredential {
-            access_token: "old-access".into(),
-            refresh_token: "old-refresh".into(),
+            access_token: "old-access".to_string().into(),
+            refresh_token: "old-refresh".to_string().into(),
             expires_at_ms: Some(0),
             token_url: TOKEN_URL.into(),
             client_id: Some(CODEX_CLIENT_ID.into()),
@@ -215,8 +215,12 @@ mod tests {
     async fn refresh_parses_rotated_tokens_absent_expiry_is_none() {
         let http = FixtureTransport::ok(200, RECORDED_SUCCESS.as_bytes().to_vec());
         let tokens = OpenAiAdapter::new().refresh(&cred(), &http).await.unwrap();
-        assert_eq!(tokens.access_token, "new-access");
-        assert_eq!(tokens.refresh_token, "new-refresh", "refresh token rotated");
+        assert_eq!(tokens.access_token.expose(), "new-access");
+        assert_eq!(
+            tokens.refresh_token.expose(),
+            "new-refresh",
+            "refresh token rotated"
+        );
         assert_eq!(
             tokens.expires_at_ms, None,
             "no expires_in in the official refresh response => no stored expiry"
@@ -228,7 +232,8 @@ mod tests {
         let http = FixtureTransport::ok(200, br#"{"access_token":"a"}"#.to_vec());
         let tokens = OpenAiAdapter::new().refresh(&cred(), &http).await.unwrap();
         assert_eq!(
-            tokens.refresh_token, "old-refresh",
+            tokens.refresh_token.expose(),
+            "old-refresh",
             "reuse existing when absent"
         );
     }

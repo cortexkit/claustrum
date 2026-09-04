@@ -139,7 +139,8 @@ async fn kill9_between_response_and_commit_resolves_to_needs_reauth() {
     );
     let before = store.get("anthropic").expect("old record present");
     assert_eq!(
-        before.payload, b"old-access",
+        before.payload.expose(),
+        b"old-access",
         "staged token never committed"
     );
 

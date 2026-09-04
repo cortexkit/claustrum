@@ -159,7 +159,7 @@ impl RefreshAdapter for KimiAdapter {
         let client_id = cred.client_id.as_deref().unwrap_or(CLIENT_ID);
         let body = form_urlencode(&[
             ("grant_type", "refresh_token"),
-            ("refresh_token", cred.refresh_token.as_str()),
+            ("refresh_token", cred.refresh_token.expose()),
             ("client_id", client_id),
         ])
         .into_bytes();
@@ -197,9 +197,10 @@ impl RefreshAdapter for KimiAdapter {
             .filter(|seconds| *seconds >= 0)
             .map(|seconds| now_ms().saturating_add(seconds.saturating_mul(1000)));
         Ok(RefreshedTokens {
-            access_token: parsed.access_token,
+            access_token: parsed.access_token.into(),
             refresh_token: parsed
                 .refresh_token
+                .map(Into::into)
                 .unwrap_or_else(|| cred.refresh_token.clone()),
             expires_at_ms,
             github_app_permissions: None,
@@ -222,8 +223,8 @@ mod tests {
 
     fn cred() -> OAuthCredential {
         OAuthCredential {
-            access_token: "old-access".into(),
-            refresh_token: "old-refresh".into(),
+            access_token: "old-access".to_string().into(),
+            refresh_token: "old-refresh".to_string().into(),
             expires_at_ms: Some(0),
             token_url: TOKEN_URL.into(),
             client_id: Some(CLIENT_ID.into()),
@@ -272,7 +273,7 @@ mod tests {
             .refresh(&cred(), &http)
             .await
             .unwrap();
-        assert_eq!(tokens.refresh_token, "old-refresh");
+        assert_eq!(tokens.refresh_token.expose(), "old-refresh");
     }
 
     #[tokio::test]

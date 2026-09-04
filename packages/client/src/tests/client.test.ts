@@ -50,6 +50,21 @@ const originalLaunchNonce = process.env.SUBC_LAUNCH_NONCE
 const originalXdgRuntime = process.env.XDG_RUNTIME_DIR
 const originalHome = process.env.HOME
 const originalTmpdir = process.env.TMPDIR
+// WINDOWS READS TEMP/TMP, NOT TMPDIR. `os.tmpdir()` consults TMPDIR on POSIX and
+// TEMP/TMP on Windows, so a fixture that sets only TMPDIR redirects the temp tier on
+// macOS and Linux and silently does NOT redirect it on Windows -- where discovery then
+// scans the runner's REAL temp directory instead of the fixture. That is precisely how
+// master went red on a suite that is green on two of three platforms.
+const originalTemp = process.env.TEMP
+const originalTmp = process.env.TMP
+
+/// Point every temp-dir variable the platform might read at `dir`, so a discovery
+/// fixture redirects on all three platforms rather than two.
+function setTempDir(dir: string): void {
+  process.env.TMPDIR = dir
+  process.env.TEMP = dir
+  process.env.TMP = dir
+}
 
 async function tempPath(name: string): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), 'claustrum-client-'))
@@ -74,6 +89,10 @@ afterEach(async () => {
   else process.env.HOME = originalHome
   if (originalTmpdir === undefined) delete process.env.TMPDIR
   else process.env.TMPDIR = originalTmpdir
+  if (originalTemp === undefined) delete process.env.TEMP
+  else process.env.TEMP = originalTemp
+  if (originalTmp === undefined) delete process.env.TMP
+  else process.env.TMP = originalTmp
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })))
 })
 
@@ -192,7 +211,7 @@ describe('ClaustrumClient', () => {
     await chmod(daemonFile, 0o600)
     delete process.env.XDG_RUNTIME_DIR
     process.env.HOME = homeDir
-    process.env.TMPDIR = fixtureTmp
+    setTempDir(fixtureTmp)
 
     try {
       expect(getDefaultClaustrumConnectionPath()).toBe(daemonFile)
@@ -232,7 +251,7 @@ describe('ClaustrumClient', () => {
 
     delete process.env.XDG_RUNTIME_DIR
     process.env.HOME = homeDir
-    process.env.TMPDIR = fixtureTmp
+    setTempDir(fixtureTmp)
 
     try {
       expect(getDefaultClaustrumConnectionPath()).toBe(fixtureFile)
@@ -255,7 +274,7 @@ describe('ClaustrumClient', () => {
     const homeDir = join(tempRoot, 'home')
     await mkdir(homeDir, { recursive: true })
     process.env.HOME = homeDir
-    process.env.TMPDIR = fixtureTmp
+    setTempDir(fixtureTmp)
 
     try {
       const path = getDefaultClaustrumConnectionPath()

@@ -9,6 +9,7 @@ import {
   withManifestLock,
   writeHandleFileLocked,
 } from '../manifest-lock'
+import type { ManifestLockError, ManifestLockErrorCode } from '../index'
 
 const roots: string[] = []
 const handle = (letter: string) => `ckh_${letter.repeat(43)}`
@@ -85,14 +86,93 @@ describe('manifest writer lock', () => {
     expect(MANIFEST_LOCK.staleTargetRe.test(suffixes[0]!)).toBe(true)
   })
 
-  test('fresh owner fails loudly after the bounded retry window', async () => {
+  test('owner that becomes stale during the retry window is evicted', async () => {
+    const path = await manifestPath()
+    __setManifestLockTestOptions({ ttlMs: 80, renewEveryMs: 1_000, retryMinMs: 2, retryMaxMs: 3 })
+    await owner(path, Date.now() - 30)
+
+    await withManifestLock(path, 'anthropic-auth', async () => {})
+
+    const suffixes = (await readdir(join(path, '..'))).filter((name) => name.startsWith(`${basename(path)}.lock.stale-`))
+    expect(suffixes).toHaveLength(1)
+  })
+
+  test('owner nonce containing a path traversal is invalid and never renamed', async () => {
+    for (const nonce of ['../escape', 'a/b', 'a:b', 'a*b', 'a?b', 'a|b']) {
+      const path = await manifestPath()
+      const lockPath = `${path}.lock`
+      __setManifestLockTestOptions({ ttlMs: 30, renewEveryMs: 10, retryMinMs: 2, retryMaxMs: 3 })
+      await mkdir(lockPath, { mode: 0o700 })
+      await writeFile(join(lockPath, 'owner'), `${JSON.stringify({ tenant: 'squatter', pid: 41, claimed_at_ms: Date.now() - 31, nonce })}\n`, { mode: 0o600 })
+
+      const error = (await withManifestLock(path, 'anthropic-auth', async () => {}).catch((caught) => caught)) as Error & { code?: string }
+
+      expect(error.code).toBe('owner_invalid')
+      expect((await stat(lockPath)).isDirectory()).toBe(true)
+      expect((await readdir(join(path, '..'))).some((name) => name.includes('.lock.stale-'))).toBe(false)
+      await expect(stat(join(path, '..', 'escape'))).rejects.toMatchObject({ code: 'ENOENT' })
+    }
+  })
+
+  test('path-safe unfamiliar nonce alphabets remain evictable', async () => {
+    for (const nonce of ['abc.def', 'AAAA====']) {
+      const path = await manifestPath()
+      const lockPath = `${path}.lock`
+      __setManifestLockTestOptions({ ttlMs: 30, renewEveryMs: 10, retryMinMs: 2, retryMaxMs: 3 })
+      await mkdir(lockPath, { mode: 0o700 })
+      await writeFile(join(lockPath, 'owner'), `${JSON.stringify({ tenant: 'newer-writer', pid: 41, claimed_at_ms: Date.now() - 31, nonce })}\n`, { mode: 0o600 })
+
+      await withManifestLock(path, 'anthropic-auth', async () => {})
+
+      expect((await readdir(join(path, '..'))).some((name) => name.startsWith(`${basename(path)}.lock.stale-`))).toBe(true)
+    }
+  })
+
+  test('unknown owner keys are busy while fresh and evictable once stale', async () => {
+    const path = await manifestPath()
+    const lockPath = `${path}.lock`
+    __setManifestLockTestOptions({ ttlMs: 30, renewEveryMs: 10, retryMinMs: 2, retryMaxMs: 3 })
+    await mkdir(lockPath, { mode: 0o700 })
+    const record = { tenant: 'newer-writer', pid: 41, claimed_at_ms: Date.now() + 1_000, nonce: 'newer_writer_nonce', generation: 2 }
+    await writeFile(join(lockPath, 'owner'), `${JSON.stringify(record)}\n`, { mode: 0o600 })
+
+    const freshError = (await withManifestLock(path, 'anthropic-auth', async () => {}).catch((caught) => caught)) as Error & { code?: string }
+    expect(freshError.code).toBe('lock_busy')
+
+    record.claimed_at_ms = Date.now() - 31
+    await writeFile(join(lockPath, 'owner'), `${JSON.stringify(record)}\n`, { mode: 0o600 })
+    await withManifestLock(path, 'anthropic-auth', async () => {})
+    expect((await readdir(join(path, '..'))).some((name) => name.startsWith(`${basename(path)}.lock.stale-`))).toBe(true)
+  })
+
+  test('malformed diagnostic owner fields do not prevent stale eviction', async () => {
+    const path = await manifestPath()
+    const lockPath = `${path}.lock`
+    __setManifestLockTestOptions({ ttlMs: 30, renewEveryMs: 10, retryMinMs: 2, retryMaxMs: 3 })
+    await mkdir(lockPath, { mode: 0o700 })
+    await writeFile(join(lockPath, 'owner'), `${JSON.stringify({ tenant: 41, pid: 'unknown', claimed_at_ms: Date.now() - 31, nonce: 'valid_nonce' })}\n`, { mode: 0o600 })
+
+    await withManifestLock(path, 'anthropic-auth', async () => {})
+
+    expect((await readdir(join(path, '..'))).some((name) => name.startsWith(`${basename(path)}.lock.stale-`))).toBe(true)
+  })
+
+  test('renewing owner fails loudly after the bounded retry window', async () => {
     const path = await manifestPath()
     __setManifestLockTestOptions({ ttlMs: 40, renewEveryMs: 10, retryMinMs: 2, retryMaxMs: 3 })
     await owner(path, Date.now())
 
     const started = Date.now()
-    await expect(withManifestLock(path, 'anthropic-auth', async () => {})).rejects.toThrow('manifest lock busy')
-    expect(Date.now() - started).toBeGreaterThanOrEqual(35)
+    const renewal = setInterval(async () => {
+      const ownerPath = join(`${path}.lock`, 'owner')
+      const current = JSON.parse(await readFile(ownerPath, 'utf8')) as Record<string, unknown>
+      current.claimed_at_ms = Date.now()
+      await writeFile(ownerPath, `${JSON.stringify(current)}\n`, { mode: 0o600 })
+    }, 5)
+    try {
+      await expect(withManifestLock(path, 'anthropic-auth', async () => {})).rejects.toThrow('manifest lock busy')
+      expect(Date.now() - started).toBeGreaterThanOrEqual(35)
+    } finally { clearInterval(renewal) }
   })
 
   test('owner file exists while held and disappears with the lock after release', async () => {
@@ -240,18 +320,54 @@ describe('manifest writer lock', () => {
     expect((await stat(path)).mode & 0o777).toBe(0o600)
   })
 
+  test('leaves the mode of a pre-existing benign parent unchanged', async () => {
+    const path = await manifestPath()
+    const parent = join(path, '..')
+    await chmod(parent, 0o755)
+    const before = (await stat(parent)).mode & 0o777
+
+    await writeHandleFileLocked(path, 'anthropic-auth', (file) => {
+      file.providers.push(provider('anthropic', 'anthropic-auth'))
+    })
+
+    expect((await stat(parent)).mode & 0o777).toBe(before)
+  })
+
+  test('refuses a group-writable manifest parent without changing its mode', async () => {
+    const path = await manifestPath()
+    const parent = join(path, '..')
+    await chmod(parent, 0o770)
+
+    await expect(writeHandleFileLocked(path, 'anthropic-auth', () => {})).rejects.toThrow('handle file parent must not be group- or other-writable')
+    expect((await stat(parent)).mode & 0o777).toBe(0o770)
+  })
+
   test('pins the shared lock constants and renewal bound', () => {
     expect(MANIFEST_LOCK.ttlMs).toBe(30_000)
     expect(MANIFEST_LOCK.renewEveryMs).toBe(10_000)
     expect(MANIFEST_LOCK.ownerKeys).toEqual(['tenant', 'pid', 'claimed_at_ms', 'nonce'])
-    expect(MANIFEST_LOCK.staleTargetRe.source).toBe('^\\.lock\\.stale-\\d+-[A-Za-z0-9_-]+$')
+    for (const [target, accepted] of [
+      ['.lock.stale-1-nonce_2', true],
+      ['.lock.stale-1-abc.def', true],
+      ['.lock.stale-1-AAAA====', true],
+      ['.lock.stale-1.bad', false],
+      ['.lock.stale-1-a/b', false],
+      ['.lock.stale-1-..', false],
+      ['.lock.stale-1-a:b', false],
+      ['.lock.stale-1-a*b', false],
+      ['.lock.stale-1-a?b', false],
+      ['.lock.stale-1-a|b', false],
+      // Windows aliases trailing dots and spaces, collapsing distinct nonces onto one ABA target.
+      ['.lock.stale-1-abc.', false],
+      ['.lock.stale-1-abc ', false],
+    ] as const) expect(MANIFEST_LOCK.staleTargetRe.test(target)).toBe(accepted)
     expect(MANIFEST_LOCK.renewEveryMs * 3).toBeLessThanOrEqual(MANIFEST_LOCK.ttlMs)
   })
 
   test('reads a Rust-shaped owner fixture using the shared field contract', async () => {
     const path = await manifestPath()
     __setManifestLockTestOptions({ ttlMs: 30, renewEveryMs: 10, retryMinMs: 2, retryMaxMs: 3 })
-    await owner(path, Date.now(), 'opencode-claustrum')
+    await owner(path, Date.now() + 1_000, 'opencode-claustrum')
     await expect(withManifestLock(path, 'anthropic-auth', async () => {})).rejects.toThrow('manifest lock busy')
   })
 
@@ -296,7 +412,7 @@ describe('manifest writer lock', () => {
     expect(await readFile(path, 'utf8')).toBe(before)
   })
 
-  test('pins missing and unparseable owner records as busy without eviction', async () => {
+  test('pins missing and unparseable owner records without eviction', async () => {
     const path = await manifestPath()
     const lockPath = `${path}.lock`
     __setManifestLockTestOptions({ ttlMs: 25, renewEveryMs: 8, retryMinMs: 2, retryMaxMs: 3 })
@@ -306,7 +422,8 @@ describe('manifest writer lock', () => {
         await writeFile(join(lockPath, 'owner'), ownerSource, { mode: 0o600 })
       }
 
-      await expect(withManifestLock(path, 'anthropic-auth', async () => {})).rejects.toThrow('manifest lock busy')
+      const error = (await withManifestLock(path, 'anthropic-auth', async () => {}).catch((caught) => caught)) as Error & { code?: string }
+      expect(error.code).toBe(ownerSource === undefined ? 'lock_busy' : 'owner_invalid')
       expect((await lstat(lockPath)).isDirectory()).toBe(true)
       expect((await readdir(join(path, '..'))).some((name) => name.includes('.lock.stale-'))).toBe(false)
       await rm(lockPath, { recursive: true })
@@ -323,19 +440,24 @@ describe('thrown errors carry a stable code', () => {
     const path = await manifestPath()
     __setManifestLockTestOptions({ ttlMs: 400, retryMinMs: 5, retryMaxMs: 10 })
     await mkdir(`${path}.lock`, { mode: 0o700 })
-    await writeFile(join(`${path}.lock`, 'owner'), `${JSON.stringify({ tenant: 'squatter', pid: 1, claimed_at_ms: Date.now(), nonce: 'n'.repeat(22) })}\n`, { mode: 0o600 })
+    await writeFile(join(`${path}.lock`, 'owner'), `${JSON.stringify({ tenant: 'squatter', pid: 1, claimed_at_ms: Date.now() + 1_000, nonce: 'n'.repeat(22) })}\n`, { mode: 0o600 })
     const error = (await withManifestLock(path, 'probe', async () => {}).catch((e) => e)) as Error & { code?: string }
     expect(error.code).toBe('lock_busy')
     expect(MANIFEST_LOCK.errorCodes).toContain('lock_busy')
   })
 
-  test('an unparseable owner is busy, never evicted, and keeps that code', async () => {
+  test('the package entrypoint exports the lock error types', () => {
+    const classify = (error: ManifestLockError): ManifestLockErrorCode => error.code
+    expect(classify(Object.assign(new Error('busy'), { code: 'lock_busy' as const }))).toBe('lock_busy')
+  })
+
+  test('an unparseable owner is invalid, never evicted, and keeps that code', async () => {
     const path = await manifestPath()
     __setManifestLockTestOptions({ ttlMs: 400, retryMinMs: 5, retryMaxMs: 10 })
     await mkdir(`${path}.lock`, { mode: 0o700 })
     await writeFile(join(`${path}.lock`, 'owner'), 'not json at all\n', { mode: 0o600 })
     const error = (await withManifestLock(path, 'probe', async () => {}).catch((e) => e)) as Error & { code?: string }
-    expect(error.code).toBe('lock_busy')
+    expect(error.code).toBe('owner_invalid')
     // the squatter's lock must still be standing: unreadable owner is never evicted
     expect((await stat(`${path}.lock`)).isDirectory()).toBe(true)
     expect((await readFile(join(`${path}.lock`, 'owner'), 'utf8')).trim()).toBe('not json at all')

@@ -53,6 +53,13 @@ fn cli() -> Command {
     }
 }
 
+/// The POSIX permission bits of `path`.
+///
+/// UNIX ONLY, AND THE ASSERTIONS THAT USE IT ARE TOO. Windows has no mode bits, and a
+/// portable stub returning a fake 0o600 would be worse than no test: the assertion would
+/// pass on a platform where the property it checks does not exist, and a reader scanning
+/// for "is the handle file 0600 everywhere" would get a yes that means nothing.
+#[cfg(unix)]
 fn mode(path: &Path) -> u32 {
     use std::os::unix::fs::PermissionsExt;
     std::fs::metadata(path)
@@ -62,6 +69,25 @@ fn mode(path: &Path) -> u32 {
         & 0o777
 }
 
+/// Set POSIX permission bits where the platform has them, and do nothing where it does
+/// not.
+///
+/// This is FIXTURE SETUP rather than an assertion, which is why it degrades to a no-op
+/// instead of being cfg-gated away: the tests using it are checking parsing, custody and
+/// lifecycle behaviour that is identical on every platform, and they were unreachable on
+/// Windows only because the setup line would not compile.
+fn set_mode(path: &Path, mode: u32) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).expect("mode");
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, mode);
+    }
+}
+
 fn read_raw_handle_fixture(
     name: &str,
     raw: &str,
@@ -69,11 +95,7 @@ fn read_raw_handle_fixture(
     let root = tmp_root(name);
     let handles = root.join("opencode-handles.json");
     std::fs::write(&handles, raw).expect("handle fixture");
-    std::fs::set_permissions(
-        &handles,
-        std::os::unix::fs::PermissionsExt::from_mode(0o600),
-    )
-    .expect("mode");
+    set_mode(&handles, 0o600);
     let result = opencode_files::read_handle_file(&handles);
     let _ = std::fs::remove_dir_all(root);
     result
@@ -101,8 +123,7 @@ fn an_auth_file_with_a_mode_other_than_0600_is_refused() {
     let root = tmp_root("auth-mode");
     let auth = root.join("auth.json");
     std::fs::write(&auth, r#"{"deepseek":{"type":"api","key":"x"}}"#).expect("auth");
-    std::fs::set_permissions(&auth, std::os::unix::fs::PermissionsExt::from_mode(0o640))
-        .expect("mode");
+    set_mode(&auth, 0o640);
 
     let err = opencode_files::read_auth_entries(&auth).expect_err("insecure mode refuses");
     assert!(err.to_string().contains("0600"), "unexpected error: {err}");
@@ -118,11 +139,7 @@ fn an_unknown_handle_shape_is_refused() {
         r#"{"version":1,"providers":[{"provider":"deepseek","shape":"unknown","serve":"opencode-claustrum","accounts":[]}]}"#,
     )
     .expect("handle file");
-    std::fs::set_permissions(
-        &handles,
-        std::os::unix::fs::PermissionsExt::from_mode(0o600),
-    )
-    .expect("mode");
+    set_mode(&handles, 0o600);
 
     let err = opencode_files::read_handle_file(&handles).expect_err("unknown shape refuses");
     assert!(
@@ -239,8 +256,7 @@ fn custody_file_reads_are_capped_and_writes_require_a_trusted_parent_with_0600_a
     )
     .expect("handle fixture");
     for path in [&auth, &handles] {
-        std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o600))
-            .expect("fixture mode");
+        set_mode(path, 0o600);
     }
     assert!(opencode_files::read_auth_entries(&auth)
         .expect_err("auth cap")
@@ -254,8 +270,7 @@ fn custody_file_reads_are_capped_and_writes_require_a_trusted_parent_with_0600_a
     // The tempfile is unobservable after rename, so the source assertion pins the creation primitive itself.
     let source = include_str!("../src/bin/cli_support/opencode_files.rs");
     assert!(source.contains("OpenOptionsExt") && source.contains(".mode(0o600)"));
-    std::fs::set_permissions(&root, std::os::unix::fs::PermissionsExt::from_mode(0o777))
-        .expect("unsafe parent mode");
+    set_mode(&root, 0o777);
     let err = opencode_files::write_auth_entry(
         &root.join("unsafe-auth.json"),
         "deepseek",
@@ -302,8 +317,7 @@ fn an_unknown_opencode_auth_shape_is_refused() {
     let root = tmp_root("unknown-shape");
     let auth = root.join("auth.json");
     std::fs::write(&auth, r#"{"deepseek":{"type":"mystery","token":"x"}}"#).expect("auth");
-    std::fs::set_permissions(&auth, std::os::unix::fs::PermissionsExt::from_mode(0o600))
-        .expect("mode");
+    set_mode(&auth, 0o600);
 
     let err = opencode_files::read_auth_entries(&auth).expect_err("unknown type refuses");
     assert!(
@@ -325,14 +339,17 @@ fn an_auth_entry_write_preserves_unrelated_entries_and_mode() {
             .unwrap(),
     )
     .expect("auth");
-    std::fs::set_permissions(&auth, std::os::unix::fs::PermissionsExt::from_mode(0o600))
-        .expect("mode");
+    set_mode(&auth, 0o600);
 
     opencode_files::write_auth_entry(&auth, "deepseek", json!({"type":"api","key":"new"}))
         .expect("atomic write");
     let entries = opencode_files::read_auth_entries(&auth).expect("read auth");
     assert_eq!(entries.get("other"), Some(&unrelated));
     assert_eq!(entries["deepseek"], json!({"type":"api","key":"new"}));
+    // The atomic replace must not widen the mode. Unix-only because the property is:
+    // Windows has no mode bits, and asserting a fabricated one there would report a pass
+    // for a check that never ran.
+    #[cfg(unix)]
     assert_eq!(mode(&auth), 0o600);
     let _ = std::fs::remove_dir_all(root);
 }
@@ -377,8 +394,14 @@ fn a_handle_file_round_trip_preserves_order_and_0600() {
         ],
     };
     opencode_files::write_handle_file(&handles, &file).expect("write handles");
-    assert_eq!(mode(handles.parent().unwrap()), 0o700);
-    assert_eq!(mode(&handles), 0o600);
+    // Handles are bearer tokens, so the file and the directory it is created in must both
+    // be private at creation rather than tightened afterwards. Unix-only for the same
+    // reason as above; the ROUND-TRIP assertions below this run everywhere.
+    #[cfg(unix)]
+    {
+        assert_eq!(mode(handles.parent().unwrap()), 0o700);
+        assert_eq!(mode(&handles), 0o600);
+    }
     assert_eq!(
         opencode_files::read_handle_file(&handles).expect("read handles"),
         file
@@ -389,11 +412,7 @@ fn a_handle_file_round_trip_preserves_order_and_0600() {
         r#"{"version":1,"providers":[{"provider":"deepseek","shape":"api","accounts":[]}]}"#,
     )
     .expect("bad handles");
-    std::fs::set_permissions(
-        &handles,
-        std::os::unix::fs::PermissionsExt::from_mode(0o600),
-    )
-    .expect("mode");
+    set_mode(&handles, 0o600);
     let err = opencode_files::read_handle_file(&handles).expect_err("missing serve rejects");
     assert!(err.to_string().contains("serve"), "unexpected error: {err}");
     let _ = std::fs::remove_dir_all(root);
@@ -586,8 +605,7 @@ impl MigrationRig {
         let handles = root.join("handles.json");
         std::fs::create_dir_all(&vault).expect("vault directory");
         std::fs::write(&auth, serde_json::to_vec(&entries).expect("auth json")).expect("auth file");
-        std::fs::set_permissions(&auth, std::os::unix::fs::PermissionsExt::from_mode(0o600))
-            .expect("auth mode");
+        set_mode(&auth, 0o600);
         let rig = Self {
             root,
             vault,
@@ -695,11 +713,7 @@ impl MigrationRig {
     fn set_auth(&self, entries: Value) {
         std::fs::write(&self.auth, serde_json::to_vec(&entries).expect("auth json"))
             .expect("rewrite auth");
-        std::fs::set_permissions(
-            &self.auth,
-            std::os::unix::fs::PermissionsExt::from_mode(0o600),
-        )
-        .expect("auth mode");
+        set_mode(&self.auth, 0o600);
     }
 }
 
@@ -1181,8 +1195,7 @@ fn usable_warns_when_an_existing_tombstone_has_an_unsafe_provider_shape() {
         .expect("auth json"),
     )
     .expect("auth file");
-    std::fs::set_permissions(&auth, std::os::unix::fs::PermissionsExt::from_mode(0o600))
-        .expect("auth mode");
+    set_mode(&auth, 0o600);
     let out = cli()
         .arg("usable")
         .arg("--data-dir")

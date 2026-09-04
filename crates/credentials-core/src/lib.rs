@@ -39,6 +39,7 @@ pub mod oauth_login;
 pub mod record;
 pub mod refresh_adapters;
 pub mod resolver;
+pub mod secret;
 pub mod signing;
 pub mod store;
 pub mod usable;

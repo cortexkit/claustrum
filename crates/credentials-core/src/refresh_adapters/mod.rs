@@ -198,6 +198,28 @@ pub struct HttpResponse {
     /// HTTP status code.
     pub status: u16,
     /// Response body bytes.
+    ///
+    /// *** THIS IS AN UNSCRUBBED COPY OF A FRESH TOKEN, AND IT IS THE FRONTIER OF WHAT
+    /// `Secret` CAN REACH. *** A refresh response body IS the new access token and
+    /// often a new refresh token, in the clear, in a `Vec<u8>` nothing zeroizes.
+    ///
+    /// It is deliberately NOT wrapped, because wrapping it would be theatre while the
+    /// layer above stays bare. The chain on a single refresh is:
+    ///
+    ///   reqwest's internal buffer   NOT under our control at all
+    ///   `.bytes().to_vec()`         a second copy, made in http.rs
+    ///   this field                  a third
+    ///   the adapter's response struct   a fourth, per token field
+    ///
+    /// Wrapping the last two while the first two stay bare would let a reader conclude
+    /// the refresh path is scrubbed when the earliest and longest-lived copies are
+    /// untouched. Closing this properly means owning the HTTP buffer, which means not
+    /// using reqwest — a real change with its own tradeoffs, not a wrapper.
+    ///
+    /// WHAT IS SCRUBBED TODAY, so the boundary is legible: the credential at rest, and
+    /// every long-lived copy the vault itself owns (`OAuthCredential`, `VaultRecord`,
+    /// `RefreshedTokens`). What is not: the transient wire buffers above, which live
+    /// from the HTTP read until the enclosing scope ends.
     pub body: Vec<u8>,
 }
 

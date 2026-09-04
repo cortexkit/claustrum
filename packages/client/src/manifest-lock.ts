@@ -4,7 +4,7 @@ import { randomBytes, randomInt } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { HANDLE_FILE_CONTRACT, parseHandleFile, type OpenCodeHandleFileV1 } from './handles.js'
 
-export const MANIFEST_LOCK = { ttlMs: 30_000, renewEveryMs: 10_000, ownerKeys: ['tenant', 'pid', 'claimed_at_ms', 'nonce'] as const, staleTargetRe: /^\.lock\.stale-\d+-[A-Za-z0-9_-]+$/, errorCodes: ['lock_busy', 'owner_invalid', 'renewal_failed'] as const }
+export const MANIFEST_LOCK = { ttlMs: 30_000, renewEveryMs: 10_000, ownerKeys: ['tenant', 'pid', 'claimed_at_ms', 'nonce'] as const, staleTargetRe: /^\.lock\.stale-\d+-(?!\.{1,2}$)(?!.*[. ]$)[^/\\\x00-\x1f:*?"<>|]{1,128}$/, errorCodes: ['lock_busy', 'owner_invalid', 'renewal_failed'] as const }
 
 /** Thrown by the lock. Branch on `code`; the message is diagnostic and may be reworded. */
 export type ManifestLockErrorCode = (typeof MANIFEST_LOCK.errorCodes)[number]
@@ -25,10 +25,14 @@ const sleep = async (ms: number) => new Promise((resolve) => setTimeout(resolve,
 const lockError = (code: ManifestLockErrorCode, message: string): ManifestLockError => Object.assign(new Error(message), { code })
 
 function parseOwner(source: string): Owner {
-  const value = JSON.parse(source) as unknown
+  let value: unknown
+  try { value = JSON.parse(source) as unknown } catch { throw lockError('owner_invalid', 'manifest lock owner invalid') }
   if (!value || typeof value !== 'object') throw lockError('owner_invalid', 'manifest lock owner invalid')
   const owner = value as Record<string, unknown>
-  if (Object.keys(owner).sort().join('\0') !== [...MANIFEST_LOCK.ownerKeys].sort().join('\0') || typeof owner.tenant !== 'string' || typeof owner.pid !== 'number' || !Number.isInteger(owner.pid) || typeof owner.claimed_at_ms !== 'number' || !Number.isFinite(owner.claimed_at_ms) || typeof owner.nonce !== 'string') throw lockError('owner_invalid', 'manifest lock owner invalid')
+  // Widen the nonce alphabet only after every tenant has this path-safe reader; an older
+  // allowlist reader can otherwise wedge forever on the first owner using the new alphabet.
+  const staleTarget = `.lock.stale-${owner.claimed_at_ms}-${owner.nonce}`
+  if (MANIFEST_LOCK.ownerKeys.some((key) => !Object.hasOwn(owner, key)) || typeof owner.claimed_at_ms !== 'number' || !Number.isInteger(owner.claimed_at_ms) || owner.claimed_at_ms < 0 || typeof owner.nonce !== 'string' || !MANIFEST_LOCK.staleTargetRe.test(staleTarget)) throw lockError('owner_invalid', 'manifest lock owner invalid')
   return owner as Owner
 }
 const readOwner = async (path: string) => parseOwner(await readFile(path, 'utf8'))
@@ -52,9 +56,9 @@ async function withLockCommit<T>(path: string, tenant: string, fn: (commit: () =
     try { await mkdir(lock, { mode: 0o700 }); await writeOwner(lock, { tenant, pid: process.pid, claimed_at_ms: Date.now(), nonce }); await testOptions?.afterClaim?.(); break } catch (error) {
       if (code(error) !== 'EEXIST') { if (code(error) !== 'ENOENT') await rm(lock, { recursive: true, force: true }).catch(() => {}); throw error }
     }
-    let observed: Owner | undefined
-    try { observed = await readOwner(ownerPath) } catch (error) { if (code(error) !== 'ENOENT' && Date.now() >= deadline) throw lockError('lock_busy', 'manifest lock busy') }
-    if (observed && started - observed.claimed_at_ms >= ttl) {
+    let observed: Owner | undefined, ownerReadError: unknown
+    try { observed = await readOwner(ownerPath) } catch (error) { ownerReadError = error; if (code(error) !== 'ENOENT' && Date.now() >= deadline) throw code(error) === 'owner_invalid' ? error : lockError('lock_busy', 'manifest lock busy') }
+    if (observed && Date.now() - observed.claimed_at_ms >= ttl) {
       await testOptions?.beforeEvict?.()
       const stale = `${lock}.stale-${observed.claimed_at_ms}-${observed.nonce}`
       let renameError: unknown
@@ -66,7 +70,7 @@ async function withLockCommit<T>(path: string, tenant: string, fn: (commit: () =
         await rename(stale, lock).catch(() => {})
       } else if (!['ENOENT', 'EEXIST', 'ENOTEMPTY'].includes(code(renameError) ?? '')) throw renameError
     }
-    if (Date.now() >= deadline) throw lockError('lock_busy', 'manifest lock busy')
+    if (Date.now() >= deadline) throw code(ownerReadError) === 'owner_invalid' ? ownerReadError : lockError('lock_busy', 'manifest lock busy')
     await sleep(Math.min(randomInt(retryMin, retryMax + 1), Math.max(1, deadline - Date.now())))
   }
   let renewal = Promise.resolve(), failed = false, stopped = false
@@ -93,7 +97,7 @@ async function readManifest(path: string): Promise<ManifestHandleFile> {
   return parseHandleFile(JSON.parse(source.toString('utf8')))
 }
 const foreign = (file: ManifestHandleFile, tenant: string) => file.providers.filter((provider) => provider.serve !== tenant).map((provider) => JSON.stringify(provider))
-async function prepareParent(path: string): Promise<void> { const parent = dirname(path); await mkdir(parent, { recursive: true, mode: 0o700 }); const metadata = await stat(parent); if (!metadata.isDirectory()) throw new Error('handle file parent must be a directory'); if ((metadata.mode & 0o002) !== 0 && (metadata.mode & 0o1000) === 0) throw new Error('handle file parent is world-writable without sticky bit'); await chmod(parent, 0o700) }
+async function prepareParent(path: string): Promise<void> { const parent = dirname(path); await mkdir(parent, { recursive: true, mode: 0o700 }); const metadata = await stat(parent); if (!metadata.isDirectory()) throw new Error('handle file parent must be a directory'); if ((metadata.mode & 0o002) !== 0 && (metadata.mode & 0o1000) === 0) throw new Error('handle file parent is world-writable without sticky bit'); if ((metadata.mode & 0o022) !== 0) throw new Error('handle file parent must not be group- or other-writable') }
 async function writeAtomic(path: string, file: ManifestHandleFile, commit: () => Promise<void>): Promise<void> {
   const bytes = Buffer.from(JSON.stringify(file)); if (bytes.byteLength > HANDLE_FILE_CONTRACT.maxBytes) throw new Error('handle file exceeds 256 KiB')
   const temporary = join(dirname(path), `.${path.split('/').pop()}.${process.pid}.${token()}.tmp`); let handle: Awaited<ReturnType<typeof open>> | undefined

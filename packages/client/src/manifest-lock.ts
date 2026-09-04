@@ -4,7 +4,11 @@ import { randomBytes, randomInt } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { HANDLE_FILE_CONTRACT, parseHandleFile, type OpenCodeHandleFileV1 } from './handles.js'
 
-export const MANIFEST_LOCK = { ttlMs: 30_000, renewEveryMs: 10_000, ownerKeys: ['tenant', 'pid', 'claimed_at_ms', 'nonce'] as const, staleTargetRe: /^\.lock\.stale-\d+-[A-Za-z0-9_-]+$/ }
+export const MANIFEST_LOCK = { ttlMs: 30_000, renewEveryMs: 10_000, ownerKeys: ['tenant', 'pid', 'claimed_at_ms', 'nonce'] as const, staleTargetRe: /^\.lock\.stale-\d+-[A-Za-z0-9_-]+$/, errorCodes: ['lock_busy', 'owner_invalid', 'renewal_failed'] as const }
+
+/** Thrown by the lock. Branch on `code`; the message is diagnostic and may be reworded. */
+export type ManifestLockErrorCode = (typeof MANIFEST_LOCK.errorCodes)[number]
+export type ManifestLockError = Error & { code: ManifestLockErrorCode }
 export type ManifestHandleAccount = OpenCodeHandleFileV1['providers'][number]['accounts'][number]
 export type ManifestHandleProvider = OpenCodeHandleFileV1['providers'][number]
 export type ManifestHandleFile = OpenCodeHandleFileV1
@@ -15,12 +19,16 @@ export function __setManifestLockTestOptions(options?: TestOptions): void { test
 const token = () => randomBytes(16).toString('base64url')
 const code = (error: unknown) => (error as NodeJS.ErrnoException | undefined)?.code
 const sleep = async (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+// A tenant classifying a failure must not string-match our prose: a copy-edit would
+// silently reclassify a retryable busy-lock as an unknown error, with nothing failing
+// loudly. The code is the contract; the message is free to change.
+const lockError = (code: ManifestLockErrorCode, message: string): ManifestLockError => Object.assign(new Error(message), { code })
 
 function parseOwner(source: string): Owner {
   const value = JSON.parse(source) as unknown
-  if (!value || typeof value !== 'object') throw new Error('manifest lock owner invalid')
+  if (!value || typeof value !== 'object') throw lockError('owner_invalid', 'manifest lock owner invalid')
   const owner = value as Record<string, unknown>
-  if (Object.keys(owner).sort().join('\0') !== [...MANIFEST_LOCK.ownerKeys].sort().join('\0') || typeof owner.tenant !== 'string' || typeof owner.pid !== 'number' || !Number.isInteger(owner.pid) || typeof owner.claimed_at_ms !== 'number' || !Number.isFinite(owner.claimed_at_ms) || typeof owner.nonce !== 'string') throw new Error('manifest lock owner invalid')
+  if (Object.keys(owner).sort().join('\0') !== [...MANIFEST_LOCK.ownerKeys].sort().join('\0') || typeof owner.tenant !== 'string' || typeof owner.pid !== 'number' || !Number.isInteger(owner.pid) || typeof owner.claimed_at_ms !== 'number' || !Number.isFinite(owner.claimed_at_ms) || typeof owner.nonce !== 'string') throw lockError('owner_invalid', 'manifest lock owner invalid')
   return owner as Owner
 }
 const readOwner = async (path: string) => parseOwner(await readFile(path, 'utf8'))
@@ -45,7 +53,7 @@ async function withLockCommit<T>(path: string, tenant: string, fn: (commit: () =
       if (code(error) !== 'EEXIST') { if (code(error) !== 'ENOENT') await rm(lock, { recursive: true, force: true }).catch(() => {}); throw error }
     }
     let observed: Owner | undefined
-    try { observed = await readOwner(ownerPath) } catch (error) { if (code(error) !== 'ENOENT' && Date.now() >= deadline) throw new Error('manifest lock busy') }
+    try { observed = await readOwner(ownerPath) } catch (error) { if (code(error) !== 'ENOENT' && Date.now() >= deadline) throw lockError('lock_busy', 'manifest lock busy') }
     if (observed && started - observed.claimed_at_ms >= ttl) {
       await testOptions?.beforeEvict?.()
       const stale = `${lock}.stale-${observed.claimed_at_ms}-${observed.nonce}`
@@ -58,14 +66,14 @@ async function withLockCommit<T>(path: string, tenant: string, fn: (commit: () =
         await rename(stale, lock).catch(() => {})
       } else if (!['ENOENT', 'EEXIST', 'ENOTEMPTY'].includes(code(renameError) ?? '')) throw renameError
     }
-    if (Date.now() >= deadline) throw new Error('manifest lock busy')
+    if (Date.now() >= deadline) throw lockError('lock_busy', 'manifest lock busy')
     await sleep(Math.min(randomInt(retryMin, retryMax + 1), Math.max(1, deadline - Date.now())))
   }
   let renewal = Promise.resolve(), failed = false, stopped = false
   const timer = setInterval(() => { renewal = renewal.then(async () => { if (failed) return; try { const current = await readOwner(ownerPath); if (current.nonce !== nonce || Date.now() - current.claimed_at_ms >= ttl) throw new Error('lease lost'); await writeOwner(lock, { ...current, claimed_at_ms: Date.now() }) } catch { failed = true } }) }, renewEvery)
   timer.unref?.()
-  const commit = async () => { if (!stopped) { stopped = true; clearInterval(timer); await renewal }; const current = await readOwner(ownerPath).catch(() => undefined); if (failed || !current || current.nonce !== nonce || Date.now() - current.claimed_at_ms >= ttl) throw new Error('manifest lock renewal failed; write aborted') }
-  try { const result = await fn(commit); if (failed) throw new Error('manifest lock renewal failed; write aborted'); return result } finally {
+  const commit = async () => { if (!stopped) { stopped = true; clearInterval(timer); await renewal }; const current = await readOwner(ownerPath).catch(() => undefined); if (failed || !current || current.nonce !== nonce || Date.now() - current.claimed_at_ms >= ttl) throw lockError('renewal_failed', 'manifest lock renewal failed; write aborted') }
+  try { const result = await fn(commit); if (failed) throw lockError('renewal_failed', 'manifest lock renewal failed; write aborted'); return result } finally {
     if (!stopped) clearInterval(timer); await renewal
     const current = await readOwner(ownerPath).catch(() => undefined)
     if (!current || current.nonce !== nonce || Date.now() - current.claimed_at_ms >= ttl) console.warn('manifest lock lease lost, not releasing', { path, tenant })

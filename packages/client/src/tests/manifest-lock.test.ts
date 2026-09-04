@@ -312,3 +312,63 @@ describe('manifest writer lock', () => {
     }
   })
 })
+
+describe('thrown errors carry a stable code', () => {
+  // A tenant classifying "retry later" vs "the artefact is wrong" vs "the write was
+  // abandoned" had only the message text to branch on, so any copy-edit here silently
+  // reclassified a busy lock as an unknown error. openai-auth asked for this before
+  // writing its conformance suite, which is the cheap moment to add it.
+  test('a busy lock throws code lock_busy', async () => {
+    const path = await manifestPath()
+    __setManifestLockTestOptions({ ttlMs: 400, retryMinMs: 5, retryMaxMs: 10 })
+    await mkdir(`${path}.lock`, { mode: 0o700 })
+    await writeFile(join(`${path}.lock`, 'owner'), `${JSON.stringify({ tenant: 'squatter', pid: 1, claimed_at_ms: Date.now(), nonce: 'n'.repeat(22) })}\n`, { mode: 0o600 })
+    const error = (await withManifestLock(path, 'probe', async () => {}).catch((e) => e)) as Error & { code?: string }
+    expect(error.code).toBe('lock_busy')
+    expect(MANIFEST_LOCK.errorCodes).toContain('lock_busy')
+  })
+
+  test('an unparseable owner is busy, never evicted, and keeps that code', async () => {
+    const path = await manifestPath()
+    __setManifestLockTestOptions({ ttlMs: 400, retryMinMs: 5, retryMaxMs: 10 })
+    await mkdir(`${path}.lock`, { mode: 0o700 })
+    await writeFile(join(`${path}.lock`, 'owner'), 'not json at all\n', { mode: 0o600 })
+    const error = (await withManifestLock(path, 'probe', async () => {}).catch((e) => e)) as Error & { code?: string }
+    expect(error.code).toBe('lock_busy')
+    // the squatter's lock must still be standing: unreadable owner is never evicted
+    expect((await stat(`${path}.lock`)).isDirectory()).toBe(true)
+    expect((await readFile(join(`${path}.lock`, 'owner'), 'utf8')).trim()).toBe('not json at all')
+  })
+
+  test('a throwing callback releases the lock and re-raises the original error unwrapped', async () => {
+    const path = await manifestPath()
+    class EnrollRefusal extends Error {
+      constructor() {
+        super('identity mismatch')
+        this.name = 'EnrollRefusal'
+      }
+    }
+    const error = await withManifestLock(path, 'probe', async () => {
+      throw new EnrollRefusal()
+    }).catch((e) => e)
+    expect(error).toBeInstanceOf(EnrollRefusal)
+    expect((error as Error).message).toBe('identity mismatch')
+    await expect(stat(`${path}.lock`)).rejects.toThrow()
+    // the consumer-visible consequence: the next claimant is not stalled for a TTL
+    const started = Date.now()
+    await withManifestLock(path, 'probe', async () => {})
+    expect(Date.now() - started).toBeLessThan(1_000)
+  })
+
+  test('distinct manifest paths do not contend', async () => {
+    const first = await manifestPath()
+    const second = await manifestPath()
+    let bothInside = false
+    await withManifestLock(first, 'tenant-a', async () => {
+      await withManifestLock(second, 'tenant-b', async () => {
+        bothInside = true
+      })
+    })
+    expect(bothInside).toBe(true)
+  })
+})

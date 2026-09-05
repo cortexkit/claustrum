@@ -693,8 +693,47 @@ impl EncryptedStore {
         }
     }
 
+    /// Apply the schema chain, and REFUSE A STORE THAT IS AHEAD OF THIS BINARY.
+    ///
+    /// The migrator deliberately does not refuse on its own: a store newer than the
+    /// running binary is exactly what a deliberate rollback produces, and refusing at
+    /// that layer would brick every rollback in the fleet. It reports, and each module
+    /// decides. This is the vault deciding.
+    ///
+    /// *** THIS CHAIN IS NOT ADDITIVE-ONLY, WHICH IS THE WHOLE ARGUMENT. *** Migration 6
+    /// rebuilds `read_grants` -- create, copy, DROP, rename -- to add a NOT NULL
+    /// `operation` column inside a compound primary key. A pre-6 binary reading that
+    /// store looks fine and INSERTS a grant without `operation`, which fails on the NOT
+    /// NULL. So an old binary on a new store is not a reduced-feature vault; it is one
+    /// that works until the first write of the wrong shape, at a moment nobody connects
+    /// to the rollback.
+    ///
+    /// A refused start is loud, immediate, and attributable: the supervisor reports it,
+    /// the operator sees both versions, and no consumer is served from a schema this
+    /// binary cannot reason about. The remedy is to roll forward, or to restore the
+    /// store alongside the binary -- backups capture it, so that is a real procedure
+    /// rather than a shrug.
+    ///
+    /// NO OVERRIDE FLAG, deliberately. An override here would be reached for during an
+    /// incident, which is precisely when serving credentials from an unknown schema is
+    /// least affordable.
+    ///
+    /// Read-only paths are unaffected and that matters more than it looks: `events`,
+    /// `audit`, `verify-audit`, `usable`, and the offline `list`/`status`/`grants` open
+    /// with `mode=ro` and never migrate, so an operator can still inspect a vault that
+    /// refuses to serve. Diagnosis stays available exactly when it is needed.
     pub fn migrate(store: &SqliteStore) -> Result<(), StoreError> {
-        store.migrate(SCHEMA_NAMESPACE, MIGRATIONS)?;
+        let outcome = store.migrate(SCHEMA_NAMESPACE, MIGRATIONS)?;
+        if outcome.store_ahead() {
+            return Err(StoreError::Backend(format!(
+                "store schema {} is newer than this binary's {} -- refusing to serve. \
+                 This binary predates migrations already applied to this vault; one of \
+                 them rebuilt a table, so writes would fail later rather than now. \
+                 Roll forward to a binary at or above {}, or restore the store from the \
+                 backup that matches this binary.",
+                outcome.recorded, outcome.chain_max, outcome.recorded,
+            )));
+        }
         store
             .with_conn(|c| c.pragma_update(None, "synchronous", "FULL"))
             .map_err(|e| StoreError::Backend(e.to_string()))
@@ -3667,6 +3706,56 @@ fn row_to_intent(row: &rusqlite::Row<'_>) -> rusqlite::Result<RefreshIntent> {
 
 #[cfg(test)]
 mod tests {
+    /// A store carrying a migration this binary does not have must refuse to open.
+    ///
+    /// Simulates the rollback shape directly: apply the real chain, then record a higher
+    /// version in the migrator's own ledger -- what a newer binary would have left
+    /// behind. `migrate` must then fail and must NAME BOTH VERSIONS, because the
+    /// operator's next decision (roll forward, or restore the matching store) needs the
+    /// target rather than only the complaint.
+    #[test]
+    fn a_store_ahead_of_this_binary_refuses_to_migrate() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "ck-cred-ahead-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let db = root.join("store.db");
+        let descriptor = StorageDescriptor {
+            module_id: "cortexkit-credentials".into(),
+            storage_namespace: "vault".into(),
+            isolation: Isolation::Module,
+            backend: StorageBackend::Sqlite {
+                path: db.to_string_lossy().into_owned(),
+            },
+        };
+        let store = open_sqlite(&descriptor).expect("open");
+        EncryptedStore::migrate(&store).expect("first migrate applies the real chain");
+
+        let ahead = newest_migration_version() + 1;
+        store
+            .with_conn(|c| {
+                c.execute(
+                    "INSERT INTO cortexkit_schema_version (namespace, version, applied_at_unix) \
+                     VALUES (?1, ?2, 0)",
+                    rusqlite::params![SCHEMA_NAMESPACE, ahead],
+                )
+            })
+            .expect("record a migration this binary does not have");
+
+        let err =
+            EncryptedStore::migrate(&store).expect_err("a store ahead of this binary must refuse");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains(&ahead.to_string())
+                && rendered.contains(&newest_migration_version().to_string()),
+            "the refusal must name BOTH versions so the operator knows the target: {rendered}"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     use super::*;
     use crate::key::MASTER_KEY_LEN;
     use crate::oauth::OAuthCredential;

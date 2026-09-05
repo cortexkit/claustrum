@@ -174,4 +174,20 @@ describe("custody logger", () => {
     expect(contents).toContain('"errorClass":"invalid_shape"');
     expect(contents).toContain('"errorCode":"invalid_shape"');
   });
+
+  test("file sink rejects objects routed into allowlisted fields", () => {
+    const root = join(tmpdir(), `claustrum-log-${crypto.randomUUID()}`);
+    const path = join(root, "custody.jsonl");
+    const handle = `ckh_${"A".repeat(43)}`;
+    createLogger(createFileLogSink({ path })).error({
+      provider: "openai",
+      errorCode: { message: `Unexpected identifier "${handle}"` },
+      errorClass: new Error(handle),
+    } as any);
+
+    const contents = readFileSync(path, "utf8");
+    expect(contents).not.toContain(handle);
+    expect(contents).not.toContain("message");
+    expect(contents).toContain("invalid_shape");
+  });
 });

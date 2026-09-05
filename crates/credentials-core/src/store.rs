@@ -2989,6 +2989,122 @@ pub fn mint_handle() -> Result<MintedHandle, getrandom::Error> {
     Ok(MintedHandle { raw: value, hash })
 }
 
+/// List credential metadata from a store file WITHOUT a lease or a master key.
+pub fn list_meta_read_only(
+    store_path: &std::path::Path,
+) -> Result<Vec<(String, RecordMeta)>, StoreOpError> {
+    let map = |e: rusqlite::Error| StoreOpError::from(StoreError::Backend(e.to_string()));
+    let conn = rusqlite::Connection::open_with_flags(
+        format!("file:{}?mode=ro", store_path.display()),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+    )
+    .map_err(map)?;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT credential_id, record_version, key_id, state, stale_pending FROM credentials \
+             ORDER BY credential_id",
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::SqliteFailure(_, Some(ref m)) if m.contains("no such table") => {
+                StoreOpError::NotFound
+            }
+            other => map(other),
+        })?;
+    let rows = stmt
+        .query_map([], |row| {
+            let id: String = row.get(0)?;
+            let version: i64 = row.get(1)?;
+            let key_id_hex: String = row.get(2)?;
+            let state: String = row.get(3)?;
+            let stale_pending: i64 = row.get(4)?;
+            Ok((
+                id,
+                RecordMeta {
+                    record_version: version as u64,
+                    key_id_hex,
+                    state: RecordState::from_str(&state),
+                    stale_pending: stale_pending != 0,
+                },
+            ))
+        })
+        .map_err(map)?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(map)
+}
+
+/// List operation grants from a store file WITHOUT a lease or a master key.
+pub fn list_read_grants_read_only(
+    store_path: &std::path::Path,
+) -> Result<Vec<ReadGrant>, StoreOpError> {
+    let map = |e: rusqlite::Error| StoreOpError::from(StoreError::Backend(e.to_string()));
+    let conn = rusqlite::Connection::open_with_flags(
+        format!("file:{}?mode=ro", store_path.display()),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+    )
+    .map_err(map)?;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT principal_kind, principal_id, credential_prefix, operation, created_at_ms \
+             FROM read_grants \
+             ORDER BY principal_kind, principal_id, credential_prefix, operation",
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::SqliteFailure(_, Some(ref m)) if m.contains("no such table") => {
+                StoreOpError::NotFound
+            }
+            other => map(other),
+        })?;
+    let rows = stmt
+        .query_map([], |row| {
+            let operation = row
+                .get::<_, String>(3)?
+                .parse()
+                .map_err(|message: String| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        3,
+                        rusqlite::types::Type::Text,
+                        Box::new(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            message,
+                        )),
+                    )
+                })?;
+            Ok(ReadGrant {
+                principal_kind: row.get(0)?,
+                principal_id: row.get(1)?,
+                credential_prefix: row.get(2)?,
+                operation,
+                created_at_ms: row.get(4)?,
+            })
+        })
+        .map_err(map)?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(map)
+}
+
+/// Count open refresh intents from a store file WITHOUT a lease or a master key.
+pub fn count_refresh_intents_read_only(
+    store_path: &std::path::Path,
+) -> Result<usize, StoreOpError> {
+    let map = |e: rusqlite::Error| StoreOpError::from(StoreError::Backend(e.to_string()));
+    let conn = rusqlite::Connection::open_with_flags(
+        format!("file:{}?mode=ro", store_path.display()),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+    )
+    .map_err(map)?;
+
+    conn.query_row("SELECT COUNT(*) FROM refresh_intent", [], |row| {
+        row.get::<_, i64>(0)
+    })
+    .map(|count| count as usize)
+    .map_err(|e| match e {
+        rusqlite::Error::SqliteFailure(_, Some(ref m)) if m.contains("no such table") => {
+            StoreOpError::NotFound
+        }
+        other => map(other),
+    })
+}
+
 /// Append an audit entry within an open transaction: read the current tip mac,
 /// compute this entry's mac over it, insert it. Used both standalone and folded
 /// into a mutation's own transaction so the audit entry and the mutation commit

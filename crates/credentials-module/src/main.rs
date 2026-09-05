@@ -29,7 +29,7 @@ mod test_support;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use cortexkit_store::{open_sqlite, StorageDescriptor};
+use cortexkit_store::{open_sqlite, StorageDescriptor, StoreError};
 use credentials_core::audit::AuthEventKind;
 use credentials_core::engine::RefreshEngine;
 use credentials_core::http::ReqwestTransport;
@@ -436,8 +436,21 @@ async fn build_surface(
     // fingerprint and resolve the master key crash-safely: pick whichever key-store
     // slot matches the database (so a rotation that crashed mid-handover still
     // opens). A locked keychain / no matching key is a clean fail-closed exit.
-    let store =
-        open_sqlite(&descriptor).map_err(|e| ModuleError::Message(format!("open store: {e}")))?;
+    // An immediate lease collision makes the supervisor restart the module and returns
+    // `Transient` to every consumer whose fetch is in that window. Waiting up to roughly
+    // half a second is cheaper than that observable outage, while a persistent writer
+    // still receives the same failure after the bounded retry.
+    let mut attempt = 0;
+    let store = loop {
+        attempt += 1;
+        match open_sqlite(&descriptor) {
+            Ok(store) => break store,
+            Err(StoreError::Lease(_)) if attempt < 5 => {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            Err(error) => return Err(ModuleError::Message(format!("open store: {error}"))),
+        }
+    };
     EncryptedStore::migrate(&store).map_err(|e| ModuleError::Message(format!("migrate: {e}")))?;
     let key = match EncryptedStore::read_db_key_id(&store)
         .map_err(|e| ModuleError::Message(format!("read db key id: {e}")))?

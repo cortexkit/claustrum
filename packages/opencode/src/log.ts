@@ -1,6 +1,8 @@
 import { appendFileSync, chmodSync, mkdirSync, renameSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 
+import { identifierIsValid } from "./handles";
+
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
 export type CustodyLogEntry = {
@@ -33,11 +35,11 @@ export const FILE_FIELDS: Array<keyof CustodyLogEntry> = [
   "level", "provider", "label", "credentialId", "recordVersion", "state", "httpStatus",
   "cooldownUntil", "errorClass", "errorCode", "ts", "pid",
 ];
-const IDENTIFIER = /^[a-z0-9][a-z0-9._-]{0,63}$/;
-const FORBIDDEN_IDENTIFIERS = new Set(["__proto__", "constructor", "prototype"]);
 const CREDENTIAL_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 const ERROR_CLASS = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
 const ERROR_CODE = /^[A-Za-z0-9_.-]{1,64}$/;
+const LEVELS = new Set(["debug", "info", "warn", "error"]);
+const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T[\d:.]+Z$/;
 const STATES = new Set([
   "available", "transient", "cooldown", "other_owner", "orphan", "split", "unmanaged",
   "refusing", "serving", "served", "gone",
@@ -68,20 +70,23 @@ function fileEntry(entry: CustodyLogEntry): Record<string, unknown> {
     if (withMetadata[field] !== undefined) {
       const value = withMetadata[field];
       if (typeof value !== "string") {
-        safe[field] = value;
+        safe[field] = (typeof value === "number" && Number.isFinite(value)) || typeof value === "boolean"
+          ? value
+          : "invalid_shape";
         continue;
       }
-      const valid = field === "provider" || field === "label"
-        ? IDENTIFIER.test(value) && !FORBIDDEN_IDENTIFIERS.has(value)
-        : field === "credentialId"
-          ? CREDENTIAL_ID.test(value)
-          : field === "state"
-            ? STATES.has(value)
-            : field === "errorClass"
-              ? ERROR_CLASS.test(value)
-              : field === "errorCode"
-                ? ERROR_CODE.test(value)
-                : true;
+      let valid: boolean;
+      switch (field) {
+        case "level": valid = LEVELS.has(value); break;
+        case "provider":
+        case "label": valid = identifierIsValid(value); break;
+        case "credentialId": valid = CREDENTIAL_ID.test(value); break;
+        case "state": valid = STATES.has(value); break;
+        case "errorClass": valid = ERROR_CLASS.test(value); break;
+        case "errorCode": valid = ERROR_CODE.test(value); break;
+        case "ts": valid = ISO_TIMESTAMP.test(value); break;
+        default: valid = false;
+      }
       safe[field] = valid ? value : "invalid_shape";
     }
   }

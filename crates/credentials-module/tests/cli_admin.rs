@@ -2022,6 +2022,89 @@ fn admin_write_refused_while_lease_held() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// Inventory reads must not contend with the daemon's single-writer lease.
+///
+/// Holding the real store lease reproduces the boot collision: these verbs have no live
+/// module to answer, so each must fall back to plaintext read-only metadata rather than
+/// trying to become a second writer. Comparing with the unlocked output also pins that
+/// changing the transport does not change the report.
+#[test]
+fn read_only_inventory_verbs_succeed_while_exclusive_lease_is_held() {
+    let vault = GrantCliVault::new("read-verbs-leased");
+    vault.bootstrap();
+
+    let put = vault.run(&["put", "--id", "apikey:lease-reader", "--payload", "secret"]);
+    assert!(
+        put.status.success(),
+        "put failed: {}",
+        String::from_utf8_lossy(&put.stderr)
+    );
+    let grant = vault.run(&[
+        "grant",
+        "--principal",
+        "agent",
+        "--prefix",
+        "apikey:",
+        "--operation",
+        "read",
+    ]);
+    assert!(
+        grant.status.success(),
+        "grant failed: {}",
+        String::from_utf8_lossy(&grant.stderr)
+    );
+
+    let unlocked: Vec<(&str, std::process::Output)> = ["list", "grants", "status"]
+        .into_iter()
+        .map(|verb| (verb, vault.run(&[verb])))
+        .collect();
+    assert!(
+        String::from_utf8_lossy(&unlocked[0].1.stdout).contains("apikey:lease-reader"),
+        "list must render the seeded credential"
+    );
+    assert!(
+        String::from_utf8_lossy(&unlocked[1].1.stdout).contains("reserved"),
+        "grants must render the seeded grant"
+    );
+    assert!(
+        String::from_utf8_lossy(&unlocked[2].1.stdout).contains("vault: ok (1/1 serving)"),
+        "status must render the seeded vault health"
+    );
+
+    let descriptor = StorageDescriptor {
+        module_id: credentials_core::contract::MODULE_ID.into(),
+        storage_namespace: "default".into(),
+        isolation: Isolation::Module,
+        backend: StorageBackend::Sqlite {
+            path: vault
+                .data_dir
+                .join("store.db")
+                .to_string_lossy()
+                .into_owned(),
+        },
+    };
+    let held = open_sqlite(&descriptor).expect("hold the daemon's exclusive lease");
+
+    for (verb, expected) in unlocked {
+        let actual = vault.run(&[verb]);
+        assert!(
+            actual.status.success(),
+            "{verb} must remain usable while the writer lease is held: {}",
+            String::from_utf8_lossy(&actual.stderr)
+        );
+        assert_eq!(
+            actual.stdout, expected.stdout,
+            "{verb} output changed when the writer lease was held"
+        );
+        assert_eq!(
+            actual.stderr, expected.stderr,
+            "{verb} diagnostics changed when the writer lease was held"
+        );
+    }
+
+    drop(held);
+}
+
 /// The validation bypass must not exist in a shipped binary.
 ///
 /// Test-only environment hatches must be compiled out of the operator binary. Some

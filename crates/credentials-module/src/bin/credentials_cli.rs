@@ -2660,12 +2660,50 @@ fn created_id_is_already_reachable(global: &GlobalArgs, id: &str) -> bool {
 }
 
 fn request_admin_status(global: &GlobalArgs) -> Result<serde_json::Value, CliError> {
-    commit_admin(
-        global,
-        AdminOpBody::Status {
-            v: ADMIN_OP_SCHEMA_V1,
-        },
-    )
+    let op = AdminOpBody::Status {
+        v: ADMIN_OP_SCHEMA_V1,
+    };
+    if let Some(conn_path) = &global.subc_conn {
+        match admin_client::commit(&global.data_dir, &resolver_config(global), conn_path, &op) {
+            admin_client::RouteCommit::Committed(v) => return Ok(v),
+            admin_client::RouteCommit::Refused(m) => return Err(CliError::RouteRefused(m)),
+            admin_client::RouteCommit::Indeterminate(m) => {
+                return Err(CliError::RouteIndeterminate(m))
+            }
+            admin_client::RouteCommit::NoLiveModule(m) => {
+                eprintln!("(no live module: {m}; using the offline lease path)");
+            }
+        }
+    }
+
+    let db = global.data_dir.join("store.db");
+    if !db.exists() {
+        return Err(CliError::Usage(format!(
+            "no vault at {} (run 'ck auth bootstrap' first)",
+            global.data_dir.display()
+        )));
+    }
+    let metas = match credentials_core::store::list_meta_read_only(&db) {
+        Ok(metas) => metas,
+        Err(StoreOpError::NotFound) => Vec::new(),
+        Err(error) => return Err(CliError::Store(error)),
+    };
+    let grants = match credentials_core::store::list_read_grants_read_only(&db) {
+        Ok(grants) => grants,
+        Err(StoreOpError::NotFound) => Vec::new(),
+        Err(error) => return Err(CliError::Store(error)),
+    };
+    let open_intents = match credentials_core::store::count_refresh_intents_read_only(&db) {
+        Ok(count) => count,
+        Err(StoreOpError::NotFound) => 0,
+        Err(error) => return Err(CliError::Store(error)),
+    };
+    Ok(credentials_core::admin_ops::status_result(
+        &metas,
+        &grants,
+        open_intents,
+        false,
+    ))
 }
 
 fn parse_inventory(result: &serde_json::Value) -> Result<Vec<(String, u64, String)>, CliError> {
@@ -3379,9 +3417,8 @@ fn format_ts_ms(ts_ms: i64) -> String {
 }
 
 fn cmd_list(global: &GlobalArgs) -> Result<(), CliError> {
-    // `admin.status` builds this no-decrypt inventory from plaintext metadata. Using
-    // the shared admin path keeps `list --subc` available while the daemon owns the
-    // lease; without a live module `commit_admin` retains the offline lease fallback.
+    // A discovered daemon still supplies authenticated `admin.status`; when none is
+    // reachable, the same report is built from lease-free plaintext metadata readers.
     let result = request_admin_status(global)?;
     let rows = parse_inventory(&result)?;
     print_inventory(&rows);
@@ -3390,8 +3427,8 @@ fn cmd_list(global: &GlobalArgs) -> Result<(), CliError> {
 
 fn cmd_grants(global: &GlobalArgs) -> Result<(), CliError> {
     // Grant inventory is part of the same authenticated admin.status response as the
-    // credential inventory. This deliberately follows `ck auth list`: a discovered
-    // daemon is queried online, otherwise the shared helper takes the offline lease.
+    // credential inventory. A discovered daemon is queried online; otherwise the same
+    // sorted rows come from the lease-free plaintext reader.
     let result = request_admin_status(global)?;
     print_grants(&result)
 }

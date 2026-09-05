@@ -17,7 +17,9 @@ use serde::{Deserialize, Serialize};
 use crate::audit::AuditRecord;
 use crate::audit::{AuditCtx, AuditOp};
 use crate::record::{RecordIdentity, VaultRecord};
-use crate::store::{mint_handle, EncryptedStore, GrantOperation, StoreOpError};
+use crate::store::{
+    mint_handle, EncryptedStore, GrantOperation, ReadGrant, RecordMeta, StoreOpError,
+};
 
 /// The admin-op schema version. Bumped only on a breaking op-body change; the
 /// module refuses any other version rather than best-effort parsing it.
@@ -529,64 +531,78 @@ pub fn apply(
             Ok(serde_json::json!({ "grant_revoked": true }))
         }
         AdminOpBody::Status { .. } => {
-            // A no-decrypt inventory + the same fail-closed health ladder the L3
-            // probe computes, so `ck creds status` answers "why does the health
-            // table say degraded" from one authenticated read. No mutation, no audit.
+            // A no-decrypt inventory plus the same fail-closed health summary used by
+            // the probe, so `ck auth status` explains a degraded health result from one
+            // authenticated read. No mutation, no audit.
             let metas = store.list_meta()?;
             let grants = store.list_read_grants()?;
             let open_intents = store.list_intents()?.len();
-            let health =
-                crate::health::VaultHealth::summarize(&metas, open_intents, store.is_fenced_out());
-            let credentials: Vec<serde_json::Value> = metas
-                .iter()
-                .map(|(id, m)| {
-                    serde_json::json!({
-                        "id": id,
-                        "state": m.state.as_str(),
-                        "record_version": m.record_version,
-                    })
-                })
-                .collect();
-            // Both source lists are SQL-sorted, and the filter retains credential order.
-            // Grants are ordered by principal, prefix, then operation so the complete
-            // authority set is stable across repeated status reads. Stable covered-set
-            // output makes an added credential under an existing prefix
-            // visible in a status diff instead of silently widening access.
-            let read_grants: Vec<serde_json::Value> = grants
-                .iter()
-                .map(|grant| {
-                    let covered_credential_ids: Vec<&str> = metas
-                        .iter()
-                        .map(|(id, _)| id.as_str())
-                        .filter(|id| id.starts_with(&grant.credential_prefix))
-                        .collect();
-                    serde_json::json!({
-                        "principal_kind": grant.principal_kind,
-                        "principal_id": grant.principal_id,
-                        "credential_prefix": grant.credential_prefix,
-                        "operation": grant.operation.as_str(),
-                        "created_at_ms": grant.created_at_ms,
-                        "covered_credential_ids": covered_credential_ids,
-                    })
-                })
-                .collect();
-            Ok(serde_json::json!({
-                "status": health.status.as_str(),
-                "credentials_total": health.credentials_total,
-                "active": health.active,
-                "needs_reauth": health.needs_reauth,
-                "retired": health.retired,
-                "corrupt": health.corrupt,
-                "needs_reauth_ids": health.needs_reauth_ids,
-                "retired_ids": health.retired_ids,
-                "corrupt_ids": health.corrupt_ids,
-                "open_intents": health.open_intents,
-                "fenced_out": health.fenced_out,
-                "credentials": credentials,
-                "read_grants": read_grants,
-            }))
+            Ok(status_result(
+                &metas,
+                &grants,
+                open_intents,
+                store.is_fenced_out(),
+            ))
         }
     }
+}
+
+/// Build the status report shared by the authenticated route and lease-free CLI fallback.
+pub fn status_result(
+    metas: &[(String, RecordMeta)],
+    grants: &[ReadGrant],
+    open_intents: usize,
+    fenced_out: bool,
+) -> serde_json::Value {
+    let health = crate::health::VaultHealth::summarize(metas, open_intents, fenced_out);
+    let credentials: Vec<serde_json::Value> = metas
+        .iter()
+        .map(|(id, m)| {
+            serde_json::json!({
+                "id": id,
+                "state": m.state.as_str(),
+                "record_version": m.record_version,
+            })
+        })
+        .collect();
+    // Both source lists are SQL-sorted, and the filter retains credential order.
+    // Grants are ordered by principal, prefix, then operation so the complete
+    // authority set is stable across repeated status reads. Stable covered-set
+    // output makes an added credential under an existing prefix
+    // visible in a status diff instead of silently widening access.
+    let read_grants: Vec<serde_json::Value> = grants
+        .iter()
+        .map(|grant| {
+            let covered_credential_ids: Vec<&str> = metas
+                .iter()
+                .map(|(id, _)| id.as_str())
+                .filter(|id| id.starts_with(&grant.credential_prefix))
+                .collect();
+            serde_json::json!({
+                "principal_kind": grant.principal_kind,
+                "principal_id": grant.principal_id,
+                "credential_prefix": grant.credential_prefix,
+                "operation": grant.operation.as_str(),
+                "created_at_ms": grant.created_at_ms,
+                "covered_credential_ids": covered_credential_ids,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "status": health.status.as_str(),
+        "credentials_total": health.credentials_total,
+        "active": health.active,
+        "needs_reauth": health.needs_reauth,
+        "retired": health.retired,
+        "corrupt": health.corrupt,
+        "needs_reauth_ids": health.needs_reauth_ids,
+        "retired_ids": health.retired_ids,
+        "corrupt_ids": health.corrupt_ids,
+        "open_intents": health.open_intents,
+        "fenced_out": health.fenced_out,
+        "credentials": credentials,
+        "read_grants": read_grants,
+    })
 }
 
 fn decode_hash32(s: &str) -> Option<[u8; 32]> {

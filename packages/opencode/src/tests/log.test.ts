@@ -34,20 +34,23 @@ describe("custody logger", () => {
     console.error = originalError;
   });
 
-  test("the default sink keeps debug on console.debug while routing info to stdout and warnings to stderr", () => {
-    const logger = createLogger();
-    logger.debug({ provider: "deepseek", state: "available" });
-    logger.info({ provider: "deepseek", state: "available" });
-    logger.warn({ provider: "deepseek", state: "transient", errorCode: "timeout" });
-    logger.error({ provider: "deepseek", state: "gone", errorClass: "ClaustrumCredentialError" });
+  test("the console sink carries only faults: info and debug never reach stdout or stderr", () => {
+    // The console is the OpenCode TUI's screen. Happy-path telemetry surfacing
+    // there is the defect this pins (2026-09-05: three "serving" lines per boot in the TUI).
+    const real = createLogger();
+    real.debug({ provider: "deepseek", state: "available" });
+    real.info({ provider: "deepseek", state: "serving" });
+    real.warn({ provider: "deepseek", state: "transient", errorCode: "timeout" });
+    real.error({ provider: "deepseek", state: "gone", errorClass: "ClaustrumCredentialError" });
 
-    expect(debugLines).toHaveLength(1);
-    expect(logLines).toHaveLength(1);
+    expect(debugLines).toHaveLength(0);
+    expect(logLines).toHaveLength(0);
     expect(errorLines).toHaveLength(2);
-    expect(debugLines[0]).toContain('"level":"debug"');
-    expect(logLines[0]).toContain('"level":"info"');
     expect(errorLines[0]).toContain('"level":"warn"');
     expect(errorLines[1]).toContain('"level":"error"');
+    for (const line of [...debugLines, ...logLines, ...errorLines]) {
+      expect(line).not.toContain('"state":"serving"');
+    }
   });
 
   test("serializedLogSink still writes every level to its caller-provided stream and never strips", () => {

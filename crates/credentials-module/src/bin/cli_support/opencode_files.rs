@@ -41,9 +41,10 @@ struct ManifestLockOptions {
     after_evict_rename_attempt: Option<Arc<dyn Fn() + Send + Sync>>,
     after_evict: Option<Arc<dyn Fn() + Send + Sync>>,
     before_manifest_rename: Option<BeforeManifestRename>,
-    // A fixed clock isolates stale-owner comparisons from host scheduling; claim
-    // deadline expiry remains monotonic so the production bound is still exercised.
+    // Manifest lock staleness is judged against the contender's clock at each observation (not at claim start); claim deadline expiry remains monotonic so the production bound is still exercised.
     now_override_ms: Option<u64>,
+    #[cfg(test)]
+    now_sequence_ms: Option<Arc<AtomicU64>>,
 }
 
 impl Default for ManifestLockOptions {
@@ -60,6 +61,8 @@ impl Default for ManifestLockOptions {
             after_evict: None,
             before_manifest_rename: None,
             now_override_ms: None,
+            #[cfg(test)]
+            now_sequence_ms: None,
         }
     }
 }
@@ -102,10 +105,11 @@ impl ManifestLease {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct ManifestLockOwner {
-    tenant: String,
-    pid: u32,
+    #[serde(default)]
+    tenant: Value,
+    #[serde(default)]
+    pid: Value,
     claimed_at_ms: u64,
     nonce: String,
 }
@@ -444,6 +448,10 @@ fn current_time_ms() -> Result<u64, OpenCodeFilesError> {
 }
 
 fn resolve_now_ms(options: &ManifestLockOptions) -> Result<u64, OpenCodeFilesError> {
+    #[cfg(test)]
+    if let Some(clock) = &options.now_sequence_ms {
+        return Ok(clock.load(Ordering::SeqCst));
+    }
     match options.now_override_ms {
         Some(fixed) => Ok(fixed),
         None => current_time_ms(),
@@ -465,7 +473,15 @@ fn io_error(action: &'static str, source: std::io::Error) -> OpenCodeFilesError 
 fn read_lock_owner(path: &Path) -> Result<ManifestLockOwner, OpenCodeFilesError> {
     let source =
         fs::read_to_string(path).map_err(|source| io_error("read manifest lock owner", source))?;
-    serde_json::from_str(&source).map_err(OpenCodeFilesError::Json)
+    let owner: ManifestLockOwner = serde_json::from_str(&source)
+        .map_err(|_| OpenCodeFilesError::Invalid("manifest lock owner invalid".into()))?;
+    let stale_target = format!(".lock.stale-{}-{}", owner.claimed_at_ms, owner.nonce);
+    if !stale_target_matches(&stale_target) {
+        return Err(OpenCodeFilesError::Invalid(
+            "manifest lock owner invalid".into(),
+        ));
+    }
+    Ok(owner)
 }
 
 fn write_lock_owner(lock: &Path, owner: &ManifestLockOwner) -> Result<(), OpenCodeFilesError> {
@@ -594,15 +610,14 @@ where
     let lock = lock_path(path);
     let owner_path = lock.join("owner");
     let nonce = random_nonce()?;
-    let started_at_ms = resolve_now_ms(&options)?;
     let deadline = Instant::now() + options.ttl;
     loop {
         match fs::create_dir(&lock) {
             Ok(()) => {
                 set_mode(&lock, 0o700)?;
                 let owner = ManifestLockOwner {
-                    tenant: tenant.into(),
-                    pid: std::process::id(),
+                    tenant: Value::String(tenant.into()),
+                    pid: Value::from(std::process::id()),
                     claimed_at_ms: resolve_now_ms(&options)?,
                     nonce: nonce.clone(),
                 };
@@ -619,50 +634,59 @@ where
             Err(error) => return Err(io_error("create manifest lock", error)),
         }
 
-        if let Ok(observed) = read_lock_owner(&owner_path) {
-            if started_at_ms.saturating_sub(observed.claimed_at_ms)
-                >= options.ttl.as_millis() as u64
-            {
-                if let Some(before_evict) = &options.before_evict {
-                    before_evict();
-                }
-                let stale = PathBuf::from(format!(
-                    "{}.stale-{}-{}",
-                    lock.display(),
-                    observed.claimed_at_ms,
-                    observed.nonce
-                ));
-                let rename_result = fs::rename(&lock, &stale);
-                #[cfg(test)]
-                if let Some(after_evict_rename_attempt) = &options.after_evict_rename_attempt {
-                    after_evict_rename_attempt();
-                }
-                match rename_result {
-                    Ok(()) => {
-                        let moved = read_lock_owner(&stale.join("owner")).ok();
-                        if moved.is_some_and(|owner| {
-                            owner.nonce == observed.nonce
-                                && owner.claimed_at_ms == observed.claimed_at_ms
-                        }) {
-                            if let Some(after_evict) = &options.after_evict {
-                                after_evict();
-                            }
-                            continue;
-                        }
-                        let _ = fs::rename(&stale, &lock);
+        let owner_read_error = match read_lock_owner(&owner_path) {
+            Ok(observed) => {
+                if resolve_now_ms(&options)?.saturating_sub(observed.claimed_at_ms)
+                    >= options.ttl.as_millis() as u64
+                {
+                    if let Some(before_evict) = &options.before_evict {
+                        before_evict();
                     }
-                    Err(error)
-                        if matches!(
-                            error.kind(),
-                            std::io::ErrorKind::NotFound
-                                | std::io::ErrorKind::AlreadyExists
-                                | std::io::ErrorKind::DirectoryNotEmpty
-                        ) => {}
-                    Err(error) => return Err(io_error("rename stale manifest lock", error)),
+                    let stale = PathBuf::from(format!(
+                        "{}.stale-{}-{}",
+                        lock.display(),
+                        observed.claimed_at_ms,
+                        observed.nonce
+                    ));
+                    let rename_result = fs::rename(&lock, &stale);
+                    #[cfg(test)]
+                    if let Some(after_evict_rename_attempt) = &options.after_evict_rename_attempt {
+                        after_evict_rename_attempt();
+                    }
+                    match rename_result {
+                        Ok(()) => {
+                            let moved = read_lock_owner(&stale.join("owner")).ok();
+                            if moved.is_some_and(|owner| {
+                                owner.nonce == observed.nonce
+                                    && owner.claimed_at_ms == observed.claimed_at_ms
+                            }) {
+                                if let Some(after_evict) = &options.after_evict {
+                                    after_evict();
+                                }
+                                continue;
+                            }
+                            let _ = fs::rename(&stale, &lock);
+                        }
+                        Err(error)
+                            if matches!(
+                                error.kind(),
+                                std::io::ErrorKind::NotFound
+                                    | std::io::ErrorKind::AlreadyExists
+                                    | std::io::ErrorKind::DirectoryNotEmpty
+                            ) => {}
+                        Err(error) => return Err(io_error("rename stale manifest lock", error)),
+                    }
                 }
+                None
             }
-        }
+            Err(error) => Some(error),
+        };
         if Instant::now() >= deadline {
+            if matches!(owner_read_error, Some(OpenCodeFilesError::Invalid(_))) {
+                return Err(OpenCodeFilesError::Invalid(
+                    "manifest lock owner invalid".into(),
+                ));
+            }
             return Err(OpenCodeFilesError::Invalid("manifest lock busy".into()));
         }
         thread::sleep(jitter(&options).min(deadline.saturating_duration_since(Instant::now())));
@@ -1209,6 +1233,156 @@ mod manifest_lock_aba_regression {
             .count();
         assert_eq!(evictions.load(Ordering::SeqCst), 1);
         assert_eq!(stale, 1);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn seed_owner(path: &Path, owner: &str) -> PathBuf {
+        let lock = lock_path(path);
+        fs::create_dir(&lock).unwrap();
+        fs::set_permissions(&lock, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(lock.join("owner"), owner).unwrap();
+        fs::set_permissions(lock.join("owner"), fs::Permissions::from_mode(0o600)).unwrap();
+        lock
+    }
+
+    #[test]
+    fn unknown_owner_keys_are_tolerated_and_evictable_once_stale() {
+        let root = std::env::temp_dir().join(format!(
+            "claustrum-manifest-lock-unknown-key-{}-{}",
+            std::process::id(),
+            TEMP_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("opencode-handles.json");
+        let now = now_ms();
+        seed_owner(
+            &path,
+            &format!(
+                "{{\"tenant\":\"other\",\"pid\":41,\"claimed_at_ms\":{},\"nonce\":\"0123456789abcdef0123456789abcdef\",\"host\":\"x\"}}\n",
+                now - 501
+            ),
+        );
+        let result = with_manifest_lock_with_options(
+            &path,
+            "claimant",
+            ManifestLockOptions {
+                ttl: Duration::from_millis(500),
+                now_override_ms: Some(now),
+                ..ManifestLockOptions::default()
+            },
+            |_| Ok(()),
+        );
+        assert!(result.is_ok());
+        assert!(!lock_path(&path).exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn malformed_diagnostic_owner_fields_are_tolerated_and_evictable_once_stale() {
+        let root = std::env::temp_dir().join(format!(
+            "claustrum-manifest-lock-malformed-diagnostic-{}-{}",
+            std::process::id(),
+            TEMP_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("opencode-handles.json");
+        let now = now_ms();
+        seed_owner(
+            &path,
+            &format!(
+                "{{\"pid\":\"not-a-number\",\"claimed_at_ms\":{},\"nonce\":\"0123456789abcdef0123456789abcdef\"}}\n",
+                now - 501
+            ),
+        );
+        let result = with_manifest_lock_with_options(
+            &path,
+            "claimant",
+            ManifestLockOptions {
+                ttl: Duration::from_millis(500),
+                now_override_ms: Some(now),
+                ..ManifestLockOptions::default()
+            },
+            |_| Ok(()),
+        );
+        assert!(result.is_ok());
+        assert!(!lock_path(&path).exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn missing_owner_nonce_fails_with_owner_invalid_at_deadline() {
+        let root = std::env::temp_dir().join(format!(
+            "claustrum-manifest-lock-owner-invalid-{}-{}",
+            std::process::id(),
+            TEMP_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("opencode-handles.json");
+        let now = now_ms();
+        seed_owner(
+            &path,
+            &format!(
+                "{{\"tenant\":\"other\",\"pid\":41,\"claimed_at_ms\":{}}}\n",
+                now - 501
+            ),
+        );
+        let result = with_manifest_lock_with_options(
+            &path,
+            "claimant",
+            ManifestLockOptions {
+                ttl: Duration::from_millis(20),
+                retry_min: Duration::from_millis(2),
+                retry_max: Duration::from_millis(3),
+                now_override_ms: Some(now),
+                ..ManifestLockOptions::default()
+            },
+            |_| Ok(()),
+        );
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "manifest lock owner invalid"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn owner_that_becomes_stale_during_retry_window_is_evicted() {
+        let root = std::env::temp_dir().join(format!(
+            "claustrum-manifest-lock-observation-clock-{}-{}",
+            std::process::id(),
+            TEMP_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("opencode-handles.json");
+        let now = now_ms();
+        seed_owner(
+            &path,
+            &format!(
+                "{{\"tenant\":\"other\",\"pid\":41,\"claimed_at_ms\":{},\"nonce\":\"0123456789abcdef0123456789abcdef\"}}\n",
+                now - 80
+            ),
+        );
+        let clock = Arc::new(AtomicU64::new(now));
+        let advancing_clock = Arc::clone(&clock);
+        let advance = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(20));
+            advancing_clock.store(now + 100, Ordering::SeqCst);
+        });
+        let result = with_manifest_lock_with_options(
+            &path,
+            "claimant",
+            ManifestLockOptions {
+                ttl: Duration::from_millis(100),
+                retry_min: Duration::from_millis(50),
+                retry_max: Duration::from_millis(50),
+                now_sequence_ms: Some(clock),
+                ..ManifestLockOptions::default()
+            },
+            |_| Ok(()),
+        );
+        advance.join().unwrap();
+        assert!(result.is_ok());
+        assert!(!lock_path(&path).exists());
         let _ = fs::remove_dir_all(root);
     }
 }

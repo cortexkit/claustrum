@@ -2671,7 +2671,14 @@ fn request_admin_status(global: &GlobalArgs) -> Result<serde_json::Value, CliErr
                 return Err(CliError::RouteIndeterminate(m))
             }
             admin_client::RouteCommit::NoLiveModule(m) => {
-                eprintln!("(no live module: {m}; using the offline lease path)");
+                // NOT the lease path, which is what this said until the read verbs stopped
+                // taking the writer lease. The wording survived the change because the
+                // test pins stdout AND stderr byte-for-byte against the online run, so a
+                // now-false sentence was the price of that pin -- worth naming, because a
+                // diagnostic that describes the mechanism it no longer uses is how an
+                // operator concludes a read is unsafe to run beside a live daemon. Which
+                // is the exact belief this change exists to remove.
+                eprintln!("(no live module: {m}; reading plaintext metadata directly)");
             }
         }
     }

@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { createFileLogSink, createLogger, serializedLogSink } from "../log";
+import { createFileLogSink, createLogger, FILE_FIELDS, serializedLogSink } from "../log";
 
 describe("custody logger", () => {
   const originalDebug = console.debug;
@@ -91,10 +91,32 @@ describe("custody logger", () => {
     const override = join(root, "override.jsonl");
 
     createLogger(createFileLogSink({ env: { CLAUSTRUM_CUSTODY_LOG: override } })).info({ provider: "x" });
-    createLogger(createFileLogSink({ env: { CLAUSTRUM_CUSTODY_LOG: "off" } })).info({ provider: "x" });
+    const disabled = join(root, ".local", "state", "cortexkit", "opencode-plugin", "custody.jsonl");
+    createLogger(createFileLogSink({ env: { CLAUSTRUM_CUSTODY_LOG: "off", XDG_STATE_HOME: join(root, ".local", "state") } })).info({ provider: "x" });
 
     expect(existsSync(override)).toBe(true);
-    expect(existsSync(join(root, "disabled.jsonl"))).toBe(false);
+    expect(existsSync(disabled)).toBe(false);
+  });
+
+  test("file sink writes only FILE_FIELDS", () => {
+    const root = join(tmpdir(), `claustrum-log-${crypto.randomUUID()}`);
+    const path = join(root, "custody.jsonl");
+    createLogger(createFileLogSink({ path })).info({ provider: "openai", state: "serving" });
+
+    const line = JSON.parse(readFileSync(path, "utf8"));
+    expect(Object.keys(line).every((key) => (FILE_FIELDS as readonly string[]).includes(key))).toBe(true);
+  });
+
+  test("file sink tightens existing directory and rotated file modes", () => {
+    const root = join(tmpdir(), `claustrum-log-${crypto.randomUUID()}`);
+    const path = join(root, "custody.jsonl");
+    mkdirSync(root, { recursive: true, mode: 0o755 });
+    writeFileSync(path, "x".repeat(5 * 1024 * 1024 + 1), { mode: 0o644 });
+    createLogger(createFileLogSink({ path })).info({ provider: "rotated" });
+
+    expect(statSync(root).mode & 0o777).toBe(0o700);
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+    expect(statSync(`${path}.1`).mode & 0o777).toBe(0o600);
   });
 
   test("file sink rotates at five MiB", () => {
@@ -123,7 +145,8 @@ describe("custody logger", () => {
   });
 
   test("file sink excludes free-text error messages", () => {
-    const path = join(tmpdir(), `claustrum-log-${crypto.randomUUID()}.jsonl`);
+    const root = join(tmpdir(), `claustrum-log-${crypto.randomUUID()}`);
+    const path = join(root, "custody.jsonl");
     const handle = `ckh_${"A".repeat(43)}`;
     const key = "sk-fake-secret-key";
     createLogger(createFileLogSink({ path })).error({ provider: "openai", errorMessage: `${handle} ${key}` });
@@ -131,5 +154,24 @@ describe("custody logger", () => {
     const contents = readFileSync(path, "utf8");
     expect(contents).not.toContain(handle);
     expect(contents).not.toContain(key);
+  });
+
+  test("file sink rejects secret-bearing values routed into allowlisted shapes", () => {
+    const root = join(tmpdir(), `claustrum-log-${crypto.randomUUID()}`);
+    const path = join(root, "custody.jsonl");
+    const handle = `ckh_${"A".repeat(43)}`;
+    const syntaxError = `Unexpected identifier "${handle}"`;
+    const key = "sk-fake-secret-key";
+    createLogger(createFileLogSink({ path })).error({
+      provider: "openai",
+      errorClass: syntaxError,
+      errorCode: `${key} `,
+    });
+
+    const contents = readFileSync(path, "utf8");
+    expect(contents).not.toContain(handle);
+    expect(contents).not.toContain(key);
+    expect(contents).toContain('"errorClass":"invalid_shape"');
+    expect(contents).toContain('"errorCode":"invalid_shape"');
   });
 });

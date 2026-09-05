@@ -15,6 +15,8 @@ export type CustodyLogEntry = {
   errorClass?: string;
   errorCode?: string;
   errorMessage?: string;
+  ts?: string;
+  pid?: number;
 };
 
 export type LogSink = (entry: CustodyLogEntry) => void;
@@ -27,10 +29,19 @@ export type CustodyLogger = {
 };
 
 const FILE_LIMIT_BYTES = 5 * 1024 * 1024;
-const FILE_FIELDS: Array<keyof CustodyLogEntry> = [
+export const FILE_FIELDS: Array<keyof CustodyLogEntry> = [
   "level", "provider", "label", "credentialId", "recordVersion", "state", "httpStatus",
-  "cooldownUntil", "errorClass", "errorCode",
+  "cooldownUntil", "errorClass", "errorCode", "ts", "pid",
 ];
+const IDENTIFIER = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+const FORBIDDEN_IDENTIFIERS = new Set(["__proto__", "constructor", "prototype"]);
+const CREDENTIAL_ID = /^[A-Za-z0-9._:-]{1,128}$/;
+const ERROR_CLASS = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
+const ERROR_CODE = /^[A-Za-z0-9_.-]{1,64}$/;
+const STATES = new Set([
+  "available", "transient", "cooldown", "other_owner", "orphan", "split", "unmanaged",
+  "refusing", "serving", "served", "gone",
+]);
 
 // Console is the OpenCode TUI's stdout: only faults belong there. Happy-path
 // telemetry (info/debug) is file-only, or it becomes noise in the operator's screen.
@@ -51,11 +62,30 @@ function defaultFilePath(env: NodeJS.ProcessEnv): string {
 }
 
 function fileEntry(entry: CustodyLogEntry): Record<string, unknown> {
+  const withMetadata = { ...entry, ts: new Date().toISOString(), pid: process.pid };
   const safe: Record<string, unknown> = {};
   for (const field of FILE_FIELDS) {
-    if (entry[field] !== undefined) safe[field] = entry[field];
+    if (withMetadata[field] !== undefined) {
+      const value = withMetadata[field];
+      if (typeof value !== "string") {
+        safe[field] = value;
+        continue;
+      }
+      const valid = field === "provider" || field === "label"
+        ? IDENTIFIER.test(value) && !FORBIDDEN_IDENTIFIERS.has(value)
+        : field === "credentialId"
+          ? CREDENTIAL_ID.test(value)
+          : field === "state"
+            ? STATES.has(value)
+            : field === "errorClass"
+              ? ERROR_CLASS.test(value)
+              : field === "errorCode"
+                ? ERROR_CODE.test(value)
+                : true;
+      safe[field] = valid ? value : "invalid_shape";
+    }
   }
-  return { ...safe, ts: new Date().toISOString(), pid: process.pid };
+  return safe;
 }
 
 export function createFileLogSink(options: FileLogSinkOptions = {}): LogSink {
@@ -78,7 +108,10 @@ export function createFileLogSink(options: FileLogSinkOptions = {}): LogSink {
   };
   const rotateIfNeeded = () => {
     try {
-      if (statSync(path).size > FILE_LIMIT_BYTES) renameSync(path, `${path}.1`);
+      if (statSync(path).size > FILE_LIMIT_BYTES) {
+        renameSync(path, `${path}.1`);
+        chmodSync(`${path}.1`, 0o600);
+      }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
@@ -88,6 +121,7 @@ export function createFileLogSink(options: FileLogSinkOptions = {}): LogSink {
     try {
       if (!initialized) {
         mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+        chmodSync(dirname(path), 0o700);
         rotateIfNeeded();
         initialized = true;
       }

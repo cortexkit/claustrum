@@ -32,13 +32,11 @@ const FILE_FIELDS: Array<keyof CustodyLogEntry> = [
   "cooldownUntil", "errorClass", "errorCode",
 ];
 
-function defaultSink(entry: CustodyLogEntry): void {
-  const out = entry.level === "debug"
-    ? console.debug
-    : entry.level === "warn" || entry.level === "error"
-      ? console.error
-      : console.log;
-  out(JSON.stringify(entry));
+// Console is the OpenCode TUI's stdout: only faults belong there. Happy-path
+// telemetry (info/debug) is file-only, or it becomes noise in the operator's screen.
+function consoleSink(entry: CustodyLogEntry): void {
+  if (entry.level !== "warn" && entry.level !== "error") return;
+  console.error(JSON.stringify(entry));
 }
 
 export type FileLogSinkOptions = {
@@ -76,7 +74,7 @@ export function createFileLogSink(options: FileLogSinkOptions = {}): LogSink {
   const fail = () => {
     if (unavailable) return;
     unavailable = true;
-    warn("persistent custody log unavailable; continuing with console logging");
+    warn("persistent custody log unavailable; info/debug telemetry dropped, faults still reach the console");
   };
   const rotateIfNeeded = () => {
     try {
@@ -105,7 +103,7 @@ export function createFileLogSink(options: FileLogSinkOptions = {}): LogSink {
 export function createLogger(sink?: LogSink): CustodyLogger {
   const fileSink = sink ? undefined : createFileLogSink();
   const output = sink ?? ((entry: CustodyLogEntry) => {
-    defaultSink(entry);
+    consoleSink(entry);
     fileSink?.(entry);
   });
   return {

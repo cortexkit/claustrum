@@ -3825,6 +3825,96 @@ fn row_to_intent(row: &rusqlite::Row<'_>) -> rusqlite::Result<RefreshIntent> {
 #[cfg(test)]
 mod tests {
 
+    /// The scrub shape leaves a WRITABLE store, which was the one claim in the restore
+    /// contract I had only read at source rather than exercised.
+    ///
+    /// The contract says a restored copy must have `cortexkit_fence` rows deleted, because
+    /// the epoch belongs to the captured machine's lease lifetime and an inherited one that
+    /// outruns the destination's counter refuses every write while the health detail blames
+    /// a newer writer that does not exist.
+    ///
+    /// So the scrub had better not break writing on its own. cortexkit-store reads
+    /// `COALESCE((SELECT epoch FROM cortexkit_fence WHERE id = 0), 0)`, so an EMPTY table
+    /// yields 0 and any holder epoch claims it -- but that is a sibling crate's line, and a
+    /// property this repo depends on deserves a test here rather than a citation.
+    ///
+    /// Note what the assertion is: the write COMMITS and the record READS BACK. Asserting
+    /// only that the call returned Ok would pass against a fence that silently swallowed
+    /// the write, which is the failure this table exists to prevent.
+    ///
+    /// WHAT THIS TEST DOES NOT COVER: a real daemon opening a scrubbed store at the
+    /// canonical data dir. The master key is scoped to that path, so a scratch placement
+    /// refuses by name before any of this runs -- the two-artifact property, working. This
+    /// exercises the store layer only, and the placement remains an operator action.
+    #[test]
+    fn a_fence_scrubbed_store_still_commits_writes() {
+        let (_root, store) = tmp_store(0x5c);
+        let id = "apikey:scrub-probe";
+        let before =
+            VaultRecord::new_static(CredentialKind::ApiKey, "test", b"before".to_vec(), None);
+        store
+            .create_audited(id, &before, AuditCtx::admin(AuditOp::Put))
+            .expect("seed the store before the scrub");
+
+        // The scrub. EITHER FORM IS SAFE, and finding that out is why this test exists.
+        //
+        // I sent the backup owner a "correction" saying DELETE FROM and DROP TABLE differ
+        // -- that a dropped table makes the fence SELECT fail to prepare and kills every
+        // write. Measured with the sqlite3 CLI against the file, which is true of the FILE
+        // and false of the STORE: `with_conn_fenced` opens every fenced write with
+        // `CREATE TABLE IF NOT EXISTS cortexkit_fence` INSIDE the transaction, so the table
+        // is repaired before the epoch is read and the two forms converge.
+        //
+        // Mutation result, recorded because the test reads as if it depended on the
+        // distinction: swapping DELETE FROM for DROP TABLE leaves this test GREEN. That is
+        // not a gap -- the property under test is "the scrub leaves a writable store", and
+        // it holds for both. Instrumented at the time: table gone right after the drop,
+        // write committed and read back, epoch > 0 afterwards.
+        let removed = store
+            .with_raw_conn(|c| c.execute("DELETE FROM cortexkit_fence", []))
+            .expect("scrub the fence rows");
+        assert!(
+            removed > 0,
+            "the fixture must HAVE a fence row before the scrub, or this test proves \
+             nothing about deleting one"
+        );
+
+        // A write after the scrub must commit AND be readable back.
+        let after =
+            VaultRecord::new_static(CredentialKind::ApiKey, "test", b"after".to_vec(), None);
+        store
+            .create_audited(
+                "apikey:scrub-probe-2",
+                &after,
+                AuditCtx::admin(AuditOp::Put),
+            )
+            .expect("a fence-scrubbed store must still accept writes");
+        let got = store
+            .get("apikey:scrub-probe-2")
+            .expect("the post-scrub write must read back");
+        assert_eq!(
+            got.payload.expose(),
+            b"after",
+            "the write committed rather than being swallowed by the fence path"
+        );
+
+        // And the epoch is re-claimed rather than left absent, so the next writer inherits
+        // a real fence rather than starting from nothing again.
+        let epoch: i64 = store
+            .with_raw_conn(|c| {
+                c.query_row(
+                    "SELECT COALESCE((SELECT epoch FROM cortexkit_fence WHERE id = 0), 0)",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .expect("read the fence back");
+        assert!(
+            epoch > 0,
+            "the first write after a scrub must re-claim the fence, not leave it empty"
+        );
+    }
+
     /// A scratch database path under the same temp-dir idiom the rest of this module
     /// uses: pid plus a counter, so parallel test threads cannot collide and a recycled
     /// pid on windows cannot inherit a previous run's directory.

@@ -3111,7 +3111,13 @@ fn a_temp_dir_connection_file_is_found_and_ambiguity_refuses() {
     // ONE candidate: discovered, so a route IS attempted -- and fails, because the
     // file is a stub. The attempt is the observable difference, and it is what the
     // temp-dir arm exists to produce.
-    std::fs::write(tmp.join("subc-1000.connection.json"), "{}").expect("write one");
+    // NON-NUMERIC TOKENS, DELIBERATELY. On unix `user_connection_token` is the real
+    // uid, so a numeric fixture name lives in the SAME NAMESPACE as a real one: this
+    // test used `subc-1000`/`subc-1001` and went green on macOS (uid 501) while
+    // failing on the ubuntu runner, whose uid IS one of them -- the CLI matched its
+    // own derived name and correctly stopped refusing. A non-numeric token cannot be
+    // a uid, so these two are provably other users on every unix host.
+    std::fs::write(tmp.join("subc-otheruser.connection.json"), "{}").expect("write one");
     let single = run(Some(key_path.as_path()));
     assert!(
         single.contains("no live module"),
@@ -3126,15 +3132,15 @@ fn a_temp_dir_connection_file_is_found_and_ambiguity_refuses() {
     // TWO candidates: refuse and name them. On a shared temp dir the token exists
     // precisely so different OS users do not collide, so two files mean two users --
     // picking one could point an admin op at another user's daemon.
-    std::fs::write(tmp.join("subc-1001.connection.json"), "{}").expect("write two");
+    std::fs::write(tmp.join("subc-thirduser.connection.json"), "{}").expect("write two");
     let ambiguous = run(Some(key_path.as_path()));
     assert!(
         ambiguous.contains("not guessing which daemon is yours"),
         "two candidates must REFUSE rather than pick one: {ambiguous}"
     );
     assert!(
-        ambiguous.contains("subc-1000.connection.json")
-            && ambiguous.contains("subc-1001.connection.json"),
+        ambiguous.contains("subc-otheruser.connection.json")
+            && ambiguous.contains("subc-thirduser.connection.json"),
         "the refusal must name both so --subc can be chosen: {ambiguous}"
     );
 

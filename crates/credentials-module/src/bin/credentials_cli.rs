@@ -4085,16 +4085,27 @@ mod discovery_tests {
         // A second daemon's file: same shape, different token. The glob sees two.
         std::fs::write(root.join("subc-otheruser.connection.json"), "{}").expect("second");
 
-        let prev_tmp = std::env::var_os("TMPDIR");
+        // ALL THREE, because `env::temp_dir()` reads TMPDIR on unix and TMP/TEMP on
+        // windows. Setting only TMPDIR redirects on macOS and linux and SILENTLY DOES
+        // NOT on windows, so the test would pass here and assert nothing there -- which
+        // is exactly what it did until CI said so. Third instance of this class today.
+        let prev: Vec<(&str, Option<std::ffi::OsString>)> = ["TMPDIR", "TMP", "TEMP"]
+            .iter()
+            .map(|k| (*k, std::env::var_os(k)))
+            .collect();
         let prev_named = std::env::var_os("SUBC_CONNECTION_FILE");
-        std::env::set_var("TMPDIR", &root);
+        for (k, _) in &prev {
+            std::env::set_var(k, &root);
+        }
         std::env::remove_var("SUBC_CONNECTION_FILE");
 
         let got = temp_dir_connection_file();
 
-        match prev_tmp {
-            Some(v) => std::env::set_var("TMPDIR", v),
-            None => std::env::remove_var("TMPDIR"),
+        for (k, v) in prev {
+            match v {
+                Some(v) => std::env::set_var(k, v),
+                None => std::env::remove_var(k),
+            }
         }
         if let Some(v) = prev_named {
             std::env::set_var("SUBC_CONNECTION_FILE", v);

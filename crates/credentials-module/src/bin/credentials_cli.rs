@@ -3922,6 +3922,27 @@ fn discover_subc_connection_file() -> Option<PathBuf> {
 /// another user's daemon.
 fn temp_dir_connection_file() -> Option<PathBuf> {
     let dir = std::env::temp_dir();
+
+    // THE EXACT PATH FIRST, FROM THE SIBLING'S OWN DERIVATION. `user_connection_token`
+    // is the token the daemon uses when it writes this file (subc-transport 0.6.0), so
+    // calling it names the file rather than searching for something shaped like it.
+    // This rung is a CALL and therefore needs no date: if subc changes the token, this
+    // stops compiling or stops matching loudly rather than quietly finding the wrong
+    // file.
+    let exact = dir.join(format!(
+        "subc-{}.connection.json",
+        subc_transport::user_connection_token()
+    ));
+    if exact.is_file() {
+        return Some(exact);
+    }
+
+    // THE GLOB STAYS AS A FALLBACK, AND IT IS NOT REDUNDANT. It exists for the states
+    // an exact lookup cannot describe: an unreadable temp directory, and MORE THAN ONE
+    // connection file, where guessing picks a daemon at random. Those were built for a
+    // real report -- a CLI that concluded "no daemon" from an I/O error took the offline
+    // path and told the operator to stop a daemon that was serving. An exact miss is
+    // silent by construction, so dropping this would trade a diagnostic for a shrug.
     match connection_file_in(&dir) {
         ConnectionSearch::Found(p) => Some(p),
         // The ordinary answer: no daemon, take the offline path silently.
@@ -4009,7 +4030,10 @@ fn connection_file_in(dir: &std::path::Path) -> ConnectionSearch {
 
 #[cfg(test)]
 mod discovery_tests {
-    use super::{connection_file_in, discover_subc_connection_file, ConnectionSearch};
+    use super::{
+        connection_file_in, discover_subc_connection_file, temp_dir_connection_file,
+        ConnectionSearch,
+    };
 
     /// An unreadable directory must not read as "no daemon is running".
     ///
@@ -4031,6 +4055,57 @@ mod discovery_tests {
         assert!(
             matches!(connection_file_in(missing), ConnectionSearch::Unreadable(_)),
             "an unreadable directory must be distinguishable from an empty one"
+        );
+    }
+
+    /// The temp rung names the daemon's file rather than searching for its shape.
+    ///
+    /// TWO matching files, deliberately. With one file this test PASSES WITH THE EXACT
+    /// RUNG DELETED, because the glob below finds the same path -- I wrote that version
+    /// first and mutation caught it, which is the silent-success the rung exists to
+    /// avoid, pointed at its own test. With two, the glob refuses as Ambiguous rather
+    /// than guessing a daemon, so only subc's own derivation can answer and the
+    /// assertion is about the CALL.
+    #[test]
+    fn the_temp_rung_finds_subcs_derived_name_where_the_glob_cannot() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "ck-tmprung-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&root).expect("root");
+
+        let derived = root.join(format!(
+            "subc-{}.connection.json",
+            subc_transport::user_connection_token()
+        ));
+        std::fs::write(&derived, "{}").expect("the daemon-shaped file");
+        // A second daemon's file: same shape, different token. The glob sees two.
+        std::fs::write(root.join("subc-otheruser.connection.json"), "{}").expect("second");
+
+        let prev_tmp = std::env::var_os("TMPDIR");
+        let prev_named = std::env::var_os("SUBC_CONNECTION_FILE");
+        std::env::set_var("TMPDIR", &root);
+        std::env::remove_var("SUBC_CONNECTION_FILE");
+
+        let got = temp_dir_connection_file();
+
+        match prev_tmp {
+            Some(v) => std::env::set_var("TMPDIR", v),
+            None => std::env::remove_var("TMPDIR"),
+        }
+        if let Some(v) = prev_named {
+            std::env::set_var("SUBC_CONNECTION_FILE", v);
+        }
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert_eq!(
+            got.as_deref(),
+            Some(derived.as_path()),
+            "with two candidates the glob refuses, so only subc's derived name can answer; \
+             a miss means the token derivation drifted"
         );
     }
 

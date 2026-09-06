@@ -4044,6 +4044,33 @@ fn connection_file_in(dir: &std::path::Path) -> ConnectionSearch {
 
 #[cfg(test)]
 mod discovery_tests {
+    /// SERIALISES THE TESTS THAT MUTATE PROCESS-GLOBAL ENVIRONMENT.
+    ///
+    /// `set_var`/`remove_var` are process-wide and cargo runs unit tests on parallel
+    /// threads, so two tests in this module touching `SUBC_CONNECTION_FILE` interleave:
+    /// one clears the variable the other just set, the cleared side falls through to
+    /// discovery, and it fails claiming a fallback happened. The failure is TRUE about
+    /// what the function did and FALSE about why, which is what makes it expensive --
+    /// it reads as a defect in the exclusivity rung rather than as a racing neighbour.
+    ///
+    /// *** OBSERVED, NOT ANTICIPATED. *** The same commit passed on its train branch and
+    /// failed on master minutes later -- identical sha, opposite outcomes, which is the
+    /// signature of a race rather than a platform difference. The duplicate master run I
+    /// had just called "buying nothing" is what surfaced it.
+    ///
+    /// A mutex rather than `--test-threads=1`: the flag is invisible at the call site and
+    /// a future runner without it silently reintroduces the race.
+    static ENV_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Take the environment guard, surviving a poisoned lock.
+    ///
+    /// A panicking test poisons the mutex; without this, every later test in the module
+    /// fails on the poison rather than on its own subject, turning one real failure into
+    /// a wall of misattributed ones.
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     use super::{
         connection_file_in, discover_subc_connection_file, temp_dir_connection_file,
         ConnectionSearch,
@@ -4082,6 +4109,7 @@ mod discovery_tests {
     /// assertion is about the CALL.
     #[test]
     fn the_temp_rung_finds_subcs_derived_name_where_the_glob_cannot() {
+        let _env = env_guard();
         use std::sync::atomic::{AtomicU64, Ordering};
         static SEQ: AtomicU64 = AtomicU64::new(0);
         let root = std::env::temp_dir().join(format!(
@@ -4144,6 +4172,7 @@ mod discovery_tests {
     /// value is the defect, not a convenience.
     #[test]
     fn subc_connection_file_is_exclusive_and_does_not_fall_back() {
+        let _env = env_guard();
         use std::sync::atomic::{AtomicU64, Ordering};
         static SEQ: AtomicU64 = AtomicU64::new(0);
         let root = std::env::temp_dir().join(format!(

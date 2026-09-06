@@ -90,8 +90,16 @@ run_arm() {
     1)
       label="grant listing keeps read and sign rows separate"
       source="crates/credentials-core/src/store.rs"
-      expected="grants_keep_read_and_sign_rows_separate_and_sort_by_prefix_then_operation"
-      cargo_args=("-p" "credentials-module" "--test" "cli_admin")
+      # NAMES THE TEST THAT COVERS THE SITE THIS ARM MUTATES. It used to name the CLI
+      # integration test, which stopped exercising `list_read_grants` when the read verbs
+      # went lease-free (b4dc8ff) and moved the offline path onto
+      # `list_read_grants_read_only`. From that commit the mutant was behaviourally inert:
+      # the named test passed WITH the defect installed, and this arm reported "expected
+      # to redden, but it passed" -- the gate detecting its own blindness rather than
+      # going quietly false-green. The CLI test still guards the read-only path; this one
+      # guards the online path the arm edits.
+      expected="the_online_grant_listing_keeps_read_and_sign_separate_and_orders_by_prefix"
+      cargo_args=("-p" "credentials-core" "--lib")
       ;;
     2)
       label="stale reports reach invalid-grant terminal state"

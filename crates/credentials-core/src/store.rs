@@ -3706,6 +3706,85 @@ fn row_to_intent(row: &rusqlite::Row<'_>) -> rusqlite::Result<RefreshIntent> {
 
 #[cfg(test)]
 mod tests {
+    /// The ONLINE grant listing orders and separates rows the same way the offline one
+    /// does. Both feed the same rendered table, so a divergence would show as an
+    /// operator seeing different output depending on whether a daemon happened to be
+    /// running -- with nothing in either report saying which path answered.
+    ///
+    /// *** THIS EXISTS BECAUSE THE STANDING MUTATION ARM WENT INERT AND SAID SO. ***
+    /// `ck auth grants` used to reach `list_read_grants` on every invocation; the
+    /// lease-free read verbs (b4dc8ff) gave it `list_read_grants_read_only` when no
+    /// daemon is reachable, which is what the CLI test exercises. The release gate's arm
+    /// mutates THIS function, so from that commit its mutant was behaviourally inert:
+    /// the named test passed with the defect installed, and the arm reported "expected
+    /// to redden, but it passed" rather than a false green.
+    ///
+    /// The lesson is about the SHAPE rather than this function: adding a second path to
+    /// a behaviour does not split its coverage evenly -- it moves the test to one side
+    /// and leaves the other bare, and nothing about the passing suite says which side
+    /// the test landed on.
+    #[test]
+    fn the_online_grant_listing_keeps_read_and_sign_separate_and_orders_by_prefix() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "ck-grantorder-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let db = root.join("store.db");
+        let descriptor = StorageDescriptor {
+            module_id: "cortexkit-credentials".into(),
+            storage_namespace: "vault".into(),
+            isolation: Isolation::Module,
+            backend: StorageBackend::Sqlite {
+                path: db.to_string_lossy().into_owned(),
+            },
+        };
+        let sqlite = open_sqlite(&descriptor).expect("open");
+        EncryptedStore::migrate(&sqlite).expect("migrate");
+        let store = EncryptedStore::open(sqlite, MasterKey::from_bytes([9u8; 32])).expect("store");
+
+        for (prefix, op) in [
+            ("z:", GrantOperation::Sign),
+            ("z:", GrantOperation::Read),
+            ("a:", GrantOperation::Sign),
+        ] {
+            store
+                .create_read_grant_audited(
+                    "reserved",
+                    "agent",
+                    prefix,
+                    op,
+                    AuditCtx::admin(AuditOp::GrantCreate),
+                )
+                .expect("create grant");
+        }
+
+        let listed = store.list_read_grants().expect("list");
+        let seen: Vec<(String, String)> = listed
+            .iter()
+            .map(|g| {
+                (
+                    g.credential_prefix.clone(),
+                    g.operation.as_str().to_string(),
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            seen,
+            vec![
+                ("a:".to_string(), "sign".to_string()),
+                ("z:".to_string(), "read".to_string()),
+                ("z:".to_string(), "sign".to_string()),
+            ],
+            "every grant needs its own row, ordered by prefix then operation; collapsing \
+             read and sign hides half an authority set from the operator reading it"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// A store carrying a migration this binary does not have must refuse to open.
     ///
     /// Simulates the rollback shape directly: apply the real chain, then record a higher

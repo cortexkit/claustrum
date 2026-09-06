@@ -873,6 +873,51 @@ which is out of scope for the in-database chain.
 
 ---
 
+## Restoring this vault from a backup needs TWO things, and one is not in the backup
+
+The store is enrolled with engram and captured whole (`backup-api-live`, an online
+backup through a `mode=ro` connection, so committed WAL frames up to the reader's
+snapshot are included — no checkpoint boundary needed). That capture is complete for
+what it covers, and what it covers is the STORE.
+
+**The master key is not in it.** `vault_secrets` holds the audit key SEALED UNDER the
+master key; the master key itself lives in the macOS keychain under the service derived
+from the data directory, or in the operator key file. So a restore is:
+
+```
+restored store.db          from the backup generation
++ the matching master key   from the keychain item, or --key-path
+= a vault that opens
+```
+
+**Restore one without the other and the failure does not say "missing key".** The store
+opens, the migration chain applies, and unsealing the audit key fails — which surfaces
+as an open error on an intact file. An operator reading that during an incident is being
+told the backup is bad, and the backup is fine.
+
+The distinguishing read, before concluding anything about the data:
+
+```sh
+# What key does the store say it wants?
+sqlite3 "file:$DATA_DIR/store.db?mode=ro" \
+  "SELECT key_id FROM vault_secrets LIMIT 1;"
+# What key can this machine resolve? (feature-gated tool, no lease taken)
+ck_key_verify --data-dir "$DATA_DIR"
+```
+
+A `KeyMismatch` names both fingerprints and means the store is fine and the key is
+wrong. `NoSlotMatchesDb` means no key on this machine matches at all — the keychain item
+is absent or belongs to a different data directory, because the service name is derived
+from the canonical data-dir path.
+
+**So a machine restoring this vault must carry the key across separately**, and a
+keychain item does not travel in a store backup by design: putting it there would make
+the backup sufficient to decrypt every credential in it.
+
+UNEXERCISED AS OF 2026-09-06. Capture is enrolled; no restore of this store has been
+walked end to end from this seat. That is a claim about the future until someone does
+it, and the first person to try should not be doing it during an incident.
+
 ## Rotating the master key
 
 `ck auth rotate-master-key` performs a crash-safe two-slot handover: it stages a new

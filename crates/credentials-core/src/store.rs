@@ -3861,25 +3861,43 @@ mod tests {
         drop(std::fs::remove_file(format!("{}-wal", path.display())));
         drop(std::fs::remove_file(format!("{}-shm", path.display())));
 
-        // *** WHAT THIS TEST CANNOT SEE, STATED RATHER THAN IMPLIED. ***
+        // *** WHY `immutable=1` RATHER THAN THE HOUSE `?mode=ro`, RESOLVED. ***
         //
-        // The reason the function opens with `immutable=1` instead of the house `?mode=ro`
-        // is that a real restored file REFUSES mode=ro with SQLite error 14. Verified
-        // against an actual captured generation restored by engram on 2026-09-06:
+        // The honest answer is a property of the OPENER, not of the file, and it took a
+        // wrong turn to find: a restored copy refuses mode=ro with SQLite error 14 under
+        // the sqlite3 CLI (3.54.0) and SILENTLY SUCCEEDS under the sqlite rusqlite links
+        // here (3.46.0). Measured both ways on the same bytes.
         //
-        //     header bytes 18/19 = 2,2 (WAL)   and   mode=ro -> "unable to open (14)"
+        // I first read that as two different FILES -- my fixture "opened anyway" while a
+        // real restored artifact refused -- and recorded the difference as unexplained. I
+        // had two files and one opener, and concluded the files differed, inside a
+        // comparison whose entire purpose was to isolate a difference. A hand-made WAL
+        // database with its companions removed refuses identically once opened through
+        // the same library.
         //
-        // A locally-created WAL database with its companions deleted does NOT reproduce
-        // that -- it opens under mode=ro even with the same header pair. So this fixture
-        // is NOT the artifact, and an arm asserting "mode=ro refuses" here would fail
-        // against a fixture that is simply a different thing wearing the same header.
+        // SO THE DURABLE PROPERTY IS THE POSITIVE ONE, and it is what this test asserts:
+        // `immutable=1` reads a restored copy correctly under BOTH libraries, while
+        // mode=ro's behaviour flipped between them. Asserting the refusal would pin a
+        // library version's mood rather than anything about the vault.
         //
-        // I could not synthesize the difference and did not guess at it. What this test
-        // therefore proves is the counting, on a WAL-header file with no sidecar; the
-        // connection-form choice rests on the measurement above rather than on this test.
-        // If someone later reproduces the refusal locally, THAT is the arm to add.
+        // AND THE DISJUNCTION THAT LOOKS RIGHT IS ALSO WRONG, which is worth recording
+        // because it is the natural next idea: "without immutable the copy is either
+        // refused OR reports fewer rows" fails on the real artifact, where both forms
+        // return 127. The backup API produces a file complete at the reader's end mark,
+        // so there is no uncheckpointed tail for the older library to miss. That
+        // disjunction holds for a MID-WRITE copy and not for a captured one -- same
+        // shape, different provenance.
 
         // ARM 2: the report reads it, and reports the REVOKED handle as not resurrected.
+        // Print the linked version with the evidence: the two behaviours above are
+        // indistinguishable in a test log without it, so a future reader debugging this
+        // cannot tell which one they are looking at.
+        let linked: String = rusqlite::Connection::open_in_memory()
+            .expect("mem")
+            .query_row("SELECT sqlite_version()", [], |r| r.get(0))
+            .expect("version");
+        println!("linked sqlite {linked}");
+
         let r = restore_resurrection_read_only(&path).expect("report must read it");
         assert_eq!(
             r.live_handles, 2,

@@ -205,14 +205,29 @@ verify "admin cli " cargo test --locked -p credentials-module --test cli_admin
 # verifying a release artifact: the seam is compiled out, so the arm either fails
 # against the staged binary or -- worse -- passes without exercising what it names.
 # Those arms are enumerable in advance by grepping for the cfg, which is what this
-# does. One seam is known and handled (the api-key validation bypass, whose arm skips
-# under CRED_CLI_BIN and says so).
+# does. FIVE seams are known and every one is handled the same way -- its arm skips under
+# CRED_CLI_BIN and PRINTS why:
+#
+#   1  api_key_login.rs        the validation bypass
+#   4  opencode_migration.rs   the CK_OPENCODE_TEST_FAIL_* crash-cut injections
+#
+# The four arrived with the opencode custody merge (#28) and this guard is what caught
+# them, at the next staging rather than at review. I had checked the STRING scan below
+# and reported that it covers the new hatches -- true, and the wrong guard: absence of a
+# string proves the seam cannot be switched on in the artifact, while this count is about
+# how much of the suite still MEANS anything when run against it. Two different questions
+# one line apart.
+#
+# The nine opencode arms drive failures through those seams, so against a staged binary
+# the injection is inert and the test would assert the SUCCESS path under a name claiming
+# to prove recovery. They now return early with a SKIPPING line, verified in both
+# directions: 9 skips under CRED_CLI_BIN, 0 without.
 #
 # A NEW seam silently NARROWS artifact verification while every line above still prints
 # green, so the count is pinned. Raising it means deciding what the matching test arm
 # does under an override -- skip with a printed reason, or be rewritten not to need the
 # seam -- rather than discovering the narrowing at some later deploy.
-KNOWN_DEBUG_SEAMS=1
+KNOWN_DEBUG_SEAMS=5
 seams="$(grep -rc 'cfg(debug_assertions)' crates/*/src --include='*.rs' 2>/dev/null \
   | awk -F: '{n += $2} END {print n + 0}')"
 if [ "$seams" -ne "$KNOWN_DEBUG_SEAMS" ]; then

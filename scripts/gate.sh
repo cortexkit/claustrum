@@ -294,12 +294,20 @@ run_expect 2 "login crash cut" \
   cargo test --locked -p credentials-core --features login-test-seam --test login_crash_cut
 # These debug-only seams prove the custody cleanup paths without making an
 # environment-triggered interruption reachable in a release binary.
+# --nocapture IS LOAD-BEARING, NOT TIDINESS. Both arms can now print a SKIPPING notice
+# (their seams are cfg(debug_assertions), so they skip when pointed at a staged release
+# binary). Without --nocapture cargo swallows that notice, and the skip check reads an
+# empty stream and passes the arm WITHOUT EVER SEEING IT SKIP -- a suite that silently
+# ran nothing, reported as coverage. The gate refuses this combination by name, which is
+# how this line came to exist: adding the skip notices made it fire.
 run_expect 1 "opencode tombstone reread crash cut" \
   cargo test --locked -p credentials-module \
-    --test cli_opencode the_migrate_opencode_tombstone_reread_failure_keeps_the_old_handle_until_rerun
+    --test cli_opencode the_migrate_opencode_tombstone_reread_failure_keeps_the_old_handle_until_rerun \
+    -- --nocapture
 run_expect 1 "opencode account handle-write crash cut" \
   cargo test --locked -p credentials-module \
-    --test cli_opencode the_opencode_account_add_recovers_a_mint_before_handle_write_with_one_live_handle
+    --test cli_opencode the_opencode_account_add_recovers_a_mint_before_handle_write_with_one_live_handle \
+    -- --nocapture
 # Rebuild the shipped CLI with default features so every later check and the caller use
 # the production release artifact rather than a test-profile seam build.
 run_check "release ck-auth (default features)" \

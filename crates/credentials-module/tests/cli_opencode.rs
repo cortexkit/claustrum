@@ -67,6 +67,36 @@ impl Drop for TestDaemon {
     }
 }
 
+/// True when this run is pointed at a STAGED RELEASE binary rather than a cargo build.
+///
+/// The distinction is load-bearing for this suite specifically: its crash-cut arms drive
+/// failures through `CK_OPENCODE_TEST_FAIL_*` seams that are `cfg(debug_assertions)`, so
+/// they are COMPILED OUT of a release artifact. Against a staged binary those env vars
+/// are inert, the injected failure never happens, and the test then asserts the
+/// SUCCESS path while its name still claims to prove recovery from a failure.
+///
+/// That is a false green in the worst position: release-artifact verification, whose
+/// entire job is to report what the shipped bytes do.
+fn running_against_staged_binary() -> bool {
+    std::env::var_os("CRED_CLI_BIN").is_some()
+}
+
+/// Skip a seam-driven arm when the seam cannot exist, and SAY SO ON STDOUT.
+///
+/// Returning quietly would make the arm indistinguishable from one that ran and passed.
+/// The gate greps for this token, so a skipped arm is visible as a skip rather than
+/// counted as coverage.
+fn skip_if_seam_is_compiled_out(arm: &str) -> bool {
+    if running_against_staged_binary() {
+        println!(
+            "SKIPPING {arm}: its CK_OPENCODE_TEST_FAIL_* seam is cfg(debug_assertions) and \
+             is absent from a release artifact, so the injected failure cannot occur"
+        );
+        return true;
+    }
+    false
+}
+
 fn cli() -> Command {
     match std::env::var_os("CRED_CLI_BIN") {
         Some(path) => Command::new(path),
@@ -1394,6 +1424,11 @@ fn the_migrate_opencode_handle_write_failure_leaves_the_real_auth_entry_untouche
 #[cfg(debug_assertions)]
 #[test]
 fn the_migrate_opencode_revokes_a_mint_when_the_first_handle_persist_fails() {
+    if skip_if_seam_is_compiled_out(
+        "the_migrate_opencode_revokes_a_mint_when_the_first_handle_persist_fails",
+    ) {
+        return;
+    }
     let rig = MigrationRig::new(
         "mint-guard-first-persist",
         json!({"deepseek": {"type": "api", "key": "first-secret"}}),
@@ -1406,6 +1441,11 @@ fn the_migrate_opencode_revokes_a_mint_when_the_first_handle_persist_fails() {
 #[cfg(debug_assertions)]
 #[test]
 fn the_migrate_opencode_revokes_a_mint_when_a_missing_handle_persist_fails() {
+    if skip_if_seam_is_compiled_out(
+        "the_migrate_opencode_revokes_a_mint_when_a_missing_handle_persist_fails",
+    ) {
+        return;
+    }
     let rig = MigrationRig::new(
         "mint-guard-missing-handle",
         json!({"deepseek": {"type": "api", "key": "missing-secret"}}),
@@ -1429,6 +1469,11 @@ fn the_migrate_opencode_revokes_a_mint_when_a_missing_handle_persist_fails() {
 #[cfg(debug_assertions)]
 #[test]
 fn the_migrate_opencode_revokes_a_remint_when_lost_handle_persist_fails() {
+    if skip_if_seam_is_compiled_out(
+        "the_migrate_opencode_revokes_a_remint_when_lost_handle_persist_fails",
+    ) {
+        return;
+    }
     let rig = MigrationRig::new(
         "mint-guard-lost-handle",
         json!({"deepseek": {"type": "api", "key": "lost-secret"}}),
@@ -1462,6 +1507,11 @@ fn the_migrate_opencode_revokes_a_remint_when_lost_handle_persist_fails() {
 #[cfg(debug_assertions)]
 #[test]
 fn the_migrate_opencode_restore_revokes_a_remint_when_handle_persist_fails() {
+    if skip_if_seam_is_compiled_out(
+        "the_migrate_opencode_restore_revokes_a_remint_when_handle_persist_fails",
+    ) {
+        return;
+    }
     let rig = MigrationRig::new(
         "mint-guard-restore",
         json!({"deepseek": {"type": "api", "key": "restore-secret"}}),
@@ -1496,6 +1546,11 @@ fn the_migrate_opencode_restore_revokes_a_remint_when_handle_persist_fails() {
 #[cfg(debug_assertions)]
 #[test]
 fn the_migrate_opencode_names_the_audit_and_revoke_remedies_when_cleanup_fails() {
+    if skip_if_seam_is_compiled_out(
+        "the_migrate_opencode_names_the_audit_and_revoke_remedies_when_cleanup_fails",
+    ) {
+        return;
+    }
     let rig = MigrationRig::new(
         "mint-guard-revoke-failure",
         json!({"deepseek": {"type": "api", "key": "revoke-secret"}}),
@@ -1526,6 +1581,11 @@ fn the_migrate_opencode_names_the_audit_and_revoke_remedies_when_cleanup_fails()
 #[cfg(debug_assertions)]
 #[test]
 fn the_migrate_opencode_tombstone_reread_failure_keeps_the_old_handle_until_rerun() {
+    if skip_if_seam_is_compiled_out(
+        "the_migrate_opencode_tombstone_reread_failure_keeps_the_old_handle_until_rerun",
+    ) {
+        return;
+    }
     let rig = MigrationRig::new(
         "migration-tombstone-seam",
         json!({"deepseek": {"type": "api", "key": "old-secret"}}),
@@ -1816,6 +1876,11 @@ fn the_opencode_account_add_key_file_stdin_does_not_echo_material() {
 #[cfg(debug_assertions)]
 #[test]
 fn the_opencode_account_add_recovers_a_mint_before_handle_write_with_one_live_handle() {
+    if skip_if_seam_is_compiled_out(
+        "the_opencode_account_add_recovers_a_mint_before_handle_write_with_one_live_handle",
+    ) {
+        return;
+    }
     let rig = MigrationRig::new(
         "account-add-handle-write-crash",
         json!({"deepseek": {"type": "api", "key": "main-secret"}}),
@@ -1922,6 +1987,11 @@ fn the_opencode_account_add_revokes_its_verification_handle_when_existing_materi
 #[cfg(debug_assertions)]
 #[test]
 fn the_opencode_account_add_revokes_its_verification_handle_when_material_read_fails() {
+    if skip_if_seam_is_compiled_out(
+        "the_opencode_account_add_revokes_its_verification_handle_when_material_read_fails",
+    ) {
+        return;
+    }
     let rig = MigrationRig::new(
         "account-add-verification-read-failure",
         json!({"deepseek": {"type": "api", "key": "main-secret"}}),
@@ -1964,6 +2034,11 @@ fn the_opencode_account_add_revokes_its_verification_handle_when_material_read_f
 #[cfg(debug_assertions)]
 #[test]
 fn the_opencode_account_add_names_remedies_when_verification_cleanup_fails() {
+    if skip_if_seam_is_compiled_out(
+        "the_opencode_account_add_names_remedies_when_verification_cleanup_fails",
+    ) {
+        return;
+    }
     let rig = MigrationRig::new(
         "account-add-verification-revoke-failure",
         json!({"deepseek": {"type": "api", "key": "main-secret"}}),

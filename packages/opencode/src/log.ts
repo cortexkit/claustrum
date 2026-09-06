@@ -36,6 +36,7 @@ export const FILE_FIELDS: Array<keyof CustodyLogEntry> = [
   "cooldownUntil", "errorClass", "errorCode", "ts", "pid",
 ];
 const CREDENTIAL_ID = /^[A-Za-z0-9._:-]{1,128}$/;
+// Lowercase-snake residuals such as sk_fake_secret share the admitted code shape and cannot be separated from real codes.
 export const ERROR_CLASS = /^(?:[A-Z][A-Za-z0-9]{0,47}|[a-z][a-z0-9_]{1,23})$/;
 export const ERROR_CODE = /^(?:[A-Z][A-Z0-9_]{1,23}|[a-z][a-z0-9_]{1,23})$/;
 const LEVELS = new Set(["debug", "info", "warn", "error"]);

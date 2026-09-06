@@ -222,7 +222,7 @@ describe("custody logger", () => {
     expect(records.slice(classes.length).map((record) => record.errorCode)).toEqual(codes);
   });
 
-  test("secret-shaped values are rejected by both error rules", () => {
+  test("realistic credential shapes are rejected by both error rules", () => {
     const root = join(tmpdir(), `claustrum-log-${crypto.randomUUID()}`);
     const path = join(root, "custody.jsonl");
     const handle = `ckh_${"A".repeat(43)}`;
@@ -244,6 +244,23 @@ describe("custody logger", () => {
       expect(record.errorClass).toBe("invalid_shape");
       expect(record.errorCode).toBe("invalid_shape");
     }
+  });
+
+  test("a code-shaped token is indistinguishable from a code and is written as-is (declared residual)", () => {
+    const root = join(tmpdir(), `claustrum-log-${crypto.randomUUID()}`);
+    const path = join(root, "custody.jsonl");
+    const residual = "sk_fake_secret";
+    const logger = createLogger(createFileLogSink({ path }));
+    logger.error({ provider: "openai", errorCode: residual, errorClass: residual });
+    logger.error({ provider: "openai", errorCode: "not_found", errorClass: "not_found" });
+
+    // sk_fake_secret has the same shape as not_found; no provider issues this short token as a
+    // secret, and rejecting it would also reject real codes, so this guards against over-tightening.
+    const records = readFileSync(path, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    expect(records[0]?.errorCode).toBe(residual);
+    expect(records[0]?.errorClass).toBe(residual);
+    expect(records[1]?.errorCode).toBe("not_found");
+    expect(records[1]?.errorClass).toBe("not_found");
   });
 
   test("file sink rejects objects routed into allowlisted fields", () => {

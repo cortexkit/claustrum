@@ -91,6 +91,45 @@ one also targeted the pre-rename data directory, so running it would have been
 actively wrong rather than merely old — worth deleting on sight rather than
 keeping for sentiment.
 
+### A DAEMON rollback copy stops being a rollback TARGET at the next migration
+
+The rule above is about confusion. This one is about correctness, and it retires
+copies faster than the two-most-recent rule does.
+
+Rolling the daemon back is safe only while the target's migration chain is at least
+as new as the store's. **And the protection is asymmetric: the store-ahead refusal
+(`560073d`) lives in the binary you roll back TO, not in the store.**
+
+```
+target HAS the refusal        refuses to serve, names both versions, touches nothing
+target PREDATES the refusal   migrates-and-serves a schema it cannot reason about
+```
+
+Measured on what was sitting in the bin path on 2026-09-06, store at schema 8:
+
+```
+ck-claustrum.rollback-20260901T082940   a683fb9 — chain_max 7, AND predates the refusal
+ck-claustrum.rollback-20260812T071751Z  predates CK_BUILD_REV (no --version at all)
+```
+
+So the newest daemon rollback copy from before 2026-09-06 would not refuse. It would
+open a schema-8 store, not see migrations 8, and serve — and the first grant write
+would fail on `read_grants.operation` NOT NULL, because migration 6 rebuilt that
+table. Not a reduced-feature vault: one that works until a write of the wrong shape,
+at a moment nobody connects to the rollback.
+
+Check the target against the STORE rather than against the calendar:
+
+```sh
+sqlite3 "file:$DATA_DIR/store.db?mode=ro" \
+  "SELECT MAX(version) FROM cortexkit_schema_version WHERE namespace='credentials';"
+git merge-base --is-ancestor <newest-migration-commit> <target-rev> \
+  && echo "target carries that migration" || echo "STALE — not a rollback target"
+```
+
+A stale target is not a rollback. Restore the store alongside the binary (backups
+capture it), or roll forward instead.
+
 ## The single-writer rule (read this first)
 
 There is exactly one writer at a time, always. What changes is **who** it is.

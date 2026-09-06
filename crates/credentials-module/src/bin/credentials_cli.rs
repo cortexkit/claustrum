@@ -1161,11 +1161,25 @@ fn cmd_put(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             // caller had to tail past it to find `created <id>`. An operator reads both
             // either way; a script capturing stdout now gets the verdict alone.
             if !created_id_is_already_reachable(global, &id) {
+                // STATE THE FACT, AND MAKE THE STEP CONDITIONAL ON A CONSUMER EXISTING.
+                //
+                // This used to read "mint one with ...", which assumes the operator
+                // deposited FOR a consumer that is already waiting. Depositing AHEAD of
+                // one is equally legitimate, and there the advice is wrong: a capability
+                // handle is bearer material, so minting it early creates a live
+                // credential surface whose only property is that nobody can use it yet.
+                //
+                // Corrected 2026-09-06 after an operator declined the advice with better
+                // reasoning than the advice had -- they deposited a key whose consumer
+                // could not select it until a field ships, and minting would have left a
+                // reachable secret with no reader in the meantime.
                 eprintln!(
                     "(not reachable by any consumer yet: no capability handle and no \
-                     covering grant; mint one with `ck auth mint-handle --id {id}` and \
-                     place it where the consumer reads handles — the vault cannot write \
-                     that file)"
+                     covering grant. When a consumer needs it, mint a handle with \
+                     `ck auth mint-handle --id {id}` and place it where that consumer \
+                     reads handles — the vault cannot write that file. A handle is bearer \
+                     material, so it is worth minting when there is a reader rather than \
+                     ahead of one.)"
                 );
             }
         }

@@ -3163,6 +3163,22 @@ pub struct RestoreResurrection {
     /// so a copy taken before it carries no trace that it happened. The audit chain in
     /// that file ends before the revoke, and nothing in the file can see that its tip is
     /// old.
+    ///
+    /// *** A SCRUB OF THIS TABLE MUST REVOKE, NOT DELETE. *** Both close the re-arm
+    /// hazard identically, because `resolve_handle` gates on `revoked = 0` and a revoked
+    /// handle is indistinguishable from an unknown one on the wire. But deleting the rows
+    /// severs the only join that makes historical `revoke_handle` audit entries readable:
+    /// those rows record the handle HASH and carry no credential id, so
+    /// `audit_log.payload_hash = handles.handle_hash` is what names the credential.
+    ///
+    /// Measured on the live store when this was written: 61 such audit rows, 56 still
+    /// joinable, 5 ALREADY unjoinable because `ck auth remove` deletes handle rows for a
+    /// removed credential. Those five are the control -- they are what a delete-shaped
+    /// scrub would do to the other 56, having already happened for a reason that is
+    /// correct in its own context.
+    ///
+    /// The chain still VERIFIES either way; the MACs are untouched. Integrity and
+    /// interpretability are different properties and only one of them has a check.
     pub live_handles: usize,
     /// Dangling refresh intents.
     ///

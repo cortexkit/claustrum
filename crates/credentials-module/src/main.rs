@@ -357,10 +357,23 @@ where
     // ~90s to Unresponsive plus up to 30s drain before SIGKILL. Acceptable because a
     // read failing for two minutes is a `transient` refusal every consumer retries.
     //
-    // THE BUDGET IS THE REAL FAILURE MODE, not the window: DEFAULT_MAX_RESTARTS is 3,
-    // lifetime. A RECURRING silent death does not converge on a self-healing loop, it
-    // converges on a PARKED MODULE -- every credential in the fleet unreachable until
-    // an operator revives it. "The supervisor restarts us" is true three times.
+    // THE BUDGET IS THE REAL FAILURE MODE, not the window: 3 crash restarts within a
+    // 600s window (DEFAULT_MAX_RESTARTS, DEFAULT_RESTART_WINDOW), re-derived at source
+    // 2026-09-05. Restarts older than the window release their slot, so the budget is a
+    // RATE and not a lifetime cap.
+    //
+    // THIS PARAGRAPH SAID "3, LIFETIME" UNTIL subc-core 0.17.17, AND THE DATE IS WHY IT
+    // WAS CAUGHT. That is the mechanism this block argues for working once: a borrowed
+    // constant that named its source but not when it was last true would still read as
+    // current, and the conclusion drawn from it would have kept its authority after the
+    // premise stopped holding.
+    //
+    // What the correction changes: a recurring silent death SPREAD THIN no longer parks
+    // the module -- deaths more than 600s apart never accumulate. What it does not
+    // change, and the reason this paragraph still stands: a FAST loop still parks, and
+    // parked means every credential in the fleet unreachable until an operator revives
+    // it. So "the supervisor restarts us" remains true only three times in ten minutes,
+    // which is the case a genuine crash loop produces.
     //
     // Do NOT add a redundant liveness probe here on the strength of the paragraph
     // above; the supervisor's already fires and a second one would only add a way to

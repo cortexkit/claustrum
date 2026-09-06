@@ -19,6 +19,21 @@
 //!   but must not keep serving as the authority). The detail distinguishes them
 //!   because the operator action differs: unreadable ⇒ check disk/lease; fenced
 //!   ⇒ find the newer writer.
+//!
+//!   *** "FIND THE NEWER WRITER" IS THE RIGHT ADVICE FOR THE CASE THIS WAS WRITTEN
+//!   FOR AND THE WRONG ADVICE AFTER A RESTORE. *** A restored store carries the fence
+//!   epoch from the machine it was captured on, while the lease counter is a LOCAL
+//!   file keyed on (module_id, backend, namespace) that starts fresh. If the restored
+//!   epoch outruns the local counter, every write is refused and the daemon reports
+//!   exactly this state — with no newer writer anywhere, because the competitor it
+//!   names does not exist. Measured during the 2026-08-07 module rename: the store
+//!   carried epoch 174 against a lease file at 1, and the refusal was correct,
+//!   immediate, and pointed at a process nobody could find. It cost a maintenance
+//!   window to diagnose.
+//!
+//!   So the fence epoch is CAPTURE-NEVER-RESTORE (pinned with engram 2026-09-06,
+//!   alongside `handles` and `refresh_intent`), and if you are reading this detail on
+//!   a store that was just restored, the answer is the epoch rather than a rival.
 //! - `Degraded` — the store serves, but ≥1 credential needs operator action because
 //!   it is `needs_reauth` or `corrupt`. `retired` is intentionally excluded: it records
 //!   an operator decision, not an alarm. An expired token is a degraded DETAIL, never

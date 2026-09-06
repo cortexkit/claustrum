@@ -1754,7 +1754,7 @@ dependencies = [
 
 [[package]]
 name = "subc-core"
-version = "0.17.17"
+version = "0.17.18"
 dependencies = [
  "base64",
  "cortexkit-paths 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -1795,10 +1795,11 @@ dependencies = [
 
 [[package]]
 name = "subc-transport"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "getrandom 0.2.17",
  "hmac",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",

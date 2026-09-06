@@ -2683,7 +2683,7 @@ fn request_admin_status(global: &GlobalArgs) -> Result<serde_json::Value, CliErr
         }
     }
 
-    let db = global.data_dir.join("store.db");
+    let db = store_path(global);
     if !db.exists() {
         return Err(CliError::Usage(format!(
             "no vault at {} (run 'ck auth bootstrap' first)",
@@ -3195,7 +3195,7 @@ fn cmd_audit(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     // plaintext, so this needs neither the lease nor a master key. It used to take the
     // lease, which meant the forensic log was unreadable while the vault ran -- i.e.
     // whenever anyone actually wanted it.
-    let db = global.data_dir.join("store.db");
+    let db = store_path(global);
     if !db.exists() {
         return Err(CliError::Usage(format!(
             "no vault at {} (run 'ck auth bootstrap' first)",
@@ -3274,7 +3274,7 @@ fn cmd_events(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
         .map_err(|e| CliError::Usage(format!("--limit not an integer: {e}")))?
         .unwrap_or(20);
 
-    let db = global.data_dir.join("store.db");
+    let db = store_path(global);
     if !db.exists() {
         return Err(CliError::Usage(format!(
             "no vault at {} (run 'ck auth bootstrap' first)",
@@ -3453,7 +3453,7 @@ fn cmd_grants(global: &GlobalArgs) -> Result<(), CliError> {
 fn cmd_usable(global: &GlobalArgs) -> Result<(), CliError> {
     use credentials_core::usable::{self, ScanError, Usability};
 
-    let db = global.data_dir.join("store.db");
+    let db = store_path(global);
     if !db.exists() {
         return Err(CliError::Usage(format!(
             "no vault at {} (run 'ck auth bootstrap' first)",
@@ -3667,7 +3667,7 @@ fn warn_unsafe_opencode_tombstones() {
 /// fingerprint names, so a vault left mid-rotation still verifies) and reads through a
 /// lease-free connection, exactly like `events` and `usable`.
 fn cmd_verify_audit(global: &GlobalArgs) -> Result<(), CliError> {
-    let db = global.data_dir.join("store.db");
+    let db = store_path(global);
     if !db.exists() {
         return Err(CliError::Usage(format!(
             "no vault at {} (run 'ck auth bootstrap' first)",
@@ -3821,6 +3821,17 @@ fn resolve_data_home_from(
 /// `~/.local/share/cortexkit/run/subc-connection.json`. Only an EXISTING file is
 /// returned — no daemon means the offline lease path, which is the correct
 /// fallback, not an error.
+/// The vault store's path under a data directory.
+///
+/// One site rather than five identical `join("store.db")` calls. The filename is not
+/// this CLI's to choose -- the daemon opens it through `cortexkit-store` from the same
+/// data dir -- so a literal repeated per read verb is five places for a rename to land
+/// in four. Unlike the connection-file rung above, there is no second authority here
+/// that would make the duplication correct.
+fn store_path(global: &GlobalArgs) -> PathBuf {
+    global.data_dir.join("store.db")
+}
+
 fn discover_subc_connection_file() -> Option<PathBuf> {
     const CONNECTION_FILE_NAME: &str = "subc-connection.json";
 
@@ -3854,6 +3865,26 @@ fn discover_subc_connection_file() -> Option<PathBuf> {
             return Some(p);
         }
     }
+    // *** THIS REBUILDS THE PREFIX `default_data_home()` DERIVES TWELVE LINES ABOVE, AND
+    // THAT DUPLICATION IS CORRECT. DO NOT COLLAPSE THEM. ***
+    //
+    // They look like one behaviour written twice and they answer different questions:
+    //
+    //   default_data_home()   where THIS MODULE's data lives -- XDG_DATA_HOME first,
+    //                         then the Windows AppData rungs, then HOME/.local/share
+    //   this rung             where `ck` LOOKS for a connection file -- HOME only,
+    //                         matching subc-core's PROD_CONNECTION_RELATIVE_PATH
+    //
+    // `ck`'s reader consults HOME and does NOT consult XDG_DATA_HOME for this rung
+    // (bin/ck.rs, `connection_file_candidates_with`, re-derived at source 2026-09-05).
+    // So routing this through `default_data_home()` would make the CLI look somewhere
+    // `ck` never looks the moment an operator sets XDG_DATA_HOME -- reintroducing the
+    // looks-where-ck-does-not class that the SUBC_CONNECTION_FILE rung above was added
+    // to close, in the same function, by way of tidying.
+    //
+    // Recorded because a duplicate-value audit REPORTS THIS PAIR, and the obvious
+    // remedy is the defect. A reported duplicate is a candidate until it is resolved
+    // against the other side's authority; these two have different authorities.
     if let Some(home) = non_empty_env("HOME") {
         let p = PathBuf::from(home)
             .join(".local")

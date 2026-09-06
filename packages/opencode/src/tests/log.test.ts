@@ -9,6 +9,7 @@ import {
   ERROR_CLASS,
   ERROR_CODE,
   FILE_FIELDS,
+  isAllHexBody,
   serializedLogSink,
   STATES,
 } from "../log";
@@ -206,6 +207,10 @@ describe("custody logger", () => {
     });
     const wireErrorClasses = ["transient", "permanent", "auth_required", "context_overflow"];
     for (const errorClass of [...customErrors, ...wireErrorClasses]) expect(ERROR_CLASS.test(errorClass)).toBe(true);
+    expect(isAllHexBody("deadbeef")).toBe(true);
+    for (const value of [...errorClasses, ...errorCodes, ...customErrors, ...wireErrorClasses]) {
+      expect(isAllHexBody(value)).toBe(false);
+    }
   });
 
   test("producer error classes and codes retain their real shapes", () => {
@@ -235,6 +240,10 @@ describe("custody logger", () => {
       "a".repeat(64),
       "a".repeat(32),
       "a".repeat(32).replace(/a/g, "z"),
+      "a".repeat(16),
+      "a".repeat(24),
+      "A".repeat(24),
+      "1".repeat(24),
     ];
     const logger = createLogger(createFileLogSink({ path }));
     for (const value of rows) logger.error({ provider: "openai", errorClass: value, errorCode: value });

@@ -36,9 +36,12 @@ export const FILE_FIELDS: Array<keyof CustodyLogEntry> = [
   "cooldownUntil", "errorClass", "errorCode", "ts", "pid",
 ];
 const CREDENTIAL_ID = /^[A-Za-z0-9._:-]{1,128}$/;
-// Lowercase-snake residuals such as sk_fake_secret share the admitted code shape and cannot be separated from real codes.
+// A ≤24-character lowercase-snake residual such as sk_fake_secret shares the admitted code shape and is not all-hex.
 export const ERROR_CLASS = /^(?:[A-Z][A-Za-z0-9]{0,47}|[a-z][a-z0-9_]{1,23})$/;
 export const ERROR_CODE = /^(?:[A-Z][A-Z0-9_]{1,23}|[a-z][a-z0-9_]{1,23})$/;
+export function isAllHexBody(value: string): boolean {
+  return /^[0-9a-f]+$/i.test(value);
+}
 const LEVELS = new Set(["debug", "info", "warn", "error"]);
 const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T[\d:.]+Z$/;
 export const STATES = new Set([
@@ -65,6 +68,7 @@ function defaultFilePath(env: NodeJS.ProcessEnv): string {
 }
 
 function fileEntry(entry: CustodyLogEntry): Record<string, unknown> {
+  // These pre-filter additions are process-generated ts/pid only; caller-influenced values enter through entry and their rules.
   const withMetadata = { ...entry, ts: new Date().toISOString(), pid: process.pid };
   const safe: Record<string, unknown> = {};
   for (const field of FILE_FIELDS) {
@@ -83,8 +87,8 @@ function fileEntry(entry: CustodyLogEntry): Record<string, unknown> {
         case "label": valid = identifierIsValid(value); break;
         case "credentialId": valid = CREDENTIAL_ID.test(value); break;
         case "state": valid = STATES.has(value); break;
-        case "errorClass": valid = ERROR_CLASS.test(value); break;
-        case "errorCode": valid = ERROR_CODE.test(value); break;
+        case "errorClass": valid = ERROR_CLASS.test(value) && !isAllHexBody(value); break;
+        case "errorCode": valid = ERROR_CODE.test(value) && !isAllHexBody(value); break;
         case "ts": valid = ISO_TIMESTAMP.test(value); break;
         default: valid = false;
       }

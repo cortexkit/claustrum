@@ -2,7 +2,14 @@ name: CI
 
 on:
   push:
-    branches: [master]
+    # `train/**` IS A PRECONDITION FOR THE CI-GATED TRAIN SHAPE, NOT A CONVENIENCE.
+    # Under that shape a branch push is the gate and main is fast-forwarded only on a
+    # green run, with GitHub required-status-checks refusing any sha that carries no
+    # check. So enabling protection while this trigger still said `[master]` alone would
+    # make main unpushable and the check that would clear it would never run -- the
+    # branch push produces nothing to wait for. Widened first, deliberately, before any
+    # protection is enabled.
+    branches: [master, 'train/**']
   pull_request:
   workflow_call:
   # Manual trigger, so a commit whose push webhook was missed (GitHub occasionally

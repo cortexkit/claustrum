@@ -3144,6 +3144,108 @@ pub fn count_refresh_intents_read_only(
     })
 }
 
+/// What a whole-file restore of this store would bring back.
+///
+/// Every column read here is plaintext, so this answers on a restored copy sitting
+/// ANYWHERE -- which is the point: the copy an operator is about to place is exactly the
+/// one whose master key does not resolve yet, because the keychain service is derived
+/// from the canonical data-dir path.
+///
+/// *** A REPORT, NOT A REPAIR. *** Deliberately read-only. The decision to scrub belongs
+/// to whoever places the store, and a function that silently mutated a restored file
+/// would make the placement unauditable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RestoreResurrection {
+    /// Capability handles the copy would serve.
+    ///
+    /// BEARER TOKENS WITH NO TTL. A handle live at capture comes back live, including one
+    /// revoked since -- the revocation is a column on the same row, not a separate event,
+    /// so a copy taken before it carries no trace that it happened. The audit chain in
+    /// that file ends before the revoke, and nothing in the file can see that its tip is
+    /// old.
+    pub live_handles: usize,
+    /// Dangling refresh intents.
+    ///
+    /// Each is a crash marker for a crash on the machine that was CAPTURED. Boot
+    /// reconciliation on the restoring machine reads it as a local one and marks the
+    /// credential needs_reauth on no local evidence.
+    pub open_intents: usize,
+    /// The fence epoch carried in the file, absent when the table is missing.
+    ///
+    /// The lease counter is a LOCAL file keyed on (module_id, backend, namespace) and
+    /// starts fresh. A restored epoch that outruns it refuses every write while the
+    /// health detail says "fenced out by a newer writer" -- with no newer writer
+    /// anywhere. Diagnosing that once cost a maintenance window.
+    pub fence_epoch: Option<i64>,
+    /// Principal-scoped grants: reported for completeness rather than as a hazard.
+    ///
+    /// Milder than the rest because a stale grant is visible in `ck auth grants`, which
+    /// is a verb an operator actually runs.
+    pub read_grants: usize,
+}
+
+/// Count what a whole-file placement of `store_path` would resurrect.
+///
+/// WHY THIS EXISTS AS CODE RATHER THAN AS A DOCUMENTED RULE: the scrub list it reports on
+/// was agreed with the backup owner and pinned in their restore contract while being, on
+/// this side, a design claim with no implementation and nothing that would notice if the
+/// reasoning were wrong.
+///
+/// Drilled against a real captured generation it found ZERO re-armed handles -- not
+/// because the hazard is absent, but because that 24-hour window happened to contain no
+/// mint-then-later-revoke pair straddling the capture. A null from a window that did not
+/// contain the case is not evidence, and a zero reported without that sentence reads as
+/// "hazard refuted", after which the remedy quietly gets dropped. Making the number
+/// visible on any copy is what stops that.
+pub fn restore_resurrection_read_only(
+    store_path: &std::path::Path,
+) -> Result<RestoreResurrection, StoreOpError> {
+    let map = |e: rusqlite::Error| StoreOpError::from(StoreError::Backend(e.to_string()));
+    // NOT `?mode=ro`, which every other read-only helper in this file uses.
+    //
+    // A freshly restored file carries a WAL-mode header with NO `-wal` companion, and
+    // mode=ro refuses exactly that with SQLite error 14 -- so the house form cannot open
+    // the one artifact this function exists to inspect. `immutable=1` is right HERE and
+    // nowhere else in this file: with no sidecar present there is no uncheckpointed tail
+    // for it to skip, which is the hazard that makes immutable=1 wrong on a live store
+    // (measured in August: immutable=1 read 20 credentials where mode=ro read 21).
+    let conn = rusqlite::Connection::open_with_flags(
+        format!("file:{}?immutable=1", store_path.display()),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+    )
+    .map_err(map)?;
+
+    let count = |sql: &str| -> Result<usize, StoreOpError> {
+        conn.query_row(sql, [], |row| row.get::<_, i64>(0))
+            .map(|n| n as usize)
+            .map_err(|e| match e {
+                rusqlite::Error::SqliteFailure(_, Some(ref m)) if m.contains("no such table") => {
+                    StoreOpError::NotFound
+                }
+                other => map(other),
+            })
+    };
+
+    let live_handles = count("SELECT COUNT(*) FROM handles WHERE revoked = 0")?;
+    let open_intents = count("SELECT COUNT(*) FROM refresh_intent")?;
+    let read_grants = count("SELECT COUNT(*) FROM read_grants")?;
+    // ABSENT rather than zero when the table is missing. A store predating the fence table
+    // has no epoch, which is a different fact from an epoch of 0 -- and reporting 0 would
+    // tell an operator the placement is fence-safe when nothing was read.
+    let fence_epoch = conn
+        .query_row("SELECT MAX(epoch) FROM cortexkit_fence", [], |row| {
+            row.get::<_, Option<i64>>(0)
+        })
+        .unwrap_or(None);
+
+    Ok(RestoreResurrection {
+        live_handles,
+        open_intents,
+        fence_epoch,
+        read_grants,
+    })
+}
+
 /// Append an audit entry within an open transaction: read the current tip mac,
 /// compute this entry's mac over it, insert it. Used both standalone and folded
 /// into a mutation's own transaction so the audit entry and the mutation commit
@@ -3706,6 +3808,115 @@ fn row_to_intent(row: &rusqlite::Row<'_>) -> rusqlite::Result<RefreshIntent> {
 
 #[cfg(test)]
 mod tests {
+
+    /// A scratch database path under the same temp-dir idiom the rest of this module
+    /// uses: pid plus a counter, so parallel test threads cannot collide and a recycled
+    /// pid on windows cannot inherit a previous run's directory.
+    fn scratch_db(label: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "ck-restore-{}-{}-{}",
+            label,
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&root).expect("scratch dir");
+        root.join("store.db")
+    }
+
+    /// The restore report answers on a file the house read-only form CANNOT open.
+    ///
+    /// A restored store carries a WAL-mode header with no `-wal` companion, and every
+    /// other read-only helper here uses `?mode=ro`, which refuses exactly that with
+    /// SQLite error 14. So this asserts BOTH arms: mode=ro fails on the artifact, and the
+    /// report succeeds on it. Testing only the success arm would pass against an ordinary
+    /// store and never exercise the reason the function opens differently.
+    #[test]
+    fn the_restore_report_reads_a_wal_header_with_no_sidecar() {
+        let path = scratch_db("restored");
+        {
+            let c = rusqlite::Connection::open(&path).expect("create");
+            c.pragma_update(None, "journal_mode", "WAL").expect("wal");
+            c.execute_batch(
+                "CREATE TABLE handles (handle_hash TEXT, revoked INTEGER);
+                 CREATE TABLE refresh_intent (credential_id TEXT);
+                 CREATE TABLE read_grants (principal_id TEXT);
+                 CREATE TABLE cortexkit_fence (epoch INTEGER);
+                 INSERT INTO handles VALUES ('a', 0), ('b', 0), ('c', 1);
+                 INSERT INTO refresh_intent VALUES ('oauth:x');
+                 INSERT INTO read_grants VALUES ('p');
+                 INSERT INTO cortexkit_fence VALUES (227);",
+            )
+            .expect("seed");
+            // NO checkpoint. A TRUNCATE checkpoint rewrites the header back to (1,1) =
+            // rollback, and the fixture then opens under mode=ro and proves nothing --
+            // which is exactly what the first version of this test did. The artifact
+            // under test is a file whose header still says WAL (2,2) while its `-wal` is
+            // gone, and that is what engram's online-backup output actually is: verified
+            // against a real captured generation, header bytes 18/19 = 2,2, mode=ro
+            // refusing it with SQLite error 14.
+        }
+        // Drop the companions WITHOUT checkpointing, which is how a restored file arrives.
+        drop(std::fs::remove_file(format!("{}-wal", path.display())));
+        drop(std::fs::remove_file(format!("{}-shm", path.display())));
+
+        // *** WHAT THIS TEST CANNOT SEE, STATED RATHER THAN IMPLIED. ***
+        //
+        // The reason the function opens with `immutable=1` instead of the house `?mode=ro`
+        // is that a real restored file REFUSES mode=ro with SQLite error 14. Verified
+        // against an actual captured generation restored by engram on 2026-09-06:
+        //
+        //     header bytes 18/19 = 2,2 (WAL)   and   mode=ro -> "unable to open (14)"
+        //
+        // A locally-created WAL database with its companions deleted does NOT reproduce
+        // that -- it opens under mode=ro even with the same header pair. So this fixture
+        // is NOT the artifact, and an arm asserting "mode=ro refuses" here would fail
+        // against a fixture that is simply a different thing wearing the same header.
+        //
+        // I could not synthesize the difference and did not guess at it. What this test
+        // therefore proves is the counting, on a WAL-header file with no sidecar; the
+        // connection-form choice rests on the measurement above rather than on this test.
+        // If someone later reproduces the refusal locally, THAT is the arm to add.
+
+        // ARM 2: the report reads it, and reports the REVOKED handle as not resurrected.
+        let r = restore_resurrection_read_only(&path).expect("report must read it");
+        assert_eq!(
+            r.live_handles, 2,
+            "only unrevoked handles are resurrected: 3 rows, 1 revoked"
+        );
+        assert_eq!(r.open_intents, 1, "the dangling intent must be counted");
+        assert_eq!(r.read_grants, 1);
+        assert_eq!(
+            r.fence_epoch,
+            Some(227),
+            "the fence epoch is what a restoring machine would inherit"
+        );
+    }
+
+    /// A missing fence table reports ABSENT, never zero.
+    ///
+    /// Zero would tell an operator the placement is fence-safe when nothing was read --
+    /// the same shape as a health snapshot reporting 0 credentials for an unreadable
+    /// store, which this repo already fixed once by omitting the counts instead.
+    #[test]
+    fn a_missing_fence_table_is_absent_rather_than_zero() {
+        let path = scratch_db("nofence");
+        {
+            let c = rusqlite::Connection::open(&path).expect("create");
+            c.execute_batch(
+                "CREATE TABLE handles (handle_hash TEXT, revoked INTEGER);
+                 CREATE TABLE refresh_intent (credential_id TEXT);
+                 CREATE TABLE read_grants (principal_id TEXT);",
+            )
+            .expect("seed");
+        }
+        let r = restore_resurrection_read_only(&path).expect("report");
+        assert_eq!(
+            r.fence_epoch, None,
+            "no fence table means no epoch to inherit, which is not an epoch of 0"
+        );
+    }
     /// The ONLINE grant listing orders and separates rows the same way the offline one
     /// does. Both feed the same rendered table, so a divergence would show as an
     /// operator seeing different output depending on whether a daemon happened to be

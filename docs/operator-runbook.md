@@ -914,9 +914,36 @@ from the canonical data-dir path.
 keychain item does not travel in a store backup by design: putting it there would make
 the backup sufficient to decrypt every credential in it.
 
-UNEXERCISED AS OF 2026-09-06. Capture is enrolled; no restore of this store has been
-walked end to end from this seat. That is a claim about the future until someone does
-it, and the first person to try should not be doing it during an incident.
+EXERCISED 2026-09-06, both arms, and the numbers are worth keeping because they are what
+a future restore should look like.
+
+```
+local arm    staging -> plaintext   gen 182, 2,822,144 bytes, integrity ok, 52 credentials
+cloud arm    R2 -> plaintext        byte-identical, sha256 6d1cb3f7412b5a2ca0a2f7f6985e3b54…
+```
+
+Two object sources, one answer. The cloud arm is the one a lost device needs, and it was
+the one still unproven for most of the day.
+
+**What the drill proved and what it did not.** It produced a structurally intact store
+carrying the right `key_id`, 52 credentials against 53 live — the missing row is
+`apikey:openai:astro`, deposited after the capture, so the delta is explicable to the row
+rather than merely small. It did NOT decrypt anything: the backup owner holds no key and
+should not. Placing that copy in a scratch data dir and pointing the CLI at it refused by
+name, which is the two-artifact requirement above behaving exactly as described.
+
+**One defect the drill found, in the recovery path itself:** the restore surface built its
+cloud target from the account JWT alone, so on a device-auth deployment it answered `401
+invalid token` and required an interactive login — at precisely the moment someone is
+reaching for a backup because something is already wrong. Fixed upstream before the drill
+re-ran. Worth recording because it is the shape a recovery path fails in: every other
+surface mints its own token on a tick, and restore was the one still on the human
+credential, unnoticed because nobody restores until something is broken.
+
+The evidence copy is retained at `restore-evidence/gen182-claustrum-store.db` (0600) with
+its digest pinned above. It is inert without the master key, and the daemon cannot mistake
+it for a live store: both the daemon and the CLI open an exact `store.db` path rather than
+scanning the directory.
 
 ## Rotating the master key
 

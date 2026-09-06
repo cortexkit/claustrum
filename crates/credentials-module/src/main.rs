@@ -1296,20 +1296,32 @@ fn manifest(module_id: &str) -> ModuleManifest {
     ModuleManifest::builder(
         module_id.to_string(),
         env!("CARGO_PKG_VERSION").to_string(),
-        TrustTier::FirstParty,
-        Bindings {
-            storage: StorageBinding {
-                kind: StorageKind::Sqlite,
-                scope: StorageScope::Project,
-                owns_schema: true,
-            },
-            vault_grants: Vec::new(),
-            identity: IdentityBinding {
-                requires: Vec::new(),
-                optional: Vec::new(),
-            },
-        },
     )
+    // TRUST TIER AND BINDINGS MOVED OUT OF `builder()` IN PROTOCOL 0.19 and are set here
+    // explicitly for the same reason every other optional setter below is: the builder
+    // defaults both to None, and an absence expressed by omission is indistinguishable
+    // from a field nobody considered.
+    //
+    // 0.19's own note says the daemon evaluates neither on any production path, and that
+    // a required-but-unread field forces producers to invent fabricated values. Both are
+    // true and neither makes these values fabricated HERE: this module really is
+    // first-party, and it really does own a project-scoped SQLite schema. Keeping them
+    // declared costs two calls and keeps the manifest a description of the module rather
+    // than of what the supervisor currently bothers to read -- which is a fact about the
+    // reader, and readers change.
+    .trust_tier(Some(TrustTier::FirstParty))
+    .bindings(Some(Bindings {
+        storage: StorageBinding {
+            kind: StorageKind::Sqlite,
+            scope: StorageScope::Project,
+            owns_schema: true,
+        },
+        vault_grants: Vec::new(),
+        identity: IdentityBinding {
+            requires: Vec::new(),
+            optional: Vec::new(),
+        },
+    }))
     // `capabilities(None)` is DELIBERATE, not an unfilled field.
     //
     // The protocol defines it as `Option<CapabilityDeclarations>` and states that
@@ -1638,6 +1650,48 @@ mod tests {
              no-plaintext-outward boundary with cerebellum and the immune-by-role-shape \
              property the supervisor's connection census depends on. Found: {:?}",
             manifest.consumes
+        );
+    }
+
+    /// The two fields protocol 0.19 moved OUT of `builder()` are still declared.
+    ///
+    /// 0.19 made `trust_tier` and `bindings` optional setters defaulting to `None`,
+    /// on the stated grounds that the daemon reads neither on any production path.
+    /// Both were previously REQUIRED positional arguments, so the compiler was the
+    /// thing keeping them present — and the migration silently converted a
+    /// compiler-enforced declaration into a convention.
+    ///
+    /// Measured rather than assumed: with `.trust_tier(...)` deleted, all 106 tests in
+    /// this binary passed. So nothing defended it, and the next person tidying the
+    /// builder chain would find a value the daemon admits it does not read, with no
+    /// test objecting.
+    ///
+    /// These are not fabricated defaults filled in to clear a compile error, which is
+    /// the failure 0.19's note is guarding against: this module IS first-party, and it
+    /// DOES own a project-scoped SQLite schema whose migrations it applies itself. A
+    /// manifest should describe the module rather than describe what the supervisor
+    /// currently bothers to read, because the reader changes and the module does not.
+    #[test]
+    fn the_manifest_still_declares_the_fields_protocol_0_19_made_optional() {
+        let manifest = super::manifest("claustrum");
+        assert_eq!(
+            manifest.trust_tier,
+            Some(TrustTier::FirstParty),
+            "claustrum must declare its trust tier even though the daemon does not read \
+             it: 0.19 moved this out of builder() so the compiler no longer requires it, \
+             and omission is indistinguishable from a field nobody considered"
+        );
+        let bindings = manifest
+            .bindings
+            .as_ref()
+            .expect("claustrum must declare its bindings: it owns a project-scoped SQLite schema");
+        assert!(
+            matches!(bindings.storage.kind, StorageKind::Sqlite)
+                && matches!(bindings.storage.scope, StorageScope::Project)
+                && bindings.storage.owns_schema,
+            "the storage binding must keep saying what this module actually does — \
+             sqlite, project-scoped, owns its schema. Found: {:?}",
+            bindings.storage
         );
     }
 

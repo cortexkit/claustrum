@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "module_id": "claustrum",
+  "entries": [
+    {
+      "entry_id": "claustrum/store",
+      "class": "portable",
+      "mechanism": "whole-db",
+      "path": "store.db",
+      "writer_interaction": "backup-api-live"
+    },
+    {
+      "entry_id": "claustrum/signed-payloads",
+      "class": "portable",
+      "mechanism": "filetree",
+      "path": "signed-payloads",
+      "writer_interaction": "none"
+    }
+  ]
+}

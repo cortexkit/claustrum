@@ -2,8 +2,8 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
+import { createFileLogSink, createLogger, FILE_FIELDS } from "../log";
 import { createOpencodeClaustrumPlugin } from "../plugin";
-import { FILE_FIELDS } from "../log";
 
 const savedEnv = new Map<string, string | undefined>();
 const fixtureRoots = new Set<string>();
@@ -67,6 +67,8 @@ describe("custody log secret absence canary", () => {
     const hooks = await createOpencodeClaustrumPlugin()({} as never) as { config?: (cfg: unknown) => Promise<void> };
     await hooks.config?.({ provider: {} });
 
+    createLogger(createFileLogSink({ path: custody })).error({ provider: "openai", errorCode: key, errorClass: handle });
+
     const records = readFileSync(custody, "utf8").trim().split("\n").map((line) => JSON.parse(line));
     expect(records.length).toBeGreaterThan(0);
     for (const record of records) {
@@ -75,5 +77,9 @@ describe("custody log secret absence canary", () => {
     }
     const contents = readFileSync(custody, "utf8");
     expect(contents).not.toContain(handle);
+    expect(contents).not.toContain(key);
+    const injected = records.at(-1)!;
+    expect(injected.errorCode).toBe("invalid_shape");
+    expect(injected.errorClass).toBe("invalid_shape");
   });
 });

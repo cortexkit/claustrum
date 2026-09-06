@@ -3,7 +3,15 @@ import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { createFileLogSink, createLogger, FILE_FIELDS, serializedLogSink, STATES } from "../log";
+import {
+  createFileLogSink,
+  createLogger,
+  ERROR_CLASS,
+  ERROR_CODE,
+  FILE_FIELDS,
+  serializedLogSink,
+  STATES,
+} from "../log";
 
 describe("custody logger", () => {
   const originalDebug = console.debug;
@@ -177,21 +185,34 @@ describe("custody logger", () => {
 
   test("STATES contains every literal state emitted by the producers", () => {
     const sourceFiles = ["plugin.ts", "serve.ts", "freshness.ts"];
-    const literals = sourceFiles.flatMap((file) => {
-      const source = readFileSync(join(import.meta.dir, "..", file), "utf8");
+    const sources = sourceFiles.map((file) => readFileSync(join(import.meta.dir, "..", file), "utf8"));
+    const literals = sources.flatMap((source) => {
       return [...source.matchAll(/state\s*(?::|=)\s*"([^"]+)"/g)].map((match) => match[1]!);
     });
+    const errorClasses = sources.flatMap((source) => [...source.matchAll(/errorClass\s*:\s*"([^"]+)"/g)].map((match) => match[1]!));
+    const errorCodes = sources.flatMap((source) => [...source.matchAll(/errorCode\s*:\s*"([^"]+)"/g)].map((match) => match[1]!));
 
     expect(literals.length).toBeGreaterThanOrEqual(3);
     for (const state of literals) expect(STATES.has(state)).toBe(true);
     expect(STATES.has("reauth")).toBe(true);
+    expect(errorClasses.length).toBeGreaterThanOrEqual(2);
+    for (const errorClass of errorClasses) expect(ERROR_CLASS.test(errorClass)).toBe(true);
+    expect(errorCodes.length).toBeGreaterThanOrEqual(2);
+    for (const errorCode of errorCodes) expect(ERROR_CODE.test(errorCode)).toBe(true);
+
+    const customErrors = ["errors.ts", "secret-json.ts"].flatMap((file) => {
+      const source = readFileSync(join(import.meta.dir, "..", file), "utf8");
+      return [...source.matchAll(/export class (\w+Error) extends/g)].map((match) => match[1]!);
+    });
+    const wireErrorClasses = ["transient", "permanent", "auth_required", "context_overflow"];
+    for (const errorClass of [...customErrors, ...wireErrorClasses]) expect(ERROR_CLASS.test(errorClass)).toBe(true);
   });
 
   test("producer error classes and codes retain their real shapes", () => {
     const root = join(tmpdir(), `claustrum-log-${crypto.randomUUID()}`);
     const path = join(root, "custody.jsonl");
-    const classes = ["SyntaxError", "HandleFileValidationError", "UpstreamFetchError", "FreshnessTickError", "AbortError"];
-    const codes = ["ENOENT", "EACCES", "ERR_INVALID_ARG_TYPE", "not_found", "needs_reauth", "kind_not_gettable", "sentinel_in_request"];
+    const classes = ["SyntaxError", "HandleFileValidationError", "UpstreamFetchError", "FreshnessTickError", "AbortError", "credential_warm", "transient", "permanent", "auth_required", "context_overflow", "other_owner"];
+    const codes = ["ENOENT", "EACCES", "ERR_INVALID_ARG_TYPE", "not_found", "needs_reauth", "kind_not_gettable", "sentinel_in_request", "timeout", "transport_error"];
     const logger = createLogger(createFileLogSink({ path }));
     for (const errorClass of classes) logger.error({ provider: "openai", errorClass });
     for (const errorCode of codes) logger.error({ provider: "openai", errorCode });
@@ -199,6 +220,30 @@ describe("custody logger", () => {
     const records = readFileSync(path, "utf8").trim().split("\n").map((line) => JSON.parse(line));
     expect(records.slice(0, classes.length).map((record) => record.errorClass)).toEqual(classes);
     expect(records.slice(classes.length).map((record) => record.errorCode)).toEqual(codes);
+  });
+
+  test("secret-shaped values are rejected by both error rules", () => {
+    const root = join(tmpdir(), `claustrum-log-${crypto.randomUUID()}`);
+    const path = join(root, "custody.jsonl");
+    const handle = `ckh_${"A".repeat(43)}`;
+    const handlePunctuated = `ckh_${"A".repeat(20)}-${"B".repeat(10)}_${"C".repeat(13)}`;
+    const rows = [
+      "sk-fake-secret-key",
+      `sk-ant-oat01-${"A".repeat(40)}`,
+      handle,
+      handlePunctuated,
+      "a".repeat(64),
+      "a".repeat(32),
+      "a".repeat(32).replace(/a/g, "z"),
+    ];
+    const logger = createLogger(createFileLogSink({ path }));
+    for (const value of rows) logger.error({ provider: "openai", errorClass: value, errorCode: value });
+
+    const records = readFileSync(path, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    for (const record of records) {
+      expect(record.errorClass).toBe("invalid_shape");
+      expect(record.errorCode).toBe("invalid_shape");
+    }
   });
 
   test("file sink rejects objects routed into allowlisted fields", () => {

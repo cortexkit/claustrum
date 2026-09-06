@@ -36,8 +36,8 @@ export const FILE_FIELDS: Array<keyof CustodyLogEntry> = [
   "cooldownUntil", "errorClass", "errorCode", "ts", "pid",
 ];
 const CREDENTIAL_ID = /^[A-Za-z0-9._:-]{1,128}$/;
-const ERROR_CLASS = /^[A-Z][A-Za-z0-9]{0,47}$/;
-const ERROR_CODE = /^(?:[A-Z][A-Z0-9_]{1,31}|[a-z][a-z0-9_]{1,31})$/;
+export const ERROR_CLASS = /^(?:[A-Z][A-Za-z0-9]{0,47}|[a-z][a-z0-9_]{1,23})$/;
+export const ERROR_CODE = /^(?:[A-Z][A-Z0-9_]{1,23}|[a-z][a-z0-9_]{1,23})$/;
 const LEVELS = new Set(["debug", "info", "warn", "error"]);
 const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T[\d:.]+Z$/;
 export const STATES = new Set([

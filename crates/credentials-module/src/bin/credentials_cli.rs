@@ -3823,6 +3823,31 @@ fn resolve_data_home_from(
 /// fallback, not an error.
 fn discover_subc_connection_file() -> Option<PathBuf> {
     const CONNECTION_FILE_NAME: &str = "subc-connection.json";
+
+    // SUBC_CONNECTION_FILE NAMES THE DAEMON THE CALLER MEANS, SO IT IS EXCLUSIVE RATHER
+    // THAN FIRST-IN-A-LIST -- matching `ck`'s own reader, re-derived at source
+    // 2026-09-05 from subc-core's `connection_file_candidates_with` in bin/ck.rs.
+    //
+    // This ladder is a COPY of that one and cannot be a call: subc-core exposes the
+    // WRITER's helper, which resolves to the temp fallback rather than searching, so
+    // calling it would answer about a path the daemon would write rather than the one it
+    // wrote. A copied ladder diverges SILENTLY -- nothing links the two, no test can
+    // compare them, and the failure is that this CLI looks where `ck` does not.
+    //
+    // IT HAD ALREADY DIVERGED. This arm was absent until 2026-09-05: an operator who set
+    // SUBC_CONNECTION_FILE to name a rig fell through to discovery and reached whichever
+    // daemon was found -- in practice production. For a read verb that is a true answer
+    // about the wrong machine; for `put`, `login` or `invalidate` it is a credential
+    // written into the wrong vault, with both stores looking healthy afterwards.
+    //
+    // Exclusive, not first-tried, for the reason subc gives: a value that is set and
+    // wrong must FAIL rather than fall back, or honouring it is indistinguishable from
+    // ignoring it. Returning it unconditionally keeps the existing not-found path, which
+    // names the file it could not read.
+    if let Some(named) = non_empty_env("SUBC_CONNECTION_FILE") {
+        return Some(PathBuf::from(named));
+    }
+
     if let Some(runtime_dir) = non_empty_env("XDG_RUNTIME_DIR") {
         let p = PathBuf::from(runtime_dir).join(CONNECTION_FILE_NAME);
         if p.is_file() {
@@ -3953,7 +3978,7 @@ fn connection_file_in(dir: &std::path::Path) -> ConnectionSearch {
 
 #[cfg(test)]
 mod discovery_tests {
-    use super::{connection_file_in, ConnectionSearch};
+    use super::{connection_file_in, discover_subc_connection_file, ConnectionSearch};
 
     /// An unreadable directory must not read as "no daemon is running".
     ///
@@ -3975,6 +4000,56 @@ mod discovery_tests {
         assert!(
             matches!(connection_file_in(missing), ConnectionSearch::Unreadable(_)),
             "an unreadable directory must be distinguishable from an empty one"
+        );
+    }
+
+    /// `SUBC_CONNECTION_FILE` must be EXCLUSIVE, matching `ck`'s own reader.
+    ///
+    /// The hazard is not that the variable is ignored -- it is that ignoring it looks
+    /// like honouring it. A caller who names a rig and silently reaches production gets
+    /// a true answer about the wrong machine, and for a write verb a credential in the
+    /// wrong vault. So the assertion is that the named path is returned even when it
+    /// does NOT exist and a discoverable file DOES: falling back on a set-and-wrong
+    /// value is the defect, not a convenience.
+    #[test]
+    fn subc_connection_file_is_exclusive_and_does_not_fall_back() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "ck-conn-excl-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let runtime = root.join("runtime");
+        std::fs::create_dir_all(&runtime).expect("runtime dir");
+        let discoverable = runtime.join("subc-connection.json");
+        std::fs::write(&discoverable, "{}").expect("discoverable file");
+
+        let named = root.join("rig").join("subc-connection.json");
+
+        let prev_named = std::env::var_os("SUBC_CONNECTION_FILE");
+        let prev_runtime = std::env::var_os("XDG_RUNTIME_DIR");
+        std::env::set_var("SUBC_CONNECTION_FILE", &named);
+        std::env::set_var("XDG_RUNTIME_DIR", &runtime);
+
+        let got = discover_subc_connection_file();
+
+        match prev_named {
+            Some(v) => std::env::set_var("SUBC_CONNECTION_FILE", v),
+            None => std::env::remove_var("SUBC_CONNECTION_FILE"),
+        }
+        match prev_runtime {
+            Some(v) => std::env::set_var("XDG_RUNTIME_DIR", v),
+            None => std::env::remove_var("XDG_RUNTIME_DIR"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert_eq!(
+            got.as_deref(),
+            Some(named.as_path()),
+            "a named connection file must win outright; falling back to the discoverable \
+             one at {} would answer about a different daemon",
+            discoverable.display()
         );
     }
 

@@ -562,7 +562,11 @@ fn help_verb(verb: &str) -> String {
              consumers re-fetch; keeps handles); --expected-hash is a concurrency-safe\n\
              CAS overwrite. A cookie:<domain> id always creates a session-cookie record:\n\
              its payload-file bytes are preserved exactly and --expires-ms is refused.\n\
-             --payload-file keeps the secret out of argv."
+             --payload-file keeps the secret out of argv. For every kind EXCEPT cookie\n\
+             it strips TRAILING whitespace (any amount: newlines, CR, spaces, tabs) and\n\
+             keeps LEADING whitespace, so a one-line secret file gives the same bytes as\n\
+             $(cat file). A value that must END in whitespace cannot come from a file;\n\
+             use a cookie: id, whose bytes are taken verbatim."
         }
         "import" => {
             "ck auth import --source <opencode|pi|gemini-cli|antigravity> --id <id> \

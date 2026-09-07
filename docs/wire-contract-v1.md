@@ -99,8 +99,10 @@ level deliberately, not at a leaf you expect to be exact.
 ## 3. Reading a credential
 
 `credential.get` returns the opaque payload as a JSON array of byte integers, plus
-`expires_at_ms` and `record_version`, plus non-secret routing metadata where the vault
-has it (`account_id`, `email`, `org_name`, and `project_id` for `antigravity`).
+`expires_at_ms` and `record_version`, plus non-secret metadata where the vault has it
+(`credential_id`, `account_id`, `email`, `org_name`, and `project_id` for `antigravity`).
+Use `credential_id` only to verify a handle-to-manifest binding, never to route: it is an
+operator-chosen label, while account routing joins on `account_id` + `record_version`.
 
 Two optional levers, and they are the same lever pointed differently:
 
@@ -120,9 +122,14 @@ unmeetable — never speculatively.
 | field | meaning |
 |---|---|
 | `ready` | the vault will attempt to serve this record |
+| `credential_id` | resolved operator-chosen label, for verifying an existing binding only |
 | `record_version` | monotone change cursor over the stored MATERIAL |
 | `stale_pending` | whether the next `get` will pay an upstream exchange |
 | `last_error_code` | the most recent refusal, if any |
+
+`credential_id` is absent for overall readiness and unresolved addresses; verify a held
+binding with it, but never route on it—account routing remains `account_id` +
+`record_version`.
 
 **`record_version` and `ready` move independently, and that is deliberate.**
 `record_version` tracks material: it bumps on refresh and on replace. `ready` tracks the

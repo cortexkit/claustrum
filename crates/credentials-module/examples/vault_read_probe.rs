@@ -754,13 +754,17 @@ fn report(frame: &Frame, show_account_id: bool, show_claims: bool) {
                         bytes.len(),
                         fnv1a64(&bytes)
                     );
-                    // Non-secret metadata, printed verbatim: the record revision, the
-                    // provider account the token executes under (chatgpt wire), and the
-                    // Code-Assist project id (antigravity). These are exactly the fields
-                    // a consumer keys routing on, so the probe surfaces them for
-                    // operator diagnosis.
+                    // Non-secret metadata, printed verbatim. `account_id` plus
+                    // `record_version` is the routing binding; `credential_id` is printed
+                    // only so a deploy can verify the operator's handle-to-manifest binding,
+                    // never as another routing key.
                     let result = value.get("result");
-                    for key in ["record_version", "account_id", "project_id"] {
+                    for key in [
+                        "credential_id",
+                        "record_version",
+                        "account_id",
+                        "project_id",
+                    ] {
                         if let Some(v) = result.and_then(|r| r.get(key)) {
                             println!("   {key}: {v}");
                         }

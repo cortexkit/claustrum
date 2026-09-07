@@ -3282,6 +3282,323 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn get_through_a_resolving_handle_returns_its_bound_credential_id() {
+        let (surface, store, _db) = tmp_surface_with_store(93);
+        let credential_id = "apikey:get-binding-proof";
+        store
+            .create(
+                credential_id,
+                &VaultRecord::new_static(CredentialKind::ApiKey, "test", b"key".to_vec(), None),
+            )
+            .expect("create credential");
+        let handle = credentials_core::store::mint_handle().expect("mint handle");
+        store
+            .put_handle_hash(
+                &handle.hash,
+                credential_id,
+                AuditCtx::admin(AuditOp::MintHandle),
+            )
+            .expect("bind handle");
+
+        let read_surface::GetOutcome::Ok(result) = surface
+            .get(
+                93,
+                &read_surface::GetParams {
+                    handle: handle.raw,
+                    min_ttl_ms: None,
+                    force_refresh: false,
+                },
+            )
+            .await
+        else {
+            panic!("a handle bound to a live credential must resolve");
+        };
+        assert_eq!(
+            result.credential_id.as_deref(),
+            Some(credential_id),
+            "get must return the credential id the presented handle was minted for"
+        );
+    }
+
+    #[tokio::test]
+    async fn status_through_a_resolving_handle_returns_its_bound_credential_id() {
+        let (surface, store, _db) = tmp_surface_with_store(94);
+        let credential_id = "apikey:status-binding-proof";
+        store
+            .create(
+                credential_id,
+                &VaultRecord::new_static(CredentialKind::ApiKey, "test", b"key".to_vec(), None),
+            )
+            .expect("create credential");
+        let handle = credentials_core::store::mint_handle().expect("mint handle");
+        store
+            .put_handle_hash(
+                &handle.hash,
+                credential_id,
+                AuditCtx::admin(AuditOp::MintHandle),
+            )
+            .expect("bind handle");
+
+        let result = surface
+            .status(
+                94,
+                None,
+                &read_surface::StatusParams {
+                    handle: Some(handle.raw),
+                    credential_id: None,
+                },
+            )
+            .await;
+        assert_eq!(
+            result.credential_id.as_deref(),
+            Some(credential_id),
+            "status must return the credential id the presented handle resolved to"
+        );
+    }
+
+    #[tokio::test]
+    async fn unaddressed_status_omits_credential_id_instead_of_sending_null() {
+        let (surface, _store, _db) = tmp_surface_with_store(95);
+        let encoded = serde_json::to_value(
+            surface
+                .status(
+                    95,
+                    None,
+                    &read_surface::StatusParams {
+                        handle: None,
+                        credential_id: None,
+                    },
+                )
+                .await,
+        )
+        .expect("serialize overall status");
+
+        assert!(
+            encoded
+                .as_object()
+                .is_some_and(|result| !result.contains_key("credential_id")),
+            "overall readiness names no credential, so credential_id must be absent rather than null: {encoded}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_and_revoked_get_handles_refuse_without_disclosing_a_credential_id() {
+        fn body_contains_key(value: &serde_json::Value, needle: &str) -> bool {
+            match value {
+                serde_json::Value::Object(object) => {
+                    object.contains_key(needle)
+                        || object
+                            .values()
+                            .any(|child| body_contains_key(child, needle))
+                }
+                serde_json::Value::Array(array) => {
+                    array.iter().any(|child| body_contains_key(child, needle))
+                }
+                _ => false,
+            }
+        }
+
+        let (surface, store, _db) = tmp_surface_with_store(96);
+        let (admin, _admin_store) = tmp_admin(96);
+        let credential_id = "apikey:revoked-binding-proof";
+        store
+            .create(
+                credential_id,
+                &VaultRecord::new_static(CredentialKind::ApiKey, "test", b"key".to_vec(), None),
+            )
+            .expect("create credential");
+        let revoked_handle = credentials_core::store::mint_handle().expect("mint handle");
+        store
+            .put_handle_hash(
+                &revoked_handle.hash,
+                credential_id,
+                AuditCtx::admin(AuditOp::MintHandle),
+            )
+            .expect("bind handle");
+        store
+            .revoke_handle(&revoked_handle.raw, AuditCtx::admin(AuditOp::RevokeHandle))
+            .expect("revoke handle");
+
+        let unknown = scoped_route_request(
+            &surface,
+            &admin,
+            96,
+            OP_GET,
+            json!({ "handle": "ckh_unknown_credential_id_probe" }),
+        )
+        .await;
+        let revoked = scoped_route_request(
+            &surface,
+            &admin,
+            97,
+            OP_GET,
+            json!({ "handle": revoked_handle.raw }),
+        )
+        .await;
+
+        assert_eq!(
+            unknown["result"]["error"],
+            json!({ "code": "not_found", "class": "permanent" }),
+            "an unknown handle must receive the complete uniform not_found refusal"
+        );
+        assert!(
+            !body_contains_key(&unknown, "credential_id")
+                && !serde_json::to_string(&unknown)
+                    .expect("render response")
+                    .contains(credential_id),
+            "the not_found body must disclose neither a credential_id field nor the id once bound to the revoked handle: {unknown}"
+        );
+        assert_eq!(
+            unknown, revoked,
+            "unknown and revoked handles must remain byte-equivalent after JSON decoding"
+        );
+    }
+
+    /// `credential.get` is a wire contract, not merely an internal struct serialization.
+    ///
+    /// This drives the real route handler, so the response is produced by `GetResult` and
+    /// serialized through the same `{ "result": ... }` path consumers receive. The fully
+    /// populated and minimal shapes are pinned separately so optional metadata is present
+    /// only when the real producer has a value for it.
+    #[tokio::test]
+    async fn the_get_wire_key_set_is_a_contract_and_a_rename_obliges_an_announcement() {
+        async fn get_wire(
+            surface: &Arc<ReadSurface>,
+            admin: &Arc<admin_surface::AdminSurface>,
+            handle: String,
+            corr: u64,
+        ) -> serde_json::Value {
+            let (tx, mut rx) = mpsc::channel(1);
+            let frame = Frame::build_with_version(
+                PROTOCOL_VERSION,
+                FrameType::Request,
+                Flags::new(false, Priority::Interactive, false),
+                1,
+                1,
+                corr,
+                serde_json::to_vec(&json!({
+                    "method": OP_GET,
+                    "params": { "handle": handle },
+                }))
+                .expect("serialize get request"),
+            )
+            .expect("build get request frame");
+
+            // The response comes from the real route producer and serializer rather than
+            // a hand-written value that could stay stable while the wire changes.
+            handle_read_request(frame, &tx, surface, admin, None)
+                .await
+                .expect("get request must be handled");
+            let response = rx.recv().await.expect("get response must be sent");
+            assert_eq!(response.header.ty, FrameType::Response);
+            serde_json::from_slice(&response.body).expect("decode get response")
+        }
+
+        fn assert_exact_keys(body: &serde_json::Value, expected: &[&str], shape: &str) {
+            let result = body
+                .get("result")
+                .and_then(serde_json::Value::as_object)
+                .unwrap_or_else(|| panic!("{shape}: get result must be a JSON object"));
+
+            // Check both directions so either a missing key or an unexpected key fails
+            // with the consumer-notification obligation at the contract boundary.
+            for key in expected {
+                assert!(
+                    result.contains_key(*key),
+                    "the credential.get response key set changed. Consumers decode these BY NAME, so this is a consumer-impact change rather than a refactor: announce the delta to the supervisor seat, then update this list. {shape}: missing `{key}`"
+                );
+            }
+            for key in result.keys() {
+                assert!(
+                    expected.iter().any(|expected_key| *expected_key == key),
+                    "the credential.get response key set changed. Consumers decode these BY NAME, so this is a consumer-impact change rather than a refactor: announce the delta to the supervisor seat, then update this list. {shape}: unexpected `{key}`"
+                );
+            }
+
+            let mut actual: Vec<&str> = result.keys().map(String::as_str).collect();
+            actual.sort_unstable();
+            let mut expected = expected.to_vec();
+            expected.sort_unstable();
+            assert_eq!(
+                actual,
+                expected,
+                "the credential.get response key set changed. Consumers decode these BY NAME, so this is a consumer-impact change rather than a refactor: announce the delta to the supervisor seat, then update this list."
+            );
+        }
+
+        let (surface, store, _db) = tmp_surface_with_store(97);
+        let (admin, _admin_store) = tmp_admin(97);
+        let populated_id = "antigravity:get-wire-contract";
+        let populated_record = VaultRecord::new_oauth(
+            "test",
+            "antigravity",
+            OAuthCredential {
+                access_token: "opaque-access".to_string().into(),
+                refresh_token: "refresh-secret|project-wire|managed-wire"
+                    .to_string()
+                    .into(),
+                expires_at_ms: Some(4_102_444_800_000),
+                token_url: "https://oauth2.googleapis.com/token".to_string(),
+                client_id: Some("client".to_string()),
+                scopes: Vec::new(),
+            },
+            b"opaque-access".to_vec(),
+        )
+        .with_identity(credentials_core::record::RecordIdentity {
+            account_id: Some("account-wire".to_string()),
+            email: Some("wire@example.com".to_string()),
+            org_name: Some("Wire Organization".to_string()),
+        });
+        store
+            .create(populated_id, &populated_record)
+            .expect("create populated credential");
+        let populated_handle = credentials_core::store::mint_handle().expect("mint handle");
+        store
+            .put_handle_hash(
+                &populated_handle.hash,
+                populated_id,
+                AuditCtx::admin(AuditOp::MintHandle),
+            )
+            .expect("bind populated handle");
+
+        let populated = get_wire(&surface, &admin, populated_handle.raw, 1).await;
+        assert_exact_keys(
+            &populated,
+            &[
+                "payload",
+                "expires_at_ms",
+                "record_version",
+                "credential_id",
+                "project_id",
+                "account_id",
+                "email",
+                "org_name",
+            ],
+            "fully populated result",
+        );
+
+        let minimal_handle = credentials_core::store::mint_handle().expect("mint handle");
+        store
+            .put_handle_hash(
+                &minimal_handle.hash,
+                "apikey:active",
+                AuditCtx::admin(AuditOp::MintHandle),
+            )
+            .expect("bind minimal handle");
+        let minimal = get_wire(&surface, &admin, minimal_handle.raw, 2).await;
+        assert_exact_keys(
+            &minimal,
+            &[
+                "payload",
+                "expires_at_ms",
+                "record_version",
+                "credential_id",
+            ],
+            "minimal result",
+        );
+    }
+
     #[test]
     fn the_health_wire_key_set_is_a_contract_and_a_rename_obliges_an_announcement() {
         let health = credentials_core::health::VaultHealth {
@@ -3329,8 +3646,8 @@ mod tests {
     /// This drives the real route handler, so the response is produced by `StatusResult` and
     /// serialized through the same `{ "result": ... }` path consumers receive. The resolved
     /// and unresolved shapes are pinned separately: when a handle cannot be resolved, there is
-    /// no credential record to describe, so `record_version` and `stale_pending` are omitted
-    /// rather than filled with defaults.
+    /// no credential record to describe, so `credential_id`, `record_version`, and
+    /// `stale_pending` are omitted rather than filled with defaults.
     ///
     /// The `credential.status` fields use `snake_case`; the separate `health.check` metrics use
     /// `camelCase` (`auditTipMac`, `storeReadable`). These are established wire conventions, so
@@ -3419,6 +3736,7 @@ mod tests {
                 "ready",
                 "last_error_code",
                 "lease_held",
+                "credential_id",
                 "record_version",
                 "stale_pending",
             ],
@@ -3436,6 +3754,10 @@ mod tests {
             .get("result")
             .and_then(serde_json::Value::as_object)
             .expect("unresolved status result must be an object");
+        assert!(
+            !unresolved_result.contains_key("credential_id"),
+            "the credential.status response key set changed. Consumers decode these BY NAME, so this is a consumer-impact change rather than a refactor: announce the delta to the supervisor seat, then update this list. An unresolved handle must omit `credential_id`, not send null or echo an unverified binding"
+        );
         assert!(
             !unresolved_result.contains_key("record_version"),
             "the credential.status response key set changed. Consumers decode these BY NAME, so this is a consumer-impact change rather than a refactor: announce the delta to the supervisor seat, then update this list. An unresolved handle must omit `record_version`, not send null for a record this path could not resolve"
@@ -3455,6 +3777,10 @@ mod tests {
             .get("result")
             .and_then(serde_json::Value::as_object)
             .expect("overall status result must be an object");
+        assert!(
+            !overall_result.contains_key("credential_id"),
+            "the credential.status response key set changed. Consumers decode these BY NAME, so this is a consumer-impact change rather than a refactor: announce the delta to the supervisor seat, then update this list. Overall readiness must omit `credential_id` because it names no record"
+        );
         assert!(
             !overall_result.contains_key("record_version"),
             "the credential.status response key set changed. Consumers decode these BY NAME, so this is a consumer-impact change rather than a refactor: announce the delta to the supervisor seat, then update this list. Overall readiness must omit `record_version` because it names no record"

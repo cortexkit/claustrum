@@ -275,6 +275,24 @@ pub struct GetResult {
     pub payload: Vec<u8>,
     pub expires_at_ms: Option<i64>,
     pub record_version: u64,
+    /// The credential id this request resolved to. This field is FOR VERIFYING A BINDING
+    /// the caller already holds: a consumer that stored `{label, handle, credential_id}`
+    /// in its own manifest can refuse the handle when this vault-side id disagrees with
+    /// that row.
+    ///
+    /// IT IS NOT A ROUTING KEY. Account-scoped routing joins on `account_id` plus
+    /// `record_version`. A credential id is an OPERATOR-CHOSEN LABEL: it is hand-written,
+    /// can differ between two records holding the same provider account, and means
+    /// nothing to the provider. A consumer routing on it will drift silently.
+    ///
+    /// This discloses nothing new. A handle holder already receives the payload itself,
+    /// plus `account_id`, `email`, and `org_name` where captured. The id is only the
+    /// operator's name for material the caller is already being given.
+    ///
+    /// A principal-scoped `get_scoped` caller supplied the id, so echoing it adds no
+    /// information. It is populated there too so successful get shapes stay consistent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential_id: Option<String>,
     /// The Code-Assist project id for an antigravity credential, a NON-secret value
     /// the consumer freezes into its render config (it is in the request path).
     /// Absent for every non-antigravity credential. Never the refresh token.
@@ -286,8 +304,9 @@ pub struct GetResult {
     /// this handle execute under" — the binding key an account-scoped router joins on,
     /// paired with `record_version` (which bumps on every replace, so the router
     /// re-resolves when a handle is re-pointed at a different account). Absent when the
-    /// provider has no known account claim or the token does not carry one. Never a
-    /// secret and never the credential id / handle (handles survive replace by design).
+    /// provider has no known account claim or the token does not carry one. This field
+    /// never contains the operator's credential id or the bearer handle; it contains only
+    /// the provider's account identity.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub account_id: Option<String>,
     /// The account email, when captured at login (Anthropic discloses it in the token
@@ -440,6 +459,26 @@ pub struct StatusResult {
     pub ready: bool,
     pub last_error_code: Option<ReadError>,
     pub lease_held: bool,
+    /// The credential id this status address resolved to. This field is FOR VERIFYING A
+    /// BINDING the caller already holds: a consumer that stored
+    /// `{label, handle, credential_id}` in its own manifest can refuse the handle when
+    /// this vault-side id disagrees with that row.
+    ///
+    /// IT IS NOT A ROUTING KEY. Account-scoped routing joins on `account_id` plus
+    /// `record_version`. A credential id is an OPERATOR-CHOSEN LABEL: it is hand-written,
+    /// can differ between two records holding the same provider account, and means
+    /// nothing to the provider. A consumer routing on it will drift silently.
+    ///
+    /// This discloses nothing new. A handle holder already receives the payload itself on
+    /// `get`, plus `account_id`, `email`, and `org_name` where captured. The id is only the
+    /// operator's name for material the caller is already entitled to receive.
+    ///
+    /// Absent for overall readiness (neither addressing form) or when the presented
+    /// address did not resolve. A principal-scoped caller supplied the id, so echoing it
+    /// adds no information; it is populated after the scoped lookup succeeds so both
+    /// addressed status shapes agree.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential_id: Option<String>,
     /// The record's current version, when a handle resolved to one.
     ///
     /// THE CHANGE CURSOR FOR A CONSUMER THAT MUST NOTICE A CREDENTIAL COMING BACK.
@@ -860,6 +899,7 @@ impl ReadSurface {
                     payload: record.payload.into_inner().to_vec(),
                     expires_at_ms: record.expires_at_ms,
                     record_version: record.record_version,
+                    credential_id: Some(credential_id),
                     project_id,
                     account_id,
                     email: record.identity.email.clone(),
@@ -1008,6 +1048,9 @@ impl ReadSurface {
                     payload: record.payload.into_inner().to_vec(),
                     expires_at_ms: record.expires_at_ms,
                     record_version: record.record_version,
+                    // The principal supplied this id; echo it after the successful read so
+                    // scoped and handle-authorized success bodies keep one shape.
+                    credential_id: Some(params.credential_id.clone()),
                     project_id,
                     account_id,
                     email: record.identity.email.clone(),
@@ -1219,10 +1262,11 @@ impl ReadSurface {
     ) -> StatusResult {
         let fenced_out = self.engine.store().is_fenced_out();
         let lease_held = !fenced_out;
-        let unavailable = || StatusResult {
+        let unavailable = |credential_id| StatusResult {
             ready: false,
             last_error_code: Some(ReadError::NotFound),
             lease_held,
+            credential_id,
             record_version: None,
             stale_pending: None,
         };
@@ -1235,6 +1279,7 @@ impl ReadSurface {
                     ready: !fenced_out,
                     last_error_code: None,
                     lease_held,
+                    credential_id: None,
                     record_version: None,
                     // No address means no record, so there is no mark to report. Absent
                     // rather than false: this is overall daemon readiness, not a claim
@@ -1246,7 +1291,7 @@ impl ReadSurface {
                 // Rate-limit the handle probe before resolution (enumeration-sweep guard).
                 self.check_limiter(connection_id, handle).await;
                 let Ok(credential_id) = self.engine.store().resolve_handle(handle) else {
-                    return unavailable();
+                    return unavailable(None);
                 };
                 (credential_id, false)
             }
@@ -1255,13 +1300,13 @@ impl ReadSurface {
                     .authorize_scoped(principal, credential_id, GrantOperation::Read)
                     .is_err()
                 {
-                    return unavailable();
+                    return unavailable(None);
                 }
                 (credential_id.clone(), true)
             }
             // The route rejects a request with both addressing forms as `invalid_params`.
             // Preserve the non-enumerating status shape for direct callers of this surface.
-            (Some(_), Some(_)) => return unavailable(),
+            (Some(_), Some(_)) => return unavailable(None),
         };
 
         match self.engine.store().meta(&credential_id) {
@@ -1297,6 +1342,7 @@ impl ReadSurface {
                         credentials_core::store::RecordState::Active => None,
                     },
                     lease_held,
+                    credential_id: Some(credential_id.clone()),
                     record_version: Some(meta.record_version),
                 }
             }
@@ -1313,7 +1359,11 @@ impl ReadSurface {
                         },
                     );
                 }
-                unavailable()
+                // A handle lookup already resolved the credential, so a later metadata
+                // failure may safely include its id. For scoped lookups, omit the id on
+                // failure so callers cannot distinguish a nonexistent credential from one
+                // that exists but is outside their authorization scope.
+                unavailable((!scoped).then_some(credential_id))
             }
         }
     }

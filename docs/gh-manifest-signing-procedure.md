@@ -48,6 +48,29 @@ nobody reviewing a narrower manifest would expect that.
 
 This is the whole reason the approval is a question rather than a checkbox.
 
+## 2b. The hand-off envelope form, which I got wrong once
+
+The consumer's active file is:
+
+```
+{artifact_id, envelope_version: 2, fetched_at_unix_secs, key_id, manifest_bytes, signature}
+```
+
+and the retained per-version files are `{key_id, manifest_bytes, signature}`.
+
+**`manifest_bytes` is the RAW JSON STRING, not base64.** On the v13 hand-off I released
+`{key_id, manifest_bytes(base64), signature}` and the shim read it as `regressed`/invalid
+until the holder rewrote it in the active form.
+
+The signature is over the raw bytes either way, so nothing was unsafe — which is exactly
+why it is worth writing down rather than remembering. THE FAILURE WAS NOT IN THE CRYPTO,
+IT WAS IN THE CONTAINER, and a container mismatch presents as an invalid signature, which
+sends the reader to look at the key and the bytes rather than at the wrapper.
+
+Hand off in the form the consumer already stores, so the next activation is a copy rather
+than a transform. If the two ever disagree again, compare the WRAPPER before re-checking
+the signature.
+
 ## 3. The approver approves BYTES
 
 There is no canonicalization step in this envelope: it carries the manifest as the

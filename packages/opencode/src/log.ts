@@ -39,6 +39,10 @@ const CREDENTIAL_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 // A ≤24-character lowercase-snake residual such as sk_fake_secret shares the admitted code shape and is not all-hex.
 export const ERROR_CLASS = /^(?:[A-Z][A-Za-z0-9]{0,47}|[a-z][a-z0-9_]{1,23})$/;
 export const ERROR_CODE = /^(?:[A-Z][A-Z0-9_]{1,23}|[a-z][a-z0-9_]{1,23})$/;
+// False positives to expect when diagnosing: an English word made only of hex letters (deadbeef, facade,
+// decade) is rejected here and reaches the file as invalid_shape while looking ordinary at the call site.
+// No current producer emits one — .name gives JS error names, .code gives errno strings — so a field that
+// silently reads invalid_shape is the symptom to check first if a future producer starts emitting one.
 export function isAllHexBody(value: string): boolean {
   return /^[0-9a-f]+$/i.test(value);
 }

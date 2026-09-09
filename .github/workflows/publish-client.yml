@@ -1,0 +1,100 @@
+# THIS WORKFLOW DOES NOT RUN ON A BRANCH PUSH, and that is deliberate: a publish must be
+# an act with a named version behind it rather than something a merge can trigger. Same
+# reasoning as release.yml.
+name: Publish client
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish (must equal packages/client/package.json)'
+        required: true
+        type: string
+
+# OIDC trusted publishing: npm mints a short-lived credential from this token rather than
+# reading a long-lived secret. `id-token: write` is what makes that possible and is the
+# whole reason this file exists — a static NPM_TOKEN in repo secrets is a credential with
+# no expiry that every workflow can read, which is the shape this project spent a week
+# removing from operator machines.
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      # npm >= 11.5.1 is required for OIDC trusted publishing. Pinning the floor rather
+      # than trusting the runner's bundled npm: a runner image bump that moves npm
+      # BACKWARDS would otherwise fail at the publish step with an auth error that reads
+      # like a credentials problem.
+      - name: Pin an npm that supports OIDC
+        run: |
+          npm install -g npm@latest
+          npm --version
+
+      # The tag/input and the manifest are two claims about which version this is. They are
+      # checked against each other BEFORE anything is built, because a publish is
+      # effectively irreversible and npm will not let the number be corrected in place.
+      - name: Refuse a version disagreement
+        run: |
+          set -euo pipefail
+          declared="$(node -p "require('./packages/client/package.json').version")"
+          requested="${{ inputs.version }}"
+          if [ "$declared" != "$requested" ]; then
+            echo "REFUSED: requested $requested but packages/client/package.json says $declared"
+            echo "The manifest is the authority. Bump it in a commit rather than here."
+            exit 1
+          fi
+          echo "version agrees: $declared"
+
+      # Refuse a version that already exists rather than discovering it at publish time,
+      # where the error arrives after the build and reads as a permissions failure.
+      - name: Refuse an already-published version
+        run: |
+          set -euo pipefail
+          v="${{ inputs.version }}"
+          if npm view "@cortexkit/claustrum-client@$v" version >/dev/null 2>&1; then
+            echo "REFUSED: @cortexkit/claustrum-client@$v is already on the registry."
+            echo "npm versions are immutable; bump the manifest."
+            exit 1
+          fi
+          echo "$v is not on the registry"
+
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      - name: Gate the package on its own terms
+        working-directory: packages/client
+        run: |
+          bun run typecheck
+          bun test
+
+      # `prepack` rebuilds dist, so the published artifact is built from this checkout
+      # rather than from whatever happened to be on disk. `--provenance` attaches a signed
+      # statement linking the tarball to this workflow run and commit, which is the half of
+      # trusted publishing a consumer can actually verify.
+      - name: Publish
+        working-directory: packages/client
+        run: npm publish --provenance --access public
+
+      - name: Prove it is fetchable rather than assuming the exit code
+        run: |
+          set -euo pipefail
+          v="${{ inputs.version }}"
+          for i in 1 2 3 4 5 6; do
+            if npm view "@cortexkit/claustrum-client@$v" version >/dev/null 2>&1; then
+              echo "registry serves $v"
+              exit 0
+            fi
+            echo "not visible yet, attempt $i"
+            sleep 10
+          done
+          echo "PUBLISH REPORTED SUCCESS BUT THE REGISTRY DOES NOT SERVE $v"
+          exit 1

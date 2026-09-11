@@ -758,11 +758,22 @@ fn report(frame: &Frame, show_account_id: bool, show_claims: bool) {
                     // `record_version` is the routing binding; `credential_id` is printed
                     // only so a deploy can verify the operator's handle-to-manifest binding,
                     // never as another routing key.
+                    //
+                    // `email` AND `org_name` ARE HERE BECAUSE THEIR ABSENCE WAS UNREADABLE.
+                    // The read surface serves three identity fields and this list carried
+                    // one, so a record with an email and no `account_id` -- the exact shape
+                    // `RecordIdentity::is_servable` exists to reject, which makes a consumer
+                    // collapse its per-account labels into one unlabelled row -- rendered
+                    // here IDENTICALLY to a record with no identity at all. A consumer
+                    // reported that collapse from downstream and this probe could not
+                    // confirm or refute the cause, which is the one job it has on a deploy.
                     let result = value.get("result");
                     for key in [
                         "credential_id",
                         "record_version",
                         "account_id",
+                        "email",
+                        "org_name",
                         "project_id",
                     ] {
                         if let Some(v) = result.and_then(|r| r.get(key)) {

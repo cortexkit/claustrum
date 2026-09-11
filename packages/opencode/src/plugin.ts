@@ -245,7 +245,15 @@ export function createOpencodeClaustrumPlugin(dependencies: ConfigHookDependenci
     const pending = (async () => {
       const result = await detection();
       if (result.status !== "available") throw new Error(`Claustrum connection ${result.status}`);
-      return clientFactory();
+      // The client's default unknown-class logger is `console.warn`, which is the OpenCode
+      // TUI's screen. Routing it into our file sink keeps the whole plugin -- including the
+      // vendored client bundled with it -- off the operator's terminal. Without this the
+      // console ban in log.ts is only two thirds enforced: our own levels are silenced and
+      // a wire response carrying an unrecognised error class still prints.
+      return clientFactory({
+        logger: (errorClass: string) =>
+          log.warn({ errorClass: typeof errorClass === "string" ? errorClass : "invalid_shape" }),
+      });
     })();
     connected = pending;
     try {

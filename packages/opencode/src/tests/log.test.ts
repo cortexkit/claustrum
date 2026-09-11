@@ -43,9 +43,13 @@ describe("custody logger", () => {
     console.error = originalError;
   });
 
-  test("the console sink carries only faults: info and debug never reach stdout or stderr", () => {
-    // The console is the OpenCode TUI's screen. Happy-path telemetry surfacing
-    // there is the defect this pins (2026-09-05: three "serving" lines per boot in the TUI).
+  test("NO level reaches the console: warn and error are file-only alongside info and debug", () => {
+    // The console is the OpenCode TUI's screen, and this pins the whole channel shut.
+    // Two rounds of the same defect: info-level "serving" lines in the TUI (2026-09-05),
+    // then warn/error JSON printed over a live render during a transient vault timeout
+    // (2026-09-11). The first fix exempted faults on the reasoning that only faults belong
+    // on a console -- but a fault is when the plugin is LOUDEST, so the carve-out kept the
+    // defect for the noisiest case. There is no level-based exemption now; assert all four.
     const real = createLogger();
     real.debug({ provider: "deepseek", state: "available" });
     real.info({ provider: "deepseek", state: "serving" });
@@ -54,12 +58,7 @@ describe("custody logger", () => {
 
     expect(debugLines).toHaveLength(0);
     expect(logLines).toHaveLength(0);
-    expect(errorLines).toHaveLength(2);
-    expect(errorLines[0]).toContain('"level":"warn"');
-    expect(errorLines[1]).toContain('"level":"error"');
-    for (const line of [...debugLines, ...logLines, ...errorLines]) {
-      expect(line).not.toContain('"state":"serving"');
-    }
+    expect(errorLines).toHaveLength(0);
   });
 
   test("serializedLogSink still writes every level to its caller-provided stream and never strips", () => {

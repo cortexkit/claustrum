@@ -53,12 +53,21 @@ export const STATES = new Set([
   "refusing", "serving", "served", "gone",
 ]);
 
-// Console is the OpenCode TUI's stdout: only faults belong there. Happy-path
-// telemetry (info/debug) is file-only, or it becomes noise in the operator's screen.
-function consoleSink(entry: CustodyLogEntry): void {
-  if (entry.level !== "warn" && entry.level !== "error") return;
-  console.error(JSON.stringify(entry));
-}
+// NOTHING ROUTINE GOES TO THE CONSOLE. The console is the OpenCode TUI's screen, and a
+// plugin writing there corrupts the operator's terminal -- including mid-render, which is
+// how this surfaced twice: first as info-level "serving" lines (2026-09-05), then as
+// warn/error JSON printed over the TUI during a transient vault timeout (2026-09-11).
+//
+// The second one is the instructive one. The first fix kept faults on the console on the
+// reasoning that "only faults belong there" -- a judgement substituted for the instruction,
+// which was that ALL plugin logs go to the file. A fault is exactly when the plugin is
+// noisiest, so the carve-out preserved the defect for the case that produces the most output.
+//
+// The console sink is gone. Every level goes to the file. The ONE remaining console write in
+// this module is the once-per-process notice below, emitted only when the log FILE itself is
+// unwritable -- reporting that logging is broken is not logging, and there is nowhere else to
+// put it. If that line is ever seen in a terminal, the file sink has failed, which is the only
+// condition under which this module may speak.
 
 export type FileLogSinkOptions = {
   path?: string;
@@ -149,11 +158,7 @@ export function createFileLogSink(options: FileLogSinkOptions = {}): LogSink {
 }
 
 export function createLogger(sink?: LogSink): CustodyLogger {
-  const fileSink = sink ? undefined : createFileLogSink();
-  const output = sink ?? ((entry: CustodyLogEntry) => {
-    consoleSink(entry);
-    fileSink?.(entry);
-  });
+  const output = sink ?? createFileLogSink();
   return {
     debug: (entry) => output({ level: "debug", ...entry }),
     info: (entry) => output({ level: "info", ...entry }),

@@ -53,14 +53,25 @@ async function writeOwner(lock: string, owner: Owner): Promise<void> {
   } finally { await file?.close().catch(() => {}); await unlink(temporary).catch(() => {}) }
 }
 
+// Split out from the sweep so the platform claim is testable from a POSIX runner: this takes
+// the basename FUNCTION, so a test can drive it with path.win32.basename without pretending
+// a Linux host is Windows. A filesystem test cannot do that -- on Linux a '/' split and
+// basename agree, so the defect below survives every filesystem test written against it.
+//
+// pathBasename, not a split on '/': on Windows the manifest path is backslash-separated, so a
+// '/' split yields the whole path, nothing matches the prefix, and the sweep becomes a silent
+// no-op on the one platform the quarantine bound is hardest to observe. Fails closed -- it
+// cannot reap the wrong directory -- but the feature is inert, which is worse than loud.
+export function manifestLockQuarantinePrefix(path: string, basename: (p: string) => string = pathBasename): string | undefined {
+  const name = basename(path)
+  return name ? name : undefined
+}
+
 async function reclaimStaleManifestLockQuarantines(path: string, ttlMs: number, claimDeadlineMs: number): Promise<void> {
   const reclaimAgeMs = Math.max(ttlMs, claimDeadlineMs) + MANIFEST_LOCK_QUARANTINE_RECLAIM_MARGIN_MS
   let names: string[]
   try { names = await readdir(dirname(path)) } catch { return }
-  // pathBasename, not a split on '/': on Windows the manifest path is backslash-separated,
-  // so a '/' split returns the whole path, nothing matches the prefix, and the sweep becomes
-  // a silent no-op on the one platform the quarantine bound is hardest to observe.
-  const basename = pathBasename(path)
+  const basename = manifestLockQuarantinePrefix(path)
   if (!basename) return
   await Promise.all(names.map(async (name) => {
     const staleTarget = name.startsWith(basename) ? name.slice(basename.length) : undefined
@@ -130,7 +141,13 @@ const foreign = (file: ManifestHandleFile, tenant: string) => file.providers.fil
 async function prepareParent(path: string): Promise<void> { const parent = dirname(path); await mkdir(parent, { recursive: true, mode: 0o700 }); const metadata = await stat(parent); if (!metadata.isDirectory()) throw new Error('handle file parent must be a directory'); if ((metadata.mode & 0o002) !== 0 && (metadata.mode & 0o1000) === 0) throw new Error('handle file parent is world-writable without sticky bit'); if ((metadata.mode & 0o022) !== 0) throw new Error('handle file parent must not be group- or other-writable') }
 async function writeAtomic(path: string, file: ManifestHandleFile, commit: () => Promise<void>): Promise<void> {
   const bytes = Buffer.from(JSON.stringify(file)); if (bytes.byteLength > HANDLE_FILE_CONTRACT.maxBytes) throw new Error('handle file exceeds 256 KiB')
-  const temporary = join(dirname(path), `.${path.split('/').pop()}.${process.pid}.${token()}.tmp`); let handle: Awaited<ReturnType<typeof open>> | undefined
+    // pathBasename for the same reason the quarantine sweep uses it, but this one fails LOUD
+    // rather than inert: a '/' split over a backslash path yields the whole path, so the temp
+    // name embeds separators and a drive-letter colon, join() nests it under its own directory,
+    // and O_CREAT|O_EXCL throws on a name Windows will not accept -- taking the manifest WRITE
+    // down, not just the reclaim. Covered by the dual-basename test, which a POSIX filesystem
+    // test cannot reach.
+    const temporary = join(dirname(path), `.${pathBasename(path)}.${process.pid}.${token()}.tmp`); let handle: Awaited<ReturnType<typeof open>> | undefined
   try { handle = await open(temporary, fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY, 0o600); await handle.chmod(0o600); await handle.writeFile(bytes); await handle.sync(); await handle.close(); handle = undefined; await chmod(temporary, 0o600); await testOptions?.beforeManifestRename?.(`${path}.lock`); await commit(); await rename(temporary, path) } finally { await handle?.close().catch(() => {}); await unlink(temporary).catch(() => {}) }
 }
 export async function writeHandleFileLocked(path: string, tenant: string, mutate: (file: ManifestHandleFile) => void | ManifestHandleFile | Promise<void | ManifestHandleFile>): Promise<void> {

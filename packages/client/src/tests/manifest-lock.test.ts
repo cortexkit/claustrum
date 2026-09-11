@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { basename, join } from 'node:path'
+import { basename, join, posix, win32 } from 'node:path'
 
 import {
   __setManifestLockTestOptions,
   MANIFEST_LOCK,
+  manifestLockQuarantinePrefix,
   withManifestLock,
   writeHandleFileLocked,
 } from '../manifest-lock'
@@ -586,5 +587,39 @@ describe('thrown errors carry a stable code', () => {
       })
     })
     expect(bothInside).toBe(true)
+  })
+})
+
+// The Windows arm of the quarantine sweep, tested WITHOUT pretending a POSIX runner is Windows.
+// A filesystem test cannot reach this: on Linux `path.split('/')` and `basename` agree, so the
+// defect this guards (a '/' split yielding the whole path on a backslash-separated path, making
+// the sweep a silent no-op) passes every filesystem test in this file. Driving the derivation
+// with path.win32.basename tests the actual platform claim.
+describe('quarantine prefix derivation', () => {
+  test('derives prefixes from POSIX and Windows path basenames', () => {
+    expect(manifestLockQuarantinePrefix('/home/u/.config/ck/opencode-handles.json', posix.basename)).toBe('opencode-handles.json')
+    expect(manifestLockQuarantinePrefix('C:\\Users\\u\\AppData\\ck\\opencode-handles.json', win32.basename)).toBe('opencode-handles.json')
+    // The regression itself: a '/' split over a backslash path returns the whole path, so the
+    // prefix never matches a bare directory entry and nothing is ever reclaimed.
+    const viaSlashSplit = (p: string) => p.split('/').pop() ?? ''
+    expect(manifestLockQuarantinePrefix('C:\\Users\\u\\AppData\\ck\\opencode-handles.json', viaSlashSplit))
+      .toBe('C:\\Users\\u\\AppData\\ck\\opencode-handles.json')
+  })
+
+  test('the atomic-write temp name is a bare basename on both platforms', () => {
+    // Not the same call site as the sweep: this one feeds join(), so a '/' split over a
+    // backslash path produces a temp path nested under its own directory and carrying a
+    // drive-letter colon -- a name O_CREAT|O_EXCL cannot open. The manifest write throws
+    // rather than silently skipping, so this arm is about a broken feature, not an inert one.
+    const tempName = (p: string, base: (x: string) => string) => `.${base(p)}.1234.abcd.tmp`
+    expect(tempName('/home/u/.config/ck/opencode-handles.json', posix.basename)).toBe('.opencode-handles.json.1234.abcd.tmp')
+    expect(tempName('C:\\Users\\u\\AppData\\ck\\opencode-handles.json', win32.basename)).toBe('.opencode-handles.json.1234.abcd.tmp')
+    const viaSlashSplit = (p: string) => p.split('/').pop() ?? ''
+    expect(tempName('C:\\Users\\u\\AppData\\ck\\opencode-handles.json', viaSlashSplit)).toContain('\\')
+  })
+
+  test('a basename that yields nothing disables the sweep rather than matching everything', () => {
+    expect(manifestLockQuarantinePrefix('/', posix.basename)).toBeUndefined()
+    expect(manifestLockQuarantinePrefix('', posix.basename)).toBeUndefined()
   })
 })

@@ -7,6 +7,17 @@ export {
 } from './detect.js'
 export { storeIdentity, storageFingerprint } from './identity.js'
 export {
+  MANIFEST_LOCK,
+  manifestLockQuarantinePrefix,
+  withManifestLock,
+  writeHandleFileLocked,
+  type ManifestHandleAccount,
+  type ManifestHandleFile,
+  type ManifestHandleProvider,
+  type ManifestLockError,
+  type ManifestLockErrorCode,
+} from './manifest-lock.js'
+export {
   ClaustrumCredentialError,
   credentialErrorAction,
   ERROR_CLASS_WIRE_SET,
@@ -21,3 +32,15 @@ export {
   type CredentialStatus,
   type ServedCredential,
 } from './wire.js'
+export {
+  HANDLE_FILE_CONTRACT,
+  HandleFileValidationError,
+  defaultHandleFilePath,
+  handleFileRevision,
+  parseHandleFile,
+  readHandleFile,
+  type HandleAccount,
+  type HandleFileIo,
+  type HandleProvider,
+  type OpenCodeHandleFileV1,
+} from './handles.js'

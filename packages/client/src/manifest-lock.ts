@@ -1,7 +1,7 @@
 import { constants as fsConstants } from 'node:fs'
 import { chmod, lstat, mkdir, open, readFile, readdir, rename, rm, stat, unlink } from 'node:fs/promises'
 import { randomBytes, randomInt } from 'node:crypto'
-import { dirname, join } from 'node:path'
+import { basename as pathBasename, dirname, join } from 'node:path'
 import { HANDLE_FILE_CONTRACT, parseHandleFile, type OpenCodeHandleFileV1 } from './handles.js'
 
 export const MANIFEST_LOCK = { ttlMs: 30_000, renewEveryMs: 10_000, ownerKeys: ['tenant', 'pid', 'claimed_at_ms', 'nonce'] as const, staleTargetRe: /^\.lock\.stale-\d+-(?!\.{1,2}$)(?!.*[. ]$)[^/\\\x00-\x1f:*?"<>|]{1,128}$/, errorCodes: ['lock_busy', 'owner_invalid', 'renewal_failed'] as const }
@@ -57,7 +57,10 @@ async function reclaimStaleManifestLockQuarantines(path: string, ttlMs: number, 
   const reclaimAgeMs = Math.max(ttlMs, claimDeadlineMs) + MANIFEST_LOCK_QUARANTINE_RECLAIM_MARGIN_MS
   let names: string[]
   try { names = await readdir(dirname(path)) } catch { return }
-  const basename = path.split('/').pop()
+  // pathBasename, not a split on '/': on Windows the manifest path is backslash-separated,
+  // so a '/' split returns the whole path, nothing matches the prefix, and the sweep becomes
+  // a silent no-op on the one platform the quarantine bound is hardest to observe.
+  const basename = pathBasename(path)
   if (!basename) return
   await Promise.all(names.map(async (name) => {
     const staleTarget = name.startsWith(basename) ? name.slice(basename.length) : undefined

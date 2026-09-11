@@ -1,10 +1,15 @@
 import { constants as fsConstants } from 'node:fs'
-import { chmod, lstat, mkdir, open, readFile, rename, rm, stat, unlink } from 'node:fs/promises'
+import { chmod, lstat, mkdir, open, readFile, readdir, rename, rm, stat, unlink } from 'node:fs/promises'
 import { randomBytes, randomInt } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { HANDLE_FILE_CONTRACT, parseHandleFile, type OpenCodeHandleFileV1 } from './handles.js'
 
 export const MANIFEST_LOCK = { ttlMs: 30_000, renewEveryMs: 10_000, ownerKeys: ['tenant', 'pid', 'claimed_at_ms', 'nonce'] as const, staleTargetRe: /^\.lock\.stale-\d+-(?!\.{1,2}$)(?!.*[. ]$)[^/\\\x00-\x1f:*?"<>|]{1,128}$/, errorCodes: ['lock_busy', 'owner_invalid', 'renewal_failed'] as const }
+// The claim deadline bounds when the last stale-lock rename is issued, not when it lands:
+// a rename issued at deadline-1ms can complete afterwards, by tens to hundreds of ms on a
+// loaded host. The retry deadline and staleness window both read `ttl` today; if they split,
+// this bound must keep their max so reclamation still covers the longer role.
+const MANIFEST_LOCK_QUARANTINE_RECLAIM_MARGIN_MS = 5_000
 
 /** Thrown by the lock. Branch on `code`; the message is diagnostic and may be reworded. */
 export type ManifestLockErrorCode = (typeof MANIFEST_LOCK.errorCodes)[number]
@@ -16,6 +21,8 @@ type Owner = { tenant: string; pid: number; claimed_at_ms: number; nonce: string
 type TestOptions = { ttlMs?: number; renewEveryMs?: number; retryMinMs?: number; retryMaxMs?: number; afterClaim?: () => Promise<void> | void; beforeEvict?: () => Promise<void>; afterEvictRenameAttempt?: () => Promise<void>; afterEvict?: () => void; beforeManifestRename?: (path: string) => Promise<void> }
 let testOptions: TestOptions | undefined
 export function __setManifestLockTestOptions(options?: TestOptions): void { testOptions = options }
+// 16 CSPRNG bytes: a collision needs both the same millisecond and the same nonce. Do not
+// simplify this to a counter, pid+timestamp, or a short token.
 const token = () => randomBytes(16).toString('base64url')
 const code = (error: unknown) => (error as NodeJS.ErrnoException | undefined)?.code
 const sleep = async (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -46,6 +53,23 @@ async function writeOwner(lock: string, owner: Owner): Promise<void> {
   } finally { await file?.close().catch(() => {}); await unlink(temporary).catch(() => {}) }
 }
 
+async function reclaimStaleManifestLockQuarantines(path: string, ttlMs: number, claimDeadlineMs: number): Promise<void> {
+  const reclaimAgeMs = Math.max(ttlMs, claimDeadlineMs) + MANIFEST_LOCK_QUARANTINE_RECLAIM_MARGIN_MS
+  let names: string[]
+  try { names = await readdir(dirname(path)) } catch { return }
+  const basename = path.split('/').pop()
+  if (!basename) return
+  await Promise.all(names.map(async (name) => {
+    const staleTarget = name.startsWith(basename) ? name.slice(basename.length) : undefined
+    if (!staleTarget || !MANIFEST_LOCK.staleTargetRe.test(staleTarget)) return
+    const target = join(dirname(path), name)
+    let metadata: Awaited<ReturnType<typeof lstat>>
+    try { metadata = await lstat(target) } catch { return }
+    if (!metadata.isDirectory() || Date.now() - metadata.mtimeMs < reclaimAgeMs) return
+    await rm(target, { recursive: true, force: true }).catch(() => {})
+  }))
+}
+
 export async function withManifestLock<T>(path: string, tenant: string, fn: () => Promise<T> | T): Promise<T> {
   return withLockCommit(path, tenant, async () => fn())
 }
@@ -60,6 +84,8 @@ async function withLockCommit<T>(path: string, tenant: string, fn: (commit: () =
     try { observed = await readOwner(ownerPath) } catch (error) { ownerReadError = error; if (code(error) !== 'ENOENT' && Date.now() >= deadline) throw code(error) === 'owner_invalid' ? error : lockError('lock_busy', 'manifest lock busy') }
     if (observed && Date.now() - observed.claimed_at_ms >= ttl) {
       await testOptions?.beforeEvict?.()
+      // The owner record remains because the quarantine is the ABA guard, not an audit log;
+      // bounded reclamation below is what makes that retention finite.
       const stale = `${lock}.stale-${observed.claimed_at_ms}-${observed.nonce}`
       let renameError: unknown
       try { await rename(lock, stale) } catch (error) { renameError = error }
@@ -73,6 +99,7 @@ async function withLockCommit<T>(path: string, tenant: string, fn: (commit: () =
     if (Date.now() >= deadline) throw code(ownerReadError) === 'owner_invalid' ? ownerReadError : lockError('lock_busy', 'manifest lock busy')
     await sleep(Math.min(randomInt(retryMin, retryMax + 1), Math.max(1, deadline - Date.now())))
   }
+  await reclaimStaleManifestLockQuarantines(path, ttl, deadline - started)
   let renewal = Promise.resolve(), failed = false, stopped = false
   const timer = setInterval(() => { renewal = renewal.then(async () => { if (failed) return; try { const current = await readOwner(ownerPath); if (current.nonce !== nonce || Date.now() - current.claimed_at_ms >= ttl) throw new Error('lease lost'); await writeOwner(lock, { ...current, claimed_at_ms: Date.now() }) } catch { failed = true } }) }, renewEvery)
   timer.unref?.()

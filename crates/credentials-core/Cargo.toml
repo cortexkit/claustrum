@@ -7,6 +7,9 @@ license = "MIT"
 description = "Credential custody logic for the claustrum subc module: typed VaultRecord, canonical OAuthCredential, value-level encryption envelope, bounded refresh adapters, crash-safe refresh state machine, master-key resolution. Pure logic, wire-agnostic."
 
 [features]
+# Exposes test fixtures to integration tests without linking them into normal release builds.
+test-support = []
+
 # Compiles a test-only pre-commit seam INTO the refresh engine: a hook that fires
 # after the intent is durably committed and the new tokens are staged, but BEFORE
 # the commit transaction. The kill-9 conformance harness uses it to park a helper
@@ -14,14 +17,14 @@ description = "Credential custody logic for the claustrum subc module: typed Vau
 # reconciliation resolves the interrupted refresh to needs_reauth. OFF by default —
 # the release vault contains no block-before-commit code path at all (zero release
 # surface for a security boundary).
-kill9-test-seam = []
+kill9-test-seam = ["test-support"]
 
 # Gates ONLY the vault-native-login crash-cut helper binary out of release builds.
 # Like rotate-test-seam this compiles NO code into the library: the login write is a
 # SINGLE atomic fenced transaction (no intent log, no txn1/txn2 window), so the helper
 # just brackets that one public store call with park points using public API — there is
 # no block-before-commit seam because there is no mid-operation durable state to catch.
-login-test-seam = []
+login-test-seam = ["test-support"]
 
 # Gates ONLY the master-key-rotation crash-cut helper binary out of release builds.
 # Unlike kill9-test-seam this compiles NO code into the library: the rotation
@@ -29,7 +32,7 @@ login-test-seam = []
 # (stage_next -> DB rewrap -> promote), each individually atomic, so the helper just
 # parks after a chosen step using public API — no block-before-commit seam in the
 # vault. The feature exists solely to keep the test binary out of a normal build.
-rotate-test-seam = []
+rotate-test-seam = ["test-support"]
 
 # Gates the module-rename ceremony one-shots (ck_key_move, ck_key_verify) out of
 # normal builds. Compiles NO code into the library — both drive the shipped resolver
@@ -42,7 +45,7 @@ rotate-test-seam = []
 # run roughly once per rename against two directory arguments, and a normal build
 # putting it on PATH is how a wrong-argument run becomes reachable years after anyone
 # remembers what it does.
-migration-tools = []
+migration-tools = ["test-support"]
 
 # The two rename-ceremony one-shots. Gated together because they are used at the same
 # moment and never afterwards, and they WRITE master-key material -- so they must not

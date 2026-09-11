@@ -20,6 +20,7 @@ use crate::refresh_adapters::{
     HttpTransport, RefreshAdapter, RefreshError, RefreshedTokens, ValidityOutcome,
 };
 use crate::store::{AuthObservation, EncryptedStore, StoreOpError};
+use crate::test_support::TestTempDir;
 use cortexkit_store::{open_sqlite, Isolation, StorageBackend, StorageDescriptor};
 
 /// A stub adapter that counts refresh calls and returns a fixed rotated token, with
@@ -123,10 +124,10 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-fn tmp_descriptor() -> (std::path::PathBuf, StorageDescriptor) {
+fn tmp_descriptor() -> (TestTempDir, StorageDescriptor) {
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
-    let root = std::env::temp_dir().join(format!(
+    let root = TestTempDir::new(format!(
         "ck-cred-engine-{}-{}",
         std::process::id(),
         SEQ.fetch_add(1, Ordering::Relaxed)

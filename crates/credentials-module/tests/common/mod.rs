@@ -7,12 +7,13 @@
 //! ai-provider-quota consumer driver; only the module id and ops differ.
 
 use std::{
-    path::{Path, PathBuf},
+    path::Path,
     process,
     sync::atomic::{AtomicU64, Ordering},
     time::Duration,
 };
 
+use credentials_core::test_support::TestTempDir;
 use serde_json::Value;
 use subc_core::{read_frame, write_frame, Frame};
 use subc_protocol::{BindIdentity, Flags, FrameType, Priority, RouteTarget};
@@ -51,26 +52,17 @@ static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 ///   than re-derived from a symptom three layers downstream. If the antigravity flake
 ///   recurs WITHOUT this firing, the hypothesis is wrong and the next investigation
 ///   starts somewhere genuinely different.
-pub fn tmp_root(tag: &str) -> PathBuf {
+pub fn tmp_root(tag: &str) -> TestTempDir {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let d = std::env::temp_dir().join(format!(
+    TestTempDir::new(format!(
         "ck-cred-cli-{}-{}-{}-{nanos:09}",
         process::id(),
         tag,
         TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
-    ));
-    std::fs::create_dir(&d).unwrap_or_else(|e| {
-        panic!(
-            "temp root {} could not be created fresh ({e}). AlreadyExists here means a \
-             path collision across processes, and reusing it would hand this test a \
-             stale vault whose store and key file disagree.",
-            d.display()
-        )
-    });
-    d
+    ))
 }
 
 /// A temp path unique across PROCESSES, not merely within one.
@@ -86,13 +78,13 @@ pub fn tmp_root(tag: &str) -> PathBuf {
 ///
 /// Callers here create the directory themselves, so this cannot refuse a collision the
 /// way `tmp_root` does; the nanosecond component only makes one unlikely.
-pub fn unique_temp_dir(label: &str) -> PathBuf {
+pub fn unique_temp_dir(label: &str) -> TestTempDir {
     let n = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.subsec_nanos())
         .unwrap_or(0);
-    std::env::temp_dir().join(format!("{label}-{}-{n}-{nanos:09}", process::id()))
+    TestTempDir::new(format!("{label}-{}-{n}-{nanos:09}", process::id()))
 }
 
 /// Connect to a daemon from its connection file and complete the client HMAC

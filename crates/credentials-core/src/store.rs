@@ -3824,6 +3824,7 @@ fn row_to_intent(row: &rusqlite::Row<'_>) -> rusqlite::Result<RefreshIntent> {
 
 #[cfg(test)]
 mod tests {
+    use crate::test_support::TestTempDir;
 
     /// The scrub shape leaves a WRITABLE store, which was the one claim in the restore
     /// contract I had only read at source rather than exercised.
@@ -3918,17 +3919,17 @@ mod tests {
     /// A scratch database path under the same temp-dir idiom the rest of this module
     /// uses: pid plus a counter, so parallel test threads cannot collide and a recycled
     /// pid on windows cannot inherit a previous run's directory.
-    fn scratch_db(label: &str) -> std::path::PathBuf {
+    fn scratch_db(label: &str) -> (TestTempDir, std::path::PathBuf) {
         use std::sync::atomic::{AtomicU64, Ordering};
         static SEQ: AtomicU64 = AtomicU64::new(0);
-        let root = std::env::temp_dir().join(format!(
+        let root = TestTempDir::new(format!(
             "ck-restore-{}-{}-{}",
             label,
             std::process::id(),
             SEQ.fetch_add(1, Ordering::Relaxed)
         ));
-        std::fs::create_dir(&root).expect("scratch dir");
-        root.join("store.db")
+        let path = root.join("store.db");
+        (root, path)
     }
 
     /// The restore report answers on a file the house read-only form CANNOT open.
@@ -3940,7 +3941,7 @@ mod tests {
     /// store and never exercise the reason the function opens differently.
     #[test]
     fn the_restore_report_reads_a_wal_header_with_no_sidecar() {
-        let path = scratch_db("restored");
+        let (_root, path) = scratch_db("restored");
         {
             let c = rusqlite::Connection::open(&path).expect("create");
             c.pragma_update(None, "journal_mode", "WAL").expect("wal");
@@ -4025,7 +4026,7 @@ mod tests {
     /// store, which this repo already fixed once by omitting the counts instead.
     #[test]
     fn a_missing_fence_table_is_absent_rather_than_zero() {
-        let path = scratch_db("nofence");
+        let (_root, path) = scratch_db("nofence");
         {
             let c = rusqlite::Connection::open(&path).expect("create");
             c.execute_batch(
@@ -4062,7 +4063,7 @@ mod tests {
     fn the_online_grant_listing_keeps_read_and_sign_separate_and_orders_by_prefix() {
         use std::sync::atomic::{AtomicU64, Ordering};
         static SEQ: AtomicU64 = AtomicU64::new(0);
-        let root = std::env::temp_dir().join(format!(
+        let root = TestTempDir::new(format!(
             "ck-grantorder-{}-{}",
             std::process::id(),
             SEQ.fetch_add(1, Ordering::Relaxed)
@@ -4131,7 +4132,7 @@ mod tests {
     fn a_store_ahead_of_this_binary_refuses_to_migrate() {
         use std::sync::atomic::{AtomicU64, Ordering};
         static SEQ: AtomicU64 = AtomicU64::new(0);
-        let root = std::env::temp_dir().join(format!(
+        let root = TestTempDir::new(format!(
             "ck-cred-ahead-{}-{}",
             std::process::id(),
             SEQ.fetch_add(1, Ordering::Relaxed)
@@ -4175,10 +4176,10 @@ mod tests {
     use crate::oauth::OAuthCredential;
     use cortexkit_store::{open_sqlite, Isolation, StorageBackend, StorageDescriptor};
 
-    fn tmp_store(seed: u8) -> (std::path::PathBuf, EncryptedStore) {
+    fn tmp_store(seed: u8) -> (TestTempDir, EncryptedStore) {
         use std::sync::atomic::{AtomicU64, Ordering};
         static SEQ: AtomicU64 = AtomicU64::new(0);
-        let root = std::env::temp_dir().join(format!(
+        let root = TestTempDir::new(format!(
             "ck-cred-store-{}-{}",
             std::process::id(),
             SEQ.fetch_add(1, Ordering::Relaxed)

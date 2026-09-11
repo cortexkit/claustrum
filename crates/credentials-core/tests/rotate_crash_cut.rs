@@ -20,7 +20,7 @@
 #![cfg(all(unix, feature = "rotate-test-seam"))]
 
 use std::os::unix::process::ExitStatusExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
@@ -28,25 +28,25 @@ use cortexkit_store::{open_sqlite, Isolation, StorageBackend, StorageDescriptor}
 use credentials_core::key::MasterKey;
 use credentials_core::resolver::{self, KeySlot, KeySource, MasterKeyError, ResolverConfig};
 use credentials_core::store::{EncryptedStore, StoreOpError};
+use credentials_core::test_support::TestTempDir;
 
 mod common;
 
 /// Spawn the helper at one cut point, wait for it to park, SIGKILL it, and return
 /// the rig dir so the caller can re-open the vault from the killed-at-cut state.
-fn kill_at_cut(cut: &str) -> PathBuf {
+fn kill_at_cut(cut: &str) -> TestTempDir {
     // Unique per CALL, not per cut. Keying on the cut name alone collided the moment a
     // second test reused a cut: both rigs resolved to one directory, the second helper
     // found a provisioned key slot and panicked, and the failure surfaced in whichever
     // test lost the race rather than in the one that was added. The counter makes the
     // rig private to a call the way the test reads as if it already were.
     static RIG_SEQ: AtomicU32 = AtomicU32::new(0);
-    let root = std::env::temp_dir().join(format!(
+    let root = TestTempDir::new(format!(
         "ck-cred-rotate-cut-{}-{}-{}",
         cut,
         std::process::id(),
         RIG_SEQ.fetch_add(1, Ordering::Relaxed)
     ));
-    let _ = std::fs::remove_dir_all(&root);
     let data_dir = root.join("data");
     let key_dir = root.join("secrets");
     std::fs::create_dir_all(&data_dir).unwrap();
@@ -248,7 +248,6 @@ fn crash_after_stage_resolves_to_current_and_never_bricks() {
         "the crash happened AFTER staging, so k2 must be sitting in the next slot"
     );
     assert_wrong_key_fails_closed(&root);
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -280,7 +279,6 @@ fn crash_after_rewrap_resolves_to_next_and_never_bricks() {
         "the database's key is reachable only via next at this cut"
     );
     assert_wrong_key_fails_closed(&root);
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -312,7 +310,6 @@ fn crash_after_promote_resolves_to_current_and_never_bricks() {
         "promotion clears next, freeing it for the next rotation"
     );
     assert_wrong_key_fails_closed(&root);
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -353,7 +350,6 @@ fn crash_during_a_resumed_second_rotation_never_bricks() {
         "the second rotation's key occupies next"
     );
     assert_wrong_key_fails_closed(&root);
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// The read-only usable-scan must read a vault the daemon can still open.
@@ -406,5 +402,4 @@ fn the_usable_scan_reads_a_vault_left_mid_rotation() {
         1,
         "the scan must decrypt and report the record, not merely avoid the error: {rows:?}"
     );
-    let _ = std::fs::remove_dir_all(&root);
 }

@@ -23,12 +23,13 @@
 #![cfg(all(unix, feature = "login-test-seam"))]
 
 use std::os::unix::process::ExitStatusExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use cortexkit_store::{open_sqlite, Isolation, StorageBackend, StorageDescriptor};
 use credentials_core::resolver::{self, KeySource, ResolverConfig};
 use credentials_core::store::EncryptedStore;
+use credentials_core::test_support::TestTempDir;
 
 mod common;
 
@@ -37,10 +38,8 @@ const NEW_REFRESH: &str = "NEW-INDEPENDENT-REFRESH-TOKEN";
 
 /// Spawn the helper at one cut point, wait for it to park, SIGKILL it, and return the
 /// rig dir so the caller can re-open the vault from the killed-at-cut state.
-fn kill_at_cut(cut: &str) -> PathBuf {
-    let root =
-        std::env::temp_dir().join(format!("ck-cred-login-cut-{}-{}", cut, std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+fn kill_at_cut(cut: &str) -> TestTempDir {
+    let root = TestTempDir::new(format!("ck-cred-login-cut-{}-{}", cut, std::process::id()));
     let data_dir = root.join("data");
     let key_dir = root.join("secrets");
     std::fs::create_dir_all(&data_dir).unwrap();
@@ -160,8 +159,6 @@ fn crash_before_login_write_leaves_old_credential_intact_and_refreshable() {
         !audit_has_op(&store, "login"),
         "no dangling Login audit entry before the write committed"
     );
-
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -194,6 +191,4 @@ fn crash_after_login_write_commits_new_credential_and_keeps_handle() {
         audit_has_op(&store, "login"),
         "a distinct login audit op was recorded"
     );
-
-    let _ = std::fs::remove_dir_all(&root);
 }

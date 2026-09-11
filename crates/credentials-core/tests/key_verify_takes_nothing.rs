@@ -46,22 +46,20 @@
 // defect class as a suite that cannot see the file it claims to verify.
 #![cfg(feature = "migration-tools")]
 
-use std::path::PathBuf;
-
 use cortexkit_store::{open_sqlite, Isolation, StorageBackend, StorageDescriptor};
 use credentials_core::audit::AuditOp;
 use credentials_core::record::{CredentialKind, VaultRecord};
 use credentials_core::store::EncryptedStore;
+use credentials_core::test_support::TestTempDir;
 
-fn rig() -> PathBuf {
+fn rig() -> TestTempDir {
     use std::sync::atomic::{AtomicU32, Ordering};
     static SEQ: AtomicU32 = AtomicU32::new(0);
-    let root = std::env::temp_dir().join(format!(
+    let root = TestTempDir::new(format!(
         "ck-key-verify-{}-{}",
         std::process::id(),
         SEQ.fetch_add(1, Ordering::Relaxed)
     ));
-    let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(root.join("data")).unwrap();
     std::fs::create_dir_all(root.join("secrets")).unwrap();
     root

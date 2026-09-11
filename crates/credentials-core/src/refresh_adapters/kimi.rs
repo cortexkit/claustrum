@@ -220,6 +220,7 @@ fn now_ms() -> i64 {
 mod tests {
     use super::*;
     use crate::refresh_adapters::fixture::FixtureTransport;
+    use crate::test_support::TestTempDir;
 
     fn cred() -> OAuthCredential {
         OAuthCredential {
@@ -290,8 +291,7 @@ mod tests {
 
     #[test]
     fn device_id_file_is_mode_0600_and_stable() {
-        let root = std::env::temp_dir().join(format!("ck-kimi-device-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = TestTempDir::new(format!("ck-kimi-device-{}", std::process::id()));
         let path = device_id_path(&root);
         let first = ensure_device_id(&path).unwrap();
         let second = ensure_device_id(&path).unwrap();
@@ -305,6 +305,5 @@ mod tests {
                 0o600
             );
         }
-        let _ = std::fs::remove_dir_all(root);
     }
 }

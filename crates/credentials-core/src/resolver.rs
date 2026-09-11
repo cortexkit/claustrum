@@ -1096,6 +1096,7 @@ mod tests {
         );
     }
     use super::*;
+    use crate::test_support::TestTempDir;
 
     /// A platform with no keychain must SAY SO, and say what to do instead.
     ///
@@ -1129,17 +1130,15 @@ mod tests {
         );
     }
 
-    fn tmp_dir(tag: &str) -> PathBuf {
+    fn tmp_dir(tag: &str) -> TestTempDir {
         use std::sync::atomic::{AtomicU64, Ordering};
         static SEQ: AtomicU64 = AtomicU64::new(0);
-        let d = std::env::temp_dir().join(format!(
+        TestTempDir::new(format!(
             "ck-cred-resolver-{}-{}-{}",
             std::process::id(),
             tag,
             SEQ.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&d).unwrap();
-        d
+        ))
     }
 
     /// A directory fsync that fails for a REAL I/O reason must surface, while a platform

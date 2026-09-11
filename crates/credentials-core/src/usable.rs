@@ -123,6 +123,21 @@ pub struct RecordUsability {
     pub unservable_identity: bool,
     /// The non-secret account id operators use to distinguish OAuth credentials.
     pub account_id: Option<String>,
+    /// The account email, and ONLY when it differs from `account_id`.
+    ///
+    /// CARRIED SO A UUID-LABELLED ACCOUNT CAN BE NAMED. Anthropic and ChatGPT store a
+    /// provider uuid, so a scan of five accounts renders five opaque strings that an
+    /// operator cannot tell apart without a lookup elsewhere. The credential id's own
+    /// label (`:ufuk2`, `:yiyi`) is operator-chosen and can disagree with whose account
+    /// the record actually holds -- which is the exact transposition a consumer checks
+    /// for by reading identity from the vault rather than from labels.
+    ///
+    /// SUPPRESSED WHEN EQUAL rather than always rendered. For providers with opaque
+    /// tokens the documented rule puts the email in BOTH fields
+    /// ([`crate::record::RecordIdentity`]), so an unconditional column would be a
+    /// duplicate on every such row. A field that repeats its neighbour nine times in ten
+    /// teaches a reader to skip it, and then it is not read on the tenth.
+    pub email: Option<String>,
 }
 
 /// Why a scan could not start. Distinguished from a per-record failure, which is
@@ -281,8 +296,13 @@ pub fn scan(conn: &Connection, key: &MasterKey) -> Result<Vec<RecordUsability>, 
                     usability: Usability::Unreadable {
                         why: format!("{e:?}"),
                     },
+                    // No identity claims on a record that would not open: the fields
+                    // live INSIDE the envelope, so absent here means unread rather than
+                    // unset, and rendering either as empty would assert something this
+                    // arm cannot know.
                     unservable_identity: false,
                     account_id: None,
+                    email: None,
                 });
                 continue;
             }
@@ -298,6 +318,7 @@ pub fn scan(conn: &Connection, key: &MasterKey) -> Result<Vec<RecordUsability>, 
                     },
                     unservable_identity: false,
                     account_id: None,
+                    email: None,
                 });
                 continue;
             }
@@ -326,15 +347,34 @@ pub fn scan(conn: &Connection, key: &MasterKey) -> Result<Vec<RecordUsability>, 
         };
         let unservable_identity = !record.identity.is_servable();
         let (account_id, invalid_account_id) = account_id_for_output(record.identity.account_id);
+        // Same control-character treatment as the account id, and for the same reason:
+        // both are operator-facing output built from stored bytes, and a terminal escape
+        // in one is no less a problem than in the other.
+        let (email, invalid_email) = account_id_for_output(record.identity.email);
+        let email = email_that_says_more(account_id.as_deref(), email);
         out.push(RecordUsability {
             credential_id: id,
             state,
             usability,
-            unservable_identity: unservable_identity || invalid_account_id,
+            unservable_identity: unservable_identity || invalid_account_id || invalid_email,
             account_id,
+            email,
         });
     }
     Ok(out)
+}
+
+/// The email, or `None` when it only repeats the account id.
+///
+/// EXTRACTED RATHER THAN INLINED SO A TEST CAN REACH IT. Left as a match arm inside the
+/// scan loop, the only way to test the rule would be to restate it in the test -- which
+/// verifies the test's copy against itself and passes just as well when the production
+/// arm is deleted.
+fn email_that_says_more(account_id: Option<&str>, email: Option<String>) -> Option<String> {
+    match (account_id, email) {
+        (Some(account_id), Some(email)) if account_id == email => None,
+        (_, email) => email,
+    }
 }
 
 fn account_id_for_output(account_id: Option<String>) -> (Option<String>, bool) {
@@ -426,6 +466,35 @@ mod declared_expiry_tests {
 #[cfg(test)]
 mod identity_output_tests {
     use super::*;
+
+    /// An email EQUAL to the account id is suppressed; one that DIFFERS is carried.
+    ///
+    /// BOTH ARMS, because a test asserting only the differing case passes against an
+    /// implementation that renders the email unconditionally -- which is the duplicate
+    /// column the suppression exists to avoid, and the one a reader learns to skip.
+    #[test]
+    fn an_email_is_carried_only_when_it_says_more_than_the_account_id() {
+        assert_eq!(
+            email_that_says_more(Some("a@b.c"), Some("a@b.c".to_string())),
+            None,
+            "an email equal to the account id is a duplicate column"
+        );
+        assert_eq!(
+            email_that_says_more(
+                Some("ec72a6ee-4223-47a6-8148-6d87bff71ebe"),
+                Some("a@b.c".to_string())
+            )
+            .as_deref(),
+            Some("a@b.c"),
+            "a uuid account id names nobody; the email is the entire reason for the field"
+        );
+        assert_eq!(
+            email_that_says_more(None, Some("a@b.c".to_string())).as_deref(),
+            Some("a@b.c"),
+            "the unservable shape must still surface its email, since that is the \
+             evidence a capture half-ran"
+        );
+    }
 
     #[test]
     fn account_id_controls_are_never_returned_for_cli_rendering() {

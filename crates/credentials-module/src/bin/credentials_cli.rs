@@ -3611,9 +3611,16 @@ fn cmd_usable(global: &GlobalArgs) -> Result<(), CliError> {
                     None => "no expiry recorded".to_string(),
                 };
                 println!(
-                    "  {id:34} oauth   {}  account={}  {ttl}",
+                    "  {id:34} oauth   {}  account={}{}  {ttl}",
                     row.state,
-                    row.account_id.as_deref().unwrap_or("none")
+                    row.account_id.as_deref().unwrap_or("none"),
+                    // Only when it says something the account id does not -- the scan
+                    // suppresses an email equal to it, so this appends exactly where a
+                    // provider uuid would otherwise leave five accounts indistinguishable.
+                    row.email
+                        .as_deref()
+                        .map(|email| format!(" ({email})"))
+                        .unwrap_or_default()
                 );
                 serviceable += 1;
             }

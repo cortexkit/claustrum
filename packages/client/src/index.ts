@@ -8,6 +8,7 @@ export {
 export { storeIdentity, storageFingerprint } from './identity.js'
 export {
   MANIFEST_LOCK,
+  manifestLockQuarantinePrefix,
   withManifestLock,
   writeHandleFileLocked,
   type ManifestHandleAccount,

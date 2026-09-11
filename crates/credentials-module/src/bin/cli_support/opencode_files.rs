@@ -21,6 +21,11 @@ const AUTH_FILE_MAX_BYTES: u64 = 1024 * 1024;
 const HANDLE_FILE_MAX_BYTES: u64 = 256 * 1024;
 const MANIFEST_LOCK_TTL_MS: u64 = 30_000;
 const MANIFEST_LOCK_RENEW_EVERY_MS: u64 = 10_000;
+// The claim deadline bounds when the last stale-lock rename is issued, not when it lands:
+// a rename issued at deadline-1ms can complete afterwards, by tens to hundreds of ms on a
+// loaded host. The retry deadline and staleness window both read `ttl` today; if they split,
+// this bound must keep their max so reclamation still covers the longer role.
+const MANIFEST_LOCK_QUARANTINE_RECLAIM_MARGIN: Duration = Duration::from_millis(5_000);
 const MANIFEST_LOCK_OWNER_KEYS: [&str; 4] = ["tenant", "pid", "claimed_at_ms", "nonce"];
 const MANIFEST_LOCK_STALE_TARGET_PATTERN: &str = r"^\.lock\.stale-\d+-[A-Za-z0-9_-]+$";
 const OPENCODE_CLAUSTRUM_TENANT: &str = "opencode-claustrum";
@@ -459,6 +464,8 @@ fn resolve_now_ms(options: &ManifestLockOptions) -> Result<u64, OpenCodeFilesErr
 }
 
 fn random_nonce() -> Result<String, OpenCodeFilesError> {
+    // 16 CSPRNG bytes from ring: a collision needs both the same millisecond and the same
+    // nonce. Do not simplify this to a counter, pid+timestamp, or a short token.
     let mut bytes = [0_u8; 16];
     SystemRandom::new()
         .fill(&mut bytes)
@@ -537,6 +544,48 @@ fn stale_target_matches(value: &str) -> bool {
         && random
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+fn reclaim_stale_manifest_lock_quarantines(path: &Path, ttl: Duration, claim_deadline: Duration) {
+    let reclaim_age = ttl
+        .max(claim_deadline)
+        .saturating_add(MANIFEST_LOCK_QUARANTINE_RECLAIM_MARGIN);
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    let Some(basename) = path.file_name().and_then(|name| name.to_str()) else {
+        return;
+    };
+    let Ok(entries) = fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some(stale_target) = name.strip_prefix(basename) else {
+            continue;
+        };
+        if !stale_target_matches(stale_target) {
+            continue;
+        }
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        let Ok(modified) = entry.metadata().and_then(|metadata| metadata.modified()) else {
+            continue;
+        };
+        let Ok(age) = SystemTime::now().duration_since(modified) else {
+            continue;
+        };
+        if age >= reclaim_age {
+            let _ = fs::remove_dir_all(entry.path());
+        }
+    }
 }
 
 fn warn_lease_lost(path: &Path) {
@@ -642,6 +691,8 @@ where
                     if let Some(before_evict) = &options.before_evict {
                         before_evict();
                     }
+                    // The owner record remains because the quarantine is the ABA guard, not
+                    // an audit log; bounded reclamation below is what makes that retention finite.
                     let stale = PathBuf::from(format!(
                         "{}.stale-{}-{}",
                         lock.display(),
@@ -691,6 +742,8 @@ where
         }
         thread::sleep(jitter(&options).min(deadline.saturating_duration_since(Instant::now())));
     }
+
+    reclaim_stale_manifest_lock_quarantines(path, options.ttl, options.ttl);
 
     let (stop_tx, stop_rx) = mpsc::channel::<()>();
     let renewal_lock = lock.clone();
@@ -1243,6 +1296,181 @@ mod manifest_lock_aba_regression {
         fs::write(lock.join("owner"), owner).unwrap();
         fs::set_permissions(lock.join("owner"), fs::Permissions::from_mode(0o600)).unwrap();
         lock
+    }
+
+    fn seed_quarantine(path: &Path, claimed_at_ms: u64, nonce: &str) -> PathBuf {
+        let quarantine = path.with_file_name(format!(
+            "{}.lock.stale-{claimed_at_ms}-{nonce}",
+            path.file_name().unwrap().to_string_lossy()
+        ));
+        fs::create_dir(&quarantine).unwrap();
+        fs::set_permissions(&quarantine, fs::Permissions::from_mode(0o700)).unwrap();
+        quarantine
+    }
+
+    fn set_directory_mtime(path: &Path, modified_at_ms: u64) {
+        fs::File::open(path)
+            .unwrap()
+            .set_times(
+                fs::FileTimes::new()
+                    .set_modified(UNIX_EPOCH + Duration::from_millis(modified_at_ms)),
+            )
+            .unwrap();
+    }
+
+    fn reclaim_options(ttl: Duration) -> ManifestLockOptions {
+        ManifestLockOptions {
+            ttl,
+            renew_every: Duration::from_secs(1),
+            retry_min: Duration::from_millis(1),
+            retry_max: Duration::from_millis(1),
+            ..ManifestLockOptions::default()
+        }
+    }
+
+    #[test]
+    fn quarantine_younger_than_reclaim_age_is_retained() {
+        let root = std::env::temp_dir().join(format!(
+            "claustrum-manifest-lock-reclaim-young-{}-{}",
+            std::process::id(),
+            TEMP_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("opencode-handles.json");
+        let ttl = Duration::from_millis(100);
+        let quarantine = seed_quarantine(&path, 1, "young_nonce");
+        set_directory_mtime(&quarantine, now_ms() - 4_100);
+
+        with_manifest_lock_with_options(&path, "claimant", reclaim_options(ttl), |_| Ok(()))
+            .unwrap();
+
+        assert!(quarantine.exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn quarantine_older_than_reclaim_age_is_reclaimed() {
+        let root = std::env::temp_dir().join(format!(
+            "claustrum-manifest-lock-reclaim-old-{}-{}",
+            std::process::id(),
+            TEMP_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("opencode-handles.json");
+        let ttl = Duration::from_millis(100);
+        let quarantine = seed_quarantine(&path, 1, "old_nonce");
+        set_directory_mtime(&quarantine, now_ms() - 5_101);
+
+        with_manifest_lock_with_options(&path, "claimant", reclaim_options(ttl), |_| Ok(()))
+            .unwrap();
+
+        assert!(!quarantine.exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn quarantine_past_ttl_but_inside_margin_is_retained() {
+        let root = std::env::temp_dir().join(format!(
+            "claustrum-manifest-lock-reclaim-margin-{}-{}",
+            std::process::id(),
+            TEMP_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("opencode-handles.json");
+        let ttl = Duration::from_millis(100);
+        let quarantine = seed_quarantine(&path, 1, "margin_nonce");
+        set_directory_mtime(&quarantine, now_ms() - 101);
+
+        with_manifest_lock_with_options(&path, "claimant", reclaim_options(ttl), |_| Ok(()))
+            .unwrap();
+
+        assert!(quarantine.exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn old_quarantine_name_with_recent_mtime_is_retained() {
+        let root = std::env::temp_dir().join(format!(
+            "claustrum-manifest-lock-reclaim-mtime-{}-{}",
+            std::process::id(),
+            TEMP_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("opencode-handles.json");
+        let quarantine = seed_quarantine(&path, 1, "recent_mtime_nonce");
+        set_directory_mtime(&quarantine, now_ms());
+
+        with_manifest_lock_with_options(
+            &path,
+            "claimant",
+            reclaim_options(Duration::from_millis(100)),
+            |_| Ok(()),
+        )
+        .unwrap();
+
+        assert!(quarantine.exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn reclaim_leaves_nonmatching_siblings_live_lock_and_other_manifest_quarantine() {
+        let root = std::env::temp_dir().join(format!(
+            "claustrum-manifest-lock-reclaim-scope-{}-{}",
+            std::process::id(),
+            TEMP_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("opencode-handles.json");
+        let nonmatching = root.join("opencode-handles.json.lock.stale-not-a-timestamp-nonce");
+        let unrelated_file = root.join("unrelated");
+        let other_path = root.join("another-manifest.json");
+        let other_quarantine = seed_quarantine(&other_path, 1, "other_nonce");
+        fs::create_dir(&nonmatching).unwrap();
+        fs::write(&unrelated_file, "untouched").unwrap();
+        set_directory_mtime(&nonmatching, now_ms() - 5_101);
+        set_directory_mtime(&other_quarantine, now_ms() - 5_101);
+
+        with_manifest_lock_with_options(
+            &path,
+            "claimant",
+            reclaim_options(Duration::from_millis(100)),
+            |_| {
+                assert!(lock_path(&path).is_dir());
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert!(nonmatching.exists());
+        assert_eq!(fs::read_to_string(&unrelated_file).unwrap(), "untouched");
+        assert!(other_quarantine.exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn reclaim_failure_does_not_fail_acquisition() {
+        let root = std::env::temp_dir().join(format!(
+            "claustrum-manifest-lock-reclaim-failure-{}-{}",
+            std::process::id(),
+            TEMP_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("opencode-handles.json");
+        let quarantine = seed_quarantine(&path, 1, "unreadable_nonce");
+        set_directory_mtime(&quarantine, now_ms() - 5_101);
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o300)).unwrap();
+
+        let result = with_manifest_lock_with_options(
+            &path,
+            "claimant",
+            reclaim_options(Duration::from_millis(100)),
+            |_| Ok(()),
+        );
+
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(result.is_ok());
+        assert!(quarantine.exists());
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

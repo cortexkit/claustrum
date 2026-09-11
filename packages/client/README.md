@@ -36,11 +36,30 @@ prove. Each was found by a consumer shipping green and failing elsewhere.
   `~/.config/opencode` without an override writes lock files and manifests beside real
   credentials — passing locally, and mutating state no CI runner has.
 • **A bare `bun` run is not an oracle for module resolution.** The Bun CLI auto-installs
-  a public dependency it cannot resolve, needing only a `package.json` in scope; a
-  compiled binary does not. Measured on the same module, same directory, no
-  `node_modules`: compiled loader gives `ERR_MODULE_NOT_FOUND`, `bun -e` resolves. Since
-  consumers of a credential client are daemons and plugins, exercise resolution under a
-  compiled loader (`bun build --compile`) or the real host.
+  a public dependency it cannot resolve; a compiled binary does not. All readings below
+  are bun 1.3.14, same module, no `node_modules` — a toolchain behaviour with no version
+  attached reads as permanent, and this one is a moving target by construction.
+
+  ```
+  bun run m.mjs / bun -e     resolves   with or without a package.json in scope,
+                                        from any cwd, on a cold install cache
+  bun build --compile        error: Could not resolve: "X". Maybe you need to
+    (static import)                     "bun install"?  -- NO BINARY PRODUCED
+  bun build --compile        builds; fails in the consumer's process at import:
+    (dynamic import of a               ERR_MODULE_NOT_FOUND Cannot find package 'X'
+     disk module)
+  ```
+
+  Both compiled shapes matter and they fail at opposite ends. A bare dependency the
+  compiler can see is refused early and loudly, before any artifact exists. One it cannot
+  see — a plugin or a path-imported client loaded at runtime — survives the build and
+  fails at import inside the host, which is exactly where a credential client cannot
+  afford to fail. Since this client's consumers are daemons and plugins, exercise
+  resolution under a compiled loader or the real host, never a bare CLI run.
+
+  On macOS, sign the compiled probe (`codesign --force --sign -`) before trusting its
+  result: a freshly linked unsigned binary is SIGKILLed, and `rc=137` with empty stderr
+  reads as a resolution failure while being a signature one.
 
 The shape is the same in all three: the producing machine supplies the thing under test.
 A passing check on it is evidence only when the ambient supply is removed first.

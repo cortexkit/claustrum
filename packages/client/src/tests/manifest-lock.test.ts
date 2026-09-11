@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test'
-import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 
@@ -14,6 +14,7 @@ import type { ManifestLockError, ManifestLockErrorCode } from '../index'
 const roots: string[] = []
 const handle = (letter: string) => `ckh_${letter.repeat(43)}`
 const sleep = async (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+const RECLAIM_MARGIN_MS = 5_000
 
 async function manifestPath(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), 'claustrum-manifest-lock-'))
@@ -45,6 +46,15 @@ async function owner(path: string, claimedAtMs: number, tenant = 'other-tenant')
   })}\n`, { mode: 0o600 })
   await chmod(join(lockPath, 'owner'), 0o600)
 }
+
+async function quarantine(path: string, claimedAtMs: number, nonce: string, modifiedAtMs: number): Promise<string> {
+  const target = `${path}.lock.stale-${claimedAtMs}-${nonce}`
+  await mkdir(target, { mode: 0o700 })
+  await utimes(target, modifiedAtMs / 1_000, modifiedAtMs / 1_000)
+  return target
+}
+
+const reclaimOptions = (ttlMs = 100) => ({ ttlMs, renewEveryMs: 1_000, retryMinMs: 1, retryMaxMs: 1 })
 
 afterEach(async () => {
   __setManifestLockTestOptions()
@@ -84,6 +94,81 @@ describe('manifest writer lock', () => {
       .map((name) => name.slice(basename(path).length))
     expect(suffixes).toHaveLength(1)
     expect(MANIFEST_LOCK.staleTargetRe.test(suffixes[0]!)).toBe(true)
+  })
+
+  test('quarantine younger than reclaim age is retained', async () => {
+    const path = await manifestPath()
+    __setManifestLockTestOptions(reclaimOptions())
+    const target = await quarantine(path, 1, 'young_nonce', Date.now() - (100 + RECLAIM_MARGIN_MS - 1_000))
+
+    await withManifestLock(path, 'claimant', async () => {})
+
+    expect((await stat(target)).isDirectory()).toBe(true)
+  })
+
+  test('quarantine older than reclaim age is reclaimed', async () => {
+    const path = await manifestPath()
+    __setManifestLockTestOptions(reclaimOptions())
+    const target = await quarantine(path, 1, 'old_nonce', Date.now() - (100 + RECLAIM_MARGIN_MS + 1))
+
+    await withManifestLock(path, 'claimant', async () => {})
+
+    await expect(stat(target)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  test('quarantine past ttl but inside margin is retained', async () => {
+    const path = await manifestPath()
+    __setManifestLockTestOptions(reclaimOptions())
+    const target = await quarantine(path, 1, 'margin_nonce', Date.now() - 101)
+
+    await withManifestLock(path, 'claimant', async () => {})
+
+    expect((await stat(target)).isDirectory()).toBe(true)
+  })
+
+  test('old quarantine name with recent mtime is retained', async () => {
+    const path = await manifestPath()
+    __setManifestLockTestOptions(reclaimOptions())
+    const target = await quarantine(path, 1, 'recent_mtime_nonce', Date.now())
+
+    await withManifestLock(path, 'claimant', async () => {})
+
+    expect((await stat(target)).isDirectory()).toBe(true)
+  })
+
+  test('reclaim leaves nonmatching siblings, the live lock, and another manifest quarantine', async () => {
+    const path = await manifestPath()
+    __setManifestLockTestOptions(reclaimOptions())
+    const parent = join(path, '..')
+    const nonmatching = join(parent, `${basename(path)}.lock.stale-not-a-timestamp-nonce`)
+    const unrelatedFile = join(parent, 'unrelated')
+    const otherQuarantine = await quarantine(join(parent, 'another-manifest.json'), 1, 'other_nonce', Date.now() - (100 + RECLAIM_MARGIN_MS + 1))
+    await mkdir(nonmatching, { mode: 0o700 })
+    await utimes(nonmatching, (Date.now() - (100 + RECLAIM_MARGIN_MS + 1)) / 1_000, (Date.now() - (100 + RECLAIM_MARGIN_MS + 1)) / 1_000)
+    await writeFile(unrelatedFile, 'untouched')
+
+    await withManifestLock(path, 'claimant', async () => {
+      expect((await stat(`${path}.lock`)).isDirectory()).toBe(true)
+    })
+
+    expect((await stat(nonmatching)).isDirectory()).toBe(true)
+    expect(await readFile(unrelatedFile, 'utf8')).toBe('untouched')
+    expect((await stat(otherQuarantine)).isDirectory()).toBe(true)
+  })
+
+  test('reclaim failure does not fail acquisition', async () => {
+    const path = await manifestPath()
+    __setManifestLockTestOptions(reclaimOptions())
+    const parent = join(path, '..')
+    const target = await quarantine(path, 1, 'unreadable_nonce', Date.now() - (100 + RECLAIM_MARGIN_MS + 1))
+    await chmod(parent, 0o300)
+    try {
+      await withManifestLock(path, 'claimant', async () => {})
+    } finally {
+      await chmod(parent, 0o700)
+    }
+
+    expect((await stat(target)).isDirectory()).toBe(true)
   })
 
   test('owner that becomes stale during the retry window is evicted', async () => {

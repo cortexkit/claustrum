@@ -983,6 +983,23 @@ fn cmd_put(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     // Ordinary key files drop their terminal line ending, but a cookie header is sent
     // verbatim upstream, so its file bytes cannot be trimmed or normalized.
     // --payload-file keeps a real secret OUT of argv (process list / shell history).
+    //
+    // AND THERE IS DELIBERATELY NO ADVISORY WHEN --payload IS USED, which looks like an
+    // omission next to the reachability advisory ~200 lines below. The difference is that
+    // THAT condition is structural -- no handle AND no covering grant is a fact the vault
+    // can read -- while "this value is a secret" is a guess. Every discriminator available
+    // here is a heuristic on the bytes, and both of its failure modes are worse than
+    // silence: a false positive fires on probe deposits (`--payload
+    // 'claustrum-tombstone:v1:probe'` is a real invocation from this week's testing) and
+    // teaches the operator to skip the line, after which the true positives are invisible
+    // too; a false negative is worse still, because a warning that did not fire reads as
+    // clearance.
+    //
+    // So the exposure is real and the vault cannot close it at this seam. It is closed
+    // upstream instead, by whoever ASKS for a key naming a file path rather than
+    // prohibiting a paste -- a prohibition leaves the person holding a secret with no next
+    // step, and under time pressure they paste it anyway. Recorded 2026-09-13 after a peer
+    // routed a key through an ask row for exactly that reason.
     let payload = match (
         optional(args, "--payload"),
         optional(args, "--payload-file"),

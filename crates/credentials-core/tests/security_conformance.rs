@@ -16,17 +16,16 @@ use credentials_core::audit::{AuditCtx, AuditOp};
 use credentials_core::key::{MasterKey, MASTER_KEY_LEN};
 use credentials_core::record::{CredentialKind, VaultRecord};
 use credentials_core::store::{payload_hash, EncryptedStore, StoreOpError};
+use credentials_core::test_support::TestTempDir;
 
-fn tmp_root(tag: &str) -> std::path::PathBuf {
+fn tmp_root(tag: &str) -> TestTempDir {
     static SEQ: AtomicU64 = AtomicU64::new(0);
-    let d = std::env::temp_dir().join(format!(
+    TestTempDir::new(format!(
         "ck-cred-conf-{}-{}-{}",
         tag,
         std::process::id(),
         SEQ.fetch_add(1, Ordering::Relaxed)
-    ));
-    std::fs::create_dir_all(&d).unwrap();
-    d
+    ))
 }
 
 fn descriptor(root: &std::path::Path) -> StorageDescriptor {

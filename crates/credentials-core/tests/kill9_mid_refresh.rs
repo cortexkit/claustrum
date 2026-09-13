@@ -28,6 +28,7 @@ use credentials_core::refresh_adapters::{
     HttpResponse, HttpTransport, RefreshAdapter, RefreshError, RefreshedTokens,
 };
 use credentials_core::store::{EncryptedStore, StoreOpError};
+use credentials_core::test_support::TestTempDir;
 
 mod common;
 
@@ -63,8 +64,11 @@ impl HttpTransport for NoHttp {
 
 #[tokio::test]
 async fn kill9_between_response_and_commit_resolves_to_needs_reauth() {
-    let root = std::env::temp_dir().join(format!("ck-cred-kill9-{}", std::process::id()));
-    std::fs::create_dir_all(&root).unwrap();
+    // The SIGKILL'd helper's evidence is read below, inside this scope, so the guard is still
+    // alive at every inspection. Holding the GUARD rather than calling keep() means the
+    // directory is also removed when this test PANICS -- which is when a crash-cut test is
+    // most likely to leave one behind, and exactly the leak this change exists to close.
+    let root = TestTempDir::new(format!("ck-cred-kill9-{}", std::process::id()));
     let db_path = root.join("store.db");
     let marker_path = root.join("ready.marker");
 
@@ -170,5 +174,5 @@ async fn kill9_between_response_and_commit_resolves_to_needs_reauth() {
         "intent cleared by reconciliation"
     );
 
-    let _ = std::fs::remove_dir_all(&root);
+    // No explicit removal: the guard owns it and removes on every exit path, panic included.
 }

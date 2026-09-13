@@ -157,11 +157,10 @@ fn canonical_path_bytes(path: &Path) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::TestTempDir;
 
-    fn tmp_dir(label: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("ck-contract-{label}-{}", std::process::id()));
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    fn tmp_dir(label: &str) -> TestTempDir {
+        TestTempDir::new(format!("ck-contract-{label}-{}", std::process::id()))
     }
 
     #[test]
@@ -194,7 +193,7 @@ mod tests {
         );
 
         let with_trailing = {
-            let mut s = dir.clone().into_os_string();
+            let mut s = dir.path().to_path_buf().into_os_string();
             s.push("/");
             std::path::PathBuf::from(s)
         };

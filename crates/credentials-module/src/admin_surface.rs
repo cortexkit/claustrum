@@ -361,11 +361,13 @@ mod tests {
     use credentials_core::key::{MasterKey, MASTER_KEY_LEN};
     use credentials_core::record::{CredentialKind, RecordIdentity, VaultRecord};
     use credentials_core::store::{mint_handle, EncryptedStore};
+    use credentials_core::test_support::TestTempDir;
     use credentials_core::vault_id_for;
 
     /// A test rig: the AdminSurface plus everything a caller-side signer needs
     /// (the same MAC key derivation the CLI would perform from the keychain key).
     struct Rig {
+        _root: TestTempDir,
         admin: AdminSurface,
         store: Arc<EncryptedStore>,
         caller_mac: AdminMacKey,
@@ -376,12 +378,11 @@ mod tests {
     fn rig(seed: u8) -> Rig {
         use std::sync::atomic::{AtomicU64, Ordering};
         static SEQ: AtomicU64 = AtomicU64::new(0);
-        let root = std::env::temp_dir().join(format!(
+        let root = TestTempDir::new(format!(
             "ck-admin-surface-{}-{}",
             std::process::id(),
             SEQ.fetch_add(1, Ordering::Relaxed)
         ));
-        std::fs::create_dir_all(&root).expect("mkdir");
         let descriptor = StorageDescriptor {
             module_id: "cortexkit-credentials".into(),
             storage_namespace: "default".into(),
@@ -401,6 +402,7 @@ mod tests {
         let http = Arc::new(crate::test_support::NoHttp);
         let engine = Arc::new(RefreshEngine::new(Arc::clone(&store), Vec::new(), http));
         Rig {
+            _root: root,
             admin: AdminSurface::new(engine, mac_key, vault_id, key_id),
             store,
             caller_mac,

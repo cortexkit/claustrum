@@ -38,20 +38,20 @@ use common::{
 use cortexkit_store::{open_sqlite, Isolation, StorageBackend, StorageDescriptor};
 use credentials_core::resolver::{KeySource, ResolverConfig};
 use credentials_core::store::EncryptedStore;
+use credentials_core::test_support::TestTempDir;
 
 const SUBCONSCIOUS_REL: &str = "../../../subconscious";
 
 /// A real `ck-subc` daemon process plus its isolated rig dir; killed on drop.
 struct RealDaemon {
     child: Child,
-    rig: PathBuf,
+    rig: TestTempDir,
     connection_file: PathBuf,
 }
 
 impl Drop for RealDaemon {
     fn drop(&mut self) {
         let _ = self.child.start_kill();
-        let _ = std::fs::remove_dir_all(&self.rig);
     }
 }
 

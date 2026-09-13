@@ -335,7 +335,7 @@ fn a_global_flag_before_the_verb_reaches_the_same_vault_as_one_after_it() {
 }
 
 struct GrantCliVault {
-    root: PathBuf,
+    root: credentials_core::test_support::TestTempDir,
     data_dir: PathBuf,
     key_path: PathBuf,
 }

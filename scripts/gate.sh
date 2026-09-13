@@ -120,10 +120,10 @@ run_check "bun build" "$BUN" run build
 run_check "bun tests (hermetic)" "$BUN" run test:hermetic
 
 run_check "clippy" \
-  cargo clippy --locked --workspace --all-targets -- -D warnings
+  cargo clippy --locked --workspace --all-targets --features credentials-core/test-support -- -D warnings
 run_check "clippy (seam features)" \
   cargo clippy --locked --workspace --all-targets \
-    --features kill9-test-seam,rotate-test-seam,login-test-seam,migration-tools -- -D warnings
+    --features credentials-core/test-support,kill9-test-seam,rotate-test-seam,login-test-seam,migration-tools -- -D warnings
 
 # Run a cargo invocation and require at least `min` tests to have PASSED, and that
 # no arm announced a skip.
@@ -235,17 +235,17 @@ stream and pass the arm without ever seeing it skip."
 # follows it), and any gap between the floor and the real count is how many can go
 # before anyone is told. Measured 402 across the workspace's suites at the time of
 # writing; an earlier floor of 200 left a third of them free to disappear.
-# The current measured total is 578 (debug profile, the same
+# The current measured total is 580 (debug profile, the same
 # `cargo test --locked --workspace` this arm runs). The latest five tests pin the resolved
 # credential id on get/status, its omission on unresolved shapes, and the get response key
-# set in both directions.
+# set in both directions. 2026-09-11: the RAII temp-dir lifecycle added two tests.
 # Do not measure it with `--release`: one login test deliberately fails there and the
 # pipeline still prints a number, 32 short of the truth.
 #
 # Raise this when tests are added. A failure here is normally that, not a defect --
 # but it should be a deliberate edit rather than a number nobody revisits.
-run_expect 578 "workspace unit + integration" \
-  cargo test --locked --workspace
+run_expect 580 "workspace unit + integration" \
+  cargo test --locked --workspace --features credentials-core/test-support
 
 # Two independent defences, because each catches what the other misses:
 #   - CRED_REQUIRE_DAEMON=1 turns an unreachable sibling ck-subc into a failure at

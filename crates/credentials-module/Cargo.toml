@@ -47,6 +47,7 @@ chrono = { workspace = true }
 dialoguer = { version = "0.12", features = ["fuzzy-select"] }
 
 [dev-dependencies]
+credentials-core = { path = "../credentials-core", features = ["test-support"] }
 subc-core = { workspace = true }
 # Read the audit_log directly (after stopping the daemon to release the lease) so
 # the on-the-wire malicious-client conformance test can assert the durable alarm

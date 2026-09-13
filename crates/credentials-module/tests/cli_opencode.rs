@@ -640,7 +640,7 @@ fn spawn_route_daemon(
 }
 
 struct MigrationRig {
-    root: PathBuf,
+    root: credentials_core::test_support::TestTempDir,
     vault: PathBuf,
     key: PathBuf,
     auth: PathBuf,

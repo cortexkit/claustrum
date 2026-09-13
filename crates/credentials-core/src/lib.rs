@@ -42,6 +42,8 @@ pub mod resolver;
 pub mod secret;
 pub mod signing;
 pub mod store;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 pub mod usable;
 
 pub use admin_auth::{

@@ -1702,10 +1702,12 @@ mod tests {
     use credentials_core::oauth::OAuthCredential;
     use credentials_core::record::{CredentialKind, VaultRecord};
     use credentials_core::store::{GrantOperation, RecordState};
+    use credentials_core::test_support::TestTempDir;
     use read_surface::ReadSurface;
 
-    fn tmp_surface(seed: u8) -> Arc<ReadSurface> {
-        tmp_surface_with_store(seed).0
+    fn tmp_surface(seed: u8) -> (Arc<ReadSurface>, TestTempDir) {
+        let (surface, _, _, root) = tmp_surface_with_store(seed);
+        (surface, root)
     }
 
     /// Boot reconciliation's REASON survives as a durable row.
@@ -1721,7 +1723,7 @@ mod tests {
     /// engine -- it was at the call site.
     #[tokio::test]
     async fn boot_reconciliation_records_why_a_credential_needs_reauth() {
-        let (_, store, _) = tmp_surface_with_store(71);
+        let (_, store, _, _root) = tmp_surface_with_store(71);
         let record = VaultRecord::new_oauth(
             "test",
             "stub",
@@ -1765,8 +1767,14 @@ mod tests {
 
     /// A test AdminSurface over the same engine/store shape as tmp_surface, with a
     /// known master key (seed) so tests can derive the same MAC key caller-side.
-    fn tmp_admin(seed: u8) -> (Arc<admin_surface::AdminSurface>, Arc<EncryptedStore>) {
-        let (_, store, db_path) = tmp_surface_with_store(seed);
+    fn tmp_admin(
+        seed: u8,
+    ) -> (
+        Arc<admin_surface::AdminSurface>,
+        Arc<EncryptedStore>,
+        TestTempDir,
+    ) {
+        let (_, store, db_path, root) = tmp_surface_with_store(seed);
         let http = Arc::new(crate::test_support::NoHttp);
         let engine = Arc::new(RefreshEngine::new(Arc::clone(&store), Vec::new(), http));
         let key = MasterKey::from_bytes([seed; MASTER_KEY_LEN]);
@@ -1779,20 +1787,24 @@ mod tests {
             vault_id,
             key.key_id(),
         ));
-        (admin, store)
+        (admin, store, root)
     }
 
     fn tmp_surface_with_store(
         seed: u8,
-    ) -> (Arc<ReadSurface>, Arc<EncryptedStore>, std::path::PathBuf) {
+    ) -> (
+        Arc<ReadSurface>,
+        Arc<EncryptedStore>,
+        std::path::PathBuf,
+        TestTempDir,
+    ) {
         use std::sync::atomic::{AtomicU64, Ordering};
         static SEQ: AtomicU64 = AtomicU64::new(0);
-        let root = std::env::temp_dir().join(format!(
+        let root = TestTempDir::new(format!(
             "ck-cred-health-{}-{}",
             std::process::id(),
             SEQ.fetch_add(1, Ordering::Relaxed)
         ));
-        std::fs::create_dir_all(&root).expect("mkdir");
         let db_path = root.join("store.db");
         let descriptor = StorageDescriptor {
             module_id: "cortexkit-credentials".into(),
@@ -1825,7 +1837,7 @@ mod tests {
         let http = Arc::new(crate::test_support::NoHttp);
         let engine = Arc::new(RefreshEngine::new(Arc::clone(&store), Vec::new(), http));
         let surface = Arc::new(ReadSurface::new(engine, FetchLimiter::new(Caps::default())));
-        (surface, store, db_path)
+        (surface, store, db_path, root)
     }
 
     /// A deterministic refresh adapter for minimum-TTL read tests. Its counter proves
@@ -1903,7 +1915,7 @@ mod tests {
         Arc<EncryptedStore>,
         Arc<std::sync::atomic::AtomicUsize>,
     ) {
-        let (_unused_surface, store, _db_path) = tmp_surface_with_store(seed);
+        let (_unused_surface, store, _db_path, _root) = tmp_surface_with_store(seed);
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let adapter = TtlFixtureAdapter {
             calls: Arc::clone(&calls),
@@ -2159,7 +2171,7 @@ mod tests {
         Arc<admin_surface::AdminSurface>,
         Arc<EncryptedStore>,
     ) {
-        let (surface, store, db_path) = tmp_surface_with_store(seed);
+        let (surface, store, db_path, _root) = tmp_surface_with_store(seed);
         let http = Arc::new(crate::test_support::NoHttp);
         let engine = Arc::new(RefreshEngine::new(Arc::clone(&store), Vec::new(), http));
         let key = MasterKey::from_bytes([seed; MASTER_KEY_LEN]);
@@ -3284,7 +3296,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_through_a_resolving_handle_returns_its_bound_credential_id() {
-        let (surface, store, _db) = tmp_surface_with_store(93);
+        let (surface, store, _db, _root) = tmp_surface_with_store(93);
         let credential_id = "apikey:get-binding-proof";
         store
             .create(
@@ -3323,7 +3335,7 @@ mod tests {
 
     #[tokio::test]
     async fn status_through_a_resolving_handle_returns_its_bound_credential_id() {
-        let (surface, store, _db) = tmp_surface_with_store(94);
+        let (surface, store, _db, _root) = tmp_surface_with_store(94);
         let credential_id = "apikey:status-binding-proof";
         store
             .create(
@@ -3359,7 +3371,7 @@ mod tests {
 
     #[tokio::test]
     async fn unaddressed_status_omits_credential_id_instead_of_sending_null() {
-        let (surface, _store, _db) = tmp_surface_with_store(95);
+        let (surface, _store, _db, _root) = tmp_surface_with_store(95);
         let encoded = serde_json::to_value(
             surface
                 .status(
@@ -3399,8 +3411,8 @@ mod tests {
             }
         }
 
-        let (surface, store, _db) = tmp_surface_with_store(96);
-        let (admin, _admin_store) = tmp_admin(96);
+        let (surface, store, _db, _root) = tmp_surface_with_store(96);
+        let (admin, _admin_store, _admin_root) = tmp_admin(96);
         let credential_id = "apikey:revoked-binding-proof";
         store
             .create(
@@ -3527,8 +3539,8 @@ mod tests {
             );
         }
 
-        let (surface, store, _db) = tmp_surface_with_store(97);
-        let (admin, _admin_store) = tmp_admin(97);
+        let (surface, store, _db, _root) = tmp_surface_with_store(97);
+        let (admin, _admin_store, _admin_root) = tmp_admin(97);
         let populated_id = "antigravity:get-wire-contract";
         let populated_record = VaultRecord::new_oauth(
             "test",
@@ -3718,8 +3730,8 @@ mod tests {
             );
         }
 
-        let (surface, store, _db) = tmp_surface_with_store(92);
-        let (admin, _admin_store) = tmp_admin(92);
+        let (surface, store, _db, _root) = tmp_surface_with_store(92);
+        let (admin, _admin_store, _admin_root) = tmp_admin(92);
         let handle = credentials_core::store::mint_handle().expect("mint handle");
         store
             .put_handle_hash(
@@ -3798,7 +3810,7 @@ mod tests {
 
     #[tokio::test]
     async fn health_check_control_request_returns_domain_report() {
-        let surface = tmp_surface(7);
+        let (surface, _surface_root) = tmp_surface(7);
         let (tx, mut rx) = mpsc::channel::<Frame>(4);
 
         let request = ModuleControlRequest::HealthCheck {};
@@ -3813,7 +3825,7 @@ mod tests {
         )
         .unwrap();
 
-        let (admin, _admin_store) = tmp_admin(7);
+        let (admin, _admin_store, _admin_root) = tmp_admin(7);
         let routes = Arc::new(RouteEpochs::default());
         handle_control_request(frame, &tx, &surface, &admin, &routes)
             .await
@@ -3849,7 +3861,7 @@ mod tests {
     /// convenient sequence count.
     #[tokio::test]
     async fn health_snapshot_audit_tip_matches_store_tip_pair() {
-        let (surface, store, _db) = tmp_surface_with_store(10);
+        let (surface, store, _db, _root) = tmp_surface_with_store(10);
         let (expected_seq, expected_mac) = store
             .audit_tip()
             .expect("read audit tip")
@@ -3868,7 +3880,7 @@ mod tests {
     /// change even though the store itself has advanced.
     #[tokio::test]
     async fn health_refresh_recomputes_audit_tip_after_append() {
-        let (surface, store, _db) = tmp_surface_with_store(12);
+        let (surface, store, _db, _root) = tmp_surface_with_store(12);
         let before = surface.health_snapshot();
         store
             .append_audit(&AuditRecord {
@@ -3902,7 +3914,7 @@ mod tests {
     /// immediately; the cached one must not.
     #[tokio::test]
     async fn health_probe_serves_cached_snapshot_not_a_live_read() {
-        let (surface, store, _db) = tmp_surface_with_store(11);
+        let (surface, store, _db, _root) = tmp_surface_with_store(11);
 
         // Initial snapshot (computed at construction): 1 active + 1 needs_reauth.
         let before = surface.health_snapshot();
@@ -3941,7 +3953,7 @@ mod tests {
     /// staleness gate can drive it to Failing here.
     #[tokio::test]
     async fn a_stalled_refresher_fails_the_probe_closed() {
-        let surface = tmp_surface(13);
+        let (surface, _surface_root) = tmp_surface(13);
         // Fresh snapshot: healthy store, refresher just ran → not Failing.
         let fresh = surface.health_snapshot();
         assert_ne!(
@@ -4157,7 +4169,7 @@ mod tests {
     /// the same probe flips both.
     #[tokio::test]
     async fn status_reflects_fenced_out_lease_loss() {
-        let (surface, store, db_path) = tmp_surface_with_store(14);
+        let (surface, store, db_path, _root) = tmp_surface_with_store(14);
         // Mint a handle for the active credential so a per-handle status has a target.
         let handle = credentials_core::store::mint_handle().expect("mint handle");
         store
@@ -4220,7 +4232,7 @@ mod tests {
     /// credential as healthy.
     #[tokio::test]
     async fn status_names_the_state_of_each_credential() {
-        let (surface, store, _db) = tmp_surface_with_store(16);
+        let (surface, store, _db, _root) = tmp_surface_with_store(16);
 
         // The rig seeds apikey:active (Active) and apikey:dead (NeedsReauth). Add a
         // corrupt row so all three arms of the mapping are exercised in one run.
@@ -4510,7 +4522,7 @@ mod tests {
     /// signing-key refusal associated with the following input.
     #[tokio::test]
     async fn get_many_delegates_signing_key_refusal_without_blocking_other_items() {
-        let (surface, store, _db) = tmp_surface_with_store(85);
+        let (surface, store, _db, _root) = tmp_surface_with_store(85);
         let pem = test_ed25519_pem();
         store
             .create(
@@ -5044,7 +5056,7 @@ mod tests {
     #[tokio::test]
     async fn signing_is_fenced_to_signing_key_records() {
         use credentials_core::record::CredentialKind;
-        let (surface, store, _db) = tmp_surface_with_store(31);
+        let (surface, store, _db, _root) = tmp_surface_with_store(31);
 
         // One PEM, deposited twice under different kinds. Same bytes, so the ONLY
         // difference between the two arms is the kind.
@@ -5167,7 +5179,7 @@ mod tests {
             }
         }
 
-        let (surface, store, _db) = tmp_surface_with_store(32);
+        let (surface, store, _db, _root) = tmp_surface_with_store(32);
         let pem = test_ed25519_pem();
         store
             .create(
@@ -5292,7 +5304,7 @@ mod tests {
     /// bumped it would be writing a record it can no longer open.
     #[tokio::test]
     async fn a_reactivate_repair_moves_ready_and_leaves_the_version_alone() {
-        let (surface, store, _db) = tmp_surface_with_store(29);
+        let (surface, store, _db, _root) = tmp_surface_with_store(29);
         let record = VaultRecord::new_static(
             credentials_core::record::CredentialKind::ApiKey,
             "test",
@@ -5360,7 +5372,7 @@ mod tests {
     /// Metadata-only status answers normally.
     #[tokio::test]
     async fn status_does_not_consult_the_refresh_path() {
-        let (surface, store, _db) = tmp_surface_with_store(23);
+        let (surface, store, _db, _root) = tmp_surface_with_store(23);
         // Stale: an OAuth record whose access token expired long ago. Reaching the
         // refresh path with no adapter registered cannot succeed.
         let oauth = credentials_core::oauth::OAuthCredential {
@@ -5422,7 +5434,7 @@ mod tests {
     /// that is always Some(1) would satisfy a presence check and be useless.
     #[tokio::test]
     async fn status_carries_a_record_version_that_moves_on_replace() {
-        let (surface, store, _db) = tmp_surface_with_store(16);
+        let (surface, store, _db, _root) = tmp_surface_with_store(16);
         let handle = credentials_core::store::mint_handle().expect("mint handle");
         store
             .put_handle_hash(
@@ -5523,7 +5535,7 @@ mod tests {
     /// a hand-staged copy of the mark with no assertion behind it.
     #[tokio::test]
     async fn status_publishes_the_stale_mark_without_calling_the_credential_unhealthy() {
-        let (surface, store, _db) = tmp_surface_with_store(16);
+        let (surface, store, _db, _root) = tmp_surface_with_store(16);
         store
             .create(
                 "oauth:stub",
@@ -5673,7 +5685,7 @@ mod tests {
         // The surface's engine must HOLD the failing adapter -- `tmp_surface_with_store`
         // builds one with an empty adapter list, and a forced refresh against it answers
         // `refresh_unsupported` without ever reaching a provider.
-        let (_unused, store, _db) = tmp_surface_with_store(17);
+        let (_unused, store, _db, _root) = tmp_surface_with_store(17);
         let surface = Arc::new(ReadSurface::new(
             Arc::new(RefreshEngine::new(
                 Arc::clone(&store),
@@ -5836,7 +5848,7 @@ mod tests {
 
     #[tokio::test]
     async fn status_handle_probe_runs_the_limiter() {
-        let (surface, store, _db) = tmp_surface_with_store(15);
+        let (surface, store, _db, _root) = tmp_surface_with_store(15);
         // Sweep more distinct unknown handles than the distinct ceiling (16) on ONE
         // connection, all via status (not get). None resolve — the probe itself is the
         // signal — so this must still trip the anomaly.
@@ -5868,8 +5880,8 @@ mod tests {
     /// epoch check, not a broken dispatch path.
     #[tokio::test]
     async fn stale_epoch_route_frames_are_dropped_before_dispatch() {
-        let surface = tmp_surface(21);
-        let (admin, _admin_store) = tmp_admin(21);
+        let (surface, _surface_root) = tmp_surface(21);
+        let (admin, _admin_store, _admin_root) = tmp_admin(21);
         let (control_tx, _control_rx) = mpsc::channel::<Frame>(8);
         let (route_tx, mut route_rx) = mpsc::channel::<Frame>(8);
         let egress = Egress {
@@ -5961,7 +5973,7 @@ mod tests {
     /// preserve every byte rather than treating its separators or spaces as structure.
     #[tokio::test]
     async fn cookie_record_round_trips_byte_exact_through_seal_and_serve() {
-        let (surface, store, _db) = tmp_surface_with_store(74);
+        let (surface, store, _db, _root) = tmp_surface_with_store(74);
         let payload = b" session=abc=123; preference=space value; ending=%".to_vec();
         store
             .create(
@@ -6012,7 +6024,7 @@ mod tests {
     async fn get_quarantines_an_empty_nonrefreshable_record() {
         use credentials_core::store::RecordState;
 
-        let (surface, store, _db) = tmp_surface_with_store(20);
+        let (surface, store, _db, _root) = tmp_surface_with_store(20);
         let mut legacy = VaultRecord::new_oauth(
             "legacy-import",
             "legacy",
@@ -6067,7 +6079,7 @@ mod tests {
     /// for the admin surface, not a recovery branch for consumers.
     #[tokio::test]
     async fn retired_reads_use_the_same_auth_required_refusal_as_needs_reauth() {
-        let (surface, store, _db) = tmp_surface_with_store(21);
+        let (surface, store, _db, _root) = tmp_surface_with_store(21);
         store
             .create(
                 "apikey:retired",
@@ -6148,7 +6160,7 @@ mod tests {
     async fn report_auth_failure_invalidates_only_on_auth_status_at_the_served_version() {
         use credentials_core::store::RecordState;
 
-        let (surface, store, _db) = tmp_surface_with_store(31);
+        let (surface, store, _db, _root) = tmp_surface_with_store(31);
         let raw = credentials_core::store::mint_handle().expect("mint");
         store
             .put_handle_hash(
@@ -6293,7 +6305,7 @@ mod tests {
         use credentials_core::oauth::OAuthCredential;
         use credentials_core::store::RecordState;
 
-        let (surface, store, _db) = tmp_surface_with_store(85);
+        let (surface, store, _db, _root) = tmp_surface_with_store(85);
         store
             .create(
                 "oauth:stub",
@@ -6359,7 +6371,7 @@ mod tests {
     async fn report_on_a_static_oauth_shaped_id_latches_on_the_next_get() {
         use credentials_core::store::RecordState;
 
-        let (surface, store, _db) = tmp_surface_with_store(86);
+        let (surface, store, _db, _root) = tmp_surface_with_store(86);
         store
             .create(
                 "oauth:anthropic",
@@ -6429,7 +6441,7 @@ mod tests {
     async fn get_many_serves_at_the_cap_and_refuses_whole_past_it() {
         use crate::limiter::GET_MANY_MAX;
 
-        let (surface, store, _db) = tmp_surface_with_store(24);
+        let (surface, store, _db, _root) = tmp_surface_with_store(24);
         let mut handles = Vec::new();
         for i in 0..GET_MANY_MAX {
             let id = format!("apikey:batch-{i}");
@@ -6506,7 +6518,7 @@ mod tests {
     async fn get_surfaces_account_id_for_chatgpt_openai_and_none_otherwise() {
         use credentials_core::oauth::OAuthCredential;
 
-        let (surface, store, _db) = tmp_surface_with_store(21);
+        let (surface, store, _db, _root) = tmp_surface_with_store(21);
 
         // A faithful OpenAI access-token JWT carrying the nested claim path
         // "https://api.openai.com/auth"."chatgpt_account_id" = "acct-e2e-7". Unsigned
@@ -6597,7 +6609,7 @@ mod tests {
         use credentials_core::oauth::OAuthCredential;
         use credentials_core::record::RecordIdentity;
 
-        let (surface, store, _db) = tmp_surface_with_store(22);
+        let (surface, store, _db, _root) = tmp_surface_with_store(22);
 
         let oauth = OAuthCredential {
             // Opaque (non-JWT) access token — the live claim parse yields nothing,
@@ -6694,7 +6706,7 @@ mod tests {
         use credentials_core::oauth::OAuthCredential;
         use credentials_core::record::RecordIdentity;
 
-        let (surface, store, _db) = tmp_surface_with_store(31);
+        let (surface, store, _db, _root) = tmp_surface_with_store(31);
         let oauth = OAuthCredential {
             access_token: "opaque-access".to_string().into(),
             refresh_token: "refresh-secret".to_string().into(),

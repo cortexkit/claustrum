@@ -18,7 +18,8 @@ use crate::secret::SecretString;
 
 pub const CUSTODY_TOMBSTONE_PREFIX: &str = "claustrum-tombstone:v1:";
 
-fn is_custody_tombstone(value: &str) -> bool {
+/// Shared definition used by import parsers and the store sink so the two cannot drift.
+pub fn is_custody_tombstone(value: &str) -> bool {
     value.starts_with(CUSTODY_TOMBSTONE_PREFIX)
 }
 

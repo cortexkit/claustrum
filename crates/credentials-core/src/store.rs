@@ -48,6 +48,7 @@ use crate::audit::{
 };
 use crate::envelope::{self, EnvelopeError, RecordBinding};
 use crate::key::{KeyId, MasterKey};
+use crate::oauth::{is_custody_tombstone, CUSTODY_TOMBSTONE_PREFIX};
 pub use crate::record::RecordState;
 use crate::record::{CredentialKind, VaultRecord};
 
@@ -2797,6 +2798,25 @@ impl EncryptedStore {
                 "non-OAuth credential payload must not be empty".into(),
             ));
         }
+        // The sentinel is never a credential. Entrance checks enumerate doors, and the door
+        // that matters is the one added next. The unattended re-sealer is the live caller that
+        // makes this concrete: it re-seals whatever it finds in a consumer store, and that
+        // store is exactly where the tombstone gets written.
+        if (record.kind != CredentialKind::Oauth
+            && record
+                .payload
+                .expose()
+                .starts_with(CUSTODY_TOMBSTONE_PREFIX.as_bytes()))
+            || record.oauth.as_ref().is_some_and(|oauth| {
+                is_custody_tombstone(oauth.access_token.expose())
+                    || is_custody_tombstone(oauth.refresh_token.expose())
+            })
+        {
+            return Err(StoreOpError::Encode(
+                "custody-tombstone material is not a credential; storing it would invert custody"
+                    .into(),
+            ));
+        }
         // `Cookie` is a request header captured after the browser consumed Set-Cookie
         // attributes. It cannot disclose an expiry, so accepting a supplied timestamp
         // would persist an invented lifetime rather than an observed fact.
@@ -4449,6 +4469,114 @@ mod tests {
             b"real",
             "a refused write must leave the existing record untouched"
         );
+    }
+
+    /// EVERY write path refuses custody-tombstone material, not merely the importer
+    /// that happens to parse it.
+    ///
+    /// A tombstone is the sentinel the vault writes INTO a consumer's credential store
+    /// to mark "the real material lives in the vault". It is the one string that is
+    /// never a credential, and storing it inverts custody: the vault would then serve
+    /// the marker that means the vault holds the secret, and the real family would
+    /// exist nowhere. The refusal existed only at the OpenCode import entrances
+    /// (`opencode_migration`, `opencode_accounts`, the OAuth source parsers), so a
+    /// generic `put --replace --payload 'claustrum-tombstone:v1:...'` reached the store
+    /// and replaced a working credential with the marker.
+    ///
+    /// Entrance checks are the wrong shape for this: they enumerate the doors, and the
+    /// door that matters is the one added next. The unattended re-sealer is the live
+    /// caller that makes it concrete -- it reads a consumer's store and re-seals what it
+    /// finds, so the moment that store carries the tombstone the sealer is holding the
+    /// sentinel as if it were a token.
+    #[test]
+    fn every_write_path_refuses_custody_tombstone_material() {
+        let (_root, store) = tmp_store(0x5B);
+        let tombstone = VaultRecord::new_static(
+            CredentialKind::ApiKey,
+            "test",
+            b"claustrum-tombstone:v1:anthropic".to_vec(),
+            None,
+        );
+
+        assert!(
+            store.create("apikey:tomb", &tombstone).is_err(),
+            "create must refuse tombstone material"
+        );
+        assert!(
+            store
+                .create_audited("apikey:tomb", &tombstone, AuditCtx::admin(AuditOp::Put))
+                .is_err(),
+            "create_audited must refuse tombstone material"
+        );
+
+        // The replace paths are the dangerous ones: this is the reported defect, where
+        // a working credential is overwritten by the marker.
+        let good = VaultRecord::new_static(CredentialKind::ApiKey, "test", b"real".to_vec(), None);
+        store.create("apikey:live", &good).expect("seed");
+        assert!(
+            store
+                .overwrite_unconditional_audited(
+                    "apikey:live",
+                    &tombstone,
+                    AuditCtx::admin(AuditOp::Put)
+                )
+                .is_err(),
+            "overwrite_unconditional_audited must refuse tombstone material"
+        );
+
+        // OAUTH ARM: the same sentinel arriving in a token field rather than a payload.
+        // The source parsers reject it, but a caller constructing the credential
+        // directly does not pass through them, and both fields are reachable -- the
+        // consumer-side tombstone has been written in each.
+        let mut tombstoned_access = oauth_record();
+        tombstoned_access
+            .oauth
+            .as_mut()
+            .expect("oauth")
+            .access_token = "claustrum-tombstone:v1:anthropic".to_string().into();
+        assert!(
+            store
+                .create("oauth:tomb-access", &tombstoned_access)
+                .is_err(),
+            "an access token carrying the sentinel must be refused"
+        );
+
+        let mut tombstoned_refresh = oauth_record();
+        tombstoned_refresh
+            .oauth
+            .as_mut()
+            .expect("oauth")
+            .refresh_token = "claustrum-tombstone:v1:anthropic".to_string().into();
+        assert!(
+            store
+                .create("oauth:tomb-refresh", &tombstoned_refresh)
+                .is_err(),
+            "a refresh token carrying the sentinel must be refused"
+        );
+
+        // POSITIVE ARM: the seeded record survives every refusal above, and ordinary
+        // material still writes. A guard that matched too broadly -- or damaged the row
+        // on its way out -- would satisfy the refusals and fail here.
+        let loaded = store.get("apikey:live").expect("reload the seeded record");
+        assert_eq!(
+            loaded.payload.expose(),
+            b"real",
+            "a refused write must leave the existing record untouched"
+        );
+        store
+            .create("oauth:ordinary", &oauth_record())
+            .expect("an ordinary OAuth record must still be storable");
+        store
+            .create(
+                "apikey:mentions",
+                &VaultRecord::new_static(
+                    CredentialKind::ApiKey,
+                    "test",
+                    b"sk-claustrum-tombstone:v1:anthropic".to_vec(),
+                    None,
+                ),
+            )
+            .expect("the sentinel is refused as a PREFIX, not as a substring");
     }
 
     fn oauth_record() -> VaultRecord {

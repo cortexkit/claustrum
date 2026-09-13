@@ -27,6 +27,25 @@ use tokio::net::TcpStream;
 
 use crate::route_client;
 
+/// Resolve the master key this client signs the Gate-2 MAC with, classifying a failure
+/// as LOCAL rather than as the module refusing.
+///
+/// EXTRACTED SO A TEST CAN REACH THE DECISION. Left inline as a match arm, the only
+/// testable surface was `CliError`'s Display on a hand-built variant -- which verifies
+/// the test's own copy of the classification and passes just as well when the production
+/// arm picks the wrong one. Mutation-proved: putting this back on `RouteCommit::Refused`
+/// left the whole bin target green while the operator-facing attribution was wrong again.
+pub fn resolve_signing_key(
+    config: &ResolverConfig,
+    key_id: credentials_core::key::KeyId,
+) -> Result<credentials_core::key::MasterKey, RouteCommit> {
+    resolver::resolve_for_db(config, key_id).map_err(|e| {
+        RouteCommit::LocalFailure(format!(
+            "cannot resolve the master key to authorize this op: {e}"
+        ))
+    })
+}
+
 /// The outcome of attempting a route-plane commit.
 pub enum RouteCommit {
     /// The op committed on the running module; carries its JSON result.
@@ -37,7 +56,26 @@ pub enum RouteCommit {
     NoLiveModule(String),
     /// The module refused the op (auth, gate, or a store error). Terminal — do NOT
     /// fall back (the module is alive and said no).
+    ///
+    /// ONLY CONSTRUCT THIS WHEN THE MODULE ACTUALLY ANSWERED. Its Display says "the
+    /// running module refused the op", so using it for a client-side failure puts
+    /// words in the daemon's mouth and sends the operator to the wrong machine. Local
+    /// failures use [`RouteCommit::LocalFailure`].
     Refused(String),
+    /// THIS CLIENT could not build or sign the request. Terminal for the same reason
+    /// `Refused` is — the offline path needs the same master key, so falling back
+    /// would fail identically — but the cause is HERE, not on the module.
+    ///
+    /// Split out after a locked-keychain test on a macOS VM (SUBC, 2026-09-11) read
+    /// `the running module refused the op: cannot resolve the master key ...` and BOTH
+    /// of us took it as the daemon refusing. It was the CLI failing to resolve its own
+    /// key to sign the Gate-2 MAC; nothing was sent. The VM was restored to an older
+    /// build partly on the strength of that reading, and the remedy was local the
+    /// whole time (unlock the keychain, or pass `--key-path`).
+    ///
+    /// Five of the seven `Refused` sites were this shape, including "op body is not
+    /// valid utf-8" and "encoding op" — failures where the module was never asked.
+    LocalFailure(String),
     /// The op was dispatched but the outcome is UNKNOWN (connection dropped after
     /// send). Do NOT fall back or retry blindly — the op may have committed.
     Indeterminate(String),
@@ -59,7 +97,7 @@ pub fn commit(
     };
     let op_bytes = match op.to_bytes() {
         Ok(b) => b,
-        Err(e) => return RouteCommit::Refused(format!("encoding op: {e}")),
+        Err(e) => return RouteCommit::LocalFailure(format!("encoding op: {e}")),
     };
 
     run_async(async move { commit_async(conn_path, &vault_id, config, &op_bytes).await })
@@ -143,15 +181,13 @@ async fn commit_async(
     // `a_crashed_rotation_makes_resolve_and_resolve_for_db_disagree`.
     let key_id = match credentials_core::key::KeyId::from_hex(&key_id_hex) {
         Some(k) => k,
+        // The module ANSWERED and its answer is unusable, so the fault is genuinely
+        // remote even though this client is the one that noticed.
         None => return RouteCommit::Refused("module returned a malformed key_id".into()),
     };
-    let key = match resolver::resolve_for_db(config, key_id) {
+    let key = match resolve_signing_key(config, key_id) {
         Ok(k) => k,
-        Err(e) => {
-            return RouteCommit::Refused(format!(
-                "cannot resolve the master key to authorize the op: {e}"
-            ))
-        }
+        Err(refusal) => return refusal,
     };
     let mac_key = AdminMacKey::derive(&key);
     let tag = mac_key.sign(&TranscriptParts {
@@ -230,7 +266,7 @@ async fn admin_op(
     // envelope verbatim (no JSON re-encoding of the authenticated bytes).
     let op_body_str = match std::str::from_utf8(op_bytes) {
         Ok(s) => s.to_string(),
-        Err(_) => return RouteCommit::Refused("op body is not valid utf-8".into()),
+        Err(_) => return RouteCommit::LocalFailure("op body is not valid utf-8".into()),
     };
     let frame = route_client::route_request(
         route_channel,

@@ -131,6 +131,10 @@ enum CliError {
     Io(String),
     /// The running module refused an admin op (auth/gate/store error). Terminal.
     RouteRefused(String),
+    /// THIS CLIENT could not prepare the op: nothing was dispatched, and the module
+    /// was never asked. Terminal for the same reason as `RouteRefused` (the offline
+    /// path needs the same master key), but the operator's next move is local.
+    LocalFailure(String),
     /// An admin op was dispatched to the running module but its outcome is unknown
     /// (connection dropped after send). The op may have committed.
     RouteIndeterminate(String),
@@ -180,6 +184,14 @@ impl std::fmt::Display for CliError {
             CliError::StoreOpen(e) => write!(f, "{e}"),
             CliError::Io(m) => write!(f, "{m}"),
             CliError::RouteRefused(m) => write!(f, "the running module refused the op: {m}"),
+            // NAMES THIS SIDE, because the operator's next move depends on which machine
+            // is at fault and the old wording sent them to the wrong one. Nothing was
+            // dispatched, so there is no module state to inspect and no wire error to
+            // look up -- the fix is here.
+            CliError::LocalFailure(m) => write!(
+                f,
+                "could not prepare the op on this side (nothing was sent): {m}"
+            ),
             CliError::RouteIndeterminate(m) => write!(f, "{m}"),
         }
     }
@@ -803,6 +815,7 @@ fn commit_admin(
         match admin_client::commit(&global.data_dir, &resolver_config(global), conn_path, &op) {
             admin_client::RouteCommit::Committed(v) => return Ok(v),
             admin_client::RouteCommit::Refused(m) => return Err(CliError::RouteRefused(m)),
+            admin_client::RouteCommit::LocalFailure(m) => return Err(CliError::LocalFailure(m)),
             admin_client::RouteCommit::Indeterminate(m) => {
                 return Err(CliError::RouteIndeterminate(m))
             }
@@ -2685,6 +2698,7 @@ fn request_admin_status(global: &GlobalArgs) -> Result<serde_json::Value, CliErr
         match admin_client::commit(&global.data_dir, &resolver_config(global), conn_path, &op) {
             admin_client::RouteCommit::Committed(v) => return Ok(v),
             admin_client::RouteCommit::Refused(m) => return Err(CliError::RouteRefused(m)),
+            admin_client::RouteCommit::LocalFailure(m) => return Err(CliError::LocalFailure(m)),
             admin_client::RouteCommit::Indeterminate(m) => {
                 return Err(CliError::RouteIndeterminate(m))
             }
@@ -4351,6 +4365,65 @@ fn resolver_config(global: &GlobalArgs) -> ResolverConfig {
 
 #[cfg(test)]
 mod tests {
+    /// A client-side failure must not speak in the module's voice.
+    ///
+    /// DRIVES THE PRODUCTION DECISION, not a hand-built variant. The first version of
+    /// this test constructed `CliError::LocalFailure` itself and asserted its Display --
+    /// which verifies the test's own copy of the classification. Mutation proved it
+    /// worthless: putting the key-resolution failure back on `RouteCommit::Refused`, the
+    /// exact defect, left all 26 tests green.
+    ///
+    /// So it calls `resolve_signing_key` with a key path that cannot resolve, which is
+    /// the real arm an operator hits when the login keychain is locked.
+    ///
+    /// BOTH DIRECTIONS. A change making every refusal sound local would pass a one-armed
+    /// test and lose the distinction the other way, so a genuine module refusal must
+    /// still name the module.
+    #[test]
+    fn a_local_failure_does_not_claim_the_module_refused_and_a_real_refusal_still_does() {
+        let config = credentials_core::resolver::ResolverConfig {
+            source: credentials_core::resolver::KeySource::OperatorPath {
+                path: std::path::PathBuf::from("/nonexistent/claustrum-test/master.key"),
+            },
+            data_dir: std::path::PathBuf::from("/nonexistent/claustrum-test"),
+        };
+        let key_id = credentials_core::key::KeyId::from_hex("0123456789abcdef")
+            .expect("a well-formed key id");
+
+        let rendered = match admin_client::resolve_signing_key(&config, key_id) {
+            Err(admin_client::RouteCommit::LocalFailure(m)) => {
+                CliError::LocalFailure(m).to_string()
+            }
+            Err(other) => panic!(
+                "an unresolvable key is a LOCAL failure; classifying it as anything else \
+                 puts words in the daemon's mouth (got {})",
+                match other {
+                    admin_client::RouteCommit::Refused(m) => format!("Refused({m})"),
+                    admin_client::RouteCommit::NoLiveModule(m) => format!("NoLiveModule({m})"),
+                    admin_client::RouteCommit::Indeterminate(m) => format!("Indeterminate({m})"),
+                    _ => "Committed".to_string(),
+                }
+            ),
+            Ok(_) => panic!("a key path that does not exist must not resolve"),
+        };
+        assert!(
+            !rendered.contains("module refused"),
+            "a failure that never left this machine must not blame the daemon: {rendered}"
+        );
+        assert!(
+            rendered.contains("nothing was sent"),
+            "and it must say the op was never dispatched, since that decides whether \
+             there is any module state to inspect: {rendered}"
+        );
+
+        let remote = CliError::RouteRefused("gate 1: principal is not direct".into()).to_string();
+        assert!(
+            remote.contains("module refused"),
+            "a real refusal must still name the module, or the distinction is lost the \
+             other way: {remote}"
+        );
+    }
+
     /// This CLI's data-home rule conforms to the daemon's own golden fixture.
     ///
     /// The doc comment on `default_data_home` has always claimed byte-for-byte

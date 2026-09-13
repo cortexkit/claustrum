@@ -97,6 +97,30 @@
 #                fixture from a seat that has observed the state in the wild.
 #                Until then this leg's failure mode is unobserved, which is exactly
 #                what the note above it must keep saying.
+#
+#                *** 2026-09-13: A SECOND rc=137 OBSERVATION, ON OUR OWN BINARY,
+#                AND IT DOES NOT CONTRADICT THE ABOVE. *** Placing the daemon with
+#                a plain `cp` OVER the running image produced a placed file that
+#                SIGKILLed on exec, while the identical bytes in target/staged/
+#                ran clean. The control that separates it from the September case:
+#
+#                  cp staged -> a FRESH path, then exec     rc=0
+#                  cp staged -> OVER the running image      rc=137
+#
+#                One variable differs -- whether the destination was mapped by a
+#                live process -- so this is not the September mechanism (an
+#                Apple-signed platform binary invalidated by copying) and not a
+#                property of `cp` on ad-hoc signatures either, since the fresh-path
+#                arm ran. Recorded as the VARIABLE rather than as a page-level
+#                explanation, because the September entry above is a monument to
+#                inventing one of those from a single observation.
+#
+#                CONSEQUENCE FOR THIS LEG, and it is the reason the note lives
+#                here: `cp` rewrites in place, so the inode DOES NOT CHANGE. After
+#                a cp-placement this comparison reads equal and passes FOR THE
+#                WRONG REASON -- it would report "already restarted" when nothing
+#                had. The leg only means what it claims when placement is by
+#                rename. The runbook now instructs cp-to-temp + `mv -f`.
 #   (e) store    NOT proven live: needs a daemon holding the wrong vault
 #   (f) serving  NOT proven live: needs a degraded vault
 #   (g) write    NOT proven live: needs a fenced-out daemon

@@ -998,9 +998,48 @@ The two hazards differ in severity and only the first is addressed here:
 So do not run `cargo clean` between staging and placement, and if a stage ever
 needs to survive one, it has to leave `target/` entirely.
 
-Copy the results into place with a plain `cp`. **Do not re-sign at the
-destination** — a pinned identifier is not sticky, and one `codesign --force --sign
--` there reverts it to the derived form.
+Place by **rename**, never by a plain `cp` over the destination:
+
+```sh
+cp target/staged/<rev>/ck-claustrum ~/.local/share/cortexkit/bin/.ck-claustrum.incoming
+mv -f ~/.local/share/cortexkit/bin/.ck-claustrum.incoming ~/.local/share/cortexkit/bin/ck-claustrum
+```
+
+**Do not re-sign at the destination** — a pinned identifier is not sticky, and one
+`codesign --force --sign -` there reverts it to the derived form.
+
+### Why not `cp`, measured 2026-09-13 on a live daemon
+
+This instruction used to say "copy into place with a plain `cp`", and that is wrong
+for a binary whose process is running. `cp` opens the destination and rewrites it
+IN PLACE, so the inode does not change — and overwriting pages under a mapped,
+code-signed image invalidates the signature:
+
+```
+cp, then run the placed binary     rc=137 (SIGKILL), zero bytes of output
+the same bytes in target/staged/   rc=0, prints its version
+disk inode after cp                UNCHANGED
+```
+
+The daemon carried on serving from its old mapping — `ck auth status` still read
+`ok (58/58)` — while the binary a restart would exec was dead. **A restart in that
+window takes the vault down**, and none of the other acceptance legs can see it:
+they read the staged file, the signature, or the config, and none of them execs
+the placed one.
+
+Rename is atomic, allocates a NEW inode, and leaves the running process's inode
+intact until it exits. After the rename the placed binary ran clean.
+
+**And `cp` breaks the inode leg itself, which is the part worth internalising.**
+Because `cp` leaves the inode unchanged, `running inode == disk inode` reads
+"already restarted" immediately after a cp-placement — the comparison passes for
+the wrong reason. Only after a rename does that pair mean what the table below
+claims: differ = placed-not-restarted, match = the running process execs the file
+on disk.
+
+**Verify by executing the PLACED file and checking `rc`**, not by reading its
+output: `rc=137` with an empty stdout reads exactly like a command that printed
+nothing.
 
 **The test suite cannot verify a staged artifact.** `CARGO_BIN_EXE_*` resolves
 per-profile and cargo rebuilds before running, so even `cargo test --release`

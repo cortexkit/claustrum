@@ -143,7 +143,27 @@ impl MasterKeyError {
 impl std::fmt::Display for MasterKeyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            MasterKeyError::VaultLocked => f.write_str("vault is locked (key store unavailable)"),
+            // NAMES THE REMEDY UNCONDITIONALLY, unlike `KeyStoreUnwritable` below, and
+            // the difference is the variant's origin rather than a judgement call.
+            // `VaultLocked` has exactly ONE construction site -- `KeychainFind::Locked`,
+            // which is `security` exiting 36 (`errSecInteractionNotAllowed & 0xFF`) or
+            // saying so in stderr. So every instance IS a locked login keychain, and the
+            // unlock advice can never be the wrong advice here. `KeyStoreUnwritable`
+            // covers permissions and disk failures too, which is why that one has to
+            // inspect the platform message before suggesting anything.
+            //
+            // WITHOUT THIS THE OPERATOR GOT A DIAGNOSIS AND NO NEXT STEP. Measured by
+            // SUBC on a macOS VM over SSH, 2026-09-11: the classification fix landed and
+            // the refusal read `vault is locked (key store unavailable)` -- typed,
+            // readable, and silent about the one command that clears it. The earlier
+            // remedy work sat on the WRITE path (bootstrap), so a read that could not
+            // resolve the key never reached it.
+            MasterKeyError::VaultLocked => f.write_str(
+                "vault is locked (key store unavailable)\n  the login keychain is locked \
+                 (typical over SSH or on a headless session); unlock it with \
+                 `security unlock-keychain ~/Library/Keychains/login.keychain-db` and \
+                 retry, or pass --key-path to use an operator key file instead",
+            ),
             MasterKeyError::NotBootstrapped => f.write_str("no master key has been provisioned"),
             MasterKeyError::KeyMismatch { loaded, expected } => write!(
                 f,
@@ -1094,6 +1114,58 @@ mod tests {
             "an unrelated write failure must NOT advise an unlock that cannot help it: \
              {rendered}"
         );
+    }
+
+    /// The READ path names the remedy too, not just the write path.
+    ///
+    /// This is the refusal an operator actually meets. Bootstrap fails once on a locked
+    /// keychain; `VaultLocked` is returned by every op that resolves a key to authorize
+    /// itself, so it is the message that reaches a person who is trying to USE the vault
+    /// rather than provision it. Measured through the daemon on a locked macOS VM: the
+    /// operator got `vault is locked (key store unavailable)` and no next step, while
+    /// the remedy sat on a variant that path never constructs.
+    ///
+    /// Unconditional here BECAUSE THE VARIANT HAS ONE ORIGIN: `KeychainFind::Locked`.
+    /// The guard that keeps it honest is therefore the one below -- if a future edit
+    /// gives `VaultLocked` a second construction site for a cause an unlock cannot fix,
+    /// this advice becomes wrong and nothing else would catch it.
+    #[test]
+    fn the_read_path_lock_names_its_remedy_and_has_only_one_origin() {
+        let rendered = MasterKeyError::VaultLocked.to_string();
+        assert!(
+            rendered.contains("security unlock-keychain"),
+            "the refusal an operator meets must name the command that clears it: \
+             {rendered}"
+        );
+        assert!(
+            rendered.contains("--key-path"),
+            "and the headless alternative, since unlocking is not always possible: \
+             {rendered}"
+        );
+
+        // The premise the unconditional advice rests on, asserted rather than trusted:
+        // this is the only classification that yields VaultLocked.
+        assert!(
+            matches!(
+                classify_keychain_find(Some(36), "", ""),
+                KeychainFind::Locked
+            ),
+            "a silent exit 36 is the locked case"
+        );
+        for (code, stdout, stderr) in [
+            (Some(44), "", ""),
+            (Some(99), "", "boom"),
+            (Some(0), "deadbeef", ""),
+        ] {
+            assert!(
+                !matches!(
+                    classify_keychain_find(code, stdout, stderr),
+                    KeychainFind::Locked
+                ),
+                "only the lock may classify as Locked, else the unlock advice is wrong \
+                 for code {code:?}"
+            );
+        }
     }
     use super::*;
 

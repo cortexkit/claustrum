@@ -152,6 +152,34 @@ describe("custody logger", () => {
     expect(warnings).toHaveLength(1);
   });
 
+  test("the unavailable notice describes the drop it actually causes, and faults really are gone", () => {
+    // Pins the NOTICE against the BEHAVIOUR, not against its own wording. The text used to end
+    // "faults still reach the console" -- true while a console sink existed, false the moment that
+    // sink was deleted, and nothing failed. Two arms so neither half can drift alone: the claim
+    // must not promise a console that carries faults, and warn/error must genuinely produce no
+    // console output once the file is unavailable. Re-adding a console fallback reddens arm 2;
+    // restoring the old sentence reddens arm 1.
+    const root = join(tmpdir(), `claustrum-log-${crypto.randomUUID()}`);
+    mkdirSync(root, { recursive: true });
+    const blocked = join(root, "blocked");
+    writeFileSync(blocked, "not a directory");
+    const warnings: string[] = [];
+    const logger = createLogger(createFileLogSink({
+      path: join(blocked, "custody.jsonl"),
+      warn: (message) => warnings.push(message),
+    }));
+
+    logger.warn({ provider: "x", state: "transient" });
+    logger.error({ provider: "x", errorClass: "ClaustrumCredentialError" });
+
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).not.toContain("reach the console");
+    expect(warnings[0]).toContain("ALL custody telemetry dropped");
+    expect(errorLines).toHaveLength(0);
+    expect(logLines).toHaveLength(0);
+    expect(debugLines).toHaveLength(0);
+  });
+
   test("file sink excludes free-text error messages", () => {
     const root = join(tmpdir(), `claustrum-log-${crypto.randomUUID()}`);
     const path = join(root, "custody.jsonl");

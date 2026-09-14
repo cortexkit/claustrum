@@ -127,7 +127,12 @@ export function createFileLogSink(options: FileLogSinkOptions = {}): LogSink {
   const fail = () => {
     if (unavailable) return;
     unavailable = true;
-    warn("persistent custody log unavailable; info/debug telemetry dropped, faults still reach the console");
+    // This notice is the ONLY thing this module prints, so it must describe the state it
+    // actually leaves behind. It used to end "faults still reach the console", which was true
+    // while a console sink carried warn/error -- deleting that sink made the sentence a lie in
+    // the same commit, and an operator reading it would go looking for errors on a channel that
+    // no longer carries any. Every level is dropped once the file is gone.
+    warn("persistent custody log unavailable; ALL custody telemetry dropped, including warnings and errors");
   };
   const rotateIfNeeded = () => {
     try {

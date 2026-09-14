@@ -272,9 +272,23 @@ fi
 
 echo
 echo "staged in ${STAGE}/ -- outside cargo's reach, so these hashes stay true."
-echo "Copy into place with a plain cp -- do NOT re-sign."
-echo "Then verify AFTER placement: codesign -dv <dest> shows the pinned Identifier,"
-echo "and <dest> --version reports ${REV}."
+# PLACE BY RENAME. This line said "copy into place with a plain cp" until 2026-09-13,
+# and it is read at the exact moment someone is about to place a binary -- so it is more
+# load-bearing than the runbook paragraph that said the same thing. `cp` rewrites the
+# destination IN PLACE, leaving the inode unchanged; over a running image that invalidates
+# the signature of the mapped pages and the placed file SIGKILLs on exec (rc=137, no
+# output) while the daemon keeps serving from its old mapping. Measured, with the control
+# that rules out "cp breaks ad-hoc signatures": the same bytes copied to a FRESH path ran
+# rc=0.
+echo "Place by RENAME, never a plain cp over the destination:"
+echo "  cp ${STAGE}/<bin> <dest>.incoming && mv -f <dest>.incoming <dest>"
+echo "  (cp rewrites in place: the placed file SIGKILLs on exec while the daemon serves on,"
+echo "   and the unchanged inode makes the running-inode acceptance leg pass for the wrong"
+echo "   reason. Rename is atomic and allocates a new inode.)"
+echo "Do NOT re-sign at the destination -- a pinned identifier is not sticky."
+echo "Then verify AFTER placement by EXECUTING the placed file and checking rc:"
+echo "  <dest> --version reports ${REV}, and codesign -dv <dest> shows the pinned Identifier."
+echo "  (rc=137 with empty output is a dead placement, not a quiet command.)"
 echo
 echo "reachability probe: ${PROBE}"
 echo "  ^ include this line VERBATIM in the staging request. The placer runs it as"

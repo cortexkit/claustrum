@@ -48,13 +48,17 @@ prove. Each was found by a consumer shipping green and failing elsewhere.
   attached reads as permanent, and this one is a moving target by construction.
 
   ```
-  bun run m.mjs / bun -e     resolves   with or without a package.json in scope,
-                                        from any cwd, on a cold install cache
-  bun build --compile        error: Could not resolve: "X". Maybe you need to
-    (static import)                     "bun install"?  -- NO BINARY PRODUCED
-  bun build --compile        builds; fails in the consumer's process at import:
-    (dynamic import of a               ERR_MODULE_NOT_FOUND Cannot find package 'X'
-     disk module)
+  bun run m.mjs / bun -e
+      resolves, with or without a package.json in scope, from any cwd,
+      on a cold install cache
+
+  bun build --compile, static import
+      error: Could not resolve: "X". Maybe you need to "bun install"?
+      NO BINARY PRODUCED
+
+  bun build --compile, dynamic import of a disk module
+      builds; fails in the consumer's process at import:
+      ERR_MODULE_NOT_FOUND Cannot find package 'X'
   ```
 
   Both compiled shapes matter and they fail at opposite ends. A bare dependency the

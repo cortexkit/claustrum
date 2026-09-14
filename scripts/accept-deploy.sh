@@ -159,9 +159,21 @@ echo
 # The only leg that interrogates the ARTIFACT rather than inferring identity from
 # a path, a timestamp, or a hash you must already hold. It is also the only one
 # that works during an incident, when all you have is the running binary.
+# AND IT IS THE ONLY LEG THAT CAN SEE A DEAD PLACEMENT, so it reads the EXIT CODE
+# rather than only the output. A binary placed with `cp` OVER a running image is
+# SIGKILLed on exec (rc=137, empty stdout) because the copy rewrites the
+# destination in place and invalidates the signature of the mapped pages, while
+# the old process serves on. Without the rc check that state renders as
+# "reports '<none>', expected '<rev>'" -- which reads as a stamping problem and
+# sends the reader to the build, not to the placement. Measured 2026-09-13.
 for name in ck-claustrum ck-auth; do
-    got="$("$BIN_DIR/$name" --version 2>&1 | sed -n 's/.*(\(.*\))/\1/p')"
-    if [ "$got" = "$EXPECTED_REV" ]; then
+    raw="$("$BIN_DIR/$name" --version 2>&1)"; rc=$?
+    got="$(printf '%s' "$raw" | sed -n 's/.*(\(.*\))/\1/p')"
+    if [ "$rc" -ge 128 ] && [ -z "$raw" ]; then
+        fail "$name was KILLED on exec (rc=$rc, no output): the placed file is dead. \
+The usual cause is a plain \`cp\` over the running image -- replace by rename \
+(cp to <dest>.incoming, then mv -f). The old process keeps serving until it restarts."
+    elif [ "$got" = "$EXPECTED_REV" ]; then
         pass "$name reports $got"
     else
         fail "$name reports '${got:-<none>}', expected '$EXPECTED_REV'"

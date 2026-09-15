@@ -40,7 +40,7 @@ function handleIsValid(handle: unknown): handle is string {
   return typeof handle === "string" && /^ckh_[A-Za-z0-9_-]{43}$/.test(handle);
 }
 
-function identifierIsValid(value: unknown): value is string {
+export function identifierIsValid(value: unknown): value is string {
   return typeof value === "string" && PROVIDER_ID.test(value) && !FORBIDDEN_IDENTIFIERS.has(value);
 }
 

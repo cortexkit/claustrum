@@ -15,17 +15,26 @@ import {
 } from "../log";
 
 describe("custody logger", () => {
+  // EVERY console channel the module could reach must be captured, not just the ones it uses
+  // today. Capturing a subset silently narrows every "nothing reached the console" assertion in
+  // this file to "nothing reached the channels I happened to mock" -- and console.warn was the
+  // gap: a fallback written via console.warn passed all 16 tests, including the one whose whole
+  // purpose is to deny console output. Found by review, after a mutation of mine used
+  // console.error and cleared the only channel that was covered.
   const originalDebug = console.debug;
   const originalLog = console.log;
   const originalError = console.error;
+  const originalWarn = console.warn;
   let debugLines: string[];
   let logLines: string[];
   let errorLines: string[];
+  let warnLines: string[];
 
   beforeEach(() => {
     debugLines = [];
     logLines = [];
     errorLines = [];
+    warnLines = [];
     console.debug = (...args: unknown[]) => {
       debugLines.push(args.map(String).join(" "));
     };
@@ -35,12 +44,16 @@ describe("custody logger", () => {
     console.error = (...args: unknown[]) => {
       errorLines.push(args.map(String).join(" "));
     };
+    console.warn = (...args: unknown[]) => {
+      warnLines.push(args.map(String).join(" "));
+    };
   });
 
   afterEach(() => {
     console.debug = originalDebug;
     console.log = originalLog;
     console.error = originalError;
+    console.warn = originalWarn;
   });
 
   test("NO level reaches the console: warn and error are file-only alongside info and debug", () => {
@@ -59,6 +72,7 @@ describe("custody logger", () => {
     expect(debugLines).toHaveLength(0);
     expect(logLines).toHaveLength(0);
     expect(errorLines).toHaveLength(0);
+    expect(warnLines).toHaveLength(0);
   });
 
   test("serializedLogSink still writes every level to its caller-provided stream and never strips", () => {
@@ -178,6 +192,7 @@ describe("custody logger", () => {
     expect(errorLines).toHaveLength(0);
     expect(logLines).toHaveLength(0);
     expect(debugLines).toHaveLength(0);
+    expect(warnLines).toHaveLength(0);
   });
 
   test("file sink excludes free-text error messages", () => {

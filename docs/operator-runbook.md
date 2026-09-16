@@ -333,6 +333,47 @@ usual recovery for a `needs_reauth` credential, and the reason a re-login never
 requires re-distributing handles. Without it, `login` is create-only. A native login
 records a distinct `Login` audit entry (not `Import`).
 
+### Anthropic credentials expire about a month after login, and that is not a defect
+
+Measured on this vault 2026-09-15, across seven deaths, three accounts, and two
+independent login cycles — every interval is from a `login` audit row to the
+`invalidate` that followed it:
+
+```
+oauth:anthropic:ufuk3   24d 16h
+oauth:anthropic:yiyi    27d 13h      oauth:anthropic:yiyi    27d 15h
+oauth:anthropic:ufuk2   28d 21h      oauth:anthropic         27d  3h
+oauth:anthropic         30d  2h      oauth:anthropic:ufuk2   28d 15h
+```
+
+The vault discovers it as `invalid_grant` on a refresh, latches `needs_reauth`, and
+the repair is `ck auth login --provider anthropic --id <id> --replace`, which keeps
+the handles. Expect it roughly monthly per account. `ck auth reactivate` will NOT
+fix it — that clears a wrong verdict, and this verdict is right.
+
+*** THIS REFUTES THE DUAL-CUSTODY EXPLANATION, which is the tempting one. *** There
+IS a second holder on this machine (OpenCode keeps its own anthropic refresh token in
+`~/.local/share/opencode/auth.json`), and Anthropic does revoke a token family when a
+rotated-away refresh token is presented. So "the other holder killed it" fits the
+symptom. It does not fit the TIMING: another holder's refresh schedule has no reason
+to track the vault's login date, and could not do so across three separate accounts
+in two separate cycles. Deaths that cluster in a 24-30 day band relative to MY login
+are a property of the authorization, not a race.
+
+**What this data CANNOT tell you is whether the ceiling is denominated in days or in
+refreshes**, and the reason is worth stating so nobody reads a number out of it that
+is not there. Every anthropic credential here refreshes at essentially one rate —
+~3/day, set by the 8-hour access token — so age and refresh count are collinear:
+
+```
+ufuk3   71 refreshes / 24d 16h   = 2.88/day
+yiyi    82 refreshes / 27d 13h   = 2.98/day
+```
+
+The credential that died earliest also had the fewest refreshes, so both hypotheses
+predict the same ordering. Separating them needs a credential deliberately used at a
+different rate, which no one has had a reason to create.
+
 ---
 
 ## 3. Mint a handle and give it to the consumer

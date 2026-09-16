@@ -374,6 +374,26 @@ The credential that died earliest also had the fewest refreshes, so both hypothe
 predict the same ordering. Separating them needs a credential deliberately used at a
 different rate, which no one has had a reason to create.
 
+**Do not generalize this to other OAuth providers — Codex is the counter-example.**
+Measured the same day, from the same audit chain:
+
+```
+chatgpt:openai        last login 2026-08-11   36d old   still active
+chatgpt:openai:gmail  last login 2026-08-11   36d old   still active
+```
+
+Both are past Anthropic's entire band with no death, so the ceiling is a property of
+the provider's authorization rather than of subscription OAuth. A monthly re-login is
+an Anthropic fact, not a vault fact.
+
+*** AND WHEN READING THE CHAIN FOR THIS, SPLIT ON `actor`. *** Filtering `op =
+'invalidate'` alone conflates two opposite events that share a row shape: `actor =
+vault` is the provider refusing a refresh (the credential died underneath you), while
+`actor = route-admin` or `offline-cli` is an operator deliberately stopping it. The
+only Codex "death" in this chain is a 2d22h interval that is an operator logout from
+the July account setup — counted naively it reads as Codex dying five times faster
+than Anthropic, which is the opposite of what the data says.
+
 ---
 
 ## 3. Mint a handle and give it to the consumer

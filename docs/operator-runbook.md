@@ -582,10 +582,15 @@ ck auth events --limit 100
 ```
 
 ```
-2026-08-11 07:58:09  chatgpt:openai   consumer_report  403        v7   applied=yes
-2026-08-11 07:57:50  chatgpt:openai   consumer_report  401        v5   applied=no
-2026-08-11 06:12:03  oauth:xai        refresh_failed   503 status v2   applied=no
+WHEN                 CREDENTIAL      KIND             PRINCIPAL DETAIL     VER  APPLIED
+2026-08-11 07:58:09  chatgpt:openai  consumer_report  -         403        v7   applied=yes
+2026-08-11 07:57:50  chatgpt:openai  consumer_report  -         401        v5   applied=no
+2026-08-11 06:12:03  oauth:xai       refresh_failed   -         503 status v2   applied=no
 ```
+
+Column widths are measured from the rows, so they move with the data; the header is the
+only stable way to read a column. `PRINCIPAL` is `-` on consumer reports because the read
+surface does not record one (issue #42) — that is a gap, not a property of these rows.
 
 - **`consumer_report`** — a consumer spent the token and the provider refused it. The
   status distinguishes a rejected token (401) from a forbidden request (403), which

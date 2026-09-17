@@ -3439,6 +3439,17 @@ fn cmd_events(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     println!("absence of a refresh row means 'none failed', not 'none was attempted'.");
     println!();
 
+    type EventRow = (
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+    );
+    let mut rows: Vec<EventRow> = Vec::with_capacity(events.len());
     for e in &events {
         let when = format_ts_ms(e.ts_ms);
         let what = match (e.provider_status, e.detail.as_deref()) {
@@ -3463,11 +3474,41 @@ fn cmd_events(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             .as_deref()
             .map(|s| format!(" src={s}"))
             .unwrap_or_default();
+        rows.push((
+            when,
+            e.credential_id.clone(),
+            e.kind.clone(),
+            principal,
+            what,
+            version,
+            if e.applied { "yes" } else { "no" }.to_string(),
+            source,
+        ));
+    }
+
+    // MEASURED WIDTHS, for the same reason as `grants`. The fixed `{:34} {:16} {:24} {:22}`
+    // this replaced rendered every row at 155 columns against 90 of actual content -- 65
+    // columns of padding for values that are never that wide. At 155 the row wraps on any
+    // ordinary terminal, and a wrapped table is harder to read than an unaligned one.
+    let w = |f: &dyn Fn(&EventRow) -> &str, head: &str| {
+        rows.iter()
+            .map(|r| f(r).chars().count())
+            .chain(std::iter::once(head.chars().count()))
+            .max()
+            .unwrap_or(head.len())
+    };
+    let wc = w(&|r| r.1.as_str(), "CREDENTIAL");
+    let wk = w(&|r| r.2.as_str(), "KIND");
+    let wp = w(&|r| r.3.as_str(), "PRINCIPAL");
+    let ww = w(&|r| r.4.as_str(), "DETAIL");
+    let wv = w(&|r| r.5.as_str(), "VER");
+    println!(
+        "{:19}  {:wc$} {:wk$} {:wp$} {:ww$} {:wv$} APPLIED",
+        "WHEN", "CREDENTIAL", "KIND", "PRINCIPAL", "DETAIL", "VER"
+    );
+    for (when, cred, kind, principal, what, version, applied, source) in &rows {
         println!(
-            "{when}  {:34} {:16} {principal:24} {what:22} {version:6} applied={}{source}",
-            e.credential_id,
-            e.kind,
-            if e.applied { "yes" } else { "no" }
+            "{when}  {cred:wc$} {kind:wk$} {principal:wp$} {what:ww$} {version:wv$} applied={applied}{source}"
         );
     }
     // DISCLOSE THE TRIM. The per-credential cap is enforced by a silent DELETE, so a

@@ -587,6 +587,50 @@ fn every_verb_names_on_its_help_page_each_flag_its_parser_accepts() {
     );
 }
 
+// THE RUNBOOK'S SAMPLE OUTPUT MUST MATCH WHAT THE BINARY PRINTS. A sample block in a
+// document is a claim about behaviour, and it goes stale silently: I changed the `events`
+// renderer and the runbook's example kept its old column layout with nothing failing. An
+// operator reading a stale sample learns a column order that no longer exists.
+//
+// Pins the HEADER only, not the rows. Widths are measured from the data, so row alignment
+// legitimately differs between a documented example and any real vault -- but the column
+// NAMES and their order are the contract a reader relies on.
+#[test]
+fn the_runbook_events_sample_names_the_columns_the_binary_prints() {
+    let runbook = include_str!("../../../docs/operator-runbook.md");
+
+    let out = cli()
+        .args(["events", "--limit", "1"])
+        .output()
+        .expect("run events");
+    // A vault with no events still prints its header, which is what this pins.
+    let printed = String::from_utf8_lossy(&out.stdout);
+    let header = printed
+        .lines()
+        .find(|l| l.starts_with("WHEN"))
+        .unwrap_or_else(|| panic!("events printed no header:\n{printed}"));
+
+    let columns: Vec<&str> = header.split_whitespace().collect();
+    assert!(
+        columns.len() >= 6,
+        "header has {} columns; the extractor has narrowed:\n{header}",
+        columns.len()
+    );
+
+    let sample = runbook
+        .lines()
+        .find(|l| l.trim_start().starts_with("WHEN") && l.contains("CREDENTIAL"))
+        .unwrap_or_else(|| panic!("the runbook's events sample carries no header row"));
+
+    for column in &columns {
+        assert!(
+            sample.contains(column),
+            "the runbook's events sample never names the `{column}` column that the binary \
+             prints, so the documented layout is stale:\n  binary: {header}\n  runbook: {sample}"
+        );
+    }
+}
+
 #[test]
 fn grants_help_describes_the_read_only_inventory() {
     let out = cli()

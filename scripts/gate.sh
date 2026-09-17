@@ -256,6 +256,16 @@ assert_floor_not_lowered() {
   local file="$1" target="${CK_GATE_FLOOR_TARGET:-origin/master}"
   local ours theirs target_file
 
+  # NAME THE RESOLVED SHA, NOT JUST THE REF. `origin/master` means a DIFFERENT COMMIT
+  # depending on who runs this: a fork contributor's `origin` is their own fork, whose
+  # master can lag the real merge target arbitrarily. The comparison then runs against a
+  # stale number and PASSES -- a false green rather than a refusal, which is the worse
+  # direction. Printing the resolved SHA does not fix the staleness, but it makes it
+  # legible: a four-week-old commit beside today's is visible where a bare ref name is
+  # not. Set CK_GATE_FLOOR_TARGET to compare against the real upstream ref instead.
+  local target_sha
+  target_sha=$(git rev-parse --short "$target" 2>/dev/null || echo 'unresolved')
+
   ours=$(grep -m1 -oE 'run_expect [0-9]+ "workspace' "$file" | grep -oE '[0-9]+')
   if [ -z "$ours" ]; then
     fail "floor ratchet: cannot read this tree's workspace floor from $file"
@@ -265,7 +275,7 @@ assert_floor_not_lowered() {
   if ! target_file=$(git show "$target:scripts/gate.sh" 2>/dev/null); then
     GATE_UNCHECKED="${GATE_UNCHECKED:-}floor ratchet (cannot resolve $target) "
     printf '\n=== floor ratchet: UNCHECKED ===\n'
-    printf 'cannot resolve %s — no comparison made (this is not a pass)\n' "$target"
+    printf 'cannot resolve %s (%s) — no comparison made (this is not a pass)\n' "$target" "$target_sha"
     return
   fi
 
@@ -273,7 +283,7 @@ assert_floor_not_lowered() {
   if [ -z "$theirs" ]; then
     GATE_UNCHECKED="${GATE_UNCHECKED:-}floor ratchet (no floor in $target) "
     printf '\n=== floor ratchet: UNCHECKED ===\n'
-    printf 'cannot read a workspace floor from %s — no comparison made (this is not a pass)\n' "$target"
+    printf 'cannot read a workspace floor from %s (%s) — no comparison made (this is not a pass)\n' "$target" "$target_sha"
     return
   fi
 
@@ -283,12 +293,12 @@ assert_floor_not_lowered() {
       printf 'this tree %s < %s %s — reason: %s\n' "$ours" "$target" "$theirs" "$CK_GATE_FLOOR_LOWER_REASON"
       return
     fi
-    fail "floor ratchet: this tree's workspace floor is $ours but $target carries $theirs — a branch forked before a raise lowers it silently and every gate still passes; rebase and re-measure on the merged tree, or set CK_GATE_FLOOR_LOWER_REASON"
+    fail "floor ratchet: this tree's workspace floor is $ours but $target ($target_sha) carries $theirs — a branch forked before a raise lowers it silently and every gate still passes; rebase and re-measure on the merged tree, or set CK_GATE_FLOOR_LOWER_REASON"
     return
   fi
 
   printf '\n=== floor ratchet ===\n'
-  printf 'workspace floor %s >= %s %s\n' "$ours" "$target" "$theirs"
+  printf 'workspace floor %s >= %s %s at %s\n' "$ours" "$target" "$theirs" "$target_sha"
 }
 
 # The floor is the MEASURED total, not a round number below it. A floor with slack

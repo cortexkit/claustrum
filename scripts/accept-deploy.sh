@@ -220,11 +220,34 @@ for name in ck-claustrum ck-auth; do
 done
 
 # ---- leg (d): the running image is the deployed file ------------------------
-# `pgrep -x`, NEVER `-f`: `-f` matches the whole command line, so it also matches
-# any shell whose script text contains the name -- including THIS script. It
-# would return two pids here, and `head -1` would hand lsof the wrong one, which
-# reports no store.db and reads as "the daemon has no vault open".
-pid="$(pgrep -x ck-claustrum || true)"
+  # `pgrep -x`, NEVER `-f`: `-f` matches the whole command line, so it also matches
+  # any shell whose script text contains the name -- including THIS script. It
+  # would return two pids here, and `head -1` would hand lsof the wrong one, which
+  # reports no store.db and reads as "the daemon has no vault open".
+  #
+  # `-a` BECAUSE pgrep EXCLUDES THE CALLER'S OWN ANCESTORS BY DEFAULT (man pgrep:
+  # "-a  Include process ancestors in the match list"). Measured 2026-09-17: from a
+  # shell under the supervisor, `pgrep -x ck-subc` is EMPTY while the process is
+  # plainly alive, and `pgrep -a -x` finds it. Two processes with identical comm
+  # shape gave opposite results, and the only differing property was ancestry.
+  #
+  # ck-claustrum is a supervised module and cannot be an ancestor of this script, so
+  # the bare form happens to be correct TODAY. `-a` is here so it stays correct
+  # whoever runs it: without the flag, the answer depends on who is ASKING, and the
+  # failure below would read "no ck-claustrum process" -- a loud failure with a wrong
+  # cause, during a deploy, which is the worst moment to be told the daemon is gone.
+  #
+  # `-a` IS BSD/macOS SPELLING AND DOES NOT PORT. On Linux, `pgrep -a` means "list the
+  # full command line", so this would yield `2340 /path/to/ck-claustrum …` and hand a
+  # non-pid to lsof. Safe here because this script is macOS-bound by construction --
+  # it calls `lsof`, `codesign` and friends at a dozen sites and is only ever run
+  # against the live deploy host. If it is ever ported, this line needs
+  # `ps -axo pid=,comm= | awk '$2 ~ /ck-claustrum$/'`, which needs no flag at all
+  # because `ps` has no ancestor exclusion.
+  #
+  # Verified on this host that `-a` does not change the output shape: both forms
+  # return exactly `2340`.
+  pid="$(pgrep -a -x ck-claustrum || true)"
 if [ -z "$pid" ]; then
     fail "no ck-claustrum process"
 else

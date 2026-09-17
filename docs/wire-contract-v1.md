@@ -169,6 +169,30 @@ no recovery path to attempt.
 `relay_message_parse` — recorded for forensics. An unrecognised value is stored as
 `unrecognised` rather than persisted verbatim.
 
+### If you gate reports on a provider's error body, gate on the WRONG-REQUEST case
+
+The rule above asks you to report only a credential you believe invalid, and a provider
+that answers every case with a bare `401` does not let you tell. Some providers do carry a
+discriminating field in the error body, and the direction you gate it in decides which way
+the gate fails.
+
+Gate on **"this value means the request was wrong"** and suppress those. Do not gate on
+"this value means the token was dead" and report only those — an unrecognised or newly
+added value would then suppress a real dead-token report, the vault never learns, and the
+credential stays unusable until something else discovers it.
+
+Inverted, an unrecognised value still reports. The version fence absorbs the cost of a
+wrong report; nothing absorbs the cost of a suppressed one.
+
+And do not adopt a discriminator you have only observed in one of the two cases. Seeing
+`authentication_error` on a dead token does not establish that it is absent when the
+request shape is wrong, and a gate built on that half-observation fails open in exactly
+the direction above. Over-reporting behind the fence is the correct default until both
+cases have been seen side by side.
+
+*(Contributed by a consumer seat, 2026-09-17, after a real 401 cluster where the vault
+could not name the reporting consumer and the fence was the only thing that held.)*
+
 ---
 
 ## 6. Health

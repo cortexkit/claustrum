@@ -1294,7 +1294,7 @@ Each leg must be able to fail:
 | mint a throwaway handle, then revoke it | exercises the fenced write path and its atomic audit append |
 
 ```sh
-lsof -p "$(pgrep -x ck-claustrum)" | awk '$NF ~ /store\.db$/ {print $NF}'
+lsof -p "$(pgrep -a -x ck-claustrum)" | awk '$NF ~ /store\.db$/ {print $NF}'
 # /Users/<you>/.local/share/cortexkit/claustrum/store.db
 ```
 
@@ -1367,9 +1367,8 @@ ancestor 3  pid 2307   ck-subc      <- the process pgrep cannot see
 full-path comm" predicts that `-f`, or passing the absolute path, fixes it.
 Neither does, so a reader would try both, watch them fail, and be left without an
 explanation. "pgrep never reports your own ancestors" predicts the real fix --
-stop using pgrep for any process that might be above you -- and generalises to
-every supervised seat checking the supervisor during an incident, which is
-precisely when the false negative appears.
+`-a`, below -- and generalises to every supervised seat checking the supervisor
+during an incident, which is precisely when the false negative appears.
 
 `ps -axo pid=,comm= | awk '$2 ~ /ck-subc$/'` is the portable form, and it works
 because `ps` has no ancestor exclusion at all, not because it tolerates the path.

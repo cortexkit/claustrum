@@ -274,6 +274,15 @@ run_expect 610 "workspace unit + integration" \
 #
 # Skipped, loudly, when the target is not installed: `rustup target add x86_64-pc-windows-gnu`.
 # Silence here would restore exactly the blind spot this arm exists to close.
+#
+# LOCAL ONLY, AND DELIBERATELY SO -- I added the matching ci.yml step first and it was
+# wrong twice over. It failed on the ubuntu runner (ring's build script wants
+# x86_64-w64-mingw32-gcc, which GitHub's image does not carry and this mac has via
+# homebrew), and the reason I gave for adding it did not survive checking: I claimed it
+# would give fork PRs a signal, but the fork-safe job runs cargo ZERO times, so it would
+# have given them nothing. CI's own windows runner already compiles this natively -- that
+# is how the defect was caught. The gap was never CI's. It was that this gate could not
+# see a platform the host is not.
 if rustup target list --installed 2>/dev/null | grep -qx x86_64-pc-windows-gnu; then
   run_check "windows cross type-check" \
     cargo check --locked --target x86_64-pc-windows-gnu --workspace --all-targets

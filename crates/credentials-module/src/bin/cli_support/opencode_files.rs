@@ -869,7 +869,27 @@ fn validate_handle_file(file: &HandleFile) -> Result<(), OpenCodeFilesError> {
                     account.label
                 )));
             }
-            if account.credential_id.is_empty() {
+            // Must match `parseHandleFile` in packages/client/src/handles.ts. THIS IS A
+            // WRITER: `validate_handle_file` runs from `write_handle_file_for_tenant` and
+            // `verify_handle_written`, so a rule missing here lets `ck auth` ORIGINATE a
+            // row the TypeScript reader refuses -- and that reader refuses the whole
+            // document, so one bad row written here denies every tenant in the file.
+            //
+            // Until this commit the check was emptiness only, which let `ck auth` write
+            // `oauth:openai` into an `anthropic` block: the exact cross-provider smuggle
+            // the TypeScript side was tightened to reject. Two implementations of one
+            // predicate in one repo, diverging because the fix landed on the reader.
+            //
+            // Segment 2 must BE the provider block; NO segment may be empty. Segment 1
+            // (kind) is an open set -- oauth, chatgpt, antigravity, apikey are all live --
+            // and segment 3+ (label) is operator-chosen and optional, so neither is
+            // constrained beyond non-emptiness. `:anthropic:x` and `oauth:anthropic:`
+            // satisfy the provider rule literally while naming ids that cannot exist.
+            let segments: Vec<&str> = account.credential_id.split(':').collect();
+            if account.credential_id.is_empty()
+                || segments.get(1) != Some(&provider.provider.as_str())
+                || segments.iter().any(|segment| segment.is_empty())
+            {
                 return Err(OpenCodeFilesError::Invalid(format!(
                     "provider {index} account {} has invalid credential id",
                     account.label

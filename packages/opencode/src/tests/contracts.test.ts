@@ -8,6 +8,19 @@ import goldenHandles from "../../golden/handles.json";
 import goldenTombstoneJson from "../../golden/tombstone.json";
 
 const goldenTombstone = goldenTombstoneJson as GoldenTombstone;
+const validHandle = `ckh_${"a".repeat(43)}`;
+
+function manifestWithCredential(provider: string, label: string, credentialId: string) {
+  return {
+    version: 1,
+    providers: [{
+      provider,
+      shape: "api",
+      serve: "opencode-claustrum",
+      accounts: [{ label, handle: validHandle, credential_id: credentialId }],
+    }],
+  };
+}
 
 describe("custody wire contracts", () => {
   test("loads the canonical tombstone golden rather than a copied fixture", () => {
@@ -76,5 +89,61 @@ describe("custody wire contracts", () => {
         }],
       }),
     ).toThrow("invalid handle");
+  });
+
+  // Discriminator: an oauth-only kind rule rejects this live OpenAI shape, so it cannot prove provider scoping.
+  test("accepts chatgpt:openai for the openai provider", () => {
+    expect(() => parseHandleFile(manifestWithCredential("openai", "main", "chatgpt:openai"))).not.toThrow();
+  });
+
+  // Discriminator: an oauth-only kind rule rejects this live Google shape, so it cannot prove provider scoping.
+  test("accepts antigravity:google for the google provider", () => {
+    expect(() => parseHandleFile(manifestWithCredential("google", "main", "antigravity:google"))).not.toThrow();
+  });
+
+  test("accepts a provider-scoped id whose label does not match the account label", () => {
+    expect(() =>
+      parseHandleFile(manifestWithCredential("anthropic", "work-alt", "oauth:anthropic:something-else")),
+    ).not.toThrow();
+  });
+
+  test("rejects a credential id scoped to another provider", () => {
+    expect(() => parseHandleFile(manifestWithCredential("anthropic", "main", "chatgpt:openai"))).toThrow("credential id");
+  });
+
+  test("accepts the existing apikey provider-scoped live shape", () => {
+    expect(() => parseHandleFile(manifestWithCredential("deepseek", "main", "apikey:deepseek:main"))).not.toThrow();
+  });
+
+  test("accepts the existing unlabelled oauth provider-scoped live shape", () => {
+    expect(() => parseHandleFile(manifestWithCredential("anthropic", "main", "oauth:anthropic"))).not.toThrow();
+  });
+
+  test("rejects a credential id without a provider segment", () => {
+    expect(() => parseHandleFile(manifestWithCredential("anthropic", "main", "oauth"))).toThrow("credential id");
+  });
+
+  // Both of these satisfy "segment 2 is the provider" literally, so a position-1 check
+  // alone accepts them -- and both name credentials that cannot exist, deferring a
+  // guaranteed resolve-time failure past the door. They also fixed an asymmetry that
+  // read as a bug: `oauth::anthropic` rejected (empty at position 1) while these passed
+  // (empty at positions 0 and 2). Agreed with the anthropic-auth tenant and mirrored
+  // there, so the rule is chosen on both sides rather than defaulted on either.
+  test("rejects a credential id with an empty kind segment", () => {
+    expect(() => parseHandleFile(manifestWithCredential("anthropic", "main", ":anthropic:x"))).toThrow("credential id");
+  });
+
+  test("rejects a credential id with an empty label segment", () => {
+    expect(() => parseHandleFile(manifestWithCredential("anthropic", "main", "oauth:anthropic:"))).toThrow(
+      "credential id",
+    );
+  });
+
+  test("rejects a credential id with an empty provider segment", () => {
+    expect(() => parseHandleFile(manifestWithCredential("anthropic", "main", "oauth::main"))).toThrow("credential id");
+  });
+
+  test("rejects a credential id whose provider segment differs only by case", () => {
+    expect(() => parseHandleFile(manifestWithCredential("anthropic", "main", "oauth:Anthropic:main"))).toThrow("credential id");
   });
 });

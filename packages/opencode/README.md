@@ -38,6 +38,11 @@ The plugin never reads this table: only the CLI that creates tombstones does.
 
 The handle file comes from `CLAUSTRUM_OPENCODE_HANDLES`, or from `${XDG_CONFIG_HOME:-$HOME/.config}/cortexkit/opencode-handles.json`. It must be a regular file owned by the current user with mode `0600`; symlinks are refused. Provider ids and account labels must match `^[a-z0-9][a-z0-9._-]{0,63}$` and cannot be `__proto__`, `constructor`, or `prototype`. OpenCode auth is read from `OPENCODE_AUTH_CONTENT` when it is set, otherwise from `${XDG_DATA_HOME:-$HOME/.local/share}/opencode/auth.json`.
 
+The canonical handle-manifest credential-id scope contract and its conformance table live in
+`docs/opencode-custody-design.md` under “Handle-manifest credential-id scope”. In short, the
+second colon-separated segment must equal the block provider; the kind is open and labels are not
+used for validation.
+
 If the selected auth source cannot be parsed or validated, the plugin scans it in bounded chunks for self-describing tombstones and refuses the named providers. No scan hit leaves a never-migrated oversized auth source alone. A raw scan does not recognize JSON-escaped sentinel bytes; that hand-edit/foreign-writer limitation shares the same no-hit branch, so changing either behavior requires deciding both.
 
 OpenCode's provider API and UI serialize `Provider.Info.key`, so a tombstone can look like a configured credential. It is non-secret and does not grant access; custody still refuses when ownership cannot be proven.

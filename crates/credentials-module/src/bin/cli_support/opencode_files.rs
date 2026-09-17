@@ -453,6 +453,15 @@ fn current_time_ms() -> Result<u64, OpenCodeFilesError> {
 }
 
 fn resolve_now_ms(options: &ManifestLockOptions) -> Result<u64, OpenCodeFilesError> {
+    // Anything that COMPARES against a `claimed_at_ms` must read its clock through here. The stamp
+    // is written from this clock, so a consumer calling `current_time_ms()` instead measures real
+    // elapsed time against an injected stamp -- under test that difference is the injected offset,
+    // and on a loaded machine it silently crosses the TTL and skips the release. Not hypothetical:
+    // it made `owner_that_becomes_stale_during_retry_window_is_evicted` fail 1 in 8 runs at load 41.
+    //
+    // NOT YET UNIFORM. `ManifestLease::commit` and the renewal thread still compare against
+    // `current_time_ms()`; neither takes `ManifestLockOptions`, and the renewal thread would need
+    // the clock threaded across a spawn. They are the same split and should move here too.
     #[cfg(test)]
     if let Some(clock) = &options.now_sequence_ms {
         return Ok(clock.load(Ordering::SeqCst));
@@ -614,6 +623,7 @@ fn release_manifest_lock(
     path: &Path,
     lock: &Path,
     nonce: &str,
+    options: &ManifestLockOptions,
     ttl: Duration,
 ) -> Result<(), OpenCodeFilesError> {
     let owner = match read_lock_owner(&lock.join("owner")) {
@@ -623,7 +633,7 @@ fn release_manifest_lock(
             return Ok(());
         }
     };
-    let now = current_time_ms()?;
+    let now = resolve_now_ms(options)?;
     if owner.nonce != nonce || now.saturating_sub(owner.claimed_at_ms) >= ttl.as_millis() as u64 {
         warn_lease_lost(path);
         return Ok(());
@@ -636,7 +646,7 @@ fn release_manifest_lock(
     let moved = read_lock_owner(&release.join("owner")).ok();
     let moved_is_ours = moved.is_some_and(|owner| {
         owner.nonce == nonce
-            && current_time_ms()
+            && resolve_now_ms(options)
                 .is_ok_and(|now| now.saturating_sub(owner.claimed_at_ms) < ttl.as_millis() as u64)
     });
     if !moved_is_ours {
@@ -795,7 +805,7 @@ where
         )),
         other => other,
     };
-    let release = release_manifest_lock(path, &lock, &nonce, options.ttl);
+    let release = release_manifest_lock(path, &lock, &nonce, &options, options.ttl);
     match (result, release) {
         (Err(error), _) => Err(error),
         (Ok(_), Err(error)) => Err(error),

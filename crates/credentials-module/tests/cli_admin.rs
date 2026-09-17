@@ -597,23 +597,38 @@ fn every_verb_names_on_its_help_page_each_flag_its_parser_accepts() {
 // NAMES and their order are the contract a reader relies on.
 #[test]
 fn the_runbook_events_sample_names_the_columns_the_binary_prints() {
+    // READ THE HEADER FROM SOURCE, NOT BY RUNNING THE BINARY.
+    //
+    // My first version ran `ck auth events` and searched its stdout. It passed locally and
+    // failed on CI, and the reason is the worse of the two: with no `--data-dir` it read
+    // the AMBIENT vault -- a real credential store with real rows -- so it found a header
+    // because this machine happens to have events. CI has no store, so no header.
+    //
+    // Building a fixture instead does not work either, and the two refusals are worth
+    // recording: a fresh vault has no `auth_events` TABLE (it arrives with a migration the
+    // daemon applies), and a vault with the table but no rows prints an explanatory block
+    // rather than a header. The header appears only when rows exist, and a row requires a
+    // consumer report over the route plane -- daemon territory, for a test about whether
+    // two strings agree.
+    //
+    // So pin the two strings. The header lives in one format-string literal in the CLI and
+    // one sample block in the runbook; this asserts the runbook names every column the
+    // literal prints, which is the whole claim.
+    let cli_src = include_str!("../src/bin/credentials_cli.rs");
     let runbook = include_str!("../../../docs/operator-runbook.md");
 
-    let out = cli()
-        .args(["events", "--limit", "1"])
-        .output()
-        .expect("run events");
-    // A vault with no events still prints its header, which is what this pins.
-    let printed = String::from_utf8_lossy(&out.stdout);
-    let header = printed
+    let header_line = cli_src
         .lines()
-        .find(|l| l.starts_with("WHEN"))
-        .unwrap_or_else(|| panic!("events printed no header:\n{printed}"));
+        .find(|l| l.contains("\"WHEN\", \"CREDENTIAL\""))
+        .unwrap_or_else(|| panic!("no events header literal in the CLI source"));
 
-    let columns: Vec<&str> = header.split_whitespace().collect();
+    let columns: Vec<&str> = header_line
+        .split('"')
+        .filter(|t| !t.is_empty() && t.chars().all(|c| c.is_ascii_uppercase()))
+        .collect();
     assert!(
         columns.len() >= 6,
-        "header has {} columns; the extractor has narrowed:\n{header}",
+        "extracted {} columns from the header literal; the extractor has narrowed:\n{header_line}",
         columns.len()
     );
 
@@ -625,8 +640,8 @@ fn the_runbook_events_sample_names_the_columns_the_binary_prints() {
     for column in &columns {
         assert!(
             sample.contains(column),
-            "the runbook's events sample never names the `{column}` column that the binary \
-             prints, so the documented layout is stale:\n  binary: {header}\n  runbook: {sample}"
+            "the runbook's events sample never names the `{column}` column the CLI prints, \
+             so the documented layout is stale:\n  cli:     {header_line}\n  runbook: {sample}"
         );
     }
 }

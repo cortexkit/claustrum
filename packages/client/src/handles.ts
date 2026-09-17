@@ -76,7 +76,45 @@ export function parseHandleFile(value: unknown): OpenCodeHandleFileV1 {
       if (labels.has(account.label)) invalid(`provider ${index} duplicates account label ${account.label}`)
       labels.add(account.label)
       if (!handleIsValid(account.handle)) invalid(`provider ${index} account ${account.label} has invalid handle`)
-      if (!account.credential_id) invalid(`provider ${index} account ${account.label} has invalid credential id`)
+      // Segment 2 of the credential id must BE the provider block it sits in. Without
+      // this the check was non-empty-string only, so an `oauth:openai` binding parsed
+      // cleanly inside an `anthropic` block -- a cross-provider smuggle that every
+      // tenant reading this manifest would have honoured. Two peer tenants found the
+      // same hole in their own parsers independently.
+      //
+      // SCOPED TO SEGMENT 2 ONLY, deliberately. Segment 1 (the kind) is an OPEN SET --
+      // `oauth:`, `chatgpt:`, `antigravity:`, `apikey:` are all live in this vault today
+      // -- so a kind allowlist would refuse real ids. Segment 3+ (the label) is
+      // operator-chosen and may be absent: main is the 2-segment `oauth:anthropic`,
+      // fallbacks are 3-segment. Constraining either would reject the deployment this
+      // contract describes.
+      //
+      // NO SEGMENT MAY BE EMPTY. Segment 2 alone is what fences the provider, but a
+      // position-1 check ignores the rest of the string, and that left two ids passing
+      // that name credentials which cannot exist: `:anthropic:x` (empty kind) and
+      // `oauth:anthropic:` (empty label) both satisfy "segment 2 is the provider"
+      // literally. Neither is a smuggle; both defer a GUARANTEED resolve-time failure
+      // past the door, and under custody a resolve-time failure on a tombstoned account
+      // is a dark route rather than a refused row.
+      //
+      // It also removes an asymmetry nobody designed and everyone would read as a bug:
+      // `oauth::anthropic` rejected while `:anthropic:x` passed, purely because the
+      // check indexed position 1 and ignored positions 0 and 2. Agreed with the peer
+      // tenant and mirrored on their side, so this is chosen rather than defaulted --
+      // the previous behaviour was two independent defaults that happened to differ.
+      //
+      // The emptiness guard is ALSO explicit rather than a consequence: `''.split(':')`
+      // yields `['']`, whose `[1]` is `undefined` and cannot equal a provider string,
+      // so an empty id would reject anyway -- but that is a coincidence doing
+      // load-bearing work, and the check this replaced (`!account.credential_id`) was
+      // the emptiness guard. NO TEST DISTINGUISHES THAT ONE (empty rejects with or
+      // without it, verified by removal), so it is kept for a future reader who loosens
+      // the comparison, not for an arm it could never redden. The non-empty-SEGMENT
+      // rule below is different: it reddens, and is pinned.
+      const segments = account.credential_id.split(':')
+      if (!account.credential_id || segments[1] !== item.provider || segments.some((segment) => segment.length === 0)) {
+        invalid(`provider ${index} account ${account.label} has invalid credential id`)
+      }
       if (account.superseded?.some((handle) => !handleIsValid(handle))) {
         invalid(`provider ${index} account ${account.label} has invalid superseded handle`)
       }

@@ -235,7 +235,7 @@ stream and pass the arm without ever seeing it skip."
 # follows it), and any gap between the floor and the real count is how many can go
 # before anyone is told. Measured 402 across the workspace's suites at the time of
 # writing; an earlier floor of 200 left a third of them free to disappear.
-# The current measured total is 608 (debug profile, the same command this arm
+# The current measured total is 614 (debug profile, the same command this arm
 # runs). It covers master's resolved-credential-id pins and RAII temp-dir lifecycle, plus this
 # branch's Rust manifest-lock tests: the ABA observation that cannot rename a replacement, one
 # quarantine directory per stale owner, unknown and malformed owner fields tolerated but still
@@ -254,7 +254,7 @@ stream and pass the arm without ever seeing it skip."
 #
 # Raise this when tests are added. A failure here is normally that, not a defect --
 # but it should be a deliberate edit rather than a number nobody revisits.
-run_expect 610 "workspace unit + integration" \
+run_expect 614 "workspace unit + integration" \
   cargo test --locked --workspace --features credentials-core/test-support
 
 # THE ONE THING THIS macOS GATE CANNOT OTHERWISE SEE: code that does not COMPILE on Windows.

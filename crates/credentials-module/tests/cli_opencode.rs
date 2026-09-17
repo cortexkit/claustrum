@@ -263,6 +263,66 @@ fn hostile_provider_ids_and_account_labels_are_refused_by_the_rust_handle_valida
     }
 }
 
+/// Holds the WRITE path specifically. The sibling arms parse raw fixtures and would stay
+/// green if `validate_handle_file` were dropped from `write_handle_file_for_tenant`, and
+/// that is the direction that matters: a writer without the rule ORIGINATES a row the
+/// TypeScript reader refuses wholesale, denying every tenant in the shared manifest.
+///
+/// Constructed in memory rather than parsed, because the point is that a caller already
+/// holding a `HandleFile` cannot persist an invalid one -- no deserialization step stands
+/// between this value and the disk.
+///
+/// THE WRITER VALIDATES TWICE -- once on the caller's value and once on the merged result
+/// after the tenant block is folded in -- so REMOVING EITHER ONE ALONE LEAVES THIS ARM
+/// GREEN. That was measured, not assumed: deleting only the entry check kept all 71 tests
+/// passing, and the arm reddens only when both go. So this holds the WRITE PATH as a
+/// whole and does NOT pin either call site individually; a refactor that drops one of the
+/// two will not be caught here. Stated because the alternative is a reader inferring
+/// coverage from the name, which is how the gap this arm closes was created.
+#[test]
+fn an_invalid_handle_file_is_refused_at_the_write_path() {
+    let root = tmp_root("write-path-validation");
+    let path = root.path().join("opencode-handles.json");
+
+    let invalid = opencode_files::HandleFile {
+        version: 1,
+        providers: vec![opencode_files::HandleProvider {
+            provider: "deepseek".into(),
+            shape: opencode_files::HandleShape::Api,
+            serve: "opencode-claustrum".into(),
+            accounts: vec![opencode_files::HandleAccount {
+                label: "main".into(),
+                handle: "ckh_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+                // Scoped to another provider: the smuggle the TypeScript reader rejects.
+                credential_id: "oauth:anthropic".into(),
+                superseded: Vec::new(),
+            }],
+        }],
+    };
+
+    let err = opencode_files::write_handle_file(&path, &invalid)
+        .expect_err("the write path must refuse a cross-provider credential id");
+    assert!(
+        err.to_string().contains("invalid credential id"),
+        "unexpected error: {err}"
+    );
+
+    // Refused BEFORE touching disk. A writer that validates after creating the file
+    // leaves a partial artifact for the next reader, and "it returned an error" does not
+    // distinguish the two.
+    assert!(
+        !path.exists(),
+        "a refused write must not leave a file behind"
+    );
+
+    // Positive control: the same shape with a correctly scoped id must persist, so the
+    // refusal above is the predicate acting rather than the writer refusing everything.
+    let mut valid = invalid;
+    valid.providers[0].accounts[0].credential_id = "apikey:deepseek:main".into();
+    opencode_files::write_handle_file(&path, &valid).expect("a valid file must persist");
+    assert!(path.exists(), "the valid write must produce a file");
+}
+
 #[test]
 fn handle_file_debug_redacts_live_and_superseded_capabilities() {
     let file = opencode_files::HandleFile {
@@ -347,6 +407,79 @@ fn a_handle_file_with_an_empty_credential_id_is_refused() {
         err.to_string().contains("invalid credential id"),
         "unexpected error: {err}"
     );
+}
+
+/// The Rust validator runs on the WRITE path (`write_handle_file_for_tenant`,
+/// `verify_handle_written`), so a rule it lacks lets `ck auth` ORIGINATE a row the
+/// TypeScript reader refuses -- and that reader refuses the whole document, denying
+/// every tenant in a shared file. These arms pin the two sides to one predicate.
+///
+/// Each case is also asserted in `packages/opencode/src/tests/contracts.test.ts`. The
+/// duplication is forced -- two languages, one contract -- so it is marked here rather
+/// than left to look like an independent local rule.
+///
+/// THE ARMS BELOW GO THROUGH `read_handle_file`, WHICH IS THE READ PATH. They pin the
+/// predicate but NOT the claim in the paragraph above: deleting `validate_handle_file`
+/// from the writer leaves every one of them green, because a raw fixture never reaches
+/// the writer at all. `an_invalid_handle_file_is_refused_at_the_write_path` is the arm
+/// that holds the writer, and it is separate for exactly that reason -- a comment
+/// asserting coverage its arms do not have is the defect this file keeps finding
+/// elsewhere.
+#[test]
+fn a_handle_file_with_a_cross_provider_credential_id_is_refused() {
+    let err = read_raw_handle_fixture(
+        "cross-provider-credential-id",
+        r#"{"version":1,"providers":[{"provider":"deepseek","shape":"api","serve":"opencode-claustrum","accounts":[{"label":"main","handle":"ckh_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","credential_id":"oauth:anthropic"}]}]}"#,
+    )
+    .expect_err("a credential id scoped to another provider refuses");
+
+    assert!(
+        err.to_string().contains("invalid credential id"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn a_handle_file_with_an_empty_credential_id_segment_is_refused() {
+    for (name, credential_id) in [
+        ("empty-kind-segment", ":deepseek:main"),
+        ("empty-label-segment", "apikey:deepseek:"),
+        ("empty-middle-segment", "apikey::deepseek"),
+    ] {
+        let err = read_raw_handle_fixture(
+            name,
+            &format!(
+                r#"{{"version":1,"providers":[{{"provider":"deepseek","shape":"api","serve":"opencode-claustrum","accounts":[{{"label":"main","handle":"ckh_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","credential_id":"{credential_id}"}}]}}]}}"#
+            ),
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string().contains("invalid credential id"),
+            "{name}: unexpected error: {err}"
+        );
+    }
+}
+
+#[test]
+fn a_handle_file_with_live_credential_id_shapes_is_accepted() {
+    // Positive control against the real deployment: a tightening that refuses a live id
+    // is worse than the gap it closes, and every one of these is in the vault today.
+    for (provider, credential_id) in [
+        ("deepseek", "apikey:deepseek:main"),
+        ("anthropic", "oauth:anthropic"),
+        ("anthropic", "oauth:anthropic:work-alt"),
+        ("openai", "chatgpt:openai"),
+        ("google", "antigravity:google"),
+    ] {
+        read_raw_handle_fixture(
+            &format!("live-shape-{credential_id}"),
+            &format!(
+                r#"{{"version":1,"providers":[{{"provider":"{provider}","shape":"api","serve":"opencode-claustrum","accounts":[{{"label":"main","handle":"ckh_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","credential_id":"{credential_id}"}}]}}]}}"#
+            ),
+        )
+        .unwrap_or_else(|err| panic!("{credential_id} must parse: {err}"));
+    }
 }
 
 #[test]

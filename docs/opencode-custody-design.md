@@ -34,6 +34,48 @@ provider with in-request failover for providers the generic plugin serves.
 | Multi-account | One vault record per key/account; ordered priority list per provider |
 | Dedicated-plugin providers | Served by THEIR plugin consuming this client + handle file + tombstone convention; never by the generic closure |
 
+### Handle-manifest credential-id scope
+
+The handle manifest is multi-tenant: each tenant owns only its `provider` + `serve` blocks.
+Within a block for provider `P`, `credential_id.split(':')[1] === P` is the whole id-level
+scope check. Segment 1 is the credential kind and is an OPEN SET: `antigravity`, `apikey`,
+`chatgpt`, and `oauth` exist today, and new kinds are expected. Do not allowlist or infer the
+kind. Segment 3+ is a label convention only and is never consulted for provider scoping;
+provider scoping and label derivation are different properties, and an unlabelled
+`oauth:anthropic` is valid for `anthropic` just as `oauth:anthropic:any-label` is.
+
+| expectation | provider | account label | `credential_id` | reason |
+|---|---|---|---|---|
+| MUST RESOLVE | `openai` | `main` | `chatgpt:openai` | A kind-prefix rule would reject this live OpenAI shape. |
+| MUST RESOLVE | `google` | `main` | `antigravity:google` | A kind-prefix rule would reject this live Google shape. |
+| MUST RESOLVE | `anthropic` | `work-alt` | `oauth:anthropic:something-else` | The label must not be derived or consulted. |
+| MUST REJECT | `anthropic` | `main` | `chatgpt:openai` | A real cross-tenant id must not parse in another provider's block. |
+
+Provider-segment validation is a SHAPE check, not an existence check: only the runtime fence,
+which compares `credential_id` with what `credential.get` returns for the bound handle, proves
+that a binding names a real record. This rule is only a cheap pre-filter for cross-tenant
+smuggling. Tenant fixtures must therefore use the REAL vault credential id and say why; a tidier
+plausible id can pass every row above and still fail the runtime fence. Credential ids are
+operator-chosen and cannot be derived from the provider, account label, or record kind:
+`chatgpt:openai` is live even though its kind segment is `chatgpt` while the record kind is
+`oauth`; those are unrelated.
+
+**"The runtime fence catches it" is only a valid justification for a consumer that CAN read vault
+ground truth, and today that is a property of the transport a tenant happened to choose.** A tenant
+with its own transport reads `credential_id` off the `credential.get` reply and can refuse on
+mismatch. A tenant vendoring `@cortexkit/claustrum-client` CANNOT: `ServedCredential` is
+`{material, recordVersion, expiresAtMs}` and has never carried `credential_id` or `account_id` at
+any ref, so the client discards five of the eight non-secret fields the wire sends before a
+consumer sees them. This repo's own custody plugin is in that position — `packages/opencode/src/serve.ts`
+logs the manifest's `credential_id` beside the vault's `record_version`, two values from different
+sources that read as corroboration.
+
+That matters because relaxing a parse-time constraint is licensed by the runtime fence existing.
+That license was extended to three tenants while only two could exercise it. Until the client
+carries the served metadata, treat the fence as a per-tenant capability rather than a contract-level
+guarantee, and do not justify a parse-time relaxation by it without checking that the tenant in
+question can actually perform the comparison.
+
 ### Seam boundary
 
 This is a config-hook/fetch-seam integration, **not provider-universal custody**. The generic

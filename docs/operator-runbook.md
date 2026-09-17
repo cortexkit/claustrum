@@ -1335,6 +1335,45 @@ not your own ancestors. **When the answer is empty and it matters, confirm with
 or the module's own parent -- before concluding anything is down. An empty
 `pgrep` is not evidence of absence.
 
+**A SECOND MEASUREMENT, 2026-09-17, with the control the first one lacked -- and it
+kills a competing explanation.** Another seat hit the same empty result and diagnosed
+it as macOS carrying `argv[0]` as an absolute path in `comm`, so that `pgrep -x`
+fails on the directory prefix. Plausible, and wrong. Both processes carry a
+full-path comm:
+
+```
+pid 2307  comm=/Users/.../bin/ck-subc
+pid 2365  comm=/Users/.../bin/ck-subc-mcp
+
+pgrep -x ck-subc       -> <empty>
+pgrep -x ck-subc-mcp   -> 2365        same path shape, MATCHES
+```
+
+If the absolute path were the cause, neither would match by bare name. The
+predicted workarounds also fail: `pgrep -x` against the exact full comm string
+returns nothing, and `pgrep -lf ck-subc` returns only 2365.
+
+The parent chain from the calling shell settles it:
+
+```
+ancestor 1  pid 91260  sh
+ancestor 2  pid 51168  ck-aft
+ancestor 3  pid 2307   ck-subc      <- the process pgrep cannot see
+```
+
+2307 is an ancestor; 2365 is not. That is the only property that differs.
+
+**WHY THE WRONG REASON WOULD HAVE COST SOMETHING.** "pgrep -x fails on a
+full-path comm" predicts that `-f`, or passing the absolute path, fixes it.
+Neither does, so a reader would try both, watch them fail, and be left without an
+explanation. "pgrep never reports your own ancestors" predicts the real fix --
+stop using pgrep for any process that might be above you -- and generalises to
+every supervised seat checking the supervisor during an incident, which is
+precisely when the false negative appears.
+
+`ps -axo pid=,comm= | awk '$2 ~ /ck-subc$/'` is the portable form, and it works
+because `ps` has no ancestor exclusion at all, not because it tolerates the path.
+
 Relocating the data directory is safe in the sense that matters: **the daemon
 never bootstraps**, so a moved vault finds no key for its new keychain scope and
 refuses to serve rather than coming up empty. That is worth knowing precisely

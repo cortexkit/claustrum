@@ -101,9 +101,25 @@ fn main() -> ExitCode {
             //
             // So the exit code was always honest and the rendering was not. One line at
             // the end costs nothing and makes a tailed transcript self-describing.
+            // ONLY WHEN SOMETHING CAME BETWEEN, measured 2026-09-17. The restatement was
+            // unconditional, so a one-line refusal printed the same sentence twice with a
+            // blank line between:
+            //
+            //     error: --id is required
+            //
+            //     error: --id is required — nothing ran, nothing changed.
+            //
+            // The reasoning above is about a refusal BURIED by a help page. When the error
+            // body is a single line there is nothing to bury it, the reader has the first
+            // line in view, and the echo reads as a second, different failure. Every verb
+            // with a required flag renders this way, so the noise is the common case and
+            // the case the restatement was written for is the rare one.
             if let CliError::Usage(m) = &e {
-                let first = m.lines().next().unwrap_or("invalid usage");
-                eprintln!("\nerror: {first} — nothing ran, nothing changed.");
+                let mut lines = m.lines();
+                let first = lines.next().unwrap_or("invalid usage");
+                if lines.next().is_some() {
+                    eprintln!("\nerror: {first} — nothing ran, nothing changed.");
+                }
             }
             e.exit_code()
         }
@@ -2925,15 +2941,43 @@ fn parse_grants(result: &serde_json::Value) -> Result<Vec<GrantRow>, CliError> {
 }
 
 /// Print one stable row per principal-scoped grant, including the creation time.
+///
+/// WIDTHS ARE MEASURED FROM THE ROWS, NOT FIXED. The fixed `{:<24}` this replaced was
+/// narrower than real data: `apikey:artificial-analysis` is 26 characters, so that one row
+/// pushed its last two columns right while every other row stayed aligned. A table where
+/// one row is offset reads as a rendering fault in the VALUE -- I misread a correct
+/// 16-character prefix as truncated output on the strength of it, and only the store
+/// settled it.
+///
+/// The header is here for the same reason. Without it the operation column (`read` /
+/// `sign`) and the principal kind are both short lowercase words, and nothing on screen
+/// says which is which.
 fn print_grants(result: &serde_json::Value) -> Result<(), CliError> {
     let grants = parse_grants(result)?;
     if grants.is_empty() {
         println!("no grants");
         return Ok(());
     }
+    // Include the header in the width so a long heading cannot overrun its own column.
+    let w = |head: &str, f: &dyn Fn(&GrantRow) -> &str| {
+        grants
+            .iter()
+            .map(|g| f(g).chars().count())
+            .chain(std::iter::once(head.chars().count()))
+            .max()
+            .unwrap_or(head.len())
+    };
+    let wk = w("KIND", &|g| g.principal_kind.as_str());
+    let wp = w("PRINCIPAL", &|g| g.principal_id.as_str());
+    let wc = w("CREDENTIAL PREFIX", &|g| g.credential_prefix.as_str());
+    let wo = w("OP", &|g| g.operation.as_str());
+    println!(
+        "{:<wk$}  {:<wp$}  {:<wc$}  {:<wo$}  GRANTED",
+        "KIND", "PRINCIPAL", "CREDENTIAL PREFIX", "OP"
+    );
     for grant in grants {
         println!(
-            "{:<14} {:<24} {:<24} {:<10} {}",
+            "{:<wk$}  {:<wp$}  {:<wc$}  {:<wo$}  {}",
             grant.principal_kind,
             grant.principal_id,
             grant.credential_prefix,

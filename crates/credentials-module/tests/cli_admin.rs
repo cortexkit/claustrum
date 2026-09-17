@@ -389,6 +389,126 @@ fn grant_row_fields<'a>(stdout: &'a str, credential_prefix: &str) -> Vec<&'a str
         .collect()
 }
 
+// BOTH ARMS, because the fix and the defect it replaced are each correct for one of them.
+// The restatement exists so a refusal buried under a verb's help page still reads as a
+// refusal in a tailed transcript. It was firing unconditionally, so a one-line refusal
+// printed the same sentence twice with a blank line between. Assert the buried form KEEPS
+// its restatement and the short form does not grow one -- with only the second arm,
+// restoring the unconditional version passes.
+#[test]
+fn a_one_line_refusal_says_it_once_and_a_buried_one_is_restated() {
+    let short = cli()
+        .args(["mint-handle"])
+        .output()
+        .expect("run mint-handle");
+    assert!(
+        !short.status.success(),
+        "mint-handle with no --id must refuse"
+    );
+    let short_err = String::from_utf8_lossy(&short.stderr);
+    assert_eq!(
+        short_err.matches("--id is required").count(),
+        1,
+        "a one-line refusal must say it once; twice reads as two failures:\n{short_err}"
+    );
+    assert!(
+        !short_err.contains("nothing ran, nothing changed"),
+        "nothing buried this refusal, so the restatement is pure echo:\n{short_err}"
+    );
+
+    // The arm the restatement was written for: a usage error that prints the verb's whole
+    // help page, so the first line is scrolled away by the time the reader reaches the end.
+    let buried = cli()
+        .args(["list", "--nonsense"])
+        .output()
+        .expect("run list with a bad flag");
+    assert!(!buried.status.success(), "an unknown flag must refuse");
+    let buried_err = String::from_utf8_lossy(&buried.stderr);
+    assert!(
+        buried_err.lines().count() > 3,
+        "precondition: this arm only means something if a help page follows:\n{buried_err}"
+    );
+    assert!(
+        buried_err.contains("nothing ran, nothing changed"),
+        "a refusal buried under a help page must be restated at the end:\n{buried_err}"
+    );
+}
+
+// THE DEFECT THIS DEFENDS was a fixed `{:<24}` prefix column against a real 26-character
+// prefix: that one row's last two columns shifted right while every other row stayed put.
+// A table with one offset row reads as a fault in the VALUE rather than in the layout --
+// it cost a false "this prefix is truncated" alarm before the store settled it.
+//
+// Asserted as EQUAL COLUMN STARTS rather than equal line lengths: the trailing column is
+// deliberately unpadded, so line length legitimately varies with its content.
+#[test]
+fn grants_columns_hold_their_positions_when_a_prefix_is_wider_than_the_others() {
+    let home = tmp_root("grants_wide_prefix");
+    let data_dir = home.join("vault");
+    let key = home.join("master.key");
+    std::fs::create_dir_all(&data_dir).expect("data dir");
+
+    let run = |args: &[&str]| -> (bool, String, String) {
+        let out = cli()
+            .args([
+                "--data-dir",
+                data_dir.to_str().unwrap(),
+                "--key-path",
+                key.to_str().unwrap(),
+            ])
+            .args(args)
+            .output()
+            .expect("cli runs");
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).to_string(),
+            String::from_utf8_lossy(&out.stderr).to_string(),
+        )
+    };
+
+    let (ok, _, err) = run(&["bootstrap"]);
+    assert!(ok, "bootstrap failed: {err}");
+
+    // One short prefix and one deliberately wider than the fixed width this replaced.
+    for (principal, prefix) in [
+        ("short-p", "apikey:x"),
+        ("long-p", "apikey:artificial-analysis"),
+    ] {
+        let (ok, _, err) = run(&[
+            "grant",
+            "--principal",
+            principal,
+            "--prefix",
+            prefix,
+            "--operation",
+            "read",
+        ]);
+        assert!(ok, "grant for {principal} failed: {err}");
+    }
+
+    let (ok, stdout, err) = run(&["grants"]);
+    assert!(ok, "grants failed: {err}");
+    let rows: Vec<&str> = stdout.lines().filter(|l| l.contains("apikey:")).collect();
+    assert_eq!(rows.len(), 2, "expected both grants to render:\n{stdout}");
+
+    // The operation column starts at the same offset in both rows, or the wide prefix
+    // pushed it. Measured on the rendered line, which is what a reader sees.
+    let op_at: Vec<usize> = rows
+        .iter()
+        .map(|r| r.rfind("read").expect("every row carries its operation"))
+        .collect();
+    assert_eq!(
+        op_at[0], op_at[1],
+        "a wider prefix shifted the columns after it:\n{stdout}"
+    );
+
+    let header = stdout.lines().next().unwrap_or("");
+    assert!(
+        header.contains("CREDENTIAL PREFIX") && header.contains("OP"),
+        "the table needs a header; two short lowercase columns are otherwise unlabelled:\n{stdout}"
+    );
+}
+
 #[test]
 fn grants_help_describes_the_read_only_inventory() {
     let out = cli()

@@ -790,6 +790,33 @@ Other unknown kinds may still appear (a future retirement, a fixture from a test
 harness). Treat them as diagnostics, never as audit-log operations or alarm reasons --
 the vocabularies are separate and a value from one is not a value from another.
 
+**Before you read a MISSING row here as evidence, ask whether the path could have
+completed without writing it.**
+
+```
+CAN THE PATH THAT WOULD HAVE WRITTEN THIS ROW COMPLETE WITHOUT WRITING IT?
+  no   -> absence is a STATEMENT
+  yes  -> absence is a SILENCE
+```
+
+The two tables answer that differently and the difference is not visible in either one.
+`auth_events` is written unconditionally on a consumer report, so a missing row there is a
+statement: the report did not arrive. The attributed `audit_log` row is written only when
+the version gate passes, so its absence is a silence -- it is missing for every
+`applied=0` report, which are exactly the reports worth tracing.
+
+This is not theoretical. On 2026-09-17 a cluster of twelve reports landed on the anthropic
+records against one the week before, several on tokens minted seconds earlier. Every one
+was `applied=0`, so none wrote an attributed audit row, and `auth_events.principal_kind`
+is structurally NULL on consumer reports (issue #42). A consumer seat offered the check
+that would have named the sender -- their route open stamps a principal -- and it could
+not be run. The schema carrying the columns is what made the null look like an answer.
+
+General form, worth applying to any store before reading its silence: a write-on-success
+path makes absence meaningful, a write-on-transition path does not, and nothing in a row
+count tells you which you are looking at. *(Framing contributed by a consumer seat,
+2026-09-17.)*
+
 #### `auth_events.reporter_source`
 
 **Table:** `auth_events`

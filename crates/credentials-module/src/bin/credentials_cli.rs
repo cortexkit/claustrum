@@ -510,6 +510,8 @@ fn help_verb(verb: &str) -> String {
         "login" => {
             "ck auth login [--provider <name>] [--id <id>] [--account <id>] \
              [--replace] [--no-listener] [--device]\n\
+             \x20             [--payload-file <path>]  api-key logins: read the key from a\n\
+             \x20                                      file instead of prompting\n\
              \n\
              Vault-native first-party login — mints an INDEPENDENT credential the vault\n\
              solely custodies (no dual-custody rotation race). Run with NO --provider for\n\
@@ -584,6 +586,7 @@ fn help_verb(verb: &str) -> String {
             "ck auth put --id <id> --payload <v> | --payload-file <path>\n\
              \x20            [--kind api_key|dsn|opaque] [--expires-ms N]\n\
              \x20            [--replace | --expected-hash <hex>]\n\
+             \x20            [--client-id <id>]   required for a github_app: deposit\n\
              \n\
              Ingest a non-OAuth secret (an api_key, dsn, or opaque blob). Create-only by\n\
              default; --replace rotates it unconditionally (bumps record_version so\n\
@@ -597,22 +600,29 @@ fn help_verb(verb: &str) -> String {
              use a cookie: id, whose bytes are taken verbatim."
         }
         "import" => {
-            "ck auth import --source <opencode|pi|gemini-cli|antigravity> --id <id> \
-             --json <file>\n\
-             \x20             [--provider <key>] [--adapter <name>] [--replace]\n\
-             \x20             [--account-id <id> [--email <email>] [--org-name <name>] | --clear-identity]\n\
+            "ck auth import --source <opencode|pi|gemini-cli|antigravity> --id <id>\n\
              \n\
-             opencode/pi read auth.json (--provider selects one entry; an apikey:<p> id\n\
-               imports a {type:api,key} entry as a static key, an oauth id imports tokens);\n\
-             gemini-cli reads ~/.gemini/oauth_creds.json (single credential, no --provider);\n\
-             antigravity reads ~/.config/opencode/antigravity-accounts.json (accounts array;\n\
-               --provider selects an account by email/index, default activeIndex);\n\
-              --adapter overrides the method-derived refresh adapter;\n\
-              --account-id attaches non-secret account metadata (required with --email or\n\
-                --org-name); --clear-identity removes it;\n\
-              --replace overwrites an existing id (fix a wrong-source import; keeps handles)\n\
-                and preserves prior identity only when the incoming token belongs to the same\n\
-                account; a detectable mismatch requires explicit identity flags to override or clear it."
+             \x20 --source        which harness to read\n\
+             \x20 --id            vault credential id to create\n\
+             \x20 --json <file>   read that file instead of the source's default path\n\
+             \x20 --provider      opencode/pi: pick one auth.json entry\n\
+             \x20                 antigravity: pick an account by email or index\n\
+             \x20 --adapter       override the refresh adapter the method implies\n\
+             \x20 --replace       overwrite an existing id, keeping its handles\n\
+             \n\
+             SOURCES\n\
+             \x20 opencode, pi    auth.json. An apikey:<p> id imports a {type:api,key}\n\
+             \x20                 entry as a static key; an oauth id imports tokens.\n\
+             \x20 gemini-cli      ~/.gemini/oauth_creds.json, one credential, no --provider\n\
+             \x20 antigravity     antigravity-accounts.json, defaults to activeIndex\n\
+             \n\
+             IDENTITY\n\
+             \x20 --account-id attaches non-secret account metadata, and is required with\n\
+             \x20 --email or --org-name. --clear-identity removes it.\n\
+             \n\
+             \x20 --replace keeps prior identity only when the incoming token belongs to\n\
+             \x20 the same account. A detectable mismatch refuses until you pass identity\n\
+             \x20 flags to override or clear it."
         }
         "set-identity" => {
             "ck auth set-identity <credential-id> --account-id <id> [--email <email>] \

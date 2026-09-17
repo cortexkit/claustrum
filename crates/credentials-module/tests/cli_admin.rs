@@ -509,6 +509,84 @@ fn grants_columns_hold_their_positions_when_a_prefix_is_wider_than_the_others() 
     );
 }
 
+// EVERY FLAG THE PARSER ACCEPTS IS NAMED ON ITS HELP PAGE. This is the defence for the
+// help-page reformat: a page can be rewritten for shape without silently dropping a flag,
+// because a dropped flag is undiscoverable -- the parser still takes it, so nothing fails,
+// and the operator simply never learns it exists.
+//
+// Drives the real binary rather than reading source strings, because the defect is in what
+// RENDERS. The flag table is read from the parser's own accept-list, so this cannot drift
+// the way a hand-kept list would.
+#[test]
+fn every_verb_names_on_its_help_page_each_flag_its_parser_accepts() {
+    // Read the accept-lists from the CLI source rather than keeping a second copy here.
+    //
+    // TWO SHAPES AND TWO LISTS, both found by this test failing on its own first draft:
+    //   "import" => &[...]                        value-taking flags
+    //   "import" => &["--replace", ...]           boolean flags, a SEPARATE arm
+    //   "grant" | "revoke-grant" => &[...]        one arm serving two verbs
+    // A `find()` for a single `"verb" => &[` takes the first list and silently ignores the
+    // second, which is how the first draft reported "8 of 8 named" while checking only the
+    // value flags. Collect from EVERY arm whose pattern names the verb.
+    let src = include_str!("../src/bin/credentials_cli.rs");
+
+    let accepted = |verb: &str| -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for (idx, _) in src.match_indices("=> &[") {
+            // The arm pattern is everything from the previous newline up to the fat arrow.
+            let line_start = src[..idx].rfind('\n').map(|n| n + 1).unwrap_or(0);
+            let pattern = &src[line_start..idx];
+            if !pattern.contains(&format!("\"{verb}\"")) {
+                continue;
+            }
+            let rest = &src[idx + "=> &[".len()..];
+            let to = rest.find(']').expect("unterminated accept-list");
+            for token in rest[..to].split('"') {
+                if token.starts_with("--") && !out.contains(&token.to_string()) {
+                    out.push(token.to_string());
+                }
+            }
+        }
+        out
+    };
+
+    let verbs = ["import", "put", "login", "grant", "set-identity"];
+    let mut total = 0usize;
+
+    for verb in verbs {
+        let flags = accepted(verb);
+        assert!(
+            flags.len() >= 2,
+            "extractor found {} flags for {verb}; a broken scan passes this vacuously",
+            flags.len()
+        );
+
+        let help = cli().args(["help", verb]).output().expect("run help");
+        assert!(help.status.success(), "help {verb} failed");
+        let page = String::from_utf8_lossy(&help.stdout);
+
+        let missing: Vec<&String> = flags
+            .iter()
+            .filter(|f| !page.contains(f.as_str()))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "`ck auth help {verb}` never names {missing:?}. The parser accepts them, so a \
+             dropped flag fails nothing and is simply undiscoverable:\n{page}"
+        );
+        total += flags.len();
+    }
+
+    // ANCHOR against the extractor narrowing. The first draft matched one arm per verb and
+    // reached 24; both arms reach more. A future refactor that splits an arm must not
+    // quietly reduce coverage.
+    assert!(
+        total >= 28,
+        "only {total} flags checked across {} verbs; the extractor has narrowed",
+        verbs.len()
+    );
+}
+
 #[test]
 fn grants_help_describes_the_read_only_inventory() {
     let out = cli()

@@ -89,6 +89,26 @@ cargo check --workspace --locked
 The gate is exact rather than approximate: it asserts test counts per suite, so a
 suite that silently stops running fails the gate instead of passing quietly.
 
+### The TypeScript packages need a build before they can be imported
+
+```
+bun install
+bun run build               # REQUIRED -- packages/client/dist is gitignored
+```
+
+`@cortexkit/claustrum-client` is a workspace package whose `main` points into
+`dist/`, and `dist/` is not committed. So on a fresh clone `bun install` succeeds,
+reports no changes, and leaves the package unresolvable — any import of it fails
+with `Cannot find package '@cortexkit/claustrum-client'`, which reads like a
+missing dependency rather than a missing build.
+
+Worth stating plainly because the error points away from the cause: `bun install`
+is not enough, and running it again will not help. This is the wall behind
+[issue #39](https://github.com/cortexkit/claustrum/issues/39), and it is reachable
+from inside the repo too — a `git worktree` of this project is a fresh checkout by
+the same definition, so the same three commands fail there while the main checkout
+works.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

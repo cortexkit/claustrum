@@ -224,6 +224,30 @@ stream and pass the arm without ever seeing it skip."
   broken instrument, not a result. Do not read it as a test count; the arm's own
   'test result:' lines are printed above."
   fi
+  # AND THE SAME CHECK ON THE FLOOR ITSELF, one argument to the left.
+  #
+  # `[ "$passed" -lt "$min" ]` with a non-numeric $min returns rc=2 and takes NEITHER
+  # branch, so `fail` is never called and the arm reports clean. Measured by driving it:
+  #
+  #   run_expect NOT_A_NUMBER 'probe' printf 'test result: ok. 580 passed;\n'
+  #     -> gate.sh: [: NOT_A_NUMBER: integer expression expected
+  #     -> ARM OUTCOME: FAILED=0
+  #
+  # One stderr line, in a run that prints thousands, and ANY count passes -- including the
+  # shrunken suite the floor exists to catch. It went live once: a contributor branch
+  # carried a `MEASURED_FLOOR_PLACEHOLDER` on that line and its gate reported PASSED with
+  # the floor entirely disarmed.
+  #
+  # The class is a guard whose own INPUT can disarm it silently. This file has had three:
+  # a `SKIPPING` token matching case-sensitively against a lowercase emitter, an undeclared
+  # `bc` whose absence was swallowed by `2>/dev/null || echo 0`, and this. All three were
+  # found by making the guard try, never by reading it.
+  case $min in
+    '' | *[!0-9]*)
+      fail "$label: floor '$min' is not a number, so the comparison below would take neither
+  branch and this arm would pass for any count. Fix the floor."
+      ;;
+  esac
   if [ "$passed" -lt "$min" ]; then
     fail "$label ran $passed tests, expected at least $min — a suite that shrank is indistinguishable from one that passed"
   fi

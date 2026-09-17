@@ -235,16 +235,26 @@ stream and pass the arm without ever seeing it skip."
 # follows it), and any gap between the floor and the real count is how many can go
 # before anyone is told. Measured 402 across the workspace's suites at the time of
 # writing; an earlier floor of 200 left a third of them free to disappear.
-# The current measured total is 580 (debug profile, the same
-# `cargo test --locked --workspace` this arm runs). The latest five tests pin the resolved
-# credential id on get/status, its omission on unresolved shapes, and the get response key
-# set in both directions. 2026-09-11: the RAII temp-dir lifecycle added two tests.
+# The current measured total is 608 (debug profile, the same command this arm
+# runs). It covers master's resolved-credential-id pins and RAII temp-dir lifecycle, plus this
+# branch's Rust manifest-lock tests: the ABA observation that cannot rename a replacement, one
+# quarantine directory per stale owner, unknown and malformed owner fields tolerated but still
+# evictable, a missing nonce surfacing as owner_invalid at the deadline, an owner that goes stale
+# inside the retry window, and the expired-quarantine reclaim.
+#
+# MEASURED, NOT ARITHMETIC -- and this rebase is the third time it mattered. The branch bumped
+# 564 to 568, master reached 578 independently, and their sum (582) was already wrong because
+# later branch commits added Rust tests without touching the floor. At this rebase master carried
+# 580 and the branch 603; adding the deltas is wrong again, and master ALSO changed the command
+# itself (--features credentials-core/test-support), so the two numbers were never counting the
+# same set. A mid-rebase measurement is wrong too: replaying commit N gives the count at N, not
+# at the tip. Take master's invocation, run it on the FINAL tree, and read the number.
 # Do not measure it with `--release`: one login test deliberately fails there and the
 # pipeline still prints a number, 32 short of the truth.
 #
 # Raise this when tests are added. A failure here is normally that, not a defect --
 # but it should be a deliberate edit rather than a number nobody revisits.
-run_expect 580 "workspace unit + integration" \
+run_expect 610 "workspace unit + integration" \
   cargo test --locked --workspace --features credentials-core/test-support
 
 # Two independent defences, because each catches what the other misses:

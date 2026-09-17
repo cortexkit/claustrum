@@ -359,6 +359,28 @@ if git rev-parse --verify -q refs/heads/"$default_branch" >/dev/null; then
   fi
 fi
 
+# HEAD MUST *BE* THE DEFAULT BRANCH, not merely descend from it. The descendant
+# check below is necessary and not sufficient: a feature branch cut from main is
+# a descendant, so it sails through while carrying every commit made on it.
+#
+# MEASURED 2026-09-17, which is why this exists. A sibling repository's agent
+# checked out a branch in this working tree, merged an in-review PR branch into
+# it, and committed 2,036 lines. I then ran a train from that branch believing I
+# was on main -- `git status` was clean because the work was COMMITTED, not
+# staged -- and published all of it to a train branch. Only a Windows CI failure
+# stopped the fast-forward. Every other guard agreed: the tree was clean, HEAD
+# descended from origin/main, the lockfile resolved.
+#
+# The train's contract is "fast-forward main to this sha". Run from anywhere but
+# main, that contract publishes whatever the branch happens to carry, and the
+# operator's mental model of what is being landed is silently wrong.
+current_branch="$(git symbolic-ref -q --short HEAD || echo '<detached>')"
+if [ "$current_branch" != "$default_branch" ]; then
+  refuse "on branch '$current_branch', not '$default_branch' -- a train fast-forwards \
+$default_branch to HEAD, so from here it would publish every commit this branch carries. \
+If that is what you want, merge into $default_branch first and run the train from there."
+fi
+
 head_sha="$(git rev-parse HEAD)"
 # HEAD is what lands, so HEAD is what has to fast-forward main. Checked here so
 # a doomed train is refused before it costs a CI run, and again after CI.

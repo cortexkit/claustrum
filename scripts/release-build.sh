@@ -33,6 +33,28 @@ if [ -n "$(git status --porcelain)" ]; then
   exit 1
 fi
 
+# AND THE CLEAN-TREE CHECK ABOVE IS NOT ENOUGH ON ITS OWN, measured 2026-09-17.
+# A binary was staged and installed from a feature branch carrying 2,036 lines
+# committed by a sibling repository's agent in this working tree. The tree was
+# clean -- the work was COMMITTED, which is exactly what `git status` cannot see
+# -- so this refusal never fired, and the CLI on the operator's PATH ran code
+# that had never been on the default branch or through CI.
+#
+# A release stamps a revision consumers trust, so it must be cut from the branch
+# that is reviewed. Overridable because there is a legitimate case (bisecting a
+# regression, proving a fix before it lands), and that case wants the override
+# LOUD in the operator's scrollback rather than silent.
+BRANCH="$(git symbolic-ref -q --short HEAD || echo '<detached>')"
+if [ "$BRANCH" != "master" ] && [ "${CK_RELEASE_ALLOW_BRANCH:-}" != "1" ]; then
+  echo "REFUSING: on branch '${BRANCH}', not master." >&2
+  echo "  A feature-branch release ships commits that have not landed or passed CI." >&2
+  echo "  Deliberate? re-run with CK_RELEASE_ALLOW_BRANCH=1" >&2
+  exit 1
+fi
+if [ "$BRANCH" != "master" ]; then
+  echo "*** BUILDING FROM BRANCH '${BRANCH}', NOT master -- override in effect ***" >&2
+fi
+
 bash scripts/mutation-check.sh
 
 # FULL 40-HEX, NOT --short. This value is stamped into CK_BUILD_REV and becomes the

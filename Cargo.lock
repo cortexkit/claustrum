@@ -1786,7 +1786,7 @@ dependencies = [
 
 [[package]]
 name = "subc-core"
-version = "0.17.45"
+version = "0.17.48"
 dependencies = [
  "base64",
  "cortexkit-log",
@@ -1820,7 +1820,7 @@ dependencies = [
 
 [[package]]
 name = "subc-protocol"
-version = "0.19.1"
+version = "0.19.2"
 dependencies = [
  "serde",
  "serde_json",

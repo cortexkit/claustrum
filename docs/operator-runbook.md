@@ -1374,6 +1374,36 @@ precisely when the false negative appears.
 `ps -axo pid=,comm= | awk '$2 ~ /ck-subc$/'` is the portable form, and it works
 because `ps` has no ancestor exclusion at all, not because it tolerates the path.
 
+**THE BEHAVIOUR IS SPECIFIED AND HAS A FLAG, so "stop using pgrep" was too broad.**
+`man pgrep`:
+
+```
+-a    Include process ancestors in the match list.  By default, the current
+      pgrep or pkill process and all of its ancestors are excluded
+      (unless -v is used).
+
+pgrep -x      ck-subc  -> <empty>
+pgrep -a -x   ck-subc  -> 2307
+```
+
+So `pgrep -a -x` is the correct positive read from under the supervisor, and `ps`
+remains the form that needs no flag.
+
+**DO NOT REACH FOR `-v` ON THE STRENGTH OF THAT PARENTHETICAL.** It does not mean
+"-v also includes ancestors". Measured here, with a control:
+
+```
+pgrep -a -x ck-subc                      -> 2307        ancestor, MATCHES
+pgrep -v -x ck-subc | grep -c '^2307$'   -> 1           ...and is listed as a NON-match
+pgrep -v -x ck-subc-mcp | grep -c '2365' -> 0           non-ancestor match, correctly absent
+```
+
+An excluded ancestor is evidently treated as "did not match", and `-v` prints the
+did-not-match set — so a process that matches lands on the WRONG side of the
+partition purely because it is above you. `pgrep -v` is therefore not a safe
+inverse of `pgrep` for any process that might be an ancestor. Use `-a` for the
+positive read and `ps` for the negative.
+
 Relocating the data directory is safe in the sense that matters: **the daemon
 never bootstraps**, so a moved vault finds no key for its new keychain scope and
 refuses to serve rather than coming up empty. That is worth knowing precisely

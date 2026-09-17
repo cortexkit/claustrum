@@ -293,7 +293,7 @@ assert_floor_not_lowered() {
       printf 'this tree %s < %s %s — reason: %s\n' "$ours" "$target" "$theirs" "$CK_GATE_FLOOR_LOWER_REASON"
       return
     fi
-    fail "floor ratchet: this tree's workspace floor is $ours but $target ($target_sha) carries $theirs — a branch forked before a raise lowers it silently and every gate still passes; rebase and re-measure on the merged tree, or set CK_GATE_FLOOR_LOWER_REASON"
+    fail "floor ratchet: this tree's workspace floor is $ours but $target ($target_sha) carries $theirs — a squash does NOT carry a stale floor onto master (the diff wins, and a branch that edits this line conflicts loudly), so the way a raise actually gets dropped is a human resolving that conflict with --ours, or a hand-edit here; re-measure on the merged tree, or set CK_GATE_FLOOR_LOWER_REASON"
     return
   fi
 

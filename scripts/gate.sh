@@ -229,6 +229,68 @@ stream and pass the arm without ever seeing it skip."
   fi
 }
 
+# A FLOOR IS A LOWER BOUND, AND LOWER BOUNDS DO NOT COMPLAIN ABOUT BEING LOWERED.
+#
+# A branch forked before a floor raise carries the OLD number forward in this file and
+# merges green, silently reverting the raise. Nothing goes red: the count still clears
+# the (now smaller) minimum, so the gate passes on both sides of the defect. Worse, the
+# branch need not touch this file at all -- it inherits the value -- so the hazard is
+# invisible in the diff and no marker catches it, because "the gate passes" is true
+# either way. Live instance: an open PR sat on a pre-raise master carrying 578 while
+# master was at 610, which would have handed back 32 tests' worth of protection.
+#
+# So the floor is RATCHETED: it may rise, and it may not fall below the merge target's.
+# The comparison is against the TARGET's value rather than this file's own, because a
+# check that reads only the number it is validating cannot detect that the number moved.
+#
+# UNRESOLVABLE IS NOT PASSING. A shallow clone, a detached CI checkout, or a missing
+# remote means this cannot be answered -- and a check that answers "fine" when it means
+# "I could not look" is the failure this whole file is written against. It reports
+# UNCHECKED and says why, which is visible in the log without failing a legitimate build
+# that simply has no remote to compare against.
+#
+# A DELIBERATE LOWERING (tests genuinely removed) fails here and should: that is a
+# review conversation, not a number to edit quietly. Set CK_GATE_FLOOR_LOWER_REASON to
+# override, which leaves the reason in the build log where a reviewer will see it.
+assert_floor_not_lowered() {
+  local file="$1" target="${CK_GATE_FLOOR_TARGET:-origin/master}"
+  local ours theirs target_file
+
+  ours=$(grep -m1 -oE 'run_expect [0-9]+ "workspace' "$file" | grep -oE '[0-9]+')
+  if [ -z "$ours" ]; then
+    fail "floor ratchet: cannot read this tree's workspace floor from $file"
+    return
+  fi
+
+  if ! target_file=$(git show "$target:scripts/gate.sh" 2>/dev/null); then
+    GATE_UNCHECKED="${GATE_UNCHECKED:-}floor ratchet (cannot resolve $target) "
+    printf '\n=== floor ratchet: UNCHECKED ===\n'
+    printf 'cannot resolve %s — no comparison made (this is not a pass)\n' "$target"
+    return
+  fi
+
+  theirs=$(printf '%s\n' "$target_file" | grep -m1 -oE 'run_expect [0-9]+ "workspace' | grep -oE '[0-9]+')
+  if [ -z "$theirs" ]; then
+    GATE_UNCHECKED="${GATE_UNCHECKED:-}floor ratchet (no floor in $target) "
+    printf '\n=== floor ratchet: UNCHECKED ===\n'
+    printf 'cannot read a workspace floor from %s — no comparison made (this is not a pass)\n' "$target"
+    return
+  fi
+
+  if [ "$ours" -lt "$theirs" ]; then
+    if [ -n "${CK_GATE_FLOOR_LOWER_REASON:-}" ]; then
+      printf '\n=== floor ratchet: LOWERED DELIBERATELY ===\n'
+      printf 'this tree %s < %s %s — reason: %s\n' "$ours" "$target" "$theirs" "$CK_GATE_FLOOR_LOWER_REASON"
+      return
+    fi
+    fail "floor ratchet: this tree's workspace floor is $ours but $target carries $theirs — a branch forked before a raise lowers it silently and every gate still passes; rebase and re-measure on the merged tree, or set CK_GATE_FLOOR_LOWER_REASON"
+    return
+  fi
+
+  printf '\n=== floor ratchet ===\n'
+  printf 'workspace floor %s >= %s %s\n' "$ours" "$target" "$theirs"
+}
+
 # The floor is the MEASURED total, not a round number below it. A floor with slack
 # is a check that tolerates exactly the defect it exists to catch: tests vanish one
 # at a time (a misplaced #[test] attribute silently unregisters the function that
@@ -254,8 +316,13 @@ stream and pass the arm without ever seeing it skip."
 #
 # Raise this when tests are added. A failure here is normally that, not a defect --
 # but it should be a deliberate edit rather than a number nobody revisits.
+#
+# THE FLOOR IS RATCHETED AGAINST THE MERGE TARGET BY `assert_floor_not_lowered` BELOW,
+# because a floor alone does not defend the property it exists for. See that function.
 run_expect 614 "workspace unit + integration" \
   cargo test --locked --workspace --features credentials-core/test-support
+
+assert_floor_not_lowered "$(dirname "$0")/gate.sh"
 
 # THE ONE THING THIS macOS GATE CANNOT OTHERWISE SEE: code that does not COMPILE on Windows.
 #
@@ -426,7 +493,15 @@ fi
 # claim below is only true while that stays so: CI grew two steps past this gate
 # (inbound contracts, release artifact) before anyone noticed, which is exactly
 # the subset-of-CI failure this file's header says it exists to prevent.
-printf '\nGATE PASSED -- every check CI runs, on this working tree\n'
+  # AN UNCHECKED ARM IS NOT A PASSED ARM, and the exit code cannot tell them apart --
+  # a check that could not run exits 0 exactly like one that ran and was satisfied. So
+  # the count rides the VERDICT LINE, which is the one thing every reader of this output
+  # sees, rather than a mid-log print they scrolled past on the way to the last line.
+  if [ -n "${GATE_UNCHECKED:-}" ]; then
+    printf '\nGATE PASSED WITH UNCHECKED ARMS -- %s\n' "$GATE_UNCHECKED"
+    printf '  Those arms did not run. A green here does not cover them.\n'
+  fi
+  printf '\nGATE PASSED -- every check CI runs, on this working tree\n'
 printf '  NOT covered: cross-platform (CI also runs Windows), and whether a\n'
 printf '  deployed BINARY carries what you just built (scripts/accept-deploy.sh).\n'
 printf '  Two windows-only defects passed this gate on 2026-09-04: a fixture\n'

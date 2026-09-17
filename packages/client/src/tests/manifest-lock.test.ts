@@ -62,8 +62,26 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
 })
 
+// PER-TEST, NOT PER-FILE, and that distinction was measured rather than reasoned.
+//
+// The Rust half of this feature carries `#![cfg(unix)]` at file scope
+// (crates/credentials-module/tests/cli_opencode.rs), so a file-level gate here looked
+// like the matching shape. It is not: inverting the gate to simulate Windows skipped 30
+// tests against the 14 that actually fail there. The other 16 -- nonce alphabets, the
+// shared constants, the Rust-shaped owner fixture, quarantine age arithmetic -- pass on
+// Windows today and are real coverage of code that runs there.
+//
+// So only the tests whose SUBJECT is a POSIX permission or link primitive are gated: a
+// 0600 publication, a world- or group-writable parent, a symlink, an atomic rename whose
+// mode the reader re-checks. Windows has no such mode, so those assert nothing there.
+//
+// NOT NAMED `posix`: this file already imports `posix` and `win32` from node:path and uses
+// them at the bottom to test quarantine-prefix derivation on both separators. Shadowing
+// that import would quietly redirect those calls.
+const onPosix = process.platform !== 'win32'
+
 describe('manifest writer lock', () => {
-  test('two concurrent tenant writers preserve both provider blocks', async () => {
+  test.skipIf(!onPosix)('two concurrent tenant writers preserve both provider blocks', async () => {
     const path = await manifestPath()
     const firstEntered = Promise.withResolvers<void>()
     const releaseFirst = Promise.withResolvers<void>()
@@ -157,7 +175,7 @@ describe('manifest writer lock', () => {
     expect((await stat(otherQuarantine)).isDirectory()).toBe(true)
   })
 
-  test('reclaim failure does not fail acquisition', async () => {
+  test.skipIf(!onPosix)('reclaim failure does not fail acquisition', async () => {
     const path = await manifestPath()
     __setManifestLockTestOptions(reclaimOptions())
     const parent = join(path, '..')
@@ -243,7 +261,7 @@ describe('manifest writer lock', () => {
     expect((await readdir(join(path, '..'))).some((name) => name.startsWith(`${basename(path)}.lock.stale-`))).toBe(true)
   })
 
-  test('renewing owner fails loudly after the bounded retry window', async () => {
+  test.skipIf(!onPosix)('renewing owner fails loudly after the bounded retry window', async () => {
     const path = await manifestPath()
     __setManifestLockTestOptions({ ttlMs: 40, renewEveryMs: 10, retryMinMs: 2, retryMaxMs: 3 })
     await owner(path, Date.now())
@@ -274,7 +292,7 @@ describe('manifest writer lock', () => {
     await expect(stat(lockPath)).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
-  test('two stale evictors produce one eviction winner and never overlap holders', async () => {
+  test.skipIf(!onPosix)('two stale evictors produce one eviction winner and never overlap holders', async () => {
     const path = await manifestPath()
     await owner(path, Date.now() - MANIFEST_LOCK.ttlMs - 1)
     let waiting = 0
@@ -308,7 +326,7 @@ describe('manifest writer lock', () => {
     expect(maxActive).toBe(1)
   })
 
-  test('an evictor that observed stale owner cannot rename a replacement lock', async () => {
+  test.skipIf(!onPosix)('an evictor that observed stale owner cannot rename a replacement lock', async () => {
     const path = await manifestPath()
     const now = Date.now()
     await owner(path, now - 501)
@@ -381,7 +399,7 @@ describe('manifest writer lock', () => {
     expect(warnings.some((args) => args.includes('manifest lock lease lost, not releasing'))).toBe(true)
   })
 
-  test('atomic publication remains 0600 under umask 022', async () => {
+  test.skipIf(!onPosix)('atomic publication remains 0600 under umask 022', async () => {
     const path = await manifestPath()
     const previous = process.umask(0o022)
     try {
@@ -394,7 +412,7 @@ describe('manifest writer lock', () => {
     expect((await stat(path)).mode & 0o777).toBe(0o600)
   })
 
-  test('creates a missing manifest parent before claiming its colocated lock', async () => {
+  test.skipIf(!onPosix)('creates a missing manifest parent before claiming its colocated lock', async () => {
     const root = await mkdtemp(join(tmpdir(), 'claustrum-manifest-parent-'))
     roots.push(root)
     const path = join(root, 'nested', 'opencode-handles.json')
@@ -406,7 +424,7 @@ describe('manifest writer lock', () => {
     expect((await stat(path)).mode & 0o777).toBe(0o600)
   })
 
-  test('leaves the mode of a pre-existing benign parent unchanged', async () => {
+  test.skipIf(!onPosix)('leaves the mode of a pre-existing benign parent unchanged', async () => {
     const path = await manifestPath()
     const parent = join(path, '..')
     await chmod(parent, 0o755)
@@ -419,7 +437,7 @@ describe('manifest writer lock', () => {
     expect((await stat(parent)).mode & 0o777).toBe(before)
   })
 
-  test('refuses a group-writable manifest parent without changing its mode', async () => {
+  test.skipIf(!onPosix)('refuses a group-writable manifest parent without changing its mode', async () => {
     const path = await manifestPath()
     const parent = join(path, '..')
     await chmod(parent, 0o770)
@@ -457,7 +475,7 @@ describe('manifest writer lock', () => {
     await expect(withManifestLock(path, 'anthropic-auth', async () => {})).rejects.toThrow('manifest lock busy')
   })
 
-  test('refuses a dangling manifest symlink without replacing it', async () => {
+  test.skipIf(!onPosix)('refuses a dangling manifest symlink without replacing it', async () => {
     const path = await manifestPath()
     const target = join(path, '..', 'missing-target.json')
     await symlink(target, path)
@@ -470,7 +488,7 @@ describe('manifest writer lock', () => {
     await expect(stat(target)).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
-  test('aborts before manifest rename when renewal loses the original lock path', async () => {
+  test.skipIf(!onPosix)('aborts before manifest rename when renewal loses the original lock path', async () => {
     const path = await manifestPath()
     await writeHandleFileLocked(path, 'anthropic-auth', (file) => {
       file.providers.push(provider('anthropic', 'anthropic-auth'))

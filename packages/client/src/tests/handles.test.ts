@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { chmod, mkdir, rm, symlink, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   HANDLE_FILE_CONTRACT,
@@ -10,7 +11,22 @@ import {
   type OpenCodeHandleFileV1,
 } from '../handles.js'
 
-const root = '/tmp/claustrum-client-handles-tests'
+// POSIX ONLY, DELIBERATELY. The contract these tests assert -- mode exactly 0600, a
+// non-world-writable parent, no symlink -- is a POSIX permission model. Windows has no
+// such mode: node reports a synthesised value there, so `writeFile(..., {mode: 0o600})`
+// produces a file the reader rejects, and even the VALID case fails.
+//
+// Skipped rather than weakened. Relaxing the reader on Windows would silently drop the
+// custody guarantee on that platform; asserting a different mode there would assert a
+// property of node's emulation rather than of the file. The honest state is that the
+// handle-file contract is unimplemented on Windows -- tracked, not hidden, and the skip
+// is what keeps it visible in the run output rather than passing vacuously.
+const posix = process.platform !== 'win32'
+
+// os.tmpdir(), not a hardcoded '/tmp'. Windows has no /tmp, so the literal would create a
+// stray directory at the drive root -- a fourth instance of the same defect this repo has
+// hit in Rust fixtures, in TS fixtures, and in a review worktree.
+const root = join(tmpdir(), 'claustrum-client-handles-tests')
 const handle = `ckh_${'a'.repeat(43)}`
 
 afterEach(() => rm(root, { recursive: true, force: true }))
@@ -28,7 +44,7 @@ describe('client handle-file contract', () => {
     expect(HANDLE_FILE_CONTRACT.handleRe.test(handle)).toBe(true)
   })
 
-  test('reads a valid owned 0600 manifest and computes its revision', async () => {
+  test.skipIf(!posix)('reads a valid owned 0600 manifest and computes its revision', async () => {
     await mkdir(root, { recursive: true, mode: 0o700 })
     const path = join(root, 'handles.json')
     await writeFile(path, `${JSON.stringify(validFile())}\n`, { mode: 0o600 })
@@ -36,7 +52,7 @@ describe('client handle-file contract', () => {
     expect(await handleFileRevision(path)).toMatch(/^\d+(\.\d+)?:\w{64}$/)
   })
 
-  test('rejects insecure mode and world-writable parents', async () => {
+  test.skipIf(!posix)('rejects insecure mode and world-writable parents', async () => {
     await mkdir(root, { recursive: true, mode: 0o777 })
     const path = join(root, 'handles.json')
     await writeFile(path, JSON.stringify(validFile()), { mode: 0o600 })
@@ -101,7 +117,7 @@ describe('client handle-file contract', () => {
     })).rejects.toThrow('handle file mode must be exactly 0600')
   })
 
-  test('preserves the historical symlink and grow-after-fstat fixture outcomes', async () => {
+  test.skipIf(!posix)('preserves the historical symlink and grow-after-fstat fixture outcomes', async () => {
     await mkdir(root, { recursive: true, mode: 0o700 })
     const target = join(root, 'target.json')
     const link = join(root, 'handles.json')

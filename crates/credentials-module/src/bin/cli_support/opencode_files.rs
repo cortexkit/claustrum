@@ -1583,6 +1583,54 @@ mod manifest_lock_aba_regression {
         let _ = fs::remove_dir_all(root);
     }
 
+    /// The release path must read the clock the claim was stamped from.
+    ///
+    /// Pins the disagreement directly rather than waiting for a loaded machine to expose
+    /// it. `owner_that_becomes_stale_during_retry_window_is_evicted` can catch the same
+    /// defect, but only when real elapsed time happens to exceed the injected offset plus
+    /// the TTL -- which is a property of the machine, not of the code. Here the work
+    /// inside the lock outlasts the TTL by construction, so a release reading the real
+    /// clock ALWAYS sees `real_elapsed - injected_offset >= ttl`, concludes its lease is
+    /// lost, and leaves the directory behind. The injected clock never moves, so a
+    /// release reading it always computes age 0 and removes the directory.
+    ///
+    /// The sleep is what makes the arithmetic deterministic. It is not a widened window:
+    /// raising the TTL would hide the disagreement, and this exposes it on every run.
+    #[test]
+    fn lock_release_reads_the_clock_the_claim_was_stamped_from() {
+        let root = std::env::temp_dir().join(format!(
+            "claustrum-manifest-lock-release-clock-{}-{}",
+            std::process::id(),
+            TEMP_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("opencode-handles.json");
+        let ttl = Duration::from_millis(100);
+        let clock = Arc::new(AtomicU64::new(now_ms()));
+        let result = with_manifest_lock_with_options(
+            &path,
+            "claimant",
+            ManifestLockOptions {
+                ttl,
+                now_sequence_ms: Some(clock),
+                ..ManifestLockOptions::default()
+            },
+            |_| {
+                thread::sleep(ttl * 3);
+                Ok(())
+            },
+        );
+        assert!(
+            result.is_ok(),
+            "holding the lock past its TTL is not an error"
+        );
+        assert!(
+            !lock_path(&path).exists(),
+            "release read the real clock against an injected claim stamp and skipped cleanup"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn owner_that_becomes_stale_during_retry_window_is_evicted() {
         let root = std::env::temp_dir().join(format!(

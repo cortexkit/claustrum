@@ -254,7 +254,7 @@ stream and pass the arm without ever seeing it skip."
 #
 # Raise this when tests are added. A failure here is normally that, not a defect --
 # but it should be a deliberate edit rather than a number nobody revisits.
-run_expect 608 "workspace unit + integration" \
+run_expect 610 "workspace unit + integration" \
   cargo test --locked --workspace --features credentials-core/test-support
 
 # Two independent defences, because each catches what the other misses:

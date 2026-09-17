@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { GoldenTombstone } from "../contracts";
-import { isProviderTombstone, TOMBSTONE_PREFIX, tombstoneFor } from "../tombstone";
+import { carriesSentinel, isProviderTombstone, sentinel, TOMBSTONE_PREFIX, tombstoneFor } from "../tombstone";
 import { parseHandleFile } from "../handles";
 import goldenHandles from "../../golden/handles.json";
 import goldenTombstoneJson from "../../golden/tombstone.json";
@@ -38,12 +38,34 @@ describe("custody wire contracts", () => {
     expect(isProviderTombstone(fixture.entry, fixture.provider)).toBe(true);
   });
 
+  // The sentinel-access variant has never been written by this repo or by any tenant, so it is not
+  // a legacy form to tolerate -- it is an anomaly, and recognition stays exactly as wide as the
+  // written shape. Refusal is deliberately wider: `carriesSentinel` still claims it, so an entry
+  // like this reaches a refusal rather than being ignored. Widen recognition only when a real
+  // artifact turns up on disk, with the artifact as the evidence.
+  test("an unwritten sentinel-access variant is refused, not recognized", () => {
+    const fixture = goldenTombstone.fixtures.oauth;
+    const sentinelAccess = { ...fixture.entry, access: sentinel(fixture.provider) };
+    expect(isProviderTombstone(sentinelAccess, fixture.provider)).toBe(false);
+    expect(carriesSentinel(sentinelAccess)).toBe(true);
+  });
+
   test("tombstone rendering is byte-stable for a provider", () => {
     const api = goldenTombstone.fixtures.api;
     const oauth = goldenTombstone.fixtures.oauth;
     expect(tombstoneFor("api", api.provider)).toEqual(api.entry);
     expect(tombstoneFor("oauth", oauth.provider)).toEqual(oauth.entry);
     expect(isProviderTombstone(tombstoneFor("api", "deepseek"), "anthropic")).toBe(false);
+  });
+
+  test("oauth tombstone key-count fence rejects extra fields", () => {
+    const fixture = goldenTombstone.fixtures.oauth;
+    expect(isProviderTombstone({ ...fixture.entry, source: "extra" }, fixture.provider)).toBe(false);
+  });
+
+  test("oauth tombstone remains scoped to its provider", () => {
+    const fixture = goldenTombstone.fixtures.oauth;
+    expect(isProviderTombstone({ ...fixture.entry, refresh: TOMBSTONE_PREFIX + "different-provider" }, fixture.provider)).toBe(false);
   });
 
   test("tombstone prefix remains pinned to the golden provider key", () => {

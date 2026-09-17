@@ -259,6 +259,18 @@ jobs:
       - name: Clippy (conformance seams)
         run: cargo clippy --locked --workspace --all-targets --features kill9-test-seam,rotate-test-seam,login-test-seam,migration-tools -- -D warnings
 
+      # CROSS-CHECK THE OTHER PLATFORM FAMILY FROM EVERY RUNNER, so a unix-only API in
+      # ungated code fails on ubuntu and macos too rather than only on the windows runner.
+      # Twice on 2026-09-17 a `std::os::unix` import in an ungated test module reached
+      # master: a macOS gate accepts it, a fork PR never builds Rust at all, and the first
+      # honest signal was a red master. This step moves that signal onto every job.
+      # Skipped on the windows runner itself, where the native build already answers it.
+      - name: Windows cross type-check
+        if: runner.os != 'Windows'
+        run: |
+          rustup target add x86_64-pc-windows-gnu
+          cargo check --locked --target x86_64-pc-windows-gnu --workspace --all-targets
+
       - name: Test
         run: cargo test --locked --workspace --all-targets
 

@@ -257,6 +257,31 @@ stream and pass the arm without ever seeing it skip."
 run_expect 610 "workspace unit + integration" \
   cargo test --locked --workspace --features credentials-core/test-support
 
+# THE ONE THING THIS macOS GATE CANNOT OTHERWISE SEE: code that does not COMPILE on Windows.
+#
+# Twice in one day a change passed a full local gate and reddened master on a Windows
+# compile error -- `std::os::unix` in an ungated test module, which macOS accepts happily.
+# Both times the branch's own checks were the fork-safe subset that never builds Rust, so
+# the first honest signal arrived after the merge.
+#
+# A type-check is enough: it catches the cfg class (E0433 / E0599 on unix-only APIs) without
+# needing a Windows runner or a linker. It runs against the gnu target on purpose -- the msvc
+# target refuses here because ring's build script wants a toolchain this machine does not
+# have, and a check that cannot run is worse than no check.
+#
+# Proven in both directions rather than assumed: with the test module gated it exits 0, and
+# with the gate removed it exits 101 with 11 errors.
+#
+# Skipped, loudly, when the target is not installed: `rustup target add x86_64-pc-windows-gnu`.
+# Silence here would restore exactly the blind spot this arm exists to close.
+if rustup target list --installed 2>/dev/null | grep -qx x86_64-pc-windows-gnu; then
+  run_check "windows cross type-check" \
+    cargo check --locked --target x86_64-pc-windows-gnu --workspace --all-targets
+else
+  echo "SKIPPING windows cross type-check: target x86_64-pc-windows-gnu not installed" >&2
+  echo "  install it with: rustup target add x86_64-pc-windows-gnu" >&2
+fi
+
 # Two independent defences, because each catches what the other misses:
 #   - CRED_REQUIRE_DAEMON=1 turns an unreachable sibling ck-subc into a failure at
 #     source, before any arm can skip.
@@ -370,17 +395,20 @@ if [ "$((ci_steps - gate_arms))" -gt 5 ]; then
     exit 1
 fi
 
-# HOW TO CHECK A PLATFORM THIS HOST IS NOT, when touching platform APIs. A full
-# `cargo check --target x86_64-pc-windows-msvc` does NOT work here -- ring's build
-# script needs the MSVC toolchain and fails before reaching our code. A narrower
-# probe does, and it caught the real defect on 2026-09-04:
+# THIS BLOCK USED TO BE THE WINDOWS STORY, AND IT FAILED AS GUIDANCE. It described a
+# manual probe -- extract the helpers into a standalone .rs and rustc it at the msvc
+# target -- written on 2026-09-04 after the first `std::os::unix` escape. On 2026-09-17
+# the identical defect landed again, twice, because a comment telling a human what to run
+# is only executed by a human who already suspects the defect. The arm above runs it.
 #
-#   extract the affected helpers into a standalone .rs, then
-#   rustc --edition 2021 --target x86_64-pc-windows-msvc --emit=metadata probe.rs
+# WHY THE GNU TARGET RATHER THAN MSVC: the msvc target cannot even start here -- ring's
+# build script wants a toolchain this machine does not have and fails before reaching our
+# code. gnu type-checks the whole workspace in about a second, and the cfg class this
+# exists to catch (E0433 / E0599 on unix-only APIs) is target-family, not ABI.
 #
-# ALWAYS WITH THE UNGATED VERSION AS A CONTROL. A passing probe is equally
-# consistent with a probe that checks nothing; the control must reproduce the CI
-# error (E0433 here) or the pass means nothing.
+# ALWAYS WITH THE UNGATED VERSION AS A CONTROL, which is why the arm above cites its own
+# both-directions measurement. A passing check is equally consistent with a check that
+# examines nothing.
 
 # NAME THE LANE, not just the verdict. Two checkers whose success lines are
 # indistinguishable let a transcript from one be read as covering the other --

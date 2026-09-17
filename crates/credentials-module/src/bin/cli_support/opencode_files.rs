@@ -1120,7 +1120,15 @@ fn current_uid() -> Result<u32, OpenCodeFilesError> {
         })
 }
 
-#[cfg(test)]
+// UNIX ONLY, like every other custody test in this file. The module imports
+// std::os::unix::fs::PermissionsExt and asserts 0600 publication, parent modes, and
+// symlink refusal -- none of which exist on Windows, where the import alone is E0433.
+//
+// The function under test is already #[cfg(unix)] at line 1100, so an ungated test module
+// for it cannot compile on Windows at all. Caught by CI rather than locally: a macOS gate
+// compiles every one of these happily, and the branch's own checks are the fork-safe
+// subset that never builds Rust.
+#[cfg(all(test, unix))]
 mod manifest_lock_aba_regression {
     use super::*;
     use std::{

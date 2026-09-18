@@ -29,7 +29,7 @@
 //!   invalidate --id <id>
 //!   rotate-master-key
 //!   mint-handle --id <id>                      print a fresh handle (once)
-//!   revoke-handle --handle <ckh_...>
+//!   revoke-handle --handle <ckh_...> | --hash <hex>
 //!   revoke-all-handles --id <id>
 //!   grant --principal <module-id> --prefix <credential-prefix> --operation <read|sign>
 //!   revoke-grant --principal <module-id> --prefix <credential-prefix> --operation <read|sign>
@@ -417,7 +417,7 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
         "login" => &["--provider", "--id", "--payload-file", "--account"],
         "invalidate" | "reactivate" | "mint-handle" | "revoke-all-handles" | "remove" => &["--id"],
         "logout" => &["--provider", "--id"],
-        "revoke-handle" => &["--handle"],
+        "revoke-handle" => &["--handle", "--hash"],
         "grant" | "revoke-grant" => &["--principal", "--prefix", "--operation"],
         "approve" => &["--id", "--file", "--approver"],
         "audit" => &["--limit"],
@@ -679,10 +679,14 @@ fn help_verb(verb: &str) -> String {
              consumer presents to `credential.get`. A credential can have many handles."
         }
         "revoke-handle" => {
-            "ck auth revoke-handle --handle <raw>\n\
+            "ck auth revoke-handle --handle <raw> | --hash <hex>\n\
              \n\
              Revoke one capability handle (audited). The credential and its other\n\
-             handles keep serving."
+             handles keep serving. Supply exactly one form.\n\
+             \n\
+             Flags:\n\
+               --handle <raw>  The raw ckh_ bearer token.\n\
+               --hash <hex>    64 lowercase hex; when the raw value is gone, use the handle_hash column, also audit payload_hash on its mint row (ck auth audit)."
         }
         "revoke-all-handles" => {
             "ck auth revoke-all-handles --id <id>\n\
@@ -3312,21 +3316,43 @@ fn cmd_mint_handle(global: &GlobalArgs, args: &[String]) -> Result<(), CliError>
     let handle = result["handle"]
         .as_str()
         .ok_or_else(|| CliError::Io("mint did not return a handle".into()))?;
-    // The raw handle is printed ONCE; write it into the consumer's 0600 config.
+    // Keep stdout machine-readable for consumers capturing the bearer token.
     println!("{handle}");
+    eprintln!("revoke with: ck auth revoke-handle --handle {handle}");
     eprintln!("(minted handle for {id}; store it now — it is not recoverable)");
     Ok(())
 }
 
 fn cmd_revoke_handle(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
-    let handle = required(args, "--handle")?;
-    let result = commit_admin(
-        global,
-        AdminOpBody::RevokeHandle {
-            v: ADMIN_OP_SCHEMA_V1,
-            handle,
-        },
-    )?;
+    let usage =
+        "revoke-handle requires exactly one of --handle <raw> or --hash <hex> (64 lowercase hex)";
+    let (op, form) = match (optional(args, "--handle"), optional(args, "--hash")) {
+        (Some(handle), None) => (
+            AdminOpBody::RevokeHandle {
+                v: ADMIN_OP_SCHEMA_V1,
+                handle,
+            },
+            "--handle",
+        ),
+        (None, Some(handle_hash)) => {
+            if handle_hash.len() != 64
+                || !handle_hash
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            {
+                return Err(CliError::Usage(usage.into()));
+            }
+            (
+                AdminOpBody::RevokeHandleByHash {
+                    v: ADMIN_OP_SCHEMA_V1,
+                    handle_hash,
+                },
+                "--hash",
+            )
+        }
+        _ => return Err(CliError::Usage(usage.into())),
+    };
+    let result = commit_admin(global, op)?;
     // NAME WHAT WAS REVOKED, OR SAY NOTHING MATCHED. The old line said "revoked handle"
     // for a live handle, an already-revoked one, AND one that never existed -- so an
     // operator who pasted a truncated value was told a bearer credential was dead while
@@ -3335,7 +3361,7 @@ fn cmd_revoke_handle(global: &GlobalArgs, args: &[String]) -> Result<(), CliErro
     // Falls back to the old wording against a daemon too old to send the field, rather
     // than claiming nothing matched: absent and null mean different things here.
     match result.get("credential_id") {
-        Some(serde_json::Value::String(id)) => println!("revoked handle for {id}"),
+        Some(serde_json::Value::String(id)) => println!("revoked handle for {id} via {form}"),
         Some(serde_json::Value::Null) => println!(
             "no live handle matched that value; nothing changed.\n  \
              check for a truncated paste — a handle is one unbroken ckh_ token."

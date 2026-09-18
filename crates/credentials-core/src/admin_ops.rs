@@ -85,6 +85,9 @@ pub enum AdminOpBody {
     MintHandle { v: u32, id: String },
     #[serde(rename = "admin.revoke_handle")]
     RevokeHandle { v: u32, handle: String },
+    // A distinct tag makes older daemons refuse rather than reinterpret a hash as a bearer.
+    #[serde(rename = "admin.revoke_handle_by_hash")]
+    RevokeHandleByHash { v: u32, handle_hash: String },
     #[serde(rename = "admin.revoke_all_handles")]
     RevokeAllHandles { v: u32, id: String },
     /// Grant a reserved module principal one literal-prefix credential operation.
@@ -223,6 +226,11 @@ impl std::fmt::Debug for AdminOpBody {
                 .field("v", v)
                 .field("handle", &"<redacted>")
                 .finish(),
+            AdminOpBody::RevokeHandleByHash { v, handle_hash } => f
+                .debug_struct("RevokeHandleByHash")
+                .field("v", v)
+                .field("handle_hash", handle_hash)
+                .finish(),
             AdminOpBody::RevokeAllHandles { v, id } => f
                 .debug_struct("RevokeAllHandles")
                 .field("v", v)
@@ -282,6 +290,7 @@ impl AdminOpBody {
             | AdminOpBody::Remove { v, .. }
             | AdminOpBody::MintHandle { v, .. }
             | AdminOpBody::RevokeHandle { v, .. }
+            | AdminOpBody::RevokeHandleByHash { v, .. }
             | AdminOpBody::RevokeAllHandles { v, .. }
             | AdminOpBody::GrantCreate { v, .. }
             | AdminOpBody::GrantRevoke { v, .. }
@@ -311,6 +320,7 @@ impl AdminOpBody {
             | AdminOpBody::MintHandle { id, .. }
             | AdminOpBody::RevokeAllHandles { id, .. } => Some(id),
             AdminOpBody::RevokeHandle { .. }
+            | AdminOpBody::RevokeHandleByHash { .. }
             | AdminOpBody::GrantCreate { .. }
             | AdminOpBody::GrantRevoke { .. }
             | AdminOpBody::Status { .. } => None,
@@ -493,6 +503,14 @@ pub fn apply(
             // `revoked` stays for wire compatibility; `credential_id` is the new fact and
             // is null when nothing matched, which is the case an operator needs to see.
             let owner = store.revoke_handle(&handle, ctx)?;
+            Ok(serde_json::json!({
+                "revoked": owner.is_some(),
+                "credential_id": owner,
+            }))
+        }
+        AdminOpBody::RevokeHandleByHash { handle_hash, .. } => {
+            let ctx = AuditCtx::route_admin(AuditOp::RevokeHandle, actor);
+            let owner = store.revoke_handle_by_hash_audited(&handle_hash, ctx)?;
             Ok(serde_json::json!({
                 "revoked": owner.is_some(),
                 "credential_id": owner,

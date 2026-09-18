@@ -585,6 +585,67 @@ fn every_verb_names_on_its_help_page_each_flag_its_parser_accepts() {
         "only {total} flags checked across {} verbs; the extractor has narrowed",
         verbs.len()
     );
+
+    // *** AND THE OTHER DIRECTION: NO USAGE BLOCK NAMES A FLAG THE PARSER REFUSES. ***
+    //
+    // The arm above catches a flag that EXISTS and is undocumented -- invisible, because
+    // nothing fails and the operator simply never learns it. This one catches a flag that is
+    // DOCUMENTED AND DOES NOT EXIST, which fails loudly in the worst possible place: the
+    // operator reads the page, types what it says, and is refused by the tool that just told
+    // them to.
+    //
+    // SCOPED TO THE USAGE BLOCK (everything before the first blank line), which is a real
+    // boundary rather than a heuristic. Prose below it legitimately names OTHER verbs' flags:
+    // `ck auth help logout` suggests `ck auth login --provider <p> --replace`, and --replace
+    // is genuinely not a logout flag. Measured: that line is the ONLY false positive a
+    // whole-page scan produces today, and scoping removes it without having to reason about
+    // which verb a mention belongs to.
+    //
+    // Global flags are excluded -- every page may name them, and no per-verb list holds them.
+    let global = [
+        "--data-dir",
+        "--subc",
+        "--key-path",
+        "--version",
+        "--help",
+        "--yes",
+    ];
+    let mut usage_blocks = 0usize;
+
+    for verb in verbs {
+        let flags = accepted(verb);
+        let help = cli().args(["help", verb]).output().expect("run help");
+        let page = String::from_utf8_lossy(&help.stdout);
+        let usage = page.split("\n\n").next().unwrap_or("");
+        usage_blocks += 1;
+
+        let mut phantom: Vec<String> = Vec::new();
+        for token in usage.split_whitespace() {
+            let flag: String = token
+                .trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-')
+                .to_string();
+            if !flag.starts_with("--") || flag.len() < 4 {
+                continue;
+            }
+            if flags.contains(&flag) || global.contains(&flag.as_str()) {
+                continue;
+            }
+            if !phantom.contains(&flag) {
+                phantom.push(flag);
+            }
+        }
+        assert!(
+            phantom.is_empty(),
+            "`ck auth help {verb}` usage block names {phantom:?}, which the parser REFUSES. \
+             An operator typing what the page says gets an unexpected-argument error:\n{usage}"
+        );
+    }
+
+    assert_eq!(
+        usage_blocks,
+        verbs.len(),
+        "the phantom-flag arm did not reach every verb"
+    );
 }
 
 // THE RUNBOOK'S SAMPLE OUTPUT MUST MATCH WHAT THE BINARY PRINTS. A sample block in a

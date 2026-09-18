@@ -76,6 +76,7 @@ struct ManifestLease {
     lock: PathBuf,
     nonce: String,
     ttl: Duration,
+    clock: LockClock,
     renewal_failed: Arc<AtomicBool>,
     stop_tx: Option<mpsc::Sender<()>>,
     renewal: Option<thread::JoinHandle<()>>,
@@ -96,7 +97,7 @@ impl ManifestLease {
         let owner = read_lock_owner(&self.lock.join("owner")).ok();
         let ours_and_fresh = owner.is_some_and(|owner| {
             owner.nonce == self.nonce
-                && current_time_ms().is_ok_and(|now| {
+                && self.clock.now_ms().is_ok_and(|now| {
                     now.saturating_sub(owner.claimed_at_ms) < self.ttl.as_millis() as u64
                 })
         });
@@ -452,24 +453,51 @@ fn current_time_ms() -> Result<u64, OpenCodeFilesError> {
         .map_err(|_| OpenCodeFilesError::Invalid("system clock is before UNIX epoch".into()))
 }
 
-fn resolve_now_ms(options: &ManifestLockOptions) -> Result<u64, OpenCodeFilesError> {
-    // Anything that COMPARES against a `claimed_at_ms` must read its clock through here. The stamp
-    // is written from this clock, so a consumer calling `current_time_ms()` instead measures real
-    // elapsed time against an injected stamp -- under test that difference is the injected offset,
-    // and on a loaded machine it silently crosses the TTL and skips the release. Not hypothetical:
-    // it made `owner_that_becomes_stale_during_retry_window_is_evicted` fail 1 in 8 runs at load 41.
-    //
-    // NOT YET UNIFORM. `ManifestLease::commit` and the renewal thread still compare against
-    // `current_time_ms()`; neither takes `ManifestLockOptions`, and the renewal thread would need
-    // the clock threaded across a spawn. They are the same split and should move here too.
+/// The single clock every `claimed_at_ms` comparison reads through.
+///
+/// The owner stamp is written from this clock, so any consumer that calls
+/// `current_time_ms()` instead measures real elapsed time against an injected
+/// stamp -- under test that difference is the injected offset, and on a loaded
+/// machine it silently crosses the TTL and skips the release. Not
+/// hypothetical: it made `owner_that_becomes_stale_during_retry_window_is_evicted`
+/// fail 1 in 8 runs at load 41.
+///
+/// The invariant that now holds: every comparison against `claimed_at_ms` reads
+/// the lease's clock (`LockClock::now_ms`), because the stamp is written from
+/// it. `commit` and the renewal thread carry a clone of the same clock the
+/// claim used, so they cannot disagree with the stamp under test or under load.
+#[derive(Clone)]
+enum LockClock {
+    Real,
+    Fixed(u64),
+    #[cfg(test)]
+    Sequence(Arc<AtomicU64>),
+}
+
+impl LockClock {
+    fn now_ms(&self) -> Result<u64, OpenCodeFilesError> {
+        match self {
+            LockClock::Real => current_time_ms(),
+            LockClock::Fixed(ms) => Ok(*ms),
+            #[cfg(test)]
+            LockClock::Sequence(clock) => Ok(clock.load(Ordering::SeqCst)),
+        }
+    }
+}
+
+fn clock_from_options(options: &ManifestLockOptions) -> LockClock {
     #[cfg(test)]
     if let Some(clock) = &options.now_sequence_ms {
-        return Ok(clock.load(Ordering::SeqCst));
+        return LockClock::Sequence(Arc::clone(clock));
     }
     match options.now_override_ms {
-        Some(fixed) => Ok(fixed),
-        None => current_time_ms(),
+        Some(fixed) => LockClock::Fixed(fixed),
+        None => LockClock::Real,
     }
+}
+
+fn resolve_now_ms(options: &ManifestLockOptions) -> Result<u64, OpenCodeFilesError> {
+    clock_from_options(options).now_ms()
 }
 
 fn random_nonce() -> Result<String, OpenCodeFilesError> {
@@ -794,6 +822,7 @@ where
     let renewal_nonce = nonce.clone();
     let renewal_ttl = options.ttl;
     let renewal_every = options.renew_every;
+    let renewal_clock = clock_from_options(&options);
     let renewal_failed = Arc::new(AtomicBool::new(false));
     let renewal_failed_thread = Arc::clone(&renewal_failed);
     let renewal = thread::spawn(move || loop {
@@ -805,7 +834,7 @@ where
                     renewal_failed_thread.store(true, Ordering::SeqCst);
                     break;
                 };
-                let Ok(now) = current_time_ms() else {
+                let Ok(now) = renewal_clock.now_ms() else {
                     renewal_failed_thread.store(true, Ordering::SeqCst);
                     break;
                 };
@@ -827,6 +856,7 @@ where
         lock: lock.clone(),
         nonce: nonce.clone(),
         ttl: options.ttl,
+        clock: clock_from_options(&options),
         renewal_failed,
         stop_tx: Some(stop_tx),
         renewal: Some(renewal),
@@ -2021,6 +2051,88 @@ mod manifest_lock_aba_regression {
         advance.join().unwrap();
         assert!(result.is_ok());
         assert!(!lock_path(&path).exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// `commit` must read the lease's clock, not the wall clock.
+    ///
+    /// The claim stamps `claimed_at_ms` from the injected clock (which never
+    /// moves), then the critical section sleeps 300ms of REAL time -- longer
+    /// than the 200ms TTL. If `commit` reads the real clock it computes
+    /// `real_now - injected_stamp >= ttl`, concludes the lease is stale, and
+    /// returns `Err`. If it reads the lease's clock the age is 0 and it returns
+    /// `Ok`. The sleep makes the arithmetic deterministic on every run, not
+    /// just under load.
+    #[test]
+    fn commit_measures_the_lease_clock_not_the_wall_clock() {
+        let root = std::env::temp_dir().join(format!(
+            "claustrum-manifest-lock-commit-clock-{}-{}",
+            std::process::id(),
+            TEMP_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("opencode-handles.json");
+        let now = now_ms();
+        let result = with_manifest_lock_with_options(
+            &path,
+            "claimant",
+            ManifestLockOptions {
+                ttl: Duration::from_millis(200),
+                renew_every: Duration::from_secs(10),
+                now_override_ms: Some(now),
+                ..ManifestLockOptions::default()
+            },
+            |lease| {
+                thread::sleep(Duration::from_millis(300));
+                lease.commit()
+            },
+        );
+        assert!(
+            result.is_ok(),
+            "commit read the wall clock against an injected claim stamp and refused a lease \
+             whose injected age is 0"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// The renewal thread must read the lease's clock, not the wall clock.
+    ///
+    /// The renewal interval is longer than the TTL, so the first renewal fires
+    /// after the TTL has expired in real time. If the renewal thread reads the
+    /// real clock it computes `real_now - injected_stamp >= ttl`, concludes the
+    /// lease is stale, sets `renewal_failed`, and `commit` refuses. If it reads
+    /// the lease's clock the age is 0, the stamp is refreshed, and the call
+    /// succeeds. The sleep keeps the critical section open long enough for the
+    /// renewal to fire.
+    #[test]
+    fn renewal_thread_measures_the_lease_clock_not_the_wall_clock() {
+        let root = std::env::temp_dir().join(format!(
+            "claustrum-manifest-lock-renewal-clock-{}-{}",
+            std::process::id(),
+            TEMP_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("opencode-handles.json");
+        let now = now_ms();
+        let result = with_manifest_lock_with_options(
+            &path,
+            "claimant",
+            ManifestLockOptions {
+                ttl: Duration::from_millis(200),
+                renew_every: Duration::from_millis(250),
+                now_override_ms: Some(now),
+                ..ManifestLockOptions::default()
+            },
+            |lease| {
+                thread::sleep(Duration::from_millis(400));
+                lease.commit()
+            },
+        );
+        assert!(
+            result.is_ok(),
+            "the renewal thread read the wall clock against an injected claim stamp, flagged the \
+             lease as expired, and commit refused"
+        );
         let _ = fs::remove_dir_all(root);
     }
 }

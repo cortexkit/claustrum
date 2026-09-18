@@ -311,6 +311,39 @@ async function hook(cfg: TestConfig, deps: ConfigHookDependencies = {}) {
     expect(cfg.provider.deepseek.models).toEqual({ stock: { id: "stock" } });
   });
 
+  test("forwards vault material through the config-installed fetch", async () => {
+    const files = await fixture("owned-wire-composition");
+    const material = "VAULT-MAIN-TOKEN-xyz";
+    const cfg = config("deepseek");
+    const forwarded: Request[] = [];
+    await writeHandles(files.handles, handles("deepseek"));
+    await writeAuth(files.auth, { deepseek: tombstoneFor("api", "deepseek") });
+
+    await hook(cfg, {
+      detect: async () => ({ status: "available", schema: 1, wireVersion: 1, endpoints: [] }),
+      clientFactory: async () => ({
+        getCredential: async () => ({ material, recordVersion: 1, expiresAtMs: null }),
+        reportAuthFailure: async () => {},
+      }) as never,
+      fetch: (async (request: RequestInfo | URL, init?: RequestInit) => {
+        forwarded.push(new Request(request, init));
+        return new Response("upstream", { status: 200 });
+      }) as never,
+    });
+
+    const response = await (cfg.provider.deepseek.options?.fetch as typeof globalThis.fetch)("https://upstream.example", {
+      headers: { Authorization: `Bearer ${sentinel("deepseek")}` },
+    });
+
+    expect(response.status).toBe(200);
+    expect(forwarded).toHaveLength(1);
+    const authorization = forwarded[0]?.headers.get("authorization");
+    expect(authorization).toBe(`Bearer ${material}`);
+    expect(authorization).not.toContain(sentinel("deepseek"));
+    expect(authorization).not.toBe("");
+    expect(authorization).not.toBe("Bearer");
+  });
+
   test("refuses a tombstone when the handle file cannot be read without detecting or connecting", async () => {
     const files = await fixture("missing-handles");
     await writeFile(files.handles, "not json");

@@ -490,8 +490,13 @@ pub fn apply(
         }
         AdminOpBody::RevokeHandle { handle, .. } => {
             let ctx = AuditCtx::route_admin(AuditOp::RevokeHandle, actor);
-            store.revoke_handle(&handle, ctx)?;
-            Ok(serde_json::json!({ "revoked": true }))
+            // `revoked` stays for wire compatibility; `credential_id` is the new fact and
+            // is null when nothing matched, which is the case an operator needs to see.
+            let owner = store.revoke_handle(&handle, ctx)?;
+            Ok(serde_json::json!({
+                "revoked": owner.is_some(),
+                "credential_id": owner,
+            }))
         }
         AdminOpBody::RevokeAllHandles { id, .. } => {
             let ctx = AuditCtx::route_admin(AuditOp::RevokeHandle, actor);

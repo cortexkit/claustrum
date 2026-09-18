@@ -2546,7 +2546,29 @@ impl EncryptedStore {
     /// ATTEMPT may be worth recording even when it moved no rows, and the chain has no
     /// field to say which happened. Admin-gated, so no unauthenticated caller can drive
     /// it.
-    pub fn revoke_handle(&self, raw_handle: &str, ctx: AuditCtx<'_>) -> Result<(), StoreOpError> {
+    /// RETURNS THE OWNING CREDENTIAL ID, OR `None` WHEN NO HANDLE ROW MATCHED.
+    ///
+    /// The owner is read inside the transaction anyway, to make the audit entry
+    /// attributable. Returning it costs nothing and closes a false assurance: the CLI
+    /// previously printed the same success line whether the handle was live, already
+    /// revoked, or had never existed, so an operator who pasted a truncated handle was
+    /// told a bearer credential was dead while it kept working.
+    ///
+    /// THE UNIFORM ANSWER IS A READ-SURFACE RULE AND DOES NOT APPLY HERE. `credential.get`
+    /// must not distinguish a revoked handle from an unknown one, because its callers are
+    /// strangers holding bearer tokens and the difference is an enumeration oracle. This
+    /// path is master-key gated: a caller who can reach it can already read the whole
+    /// store, so withholding the distinction protects nothing and costs the operator the
+    /// one fact they asked for.
+    ///
+    /// `Some` covers both a live handle and an already-revoked one -- the update is
+    /// idempotent and the operator's question ("is that handle dead now") has the same
+    /// answer either way. `None` is the case worth naming.
+    pub fn revoke_handle(
+        &self,
+        raw_handle: &str,
+        ctx: AuditCtx<'_>,
+    ) -> Result<Option<String>, StoreOpError> {
         let h = handle_hash(raw_handle);
         let audit_key = self.audit_key.clone();
         self.fenced_write(|tx| {
@@ -2559,6 +2581,7 @@ impl EncryptedStore {
                     |row| row.get(0),
                 )
                 .optional()?;
+            let owner_for_return = owner.clone();
             tx.execute(
                 "UPDATE handles SET revoked = 1 WHERE handle_hash = ?1",
                 rusqlite::params![h],
@@ -2574,7 +2597,7 @@ impl EncryptedStore {
                     alarm: ctx.alarm,
                 },
             )?;
-            Ok(())
+            Ok(owner_for_return)
         })
         .map_err(StoreOpError::from)
     }
@@ -5893,6 +5916,60 @@ mod tests {
         assert_eq!(by_id["a"].state, RecordState::Active);
         assert_eq!(by_id["b"].state, RecordState::NeedsReauth);
         assert_eq!(by_id["a"].key_id_hex, store.key_id().to_hex());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // AN UNKNOWN HANDLE MUST BE DISTINGUISHABLE FROM A REAL ONE ON THE ADMIN PATH.
+    //
+    // The false assurance this closes: the CLI printed one success line for a live handle,
+    // an already-revoked one, and one that never existed. An operator who pasted a
+    // truncated handle was told a bearer credential was dead while it kept serving -- and
+    // a capability handle is exactly the thing whose deadness must never be guessed.
+    //
+    // DELIBERATELY NOT THE READ-SURFACE RULE. `credential.get` answers identically for
+    // revoked and unknown handles because its callers are strangers holding bearer tokens
+    // and the difference is an enumeration oracle. This path is master-key gated: a caller
+    // who reaches it can already read the whole store, so the distinction gives away
+    // nothing and withholding it costs the operator the one fact they asked for.
+    #[test]
+    fn revoking_an_unknown_handle_is_distinguishable_from_revoking_a_real_one() {
+        let (root, store) = tmp_store(11);
+        store.create("opencode:anthropic", &oauth_record()).unwrap();
+        let h = mint_handle().expect("mint");
+        store
+            .put_handle_hash(
+                &h.hash,
+                "opencode:anthropic",
+                AuditCtx::admin(AuditOp::MintHandle),
+            )
+            .unwrap();
+
+        let real = store
+            .revoke_handle(&h.raw, AuditCtx::admin(AuditOp::RevokeHandle))
+            .expect("revoke real");
+        assert_eq!(
+            real.as_deref(),
+            Some("opencode:anthropic"),
+            "a real revocation must name the credential that lost the door"
+        );
+
+        let unknown = store
+            .revoke_handle(
+                "ckh_not-a-real-handle",
+                AuditCtx::admin(AuditOp::RevokeHandle),
+            )
+            .expect("revoke unknown");
+        assert!(
+            unknown.is_none(),
+            "an unknown handle must report that nothing matched, not a success"
+        );
+
+        // An ALREADY-REVOKED handle still names its owner: the operator asked "is that
+        // handle dead now", and the answer is yes whether or not it was dead already.
+        let again = store
+            .revoke_handle(&h.raw, AuditCtx::admin(AuditOp::RevokeHandle))
+            .expect("revoke again");
+        assert_eq!(again.as_deref(), Some("opencode:anthropic"));
         let _ = std::fs::remove_dir_all(&root);
     }
 

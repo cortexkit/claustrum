@@ -3169,14 +3169,28 @@ fn cmd_mint_handle(global: &GlobalArgs, args: &[String]) -> Result<(), CliError>
 
 fn cmd_revoke_handle(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     let handle = required(args, "--handle")?;
-    commit_admin(
+    let result = commit_admin(
         global,
         AdminOpBody::RevokeHandle {
             v: ADMIN_OP_SCHEMA_V1,
             handle,
         },
     )?;
-    println!("revoked handle");
+    // NAME WHAT WAS REVOKED, OR SAY NOTHING MATCHED. The old line said "revoked handle"
+    // for a live handle, an already-revoked one, AND one that never existed -- so an
+    // operator who pasted a truncated value was told a bearer credential was dead while
+    // it kept serving. That is the one direction this tool must never be wrong in.
+    //
+    // Falls back to the old wording against a daemon too old to send the field, rather
+    // than claiming nothing matched: absent and null mean different things here.
+    match result.get("credential_id") {
+        Some(serde_json::Value::String(id)) => println!("revoked handle for {id}"),
+        Some(serde_json::Value::Null) => println!(
+            "no live handle matched that value; nothing changed.\n  \
+             check for a truncated paste — a handle is one unbroken ckh_ token."
+        ),
+        _ => println!("revoked handle"),
+    }
     Ok(())
 }
 

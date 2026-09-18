@@ -255,13 +255,24 @@ stream and pass the arm without ever seeing it skip."
 
 # A FLOOR IS A LOWER BOUND, AND LOWER BOUNDS DO NOT COMPLAIN ABOUT BEING LOWERED.
 #
-# A branch forked before a floor raise carries the OLD number forward in this file and
-# merges green, silently reverting the raise. Nothing goes red: the count still clears
-# the (now smaller) minimum, so the gate passes on both sides of the defect. Worse, the
-# branch need not touch this file at all -- it inherits the value -- so the hazard is
-# invisible in the diff and no marker catches it, because "the gate passes" is true
-# either way. Live instance: an open PR sat on a pre-raise master carrying 578 while
-# master was at 610, which would have handed back 32 tests' worth of protection.
+# A floor that falls hands back protection with nothing going red: the count still clears
+# the (now smaller) minimum, so the gate passes on both sides of the defect.
+#
+# THE MECHANISM IS NOT THE OBVIOUS ONE, and this comment asserted the obvious one until
+# 2026-09-17. A branch forked before a raise does NOT carry its stale floor onto master.
+# Constructed, rather than reasoned about:
+#
+#   squash stale(610) onto master(616)    -> floor 616, gate.sh not even staged
+#   fork-before-raise, edits the floor    -> UU scripts/gate.sh, conflict marker
+#
+# A squash applies the DIFF, not the branch's file contents, so master's raise survives a
+# branch that never touched this line; and a branch that does touch it conflicts loudly
+# and cannot merge. Both paths are safe, and neither is what this guard catches.
+#
+# What it catches is a HUMAN RESOLVING THAT CONFLICT by keeping their own side -- which
+# happened on this repo an hour before the ratchet landed, resolved by hand -- and a plain
+# hand-edit downward, on a branch or on master. Both are invisible in review for the same
+# reason: the gate passes either way, so there is no red to notice.
 #
 # So the floor is RATCHETED: it may rise, and it may not fall below the merge target's.
 # The comparison is against the TARGET's value rather than this file's own, because a

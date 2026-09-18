@@ -555,10 +555,38 @@ fn stale_target_matches(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
-fn reclaim_stale_manifest_lock_quarantines(path: &Path, ttl: Duration, claim_deadline: Duration) {
-    let reclaim_age = ttl
+/// RECLAIM READS THE SAME CLOCK THE LOCK READS.
+///
+/// This used `SystemTime::now()` directly while every other staleness decision in this
+/// module goes through `resolve_now_ms`, which honours the injected clock. That is the
+/// two-clock split PR #33 fixed for the LOCK's own staleness -- the same defect, one
+/// directory over, and it survived because the two paths are read at different times.
+///
+/// The cost was not theoretical. Fixtures seed a quarantine mtime relative to the wall
+/// clock and then assert a reclaim verdict, so the answer depended on how long the test
+/// body took: under full-gate parallelism the fixture aged past its own threshold before
+/// the assertion ran, and DIFFERENT members failed on different runs. Three sightings
+/// across two contributor PRs that touched none of this code (issue #51).
+///
+/// Raising the TTL only moves the load at which it happens, which is what makes the class
+/// persistent: each failure looks like a flake worth re-running, and a green re-run at
+/// idle looks like a fix.
+///
+/// Milliseconds rather than `Duration` on both sides, because the injected clock is a
+/// `u64` epoch value and mixing it with a `SystemTime` is how the two clocks got apart.
+fn reclaim_stale_manifest_lock_quarantines(
+    path: &Path,
+    ttl: Duration,
+    claim_deadline: Duration,
+    options: &ManifestLockOptions,
+) {
+    let reclaim_age_ms = ttl
         .max(claim_deadline)
-        .saturating_add(MANIFEST_LOCK_QUARANTINE_RECLAIM_MARGIN);
+        .saturating_add(MANIFEST_LOCK_QUARANTINE_RECLAIM_MARGIN)
+        .as_millis() as u64;
+    let Ok(now_ms) = resolve_now_ms(options) else {
+        return;
+    };
     let Some(parent) = path.parent() else {
         return;
     };
@@ -588,10 +616,16 @@ fn reclaim_stale_manifest_lock_quarantines(path: &Path, ttl: Duration, claim_dea
         let Ok(modified) = entry.metadata().and_then(|metadata| metadata.modified()) else {
             continue;
         };
-        let Ok(age) = SystemTime::now().duration_since(modified) else {
+        let Ok(modified_ms) = modified
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+        else {
             continue;
         };
-        if age >= reclaim_age {
+        // A directory whose mtime is in the FUTURE relative to this clock reads as age 0
+        // and is retained. That is the safe direction: reclaiming on a clock disagreement
+        // would delete another process's live quarantine.
+        if now_ms.saturating_sub(modified_ms) >= reclaim_age_ms {
             let _ = fs::remove_dir_all(entry.path());
         }
     }
@@ -753,7 +787,7 @@ where
         thread::sleep(jitter(&options).min(deadline.saturating_duration_since(Instant::now())));
     }
 
-    reclaim_stale_manifest_lock_quarantines(path, options.ttl, options.ttl);
+    reclaim_stale_manifest_lock_quarantines(path, options.ttl, options.ttl, &options);
 
     let (stop_tx, stop_rx) = mpsc::channel::<()>();
     let renewal_lock = lock.clone();
@@ -1357,13 +1391,73 @@ mod manifest_lock_aba_regression {
     }
 
     fn reclaim_options(ttl: Duration) -> ManifestLockOptions {
+        reclaim_options_at(ttl, now_ms())
+    }
+
+    /// PIN THE RECLAIM CLOCK, so a fixture's verdict is arithmetic rather than a race.
+    ///
+    /// Without this the reclaim path reads the wall clock while the fixture seeds an mtime
+    /// relative to its own earlier reading of that clock, so the answer depends on how long
+    /// the test body takes. Under full-gate parallelism the fixture ages past its own
+    /// threshold before the assertion runs, and WHICH member fails is a function of
+    /// scheduling rather than of the member -- which is why three different members tripped
+    /// across three runs (issue #51).
+    ///
+    /// Raising the TTL would only move the load at which it happens. Every failure in this
+    /// class looks like a flake worth re-running, and a green re-run at idle looks like a
+    /// fix, so the defect survives being noticed.
+    ///
+    /// Seed mtimes from the SAME `at_ms` this returns. Mixing a pinned reclaim clock with a
+    /// wall-clock mtime reintroduces the split one level down.
+    fn reclaim_options_at(ttl: Duration, at_ms: u64) -> ManifestLockOptions {
         ManifestLockOptions {
             ttl,
             renew_every: Duration::from_secs(1),
             retry_min: Duration::from_millis(1),
             retry_max: Duration::from_millis(1),
+            now_override_ms: Some(at_ms),
             ..ManifestLockOptions::default()
         }
+    }
+
+    // A SLOW LOCK BODY MUST NOT CHANGE A RECLAIM VERDICT.
+    //
+    // This is the property behind issue #51. The reclaim used to read `SystemTime::now()`
+    // deep inside the lock call, after retries and sleeps, while the fixture seeded an
+    // mtime from its own earlier reading -- so the verdict depended on elapsed wall time
+    // and DIFFERENT members failed on different runs under gate parallelism.
+    //
+    // 350ms of delay against a fixture seeded 4.1s into a 5.1s threshold: 900ms of slack,
+    // so this passes either way UNLESS the delay is counted. Under the old wall-clock read
+    // the same shape at higher load is what deleted the directory.
+    //
+    // Mutation-checked in both directions: reverting the reclaim to `SystemTime::now()`
+    // and raising this delay past the slack deletes the quarantine and fails here.
+    #[test]
+    fn a_slow_lock_body_does_not_age_a_quarantine_into_reclamation() {
+        let root = std::env::temp_dir().join(format!(
+            "claustrum-manifest-lock-reclaim-slow-{}-{}",
+            std::process::id(),
+            TEMP_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("opencode-handles.json");
+        let at = now_ms();
+        let quarantine = seed_quarantine(&path, 1, "slow_body_nonce");
+        set_directory_mtime(&quarantine, at - 4_100);
+
+        let mut options = reclaim_options_at(Duration::from_millis(100), at);
+        options.after_claim = Some(Arc::new(|| thread::sleep(Duration::from_millis(350))));
+
+        with_manifest_lock_with_options(&path, "claimant", options, |_| Ok(())).unwrap();
+
+        assert!(
+            quarantine.exists(),
+            "a quarantine inside the reclaim threshold was deleted because the lock body \
+             took time -- the verdict is reading elapsed wall time rather than the clock \
+             the fixture pinned"
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

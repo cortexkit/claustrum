@@ -508,8 +508,8 @@ fn usage_short() -> String {
 fn help_verb(verb: &str) -> String {
     let body = match verb {
         "login" => {
-            "ck auth login [--provider <name>] [--id <id>] [--account <id>] \
-             [--replace] [--no-listener] [--device]\n\
+            "ck auth login [--provider <name>] [--id <id>] [--account <id>]\n\
+             \x20             [--replace] [--no-listener] [--device]\n\
              \x20             [--payload-file <path>]  api-key logins: read the key from a\n\
              \x20                                      file instead of prompting\n\
              \n\
@@ -625,8 +625,8 @@ fn help_verb(verb: &str) -> String {
              \x20 flags to override or clear it."
         }
         "set-identity" => {
-            "ck auth set-identity <credential-id> --account-id <id> [--email <email>] \
-             [--org-name <name>] | --clear\n\
+            "ck auth set-identity <credential-id> --account-id <id>\n\
+             \x20                    [--email <email>] [--org-name <name>] | --clear\n\
              \n\
              Update only non-secret account metadata. The vault decrypts and re-seals the\n\
              existing record without replacing token material, keeps its lifecycle state,\n\
@@ -634,9 +634,10 @@ fn help_verb(verb: &str) -> String {
              decryptable record, including needs-reauth or retired records."
         }
         "migrate-opencode" => {
-            "ck auth migrate-opencode [--dry-run] [--replace] [--force-shape] [--restore <provider>]\n\
-             \x20                     [--auth-file <path>] [--handle-file <path>] [--provider <id>]...\n\
-             \x20                     [--serve-by <plugin-id>]\n\
+            "ck auth migrate-opencode [--dry-run] [--replace] [--force-shape]\n\
+             \x20                        [--restore <provider>] [--auth-file <path>]\n\
+             \x20                        [--handle-file <path>] [--provider <id>]...\n\
+             \x20                        [--serve-by <plugin-id>]\n\
              \n\
              Move OpenCode api entries into the vault as apikey:<provider>:main, write a\n\
              capability handle file, then replace the auth entry with a provider tombstone.\n\
@@ -653,15 +654,17 @@ fn help_verb(verb: &str) -> String {
              --dry-run or --replace. The default --serve-by is opencode-claustrum."
         }
         "opencode-account" => {
-            "ck auth opencode-account add --provider <id> --label <label> --key-file <path|-> \
-             [--before <label>] [--handle-file <path>]\n\
-             ck auth opencode-account remove --provider <id> --label <label> \
-             [--handle-file <path>]\n\
+            "ck auth opencode-account add --provider <id> --label <label>\n\
+             \x20                        --key-file <path|-> [--before <label>]\n\
+             \x20                        [--handle-file <path>]\n\
+             ck auth opencode-account remove --provider <id> --label <label>\n\
+             \x20                        [--handle-file <path>]\n\
              ck auth opencode-account list [--provider <id>] [--handle-file <path>]\n\
-              Add, remove, or list labeled api accounts in a provider already migrated by
-              migrate-opencode. Keys are read from a file or stdin, never argv; stdin trims one
-              terminal LF or CRLF. List prints
-             labels, credential ids, lifecycle state, and record versions only."
+             \n\
+             Add, remove, or list labeled api accounts in a provider already\n\
+             migrated by migrate-opencode. Keys are read from a file or stdin,\n\
+             never argv; stdin trims one terminal LF or CRLF. List prints labels,\n\
+             credential ids, lifecycle state, and record versions only."
         }
         "mint-handle" => {
             "ck auth mint-handle --id <id>\n\

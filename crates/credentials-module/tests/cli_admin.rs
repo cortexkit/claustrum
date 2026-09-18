@@ -509,6 +509,58 @@ fn grants_columns_hold_their_positions_when_a_prefix_is_wider_than_the_others() 
     );
 }
 
+// `invalidate` MUST NOT CLAIM IT STOPPED A CREDENTIAL IT DID NOT TOUCH.
+//
+// The admin op has always sent `state_changed`, with a comment at the site saying it rides
+// the wire so the CLI can tell an operator whether the call did anything. The CLI read only
+// `handles_revoked` -- which cannot stand in, because a credential with no handles reports
+// zero whether it was live or already dead. So `invalidate --id apikey:does-not-exist`
+// printed "invalidated apikey:does-not-exist".
+//
+// Same false-assurance shape as revoke-handle, and the sibling verb `logout` already
+// reported it correctly. The data was provided for exactly this purpose and never consumed.
+#[test]
+fn invalidate_does_not_claim_success_when_nothing_changed() {
+    let root = tmp_root("invalidate-noop");
+    let data_dir = root.join("vault");
+    let key_path = root.join("master.key");
+    std::fs::create_dir_all(&data_dir).expect("data dir");
+    let base = |c: &mut std::process::Command| {
+        c.args(["--data-dir", data_dir.to_str().unwrap()])
+            .args(["--key-path", key_path.to_str().unwrap()]);
+    };
+
+    let mut boot = cli();
+    base(&mut boot);
+    assert!(
+        boot.arg("bootstrap")
+            .output()
+            .expect("bootstrap")
+            .status
+            .success(),
+        "bootstrap failed"
+    );
+
+    // A credential that never existed: the verb succeeds (invalidation is idempotent by
+    // design) but must SAY that nothing changed.
+    let mut ghost = cli();
+    base(&mut ghost);
+    let out = ghost
+        .arg("invalidate")
+        .args(["--id", "apikey:does-not-exist"])
+        .output()
+        .expect("invalidate ghost");
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        said.contains("nothing changed"),
+        "invalidate claimed success on a credential that does not exist:\n{said}"
+    );
+    assert!(
+        !said.contains("invalidated apikey:does-not-exist;"),
+        "invalidate printed its success line for a no-op:\n{said}"
+    );
+}
+
 // A KIND-PREFIXED `--principal` IS REFUSED, BECAUSE THE GRANT IT WOULD CREATE IS DEAD.
 //
 // The daemon looks a grant up by ("reserved", module_id) with the BARE id from the route

@@ -2532,7 +2532,24 @@ fn cmd_invalidate(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> 
         },
     )?;
     let revoked = result["handles_revoked"].as_u64().unwrap_or(0);
-    println!("invalidated {id}; revoked {revoked} handle(s)");
+    // READ `state_changed`, WHICH THE ADMIN OP SENDS FOR EXACTLY THIS. Without it the
+    // line claimed "invalidated <id>" for an id that does not exist, is already
+    // needs_reauth, or is retired -- and `handles_revoked` cannot stand in, because a
+    // credential with no handles reports zero whether it was live or already dead.
+    //
+    // Same false-assurance shape as revoke-handle: the operator is told a credential was
+    // stopped when nothing was. `logout` already reports this correctly; this is the
+    // sibling that did not.
+    //
+    // Absent (older daemon) falls back to the previous wording rather than claiming
+    // nothing changed -- absent and false mean different things.
+    match result.get("state_changed") {
+        Some(serde_json::Value::Bool(false)) => println!(
+            "{id} was already needs_reauth, retired, absent, or corrupt: nothing changed\n  \
+             revoked {revoked} handle(s) regardless — revocation is idempotent."
+        ),
+        _ => println!("invalidated {id}; revoked {revoked} handle(s)"),
+    }
     Ok(())
 }
 

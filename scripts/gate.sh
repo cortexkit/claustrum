@@ -353,7 +353,7 @@ assert_floor_not_lowered() {
 #
 # THE FLOOR IS RATCHETED AGAINST THE MERGE TARGET BY `assert_floor_not_lowered` BELOW,
 # because a floor alone does not defend the property it exists for. See that function.
-run_expect 620 "workspace unit + integration" \
+run_expect 621 "workspace unit + integration" \
   cargo test --locked --workspace --features credentials-core/test-support
 
 assert_floor_not_lowered "$(dirname "$0")/gate.sh"

@@ -179,11 +179,15 @@ fn json_route_open(project_root: &Path) -> Value {
     let target = RouteTarget::ManagementSurface {
         module_id: MODULE_ID.to_string(),
     };
-    let identity = BindIdentity {
-        project_root: project_root.to_path_buf(),
-        harness: "credentials-e2e".to_string(),
-        session: "session-1".to_string(),
-    };
+    // `BindIdentity::new` rather than a literal: 0.20 made the type non-exhaustive so an
+    // additive field cannot force a construction-site migration. `project_id` stays
+    // absent, which subc's contract calls the correct answer for a producer that cannot
+    // answer consistently -- alternating forks the consumer's lineage silently.
+    let identity = BindIdentity::new(
+        project_root.to_path_buf(),
+        "credentials-e2e".to_string(),
+        "session-1".to_string(),
+    );
     serde_json::json!({
         "op": "route.open",
         "target": target,

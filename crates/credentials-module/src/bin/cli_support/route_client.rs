@@ -65,11 +65,17 @@ pub async fn open_route(
     let target = RouteTarget::ManagementSurface {
         module_id: MODULE_ID.to_string(),
     };
-    let identity = BindIdentity {
-        project_root: project_root.to_path_buf(),
-        harness: harness.to_string(),
-        session: session.to_string(),
-    };
+    // `BindIdentity::new` rather than a struct literal: 0.20 made the type
+    // `#[non_exhaustive]` so an additive identity field cannot force a construction-site
+    // migration across the fleet. It also leaves `project_id` absent, which is the
+    // correct answer here rather than a gap -- the CLI is not a registered project and
+    // subc's own contract says a producer that cannot answer CONSISTENTLY must answer
+    // `None` consistently, because alternating silently forks the consumer's lineage.
+    //
+    // Worth stating once at the only place this crate builds one: every field here is
+    // client-supplied and unattested, per the normative comment on the type. Nothing
+    // downstream may authorize on them, and claustrum does not.
+    let identity = BindIdentity::new(project_root, harness, session);
     let frame = control_request(
         2,
         json!({ "op": "route.open", "target": target, "identity": identity }),

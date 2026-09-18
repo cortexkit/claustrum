@@ -1122,11 +1122,25 @@ fn validate_secure_parent(path: &Path) -> Result<(), OpenCodeFilesError> {
                 reason: "not owned by the current uid",
             });
         }
+        // GROUP-WRITABLE COUNTS, NOT ONLY WORLD-WRITABLE. Directory write permission
+        // governs unlink and create, so anyone who can write the parent can replace a
+        // mode-0600 file wholesale no matter how tightly the file itself is locked.
+        // The owner check above does not close this: a directory I own can still be
+        // group-writable (0770), and then any other uid in that group can swap the
+        // handle file for one of theirs.
+        //
+        // That matters more than the file's own mode, because a cross-uid attacker is
+        // NOT conceded by this threat model the way a same-uid one is. Latent here --
+        // the real directories are 0700/0755 -- which is exactly why a guard against
+        // misconfiguration must cover the misconfiguration.
+        //
+        // The sticky exemption applies to both bits for the same reason it applies to
+        // one: with it set, a writer may only unlink files they own.
         let mode = metadata.permissions().mode();
-        if mode & 0o002 != 0 && mode & 0o1000 == 0 {
+        if mode & 0o022 != 0 && mode & 0o1000 == 0 {
             return Err(OpenCodeFilesError::InsecureParent {
                 path: path.into(),
-                reason: "world-writable without sticky bit",
+                reason: "group- or world-writable without sticky bit",
             });
         }
     }
@@ -1456,6 +1470,53 @@ mod manifest_lock_aba_regression {
             "a quarantine inside the reclaim threshold was deleted because the lock body \
              took time -- the verdict is reading elapsed wall time rather than the clock \
              the fixture pinned"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    // THE WRITER REFUSES A GROUP-WRITABLE PARENT, NOT ONLY A WORLD-WRITABLE ONE.
+    //
+    // Directory write permission governs unlink and create, so anyone who can write the
+    // parent replaces a mode-0600 handle file wholesale however tightly the file itself is
+    // locked. The uid check above does not close it: a directory the user owns can still
+    // be 0770, and then any other uid in that group can swap the file for one of theirs.
+    // A cross-uid attacker is not conceded by this threat model the way a same-uid one is.
+    //
+    // Latent on the machines we run today -- the real directories are 0700 and 0755 --
+    // which is precisely why a guard that exists to catch a misconfiguration has to cover
+    // the misconfiguration rather than the configuration we happen to have.
+    //
+    // The 0700 arm is the control: it proves the refusal came from the group bit rather
+    // than from anything else about the fixture.
+    #[test]
+    #[cfg(unix)]
+    fn a_group_writable_parent_is_refused_even_when_the_file_is_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "claustrum-parent-group-{}-{}",
+            std::process::id(),
+            TEMP_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("opencode-handles.json");
+        fs::write(&path, b"{}").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o770)).unwrap();
+        let refused = validate_secure_parent(&root);
+        let refused_message = match refused {
+            Err(e) => e.to_string(),
+            Ok(()) => panic!("a group-writable parent must be refused, but it passed"),
+        };
+        assert!(
+            refused_message.contains("group- or world-writable"),
+            "refused for the wrong reason: {refused_message}"
+        );
+
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(
+            validate_secure_parent(&root).is_ok(),
+            "the same fixture without the group bit must pass, or the refusal proves nothing"
         );
         let _ = fs::remove_dir_all(root);
     }

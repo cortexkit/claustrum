@@ -63,6 +63,28 @@ describe('client handle-file contract', () => {
     await expect(readHandleFile(path)).rejects.toThrow('exactly 0600')
   })
 
+  // A GROUP-WRITABLE PARENT IS REFUSED, NOT ONLY A WORLD-WRITABLE ONE.
+  //
+  // Directory write permission governs unlink and create, so anyone who can write the
+  // parent replaces a mode-0600 file wholesale regardless of the file's own mode. The
+  // owner check does not close it: a directory the user owns can still be 0770.
+  //
+  // Separate from the world-writable test on purpose. The refusal message contains the
+  // substring 'world-writable' either way, so that test passes unchanged whether or not
+  // the group bit is examined -- it cannot discriminate this behaviour, and a reader
+  // would reasonably assume it does.
+  test.skipIf(!posix)('rejects a group-writable parent even though the file is 0600', async () => {
+    await mkdir(root, { recursive: true, mode: 0o700 })
+    const path = join(root, 'handles.json')
+    await writeFile(path, JSON.stringify(validFile()), { mode: 0o600 })
+    await chmod(root, 0o770)
+    await expect(readHandleFile(path)).rejects.toThrow('group- or world-writable')
+    // The same directory without the group bit reads cleanly -- proving the refusal came
+    // from that bit and not from something else about the fixture.
+    await chmod(root, 0o700)
+    expect(await readHandleFile(path)).toEqual(validFile())
+  })
+
   test('rejects invalid labels, handles, prototype keys, and oversized input', async () => {
     expect(() => parseHandleFile({ version: 1, providers: [{ ...validFile().providers[0], accounts: [{ ...validFile().providers[0].accounts[0], label: '__proto__' }] }] })).toThrow('invalid account label')
     expect(() => parseHandleFile({ version: 1, providers: [{ ...validFile().providers[0], accounts: [{ ...validFile().providers[0].accounts[0], handle: 'ckh_short' }] }] })).toThrow('invalid handle')

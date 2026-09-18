@@ -48,7 +48,9 @@ use credentials_core::credential_id::{default_refresh_adapter, parse_credential_
 use credentials_core::engine::{EngineError, RefreshEngine};
 use credentials_core::health::VaultHealth;
 use credentials_core::refresh_adapters::RefreshError;
-use credentials_core::store::{GrantOperation, ScopedReadRefusal, StoreOpError};
+use credentials_core::store::{
+    AuthEventPrincipal, GrantOperation, ScopedReadRefusal, StoreOpError,
+};
 use subc_protocol::Principal;
 
 use crate::limiter::{Admission, FetchLimiter, GET_MANY_MAX};
@@ -925,6 +927,17 @@ impl ReadSurface {
         }
     }
 
+    fn observed_principal(principal: Option<&Principal>) -> Option<AuthEventPrincipal<'_>> {
+        match principal {
+            Some(Principal::Reserved { module_id }) => {
+                Some(AuthEventPrincipal::Reserved(module_id.as_str()))
+            }
+            Some(Principal::Direct) => Some(AuthEventPrincipal::Direct),
+            Some(Principal::Unverified) => Some(AuthEventPrincipal::Unverified),
+            None => None,
+        }
+    }
+
     fn record_scoped_refusal(
         &self,
         principal: Option<&Principal>,
@@ -1091,6 +1104,7 @@ impl ReadSurface {
     pub async fn report_auth_failure(
         &self,
         connection_id: u64,
+        principal: Option<&Principal>,
         params: &ReportAuthFailureParams,
     ) -> Result<(), ReadError> {
         // Rate-limit on the presented handle (before resolution), like get — a flood
@@ -1190,6 +1204,7 @@ impl ReadSurface {
                     .reporter_source
                     .as_deref()
                     .map(ReporterSource::from_wire),
+                principal: Self::observed_principal(principal),
             };
             if refreshable {
                 self.engine

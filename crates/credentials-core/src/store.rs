@@ -2347,6 +2347,7 @@ impl EncryptedStore {
                             provider_status: None,
                             detail: Some(&detail),
                             reporter_source: None,
+                            principal: None,
                         },
                         Some(record_version),
                         true,
@@ -3715,6 +3716,37 @@ pub struct AuthObservation<'a> {
     pub detail: Option<&'a str>,
     /// Consumer-asserted, unverified; raw consumer input is unrepresentable here.
     pub reporter_source: Option<ReporterSource>,
+    /// The route principal that submitted this observation. `Some(Direct)` records a
+    /// known unnamed caller; `None` is reserved for observations that predate attribution.
+    pub principal: Option<AuthEventPrincipal<'a>>,
+}
+
+/// A principal carried from a route binding into an `auth_events` observation.
+///
+/// The closed kind vocabulary prevents callers from writing arbitrary principal kinds,
+/// while a reserved module id remains available because it is assigned at route bind.
+#[derive(Debug, Clone, Copy)]
+pub enum AuthEventPrincipal<'a> {
+    Direct,
+    Reserved(&'a str),
+    Unverified,
+}
+
+impl<'a> AuthEventPrincipal<'a> {
+    const fn kind(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::Reserved(_) => "reserved",
+            Self::Unverified => "unverified",
+        }
+    }
+
+    const fn id(self) -> Option<&'a str> {
+        match self {
+            Self::Reserved(module_id) => Some(module_id),
+            Self::Direct | Self::Unverified => None,
+        }
+    }
 }
 
 /// Append one `auth_events` row. Diagnostics only: not MAC-chained, prunable, and
@@ -3732,8 +3764,8 @@ pub(crate) fn append_auth_event_tx(
 ) -> rusqlite::Result<()> {
     tx.execute(
         "INSERT INTO auth_events \
-             (ts_ms, credential_id, kind, provider_status, detail, reporter_source, record_version, applied) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+             (ts_ms, credential_id, kind, provider_status, detail, reporter_source, record_version, applied, principal_kind, principal_id) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         rusqlite::params![
             now_ms(),
             credential_id,
@@ -3743,6 +3775,8 @@ pub(crate) fn append_auth_event_tx(
             obs.reporter_source.map(ReporterSource::as_str),
             record_version.map(|v| v as i64),
             applied as i64,
+            obs.principal.map(AuthEventPrincipal::kind),
+            obs.principal.and_then(AuthEventPrincipal::id),
         ],
     )?;
     trim_auth_events_tx(tx, credential_id)
@@ -5024,6 +5058,7 @@ mod tests {
                         provider_status: Some(401),
                         detail: None,
                         reporter_source: None,
+                        principal: None,
                     },
                     Some(1),
                 )
@@ -6612,6 +6647,7 @@ mod tests {
                     provider_status: Some(401),
                     detail: None,
                     reporter_source: None,
+                    principal: None,
                 },
             )
             .expect("stale report is accepted");
@@ -6660,6 +6696,7 @@ mod tests {
             provider_status: Some(401),
             detail: None,
             reporter_source: None,
+            principal: None,
         };
 
         // Stale report against v1 while the store holds v2.
@@ -6903,6 +6940,7 @@ mod tests {
             provider_status: Some(401),
             detail: None,
             reporter_source: None,
+            principal: None,
         };
 
         // First report at the served version: a real transition.
@@ -6977,6 +7015,7 @@ mod tests {
                     provider_status: Some(503),
                     detail: Some("status"),
                     reporter_source: None,
+                    principal: None,
                 },
                 Some(1),
             )
@@ -6993,6 +7032,7 @@ mod tests {
                         provider_status: Some(401),
                         detail: None,
                         reporter_source: None,
+                        principal: None,
                     },
                     Some(1),
                 )

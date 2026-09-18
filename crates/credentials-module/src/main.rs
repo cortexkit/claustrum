@@ -568,6 +568,7 @@ fn record_reconciliation_reasons(
                     provider_status: None,
                     detail: Some(reason.as_str()),
                     reporter_source: None,
+                    principal: None,
                 },
                 None,
             );
@@ -1073,7 +1074,10 @@ async fn handle_read_request(
         },
         OP_REPORT_AUTH_FAILURE => {
             match serde_json::from_value::<ReportAuthFailureParams>(request.params) {
-                Ok(p) => match surface.report_auth_failure(connection_id, &p).await {
+                Ok(p) => match surface
+                    .report_auth_failure(connection_id, principal.as_ref(), &p)
+                    .await
+                {
                     Ok(()) => wrap_result(json!({ "accepted": true })),
                     // Carry the produced error class alongside the code, in the same
                     // { code, class } shape get/get_many use: class gives retry policy and
@@ -2231,6 +2235,129 @@ mod tests {
             json!({ "credential_id": credential_id }),
         )
         .await
+    }
+
+    #[tokio::test]
+    async fn consumer_reports_preserve_route_direct_and_legacy_principal_states() {
+        let (surface, admin, store) = scoped_rig(76);
+        let credential_ids = [
+            "apikey:route-bound-report",
+            "apikey:direct-report",
+            "apikey:legacy-report",
+        ];
+        let mut handles = Vec::new();
+        for credential_id in credential_ids {
+            store
+                .create(
+                    credential_id,
+                    &VaultRecord::new_static(CredentialKind::ApiKey, "test", b"key".to_vec(), None),
+                )
+                .expect("create credential");
+            let handle = credentials_core::store::mint_handle().expect("mint handle");
+            store
+                .put_handle_hash(
+                    &handle.hash,
+                    credential_id,
+                    AuditCtx::admin(AuditOp::MintHandle),
+                )
+                .expect("bind handle");
+            handles.push(handle.raw);
+        }
+
+        admin.record_bind(
+            76,
+            subc_protocol::Principal::Reserved {
+                module_id: "prefrontal-core".into(),
+            },
+        );
+        let route_report = scoped_route_request(
+            &surface,
+            &admin,
+            76,
+            OP_REPORT_AUTH_FAILURE,
+            json!({
+                "handle": handles[0],
+                "provider_status": 401,
+                "record_version": 1,
+            }),
+        )
+        .await;
+        assert_eq!(route_report["result"]["accepted"], true);
+
+        admin.record_bind(77, subc_protocol::Principal::Direct);
+        let direct_report = scoped_route_request(
+            &surface,
+            &admin,
+            77,
+            OP_REPORT_AUTH_FAILURE,
+            json!({
+                "handle": handles[1],
+                "provider_status": 401,
+                "record_version": 1,
+            }),
+        )
+        .await;
+        assert_eq!(direct_report["result"]["accepted"], true);
+
+        store
+            .record_auth_event(
+                credential_ids[2],
+                credentials_core::store::AuthObservation {
+                    kind: "legacy_report",
+                    provider_status: Some(401),
+                    detail: None,
+                    reporter_source: None,
+                    principal: None,
+                },
+                Some(1),
+            )
+            .expect("write legacy event");
+
+        let events = store.recent_auth_events(10).expect("read all event states");
+        let route = events
+            .iter()
+            .find(|event| event.credential_id == credential_ids[0])
+            .expect("route-bound report event");
+        let direct = events
+            .iter()
+            .find(|event| event.credential_id == credential_ids[1])
+            .expect("direct report event");
+        let legacy = events
+            .iter()
+            .find(|event| event.credential_id == credential_ids[2])
+            .expect("legacy report event");
+
+        assert_eq!(route.principal_kind.as_deref(), Some("reserved"));
+        assert_eq!(route.principal_id.as_deref(), Some("prefrontal-core"));
+        assert_eq!(direct.principal_kind.as_deref(), Some("direct"));
+        assert_eq!(
+            direct.principal_id, None,
+            "a direct caller has no id; NULL is the recorded answer"
+        );
+        assert_eq!(legacy.principal_kind, None);
+        assert_eq!(legacy.principal_id, None);
+        assert_ne!(
+            (
+                route.principal_kind.as_deref(),
+                route.principal_id.as_deref()
+            ),
+            (
+                direct.principal_kind.as_deref(),
+                direct.principal_id.as_deref()
+            ),
+            "a route-bound and direct caller must remain distinct"
+        );
+        assert_ne!(
+            (
+                direct.principal_kind.as_deref(),
+                direct.principal_id.as_deref()
+            ),
+            (
+                legacy.principal_kind.as_deref(),
+                legacy.principal_id.as_deref()
+            ),
+            "a direct caller must remain distinguishable from a legacy row"
+        );
     }
 
     async fn scoped_status_request(
@@ -5588,6 +5715,7 @@ mod tests {
         surface
             .report_auth_failure(
                 1,
+                None,
                 &read_surface::ReportAuthFailureParams {
                     handle: handle.raw.clone(),
                     provider_status: 401,
@@ -5727,6 +5855,7 @@ mod tests {
         surface
             .report_auth_failure(
                 11,
+                None,
                 &read_surface::ReportAuthFailureParams {
                     handle: raw.raw.clone(),
                     provider_status: 401,
@@ -6193,7 +6322,7 @@ mod tests {
         // A NON-AUTH status must not invalidate: a provider 500 is a hiccup, not a dead
         // credential.
         surface
-            .report_auth_failure(7, &params(500, 1, None))
+            .report_auth_failure(7, None, &params(500, 1, None))
             .await
             .expect("a non-auth status is accepted");
         assert_eq!(
@@ -6212,7 +6341,7 @@ mod tests {
             )
             .expect("bump the record version");
         surface
-            .report_auth_failure(7, &params(401, 1, Some("relay_message_parse")))
+            .report_auth_failure(7, None, &params(401, 1, Some("relay_message_parse")))
             .await
             .expect("a stale report is accepted, not errored");
         assert_eq!(
@@ -6235,7 +6364,7 @@ mod tests {
         // THE ACCEPTED ARM. Without it, an implementation that ignored every report
         // satisfies both assertions above.
         surface
-            .report_auth_failure(7, &params(401, 2, Some(&"a".repeat(40))))
+            .report_auth_failure(7, None, &params(401, 2, Some(&"a".repeat(40))))
             .await
             .expect("a current-version 401 is accepted");
         assert_eq!(
@@ -6284,6 +6413,7 @@ mod tests {
         let unknown = surface
             .report_auth_failure(
                 7,
+                None,
                 &read_surface::ReportAuthFailureParams {
                     handle: "ckh_not_a_handle".to_string(),
                     provider_status: 401,
@@ -6336,6 +6466,7 @@ mod tests {
         surface
             .report_auth_failure(
                 8,
+                None,
                 &read_surface::ReportAuthFailureParams {
                     handle: handle.raw,
                     provider_status: 401,
@@ -6395,6 +6526,7 @@ mod tests {
         surface
             .report_auth_failure(
                 9,
+                None,
                 &read_surface::ReportAuthFailureParams {
                     handle: handle.raw.clone(),
                     provider_status: 401,

@@ -1,0 +1,8 @@
+{
+  "anthropic": {
+    "type": "oauth",
+    "refresh": "fixture-partial-valid-refresh",
+    "access": "fixture-partial-valid-access"
+  },
+  "broken": {}
+}

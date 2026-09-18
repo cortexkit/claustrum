@@ -1,0 +1,15 @@
+{
+  "version": 4,
+  "activeIndex": 0,
+  "accounts": [
+    {
+      "email": "first@example.com",
+      "refreshToken": "fixture-antigravity-first",
+      "projectId": "first-project"
+    },
+    {
+      "refreshToken": "fixture-antigravity-second",
+      "projectId": "second-project"
+    }
+  ]
+}

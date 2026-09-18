@@ -1,0 +1,12 @@
+{
+  "github-copilot": {
+    "type": "oauth",
+    "refresh": "fixture-copilot-refresh",
+    "access": "fixture-copilot-access"
+  },
+  "openai": {
+    "type": "oauth",
+    "refresh": "fixture-openai-refresh",
+    "access": "fixture-openai-access"
+  }
+}

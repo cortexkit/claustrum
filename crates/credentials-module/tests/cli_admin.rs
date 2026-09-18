@@ -7,7 +7,7 @@
 //! single-writer lease makes admin writes mutually exclusive with a held lease.
 
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use base64::Engine;
 use cortexkit_store::{open_sqlite, Isolation, StorageBackend, StorageDescriptor};
@@ -652,6 +652,11 @@ fn every_verb_names_on_its_help_page_each_flag_its_parser_accepts() {
         }
         out
     };
+
+    assert!(
+        accepted("login").iter().any(|flag| flag == "--no-browser"),
+        "login's headless browser control must stay in the parser accept-list"
+    );
 
     let verbs = ["import", "put", "login", "grant", "set-identity"];
     let mut total = 0usize;
@@ -2676,6 +2681,166 @@ fn shipped_test_hatch_env_names() -> Vec<String> {
     out
 }
 
+/// The valid-key arm makes absence of the URL a meaningful ordering signal rather than
+/// a flow that never reached URL construction for an unrelated reason.
+#[test]
+fn login_key_preflight_refuses_before_printing_the_authorize_url() {
+    let root = tmp_root("login-key-preflight");
+    let data_dir = root.join("vault");
+    let key_dir = root.join("keys");
+    std::fs::create_dir_all(&data_dir).expect("create vault dir");
+    std::fs::create_dir_all(&key_dir).expect("create key dir");
+    let missing_key_path = key_dir.join("missing-master.key");
+
+    let run = |key_path: &std::path::Path| {
+        let mut command = cli();
+        command
+            .arg("login")
+            .arg("--provider")
+            .arg("anthropic")
+            .arg("--no-listener")
+            .arg("--no-browser")
+            .arg("--data-dir")
+            .arg(&data_dir)
+            .arg("--key-path")
+            .arg(key_path)
+            .stdin(Stdio::null());
+        command.output().expect("run anthropic login")
+    };
+
+    let refused = run(&missing_key_path);
+    assert!(
+        !refused.status.success(),
+        "a missing master key must refuse"
+    );
+    let refused_stdout = String::from_utf8_lossy(&refused.stdout);
+    let refused_stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        !refused_stdout.contains("Open this URL"),
+        "the browser flow must not start before the master key resolves: {refused_stdout}"
+    );
+    assert!(
+        refused_stderr.contains("--key-path"),
+        "the refusal must name the operator-key remedy: {refused_stderr}"
+    );
+
+    // Control: the same flow reaches the URL when only the key-resolution failure is
+    // removed. Closed stdin then makes callback parsing fail without making a network call.
+    let valid_key_path = key_dir.join("master.key");
+    std::fs::write(&valid_key_path, "17".repeat(32)).expect("write operator key");
+    let reached_browser_flow = run(&valid_key_path);
+    assert!(
+        !reached_browser_flow.status.success(),
+        "empty callback input must stop before token exchange"
+    );
+    let control_stdout = String::from_utf8_lossy(&reached_browser_flow.stdout);
+    assert!(
+        control_stdout.contains("Open this URL"),
+        "a valid key must reach the browser flow, or the negative assertion proves nothing: {control_stdout}"
+    );
+}
+
+#[test]
+fn login_existence_preflight_refuses_before_printing_the_authorize_url() {
+    let root = tmp_root("login-existence-preflight");
+    let data_dir = root.join("vault");
+    let key_dir = root.join("keys");
+    std::fs::create_dir_all(&data_dir).expect("create vault dir");
+    std::fs::create_dir_all(&key_dir).expect("create key dir");
+    let key_path = key_dir.join("master.key");
+
+    let global = |command: &mut Command| {
+        command
+            .arg("--data-dir")
+            .arg(&data_dir)
+            .arg("--key-path")
+            .arg(&key_path);
+    };
+
+    let mut bootstrap = cli();
+    bootstrap.arg("bootstrap");
+    global(&mut bootstrap);
+    let bootstrapped = bootstrap.output().expect("bootstrap vault");
+    assert!(
+        bootstrapped.status.success(),
+        "bootstrap failed: {}",
+        String::from_utf8_lossy(&bootstrapped.stderr)
+    );
+
+    let mut put = cli();
+    put.arg("put")
+        .arg("--id")
+        .arg("oauth:anthropic")
+        .arg("--payload")
+        .arg("existing-credential");
+    global(&mut put);
+    let deposited = put.output().expect("deposit existing target");
+    assert!(
+        deposited.status.success(),
+        "put failed: {}",
+        String::from_utf8_lossy(&deposited.stderr)
+    );
+
+    let run_login = |id: Option<&str>, replace: bool| {
+        let mut command = cli();
+        command
+            .arg("login")
+            .arg("--provider")
+            .arg("anthropic")
+            .arg("--no-listener")
+            .arg("--no-browser");
+        if let Some(id) = id {
+            command.arg("--id").arg(id);
+        }
+        if replace {
+            command.arg("--replace");
+        }
+        global(&mut command);
+        command
+            .stdin(Stdio::null())
+            .output()
+            .expect("run anthropic login")
+    };
+
+    let refused = run_login(None, false);
+    assert!(
+        !refused.status.success(),
+        "create mode must refuse an existing id"
+    );
+    let refused_stdout = String::from_utf8_lossy(&refused.stdout);
+    let refused_stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        !refused_stdout.contains("Open this URL"),
+        "the browser flow must not start for a known collision: {refused_stdout}"
+    );
+    assert!(
+        refused_stderr.contains("already holds a credential"),
+        "the established collision advice must be preserved: {refused_stderr}"
+    );
+
+    let replacing = run_login(None, true);
+    assert!(
+        !replacing.status.success(),
+        "empty callback input must stop the replacement before token exchange"
+    );
+    let control_stdout = String::from_utf8_lossy(&replacing.stdout);
+    assert!(
+        control_stdout.contains("Open this URL"),
+        "replace on an existing id must reach the browser flow: {control_stdout}"
+    );
+
+    // ReplaceUnconditional is an update, not an upsert. Preserve its NotFound refusal
+    // before asking the operator to authorize a credential the store cannot create.
+    let missing_replace = run_login(Some("oauth:anthropic:missing"), true);
+    assert!(!missing_replace.status.success());
+    assert!(!String::from_utf8_lossy(&missing_replace.stdout).contains("Open this URL"));
+    assert!(
+        String::from_utf8_lossy(&missing_replace.stderr).contains("credential not found"),
+        "replace on a nonexistent id must keep the store's established refusal: {}",
+        String::from_utf8_lossy(&missing_replace.stderr)
+    );
+}
+
 /// NOT RUNNABLE AGAINST A STAGED RELEASE ARTIFACT, deliberately on both sides.
 ///
 /// This drives a real `login --provider zai`, which validates the key against the
@@ -2730,6 +2895,7 @@ fn api_key_login_flow_integration() {
     c.arg("login")
         .arg("--provider")
         .arg("zai")
+        .arg("--no-browser")
         .arg("--payload-file")
         .arg(&key_file);
     global(&mut c);
@@ -2759,6 +2925,7 @@ fn api_key_login_flow_integration() {
     c.arg("login")
         .arg("--provider")
         .arg("zai")
+        .arg("--no-browser")
         .arg("--id")
         .arg("apikey:zai:work")
         .arg("--payload-file")
@@ -2776,6 +2943,7 @@ fn api_key_login_flow_integration() {
     c.arg("login")
         .arg("--provider")
         .arg("zai")
+        .arg("--no-browser")
         .arg("--id")
         .arg("zai")
         .arg("--payload-file")

@@ -5,10 +5,11 @@
 //! over the subc route plane instead, authenticating each op with a master-key
 //! challenge-response (the module's Gate 2). The CLI resolves the SAME master key
 //! from the keychain WITHOUT opening the database or taking the lease — the
-//! challenge returns the module's `key_id`, and `resolver::resolve_for_db` loads
-//! the slot whose fingerprint matches it. BOTH slots are searched: a rotation that
-//! crashed before its promote leaves the live key in `Next`, and it stays there
-//! until someone rotates again.
+//! challenge returns the module's `key_id`. A login carries its preflighted key and
+//! signs with it when that fingerprint still matches; if a rotation landed meanwhile,
+//! `resolver::resolve_for_db` loads the matching slot. BOTH slots are searched: a
+//! rotation that crashed before its promote leaves the live key in `Next`, and it
+//! stays there until someone rotates again.
 //!
 //! Fallback discipline (Oracle finding 10): the caller falls back to the offline
 //! lease path ONLY when no live module is reachable. Once an `admin.op` has been
@@ -18,6 +19,7 @@
 
 use credentials_core::admin_auth::{AdminMacKey, TranscriptParts, ADMIN_NONCE_LEN, VAULT_ID_LEN};
 use credentials_core::admin_ops::AdminOpBody;
+use credentials_core::key::{KeyId, MasterKey};
 use credentials_core::resolver::{self, ResolverConfig};
 use credentials_core::vault_id_for;
 use serde_json::{json, Value};
@@ -37,12 +39,50 @@ use crate::route_client;
 /// left the whole bin target green while the operator-facing attribution was wrong again.
 pub fn resolve_signing_key(
     config: &ResolverConfig,
-    key_id: credentials_core::key::KeyId,
-) -> Result<credentials_core::key::MasterKey, RouteCommit> {
+    key_id: KeyId,
+) -> Result<MasterKey, RouteCommit> {
     resolver::resolve_for_db(config, key_id).map_err(|e| {
         RouteCommit::LocalFailure(format!(
             "cannot resolve the master key to authorize this op: {e}"
         ))
+    })
+}
+
+enum SigningKey<'a> {
+    Preflighted(&'a MasterKey),
+    Resolved(MasterKey),
+}
+
+impl SigningKey<'_> {
+    fn as_master_key(&self) -> &MasterKey {
+        match self {
+            Self::Preflighted(key) => key,
+            Self::Resolved(key) => key,
+        }
+    }
+}
+
+fn signing_key_for_challenge_with<'a, F>(
+    key_id: KeyId,
+    preflighted_key: Option<&'a MasterKey>,
+    resolve: F,
+) -> Result<SigningKey<'a>, RouteCommit>
+where
+    F: FnOnce(KeyId) -> Result<MasterKey, RouteCommit>,
+{
+    if let Some(key) = preflighted_key.filter(|key| key.key_id() == key_id) {
+        return Ok(SigningKey::Preflighted(key));
+    }
+    resolve(key_id).map(SigningKey::Resolved)
+}
+
+fn signing_key_for_challenge<'a>(
+    config: &ResolverConfig,
+    key_id: KeyId,
+    preflighted_key: Option<&'a MasterKey>,
+) -> Result<SigningKey<'a>, RouteCommit> {
+    signing_key_for_challenge_with(key_id, preflighted_key, |key_id| {
+        resolve_signing_key(config, key_id)
     })
 }
 
@@ -84,12 +124,14 @@ pub enum RouteCommit {
 /// Try to commit `op` to a running module. `data_dir` locates the vault (for the
 /// key resolution and vault-id derivation); `config` is the key-source resolver;
 /// `conn_path` is the subc connection file (from `--subc`, or the default probe
-/// path). Absence of the file ⇒ no daemon ⇒ the caller may go offline.
+/// path). `preflighted_key` lets login reuse the key it already proved readable;
+/// absence of the file ⇒ no daemon ⇒ the caller may go offline.
 pub fn commit(
     data_dir: &std::path::Path,
     config: &ResolverConfig,
     conn_path: &std::path::Path,
     op: &AdminOpBody,
+    preflighted_key: Option<&MasterKey>,
 ) -> RouteCommit {
     let vault_id = match vault_id_for(data_dir) {
         Some(v) => v,
@@ -100,7 +142,9 @@ pub fn commit(
         Err(e) => return RouteCommit::LocalFailure(format!("encoding op: {e}")),
     };
 
-    run_async(async move { commit_async(conn_path, &vault_id, config, &op_bytes).await })
+    run_async(async move {
+        commit_async(conn_path, &vault_id, config, &op_bytes, preflighted_key).await
+    })
 }
 
 fn run_async<F: std::future::Future<Output = RouteCommit>>(fut: F) -> RouteCommit {
@@ -119,6 +163,7 @@ async fn commit_async(
     vault_id: &[u8; VAULT_ID_LEN],
     config: &ResolverConfig,
     op_bytes: &[u8],
+    preflighted_key: Option<&MasterKey>,
 ) -> RouteCommit {
     let mut stream = match route_client::connect(conn_path).await {
         Ok(stream) => stream,
@@ -162,8 +207,10 @@ async fn commit_async(
         );
     }
 
-    // Resolve the master key by the module's key_id, WITHOUT opening the DB or
-    // taking the lease.
+    // Reuse a preflighted key while the module reports the same fingerprint. Besides
+    // avoiding a second keychain prompt or key-file read, this keeps a knowable local
+    // failure ahead of the single-use login flow. A different fingerprint means a
+    // rotation landed between preflight and commit, so resolve against the challenge.
     //
     // `resolve_for_db` rather than `resolve`, and the name understates it here: it
     // takes the fingerprint as an argument and never touches the database, so the
@@ -185,11 +232,11 @@ async fn commit_async(
         // remote even though this client is the one that noticed.
         None => return RouteCommit::Refused("module returned a malformed key_id".into()),
     };
-    let key = match resolve_signing_key(config, key_id) {
-        Ok(k) => k,
+    let key = match signing_key_for_challenge(config, key_id, preflighted_key) {
+        Ok(key) => key,
         Err(refusal) => return refusal,
     };
-    let mac_key = AdminMacKey::derive(&key);
+    let mac_key = AdminMacKey::derive(key.as_master_key());
     let tag = mac_key.sign(&TranscriptParts {
         vault_id,
         key_id,
@@ -315,4 +362,29 @@ fn decode_hex(s: &str) -> Option<Vec<u8>> {
         .step_by(2)
         .map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use super::{signing_key_for_challenge_with, MasterKey};
+
+    #[test]
+    fn a_matching_preflighted_key_does_not_call_the_resolver() {
+        let preflighted = MasterKey::from_bytes([17; 32]);
+        let calls = Cell::new(0);
+
+        let selected =
+            match signing_key_for_challenge_with(preflighted.key_id(), Some(&preflighted), |_| {
+                calls.set(calls.get() + 1);
+                Ok(MasterKey::from_bytes([23; 32]))
+            }) {
+                Ok(key) => key,
+                Err(_) => panic!("the matching preflighted key must be usable"),
+            };
+
+        assert_eq!(calls.get(), 0, "a matching key must not be resolved twice");
+        assert_eq!(selected.as_master_key().key_id(), preflighted.key_id());
+    }
 }

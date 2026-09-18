@@ -85,6 +85,31 @@ describe('client handle-file contract', () => {
     expect(await readHandleFile(path)).toEqual(validFile())
   })
 
+  // AN ANCESTOR IS REFUSED, NOT ONLY THE IMMEDIATE PARENT.
+  //
+  // A locked-down leaf under a permissive grandparent PASSES the immediate-parent check,
+  // which is exactly what makes it the discriminating fixture: anyone who can create and
+  // unlink in the grandparent renames the chain aside and substitutes their own.
+  //
+  // The control arm matters more than usual here. These fixtures live under /tmp, which is
+  // 1777 -- so the walk reaches a group- AND world-writable directory on every single run,
+  // and without the sticky exemption this test would fail for a reason that has nothing to
+  // do with the bit it sets.
+  test.skipIf(!posix)('rejects a group-writable ancestor even when the parent is 0700', async () => {
+    const leaf = join(root, 'mid', 'leaf')
+    await mkdir(leaf, { recursive: true, mode: 0o700 })
+    await chmod(join(root, 'mid'), 0o700)
+    await chmod(root, 0o700)
+    const path = join(leaf, 'handles.json')
+    await writeFile(path, JSON.stringify(validFile()), { mode: 0o600 })
+
+    expect(await readHandleFile(path)).toEqual(validFile())
+
+    await chmod(root, 0o770)
+    await expect(readHandleFile(path)).rejects.toThrow('ancestor')
+    await chmod(root, 0o700)
+  })
+
   test('rejects invalid labels, handles, prototype keys, and oversized input', async () => {
     expect(() => parseHandleFile({ version: 1, providers: [{ ...validFile().providers[0], accounts: [{ ...validFile().providers[0].accounts[0], label: '__proto__' }] }] })).toThrow('invalid account label')
     expect(() => parseHandleFile({ version: 1, providers: [{ ...validFile().providers[0], accounts: [{ ...validFile().providers[0].accounts[0], handle: 'ckh_short' }] }] })).toThrow('invalid handle')

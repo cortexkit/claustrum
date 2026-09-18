@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { constants } from 'node:fs'
-import { lstat as nodeLstat, open as nodeOpen, readFile, stat as nodeStat } from 'node:fs/promises'
+import { lstat as nodeLstat, open as nodeOpen, readFile, realpath, stat as nodeStat } from 'node:fs/promises'
 import { userInfo } from 'node:os'
 import { dirname, join } from 'node:path'
 
@@ -235,6 +235,44 @@ async function readHandleSnapshot(path = defaultHandleFilePath(), io: HandleFile
     // they own. Mirrors the Rust check in opencode_files.rs; the two must not drift.
     if ((parent.mode & 0o022) !== 0 && (parent.mode & 0o1000) === 0) {
       invalid('handle file parent is group- or world-writable without sticky bit')
+    }
+    // EVERY ANCESTOR, NOT JUST THIS ONE, OR THE GUARANTEE DOES NOT COMPOSE. The immediate
+    // parent being 0700 protects nothing when a directory above it is group-writable:
+    // anyone who can create and unlink there renames it aside and substitutes their own
+    // tree. Walk to '/' rather than $HOME -- a stopping point read from the environment is
+    // attacker-influenceable and undefined when unset.
+    //
+    // realpath FIRST: an unresolved walk is defeated by a symlink component pointing
+    // somewhere permissive, and every individual stat still passes while the loop is about
+    // a path we never read through.
+    //
+    // Mirrors refuse_writable_ancestor in subc-transport 0.7.0 and in opencode_files.rs;
+    // three implementations of one rule must not drift.
+    let resolved: string | undefined
+    try {
+      resolved = await realpath(dirname(path))
+    } catch {
+      // Unresolvable: the read that follows reports the real errno, and refusing here
+      // would replace a precise failure with a permissions verdict about a path we could
+      // not resolve.
+      resolved = undefined
+    }
+    if (resolved !== undefined) {
+      let component = resolved
+      for (;;) {
+        let ancestor: HandleFileStat | undefined
+        try {
+          ancestor = await stat(component)
+        } catch {
+          ancestor = undefined
+        }
+        if (ancestor && (ancestor.mode & 0o022) !== 0 && (ancestor.mode & 0o1000) === 0) {
+          invalid(`handle file ancestor ${component} is group- or world-writable without sticky bit`)
+        }
+        const next = dirname(component)
+        if (next === component) break
+        component = next
+      }
     }
     let source: string
     try {

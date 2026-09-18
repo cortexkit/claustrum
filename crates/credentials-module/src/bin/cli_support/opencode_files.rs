@@ -1103,6 +1103,59 @@ fn read_limited(path: &Path, max_bytes: u64, kind: &str) -> Result<Vec<u8>, Open
     })
 }
 
+/// Refuse when any ancestor of `parent` is group- or world-writable without sticky.
+///
+/// CANONICALISE FIRST, THEN WALK THE CANONICAL COMPONENTS. An unresolved walk is defeated
+/// by a symlink component pointing somewhere permissive: every individual stat passes, the
+/// loop visibly covers every component, and the whole thing is about a path we do not
+/// write through. A guard returning true about the wrong subject, and the nastiest member
+/// of that family because it LOOKS exhaustive.
+///
+/// STICKY EXEMPTS. `/tmp` and `/Users/Shared` are 1777, so without the exemption this
+/// refuses on correctly-configured systems -- and a lint that fires on healthy
+/// configuration gets disabled, after which the real signal reaches nobody. Load-bearing
+/// rather than a courtesy.
+///
+/// A parent that cannot be canonicalised returns Ok: the operation that follows reports the
+/// real errno, and refusing here would replace a precise "no such file" with a permissions
+/// verdict about a path we could not resolve.
+#[cfg(unix)]
+fn refuse_writable_ancestor(parent: &Path) -> Result<(), OpenCodeFilesError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let Ok(resolved) = fs::canonicalize(parent) else {
+        return Ok(());
+    };
+
+    let mut component = resolved.as_path();
+    loop {
+        // An unreadable component is skipped rather than refused. Canonicalising already
+        // required traverse permission on every component, so a metadata failure here is
+        // close to unreachable -- and refusing on it would convert a transient io error
+        // into a permissions verdict, the same trade the canonicalise arm declines.
+        if let Ok(metadata) = fs::metadata(component) {
+            let mode = metadata.permissions().mode();
+            if mode & 0o022 != 0 && mode & 0o1000 == 0 {
+                return Err(OpenCodeFilesError::InsecureParent {
+                    path: component.to_path_buf(),
+                    reason: "an ancestor is group- or world-writable without sticky bit",
+                });
+            }
+        }
+        match component.parent() {
+            Some(next) => component = next,
+            None => return Ok(()),
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn refuse_writable_ancestor(_parent: &Path) -> Result<(), OpenCodeFilesError> {
+    // Windows ACLs are not a mode bitmask and the Unix reasoning does not carry. Stated
+    // rather than silently skipped, so the absence is a decision.
+    Ok(())
+}
+
 fn validate_secure_parent(path: &Path) -> Result<(), OpenCodeFilesError> {
     let metadata = fs::symlink_metadata(path).map_err(|source| OpenCodeFilesError::Io {
         action: "stat parent directory",
@@ -1143,6 +1196,20 @@ fn validate_secure_parent(path: &Path) -> Result<(), OpenCodeFilesError> {
                 reason: "group- or world-writable without sticky bit",
             });
         }
+        // EVERY ANCESTOR, NOT JUST THIS ONE, OR THE GUARANTEE DOES NOT COMPOSE.
+        //
+        // Checking the immediate parent alone leaves a live hole rather than merely being
+        // incomplete: anyone who can create and unlink in ANY ancestor renames an
+        // intermediate directory aside and substitutes their own tree. With `~/.local` at
+        // 0777, this directory being 0700 protects nothing.
+        //
+        // Walk to `/` rather than $HOME or an XDG base. A stopping point read from the
+        // environment is attacker-influenceable and undefined when unset, which is the
+        // shape a security bound must not have.
+        //
+        // Shape agreed with SUBC 2026-09-18 and mirrored from subc-transport 0.7.0
+        // (refuse_writable_ancestor), read at source rather than from their description.
+        refuse_writable_ancestor(path)?;
     }
     Ok(())
 }
@@ -1488,6 +1555,108 @@ mod manifest_lock_aba_regression {
     //
     // The 0700 arm is the control: it proves the refusal came from the group bit rather
     // than from anything else about the fixture.
+    // THE STICKY EXEMPTION IS EXERCISED, AND WITHOUT THIS TEST IT IS NOT.
+    //
+    // Found by mutation: dropping the exemption changed no result in either suite. The
+    // reason is that fixtures live under the per-user TMPDIR (/private/var/folders/.../T
+    // on macOS), whose entire chain is 0700/0755 -- so no fixture path contains a
+    // group- or world-writable directory and the exemption branch is never taken. The
+    // 1777 directories that motivate it, /tmp and /Users/Shared, are nowhere on it.
+    //
+    // This builds its own 1777 ancestor so the walk MUST take that branch. Hermetic and
+    // rootless: chmod 1777 on a directory we own needs no privilege, and it avoids
+    // writing fixtures into a shared world-writable directory where another process
+    // could interfere.
+    //
+    // Mutation-checked: removing `mode & 0o1000 == 0` from the walk fails this by name
+    // while every other member stays green.
+    #[test]
+    #[cfg(unix)]
+    fn a_sticky_group_writable_ancestor_is_allowed_through() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "claustrum-sticky-{}-{}",
+            std::process::id(),
+            TEMP_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let shared = root.join("shared-like-tmp");
+        let leaf = shared.join("leaf");
+        fs::create_dir_all(&leaf).unwrap();
+        fs::set_permissions(&leaf, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+
+        // 1777, exactly the shape of /tmp: group- and world-writable, sticky set.
+        fs::set_permissions(&shared, fs::Permissions::from_mode(0o1777)).unwrap();
+        assert_eq!(
+            fs::metadata(&shared).unwrap().permissions().mode() & 0o7777,
+            0o1777,
+            "the fixture must actually be 1777 or this test proves nothing"
+        );
+
+        assert!(
+            validate_secure_parent(&leaf).is_ok(),
+            "a sticky group+world-writable ancestor must be allowed -- /tmp is 1777, and a \
+             lint that refuses a correctly-configured system gets disabled"
+        );
+
+        // Without sticky the same directory must refuse, proving the exemption is what
+        // allowed it rather than something else about the fixture.
+        fs::set_permissions(&shared, fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(
+            validate_secure_parent(&leaf).is_err(),
+            "the same ancestor without sticky must be refused"
+        );
+
+        fs::set_permissions(&shared, fs::Permissions::from_mode(0o700)).unwrap();
+        let _ = fs::remove_dir_all(root);
+    }
+
+    // AN ANCESTOR IS REFUSED, NOT ONLY THE IMMEDIATE PARENT.
+    //
+    // The immediate parent being 0700 protects nothing if a directory above it is
+    // group-writable: anyone who can create and unlink there renames it aside and
+    // substitutes their own tree. This fixture is exactly that shape -- a locked-down
+    // leaf under a permissive grandparent -- and it PASSES the immediate-parent check,
+    // which is what makes it the discriminating case.
+    #[test]
+    #[cfg(unix)]
+    fn a_group_writable_ancestor_is_refused_even_when_the_immediate_parent_is_0700() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "claustrum-ancestor-{}-{}",
+            std::process::id(),
+            TEMP_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let leaf = root.join("mid").join("leaf");
+        fs::create_dir_all(&leaf).unwrap();
+        fs::set_permissions(&leaf, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(root.join("mid"), fs::Permissions::from_mode(0o700)).unwrap();
+
+        // Control: the whole chain tight, so a later refusal is attributable to the bit
+        // this test sets and not to anything else about the fixture.
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(
+            validate_secure_parent(&leaf).is_ok(),
+            "a fully locked-down chain must pass, or the refusal below proves nothing"
+        );
+
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o770)).unwrap();
+        let refused = match validate_secure_parent(&leaf) {
+            Err(e) => e.to_string(),
+            Ok(()) => panic!(
+                "a group-writable ANCESTOR must be refused; the immediate \
+                              parent being 0700 does not make the path safe"
+            ),
+        };
+        assert!(
+            refused.contains("ancestor"),
+            "refused for the wrong reason: {refused}"
+        );
+
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     #[cfg(unix)]
     fn a_group_writable_parent_is_refused_even_when_the_file_is_0600() {

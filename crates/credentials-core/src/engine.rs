@@ -250,6 +250,7 @@ impl RefreshEngine {
                     provider_status: None,
                     detail: None,
                     reporter_source: None,
+                    principal: None,
                 }),
             )?;
             // If a concurrent write moved the version, return the replacement rather
@@ -437,6 +438,7 @@ impl RefreshEngine {
                         provider_status: None,
                         detail: Some(e.variant_name()),
                         reporter_source: None,
+                        principal: None,
                     }),
                 )?;
                 Err(EngineError::RefreshFailed(e))
@@ -462,6 +464,7 @@ impl RefreshEngine {
                         provider_status: other.provider_status(),
                         detail: Some(other.variant_name()),
                         reporter_source: None,
+                        principal: None,
                     },
                     Some(record.record_version),
                 );

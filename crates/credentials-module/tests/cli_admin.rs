@@ -3273,6 +3273,7 @@ fn events_discloses_that_the_retention_cap_discarded_older_rows() {
                         provider_status: Some(401),
                         detail: None,
                         reporter_source: None,
+                        principal: None,
                     },
                     Some(1),
                 )
@@ -3287,6 +3288,7 @@ fn events_discloses_that_the_retention_cap_discarded_older_rows() {
                         provider_status: Some(401),
                         detail: None,
                         reporter_source: None,
+                        principal: None,
                     },
                     Some(1),
                 )

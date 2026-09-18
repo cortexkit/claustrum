@@ -1790,12 +1790,13 @@ mod manifest_lock_aba_regression {
         fs::create_dir_all(&root).unwrap();
         let path = root.join("opencode-handles.json");
         let quarantine = seed_quarantine(&path, 1, "recent_mtime_nonce");
-        set_directory_mtime(&quarantine, now_ms());
+        let at = now_ms();
+        set_directory_mtime(&quarantine, at);
 
         with_manifest_lock_with_options(
             &path,
             "claimant",
-            reclaim_options(Duration::from_millis(100)),
+            reclaim_options_at(Duration::from_millis(100), at),
             |_| Ok(()),
         )
         .unwrap();
@@ -1819,13 +1820,14 @@ mod manifest_lock_aba_regression {
         let other_quarantine = seed_quarantine(&other_path, 1, "other_nonce");
         fs::create_dir(&nonmatching).unwrap();
         fs::write(&unrelated_file, "untouched").unwrap();
-        set_directory_mtime(&nonmatching, now_ms() - 5_101);
-        set_directory_mtime(&other_quarantine, now_ms() - 5_101);
+        let at = now_ms();
+        set_directory_mtime(&nonmatching, at - 5_101);
+        set_directory_mtime(&other_quarantine, at - 5_101);
 
         with_manifest_lock_with_options(
             &path,
             "claimant",
-            reclaim_options(Duration::from_millis(100)),
+            reclaim_options_at(Duration::from_millis(100), at),
             |_| {
                 assert!(lock_path(&path).is_dir());
                 Ok(())
@@ -1849,13 +1851,14 @@ mod manifest_lock_aba_regression {
         fs::create_dir_all(&root).unwrap();
         let path = root.join("opencode-handles.json");
         let quarantine = seed_quarantine(&path, 1, "unreadable_nonce");
-        set_directory_mtime(&quarantine, now_ms() - 5_101);
+        let at = now_ms();
+        set_directory_mtime(&quarantine, at - 5_101);
         fs::set_permissions(&root, fs::Permissions::from_mode(0o300)).unwrap();
 
         let result = with_manifest_lock_with_options(
             &path,
             "claimant",
-            reclaim_options(Duration::from_millis(100)),
+            reclaim_options_at(Duration::from_millis(100), at),
             |_| Ok(()),
         );
 

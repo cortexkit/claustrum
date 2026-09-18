@@ -453,6 +453,78 @@ describe('ClaustrumClient', () => {
     client.close()
   })
 
+  test('decodes served identity metadata without leaking raw payload outside material', async () => {
+    const rawPayload = [115, 101, 99, 114, 101, 116]
+    const client = await ClaustrumClient.connect({
+      connector: async () => new FakeDaemon([{
+        result: {
+          payload: rawPayload,
+          expires_at_ms: 1_000,
+          record_version: 63,
+          credential_id: 'operator-label',
+          project_id: 'project-123',
+          account_id: 'account-456',
+          email: 'person@example.com',
+          org_name: 'Example Organization',
+        },
+      }]) as never,
+    })
+
+    const credential = await client.getCredential('h_1')
+
+    expect(credential).toEqual({
+      material: 'secret',
+      expiresAtMs: 1_000,
+      recordVersion: 63,
+      credentialId: 'operator-label',
+      projectId: 'project-123',
+      accountId: 'account-456',
+      email: 'person@example.com',
+      orgName: 'Example Organization',
+    })
+    expect(Object.entries(credential).filter(([key]) => key !== 'material').map(([, value]) => value)).not.toContainEqual(rawPayload)
+    client.close()
+  })
+
+  test('accepts absent served identity metadata as undefined', async () => {
+    const client = await ClaustrumClient.connect({
+      connector: async () => new FakeDaemon([{
+        result: { payload: [111, 107], expires_at_ms: 1_000, record_version: 63 },
+      }]) as never,
+    })
+
+    await expect(client.getCredential('h_1')).resolves.toEqual({
+      material: 'ok',
+      expiresAtMs: 1_000,
+      recordVersion: 63,
+      credentialId: undefined,
+      projectId: undefined,
+      accountId: undefined,
+      email: undefined,
+      orgName: undefined,
+    })
+    client.close()
+  })
+
+  test('rejects non-string served identity metadata', async () => {
+    const fields = ['credential_id', 'project_id', 'account_id', 'email', 'org_name'] as const
+    for (const field of fields) {
+      const client = await ClaustrumClient.connect({
+        connector: async () => new FakeDaemon([{
+          result: {
+            payload: [111, 107],
+            expires_at_ms: 1_000,
+            record_version: 63,
+            [field]: 42,
+          },
+        }]) as never,
+      })
+
+      await expect(client.getCredential('h_1')).rejects.toMatchObject({ code: 'invalid_response' })
+      client.close()
+    }
+  })
+
   test('emits exact get, status, and report request shapes to the fake daemon', async () => {
     const daemon = new FakeDaemon([
       { result: { payload: [111, 107], expires_at_ms: 1_000, record_version: 63 } },

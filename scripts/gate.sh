@@ -123,7 +123,7 @@ run_check "clippy" \
   cargo clippy --locked --workspace --all-targets --features credentials-core/test-support -- -D warnings
 run_check "clippy (seam features)" \
   cargo clippy --locked --workspace --all-targets \
-    --features credentials-core/test-support,kill9-test-seam,rotate-test-seam,login-test-seam,migration-tools -- -D warnings
+    --features credentials-core/test-support,kill9-test-seam,rotate-test-seam,login-test-seam,migration-tools,import-prompt-seam -- -D warnings
 
 # Run a cargo invocation and require at least `min` tests to have PASSED, and that
 # no arm announced a skip.
@@ -342,8 +342,8 @@ assert_floor_not_lowered() {
 # follows it), and any gap between the floor and the real count is how many can go
 # before anyone is told. Measured 402 across the workspace's suites at the time of
 # writing; an earlier floor of 200 left a third of them free to disappear.
-# The current measured total is 644 (debug profile, the same command this arm
-# runs), including the rendered per-verb help layout check. This is the observed
+# The current measured total is 645 (debug profile, the same command this arm
+# runs), including the rendered per-verb help layout and byte-exact import help checks. This is the observed
 # workspace test population, not an addition of independent branches' test deltas.
 #
 # MEASURED, NOT ARITHMETIC -- and this rebase is the third time it mattered. The branch bumped
@@ -361,7 +361,7 @@ assert_floor_not_lowered() {
 #
 # THE FLOOR IS RATCHETED AGAINST THE MERGE TARGET BY `assert_floor_not_lowered` BELOW,
 # because a floor alone does not defend the property it exists for. See that function.
-run_expect 644 "workspace unit + integration" \
+run_expect 645 "workspace unit + integration" \
   cargo test --locked --workspace --features credentials-core/test-support
 
 assert_floor_not_lowered "$(dirname "$0")/gate.sh"
@@ -464,6 +464,12 @@ run_expect 1 "opencode account handle-write crash cut" \
 # the production release artifact rather than a test-profile seam build.
 run_check "release ck-auth (default features)" \
   cargo build --release --locked --offline -p credentials-module --bin ck-auth
+# Picker tests must probe a separately built default-feature artifact. The test refuses
+# when this export is absent so a seam-enabled CARGO_BIN_EXE cannot impersonate shipping.
+export CK_AUTH_IMPORT_SHIPPED_BINARY="$PWD/target/release/ck-auth"
+run_expect 8 "interactive import picker + real-terminal smoke" \
+  cargo test --locked -p credentials-module --features import-prompt-seam \
+    --test import_picker -- --test-threads=1
 # The migration tools are feature-gated, so clippy compiles them but nothing RAN them
 # until this arm existed. Compiling proves they build; the property that matters -- the
 # key-identity diagnostic works while the daemon holds the lease -- is a runtime fact.

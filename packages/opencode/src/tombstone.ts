@@ -16,7 +16,7 @@ export function sentinel(provider: string): string {
 export function tombstoneFor(shape: "api" | "oauth", provider: string): OpenCodeAuthEntry {
   const value = sentinel(provider);
   if (shape === "api") return { type: "api", key: value };
-  return { type: "oauth", refresh: value, access: value, expires: 0 };
+  return { type: "oauth", access: "", refresh: value, expires: 0 };
 }
 
 export function isProviderTombstone(entry: unknown, provider: string): boolean {
@@ -26,8 +26,15 @@ export function isProviderTombstone(entry: unknown, provider: string): boolean {
   if (candidate.type === "api") {
     return Object.keys(candidate).length === 2 && candidate.key === value;
   }
+  // Recognition is exactly the written form and nothing wider. `access` is empty rather than
+  // sentinel-bearing on purpose: a tenant picked it so this repo's unattended re-sealer refuses the
+  // entry as import material, so accepting a sentinel-access variant here would recognize a shape
+  // that arm is built to reject. The key-count fence carries the rest of the weight -- this
+  // predicate also guards split custody at serve.ts:135, so loosening it is a two-sided edit, and
+  // the count is the whole distance between the canonical entry and any oauth object whose refresh
+  // happens to carry a sentinel.
   return candidate.type === "oauth" && Object.keys(candidate).length === 4 &&
-    candidate.refresh === value && candidate.access === value && candidate.expires === 0;
+    candidate.refresh === value && candidate.access === "" && candidate.expires === 0;
 }
 
 function isStringRecord(value: unknown): value is Record<string, string> {

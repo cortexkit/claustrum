@@ -9,8 +9,8 @@
       "provider": "anthropic",
       "entry": {
         "type": "oauth",
+        "access": "",
         "refresh": "claustrum-tombstone:v1:anthropic",
-        "access": "claustrum-tombstone:v1:anthropic",
         "expires": 0
       }
     }

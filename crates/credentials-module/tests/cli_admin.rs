@@ -509,6 +509,57 @@ fn grants_columns_hold_their_positions_when_a_prefix_is_wider_than_the_others() 
     );
 }
 
+// A KIND-PREFIXED `--principal` IS REFUSED, BECAUSE THE GRANT IT WOULD CREATE IS DEAD.
+//
+// The daemon looks a grant up by ("reserved", module_id) with the BARE id from the route
+// bind. A grant stored as `reserved:broca` can never match a bind whose module_id is
+// `broca`, so every scoped read from that consumer is refused -- as the anti-enumeration
+// `not_found`, which is indistinguishable from the credential not existing. Meanwhile
+// `ck auth grants` shows a row that looks entirely correct.
+//
+// Found by exercising the mutating verbs on a scratch vault: the confirmation line read
+// `granted reserved:reserved:probe-consumer`, and the doubling was the only tell.
+//
+// Both verbs are checked. revoke-grant takes the same flag and would otherwise accept a
+// spelling that can never match the row it means to remove -- reporting success while
+// leaving the grant in place, which is the worse direction for a revocation.
+#[test]
+fn a_kind_prefixed_principal_is_refused_on_both_grant_verbs() {
+    let root = tmp_root("grant-principal");
+    let data_dir = root.join("vault");
+    let key_path = root.join("master.key");
+    std::fs::create_dir_all(&data_dir).expect("data dir");
+
+    let boot = cli()
+        .args(["--data-dir", data_dir.to_str().unwrap()])
+        .args(["--key-path", key_path.to_str().unwrap()])
+        .arg("bootstrap")
+        .output()
+        .expect("bootstrap");
+    assert!(boot.status.success(), "bootstrap failed");
+
+    for verb in ["grant", "revoke-grant"] {
+        let out = cli()
+            .args(["--data-dir", data_dir.to_str().unwrap()])
+            .args(["--key-path", key_path.to_str().unwrap()])
+            .arg(verb)
+            .args(["--principal", "reserved:probe"])
+            .args(["--prefix", "apikey:"])
+            .args(["--operation", "read"])
+            .output()
+            .expect("run verb");
+        assert!(
+            !out.status.success(),
+            "{verb} accepted a kind-prefixed principal"
+        );
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            err.contains("bare module id") && err.contains("can never fire"),
+            "{verb} refused without explaining why the grant would be dead:\n{err}"
+        );
+    }
+}
+
 // EVERY FLAG THE PARSER ACCEPTS IS NAMED ON ITS HELP PAGE. This is the defence for the
 // help-page reformat: a page can be rewritten for shape without silently dropping a flag,
 // because a dropped flag is undiscoverable -- the parser still takes it, so nothing fails,

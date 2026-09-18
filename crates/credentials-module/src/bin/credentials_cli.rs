@@ -3194,8 +3194,38 @@ fn cmd_revoke_all_handles(global: &GlobalArgs, args: &[String]) -> Result<(), Cl
     Ok(())
 }
 
+/// REFUSE A `--principal` THAT CARRIES ITS OWN KIND PREFIX, because the grant it would
+/// create can never fire and nothing would ever say so.
+///
+/// The daemon looks a grant up by `("reserved", module_id)` where `module_id` is the bare
+/// id from the route bind -- `broca`, not `reserved:broca`. So `--principal reserved:broca`
+/// stores `principal_id = "reserved:broca"`, which no bind can ever match: every `get_scoped`
+/// from that consumer is refused, the refusal is the anti-enumeration `not_found` shared
+/// with an unknown credential, and `ck auth grants` shows a row that looks correct.
+///
+/// The mistake is easy to make because the DISPLAY form is `reserved  broca` in two columns
+/// and the confirmation line reads `granted reserved:<id>` -- so the prefixed form looks
+/// like what the tool itself prints. Module ids in this fleet never contain a colon, so a
+/// colon here is unambiguously the wrong shape rather than an unusual name.
+///
+/// Refusing rather than stripping: silently accepting `reserved:broca` and storing `broca`
+/// would mean two spellings for one grant, and the operator would never learn which the
+/// vault holds.
+fn reject_kind_prefixed_principal(principal_id: &str) -> Result<(), CliError> {
+    if let Some((kind, rest)) = principal_id.split_once(':') {
+        return Err(CliError::Usage(format!(
+            "--principal takes a bare module id ({rest}), not a kind-prefixed one \
+             ({principal_id}). The vault matches a grant against the module id a consumer \
+             binds with, so a grant stored as '{kind}:{rest}' can never fire and every \
+             scoped read from that consumer would be refused as not_found."
+        )));
+    }
+    Ok(())
+}
+
 fn cmd_grant(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     let principal_id = required(args, "--principal")?;
+    reject_kind_prefixed_principal(&principal_id)?;
     let credential_prefix = required(args, "--prefix")?;
     let operation = required(args, "--operation")?
         .parse::<GrantOperation>()
@@ -3218,6 +3248,7 @@ fn cmd_grant(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
 
 fn cmd_revoke_grant(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     let principal_id = required(args, "--principal")?;
+    reject_kind_prefixed_principal(&principal_id)?;
     let credential_prefix = required(args, "--prefix")?;
     let operation = required(args, "--operation")?
         .parse::<GrantOperation>()

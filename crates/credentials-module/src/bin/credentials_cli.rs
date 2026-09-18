@@ -500,8 +500,21 @@ fn usage_short() -> String {
        rotate-master-key   rotate the vault master key (offline)\n\
        bootstrap           initialize a new vault (offline)\n\
      \n\
+     GLOBAL FLAGS\n\
+     \x20 --data-dir <dir>   vault location (default: <data_home>/cortexkit/claustrum)\n\
+     \x20 --subc <file>      connection file; auto-discovered on a standard install\n\
+     \x20 --key-path <file>  operator key file instead of the OS keychain\n\
+     \x20 --version          print the build version and exit\n\
+     \n\
+     NOTES\n\
      On a standard install commands need no flags — the vault location and the\n\
-     running daemon auto-discover. Run 'ck auth help <verb>' for flags and details."
+     running daemon auto-discover. Run 'ck auth help <verb>' for flags and details.\n\
+     \n\
+     Global flags are rarely needed and apply to any verb. An explicit vault\n\
+     directory targets THAT vault and stays offline unless a connection file is\n\
+     also given. With a connection file, writes commit through the running module\n\
+     (zero downtime); absent/no daemon, they take the offline single-writer lease\n\
+     (daemon must be stopped). rotate-master-key and bootstrap are always offline."
         .to_string()
 }
 
@@ -513,38 +526,47 @@ fn usage_short() -> String {
 fn help_verb(verb: &str) -> String {
     let body = match verb {
         "login" => {
-            "ck auth login [--provider <name>] [--id <id>] [--account <id>]\n\
-             \x20             [--replace] [--no-listener] [--no-browser] [--device]\n\
-             \x20             [--payload-file <path>]  api-key logins: read the key from a\n\
-             \x20                                      file instead of prompting\n\
+            "ck auth login [--provider <name>] [--id <id>] [--account <id>] [--replace]\n\
+             \x20             [--no-listener] [--no-browser] [--device] [--payload-file <path>]\n\
              \n\
+             \x20 --provider <name>      pick a provider; omit for an interactive picker of\n\
+             \x20                        every provider\n\
+             \x20 --id <id>              use the provider default id or its own freely chosen\n\
+             \x20                        labeled id\n\
+             \x20 --account <id>         required for Snowflake (id oauth:snowflake:<account>)\n\
+             \x20 --replace              swap an existing credential (keeps its handle)\n\
+             \x20 --no-listener          paste the address-bar URL instead of using the loopback\n\
+             \x20                        listener\n\
+             \x20 --no-browser           only print the browser URL for headless or SSH sessions\n\
+             \x20 --device               select headless device authorization for openai/xai\n\
+             \x20 --payload-file <path>  api-key logins: read the key from a file instead of\n\
+             \x20                        prompting\n\
+             \n\
+             NOTES\n\
              Vault-native first-party login — mints an INDEPENDENT credential the vault\n\
-             solely custodies (no dual-custody rotation race). Run with NO --provider for\n\
-             an interactive picker of every provider.\n\
+             solely custodies (no dual-custody rotation race).\n\
              \n\
-             OAuth providers open a browser URL; --no-browser only prints it for headless\n\
-             or SSH sessions. A one-shot CLI-local listener on the loopback redirect\n\
-             completes the flow automatically (--no-listener, a busy port, or a timeout\n\
-             falls back to pasting the address-bar URL). --device\n\
-             selects headless device authorization for openai/xai; github-copilot and\n\
-             kimi always use device authorization. api-key providers prompt for a key\n\
-             (validated before storing).\n\
+             OAuth providers open a browser URL. A one-shot CLI-local listener on the\n\
+             loopback redirect completes the flow automatically; a busy port or a timeout\n\
+             falls back to pasting the address-bar URL. github-copilot and kimi always use\n\
+             device authorization. api-key providers prompt for a key (validated before\n\
+             storing).\n\
              \n\
-             --replace swaps an existing credential (keeps its handle).\n\
+             Providers: anthropic, openai, xai, google, antigravity, github-copilot, kimi,\n\
+             cursor, devin, snowflake, digitalocean, plus api-key providers (zai, openrouter,\n\
+             deepseek, groq, ...).\n\
              \n\
-             Providers: anthropic, openai, xai, google, antigravity, github-copilot,\n\
-             kimi, cursor, devin, snowflake, digitalocean, plus api-key providers\n\
-             (zai, openrouter, deepseek, groq, ...). Snowflake requires --account\n\
-             (id oauth:snowflake:<account>).\n\
-             \n\
-             MULTIPLE ACCOUNTS per provider — give each its own labeled id:\n\
-               ck auth login --provider anthropic --id oauth:anthropic:work\n\
-             (label freely chosen; each labeled id is an independent credential with\n\
-             its own refresh chain and handles)."
+             MULTIPLE ACCOUNTS per provider — give each its own labeled id: ck auth login\n\
+             --provider anthropic --id oauth:anthropic:work (label freely chosen; each\n\
+             labeled id is an independent credential with its own refresh chain and handles)."
         }
         "logout" => {
             "ck auth logout --provider <p> | --id <id>\n\
              \n\
+             \x20 --provider <p>  select the provider credential to stop serving\n\
+             \x20 --id <id>       select an explicit credential id instead\n\
+             \n\
+             NOTES\n\
              Stop serving a credential REVERSIBLY: invalidate it and revoke its handles,\n\
              keeping the record and audit chain. `ck auth login --provider <p> --replace`\n\
              restores it. Never a delete — use `remove` for that."
@@ -552,26 +574,32 @@ fn help_verb(verb: &str) -> String {
         "remove" => {
             "ck auth remove --id <id>\n\
              \n\
-             PERMANENTLY delete a credential row and revoke its handles (audited; the\n\
-             audit chain keeps the history). For retiring an account or cleaning up a\n\
-             mistaken id. For a temporary stop use `logout` instead."
+             \x20 --id <id>  credential to permanently delete\n\
+             \n\
+             NOTES\n\
+             PERMANENTLY delete a credential row and revoke its handles (audited; the audit\n\
+             chain keeps the history). For retiring an account or cleaning up a mistaken id.\n\
+             For a temporary stop use `logout` instead."
         }
         "status" => {
             "ck auth status\n\
              \n\
-             Vault health + per-credential inventory (no secrets) — run this when the\n\
-             health table says degraded. Reads the RUNNING daemon when one is up, else\n\
-             the offline store."
+             NOTES\n\
+             Vault health + per-credential inventory (no secrets) — run this when the health\n\
+             table says degraded. Reads the RUNNING daemon when one is up, else the offline\n\
+             store."
         }
         "list" => {
             "ck auth list\n\
              \n\
-             Print each credential's id + lifecycle state + version (no secrets), e.g.\n\
-             to find which credential a health probe flagged needs_reauth."
+             NOTES\n\
+             Print each credential's id + lifecycle state + version (no secrets), e.g. to\n\
+             find which credential a health probe flagged needs_reauth."
         }
         "grants" => {
             "ck auth grants\n\
              \n\
+             NOTES\n\
              Print every principal-scoped grant as one stable row: principal kind, principal\n\
              id, credential prefix, operation, and creation time. Read-only; it uses the\n\
              authenticated admin.status path, reading the running daemon when available and\n\
@@ -580,194 +608,275 @@ fn help_verb(verb: &str) -> String {
         "mint-signing-key" => {
             "ck auth mint-signing-key --id signing:<provider>[:<generation>] [--replace]\n\
              \n\
+             \x20 --id <id>  signing:<provider>[:<generation>] credential to create\n\
+             \x20 --replace  explicit destructive rotation of an existing id; keeps its handles\n\
+             \n\
+             NOTES\n\
              Generate a fresh Ed25519 key pair in this process and seal its PKCS#8 private\n\
              half directly into the vault. The private key is never written to a file, argv,\n\
              environment variable, or command output. Prints the public key hex and its\n\
              derived key_id for handoff to verifiers.\n\
              \n\
-             Create-only by default: use a new generation id for normal rotation. --replace\n\
-             is an explicit destructive rotation of an existing id and keeps its handles."
+             Create-only by default: use a new generation id for normal rotation."
         }
         "put" => {
             "ck auth put --id <id> --payload <v> | --payload-file <path>\n\
-             \x20            [--kind api_key|dsn|opaque] [--expires-ms N]\n\
-             \x20            [--replace | --expected-hash <hex>]\n\
-             \x20            [--client-id <id>]   required for a github_app: deposit\n\
+             \x20           [--kind <api_key|dsn|opaque>] [--expires-ms <N>]\n\
+             \x20           [--replace | --expected-hash <hex>] [--client-id <id>]\n\
              \n\
+             \x20 --id <id>                    vault credential id to create or rotate\n\
+             \x20 --payload <v>                secret bytes from argv, instead of a file\n\
+             \x20 --payload-file <path>        keep the secret out of argv; cookie bytes are\n\
+             \x20                              preserved exactly; for every other kind strip\n\
+             \x20                              TRAILING whitespace (any amount: newlines, CR,\n\
+             \x20                              spaces, tabs), keeping LEADING whitespace\n\
+             \x20 --kind <api_key|dsn|opaque>  record kind; defaults to api_key; refused for\n\
+             \x20                              cookie ids\n\
+             \x20 --expires-ms <N>             expiry timestamp in milliseconds; refused for\n\
+             \x20                              cookie ids\n\
+             \x20 --replace                    rotate unconditionally; bumps record_version so\n\
+             \x20                              consumers re-fetch, keeping handles\n\
+             \x20 --expected-hash <hex>        concurrency-safe CAS overwrite\n\
+             \x20 --client-id <id>             required App JWT issuer for a github_app: deposit\n\
+             \n\
+             NOTES\n\
              Ingest a non-OAuth secret (an api_key, dsn, or opaque blob). Create-only by\n\
-             default; --replace rotates it unconditionally (bumps record_version so\n\
-             consumers re-fetch; keeps handles); --expected-hash is a concurrency-safe\n\
-             CAS overwrite. A cookie:<domain> id always creates a session-cookie record:\n\
-             its payload-file bytes are preserved exactly and --expires-ms is refused.\n\
-             --payload-file keeps the secret out of argv. For every kind EXCEPT cookie\n\
-             it strips TRAILING whitespace (any amount: newlines, CR, spaces, tabs) and\n\
-             keeps LEADING whitespace, so a one-line secret file gives the same bytes as\n\
-             $(cat file). A value that must END in whitespace cannot come from a file;\n\
-             use a cookie: id, whose bytes are taken verbatim."
+             default. A cookie:<domain> id always creates a session-cookie record.\n\
+             \n\
+             A one-line secret file gives the same bytes as $(cat file). A value that must\n\
+             END in whitespace cannot come from a file; use a cookie: id, whose bytes are\n\
+             taken verbatim."
         }
         "import" => {
             "ck auth import --source <opencode|pi|gemini-cli|antigravity> --id <id>\n\
+             \x20              [--json <file>] [--provider <entry>] [--adapter <adapter>]\n\
+             \x20              [--replace]\n\
+             \x20              [--account-id <id>] [--email <email>] [--org-name <name>]\n\
+             \x20              [--clear-identity]\n\
              \n\
-             \x20 --source        which harness to read\n\
-             \x20 --id            vault credential id to create\n\
-             \x20 --json <file>   read that file instead of the source's default path\n\
-             \x20 --provider      opencode/pi: pick one auth.json entry\n\
-             \x20                 antigravity: pick an account by email or index\n\
-             \x20 --adapter       override the refresh adapter the method implies\n\
-             \x20 --replace       overwrite an existing id, keeping its handles\n\
+             \x20 --source <source>    which harness to read\n\
+             \x20 --id <id>            vault credential id to create\n\
+             \x20 --json <file>        read that file instead of the source's default path\n\
+             \x20 --provider <entry>   opencode/pi: pick one auth.json entry; antigravity: pick\n\
+             \x20                      an account by email or index; not used for gemini-cli\n\
+             \x20 --adapter <adapter>  override the refresh adapter the method implies\n\
+             \x20 --replace            overwrite an existing id, keeping its handles; keeps\n\
+             \x20                      prior identity only when the incoming token belongs to\n\
+             \x20                      the same account\n\
+             \x20 --account-id <id>    attach non-secret account metadata; required with email\n\
+             \x20                      or org-name\n\
+             \x20 --email <email>      account email metadata\n\
+             \x20 --org-name <name>    account organization metadata\n\
+             \x20 --clear-identity     remove non-secret account metadata\n\
              \n\
              SOURCES\n\
              \x20 opencode, pi    auth.json. An apikey:<p> id imports a {type:api,key}\n\
              \x20                 entry as a static key; an oauth id imports tokens.\n\
-             \x20 gemini-cli      ~/.gemini/oauth_creds.json, one credential, no --provider\n\
+             \x20 gemini-cli      ~/.gemini/oauth_creds.json, one credential\n\
              \x20 antigravity     antigravity-accounts.json, defaults to activeIndex\n\
              \n\
-             IDENTITY\n\
-             \x20 --account-id attaches non-secret account metadata, and is required with\n\
-             \x20 --email or --org-name. --clear-identity removes it.\n\
-             \n\
-             \x20 --replace keeps prior identity only when the incoming token belongs to\n\
-             \x20 the same account. A detectable mismatch refuses until you pass identity\n\
-             \x20 flags to override or clear it."
+             NOTES\n\
+             A detectable account mismatch refuses until you pass identity flags to override\n\
+             or clear it."
         }
         "set-identity" => {
-            "ck auth set-identity <credential-id> --account-id <id>\n\
-             \x20                    [--email <email>] [--org-name <name>] | --clear\n\
+            "ck auth set-identity <credential-id> --account-id <id> [--email <email>]\n\
+             \x20                    [--org-name <name>] | --clear\n\
              \n\
+             \x20 --account-id <id>  account identity to attach, instead of clearing metadata\n\
+             \x20 --email <email>    account email; requires account-id\n\
+             \x20 --org-name <name>  account organization; requires account-id\n\
+             \x20 --clear            remove the account metadata instead of setting it\n\
+             \n\
+             NOTES\n\
              Update only non-secret account metadata. The vault decrypts and re-seals the\n\
-             existing record without replacing token material, keeps its lifecycle state,\n\
-             and bumps record_version because the encrypted envelope changed. Works for any\n\
+             existing record without replacing token material, keeps its lifecycle state, and\n\
+             bumps record_version because the encrypted envelope changed. Works for any\n\
              decryptable record, including needs-reauth or retired records."
         }
         "migrate-opencode" => {
             "ck auth migrate-opencode [--dry-run] [--replace] [--force-shape]\n\
              \x20                        [--restore <provider>] [--auth-file <path>]\n\
-             \x20                        [--handle-file <path>] [--provider <id>]...\n\
-             \x20                        [--serve-by <plugin-id>]\n\
+             \x20                        [--handle-file <path>]\n\
+             \x20                        [--provider <id>]... [--serve-by <plugin-id>]\n\
              \n\
+             \x20 --dry-run               print non-secret compare verdicts and stop before\n\
+             \x20                         every write\n\
+             \x20 --replace               explicitly allow replacement when material differs\n\
+             \x20 --force-shape           override the availability-only refusal for unsafe\n\
+             \x20                         provider shapes and print the concrete sentinel\n\
+             \x20                         consequence\n\
+             \x20 --restore <provider>    safely write an api entry back, revoke recorded\n\
+             \x20                         handles, and remove that provider from the handle\n\
+             \x20                         file; cannot combine with dry-run, replace,\n\
+             \x20                         force-shape, or provider\n\
+             \x20 --auth-file <path>      OpenCode auth file; defaults to\n\
+             \x20                         <data_home>/opencode/auth.json\n\
+             \x20 --handle-file <path>    handle file; defaults to\n\
+             \x20                         <config_home>/cortexkit/opencode-handles.json\n\
+             \x20 --provider <id>         select a provider; repeatable, preserving requested\n\
+             \x20                         order\n\
+             \x20 --serve-by <plugin-id>  serving plugin; defaults to opencode-claustrum\n\
+             \n\
+             NOTES\n\
              Move OpenCode api entries into the vault as apikey:<provider>:main, write a\n\
              capability handle file, then replace the auth entry with a provider tombstone.\n\
-             Re-running identical material is a no-op; different material refuses unless\n\
-             --replace is explicit. --provider is repeatable and preserves the requested\n\
-             provider order. OAuth and wellknown entries are skipped by default.\n\
+             Re-running identical material is a no-op. OAuth and wellknown entries are\n\
+             skipped by default.\n\
              \n\
-              --dry-run prints non-secret compare verdicts and stops before every write.\n\
-              Providers whose api key leaves the generic fetch seam are refused with source\n\
-              citations. --force-shape overrides that availability-only refusal and prints the\n\
-              concrete sentinel consequence.\n\
-             --restore <provider> safely writes an api entry back, revokes recorded handles,\n\
-             and removes that provider from the handle file. --restore cannot combine with\n\
-             --dry-run or --replace. The default --serve-by is opencode-claustrum."
+             Providers whose api key leaves the generic fetch seam are refused with source\n\
+             citations."
         }
         "opencode-account" => {
-            "ck auth opencode-account add --provider <id> --label <label>\n\
-             \x20                        --key-file <path|-> [--before <label>]\n\
-             \x20                        [--handle-file <path>]\n\
+            "ck auth opencode-account add --provider <id> --label <label> --key-file <path|->\n\
+             \x20                        [--before <label>] [--handle-file <path>]\n\
+             \n\
+             \x20 --provider <id>       provider already migrated; required for add/remove,\n\
+             \x20                       optional for list\n\
+             \x20 --label <label>       account label to add or remove\n\
+             \x20 --key-file <path|->   add: key from a file or stdin (-), never argv; stdin\n\
+             \x20                       trims one terminal LF or CRLF\n\
+             \x20 --before <label>      add: insert before an existing account label\n\
+             \x20 --handle-file <path>  handle file; defaults to\n\
+             \x20                       <config_home>/cortexkit/opencode-handles.json\n\
+             \n\
+             NOTES\n\
+             Add, remove, or list labeled api accounts in a provider already migrated by\n\
+             migrate-opencode. List prints labels, credential ids, lifecycle state, and\n\
+             record versions only.\n\
+             \n\
              ck auth opencode-account remove --provider <id> --label <label>\n\
              \x20                        [--handle-file <path>]\n\
-             ck auth opencode-account list [--provider <id>] [--handle-file <path>]\n\
              \n\
-             Add, remove, or list labeled api accounts in a provider already\n\
-             migrated by migrate-opencode. Keys are read from a file or stdin,\n\
-             never argv; stdin trims one terminal LF or CRLF. List prints labels,\n\
-             credential ids, lifecycle state, and record versions only."
+             ck auth opencode-account list [--provider <id>] [--handle-file <path>]"
         }
         "mint-handle" => {
             "ck auth mint-handle --id <id>\n\
              \n\
-             Mint an unguessable capability handle for a credential — the token a\n\
-             consumer presents to `credential.get`. A credential can have many handles."
+             \x20 --id <id>  credential for which to mint a capability handle\n\
+             \n\
+             NOTES\n\
+             Mint an unguessable capability handle for a credential — the token a consumer\n\
+             presents to `credential.get`. A credential can have many handles."
         }
         "revoke-handle" => {
             "ck auth revoke-handle --handle <raw> | --hash <hex>\n\
              \n\
-             Revoke one capability handle (audited). The credential and its other\n\
-             handles keep serving. Supply exactly one form.\n\
+             \x20 --handle <raw>  the raw ckh_ bearer token\n\
+             \x20 --hash <hex>    64 lowercase hex; when the raw value is gone, use the\n\
+             \x20                 handle_hash column, also audit payload_hash on its mint row\n\
+             \x20                 (ck auth audit)\n\
              \n\
-             Flags:\n\
-               --handle <raw>  The raw ckh_ bearer token.\n\
-               --hash <hex>    64 lowercase hex; when the raw value is gone, use the handle_hash column, also audit payload_hash on its mint row (ck auth audit)."
+             NOTES\n\
+             Revoke one capability handle (audited). The credential and its other handles\n\
+             keep serving. Supply exactly one form."
         }
         "revoke-all-handles" => {
             "ck auth revoke-all-handles --id <id>\n\
              \n\
-             Revoke every capability handle for a credential in one audited step. The\n\
-             record itself is untouched (still refreshable; mint new handles later)."
+             \x20 --id <id>  credential whose capability handles should all be revoked\n\
+             \n\
+             NOTES\n\
+             Revoke every capability handle for a credential in one audited step. The record\n\
+             itself is untouched (still refreshable; mint new handles later)."
         }
         "grant" => {
-            "ck auth grant --principal <module-id> --prefix <credential-prefix> \\\n              --operation <read|sign>\n\
-              \n\
-              Grant one reserved module principal either ordinary reads or signing for\n\
-              credential ids beginning with the literal prefix. Read and sign are separate\n\
-              authorities: neither operation implies the other. Status enumerates the ids\n\
-              currently covered; review that set whenever a credential is added under the\n\
-              prefix."
+            "ck auth grant --principal <module-id> --prefix <credential-prefix>\n\
+             \x20             --operation <read|sign>\n\
+             \n\
+             \x20 --principal <module-id>       reserved module principal (bare module id)\n\
+             \x20 --prefix <credential-prefix>  literal credential-id prefix\n\
+             \x20 --operation <read|sign>       authority to grant\n\
+             \n\
+             NOTES\n\
+             Grant one reserved module principal either ordinary reads or signing for\n\
+             credential ids beginning with the literal prefix. Read and sign are separate\n\
+             authorities: neither operation implies the other. Status enumerates the ids\n\
+             currently covered; review that set whenever a credential is added under the\n\
+             prefix."
         }
         "revoke-grant" => {
-            "ck auth revoke-grant --principal <module-id> --prefix <credential-prefix> \\\n              --operation <read|sign>\n\
-              \n\
-              Revoke one reserved module principal's literal-prefix read or sign grant. The\n\
-              change takes effect on the next scoped operation and does not affect capability\n\
-              handles."
+            "ck auth revoke-grant --principal <module-id> --prefix <credential-prefix>\n\
+             \x20                    --operation <read|sign>\n\
+             \n\
+             \x20 --principal <module-id>       reserved module principal (bare module id)\n\
+             \x20 --prefix <credential-prefix>  literal credential-id prefix\n\
+             \x20 --operation <read|sign>       authority to revoke\n\
+             \n\
+             NOTES\n\
+             Revoke one reserved module principal's literal-prefix read or sign grant. The\n\
+             change takes effect on the next scoped operation and does not affect capability\n\
+             handles."
         }
         "reactivate" => {
             "ck auth reactivate --id <id>\n\
              \n\
+             \x20 --id <id>  credential to clear from needs-reauth\n\
+             \n\
+             NOTES\n\
              Clear needs-reauth WITHOUT replacing the secret: the operator asserting the\n\
              credential was marked dead in error (a consumer can misreport a provider's\n\
              refusal). The stored material is untouched, so this is not a re-login.\n\
              \n\
-             Self-correcting: the next use verifies it, and a credential that really is\n\
-             dead returns to needs-reauth on its own. Refused for `corrupt` records —\n\
-             those failed our own integrity check and only a re-deposit fixes them."
+             Self-correcting: the next use verifies it, and a credential that really is dead\n\
+             returns to needs-reauth on its own. Refused for `corrupt` records — those failed\n\
+             our own integrity check and only a re-deposit fixes them."
         }
         "invalidate" => {
             "ck auth invalidate --id <id>\n\
              \n\
-             Mark a credential needs-reauth (stops serving until re-login) without\n\
-             revoking handles. `logout` is the usual operator verb; this is the lower-\n\
-             level primitive."
+             \x20 --id <id>  credential to mark needs-reauth\n\
+             \n\
+             NOTES\n\
+             Mark a credential needs-reauth (stops serving until re-login) without revoking\n\
+             handles. `logout` is the usual operator verb; this is the lower-level primitive."
         }
         "audit" => {
-            "ck auth audit [--limit N]\n\
+            "ck auth audit [--limit <N>]\n\
              \n\
+             \x20 --limit <N>  maximum audit entries to print; defaults to all entries\n\
+             \n\
+             NOTES\n\
              Print the tamper-evident HMAC audit chain. Reads LEASE-FREE, so it is safe\n\
              against a running daemon -- do not stop the vault for this.\n\
              \n\
-             This is where a SUCCESSFUL refresh appears, as refresh_commit. 'ck auth\n\
-             events' records failures only, so read the chain to answer whether a\n\
-             credential is being refreshed at all."
+             This is where a SUCCESSFUL refresh appears, as refresh_commit. 'ck auth events'\n\
+             records failures only, so read the chain to answer whether a credential is being\n\
+             refreshed at all."
         }
         "events" => {
-            "ck auth events [--limit N]\n\
+            "ck auth events [--limit <N>]\n\
              \n\
-             Print recent authentication events: why a credential stopped working.\n\
-             Records a consumer's reported provider status (401 vs 403) and refresh\n\
-             failures, neither of which the audit chain can carry.\n\
+             \x20 --limit <N>  maximum recent events to print; defaults to 20\n\
              \n\
-             `applied` says whether the event changed the credential. A report naming\n\
-             a record_version the vault had already replaced is a deliberate no-op --\n\
-             shown here as applied=no, because a consumer acting on stale state is\n\
-             worth seeing and leaves no other trace.\n\
+             NOTES\n\
+             Print recent authentication events: why a credential stopped working. Records a\n\
+             consumer's reported provider status (401 vs 403) and refresh failures, neither\n\
+             of which the audit chain can carry.\n\
              \n\
-             Reads the store read-only and takes no lease, so it works against a\n\
-             RUNNING vault. These rows are diagnostics, not evidence: unlike the audit\n\
-             chain they are not tamper-evident and may be pruned. For what authoritatively\n\
-             happened, use `audit`."
+             `applied` says whether the event changed the credential. A report naming a\n\
+             record_version the vault had already replaced is a deliberate no-op -- shown\n\
+             here as applied=no, because a consumer acting on stale state is worth seeing and\n\
+             leaves no other trace.\n\
+             \n\
+             Reads the store read-only and takes no lease, so it works against a RUNNING\n\
+             vault. These rows are diagnostics, not evidence: unlike the audit chain they are\n\
+             not tamper-evident and may be pruned. For what authoritatively happened, use\n\
+             `audit`."
         }
         "usable" => {
             "ck auth usable\n\
              \n\
+             NOTES\n\
              Open every credential's envelope and report what its contents imply.\n\
              \n\
-             The only command that decrypts. 'status' and 'list' read plaintext\n\
-             metadata, so neither can see a record that decrypts to nothing usable.\n\
+             The only command that decrypts. 'status' and 'list' read plaintext metadata, so\n\
+             neither can see a record that decrypts to nothing usable.\n\
              \n\
-             Scores STRANDED: a record holding neither a usable access token nor any\n\
-             refresh material, so it can never serve again without an operator login.\n\
-             Expiry is printed but never scored -- an expired access token beside live\n\
-             refresh material is the routine state of a healthy credential, and it\n\
-             refreshes on the next read.\n\
+             Scores STRANDED: a record holding neither a usable access token nor any refresh\n\
+             material, so it can never serve again without an operator login. Expiry is\n\
+             printed but never scored -- an expired access token beside live refresh material\n\
+             is the routine state of a healthy credential, and it refreshes on the next read.\n\
              \n\
              Safe while the daemon runs: read-only, takes no lease, writes nothing.\n\
              \n\
@@ -776,62 +885,48 @@ fn help_verb(verb: &str) -> String {
         "verify-audit" => {
             "ck auth verify-audit\n\
              \n\
-             Verify the audit-chain integrity end to end. Reads LEASE-FREE, so it is\n\
-             safe against a running daemon -- do not stop the vault for this. Fails if\n\
-             any entry was edited, reordered, or inserted.\n\
+             NOTES\n\
+             Verify the audit-chain integrity end to end. Reads LEASE-FREE, so it is safe\n\
+             against a running daemon -- do not stop the vault for this. Fails if any entry\n\
+             was edited, reordered, or inserted.\n\
              \n\
-             DOES NOT DETECT TRUNCATION OF THE NEWEST ENTRIES, at any depth. Every\n\
-             entry binds its predecessor, so a chain with its tail removed is a SHORTER\n\
-             VALID CHAIN and verifies clean -- there is no in-band record of expected\n\
-             length. Forging an entry still needs the audit key; deleting a suffix does\n\
-             not. So 'intact' means the recorded history was not ALTERED, never that it\n\
-             is ALL of the history.\n\
+             DOES NOT DETECT TRUNCATION OF THE NEWEST ENTRIES, at any depth. Every entry\n\
+             binds its predecessor, so a chain with its tail removed is a SHORTER VALID CHAIN\n\
+             and verifies clean -- there is no in-band record of expected length. Forging an\n\
+             entry still needs the audit key; deleting a suffix does not. So 'intact' means\n\
+             the recorded history was not ALTERED, never that it is ALL of the history.\n\
              \n\
              Consequence worth knowing before you rely on it: absence of rows is not\n\
-             evidence. 'The vault wrote nothing' reads identically to 'the vault's rows\n\
-             were deleted', so it cannot separate a credential the vault never\n\
-             adjudicated from one whose verdict was erased. Detecting that needs a tip\n\
-             (last seq + entry_mac) recorded OUTSIDE this database and compared for\n\
-             monotonicity -- see docs/operator-runbook.md.\n\
+             evidence. 'The vault wrote nothing' reads identically to 'the vault's rows were\n\
+             deleted', so it cannot separate a credential the vault never adjudicated from\n\
+             one whose verdict was erased. Detecting that needs a tip (last seq + entry_mac)\n\
+             recorded OUTSIDE this database and compared for monotonicity -- see\n\
+             docs/operator-runbook.md.\n\
              \n\
              The running daemon publishes that tip in its health body as auditSeq and\n\
-             auditTipMac, so a witness can record it without database access. The check\n\
-             is NOT 'the sequence never decreases': a truncation followed by fresh\n\
-             legitimate appends returns the sequence to its old value, and only the mac\n\
-             at that sequence differs. The mac observed at a given sequence must be\n\
-             stable forever."
+             auditTipMac, so a witness can record it without database access. The check is\n\
+             NOT 'the sequence never decreases': a truncation followed by fresh legitimate\n\
+             appends returns the sequence to its old value, and only the mac at that sequence\n\
+             differs. The mac observed at a given sequence must be stable forever."
         }
         "rotate-master-key" => {
             "ck auth rotate-master-key\n\
              \n\
-             Crash-safe two-slot rotation of the vault master key (ALWAYS offline; stop\n\
-             the daemon first). Re-seals every record under the new key."
+             NOTES\n\
+             Crash-safe two-slot rotation of the vault master key (ALWAYS offline; stop the\n\
+             daemon first). Re-seals every record under the new key."
         }
         "bootstrap" => {
             "ck auth bootstrap\n\
              \n\
-             Initialize a new vault: provision the master key and seal the audit key\n\
-             (ALWAYS offline). Refuses if the vault already exists."
+             NOTES\n\
+             Initialize a new vault: provision the master key and seal the audit key (ALWAYS\n\
+             offline). Refuses if the vault already exists."
         }
-        "overrides" => {
-            "Global flags (rarely needed; apply to any verb):\n\
-             \n\
-             \x20 --data-dir <dir>   vault location; defaults to the standard per-user path\n\
-             \x20                    (<data_home>/cortexkit/claustrum). An\n\
-             \x20                    explicit dir targets THAT vault and stays offline\n\
-             \x20                    unless --subc is also given.\n\
-             \x20 --subc <file>      subc connection file; auto-discovered on a standard\n\
-             \x20                    install. Present => writes commit through the running\n\
-             \x20                    module (zero downtime); absent/no daemon => offline\n\
-             \x20                    single-writer lease (daemon must be stopped).\n\
-             \x20                    rotate-master-key and bootstrap are always offline.\n\
-             \x20 --key-path <file>  operator key file instead of the OS keychain."
-        }
+        "overrides" => return usage_short(),
         _ => return format!("no help for '{verb}'\n\n{}", usage_short()),
     };
-    format!(
-        "{body}\n\nGlobal flags: --data-dir / --subc / --key-path — run 'ck auth help overrides'."
-    )
+    body.to_string()
 }
 
 /// Commit one admin op, choosing the backend by `--subc`:

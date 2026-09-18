@@ -612,6 +612,27 @@ fn a_kind_prefixed_principal_is_refused_on_both_grant_verbs() {
     }
 }
 
+fn accepted_help_flags(verb: &str) -> Vec<String> {
+    let src = include_str!("../src/bin/credentials_cli.rs");
+    let mut out: Vec<String> = Vec::new();
+    for (idx, _) in src.match_indices("=> &[") {
+        // The arm pattern is everything from the previous newline up to the fat arrow.
+        let line_start = src[..idx].rfind('\n').map(|n| n + 1).unwrap_or(0);
+        let pattern = &src[line_start..idx];
+        if !pattern.contains(&format!("\"{verb}\"")) {
+            continue;
+        }
+        let rest = &src[idx + "=> &[".len()..];
+        let to = rest.find(']').expect("unterminated accept-list");
+        for token in rest[..to].split('"') {
+            if token.starts_with("--") && !out.contains(&token.to_string()) {
+                out.push(token.to_string());
+            }
+        }
+    }
+    out
+}
+
 // EVERY FLAG THE PARSER ACCEPTS IS NAMED ON ITS HELP PAGE. This is the defence for the
 // help-page reformat: a page can be rewritten for shape without silently dropping a flag,
 // because a dropped flag is undiscoverable -- the parser still takes it, so nothing fails,
@@ -631,27 +652,7 @@ fn every_verb_names_on_its_help_page_each_flag_its_parser_accepts() {
     // A `find()` for a single `"verb" => &[` takes the first list and silently ignores the
     // second, which is how the first draft reported "8 of 8 named" while checking only the
     // value flags. Collect from EVERY arm whose pattern names the verb.
-    let src = include_str!("../src/bin/credentials_cli.rs");
-
-    let accepted = |verb: &str| -> Vec<String> {
-        let mut out: Vec<String> = Vec::new();
-        for (idx, _) in src.match_indices("=> &[") {
-            // The arm pattern is everything from the previous newline up to the fat arrow.
-            let line_start = src[..idx].rfind('\n').map(|n| n + 1).unwrap_or(0);
-            let pattern = &src[line_start..idx];
-            if !pattern.contains(&format!("\"{verb}\"")) {
-                continue;
-            }
-            let rest = &src[idx + "=> &[".len()..];
-            let to = rest.find(']').expect("unterminated accept-list");
-            for token in rest[..to].split('"') {
-                if token.starts_with("--") && !out.contains(&token.to_string()) {
-                    out.push(token.to_string());
-                }
-            }
-        }
-        out
-    };
+    let accepted = accepted_help_flags;
 
     assert!(
         accepted("login").iter().any(|flag| flag == "--no-browser"),
@@ -3972,4 +3973,134 @@ fn hash_revoke_cli_refuses_ambiguous_missing_and_malformed_forms_before_opening_
         assert!(!vault.data_dir.join("store.db").exists());
         assert!(!vault.key_path.exists());
     }
+}
+
+// Check the rendered pages, not their source literals: Rust string continuations can
+// silently eat table indentation. Collect violations so a misplaced flag reports both
+// the missing table entry and the prose leak in the same run, with the verb named.
+#[test]
+fn every_verb_help_uses_a_flags_table_and_notes_layout() {
+    let output = cli().arg("help").output().expect("top-level help");
+    assert!(output.status.success());
+    let top = String::from_utf8(output.stdout).expect("UTF-8 help");
+    let verbs: Vec<&str> = top
+        .lines()
+        .skip_while(|line| *line != "verbs:")
+        .skip(1)
+        .take_while(|line| !line.trim().is_empty())
+        .map(|line| line.split_whitespace().next().expect("verb"))
+        .collect();
+    assert_eq!(verbs.len(), 25, "the rendered verb-table scan narrowed");
+    assert!(accepted_help_flags("login").contains(&"--no-browser".to_string()));
+    assert!(accepted_help_flags("revoke-handle").contains(&"--hash".to_string()));
+    let mut violations = Vec::new();
+    // Derive the value-taking globals from the hoister, where the parser defines
+    // which flags may precede the verb. Version exits before that parser runs.
+    let src = include_str!("../src/bin/credentials_cli.rs");
+    let hoisted = src
+        .split_once("const GLOBAL_WITH_VALUE:")
+        .expect("global hoist definition")
+        .1
+        .split_once("= [")
+        .expect("global hoist array")
+        .1
+        .split_once("];")
+        .expect("global hoist array end")
+        .0;
+    let mut globals: Vec<&str> = hoisted.split('"').filter(|s| s.starts_with("--")).collect();
+    assert_eq!(globals.len(), 3, "global hoist extraction narrowed");
+    globals.push("--version");
+    let global_table = top
+        .split_once("GLOBAL FLAGS\n")
+        .map(|(_, rest)| rest.split("\n\n").next().unwrap_or(""))
+        .unwrap_or("");
+    for flag in globals {
+        let count = global_table
+            .lines()
+            .filter(|line| {
+                line.strip_prefix("  ")
+                    .and_then(|rest| rest.split_whitespace().next())
+                    == Some(flag)
+            })
+            .count();
+        if count != 1 {
+            violations.push(format!(
+                "top-level: global table must contain {flag} exactly once"
+            ));
+        }
+    }
+    for (i, line) in top.lines().enumerate() {
+        if line.chars().count() > 80 {
+            violations.push(format!("top-level: line {} exceeds 80 columns", i + 1));
+        }
+    }
+    for verb in verbs {
+        let output = cli().args(["help", verb]).output().expect("verb help");
+        assert!(output.status.success(), "help {verb} failed");
+        let page = String::from_utf8(output.stdout).expect("UTF-8 help");
+        let lines: Vec<&str> = page.lines().collect();
+        if !lines
+            .first()
+            .is_some_and(|line| line.starts_with(&format!("ck auth {verb}")))
+        {
+            violations.push(format!("{verb}: (a) missing synopsis"));
+        }
+        let synopsis_end = lines
+            .iter()
+            .position(|line| line.is_empty())
+            .unwrap_or(lines.len());
+        let table_start = synopsis_end + 1;
+        let table_end = lines
+            .iter()
+            .enumerate()
+            .skip(table_start)
+            .find(|(_, line)| line.is_empty())
+            .map(|(i, _)| i)
+            .unwrap_or(lines.len());
+        let entries: Vec<&str> = lines
+            .iter()
+            .take(table_end)
+            .skip(table_start)
+            .filter_map(|line| line.strip_prefix("  --"))
+            .filter(|rest| rest.starts_with(|c: char| c.is_ascii_lowercase()))
+            .filter_map(|rest| rest.split_whitespace().next())
+            .collect();
+        let flags = accepted_help_flags(verb);
+        if !flags.is_empty() && entries.is_empty() {
+            violations.push(format!("{verb}: (b) missing flags table"));
+        }
+        for flag in &flags {
+            if !entries.contains(&flag.trim_start_matches("--")) {
+                violations.push(format!("{verb}: (b) missing table entry {flag}"));
+            }
+        }
+        for entry in &entries {
+            if !flags.contains(&format!("--{entry}")) {
+                violations.push(format!("{verb}: phantom table entry --{entry}"));
+            }
+        }
+        let mut in_notes = false;
+        for (i, line) in lines.iter().enumerate() {
+            if line.chars().count() > 80 {
+                violations.push(format!("{verb}: (c) line {} exceeds 80 columns", i + 1));
+            }
+            if !line.is_empty() && line.chars().all(|c| c.is_ascii_uppercase() || c == ' ') {
+                in_notes = *line == "NOTES";
+            }
+            // The synopsis (including its continuations) necessarily names flags.
+            // Only a real table's indented rows and continuations are exempt below it.
+            let in_table =
+                i >= table_start && i < table_end && line.starts_with("  ") && !entries.is_empty();
+            if i >= synopsis_end
+                && !in_table
+                && !in_notes
+                && line
+                    .match_indices(" --")
+                    .any(|(at, _)| line[at + 3..].starts_with(|c: char| c.is_ascii_lowercase()))
+            {
+                violations.push(format!("{verb}: (d) flag outside table/NOTES: {line}"));
+            }
+        }
+    }
+    assert!(violations.is_empty(), "{}", violations.join("\n"));
 }

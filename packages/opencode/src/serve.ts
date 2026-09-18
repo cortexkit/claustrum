@@ -3,7 +3,17 @@ import {
   type ServedCredential,
 } from "@cortexkit/claustrum-client";
 
-import { CustodyAuthReadError, CustodyExhaustionError, CustodyOwnershipError, CustodyRedirectRefusedError, CustodyRequestError, CustodySplitError } from "./errors";
+import {
+  CustodyAuthReadError,
+  CustodyExhaustionError,
+  CustodyOwnershipError,
+  CustodyRedirectRefusedError,
+  CustodyRequestError,
+  CustodySplitError,
+  CustodyWarmTimeoutError,
+  ReportedCustodyExhaustionError,
+  type CustodyAccountSnapshot,
+} from "./errors";
 import {
   DEFAULT_RETRY_AFTER_MS,
   FreshnessController,
@@ -89,10 +99,30 @@ async function discard(response: Response): Promise<void> {
   }
 }
 
-function exhaustion(provider: string, accounts: AccountRuntime[], freshness: FreshnessController): CustodyExhaustionError {
-  const states = accounts.map(({ account }) => `${account.label}:${freshness.state(account)}`).join(", ");
-  return new CustodyExhaustionError(
-    `custody accounts exhausted: provider=${provider} accounts=${states}; run ck auth migrate-opencode for gone handles`,
+function exhaustion(
+  provider: string,
+  accounts: AccountRuntime[],
+  freshness: FreshnessController,
+): CustodyExhaustionError | CustodyWarmTimeoutError {
+  const accountStates: CustodyAccountSnapshot[] = accounts.map(({ account }) => ({
+    label: account.label,
+    state: freshness.state(account),
+    warmTimedOut: freshness.warmTimedOut(account),
+  }));
+  const states = accountStates.map((snapshot) => `${snapshot.label}:${snapshot.state}`).join(", ");
+  const anyGone = accountStates.some((snapshot) => snapshot.state === "gone");
+  // migrate-opencode is remediation for gone handles, not for a budget miss or a cooldown.
+  const migrate = anyGone ? "; run ck auth migrate-opencode for gone handles" : "";
+  if (accountStates.length > 0 && accountStates.every((snapshot) => snapshot.warmTimedOut)) {
+    return new CustodyWarmTimeoutError(
+      `custody credential warm timed out: provider=${provider} accounts=${states}`,
+      accountStates,
+    );
+  }
+  return new ReportedCustodyExhaustionError(
+    `custody accounts exhausted: provider=${provider} accounts=${states}${migrate}`,
+    accountStates,
+    anyGone,
   );
 }
 
@@ -325,7 +355,8 @@ export function createServeFetch(options: CreateServeFetchOptions) {
     }
 
     const refusal = exhaustion(options.provider, accounts, freshness);
-    options.log?.error({ provider: options.provider, errorClass: refusal.name, errorMessage: refusal.message });
+    const log = refusal instanceof CustodyWarmTimeoutError ? options.log?.warn : options.log?.error;
+    log?.({ provider: options.provider, errorClass: refusal.name, errorMessage: refusal.message });
     throw refusal;
   };
 }

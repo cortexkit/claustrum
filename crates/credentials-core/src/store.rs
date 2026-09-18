@@ -2547,7 +2547,7 @@ impl EncryptedStore {
     /// ATTEMPT may be worth recording even when it moved no rows, and the chain has no
     /// field to say which happened. Admin-gated, so no unauthenticated caller can drive
     /// it.
-    /// RETURNS THE OWNING CREDENTIAL ID, OR `None` WHEN NO HANDLE ROW MATCHED.
+    /// Returns the owning credential ID when a live handle was revoked, otherwise `None`.
     ///
     /// The owner is read inside the transaction anyway, to make the audit entry
     /// attributable. Returning it costs nothing and closes a false assurance: the CLI
@@ -2562,15 +2562,33 @@ impl EncryptedStore {
     /// store, so withholding the distinction protects nothing and costs the operator the
     /// one fact they asked for.
     ///
-    /// `Some` covers both a live handle and an already-revoked one -- the update is
-    /// idempotent and the operator's question ("is that handle dead now") has the same
-    /// answer either way. `None` is the case worth naming.
+    /// Repeated and unknown revocations are no-ops: neither appends to the durable
+    /// audit chain, which records state transitions rather than attempts.
     pub fn revoke_handle(
         &self,
         raw_handle: &str,
         ctx: AuditCtx<'_>,
     ) -> Result<Option<String>, StoreOpError> {
-        let h = handle_hash(raw_handle);
+        self.revoke_handle_by_hash_audited(&handle_hash(raw_handle), ctx)
+    }
+
+    /// Revoke by the stored hash when the raw bearer is no longer available.
+    pub fn revoke_handle_by_hash_audited(
+        &self,
+        handle_hash: &str,
+        ctx: AuditCtx<'_>,
+    ) -> Result<Option<String>, StoreOpError> {
+        // Prefix expansion could revoke a different bearer as the table grows.
+        if handle_hash.len() != 64
+            || !handle_hash
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(StoreOpError::Encode(
+                "expected 64 lowercase hex handle hash".into(),
+            ));
+        }
+        let h = handle_hash.to_owned();
         let audit_key = self.audit_key.clone();
         self.fenced_write(|tx| {
             // Read the owner INSIDE the same transaction, before the update. One indexed
@@ -2583,10 +2601,13 @@ impl EncryptedStore {
                 )
                 .optional()?;
             let owner_for_return = owner.clone();
-            tx.execute(
-                "UPDATE handles SET revoked = 1 WHERE handle_hash = ?1",
+            let changed = tx.execute(
+                "UPDATE handles SET revoked = 1 WHERE handle_hash = ?1 AND revoked = 0",
                 rusqlite::params![h],
             )?;
+            if changed == 0 {
+                return Ok(None);
+            }
             append_audit_tx(
                 tx,
                 &audit_key,
@@ -5999,13 +6020,127 @@ mod tests {
             "an unknown handle must report that nothing matched, not a success"
         );
 
-        // An ALREADY-REVOKED handle still names its owner: the operator asked "is that
-        // handle dead now", and the answer is yes whether or not it was dead already.
+        // A repeated revoke is not another state transition.
         let again = store
             .revoke_handle(&h.raw, AuditCtx::admin(AuditOp::RevokeHandle))
             .expect("revoke again");
-        assert_eq!(again.as_deref(), Some("opencode:anthropic"));
+        assert_eq!(again, None);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn hash_revoke_is_targeted_attributed_and_idempotent() {
+        let (_root, store) = tmp_store(110);
+        store.create("opencode:anthropic", &oauth_record()).unwrap();
+        let handles = [mint_handle().unwrap(), mint_handle().unwrap()];
+        for h in &handles {
+            store
+                .put_handle_hash(
+                    &h.hash,
+                    "opencode:anthropic",
+                    AuditCtx::admin(AuditOp::MintHandle),
+                )
+                .unwrap();
+        }
+        let before = store.read_audit(None).unwrap().len();
+        assert_eq!(
+            store
+                .revoke_handle_by_hash_audited(
+                    &handles[0].hash,
+                    AuditCtx::admin(AuditOp::RevokeHandle)
+                )
+                .unwrap()
+                .as_deref(),
+            Some("opencode:anthropic")
+        );
+        assert!(matches!(
+            store.resolve_handle(&handles[0].raw),
+            Err(StoreOpError::NotFound)
+        ));
+        assert_eq!(
+            store.resolve_handle(&handles[1].raw).unwrap(),
+            "opencode:anthropic"
+        );
+        for (index, h) in handles.iter().enumerate() {
+            let revoked: i64 = store
+                .store
+                .with_conn(|conn| {
+                    conn.query_row(
+                        "SELECT revoked FROM handles WHERE handle_hash = ?1",
+                        [&h.hash],
+                        |row| row.get(0),
+                    )
+                })
+                .unwrap();
+            assert_eq!(revoked, if index == 0 { 1 } else { 0 });
+        }
+        let entries = store.read_audit(None).unwrap();
+        assert_eq!(entries.len(), before + 1);
+        let revokes: Vec<_> = entries.iter().filter(|e| e.op == "revoke_handle").collect();
+        assert_eq!(revokes.len(), 1);
+        assert_eq!(
+            revokes[0].credential_id.as_deref(),
+            Some("opencode:anthropic")
+        );
+        let repeat = store
+            .revoke_handle_by_hash_audited(&handles[0].hash, AuditCtx::admin(AuditOp::RevokeHandle))
+            .unwrap();
+        assert_eq!(
+            store.read_audit(None).unwrap().len(),
+            before + 1,
+            "repeat must not grow audit"
+        );
+        assert_eq!(repeat, None);
+        assert_eq!(store.verify_audit_chain().unwrap(), None);
+    }
+
+    #[test]
+    fn raw_revoke_repeat_does_not_append_audit() {
+        let (_root, store) = tmp_store(111);
+        store.create("opencode:anthropic", &oauth_record()).unwrap();
+        let h = mint_handle().unwrap();
+        store
+            .put_handle_hash(
+                &h.hash,
+                "opencode:anthropic",
+                AuditCtx::admin(AuditOp::MintHandle),
+            )
+            .unwrap();
+        assert!(store
+            .revoke_handle(&h.raw, AuditCtx::admin(AuditOp::RevokeHandle))
+            .unwrap()
+            .is_some());
+        let before = store.read_audit(None).unwrap().len();
+        let repeat = store
+            .revoke_handle(&h.raw, AuditCtx::admin(AuditOp::RevokeHandle))
+            .unwrap();
+        assert_eq!(
+            store.read_audit(None).unwrap().len(),
+            before,
+            "repeat must not grow audit"
+        );
+        assert_eq!(repeat, None);
+    }
+
+    #[test]
+    fn hash_revoke_unknown_and_malformed_do_not_append_audit() {
+        let (_root, store) = tmp_store(112);
+        let before = store.read_audit(None).unwrap().len();
+        assert_eq!(
+            store
+                .revoke_handle_by_hash_audited(
+                    &"a".repeat(64),
+                    AuditCtx::admin(AuditOp::RevokeHandle)
+                )
+                .unwrap(),
+            None
+        );
+        for hash in ["a".repeat(63), "A".repeat(64)] {
+            assert!(store
+                .revoke_handle_by_hash_audited(&hash, AuditCtx::admin(AuditOp::RevokeHandle))
+                .is_err());
+        }
+        assert_eq!(store.read_audit(None).unwrap().len(), before);
     }
 
     #[test]
@@ -6114,18 +6249,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// A sequence-only witness cannot see a tail truncation when fresh legitimate
-    /// appends reuse the deleted sequence. The tip MAC makes the replacement visible.
-    /// A revocation names the credential that lost a door, and names nothing when the
-    /// handle does not resolve.
-    ///
-    /// Both arms are the point. Without the first, the chain answers "a handle was
-    /// revoked" and cannot answer the question an incident asks -- WHICH credentials lost
-    /// access -- which is exactly what an external contributor measured on a
-    /// five-credential rotation where two revocations shared a timestamp to the second.
-    ///
-    /// Without the second, a NULL would be meaningless and the entry could not
-    /// distinguish a revocation that closed a real door from one that found nothing.
+    /// Revocation audit rows identify the credential whose state changed;
+    /// an unknown handle changes no state and must not grow the durable chain.
     #[test]
     fn a_revocation_names_the_credential_that_lost_a_door() {
         let (_root, store) = tmp_store(41);
@@ -6155,11 +6280,10 @@ mod tests {
             .expect("idempotent on an unknown handle");
         let entries = store.read_audit(None).expect("read chain");
         let revoked: Vec<_> = entries.iter().filter(|e| e.op == "revoke_handle").collect();
-        assert_eq!(revoked.len(), 2, "the no-op attempt is still recorded");
         assert_eq!(
-            revoked[1].credential_id, None,
-            "an unresolvable handle must name NO credential, so a NULL means the \
-             revocation moved no rows rather than meaning the field was never filled"
+            revoked.len(),
+            1,
+            "a no-op must not append another audit row"
         );
     }
 

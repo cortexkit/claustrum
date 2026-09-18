@@ -658,7 +658,14 @@ fn every_verb_names_on_its_help_page_each_flag_its_parser_accepts() {
         "login's headless browser control must stay in the parser accept-list"
     );
 
-    let verbs = ["import", "put", "login", "grant", "set-identity"];
+    let verbs = [
+        "import",
+        "put",
+        "login",
+        "grant",
+        "set-identity",
+        "revoke-handle",
+    ];
     let mut total = 0usize;
 
     for verb in verbs {
@@ -689,7 +696,7 @@ fn every_verb_names_on_its_help_page_each_flag_its_parser_accepts() {
     // reached 24; both arms reach more. A future refactor that splits an arm must not
     // quietly reduce coverage.
     assert!(
-        total >= 28,
+        total >= 30,
         "only {total} flags checked across {} verbs; the extractor has narrowed",
         verbs.len()
     );
@@ -3880,4 +3887,89 @@ fn usable_distinguishes_a_cookie_age_from_an_api_key_age() {
     );
 
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn hash_revoke_cli_stops_a_previously_resolving_handle() {
+    use credentials_core::resolver::{KeySource, ResolverConfig};
+    let vault = GrantCliVault::new("hash-revoke");
+    vault.bootstrap();
+    assert!(vault
+        .run(&["put", "--id", "apikey:hash", "--payload", "secret"])
+        .status
+        .success());
+    let minted = vault.run(&["mint-handle", "--id", "apikey:hash"]);
+    assert!(minted.status.success());
+    let raw = String::from_utf8(minted.stdout).unwrap().trim().to_owned();
+    assert!(String::from_utf8_lossy(&minted.stderr)
+        .lines()
+        .any(|line| line == format!("revoke with: ck auth revoke-handle --handle {raw}")));
+    let hash = credentials_core::store::handle_hash(&raw);
+    let open = || {
+        let key = credentials_core::resolver::resolve(
+            &ResolverConfig {
+                data_dir: vault.data_dir.clone(),
+                source: KeySource::OperatorPath {
+                    path: vault.key_path.clone(),
+                },
+            },
+            None,
+        )
+        .unwrap();
+        let sqlite = open_sqlite(&StorageDescriptor {
+            module_id: credentials_core::contract::MODULE_ID.into(),
+            storage_namespace: credentials_core::contract::STORAGE_NAMESPACE.into(),
+            isolation: Isolation::Module,
+            backend: StorageBackend::Sqlite {
+                path: vault
+                    .data_dir
+                    .join("store.db")
+                    .to_string_lossy()
+                    .into_owned(),
+            },
+        })
+        .unwrap();
+        EncryptedStore::open(sqlite, key).unwrap()
+    };
+    assert_eq!(open().resolve_handle(&raw).unwrap(), "apikey:hash");
+    let revoked = vault.run(&["revoke-handle", "--hash", &hash]);
+    assert!(
+        revoked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&revoked.stderr)
+    );
+    assert!(String::from_utf8_lossy(&revoked.stdout)
+        .contains("revoked handle for apikey:hash via --hash"));
+    assert!(matches!(
+        open().resolve_handle(&raw),
+        Err(credentials_core::store::StoreOpError::NotFound)
+    ));
+    let repeat = vault.run(&["revoke-handle", "--hash", &hash]);
+    assert!(repeat.status.success());
+    assert!(String::from_utf8_lossy(&repeat.stdout)
+        .contains("no live handle matched that value; nothing changed."));
+}
+
+#[test]
+fn hash_revoke_cli_refuses_ambiguous_missing_and_malformed_forms_before_opening_vault() {
+    let vault = GrantCliVault::new("hash-revoke-usage");
+    let hash = "a".repeat(64);
+    let short = "a".repeat(63);
+    let uppercase = "A".repeat(64);
+    for args in [
+        vec!["revoke-handle", "--handle", "ckh_raw", "--hash", &hash],
+        vec!["revoke-handle"],
+        vec!["revoke-handle", "--hash", &short],
+        vec!["revoke-handle", "--hash", &uppercase],
+    ] {
+        let out = vault.run(&args);
+        assert!(!out.status.success());
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            err.contains("exactly one of --handle <raw> or --hash <hex> (64 lowercase hex)"),
+            "{err}"
+        );
+        assert!(!vault.data_dir.join("store.db").exists());
+        assert!(!vault.key_path.exists());
+    }
 }

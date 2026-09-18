@@ -342,13 +342,11 @@ assert_floor_not_lowered() {
 # follows it), and any gap between the floor and the real count is how many can go
 # before anyone is told. Measured 402 across the workspace's suites at the time of
 # writing; an earlier floor of 200 left a third of them free to disappear.
-# The current measured total is 634 (debug profile, the same command this arm
-# runs). It covers master's resolved-credential-id pins and RAII temp-dir lifecycle, plus this
-# branch's Rust manifest-lock tests: the ABA observation that cannot rename a replacement, one
-# quarantine directory per stale owner, unknown and malformed owner fields tolerated but still
-# evictable, a missing nonce surfacing as owner_invalid at the deadline, an owner that goes stale
-# inside the retry window, the expired-quarantine reclaim, and the lease-clock uniformity proofs
-# for commit and the renewal thread.
+# The current measured total is 638 (debug profile, the same command this arm
+# runs). Two branches each measured 634 on their own tree before merging: the lease-clock
+# uniformity proofs for commit and the renewal thread, and the login key/existence
+# preflight controls with the carried-key resolver-call control and the headless
+# browser-spawn predicate. Their sum is not the merged count; the merged tree was measured.
 #
 # MEASURED, NOT ARITHMETIC -- and this rebase is the third time it mattered. The branch bumped
 # 564 to 568, master reached 578 independently, and their sum (582) was already wrong because
@@ -365,7 +363,7 @@ assert_floor_not_lowered() {
 #
 # THE FLOOR IS RATCHETED AGAINST THE MERGE TARGET BY `assert_floor_not_lowered` BELOW,
 # because a floor alone does not defend the property it exists for. See that function.
-run_expect 634 "workspace unit + integration" \
+run_expect 638 "workspace unit + integration" \
   cargo test --locked --workspace --features credentials-core/test-support
 
 assert_floor_not_lowered "$(dirname "$0")/gate.sh"

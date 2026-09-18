@@ -4,8 +4,6 @@
 //! Cursor polls a browser challenge, Snowflake needs a dynamic callback port, and
 //! DigitalOcean needs an explicit fragment-capture listener.
 
-use std::process::Command;
-
 use credentials_core::oauth::OAuthCredential;
 use credentials_core::oauth_login::{generate_pkce, generate_state, parse_callback};
 use credentials_core::record::VaultRecord;
@@ -59,7 +57,7 @@ fn run_cursor(
     println!();
     println!("  {}", start.authorize_url);
     println!();
-    let _ = open_in_browser(&start.authorize_url);
+    let _ = super::open_in_browser(args, &start.authorize_url);
     println!("Waiting for browser sign-in…");
     let poller = cursor::ReqwestCursorPollTransport::new()
         .map_err(|e| format!("starting Cursor login poll: {e}"))?;
@@ -114,6 +112,7 @@ fn run_devin(
             .and_then(|addr| login_listener::capture_callback(&addr))
     };
     let callback = open_and_capture(
+        args,
         &authorize_url,
         listener,
         "After approving Devin, copy the full callback URL from the browser and paste it here:",
@@ -193,6 +192,7 @@ fn run_snowflake(
         Some(reserved)
     };
     let callback = open_and_capture(
+        args,
         &authorize_url,
         listener,
         "After approving Snowflake, copy the full callback URL from the browser and paste it here:",
@@ -254,6 +254,7 @@ fn run_digitalocean(
             .and_then(|addr| login_listener::capture_fragment_callback(&addr))
     };
     let raw = open_and_capture(
+        args,
         &authorize_url,
         listener,
         "After approving DigitalOcean, copy the full callback URL (including the #fragment) and paste it here:",
@@ -284,6 +285,7 @@ fn run_digitalocean(
 }
 
 fn open_and_capture(
+    args: &[String],
     authorize_url: &str,
     listener: Option<login_listener::CallbackListener>,
     paste_prompt: &str,
@@ -292,7 +294,7 @@ fn open_and_capture(
     println!();
     println!("  {authorize_url}");
     println!();
-    let _ = open_in_browser(authorize_url);
+    let _ = super::open_in_browser(args, authorize_url);
     let captured = match listener {
         Some(listener) => {
             println!("Approve in the browser — the login completes here automatically.");
@@ -328,25 +330,6 @@ fn optional(args: &[String], flag: &str) -> Option<String> {
 
 fn has_flag(args: &[String], flag: &str) -> bool {
     args.iter().any(|arg| arg == flag)
-}
-
-fn open_in_browser(url: &str) -> std::io::Result<()> {
-    #[cfg(target_os = "macos")]
-    {
-        Command::new("open").arg(url).spawn()?.wait()?;
-    }
-    #[cfg(target_os = "linux")]
-    {
-        Command::new("xdg-open").arg(url).spawn()?.wait()?;
-    }
-    #[cfg(target_os = "windows")]
-    {
-        Command::new("cmd")
-            .args(["/C", "start", "", url])
-            .spawn()?
-            .wait()?;
-    }
-    Ok(())
 }
 
 fn block_on<F: std::future::Future>(future: F) -> F::Output {

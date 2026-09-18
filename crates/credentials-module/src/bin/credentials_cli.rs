@@ -195,6 +195,11 @@ impl std::fmt::Display for CliError {
                  (ck module stop claustrum), run it, then start the daemon again. \
                  --subc will NOT help here.",
             ),
+            CliError::MasterKey(MasterKeyError::NotBootstrapped) => write!(
+                f,
+                "master key: no master key has been provisioned; run `ck auth bootstrap`, or \
+                 verify --key-path points to an existing operator key file"
+            ),
             CliError::MasterKey(e) => write!(f, "master key: {e}"),
             CliError::Store(e) => write!(f, "{e}"),
             CliError::StoreOpen(e) => write!(f, "{e}"),
@@ -426,7 +431,7 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
         "mint-signing-key" => &["--replace"],
         "import" => &["--replace", "--clear-identity"],
         "set-identity" => &["--clear"],
-        "login" => &["--replace", "--no-listener", "--device"],
+        "login" => &["--replace", "--no-listener", "--no-browser", "--device"],
         "migrate-opencode" => &["--dry-run", "--replace", "--force-shape"],
         _ => &[],
     };
@@ -509,7 +514,7 @@ fn help_verb(verb: &str) -> String {
     let body = match verb {
         "login" => {
             "ck auth login [--provider <name>] [--id <id>] [--account <id>]\n\
-             \x20             [--replace] [--no-listener] [--device]\n\
+             \x20             [--replace] [--no-listener] [--no-browser] [--device]\n\
              \x20             [--payload-file <path>]  api-key logins: read the key from a\n\
              \x20                                      file instead of prompting\n\
              \n\
@@ -517,9 +522,10 @@ fn help_verb(verb: &str) -> String {
              solely custodies (no dual-custody rotation race). Run with NO --provider for\n\
              an interactive picker of every provider.\n\
              \n\
-             OAuth providers open a browser URL; a one-shot CLI-local listener on the\n\
-             loopback redirect completes the flow automatically (--no-listener, a busy\n\
-             port, or a timeout falls back to pasting the address-bar URL). --device\n\
+             OAuth providers open a browser URL; --no-browser only prints it for headless\n\
+             or SSH sessions. A one-shot CLI-local listener on the loopback redirect\n\
+             completes the flow automatically (--no-listener, a busy port, or a timeout\n\
+             falls back to pasting the address-bar URL). --device\n\
              selects headless device authorization for openai/xai; github-copilot and\n\
              kimi always use device authorization. api-key providers prompt for a key\n\
              (validated before storing).\n\
@@ -840,8 +846,30 @@ fn commit_admin(
     global: &GlobalArgs,
     op: credentials_core::admin_ops::AdminOpBody,
 ) -> Result<serde_json::Value, CliError> {
+    commit_admin_with_key(global, op, None)
+}
+
+fn commit_login_admin(
+    global: &GlobalArgs,
+    op: credentials_core::admin_ops::AdminOpBody,
+    preflighted_key: MasterKey,
+) -> Result<serde_json::Value, CliError> {
+    commit_admin_with_key(global, op, Some(preflighted_key))
+}
+
+fn commit_admin_with_key(
+    global: &GlobalArgs,
+    op: credentials_core::admin_ops::AdminOpBody,
+    mut preflighted_key: Option<MasterKey>,
+) -> Result<serde_json::Value, CliError> {
     if let Some(conn_path) = &global.subc_conn {
-        match admin_client::commit(&global.data_dir, &resolver_config(global), conn_path, &op) {
+        match admin_client::commit(
+            &global.data_dir,
+            &resolver_config(global),
+            conn_path,
+            &op,
+            preflighted_key.as_ref(),
+        ) {
             admin_client::RouteCommit::Committed(v) => return Ok(v),
             admin_client::RouteCommit::Refused(m) => return Err(CliError::RouteRefused(m)),
             admin_client::RouteCommit::LocalFailure(m) => return Err(CliError::LocalFailure(m)),
@@ -854,7 +882,7 @@ fn commit_admin(
             }
         }
     }
-    let store = open_for_admin(global, true)?;
+    let store = open_for_admin_with_key(global, true, preflighted_key.take())?;
     credentials_core::admin_ops::apply(&store, op, "offline-cli").map_err(CliError::Store)
 }
 
@@ -870,6 +898,14 @@ fn open_for_admin(
     global: &GlobalArgs,
     route_path_exists: bool,
 ) -> Result<EncryptedStore, CliError> {
+    open_for_admin_with_key(global, route_path_exists, None)
+}
+
+fn open_for_admin_with_key(
+    global: &GlobalArgs,
+    route_path_exists: bool,
+    preflighted_key: Option<MasterKey>,
+) -> Result<EncryptedStore, CliError> {
     let store = open_sqlite(&descriptor(global)).map_err(|e| match e {
         // A held lease means the daemon is up — the structural "while stopped" gate.
         StoreError::Lease(_) => CliError::DaemonRunning { route_path_exists },
@@ -878,12 +914,56 @@ fn open_for_admin(
     EncryptedStore::migrate(&store).map_err(CliError::StoreOpen)?;
     // Crash-safe resolve: pick the key-store slot matching the database's recorded
     // fingerprint (so a vault left mid-rotation still opens under the right key).
-    let key = match EncryptedStore::read_db_key_id(&store).map_err(CliError::StoreOpen)? {
-        Some(db_key_id) => resolver::resolve_for_db(&resolver_config(global), db_key_id)
+    let db_key_id = EncryptedStore::read_db_key_id(&store).map_err(CliError::StoreOpen)?;
+    let key = match (db_key_id, preflighted_key) {
+        (Some(db_key_id), Some(key)) if key.key_id() == db_key_id => key,
+        (Some(db_key_id), _) => resolver::resolve_for_db(&resolver_config(global), db_key_id)
             .map_err(CliError::MasterKey)?,
-        None => resolver::resolve(&resolver_config(global), None).map_err(CliError::MasterKey)?,
+        (None, Some(key)) => key,
+        (None, None) => {
+            resolver::resolve(&resolver_config(global), None).map_err(CliError::MasterKey)?
+        }
     };
     EncryptedStore::open(store, key).map_err(CliError::Store)
+}
+
+/// Refuse login failures that are knowable before an authorization code or device
+/// code is spent. The read-only probes take no writer lease, so this stays compatible
+/// with both the online commit path and the daemon-stopped fallback.
+fn preflight_login(
+    global: &GlobalArgs,
+    id: &str,
+    replace: bool,
+    already_exists_message: String,
+) -> Result<MasterKey, CliError> {
+    let path = store_path(global);
+    let db_key_id = if path.exists() {
+        let conn = credentials_core::usable::open_store_read_only(&path)
+            .map_err(|error| CliError::Io(error.to_string()))?;
+        credentials_core::usable::read_db_key_id_read_only(&conn)
+    } else {
+        None
+    };
+    let key = match db_key_id {
+        Some(key_id) => resolver::resolve_for_db(&resolver_config(global), key_id),
+        None => resolver::resolve(&resolver_config(global), None),
+    }
+    .map_err(CliError::MasterKey)?;
+
+    let exists = if path.exists() {
+        match credentials_core::store::list_meta_read_only(&path) {
+            Ok(rows) => rows.iter().any(|(stored_id, _)| stored_id == id),
+            Err(StoreOpError::NotFound) => false,
+            Err(error) => return Err(CliError::Store(error)),
+        }
+    } else {
+        false
+    };
+    match (replace, exists) {
+        (false, true) => Err(CliError::Usage(already_exists_message)),
+        (true, false) => Err(CliError::Store(StoreOpError::NotFound)),
+        _ => Ok(key),
+    }
 }
 
 fn cmd_bootstrap(global: &GlobalArgs) -> Result<(), CliError> {
@@ -1937,6 +2017,14 @@ fn cmd_device_login(
     };
     use credentials_core::refresh_adapters::{github_copilot, kimi, xai, RefreshAdapter};
 
+    let replace = has_flag(args, "--replace");
+    let preflighted_key = preflight_login(
+        global,
+        id,
+        replace,
+        format!("'{id}' already holds a credential; use --replace or a labeled id"),
+    )?;
+
     let http =
         credentials_core::http::ReqwestTransport::new().map_err(|e| CliError::Io(e.to_string()))?;
     let print_device_instructions = |auth: &credentials_core::DeviceAuthorization| {
@@ -2050,9 +2138,8 @@ fn cmd_device_login(
     // Device-flow providers do not disclose an account identity in the response, so
     // leave RecordIdentity empty rather than making an extra account lookup.
     let record = VaultRecord::new_oauth("login", wire.adapter_name, oauth, payload);
-    let replace = has_flag(args, "--replace");
     if replace {
-        commit_admin(
+        commit_login_admin(
             global,
             store_op(
                 id,
@@ -2060,12 +2147,14 @@ fn cmd_device_login(
                 AdminAuditOp::Login,
                 StoreMode::ReplaceUnconditional,
             ),
+            preflighted_key,
         )?;
         println!("logged in and replaced {id}");
     } else {
-        let result = commit_admin(
+        let result = commit_login_admin(
             global,
             store_op(id, record, AdminAuditOp::Login, StoreMode::Create),
+            preflighted_key,
         );
         if matches!(&result, Err(CliError::Store(StoreOpError::AlreadyExists)))
             || matches!(&result, Err(CliError::RouteRefused(message)) if message.contains("already exists"))
@@ -2140,6 +2229,21 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             )));
         }
 
+        let replace = has_flag(args, "--replace") || interactive.replace;
+        let preflighted_key = preflight_login(
+            global,
+            &id,
+            replace,
+            format!(
+                "'{id}' already holds a credential.\n\
+                 To add ANOTHER account for this provider:  login --provider {provider} --id {d}:<label>\n\
+                 (e.g. --id {d}:work — each labeled id is an independent credential)\n\
+                 To REPLACE the existing credential:        login --provider {provider} --replace\n\
+                 (keeps the id, its handles, and bumps record_version)",
+                d = p.default_id
+            ),
+        )?;
+
         let key = if let Some(path) = optional(args, "--payload-file") {
             let raw = std::fs::read_to_string(&path)
                 .map_err(|e| CliError::Io(format!("reading {path}: {e}")))?;
@@ -2177,7 +2281,6 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
         let record =
             VaultRecord::new_static(CredentialKind::ApiKey, "login", key.into_bytes(), None);
 
-        let replace = has_flag(args, "--replace") || interactive.replace;
         let (audit_op, store_mode) = if replace {
             (AdminAuditOp::Overwrite, StoreMode::ReplaceUnconditional)
         } else {
@@ -2185,10 +2288,18 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
         };
 
         if replace {
-            commit_admin(global, store_op(&id, record, audit_op, store_mode))?;
+            commit_login_admin(
+                global,
+                store_op(&id, record, audit_op, store_mode),
+                preflighted_key,
+            )?;
             println!("logged in and replaced {id}");
         } else {
-            let result = commit_admin(global, store_op(&id, record, audit_op, store_mode));
+            let result = commit_login_admin(
+                global,
+                store_op(&id, record, audit_op, store_mode),
+                preflighted_key,
+            );
             let already_exists = match &result {
                 Err(CliError::Store(StoreOpError::AlreadyExists)) => true,
                 Err(CliError::RouteRefused(m)) => m.contains("already exists"),
@@ -2276,6 +2387,21 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
         return cmd_device_login(global, args, &provider, &id, &wire);
     }
 
+    let replace = has_flag(args, "--replace") || interactive.replace;
+    let preflighted_key = preflight_login(
+        global,
+        &id,
+        replace,
+        format!(
+            "'{id}' already holds a credential.\n\
+             To add ANOTHER account for this provider:  login --provider {provider} --id {d}:<label>\n\
+             (e.g. --id {d}:work — each labeled id is an independent credential)\n\
+             To REPLACE the existing credential:        login --provider {provider} --replace\n\
+             (keeps the id, its handles, and bumps record_version)",
+            d = wire.default_id
+        ),
+    )?;
+
     // Generate the PKCE pair and the CSPRNG state (state is independent of the
     // verifier), build the authorize URL, and present it to the operator.
     let pkce = generate_pkce().map_err(|e| CliError::Io(format!("csprng: {e}")))?;
@@ -2320,7 +2446,7 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     println!("  {authorize_url}");
     println!();
     // Best-effort browser open; the printed URL is the source of truth if it fails.
-    let _ = open_in_browser(&authorize_url);
+    let _ = open_in_browser(args, &authorize_url);
 
     // Prefer the listener: if it captured the redirect, use it; otherwise (bind
     // failed, timed out, or a non-loopback redirect) fall back to paste. The pasted
@@ -2477,8 +2603,8 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     // dual-custody migration: swap the imported token for the vault-minted one; the
     // handle survives). With `--subc` the commit rides the RUNNING module, so a
     // re-login needs no daemon stop at all (the zero-downtime path).
-    if has_flag(args, "--replace") || interactive.replace {
-        commit_admin(
+    if replace {
+        commit_login_admin(
             global,
             store_op(
                 &id,
@@ -2486,12 +2612,14 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
                 AdminAuditOp::Login,
                 StoreMode::ReplaceUnconditional,
             ),
+            preflighted_key,
         )?;
         println!("logged in and replaced {id}");
     } else {
-        let result = commit_admin(
+        let result = commit_login_admin(
             global,
             store_op(&id, record, AdminAuditOp::Login, StoreMode::Create),
+            preflighted_key,
         );
         // The create-only refusal must not be a dead end: name both ways forward
         // (another account under a label, or swapping this credential). The route
@@ -2758,7 +2886,13 @@ fn request_admin_status(global: &GlobalArgs) -> Result<serde_json::Value, CliErr
         v: ADMIN_OP_SCHEMA_V1,
     };
     if let Some(conn_path) = &global.subc_conn {
-        match admin_client::commit(&global.data_dir, &resolver_config(global), conn_path, &op) {
+        match admin_client::commit(
+            &global.data_dir,
+            &resolver_config(global),
+            conn_path,
+            &op,
+            None,
+        ) {
             admin_client::RouteCommit::Committed(v) => return Ok(v),
             admin_client::RouteCommit::Refused(m) => return Err(CliError::RouteRefused(m)),
             admin_client::RouteCommit::LocalFailure(m) => return Err(CliError::LocalFailure(m)),
@@ -4474,10 +4608,18 @@ fn tokio_block_on<F: std::future::Future>(fut: F) -> F::Output {
         .block_on(fut)
 }
 
+fn browser_open_allowed(args: &[String]) -> bool {
+    !has_flag(args, "--no-browser")
+}
+
 /// Best-effort open of a URL in the operator's default browser. A failure is ignored
-/// by the caller — the URL is also printed, so the login still works if this no-ops
-/// (e.g. a headless box). Never passes the URL through a shell (no injection surface).
-fn open_in_browser(url: &str) -> std::io::Result<()> {
+/// by the caller — the URL is also printed, so the login still works if this no-ops.
+/// Headless sessions can refuse the spawn before any platform command is constructed.
+/// Never passes the URL through a shell (no injection surface).
+fn open_in_browser(args: &[String], url: &str) -> std::io::Result<()> {
+    if !browser_open_allowed(args) {
+        return Ok(());
+    }
     #[cfg(target_os = "macos")]
     let mut cmd = {
         let mut c = std::process::Command::new("open");
@@ -4542,6 +4684,12 @@ fn resolver_config(global: &GlobalArgs) -> ResolverConfig {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn no_browser_flag_refuses_the_platform_browser_spawn() {
+        assert!(super::browser_open_allowed(&[]));
+        assert!(!super::browser_open_allowed(&["--no-browser".to_string()]));
+    }
+
     /// A client-side failure must not speak in the module's voice.
     ///
     /// DRIVES THE PRODUCTION DECISION, not a hand-built variant. The first version of

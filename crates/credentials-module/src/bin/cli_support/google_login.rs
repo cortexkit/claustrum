@@ -11,7 +11,10 @@ use credentials_core::oauth_login::{
 };
 use credentials_core::record::{RecordIdentity, VaultRecord};
 
-use super::{has_flag, login_id_is_valid, optional, CliError, GlobalArgs};
+use super::{
+    commit_login_admin, has_flag, login_id_is_valid, optional, preflight_login, CliError,
+    GlobalArgs,
+};
 
 /// Whether a provider flag belongs to one of the Google-family login flows.
 pub fn is_provider(provider: &str) -> bool {
@@ -43,6 +46,16 @@ pub fn cmd_login(
         )));
     }
 
+    let replace = has_flag(args, "--replace") || replace_override;
+    let preflighted_key = preflight_login(
+        global,
+        &id,
+        replace,
+        format!(
+            "'{id}' already holds a credential. To replace it, pass --replace (keeps its handles)."
+        ),
+    )?;
+
     let client_id = wire.client_id();
     let client_secret = wire.client_secret();
     let state = generate_state().map_err(|error| CliError::Io(format!("csprng: {error}")))?;
@@ -67,7 +80,7 @@ pub fn cmd_login(
     println!();
     println!("  {authorize_url}");
     println!();
-    let _ = super::open_in_browser(&authorize_url);
+    let _ = super::open_in_browser(args, &authorize_url);
 
     let captured = match listener {
         Some(listener) => {
@@ -165,9 +178,8 @@ pub fn cmd_login(
         org_name: None,
     });
 
-    let replace = has_flag(args, "--replace") || replace_override;
     if replace {
-        super::commit_admin(
+        commit_login_admin(
             global,
             super::store_op(
                 &id,
@@ -175,12 +187,13 @@ pub fn cmd_login(
                 credentials_core::admin_ops::AdminAuditOp::Login,
                 credentials_core::admin_ops::StoreMode::ReplaceUnconditional,
             ),
+            preflighted_key,
         )?;
         println!("logged in and replaced {id}");
         return Ok(());
     }
 
-    let result = super::commit_admin(
+    let result = commit_login_admin(
         global,
         super::store_op(
             &id,
@@ -188,6 +201,7 @@ pub fn cmd_login(
             credentials_core::admin_ops::AdminAuditOp::Login,
             credentials_core::admin_ops::StoreMode::Create,
         ),
+        preflighted_key,
     );
     let already_exists = match &result {
         Err(CliError::Store(credentials_core::store::StoreOpError::AlreadyExists)) => true,

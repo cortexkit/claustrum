@@ -55,6 +55,7 @@ type AccountRuntime = {
 };
 
 const REPORT_BUDGET_MS = 100;
+const missingCredentialIdWarnings = new Set<string>();
 
 async function reportWithinBudget(report: Promise<void>, onFailure: (errorClass: string, errorCode: string) => void): Promise<void> {
   let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -155,6 +156,37 @@ export function createServeFetch(options: CreateServeFetchOptions) {
     for (const { account } of accounts) {
       const served = await freshness.resolve(account);
       if (!served) continue;
+
+      // The handle-file schema has no expected account id, so served.accountId has no
+      // manifest binding to compare without widening that contract.
+      if (served.credentialId !== undefined) {
+        if (served.credentialId !== account.credential_id) {
+          options.log?.warn({
+            provider: options.provider,
+            label: account.label,
+            boundCredentialId: account.credential_id,
+            servedCredentialId: served.credentialId,
+            recordVersion: served.recordVersion,
+            state: "refusing",
+            errorCode: "binding_mismatch",
+          });
+          // A binding mismatch implicates the manifest route, not the credential itself;
+          // reporting an auth failure could invalidate a valid credential for other callers.
+          continue;
+        }
+      } else if (options.log && !missingCredentialIdWarnings.has(account.handle)) {
+        // Older daemons omit credentialId on successful reads. Absence cannot contradict
+        // the manifest binding, so retain compatibility while recording that it was unchecked.
+        missingCredentialIdWarnings.add(account.handle);
+        options.log.warn({
+          provider: options.provider,
+          label: account.label,
+          boundCredentialId: account.credential_id,
+          recordVersion: served.recordVersion,
+          state: "serving",
+          errorCode: "credential_id_absent",
+        });
+      }
 
       const attempt = { material: served.material, recordVersion: served.recordVersion };
       let target: URL | undefined;

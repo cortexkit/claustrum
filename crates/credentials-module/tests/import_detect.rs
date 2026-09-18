@@ -377,15 +377,22 @@ fn antigravity_second_account_is_rebased_and_keeps_only_original_index_in_metada
     let second = &rows[1];
     assert_eq!(second.metadata.original_account_index, Some(1));
     assert_eq!(
-        second.metadata.entry_selection,
-        EntrySelection::AntigravityAccount(0)
-    );
-    assert_eq!(
         second.metadata.proposed_id.as_deref(),
         Some("antigravity:google:1")
     );
-    let imported = import_antigravity_account(second.payload().unwrap().as_bytes(), Some("0"))
-        .expect("rebased second account");
+    let selector = match second.metadata.entry_selection {
+        EntrySelection::AntigravityAccount(index) => index.to_string(),
+        ref other => panic!("antigravity row carried the wrong selector: {other:?}"),
+    };
+    let imported = import_antigravity_account(
+        second.payload().unwrap().as_bytes(),
+        Some(selector.as_str()),
+    )
+    .expect("rebased second account");
+    assert_eq!(
+        second.metadata.entry_selection,
+        EntrySelection::AntigravityAccount(0)
+    );
     assert_eq!(
         imported.oauth.refresh_token.expose(),
         "fixture-antigravity-second|second-project"
@@ -539,16 +546,20 @@ fn copilot_uses_harness_key_not_id_provider_token_to_select_payload() {
         .iter()
         .find(|row| row.metadata.proposed_id.as_deref() == Some("copilot:github"))
         .unwrap();
+    let provider = match &copilot.metadata.entry_selection {
+        EntrySelection::ProviderKey(provider) => provider.as_str(),
+        other => panic!("copilot row carried the wrong selector: {other:?}"),
+    };
+    let imported = OAuthCredential::import_provider(
+        "opencode",
+        copilot.payload().unwrap().as_bytes(),
+        provider,
+    )
+    .expect("entry-selection key must exist in the isolated payload");
     assert_eq!(
         copilot.metadata.entry_selection,
         EntrySelection::ProviderKey("github-copilot".into())
     );
-    let imported = OAuthCredential::import_provider(
-        "opencode",
-        copilot.payload().unwrap().as_bytes(),
-        "github-copilot",
-    )
-    .expect("correct harness key");
     assert_eq!(imported.refresh_token.expose(), "fixture-copilot-refresh");
     assert!(matches!(
         OAuthCredential::import_provider(

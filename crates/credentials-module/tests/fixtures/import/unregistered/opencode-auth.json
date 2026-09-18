@@ -1,0 +1,11 @@
+{
+  "not-installed": {
+    "type": "oauth",
+    "refresh": "fixture-unregistered-refresh",
+    "access": "fixture-unregistered-access"
+  },
+  "static-control": {
+    "type": "api",
+    "key": "fixture-static-control-key"
+  }
+}

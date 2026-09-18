@@ -1,0 +1,5 @@
+{
+  "access_token": "fixture-gemini-access",
+  "refresh_token": "fixture-gemini-refresh",
+  "expiry_date": 1893456000000
+}

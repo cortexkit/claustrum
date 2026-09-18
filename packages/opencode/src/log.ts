@@ -10,6 +10,8 @@ export type CustodyLogEntry = {
   provider?: string;
   label?: string;
   credentialId?: string;
+  boundCredentialId?: string;
+  servedCredentialId?: string;
   recordVersion?: number;
   state?: string;
   httpStatus?: number;
@@ -32,7 +34,8 @@ export type CustodyLogger = {
 
 const FILE_LIMIT_BYTES = 5 * 1024 * 1024;
 export const FILE_FIELDS: Array<keyof CustodyLogEntry> = [
-  "level", "provider", "label", "credentialId", "recordVersion", "state", "httpStatus",
+  "level", "provider", "label", "credentialId", "boundCredentialId", "servedCredentialId",
+  "recordVersion", "state", "httpStatus",
   "cooldownUntil", "errorClass", "errorCode", "ts", "pid",
 ];
 const CREDENTIAL_ID = /^[A-Za-z0-9._:-]{1,128}$/;
@@ -106,6 +109,10 @@ function fileEntry(entry: CustodyLogEntry): Record<string, unknown> {
         case "provider": valid = fieldIsSafeIdentifier(value); break;
         case "label": valid = fieldIsSafeIdentifier(value); break;
         case "credentialId": valid = CREDENTIAL_ID.test(value); break;
+        case "boundCredentialId":
+        case "servedCredentialId":
+          valid = CREDENTIAL_ID.test(value) && !HANDLE_FILE_CONTRACT.handleRe.test(value);
+          break;
         case "state": valid = STATES.has(value); break;
         case "errorClass": valid = ERROR_CLASS.test(value) && !isAllHexBody(value); break;
         case "errorCode": valid = ERROR_CODE.test(value) && !isAllHexBody(value); break;

@@ -118,6 +118,135 @@ describe("OpenCode custody serve fetch", () => {
     ]);
   });
 
+  test("serves vault material when served credential id matches the manifest binding", async () => {
+    const handle = `ckh_${"c".repeat(43)}`;
+    const boundCredentialId = "apikey:deepseek:main";
+    const material = "MATCHED-VAULT-MATERIAL";
+    const requests: Request[] = [];
+    const client = new FakeClient(new Map([[handle, {
+      material,
+      recordVersion: 11,
+      expiresAtMs: null,
+      credentialId: boundCredentialId,
+    }]]));
+    const fetch = createServeFetch({
+      provider: PROVIDER,
+      accounts: [{ label: "matched", handle, credential_id: boundCredentialId }],
+      client,
+      readAuthEntry: () => tombstoneFor("api", PROVIDER),
+      upstreamFetch: createUpstream([200], requests),
+    });
+
+    expect((await fetch("https://upstream.example/v1/chat", {
+      headers: { Authorization: `Bearer ${SENTINEL}` },
+    })).status).toBe(200);
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.headers.get("authorization")).toBe(`Bearer ${material}`);
+    expect(requests[0]?.headers.get("authorization")).not.toContain(SENTINEL);
+  });
+
+  test("refuses mismatched served credential id without reporting auth failure and tries next account", async () => {
+    const mainHandle = `ckh_${"d".repeat(43)}`;
+    const backupHandle = `ckh_${"e".repeat(43)}`;
+    const boundCredentialId = "apikey:deepseek:main";
+    const servedCredentialId = "apikey:deepseek:other";
+    const refusedMaterial = "MISMATCHED-VAULT-MATERIAL";
+    const backupMaterial = "BACKUP-VAULT-MATERIAL";
+    const requests: Request[] = [];
+    const entries: Array<Record<string, unknown>> = [];
+    const client = new FakeClient(new Map([
+      [mainHandle, {
+        material: refusedMaterial,
+        recordVersion: 12,
+        expiresAtMs: null,
+        credentialId: servedCredentialId,
+      }],
+      [backupHandle, {
+        material: backupMaterial,
+        recordVersion: 13,
+        expiresAtMs: null,
+        credentialId: "apikey:deepseek:backup",
+      }],
+    ]));
+    const fetch = createServeFetch({
+      provider: PROVIDER,
+      accounts: [
+        { label: "main", handle: mainHandle, credential_id: boundCredentialId },
+        { label: "backup", handle: backupHandle, credential_id: "apikey:deepseek:backup" },
+      ],
+      client,
+      readAuthEntry: () => tombstoneFor("api", PROVIDER),
+      upstreamFetch: createUpstream([200], requests),
+      log: {
+        debug() {},
+        info() {},
+        warn(entry) { entries.push(entry); },
+        error() {},
+      },
+    });
+
+    expect((await fetch("https://upstream.example/v1/chat", {
+      headers: { Authorization: `Bearer ${SENTINEL}` },
+    })).status).toBe(200);
+
+    expect(client.gets).toEqual([mainHandle, backupHandle]);
+    expect(client.reports).toEqual([]);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.headers.get("authorization")).toBe(`Bearer ${backupMaterial}`);
+    expect(JSON.stringify(requests)).not.toContain(refusedMaterial);
+    expect(entries.filter((entry) => entry.errorCode === "binding_mismatch")).toEqual([expect.objectContaining({
+      provider: PROVIDER,
+      label: "main",
+      boundCredentialId,
+      servedCredentialId,
+      recordVersion: 12,
+      state: "refusing",
+    })]);
+  });
+
+  test("serves when credential id is absent and warns once per account across requests", async () => {
+    const handle = `ckh_${"f".repeat(43)}`;
+    const boundCredentialId = "apikey:deepseek:legacy";
+    const material = "LEGACY-DAEMON-MATERIAL";
+    const requests: Request[] = [];
+    const entries: Array<Record<string, unknown>> = [];
+    const client = new FakeClient(new Map([[handle, {
+      material,
+      recordVersion: 14,
+      expiresAtMs: null,
+    }]]));
+    const fetch = createServeFetch({
+      provider: PROVIDER,
+      accounts: [{ label: "legacy", handle, credential_id: boundCredentialId }],
+      client,
+      readAuthEntry: () => tombstoneFor("api", PROVIDER),
+      upstreamFetch: createUpstream([200, 200], requests),
+      log: {
+        debug() {},
+        info() {},
+        warn(entry) { entries.push(entry); },
+        error() {},
+      },
+    });
+
+    await fetch("https://upstream.example/v1/chat", { headers: { Authorization: `Bearer ${SENTINEL}` } });
+    await fetch("https://upstream.example/v1/chat", { headers: { Authorization: `Bearer ${SENTINEL}` } });
+
+    expect(requests).toHaveLength(2);
+    expect(requests.map((request) => request.headers.get("authorization"))).toEqual([
+      `Bearer ${material}`,
+      `Bearer ${material}`,
+    ]);
+    expect(entries.filter((entry) => entry.errorCode === "credential_id_absent")).toEqual([expect.objectContaining({
+      provider: PROVIDER,
+      label: "legacy",
+      boundCredentialId,
+      recordVersion: 14,
+      state: "serving",
+    })]);
+  });
+
   test("substitutes every sentinel occurrence in every header value", async () => {
     const requests: Request[] = [];
     const fetch = serve({ upstream: createUpstream([200], requests) });

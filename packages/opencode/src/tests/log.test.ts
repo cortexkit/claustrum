@@ -129,6 +129,28 @@ describe("custody logger", () => {
     expect(Object.keys(line).every((key) => (FILE_FIELDS as readonly string[]).includes(key))).toBe(true);
   });
 
+  test("file sink writes credential ids but refuses capability handles in served credential id", () => {
+    const root = join(tmpdir(), `claustrum-log-${crypto.randomUUID()}`);
+    const path = join(root, "custody.jsonl");
+    const handle = `ckh_${"a".repeat(43)}`;
+    const logger = createLogger(createFileLogSink({ path }));
+
+    logger.warn({
+      provider: "anthropic",
+      boundCredentialId: "oauth:anthropic:main",
+      servedCredentialId: "oauth:anthropic:work",
+      errorCode: "binding_mismatch",
+    });
+    logger.warn({ provider: "anthropic", servedCredentialId: handle, errorCode: "binding_mismatch" });
+
+    const records = readFileSync(path, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    expect(records[0]).toMatchObject({
+      boundCredentialId: "oauth:anthropic:main",
+      servedCredentialId: "oauth:anthropic:work",
+    });
+    expect(records[1]?.servedCredentialId).toBe("invalid_shape");
+  });
+
   test("file sink tightens existing directory and rotated file modes", () => {
     const root = join(tmpdir(), `claustrum-log-${crypto.randomUUID()}`);
     const path = join(root, "custody.jsonl");

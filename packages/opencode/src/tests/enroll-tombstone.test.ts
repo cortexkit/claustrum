@@ -184,20 +184,34 @@ describe("OAuth tombstone real IO", () => {
     expect((await readdir(dir)).filter((entry) => /^\.auth\.json\..*\.tmp$/.test(entry))).toHaveLength(0);
   });
 
-  test("preserves destination validation when a directory replaces the path", async () => {
+  test("preserves destination validation when a directory replaces the path mid-write", async () => {
+    // The refusal under test lives in writeAuth's catch: it fires only when the
+    // destination becomes a directory between the pre-rename lstat and the rename.
+    // No IO seam sits in that window, so the race is driven from outside and BOUNDED:
+    // the watcher stops after 2 s whether or not it caught the temp file. If it did not,
+    // the write completes and the test reports the miss by name instead of hanging or
+    // passing vacuously. Two sites answer this race with the same refusal — the pre-rename
+    // check and the catch's destination re-check — so only removing BOTH reddens this test;
+    // a single-site mutation is answered by the other site and stays green by design.
     dir = await mkdtemp(join(tmpdir(), "enroll-tombstone-"));
     const path = join(dir, "auth.json");
+    let planted = false;
+    const deadline = Date.now() + 2000;
     const watcher = (async () => {
-      for (;;) {
-        const entries = await readdir(dir);
+      while (Date.now() < deadline) {
+        const entries = await readdir(dir).catch(() => [] as string[]);
         if (entries.some((entry) => entry.startsWith(".auth.json.") && entry.endsWith(".tmp"))) {
-          await mkdir(path);
+          await mkdir(path).catch(() => {});
+          planted = true;
           return;
         }
-        await new Promise((resolve) => setTimeout(resolve, 1));
+        await new Promise((resolve) => setTimeout(resolve, 0));
       }
     })();
-    await expect(writeOAuthTombstone(path, provider)).rejects.toThrow("auth file must be a regular 0600 file");
+    const outcome = await writeOAuthTombstone(path, provider).then(() => "wrote" as const, (error: unknown) => error);
     await watcher;
+    if (!planted) throw new Error("race window missed: watcher never saw the temp file (inconclusive, not a pass)");
+    expect(outcome).toBeInstanceOf(AuthFileValidationError);
+    expect((outcome as Error).message).toBe("auth file must be a regular 0600 file");
   });
 });

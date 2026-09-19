@@ -45,6 +45,7 @@ async fn main() {
     // because the anti-enumeration property is about whether two bodies agree.
     let mut status_ids: Option<Vec<String>> = None;
     let mut scoped_id: Option<String> = None;
+    let mut as_module: Option<String> = None;
     let mut enroll_propose: Option<String> = None;
     let mut enroll_poll: Option<String> = None;
     let mut enroll_secret: Option<String> = None;
@@ -121,6 +122,13 @@ async fn main() {
             "--status" => status = true,
             "--reporter-source" => {
                 reporter_source = args.next();
+            }
+            "--as-module" => {
+                let Some(id) = args.next() else {
+                    eprintln!("vault_read_probe: --as-module needs a module id");
+                    std::process::exit(2);
+                };
+                as_module = Some(id);
             }
             "--enroll-propose" => {
                 let Some(name) = args.next() else {
@@ -313,7 +321,7 @@ async fn main() {
     wait_for_catalog(&mut stream).await;
     eprintln!("[probe] vault module '{MODULE_ID}' is catalog-live");
 
-    let (route_channel, route_epoch) = route_open(&mut stream, &root).await;
+    let (route_channel, route_epoch) = route_open(&mut stream, &root, as_module.as_deref()).await;
     eprintln!("[probe] route.open -> route_channel={route_channel} route_epoch={route_epoch}");
 
     if report_auth_failure {
@@ -829,7 +837,36 @@ async fn wait_for_catalog(stream: &mut TcpStream) {
     }
 }
 
-async fn route_open(stream: &mut TcpStream, root: &std::path::Path) -> (u16, u32) {
+/// Open a route, optionally claiming a supervised launch.
+///
+/// `consumer_identity` IS WHAT DECIDES THE PRINCIPAL, and nothing in this repository has
+/// ever sent one. Read at `subc-daemon/src/control.rs::route_open_principal`: a
+/// `route.open` presenting `{ module_id, launch_nonce }` that the supervisor validates is
+/// stamped `Principal::Reserved`; ABSENT IDENTITY IS `Direct` BY CONSTRUCTION, silently.
+/// It is not a property of being supervised — a supervised module that does not send it
+/// is Direct like anyone else.
+///
+/// Until this arm existed, every `Principal::Reserved` in this repository's tests was
+/// hand-constructed and injected past the transport via `admin.record_bind(channel,
+/// Principal::Reserved { .. })` — 29 such call sites. Those tests prove the authorization
+/// logic is correct GIVEN a Reserved principal and say nothing about whether one can
+/// arrive. The scoped surface shipped, was documented as working, and had a consumer
+/// migration guide written for it before anything asked the transport that question.
+///
+/// So this arm is the missing half of the exercise path: `--as-module <id>` claims a
+/// launch with the nonce the supervisor injected, and a scoped call can then be
+/// authorized by a GRANT rather than by a bearer token.
+///
+/// MEASURED WITH A NEGATIVE CONTROL, because the dangerous failure would be silent: a
+/// route.open carrying a WRONG nonce is answered with an ERROR FRAME and the route never
+/// opens. It is NOT downgraded to `Direct`. That matters — a silent downgrade would make
+/// a forged claim indistinguishable from no claim, and a consumer whose nonce had gone
+/// stale would see scoped refusals and go looking at its grants.
+async fn route_open(
+    stream: &mut TcpStream,
+    root: &std::path::Path,
+    as_module: Option<&str>,
+) -> (u16, u32) {
     let target = RouteTarget::ManagementSurface {
         module_id: MODULE_ID.to_string(),
     };
@@ -842,16 +879,31 @@ async fn route_open(stream: &mut TcpStream, root: &std::path::Path) -> (u16, u32
         "vault-read-probe".to_string(),
         "probe-1".to_string(),
     );
-    let frame = control_rpc(
-        stream,
-        1,
-        json!({ "op": "route.open", "target": target, "identity": identity }),
-    )
-    .await;
+    let mut body = json!({ "op": "route.open", "target": target, "identity": identity });
+    if let Some(module_id) = as_module {
+        // The nonce comes from the environment the supervisor injected, never from a
+        // flag: a nonce an operator can type is a nonce an operator can guess wrong, and
+        // the failure would be a refused route rather than anything legible.
+        let launch_nonce = std::env::var("SUBC_LAUNCH_NONCE").unwrap_or_else(|_| {
+            eprintln!(
+                "vault_read_probe: --as-module needs SUBC_LAUNCH_NONCE in the environment. \
+                 Only a supervisor-spawned process has one; run this from inside a \
+                 supervised module, or omit the flag to bind as Direct."
+            );
+            std::process::exit(2);
+        });
+        body["consumer_identity"] = json!({
+            "module_id": module_id,
+            "launch_nonce": launch_nonce,
+        });
+    }
+    let frame = control_rpc(stream, 1, body).await;
     assert_eq!(
         frame.header.ty,
         FrameType::Response,
-        "route.open should succeed: {}",
+        "route.open refused. With --as-module this means the launch claim was REJECTED \
+         (wrong or stale SUBC_LAUNCH_NONCE, or a module id the supervisor did not spawn); \
+         the daemon refuses rather than downgrading to Direct. Body: {}",
         String::from_utf8_lossy(&frame.body)
     );
     let value: Value = serde_json::from_slice(&frame.body).unwrap();

@@ -432,6 +432,11 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
         "invalidate" | "reactivate" | "mint-handle" | "revoke-all-handles" | "remove" => &["--id"],
         "logout" => &["--provider", "--id"],
         "revoke-handle" => &["--handle", "--hash"],
+        // `--prefix` stays in this table DELIBERATELY although it is refused. Removing it
+        // would make an operator who types the old flag hit the generic
+        // unknown-argument error, which says nothing about what replaced it. Listed
+        // here, it reaches `parse_grant_selector`'s refusal, which names the successor
+        // and explains why a former prefix is a category rather than an exact selector.
         "grant" | "revoke-grant" => &[
             "--principal",
             "--prefix",
@@ -830,29 +835,29 @@ fn help_verb(verb: &str) -> String {
         }
         "grant" => {
             "ck auth grant --principal <id|reserved:id>\n\
-             \x20             [--prefix <prefix>]\n\
-             \x20             [--selector-kind <exact|category> --selector <value>]\n\
+             \x20             --selector-kind <exact|category> --selector <value>\n\
              \x20             --operation <read|sign>\n\
              \n\
              \x20 --principal <id|reserved:id>  reserved module principal\n\
-             \x20 --prefix <prefix>             compatibility spelling for an id selector\n\
-             \x20 --selector-kind <kind>        exact (default) or category\n\
+             \x20 --selector-kind <kind>        exact or category (required, no default)\n\
              \x20 --selector <value>            credential id text or bare category name\n\
              \x20 --operation <read|sign>       authority to grant (`--op` is accepted)\n\
              \n\
              NOTES\n\
-             Category selectors are stored with the category: marker. Read and sign are\n\
-             separate authorities; neither operation implies the other."
+             exact matches one credential id byte for byte. category matches every\n\
+             credential carrying that category, so the set moves as categories are\n\
+             assigned. Both are stored as bare text; neither carries a kind marker.\n\
+             --prefix is gone: its reach changed whenever someone named a new\n\
+             credential. A former prefix that named a family is a category now.\n\
+             Read and sign are separate authorities; neither implies the other."
         }
         "revoke-grant" => {
             "ck auth revoke-grant --principal <id|reserved:id>\n\
-             \x20                    [--prefix <prefix>]\n\
-             \x20                    [--selector-kind <exact|category> --selector <value>]\n\
+             \x20                    --selector-kind <exact|category> --selector <value>\n\
              \x20                    --operation <read|sign>\n\
              \n\
              \x20 --principal <id|reserved:id>  reserved module principal\n\
-             \x20 --prefix <prefix>             compatibility spelling for an id selector\n\
-             \x20 --selector-kind <kind>        exact (default) or category\n\
+             \x20 --selector-kind <kind>        exact or category (required, no default)\n\
              \x20 --selector <value>            credential id text or bare category name\n\
              \x20 --operation <read|sign>       authority to revoke (`--op` is accepted)\n\
              \n\
@@ -3538,25 +3543,45 @@ fn parse_reserved_principal(principal: &str) -> Result<String, CliError> {
 }
 
 fn parse_grant_selector(args: &[String]) -> Result<(SelectorKind, String), CliError> {
-    let prefix = optional(args, "--prefix");
-    let selector = optional(args, "--selector");
-    if prefix.is_some() && selector.is_some() {
+    // `--prefix` IS REFUSED RATHER THAN ALIASED, and `--selector-kind` has no default.
+    //
+    // The tempting version of this migration keeps `--prefix` as a deprecated alias for
+    // `exact`. That is worse than removing it, and the reason is the same one the whole
+    // selector change exists for: it SUCCEEDS while silently changing what the operator
+    // granted. `--prefix apikey:` used to reach every credential under `apikey:` — on my
+    // vault, seventeen of them. Aliased to `exact` it reaches the credential LITERALLY
+    // NAMED `apikey:`, which does not exist, so the command prints success and creates a
+    // grant covering nothing while the operator believes they granted a family.
+    //
+    // `ck auth grants` would eventually show `reaches 0`, but that is a different command
+    // read at a different time. A refusal at the point of creation is the only version
+    // where the operator's belief and the stored row cannot diverge.
+    //
+    // Defaulting `--selector-kind` to `exact` has the same defect in a quieter form: an
+    // operator who omits it gets a decision made for them about reach. Requiring it makes
+    // them state the intent, which is cheap exactly once per grant.
+    if optional(args, "--prefix").is_some() {
         return Err(CliError::Usage(
-            "--prefix and --selector are mutually exclusive".into(),
+            "--prefix is gone: a prefix grant's reach changed whenever someone named a \
+             new credential. Use --selector-kind exact --selector <credential-id> for one \
+             credential, or --selector-kind category --selector <category> for a set that \
+             moves deliberately. A former --prefix that named a family is a category now, \
+             not an exact selector."
+                .into(),
         ));
     }
     let selector_kind = optional(args, "--selector-kind")
-        .unwrap_or_else(|| "exact".into())
+        .ok_or_else(|| {
+            CliError::Usage(
+                "grant requires --selector-kind exact|category (no default: the kind \
+                 decides whether this grant's reach can change without you)"
+                    .into(),
+            )
+        })?
         .parse::<SelectorKind>()
         .map_err(CliError::Usage)?;
-    if prefix.is_some() && selector_kind != SelectorKind::Exact {
-        return Err(CliError::Usage(
-            "--prefix cannot be combined with --selector-kind category".into(),
-        ));
-    }
-    let selector = prefix
-        .or(selector)
-        .ok_or_else(|| CliError::Usage("grant requires --selector or --prefix".into()))?;
+    let selector = optional(args, "--selector")
+        .ok_or_else(|| CliError::Usage("grant requires --selector".into()))?;
     Ok((selector_kind, selector))
 }
 
@@ -5257,20 +5282,39 @@ mod taxonomy_cli_tests {
             assert!(parse_reserved_principal(invalid).is_err(), "{invalid:?}");
         }
 
+        // `--prefix` is REFUSED, not aliased to exact. Aliasing would succeed while
+        // granting nothing: `apikey:` reached seventeen credentials as a prefix and
+        // names none of them exactly, so the operator would believe they granted a
+        // family and hold a row covering zero.
         let legacy = args(&["--prefix", "apikey:"]);
-        assert_eq!(
-            parse_grant_selector(&legacy).unwrap(),
-            (SelectorKind::Exact, "apikey:".to_string())
+        let refusal = parse_grant_selector(&legacy).expect_err("--prefix must refuse");
+        assert!(
+            format!("{refusal}").contains("--prefix is gone"),
+            "the refusal must name the flag and route to the replacement, not fail \
+             generically: got {refusal}"
         );
+
         let category = args(&["--selector-kind", "category", "--selector", "llm-provider"]);
         assert_eq!(
             parse_grant_selector(&category).unwrap(),
             (SelectorKind::Category, "llm-provider".to_string())
         );
-        let conflict = args(&["--prefix", "a:", "--selector", "b:"]);
-        assert!(parse_grant_selector(&conflict).is_err());
-        let wrong_kind = args(&["--prefix", "a:", "--selector-kind", "category"]);
-        assert!(parse_grant_selector(&wrong_kind).is_err());
+        let exact = args(&["--selector-kind", "exact", "--selector", "apikey:exa"]);
+        assert_eq!(
+            parse_grant_selector(&exact).unwrap(),
+            (SelectorKind::Exact, "apikey:exa".to_string())
+        );
+
+        // No default: omitting the kind must refuse rather than choose reach for the
+        // operator.
+        let no_kind = args(&["--selector", "apikey:exa"]);
+        let kind_refusal = parse_grant_selector(&no_kind)
+            .expect_err("--selector-kind is required with no default");
+        assert!(
+            format!("{kind_refusal}").contains("--selector-kind"),
+            "got {kind_refusal}"
+        );
+        assert!(parse_grant_selector(&args(&["--selector-kind", "exact"])).is_err());
     }
 
     #[test]

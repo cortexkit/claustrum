@@ -478,7 +478,9 @@ fn grants_columns_hold_their_positions_when_a_prefix_is_wider_than_the_others() 
             "grant",
             "--principal",
             principal,
-            "--prefix",
+            "--selector-kind",
+            "exact",
+            "--selector",
             prefix,
             "--operation",
             "read",
@@ -596,7 +598,7 @@ fn grant_verbs_accept_the_canonical_reserved_spelling_and_refuse_other_kinds() {
             .args(["--key-path", key_path.to_str().unwrap()])
             .arg(verb)
             .args(["--principal", "reserved:probe"])
-            .args(["--prefix", "apikey:"])
+            .args(["--selector-kind", "exact", "--selector", "apikey:"])
             .args(["--operation", "read"])
             .output()
             .expect("run canonical verb");
@@ -608,7 +610,7 @@ fn grant_verbs_accept_the_canonical_reserved_spelling_and_refuse_other_kinds() {
                 .args(["--key-path", key_path.to_str().unwrap()])
                 .arg(verb)
                 .args(["--principal", principal])
-                .args(["--prefix", "apikey:"])
+                .args(["--selector-kind", "exact", "--selector", "apikey:"])
                 .args(["--operation", "read"])
                 .output()
                 .expect("run refused verb");
@@ -616,6 +618,20 @@ fn grant_verbs_accept_the_canonical_reserved_spelling_and_refuse_other_kinds() {
         }
     }
 }
+
+/// Flags the parser KNOWS but deliberately does not advertise, because knowing them is
+/// how the operator gets a useful refusal instead of a generic one.
+///
+/// `--prefix` is the only member. It is refused with a message naming its replacement
+/// and explaining why a former prefix is a category rather than an exact selector; that
+/// message is only reachable if the flag is in the accept-list, since an unknown
+/// argument dies earlier with text that says nothing about the migration.
+///
+/// This list must stay SHORT and each entry must be genuinely refused. A flag parked
+/// here that still WORKS is an undocumented working flag, which is the exact defect the
+/// caller of this function exists to catch.
+const KNOWN_BUT_UNADVERTISED: &[(&str, &str)] =
+    &[("grant", "--prefix"), ("revoke-grant", "--prefix")];
 
 fn accepted_help_flags(verb: &str) -> Vec<String> {
     let src = include_str!("../src/bin/credentials_cli.rs");
@@ -635,7 +651,48 @@ fn accepted_help_flags(verb: &str) -> Vec<String> {
             }
         }
     }
+    out.retain(|flag| !KNOWN_BUT_UNADVERTISED.contains(&(verb, flag.as_str())));
     out
+}
+
+/// `--prefix` is REFUSED with a message that names its replacement, and the refusal is
+/// only reachable because the flag stays in the parser's accept-list.
+///
+/// Both halves matter and they pull against each other: drop it from the accept-list and
+/// an operator typing the old flag gets a generic unknown-argument error that says
+/// nothing about the migration; alias it to `exact` and the command SUCCEEDS while
+/// granting nothing, because `apikey:` reached seventeen credentials as a prefix and
+/// names none of them exactly. Refusing-but-known is the only arrangement where the
+/// operator's belief and the stored row cannot diverge.
+#[test]
+fn the_retired_prefix_flag_refuses_with_a_message_that_routes_to_its_replacement() {
+    let vault = GrantCliVault::new("retired-prefix-flag");
+    vault.bootstrap();
+    for verb in ["grant", "revoke-grant"] {
+        let output = vault.run(&[
+            verb,
+            "--principal",
+            "reserved:probe",
+            "--prefix",
+            "apikey:",
+            "--operation",
+            "read",
+        ]);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success(),
+            "{verb} must refuse --prefix, not accept it"
+        );
+        assert!(
+            stderr.contains("--prefix is gone"),
+            "{verb}: the refusal must name the retired flag: {stderr}"
+        );
+        assert!(
+            stderr.contains("--selector-kind category"),
+            "{verb}: and must route a former family to a category, since aliasing it to \
+             exact would grant nothing: {stderr}"
+        );
+    }
 }
 
 // EVERY FLAG THE PARSER ACCEPTS IS NAMED ON ITS HELP PAGE. This is the defence for the
@@ -853,7 +910,9 @@ fn offline_grants_lists_a_newly_minted_grant_with_creation_time() {
         "grant",
         "--principal",
         "agent",
-        "--prefix",
+        "--selector-kind",
+        "exact",
+        "--selector",
         "operator:",
         "--operation",
         "read",
@@ -894,7 +953,9 @@ fn grants_keep_read_and_sign_rows_separate_and_sort_by_prefix_then_operation() {
             "grant",
             "--principal",
             "agent",
-            "--prefix",
+            "--selector-kind",
+            "exact",
+            "--selector",
             prefix,
             "--operation",
             operation,
@@ -928,7 +989,9 @@ fn revoked_grant_disappears_from_the_grants_listing() {
         "grant",
         "--principal",
         "agent",
-        "--prefix",
+        "--selector-kind",
+        "exact",
+        "--selector",
         "operator:",
         "--operation",
         "read",
@@ -940,7 +1003,9 @@ fn revoked_grant_disappears_from_the_grants_listing() {
         "revoke-grant",
         "--principal",
         "agent",
-        "--prefix",
+        "--selector-kind",
+        "exact",
+        "--selector",
         "operator:",
         "--operation",
         "read",
@@ -2484,7 +2549,9 @@ fn read_only_inventory_verbs_succeed_while_exclusive_lease_is_held() {
         "grant",
         "--principal",
         "agent",
-        "--prefix",
+        "--selector-kind",
+        "exact",
+        "--selector",
         "apikey:",
         "--operation",
         "read",

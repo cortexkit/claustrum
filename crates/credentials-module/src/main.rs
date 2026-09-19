@@ -3751,17 +3751,41 @@ mod tests {
             .expect("request id")
             .to_string();
 
+        // A DIFFERENT SECRET IS A DIFFERENT CALLER. This used to send the SAME hash and
+        // assert `pending_exists`, which pinned the crash gap rather than the squatter
+        // refusal: `request_id` is minted server-side, so a consumer that crashed after
+        // the row committed could not poll and could not re-propose, and was wedged out
+        // of its own enrollment until TTL. Same name + same secret now RESUMES (asserted
+        // below); same name + different secret is the case that must still refuse.
         let duplicate = enrollment_route_frame(
             &surface,
             &admin,
             OP_ENROLL_PROPOSE,
-            json!({"proposed_name":"consumer","request_secret_hash":secret_hash.clone()}),
+            json!({"proposed_name":"consumer","request_secret_hash":"c".repeat(64)}),
         )
         .await;
         assert_eq!(duplicate.header.ty, FrameType::Error);
         assert_eq!(
             duplicate.body,
             br#"{"code":"pending_exists","disposition":"permanent"}"#
+        );
+
+        // THE RESUME, over the wire rather than only at the store: the same secret returns
+        // the SAME id. A second id for one pending row would leave the first unreachable
+        // and still holding the name.
+        let resumed = enrollment_route_frame(
+            &surface,
+            &admin,
+            OP_ENROLL_PROPOSE,
+            json!({"proposed_name":"consumer","request_secret_hash":secret_hash.clone()}),
+        )
+        .await;
+        assert_eq!(resumed.header.ty, FrameType::Response);
+        let resumed_body: serde_json::Value = serde_json::from_slice(&resumed.body).unwrap();
+        assert_eq!(
+            resumed_body["result"]["request_id"].as_str(),
+            Some(request_id.as_str()),
+            "a crashed proposer resuming with its own secret must get its original id back"
         );
 
         let unknown = enrollment_route_frame(

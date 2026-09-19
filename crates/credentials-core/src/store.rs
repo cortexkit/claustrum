@@ -1663,6 +1663,41 @@ impl EncryptedStore {
             .fenced_write(|tx| {
                 sweep_pending_enrollments_tx(tx, now, 1)?;
 
+                // RESUME BEFORE REFUSING: the same secret means the same consumer.
+                //
+                // `request_id` is minted HERE and returned, so a consumer cannot persist it
+                // before proposing -- which means a crash in the window between this INSERT
+                // committing and the consumer writing the id down leaves it holding a secret
+                // it cannot poll with, and the name held until TTL. The retry then hit
+                // `pending_exists` and the consumer was wedged out of its own enrollment by
+                // its own earlier attempt.
+                //
+                // The secret is the discriminator, and it is the right one: the consumer
+                // mints it in-process and sends only its hash, so possession of the matching
+                // hash proves this is the same caller resuming rather than a second one
+                // colliding on a popular name. A squatter presenting a different secret
+                // still gets `pending_exists`.
+                //
+                // Returns the ORIGINAL row rather than re-minting: a second id for one
+                // pending enrollment would leave the first unreachable and still holding the
+                // name, turning a resume into a second leak of the thing it was fixing.
+                //
+                // Reported by the openai-auth seat reading the ceremony before building it.
+                let resumable: Option<String> = tx
+                    .query_row(
+                        "SELECT request_id FROM pending_enrollments \
+                 WHERE proposed_name = ?1 AND request_secret_hash = ?2 AND state = 'pending'",
+                        rusqlite::params![proposed_name, request_secret_hash],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                if let Some(existing_id) = resumable {
+                    append_enrollment_event_tx(tx, ENROLL_PROPOSE_SUBJECT, "resumed", now)?;
+                    return Ok(Ok(EnrollmentProposal {
+                        request_id: existing_id,
+                    }));
+                }
+
                 let name_in_use: bool = tx.query_row(
                     "SELECT EXISTS(SELECT 1 FROM pending_enrollments \
                  WHERE proposed_name = ?1 AND state IN ('pending','approved'))",
@@ -6107,6 +6142,96 @@ fn row_to_intent(row: &rusqlite::Row<'_>) -> rusqlite::Result<RefreshIntent> {
 #[cfg(test)]
 mod tests {
     use crate::test_support::TestTempDir;
+    /// AFTER EXPIRY THE SAME SECRET STARTS A FRESH REQUEST, WITH A NEW ID.
+    ///
+    /// The openai-auth seat asked for this to be ruled either way and pinned. Fresh
+    /// request is the answer, and it falls out of the mechanism rather than being chosen:
+    /// the sweep moves the row to `expired`, the resume lookup matches only `state =
+    /// 'pending'`, and the name check counts only `pending`/`approved` -- so an expired
+    /// row blocks nothing and hides nothing.
+    ///
+    /// It is also the behaviour a consumer wants. Expiry means the operator never
+    /// approved; a terminal outcome would tell a consumer to stop asking for something
+    /// nobody refused, and the remedy would be an operator deleting a row. A fresh
+    /// proposal costs one queue slot and reaches the operator again.
+    ///
+    /// THE ID MUST CHANGE. Reusing the expired id would make a stale poll from before the
+    /// expiry -- the consumer may still be looping on it -- silently attach to the new
+    /// request, so a crash-and-retry would look like an approval of something the
+    /// operator saw once and let lapse.
+    #[test]
+    fn after_expiry_the_same_secret_starts_a_fresh_request() {
+        let (_root, store) = tmp_store(0x7a);
+        let secret = "d".repeat(64);
+        let t0 = 1_000_000_i64;
+
+        let first = store
+            .propose_enrollment_at("expiry-probe", &secret, t0)
+            .expect("first propose");
+
+        let after = t0 + ENROLLMENT_PENDING_TTL_MS + 1;
+        let second = store
+            .propose_enrollment_at("expiry-probe", &secret, after)
+            .expect("an expired pending row must not block a fresh proposal");
+
+        assert_ne!(
+            second.request_id, first.request_id,
+            "a fresh request must get a FRESH id: reusing it would let a stale poll from \
+             before the expiry attach to the new request"
+        );
+    }
+
+    /// A CRASHED PROPOSER RESUMES; A SQUATTER DOES NOT.
+    ///
+    /// `request_id` is minted server-side and returned, so a consumer CANNOT persist it
+    /// before proposing. A crash in the window between the row committing and the
+    /// consumer writing the id down left it holding a secret it could not poll with, and
+    /// the name held until TTL -- and the obvious retry then hit `pending_exists`,
+    /// wedging the consumer out of its own enrollment with its own earlier attempt.
+    ///
+    /// Both arms are load-bearing and they pull in opposite directions. Without the
+    /// RESUME arm, a plain refusal passes and the crash gap stays. Without the SQUATTER
+    /// arm, resuming on the name alone passes -- and that is strictly worse than the
+    /// original defect, because it hands any local process the pending enrollment of a
+    /// name it merely guessed.
+    ///
+    /// The secret is the right discriminator because the consumer mints it in-process and
+    /// sends only its hash: possession of the matching hash is evidence of being the same
+    /// caller, where the name is public by construction.
+    #[test]
+    fn a_crashed_proposer_resumes_with_its_secret_and_a_stranger_does_not() {
+        let (_root, store) = tmp_store(0x79);
+        let mine = "a".repeat(64);
+        let theirs = "b".repeat(64);
+
+        let first = store
+            .propose_enrollment("resume-probe", &mine)
+            .expect("first propose");
+
+        // THE RESUME. Same name, same secret: the id must be the SAME one, not a second
+        // id for one pending row -- re-minting would leave the first unreachable and
+        // still holding the name, turning the fix into a second leak.
+        let again = store
+            .propose_enrollment("resume-probe", &mine)
+            .expect("a crashed proposer must be able to resume");
+        assert_eq!(
+            again.request_id, first.request_id,
+            "resuming must return the ORIGINAL request id"
+        );
+
+        // THE SQUATTER. Same name, different secret: refused.
+        let err = store
+            .propose_enrollment("resume-probe", &theirs)
+            .expect_err("a different secret is a different caller and must be refused");
+        assert!(
+            matches!(
+                err,
+                EnrollmentError::Refused(EnrollmentRefusal::PendingExists)
+            ),
+            "a stranger guessing the name must still be refused, got {err:?}"
+        );
+    }
+
     /// A SCOPED FIRST USE IS RECORDED ONCE, NOT PER CALL.
     ///
     /// The idempotence is the whole design, and the reason is EVICTION rather than

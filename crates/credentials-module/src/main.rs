@@ -32,6 +32,7 @@ use std::sync::Arc;
 use cortexkit_store::{open_sqlite, StorageDescriptor, StoreError};
 use credentials_core::audit::AuthEventKind;
 use credentials_core::engine::RefreshEngine;
+use credentials_core::enrollment::{EnrollmentDisposition, EnrollmentError, EnrollmentRefusal};
 use credentials_core::http::ReqwestTransport;
 use credentials_core::refresh_adapters::{
     anthropic::AnthropicAdapter, antigravity::AntigravityAdapter, cursor::CursorAdapter,
@@ -43,7 +44,7 @@ use credentials_core::resolver::{self, KeySource, ResolverConfig};
 use credentials_core::store::EncryptedStore;
 #[cfg(test)]
 use credentials_core::store::SelectorKind;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use subc_protocol::manifest::Concurrency;
 use subc_protocol::manifest::{
@@ -70,8 +71,9 @@ use tokio::{
 
 use limiter::{Caps, FetchLimiter};
 use read_surface::{
-    GetManyParams, GetParams, GetScopedParams, ListScopedParams, PublicKeyParams, ReadSurface,
-    ReportAuthFailureParams, StatusParams,
+    EnrollPollParams, EnrollProposeParams, EnrollRotateParams, GetManyParams, GetParams,
+    GetScopedParams, ListScopedParams, PublicKeyParams, ReadSurface, ReportAuthFailureParams,
+    StatusParams,
 };
 
 // The vault's module id — re-exported from the single cross-binary definition site
@@ -105,6 +107,9 @@ const OP_STATUS: &str = "credential.status";
 const OP_REPORT_AUTH_FAILURE: &str = "credential.report_auth_failure";
 const OP_SIGN: &str = "credential.sign";
 const OP_PUBLIC_KEY: &str = "credential.public_key";
+const OP_ENROLL_PROPOSE: &str = "auth.enroll_propose";
+const OP_ENROLL_POLL: &str = "auth.enroll_poll";
+const OP_ENROLL_ROTATE: &str = "auth.enroll_rotate";
 /// Admin ops on the running module (authenticated: direct principal + master-key
 /// challenge-response). `admin.challenge` issues a nonce; `admin.op` carries the
 /// authenticated op body + tag.
@@ -985,6 +990,63 @@ async fn handle_read_request(
     };
 
     let result = match request.method.as_str() {
+        OP_ENROLL_PROPOSE => match serde_json::from_value::<EnrollProposeParams>(request.params) {
+            Ok(params) => match surface.enroll_propose(&params) {
+                Ok(result) => wrap_result(result),
+                Err(error) => {
+                    return send_enrollment_error(writer, ver, channel, epoch, corr, &error).await
+                }
+            },
+            Err(_) => {
+                return send_enrollment_refusal(
+                    writer,
+                    ver,
+                    channel,
+                    epoch,
+                    corr,
+                    EnrollmentRefusal::InvalidParams,
+                )
+                .await
+            }
+        },
+        OP_ENROLL_POLL => match serde_json::from_value::<EnrollPollParams>(request.params) {
+            Ok(params) => match surface.enroll_poll(&params) {
+                Ok(result) => wrap_result(result),
+                Err(error) => {
+                    return send_enrollment_error(writer, ver, channel, epoch, corr, &error).await
+                }
+            },
+            Err(_) => {
+                return send_enrollment_refusal(
+                    writer,
+                    ver,
+                    channel,
+                    epoch,
+                    corr,
+                    EnrollmentRefusal::InvalidParams,
+                )
+                .await
+            }
+        },
+        OP_ENROLL_ROTATE => match serde_json::from_value::<EnrollRotateParams>(request.params) {
+            Ok(params) => match surface.enroll_rotate(&params) {
+                Ok(result) => wrap_result(result),
+                Err(error) => {
+                    return send_enrollment_error(writer, ver, channel, epoch, corr, &error).await
+                }
+            },
+            Err(_) => {
+                return send_enrollment_refusal(
+                    writer,
+                    ver,
+                    channel,
+                    epoch,
+                    corr,
+                    EnrollmentRefusal::InvalidParams,
+                )
+                .await
+            }
+        },
         OP_GET => match serde_json::from_value::<GetParams>(request.params) {
             Ok(p) => wrap_result(surface.get(connection_id, &p).await),
             Err(e) => {
@@ -1183,6 +1245,76 @@ async fn handle_read_request(
     )
     .map_err(|e| ModuleError::Message(e.to_string()))?;
     send(writer, response).await
+}
+
+#[derive(Serialize)]
+struct EnrollmentErrorBody<'a> {
+    code: &'a str,
+    disposition: EnrollmentDisposition,
+}
+
+async fn send_enrollment_error(
+    writer: &mpsc::Sender<Frame>,
+    ver: u8,
+    channel: u16,
+    epoch: u32,
+    corr: u64,
+    error: &EnrollmentError,
+) -> Result<(), ModuleError> {
+    send_enrollment_error_body(
+        writer,
+        ver,
+        channel,
+        epoch,
+        corr,
+        error.code(),
+        error.disposition(),
+    )
+    .await
+}
+
+async fn send_enrollment_refusal(
+    writer: &mpsc::Sender<Frame>,
+    ver: u8,
+    channel: u16,
+    epoch: u32,
+    corr: u64,
+    refusal: EnrollmentRefusal,
+) -> Result<(), ModuleError> {
+    send_enrollment_error_body(
+        writer,
+        ver,
+        channel,
+        epoch,
+        corr,
+        refusal.code(),
+        refusal.disposition(),
+    )
+    .await
+}
+
+async fn send_enrollment_error_body(
+    writer: &mpsc::Sender<Frame>,
+    ver: u8,
+    channel: u16,
+    epoch: u32,
+    corr: u64,
+    code: &str,
+    disposition: EnrollmentDisposition,
+) -> Result<(), ModuleError> {
+    let body = serde_json::to_vec(&EnrollmentErrorBody { code, disposition })
+        .map_err(ModuleError::Json)?;
+    let frame = Frame::build_with_version(
+        ver,
+        FrameType::Error,
+        Flags::new(false, Priority::Interactive, false),
+        channel,
+        epoch,
+        corr,
+        body,
+    )
+    .map_err(|error| ModuleError::Message(error.to_string()))?;
+    send(writer, frame).await
 }
 
 async fn invalid_params(
@@ -1506,6 +1638,21 @@ fn manifest(module_id: &str) -> ModuleManifest {
         // what it is.
         concurrency: Concurrency::ModuleManaged,
         operations: vec![
+            ManagementOperation {
+                name: OP_ENROLL_PROPOSE.to_string(),
+                description: Some("Propose one bounded consumer enrollment using a pre-hashed resumption secret.".to_string()),
+                kind: ManagementOperationKind::Mutate,
+            },
+            ManagementOperation {
+                name: OP_ENROLL_POLL.to_string(),
+                description: Some("Poll one enrollment using only its request id and resumption secret.".to_string()),
+                kind: ManagementOperationKind::Mutate,
+            },
+            ManagementOperation {
+                name: OP_ENROLL_ROTATE.to_string(),
+                description: Some("Replace a live enrollment token at its current generation.".to_string()),
+                kind: ManagementOperationKind::Mutate,
+            },
             ManagementOperation {
                 name: OP_GET.to_string(),
                 description: Some("Serve a credential's secret bytes to the holder of a capability handle. Refuses signing keys.".to_string()),
@@ -2238,6 +2385,30 @@ mod tests {
             .expect("serve request");
         let response = responses.recv().await.expect("route response");
         serde_json::from_slice(&response.body).expect("decode response")
+    }
+
+    async fn enrollment_route_frame(
+        surface: &Arc<ReadSurface>,
+        admin: &Arc<admin_surface::AdminSurface>,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Frame {
+        let (writer, mut responses) = mpsc::channel(1);
+        let frame = Frame::build_with_version(
+            PROTOCOL_VERSION,
+            FrameType::Request,
+            Flags::new(false, Priority::Interactive, false),
+            77,
+            1,
+            1,
+            serde_json::to_vec(&json!({ "method": method, "params": params }))
+                .expect("encode enrollment request"),
+        )
+        .expect("build enrollment request");
+        handle_read_request(frame, &writer, surface, admin, None)
+            .await
+            .expect("serve enrollment request");
+        responses.recv().await.expect("enrollment response")
     }
 
     async fn scoped_request(
@@ -3455,6 +3626,257 @@ mod tests {
                 "the {op} accepted parameter set changed. Two obligations: announce the delta to consumers, and give `crates/credentials-module/examples/vault_read_probe.rs` a way to send the new parameter; a wire surface with no probe arm cannot be acceptance-tested on deploy. {op}: unexpected `{key}`"
             );
         }
+    }
+
+    #[test]
+    fn enrollment_wire_fixture_pins_exact_requests_successes_and_nine_refusals() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/enrollment_wire_contract.json"
+        ))
+        .expect("decode enrollment wire fixture");
+        let operations = fixture["operations"].as_array().expect("operation rows");
+        let operation = |name: &str| {
+            operations
+                .iter()
+                .find(|row| row["op"] == name)
+                .unwrap_or_else(|| panic!("missing {name} fixture row"))
+        };
+        let raw = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+
+        assert_eq!(
+            serde_json::to_string(&EnrollProposeParams {
+                proposed_name: "consumer".into(),
+                request_secret_hash: "0".repeat(64),
+            })
+            .unwrap(),
+            operation(OP_ENROLL_PROPOSE)["request"]
+        );
+        assert_eq!(
+            serde_json::to_string(&EnrollPollParams {
+                request_id: "request-id".into(),
+                request_secret: raw.into(),
+            })
+            .unwrap(),
+            operation(OP_ENROLL_POLL)["request"]
+        );
+        assert_eq!(
+            serde_json::to_string(&EnrollRotateParams {
+                token: raw.into(),
+                expected_token_generation: 1,
+            })
+            .unwrap(),
+            operation(OP_ENROLL_ROTATE)["request"]
+        );
+        assert!(
+            serde_json::from_value::<EnrollPollParams>(json!({
+                "request_id": "request-id",
+                "request_secret": raw,
+                "proposed_name": "consumer"
+            }))
+            .is_err(),
+            "poll accepts only request_id and request_secret"
+        );
+
+        let proposal = serde_json::to_string(&wrap_result(
+            credentials_core::enrollment::EnrollmentProposal {
+                request_id: "request-id".into(),
+            },
+        ))
+        .unwrap();
+        assert_eq!(proposal, operation(OP_ENROLL_PROPOSE)["success"][0]);
+        let poll_successes = [
+            credentials_core::enrollment::EnrollmentPoll::Pending,
+            credentials_core::enrollment::EnrollmentPoll::Denied,
+            credentials_core::enrollment::EnrollmentPoll::Approved {
+                name: "consumer".into(),
+                token: raw.into(),
+                token_generation: 1,
+            },
+        ];
+        for (index, success) in poll_successes.into_iter().enumerate() {
+            assert_eq!(
+                serde_json::to_string(&wrap_result(success)).unwrap(),
+                operation(OP_ENROLL_POLL)["success"][index]
+            );
+        }
+        let rotation = serde_json::to_string(&wrap_result(
+            credentials_core::enrollment::EnrollmentRotation {
+                token: "f".repeat(64),
+                token_generation: 2,
+            },
+        ))
+        .unwrap();
+        assert_eq!(rotation, operation(OP_ENROLL_ROTATE)["success"][0]);
+
+        let refusal_rows = fixture["refusals"].as_array().expect("refusal rows");
+        assert_eq!(
+            refusal_rows.len(),
+            9,
+            "the consumer decision table has nine rows"
+        );
+        let refusals = [
+            EnrollmentRefusal::PendingExists,
+            EnrollmentRefusal::PendingQueueFull,
+            EnrollmentRefusal::InvalidParams,
+            EnrollmentRefusal::NotFound,
+            EnrollmentRefusal::InvalidParams,
+            EnrollmentRefusal::AlreadyConsumed,
+            EnrollmentRefusal::Superseded,
+            EnrollmentRefusal::StaleGeneration,
+            EnrollmentRefusal::NotFound,
+        ];
+        for (row, refusal) in refusal_rows.iter().zip(refusals) {
+            assert_eq!(row["transport_status"], "error");
+            assert_eq!(
+                serde_json::to_string(&EnrollmentErrorBody {
+                    code: refusal.code(),
+                    disposition: refusal.disposition(),
+                })
+                .unwrap(),
+                row["body"]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn enrollment_route_uses_transport_errors_and_keeps_unknown_and_wrong_secret_identical() {
+        let (surface, admin, store) = scoped_rig(116);
+        let secret = "11".repeat(32);
+        let secret_hash = credentials_core::enrollment::enrollment_secret_hash(&secret).unwrap();
+
+        let invalid = enrollment_route_frame(
+            &surface,
+            &admin,
+            OP_ENROLL_PROPOSE,
+            json!({"proposed_name":"bad:name","request_secret_hash":secret_hash.clone()}),
+        )
+        .await;
+        assert_eq!(invalid.header.ty, FrameType::Error);
+        assert_eq!(
+            invalid.body,
+            br#"{"code":"invalid_params","disposition":"permanent"}"#
+        );
+
+        let proposed = enrollment_route_frame(
+            &surface,
+            &admin,
+            OP_ENROLL_PROPOSE,
+            json!({"proposed_name":"consumer","request_secret_hash":secret_hash.clone()}),
+        )
+        .await;
+        assert_eq!(proposed.header.ty, FrameType::Response);
+        let proposed_body: serde_json::Value = serde_json::from_slice(&proposed.body).unwrap();
+        let request_id = proposed_body["result"]["request_id"]
+            .as_str()
+            .expect("request id")
+            .to_string();
+
+        let duplicate = enrollment_route_frame(
+            &surface,
+            &admin,
+            OP_ENROLL_PROPOSE,
+            json!({"proposed_name":"consumer","request_secret_hash":secret_hash.clone()}),
+        )
+        .await;
+        assert_eq!(duplicate.header.ty, FrameType::Error);
+        assert_eq!(
+            duplicate.body,
+            br#"{"code":"pending_exists","disposition":"permanent"}"#
+        );
+
+        let unknown = enrollment_route_frame(
+            &surface,
+            &admin,
+            OP_ENROLL_POLL,
+            json!({"request_id":"ff".repeat(32),"request_secret":secret.clone()}),
+        )
+        .await;
+        let wrong_secret = enrollment_route_frame(
+            &surface,
+            &admin,
+            OP_ENROLL_POLL,
+            json!({"request_id":request_id.clone(),"request_secret":"22".repeat(32)}),
+        )
+        .await;
+        assert_eq!(unknown.header.ty, FrameType::Error);
+        assert_eq!(wrong_secret.header.ty, FrameType::Error);
+        assert_eq!(unknown.body, wrong_secret.body);
+        assert_eq!(
+            unknown.body,
+            br#"{"code":"not_found","disposition":"permanent"}"#
+        );
+
+        let pending = enrollment_route_frame(
+            &surface,
+            &admin,
+            OP_ENROLL_POLL,
+            json!({"request_id":request_id.clone(),"request_secret":secret.clone()}),
+        )
+        .await;
+        assert_eq!(pending.header.ty, FrameType::Response);
+        assert_eq!(pending.body, br#"{"result":{"status":"pending"}}"#);
+
+        store
+            .approve_enrollment(&request_id, "consumer", "operator")
+            .expect("approve");
+        let approved = enrollment_route_frame(
+            &surface,
+            &admin,
+            OP_ENROLL_POLL,
+            json!({"request_id":request_id.clone(),"request_secret":secret.clone()}),
+        )
+        .await;
+        assert_eq!(approved.header.ty, FrameType::Response);
+        let approved_body: serde_json::Value = serde_json::from_slice(&approved.body).unwrap();
+        assert_eq!(approved_body["result"]["status"], "approved");
+        assert_eq!(approved_body["result"]["token_generation"], 1);
+        let token = approved_body["result"]["token"]
+            .as_str()
+            .expect("token")
+            .to_string();
+
+        let consumed = enrollment_route_frame(
+            &surface,
+            &admin,
+            OP_ENROLL_POLL,
+            json!({"request_id":request_id.clone(),"request_secret":secret.clone()}),
+        )
+        .await;
+        assert_eq!(consumed.header.ty, FrameType::Error);
+        assert_eq!(
+            consumed.body,
+            br#"{"code":"already_consumed","disposition":"permanent"}"#
+        );
+
+        let stale = enrollment_route_frame(
+            &surface,
+            &admin,
+            OP_ENROLL_ROTATE,
+            json!({"token":token.clone(),"expected_token_generation":2}),
+        )
+        .await;
+        assert_eq!(stale.header.ty, FrameType::Error);
+        assert_eq!(
+            stale.body,
+            br#"{"code":"stale_generation","disposition":"permanent"}"#
+        );
+        let rotated = enrollment_route_frame(
+            &surface,
+            &admin,
+            OP_ENROLL_ROTATE,
+            json!({"token":token.clone(),"expected_token_generation":1}),
+        )
+        .await;
+        assert_eq!(rotated.header.ty, FrameType::Response);
+        let old_token = enrollment_route_frame(
+            &surface,
+            &admin,
+            OP_ENROLL_ROTATE,
+            json!({"token":token.clone(),"expected_token_generation":1}),
+        )
+        .await;
+        assert_eq!(old_token.header.ty, FrameType::Error);
+        assert_eq!(old_token.body, unknown.body);
     }
 
     #[test]

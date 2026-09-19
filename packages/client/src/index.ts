@@ -7,6 +7,10 @@ export {
 } from './detect.js'
 export { storeIdentity, storageFingerprint } from './identity.js'
 export {
+  writeEnrollmentTokenFile,
+  type EnrollmentTokenFile,
+} from './enrollment.js'
+export {
   MANIFEST_LOCK,
   manifestLockQuarantinePrefix,
   withManifestLock,

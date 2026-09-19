@@ -46,6 +46,13 @@ use zeroize::Zeroizing;
 use crate::audit::{
     self, AlarmReason, AuditCtx, AuditEntry, AuditOp, AuditRecord, AuthEventKind, ReporterSource,
 };
+use crate::enrollment::{
+    constant_time_hash_eq, enrollment_secret_hash, is_lower_hex_32, mint_hex_32,
+    valid_enrollment_name, EnrollmentError, EnrollmentPoll, EnrollmentProposal, EnrollmentRefusal,
+    EnrollmentRotation, ENROLLMENT_LIVE_LIMIT, ENROLLMENT_PENDING_TTL_MS,
+    ENROLLMENT_TERMINAL_MAX_ROWS, ENROLLMENT_TERMINAL_RETENTION_MS, ENROLL_EXPIRE_SUBJECT,
+    ENROLL_POLL_SUBJECT, ENROLL_PROPOSE_SUBJECT,
+};
 use crate::envelope::{self, EnvelopeError, RecordBinding};
 use crate::key::{KeyId, MasterKey};
 use crate::oauth::{is_custody_tombstone, CUSTODY_TOMBSTONE_PREFIX};
@@ -872,13 +879,15 @@ impl EncryptedStore {
     pub fn open(store: SqliteStore, key: MasterKey) -> Result<Self, StoreOpError> {
         let key_id = key.key_id();
         let audit_key = load_or_create_audit_key(&store, &key)?;
-        Ok(EncryptedStore {
+        let encrypted = EncryptedStore {
             store,
             key,
             key_id,
             audit_key,
             fenced_out: AtomicBool::new(false),
-        })
+        };
+        encrypted.sweep_pending_enrollments(now_ms(), 0)?;
+        Ok(encrypted)
     }
 
     /// Whether a fenced write has ever been rejected on this store instance because
@@ -1177,6 +1186,508 @@ impl EncryptedStore {
     pub fn list_meta(&self) -> Result<Vec<(String, RecordMeta)>, StoreOpError> {
         self.store
             .with_conn(|conn| list_meta_from_conn(conn, read_schema_version(conn)?))
+            .map_err(StoreOpError::from)
+    }
+
+    // ---- consumer enrollment ceremony ----------------------------------
+
+    /// Propose one consumer name. The request id is returned once; only the caller's
+    /// separately persisted request secret can resume the ceremony.
+    pub fn propose_enrollment(
+        &self,
+        proposed_name: &str,
+        request_secret_hash: &str,
+    ) -> Result<EnrollmentProposal, EnrollmentError> {
+        self.propose_enrollment_at(proposed_name, request_secret_hash, now_ms())
+    }
+
+    fn propose_enrollment_at(
+        &self,
+        proposed_name: &str,
+        request_secret_hash: &str,
+        now: i64,
+    ) -> Result<EnrollmentProposal, EnrollmentError> {
+        if !valid_enrollment_name(proposed_name) || !is_lower_hex_32(request_secret_hash) {
+            return Err(EnrollmentError::Refused(EnrollmentRefusal::InvalidParams));
+        }
+        let request_id = mint_hex_32()?;
+        let expires_at_ms = now.saturating_add(ENROLLMENT_PENDING_TTL_MS);
+        let outcome = self
+            .fenced_write(|tx| {
+                sweep_pending_enrollments_tx(tx, now, 1)?;
+
+                let name_in_use: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pending_enrollments \
+                 WHERE proposed_name = ?1 AND state IN ('pending','approved'))",
+                    [proposed_name],
+                    |row| row.get(0),
+                )?;
+                if name_in_use {
+                    append_enrollment_event_tx(tx, ENROLL_PROPOSE_SUBJECT, "pending_exists", now)?;
+                    return Ok(Err(EnrollmentRefusal::PendingExists));
+                }
+
+                let live_count: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM pending_enrollments \
+                 WHERE state IN ('pending','approved')",
+                    [],
+                    |row| row.get(0),
+                )?;
+                if live_count >= ENROLLMENT_LIVE_LIMIT {
+                    append_enrollment_event_tx(
+                        tx,
+                        ENROLL_PROPOSE_SUBJECT,
+                        "pending_queue_full",
+                        now,
+                    )?;
+                    return Ok(Err(EnrollmentRefusal::PendingQueueFull));
+                }
+
+                tx.execute(
+                    "INSERT INTO pending_enrollments \
+                 (request_id, proposed_name, final_name, enrollment_id, request_secret_hash, \
+                  state, approved_by, approved_at_ms, created_at_ms, expires_at_ms) \
+                 VALUES (?1, ?2, NULL, NULL, ?3, 'pending', NULL, NULL, ?4, ?5)",
+                    rusqlite::params![
+                        request_id,
+                        proposed_name,
+                        request_secret_hash,
+                        now,
+                        expires_at_ms
+                    ],
+                )?;
+                append_enrollment_event_tx(tx, ENROLL_PROPOSE_SUBJECT, "accepted", now)?;
+                Ok(Ok(EnrollmentProposal {
+                    request_id: request_id.clone(),
+                }))
+            })
+            .map_err(StoreOpError::from)?;
+        outcome.map_err(EnrollmentError::Refused)
+    }
+
+    /// Poll with exactly the request id and request secret. Unknown request ids and
+    /// wrong well-formed secrets deliberately take the same constant-time comparison
+    /// and return the same refusal.
+    pub fn poll_enrollment(
+        &self,
+        request_id: &str,
+        request_secret: &str,
+    ) -> Result<EnrollmentPoll, EnrollmentError> {
+        self.poll_enrollment_at(request_id, request_secret, now_ms())
+    }
+
+    fn poll_enrollment_at(
+        &self,
+        request_id: &str,
+        request_secret: &str,
+        now: i64,
+    ) -> Result<EnrollmentPoll, EnrollmentError> {
+        if !is_lower_hex_32(request_secret) {
+            return Err(EnrollmentError::Refused(EnrollmentRefusal::InvalidParams));
+        }
+        let presented_hash = enrollment_secret_hash(request_secret)
+            .ok_or(EnrollmentError::Refused(EnrollmentRefusal::InvalidParams))?;
+        let outcome = self
+            .fenced_write(|tx| {
+                let row = tx
+                .query_row(
+                    "SELECT request_secret_hash, state, final_name, enrollment_id, expires_at_ms \
+                     FROM pending_enrollments WHERE request_id = ?1",
+                    [request_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                            row.get::<_, Option<String>>(3)?,
+                            row.get::<_, i64>(4)?,
+                        ))
+                    },
+                )
+                .optional()?;
+
+                // Run one fixed-size comparison even for an unknown id. The row-existence bit
+                // is applied only after it, so the two paths cannot diverge through `==`.
+                let stored_hash = row
+                    .as_ref()
+                    .map(|values| values.0.as_str())
+                    .unwrap_or("0000000000000000000000000000000000000000000000000000000000000000");
+                let secret_matches = constant_time_hash_eq(&presented_hash, stored_hash);
+                if row.is_none() || !secret_matches {
+                    append_enrollment_event_tx(tx, ENROLL_POLL_SUBJECT, "not_found", now)?;
+                    return Ok(Err(EnrollmentRefusal::NotFound));
+                }
+
+                let (_, state, final_name, enrollment_id, expires_at_ms) =
+                    row.expect("checked above");
+                if matches!(state.as_str(), "pending" | "approved") && expires_at_ms <= now {
+                    tx.execute(
+                        "UPDATE pending_enrollments SET state = 'expired' WHERE request_id = ?1",
+                        [request_id],
+                    )?;
+                    append_enrollment_event_tx(tx, ENROLL_EXPIRE_SUBJECT, "expired", now)?;
+                    append_enrollment_event_tx(tx, ENROLL_POLL_SUBJECT, "superseded", now)?;
+                    return Ok(Err(EnrollmentRefusal::Superseded));
+                }
+
+                match state.as_str() {
+                    "pending" => {
+                        append_enrollment_event_tx(tx, ENROLL_POLL_SUBJECT, "pending", now)?;
+                        Ok(Ok(EnrollmentPoll::Pending))
+                    }
+                    "denied" => {
+                        append_enrollment_event_tx(tx, ENROLL_POLL_SUBJECT, "denied", now)?;
+                        Ok(Ok(EnrollmentPoll::Denied))
+                    }
+                    "consumed" => {
+                        append_enrollment_event_tx(
+                            tx,
+                            ENROLL_POLL_SUBJECT,
+                            "already_consumed",
+                            now,
+                        )?;
+                        Ok(Err(EnrollmentRefusal::AlreadyConsumed))
+                    }
+                    "expired" => {
+                        append_enrollment_event_tx(tx, ENROLL_POLL_SUBJECT, "superseded", now)?;
+                        Ok(Err(EnrollmentRefusal::Superseded))
+                    }
+                    "approved" => {
+                        let Some(enrollment_id) = enrollment_id else {
+                            append_enrollment_event_tx(tx, ENROLL_POLL_SUBJECT, "superseded", now)?;
+                            return Ok(Err(EnrollmentRefusal::Superseded));
+                        };
+                        let incarnation = tx
+                            .query_row(
+                                "SELECT name, token_hash, token_generation, revoked_at_ms \
+                             FROM enrolled_consumers WHERE enrollment_id = ?1",
+                                [&enrollment_id],
+                                |row| {
+                                    Ok((
+                                        row.get::<_, String>(0)?,
+                                        row.get::<_, Option<String>>(1)?,
+                                        row.get::<_, i64>(2)?,
+                                        row.get::<_, Option<i64>>(3)?,
+                                    ))
+                                },
+                            )
+                            .optional()?;
+                        let Some((name, token_hash, token_generation, revoked_at_ms)) = incarnation
+                        else {
+                            append_enrollment_event_tx(tx, ENROLL_POLL_SUBJECT, "superseded", now)?;
+                            return Ok(Err(EnrollmentRefusal::Superseded));
+                        };
+                        if revoked_at_ms.is_some() || token_hash.is_some() || token_generation != 0
+                        {
+                            append_enrollment_event_tx(tx, ENROLL_POLL_SUBJECT, "superseded", now)?;
+                            return Ok(Err(EnrollmentRefusal::Superseded));
+                        }
+                        if final_name.as_deref() != Some(name.as_str()) {
+                            append_enrollment_event_tx(tx, ENROLL_POLL_SUBJECT, "superseded", now)?;
+                            return Ok(Err(EnrollmentRefusal::Superseded));
+                        }
+
+                        let token = mint_hex_32_sqlite()?;
+                        let token_hash = enrollment_secret_hash(&token)
+                            .expect("a freshly minted 32-byte hex token is valid");
+                        let changed = tx.execute(
+                            "UPDATE enrolled_consumers SET token_hash = ?1, token_generation = 1 \
+                         WHERE enrollment_id = ?2 AND token_hash IS NULL \
+                           AND token_generation = 0 AND revoked_at_ms IS NULL",
+                            rusqlite::params![token_hash, enrollment_id],
+                        )?;
+                        if changed != 1 {
+                            append_enrollment_event_tx(tx, ENROLL_POLL_SUBJECT, "superseded", now)?;
+                            return Ok(Err(EnrollmentRefusal::Superseded));
+                        }
+                        tx.execute(
+                        "UPDATE pending_enrollments SET state = 'consumed' WHERE request_id = ?1",
+                        [request_id],
+                    )?;
+                        append_enrollment_event_tx(tx, ENROLL_POLL_SUBJECT, "approved", now)?;
+                        Ok(Ok(EnrollmentPoll::Approved {
+                            name,
+                            token,
+                            token_generation: 1,
+                        }))
+                    }
+                    _ => Err(rusqlite::Error::InvalidQuery),
+                }
+            })
+            .map_err(StoreOpError::from)?;
+        outcome.map_err(EnrollmentError::Refused)
+    }
+
+    /// Rotate a live token when its caller also holds the current generation.
+    pub fn rotate_enrollment(
+        &self,
+        token: &str,
+        expected_token_generation: u64,
+    ) -> Result<EnrollmentRotation, EnrollmentError> {
+        if !is_lower_hex_32(token) {
+            return Err(EnrollmentError::Refused(EnrollmentRefusal::InvalidParams));
+        }
+        let presented_hash = enrollment_secret_hash(token)
+            .ok_or(EnrollmentError::Refused(EnrollmentRefusal::InvalidParams))?;
+        let audit_key = self.audit_key.clone();
+        let outcome = self
+            .fenced_write(|tx| {
+                let mut stmt = tx.prepare(
+                    "SELECT enrollment_id, name, token_hash, token_generation \
+                 FROM enrolled_consumers WHERE revoked_at_ms IS NULL AND token_hash IS NOT NULL",
+                )?;
+                let candidates = stmt
+                    .query_map([], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, i64>(3)?,
+                        ))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                drop(stmt);
+
+                let mut matched = None;
+                for candidate in candidates {
+                    if constant_time_hash_eq(&presented_hash, &candidate.2) {
+                        matched = Some(candidate);
+                    }
+                }
+                let Some((enrollment_id, name, old_hash, generation)) = matched else {
+                    return Ok(Err(EnrollmentRefusal::NotFound));
+                };
+                if generation < 0 || generation as u64 != expected_token_generation {
+                    return Ok(Err(EnrollmentRefusal::StaleGeneration));
+                }
+
+                let replacement = mint_hex_32_sqlite()?;
+                let replacement_hash = enrollment_secret_hash(&replacement)
+                    .expect("a freshly minted 32-byte hex token is valid");
+                let next_generation = generation
+                    .checked_add(1)
+                    .ok_or(rusqlite::Error::IntegralValueOutOfRange(3, generation))?;
+                let changed = tx.execute(
+                    "UPDATE enrolled_consumers SET token_hash = ?1, token_generation = ?2 \
+                 WHERE enrollment_id = ?3 AND token_hash = ?4 \
+                   AND token_generation = ?5 AND revoked_at_ms IS NULL",
+                    rusqlite::params![
+                        replacement_hash,
+                        next_generation,
+                        enrollment_id,
+                        old_hash,
+                        generation
+                    ],
+                )?;
+                if changed != 1 {
+                    return Ok(Err(EnrollmentRefusal::NotFound));
+                }
+                append_audit_tx(
+                    tx,
+                    &audit_key,
+                    &AuditRecord {
+                        op: AuditOp::EnrollRotate,
+                        credential_id: Some(enrollment_id),
+                        payload_hash: None,
+                        actor: format!("enrolled:{name}"),
+                        alarm: None,
+                    },
+                )?;
+                Ok(Ok(EnrollmentRotation {
+                    token: replacement,
+                    token_generation: next_generation as u64,
+                }))
+            })
+            .map_err(StoreOpError::from)?;
+        outcome.map_err(EnrollmentError::Refused)
+    }
+
+    /// Approve a pending request without minting its token. Gate-2 callers provide the
+    /// actor; the first successful poll remains the only consumer token-delivery path.
+    pub fn approve_enrollment(
+        &self,
+        request_id: &str,
+        final_name: &str,
+        actor: &str,
+    ) -> Result<String, StoreOpError> {
+        if !valid_enrollment_name(final_name) {
+            return Err(StoreOpError::InvalidPrincipal);
+        }
+        let now = now_ms();
+        let enrollment_id = mint_hex_32()?;
+        let audit_key = self.audit_key.clone();
+        self.fenced_write(|tx| {
+            let state = tx
+                .query_row(
+                    "SELECT state, expires_at_ms FROM pending_enrollments WHERE request_id = ?1",
+                    [request_id],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                )
+                .optional()?;
+            let Some((state, expires_at_ms)) = state else {
+                return Err(rusqlite::Error::QueryReturnedNoRows);
+            };
+            if state != "pending" || expires_at_ms <= now {
+                if state == "pending" && expires_at_ms <= now {
+                    tx.execute(
+                        "UPDATE pending_enrollments SET state = 'expired' WHERE request_id = ?1",
+                        [request_id],
+                    )?;
+                    append_enrollment_event_tx(tx, ENROLL_EXPIRE_SUBJECT, "expired", now)?;
+                }
+                return Err(rusqlite::Error::QueryReturnedNoRows);
+            }
+            let live_name: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM enrolled_consumers \
+                 WHERE name = ?1 AND revoked_at_ms IS NULL)",
+                [final_name],
+                |row| row.get(0),
+            )?;
+            if live_name {
+                return Err(rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE),
+                    Some("enrollment name already in use".into()),
+                ));
+            }
+            tx.execute(
+                "INSERT INTO enrolled_consumers \
+                 (enrollment_id, name, token_hash, token_generation, approved_at_ms, approved_by, revoked_at_ms) \
+                 VALUES (?1, ?2, NULL, 0, ?3, ?4, NULL)",
+                rusqlite::params![enrollment_id, final_name, now, actor],
+            )?;
+            tx.execute(
+                "UPDATE pending_enrollments SET state = 'approved', final_name = ?1, \
+                 enrollment_id = ?2, approved_by = ?3, approved_at_ms = ?4 \
+                 WHERE request_id = ?5",
+                rusqlite::params![final_name, enrollment_id, actor, now, request_id],
+            )?;
+            append_audit_tx(
+                tx,
+                &audit_key,
+                &AuditRecord {
+                    op: AuditOp::EnrollApprove,
+                    credential_id: Some(enrollment_id.clone()),
+                    payload_hash: None,
+                    actor: actor.to_string(),
+                    alarm: None,
+                },
+            )?;
+            Ok(enrollment_id.clone())
+        })
+        .map_err(StoreOpError::from)
+    }
+
+    /// Deny a pending request and append exactly one Gate-2 audit row.
+    pub fn deny_enrollment(&self, request_id: &str, actor: &str) -> Result<(), StoreOpError> {
+        let audit_key = self.audit_key.clone();
+        self.fenced_write(|tx| {
+            let changed = tx.execute(
+                "UPDATE pending_enrollments SET state = 'denied' \
+                 WHERE request_id = ?1 AND state = 'pending'",
+                [request_id],
+            )?;
+            if changed != 1 {
+                return Err(rusqlite::Error::QueryReturnedNoRows);
+            }
+            append_audit_tx(
+                tx,
+                &audit_key,
+                &AuditRecord {
+                    op: AuditOp::EnrollDeny,
+                    credential_id: Some(request_id.to_string()),
+                    payload_hash: None,
+                    actor: actor.to_string(),
+                    alarm: None,
+                },
+            )?;
+            Ok(())
+        })
+        .map_err(StoreOpError::from)
+    }
+
+    /// Revoke the live incarnation for a name while retaining its grants.
+    pub fn revoke_enrollment(&self, name: &str, actor: &str) -> Result<(), StoreOpError> {
+        let now = now_ms();
+        let audit_key = self.audit_key.clone();
+        self.fenced_write(|tx| {
+            let enrollment_id = tx
+                .query_row(
+                    "SELECT enrollment_id FROM enrolled_consumers \
+                     WHERE name = ?1 AND revoked_at_ms IS NULL",
+                    [name],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+                .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+            tx.execute(
+                "UPDATE enrolled_consumers SET revoked_at_ms = ?1 WHERE enrollment_id = ?2",
+                rusqlite::params![now, enrollment_id],
+            )?;
+            append_audit_tx(
+                tx,
+                &audit_key,
+                &AuditRecord {
+                    op: AuditOp::EnrollRevoke,
+                    credential_id: Some(enrollment_id),
+                    payload_hash: None,
+                    actor: actor.to_string(),
+                    alarm: None,
+                },
+            )?;
+            Ok(())
+        })
+        .map_err(StoreOpError::from)
+    }
+
+    /// Gate-2 repair for a lost poll response. It has no expected-generation argument.
+    pub fn reissue_enrollment(
+        &self,
+        name: &str,
+        actor: &str,
+    ) -> Result<EnrollmentRotation, StoreOpError> {
+        let audit_key = self.audit_key.clone();
+        self.fenced_write(|tx| {
+            let (enrollment_id, generation) = tx
+                .query_row(
+                    "SELECT enrollment_id, token_generation FROM enrolled_consumers \
+                     WHERE name = ?1 AND revoked_at_ms IS NULL",
+                    [name],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                )
+                .optional()?
+                .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+            let token = mint_hex_32_sqlite()?;
+            let token_hash = enrollment_secret_hash(&token)
+                .expect("a freshly minted 32-byte hex token is valid");
+            let next_generation = generation
+                .checked_add(1)
+                .ok_or(rusqlite::Error::IntegralValueOutOfRange(1, generation))?;
+            tx.execute(
+                "UPDATE enrolled_consumers SET token_hash = ?1, token_generation = ?2 \
+                 WHERE enrollment_id = ?3",
+                rusqlite::params![token_hash, next_generation, enrollment_id],
+            )?;
+            append_audit_tx(
+                tx,
+                &audit_key,
+                &AuditRecord {
+                    op: AuditOp::EnrollReissue,
+                    credential_id: Some(enrollment_id),
+                    payload_hash: None,
+                    actor: actor.to_string(),
+                    alarm: None,
+                },
+            )?;
+            Ok(EnrollmentRotation {
+                token,
+                token_generation: next_generation as u64,
+            })
+        })
+        .map_err(StoreOpError::from)
+    }
+
+    fn sweep_pending_enrollments(&self, now: i64, reserve_rows: i64) -> Result<(), StoreOpError> {
+        self.fenced_write(|tx| sweep_pending_enrollments_tx(tx, now, reserve_rows))
             .map_err(StoreOpError::from)
     }
 
@@ -3645,6 +4156,72 @@ impl EncryptedStore {
         };
         envelope::seal(&self.key, &body, &binding).map_err(StoreOpError::Decrypt)
     }
+}
+
+fn append_enrollment_event_tx(
+    tx: &rusqlite::Transaction,
+    subject: &str,
+    detail: &str,
+    now: i64,
+) -> rusqlite::Result<()> {
+    debug_assert!(matches!(
+        subject,
+        ENROLL_PROPOSE_SUBJECT | ENROLL_POLL_SUBJECT | ENROLL_EXPIRE_SUBJECT
+    ));
+    tx.execute(
+        "INSERT INTO auth_events \
+         (ts_ms, credential_id, kind, provider_status, detail, record_version, applied, principal_kind, principal_id) \
+         VALUES (?1, ?2, ?3, NULL, ?4, NULL, 0, NULL, NULL)",
+        rusqlite::params![now, subject, AuthEventKind::Enrollment.as_str(), detail],
+    )?;
+    trim_auth_events_tx(tx, subject)
+}
+
+fn sweep_pending_enrollments_tx(
+    tx: &rusqlite::Transaction,
+    now: i64,
+    reserve_rows: i64,
+) -> rusqlite::Result<()> {
+    let expired = tx.execute(
+        "UPDATE pending_enrollments SET state = 'expired' \
+         WHERE state IN ('pending','approved') AND expires_at_ms <= ?1",
+        [now],
+    )?;
+    if expired > 0 {
+        append_enrollment_event_tx(tx, ENROLL_EXPIRE_SUBJECT, "expired", now)?;
+    }
+
+    let retention_cutoff = now.saturating_sub(ENROLLMENT_TERMINAL_RETENTION_MS);
+    tx.execute(
+        "DELETE FROM pending_enrollments \
+         WHERE state IN ('denied','consumed','expired') AND created_at_ms < ?1",
+        [retention_cutoff],
+    )?;
+
+    let count: i64 = tx.query_row("SELECT COUNT(*) FROM pending_enrollments", [], |row| {
+        row.get(0)
+    })?;
+    let target = ENROLLMENT_TERMINAL_MAX_ROWS.saturating_sub(reserve_rows);
+    let excess = count.saturating_sub(target);
+    if excess > 0 {
+        tx.execute(
+            "DELETE FROM pending_enrollments WHERE request_id IN (\
+                 SELECT request_id FROM pending_enrollments \
+                 WHERE state IN ('denied','consumed','expired') \
+                 ORDER BY created_at_ms ASC, request_id ASC LIMIT ?1\
+             )",
+            [excess],
+        )?;
+    }
+    Ok(())
+}
+
+fn mint_hex_32_sqlite() -> rusqlite::Result<String> {
+    mint_hex_32().map_err(|error| {
+        rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(format!(
+            "{error:?}"
+        ))))
+    })
 }
 
 fn now_ms() -> i64 {
@@ -9286,6 +9863,7 @@ mod coverage_phase_tests {
 mod migration_10_tests {
     use super::*;
     use crate::store::taxonomy_tests::{api_record, rig, sqlite};
+    use cortexkit_store::{open_sqlite, Isolation, StorageBackend, StorageDescriptor};
 
     /// *** `SelectorKind::Exact` IS NOT YET EXACT, AND THE NEXT SLICE MUST NOT ASSUME IT
     /// IS. *** This test exists to redden when someone narrows the coverage predicate,
@@ -10054,6 +10632,567 @@ mod migration_10_tests {
             "a lease-free open must not touch the store file"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn enrollment_secret(byte: u8) -> String {
+        format!("{byte:02x}").repeat(32)
+    }
+
+    #[test]
+    fn malformed_hashes_secrets_and_tokens_refuse_before_any_store_lookup() {
+        let (_root, store) = rig("enrollment-grammar", 116);
+        let invalid_values = [
+            "a".repeat(63),
+            "a".repeat(65),
+            "AB".repeat(32),
+            format!("{}g", "a".repeat(63)),
+        ];
+        for invalid in &invalid_values {
+            assert!(matches!(
+                store.propose_enrollment("consumer", invalid),
+                Err(EnrollmentError::Refused(EnrollmentRefusal::InvalidParams))
+            ));
+        }
+        let pending_count: i64 = store
+            .with_raw_conn(|conn| {
+                conn.query_row("SELECT COUNT(*) FROM pending_enrollments", [], |row| {
+                    row.get(0)
+                })
+            })
+            .expect("count pending rows");
+        assert_eq!(pending_count, 0, "malformed hashes write no pending row");
+
+        store
+            .with_raw_conn(|conn| {
+                conn.execute_batch("DROP TABLE pending_enrollments; DROP TABLE enrolled_consumers;")
+            })
+            .expect("remove lookup tables");
+        for invalid in &invalid_values {
+            assert!(matches!(
+                store.poll_enrollment("request", invalid),
+                Err(EnrollmentError::Refused(EnrollmentRefusal::InvalidParams))
+            ));
+            assert!(matches!(
+                store.rotate_enrollment(invalid, 1),
+                Err(EnrollmentError::Refused(EnrollmentRefusal::InvalidParams))
+            ));
+        }
+    }
+
+    #[test]
+    fn pending_queue_is_bounded_without_eviction_and_ttl_reclaims_approved_capacity() {
+        let (_root, store) = rig("enrollment-queue", 111);
+        let base = now_ms();
+        let secret = enrollment_secret(7);
+        let secret_hash = enrollment_secret_hash(&secret).expect("hash secret");
+        let oldest = store
+            .propose_enrollment_at("oldest", &secret_hash, base)
+            .expect("oldest proposal");
+        for index in 0..15 {
+            store
+                .propose_enrollment_at(&format!("n{index}"), &secret_hash, base + index)
+                .expect("fill queue");
+        }
+        store
+            .approve_enrollment(&oldest.request_id, "oldest", "operator")
+            .expect("approve oldest without consuming it");
+
+        for index in 0..32 {
+            assert!(matches!(
+                store.propose_enrollment_at(&format!("f{index}"), &secret_hash, base + 100 + index),
+                Err(EnrollmentError::Refused(
+                    EnrollmentRefusal::PendingQueueFull
+                ))
+            ));
+        }
+        assert!(matches!(
+            store.poll_enrollment_at(&oldest.request_id, &secret, base + 200),
+            Ok(EnrollmentPoll::Approved { .. })
+        ));
+        let live: i64 = store
+            .with_raw_conn(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM pending_enrollments WHERE state IN ('pending','approved')",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .expect("count live queue");
+        assert_eq!(
+            live, 15,
+            "consumption frees exactly the approved row's slot"
+        );
+
+        // Refill that slot with an approved-but-unconsumed row, which must occupy it.
+        let held = store
+            .propose_enrollment_at("held", &secret_hash, base + 300)
+            .expect("refill queue");
+        store
+            .approve_enrollment(&held.request_id, "held", "operator")
+            .expect("approve held request");
+        assert!(matches!(
+            store.propose_enrollment_at("blocked", &secret_hash, base + 400),
+            Err(EnrollmentError::Refused(
+                EnrollmentRefusal::PendingQueueFull
+            ))
+        ));
+
+        let after_ttl = base + ENROLLMENT_PENDING_TTL_MS + 401;
+        store
+            .propose_enrollment_at("reclaimed", &secret_hash, after_ttl)
+            .expect("TTL sweep reclaims every stale live slot");
+        assert!(matches!(
+            store.poll_enrollment_at(&held.request_id, &secret, after_ttl),
+            Err(EnrollmentError::Refused(EnrollmentRefusal::Superseded))
+        ));
+    }
+
+    #[test]
+    fn approved_restart_poll_rotation_and_total_poll_transitions_hold() {
+        let (root, store) = rig("enrollment-restart", 112);
+        let secret = enrollment_secret(8);
+        let secret_hash = enrollment_secret_hash(&secret).expect("hash secret");
+        let proposal = store
+            .propose_enrollment("consumer", &secret_hash)
+            .expect("propose");
+        let enrollment_id = store
+            .approve_enrollment(&proposal.request_id, "consumer", "operator")
+            .expect("approve");
+        let before_restart: (Option<String>, i64) = store
+            .with_raw_conn(|conn| {
+                conn.query_row(
+                    "SELECT token_hash, token_generation FROM enrolled_consumers WHERE enrollment_id = ?1",
+                    [&enrollment_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
+            .expect("read approval row");
+        assert_eq!(before_restart, (None, 0));
+        drop(store);
+
+        let descriptor = StorageDescriptor {
+            module_id: "cortexkit-credentials".into(),
+            storage_namespace: "vault".into(),
+            isolation: Isolation::Module,
+            backend: StorageBackend::Sqlite {
+                path: root.join("store.db").to_string_lossy().into_owned(),
+            },
+        };
+        let sqlite = open_sqlite(&descriptor).expect("reopen sqlite");
+        let store = std::sync::Arc::new(
+            EncryptedStore::open(sqlite, MasterKey::from_bytes([112; 32])).expect("reopen vault"),
+        );
+        let chain_before_poll = store.read_audit(None).expect("audit").len();
+
+        let wrong = enrollment_secret(9);
+        assert!(matches!(
+            store.poll_enrollment(&proposal.request_id, &wrong),
+            Err(EnrollmentError::Refused(EnrollmentRefusal::NotFound))
+        ));
+        assert!(matches!(
+            store.poll_enrollment(&enrollment_secret(10), &secret),
+            Err(EnrollmentError::Refused(EnrollmentRefusal::NotFound))
+        ));
+
+        let left = std::sync::Arc::clone(&store);
+        let right = std::sync::Arc::clone(&store);
+        let left_id = proposal.request_id.clone();
+        let right_id = proposal.request_id.clone();
+        let left_secret = secret.clone();
+        let right_secret = secret.clone();
+        let first = std::thread::spawn(move || left.poll_enrollment(&left_id, &left_secret));
+        let second = std::thread::spawn(move || right.poll_enrollment(&right_id, &right_secret));
+        let outcomes = [
+            first.join().expect("first poll"),
+            second.join().expect("second poll"),
+        ];
+        let approved = outcomes
+            .iter()
+            .find_map(|outcome| match outcome {
+                Ok(EnrollmentPoll::Approved {
+                    token,
+                    token_generation,
+                    ..
+                }) => Some((token.clone(), *token_generation)),
+                _ => None,
+            })
+            .expect("exactly one poll delivers");
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| matches!(
+                    outcome,
+                    Err(EnrollmentError::Refused(EnrollmentRefusal::AlreadyConsumed))
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(approved.1, 1);
+        assert!(is_lower_hex_32(&approved.0));
+        assert_eq!(
+            store.read_audit(None).expect("audit").len(),
+            chain_before_poll
+        );
+
+        let stored_hash: String = store
+            .with_raw_conn(|conn| {
+                conn.query_row(
+                    "SELECT token_hash FROM enrolled_consumers WHERE enrollment_id = ?1",
+                    [&enrollment_id],
+                    |row| row.get(0),
+                )
+            })
+            .expect("stored token hash");
+        assert_eq!(stored_hash, enrollment_secret_hash(&approved.0).unwrap());
+        store
+            .with_raw_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO read_grants \
+                     (principal_kind, principal_id, selector_kind, selector, operation, created_at_ms) \
+                     VALUES ('enrolled', 'consumer', 'exact', 'apikey:one', 'read', 123)",
+                    [],
+                )
+            })
+            .expect("seed enrolled grant");
+        let grants_before: Vec<(String, String, String, String, String, i64)> = store
+            .with_raw_conn(|conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT principal_kind, principal_id, selector_kind, selector, operation, created_at_ms \
+                     FROM read_grants ORDER BY principal_kind, principal_id, selector_kind, selector, operation",
+                )?;
+                let rows = stmt
+                    .query_map([], |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                        ))
+                    })?
+                    .collect();
+                rows
+            })
+            .expect("dump grants before rotation");
+
+        let chain_before_rotate = store.read_audit(None).expect("audit").len();
+        let rotated = store
+            .rotate_enrollment(&approved.0, 1)
+            .expect("rotate to two");
+        assert_eq!(rotated.token_generation, 2);
+        assert_eq!(
+            store.read_audit(None).expect("audit").len(),
+            chain_before_rotate + 1
+        );
+        assert!(matches!(
+            store.rotate_enrollment(&rotated.token, 1),
+            Err(EnrollmentError::Refused(EnrollmentRefusal::StaleGeneration))
+        ));
+        assert_eq!(
+            store.read_audit(None).expect("audit").len(),
+            chain_before_rotate + 1
+        );
+        assert!(matches!(
+            store.rotate_enrollment(&approved.0, 1),
+            Err(EnrollmentError::Refused(EnrollmentRefusal::NotFound))
+        ));
+        let rotated_again = store
+            .rotate_enrollment(&rotated.token, 2)
+            .expect("rotate to three");
+        assert_eq!(rotated_again.token_generation, 3);
+        assert_eq!(
+            store.read_audit(None).expect("audit").len(),
+            chain_before_rotate + 2
+        );
+        let grants_after: Vec<(String, String, String, String, String, i64)> = store
+            .with_raw_conn(|conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT principal_kind, principal_id, selector_kind, selector, operation, created_at_ms \
+                     FROM read_grants ORDER BY principal_kind, principal_id, selector_kind, selector, operation",
+                )?;
+                let rows = stmt
+                    .query_map([], |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                        ))
+                    })?
+                    .collect();
+                rows
+            })
+            .expect("dump grants after rotation");
+        assert_eq!(
+            grants_after, grants_before,
+            "rotation must not touch grants"
+        );
+    }
+
+    #[test]
+    fn revoked_reissued_expired_and_reenrolled_requests_are_superseded_without_hash_changes() {
+        let (_root, store) = rig("enrollment-superseded", 115);
+        let base = now_ms();
+
+        let old_secret = enrollment_secret(20);
+        let old = store
+            .propose_enrollment(
+                "old-proposal",
+                &enrollment_secret_hash(&old_secret).unwrap(),
+            )
+            .expect("old proposal");
+        let old_enrollment = store
+            .approve_enrollment(&old.request_id, "reused-name", "operator")
+            .expect("approve old incarnation");
+        store
+            .revoke_enrollment("reused-name", "operator")
+            .expect("revoke old incarnation");
+        assert!(matches!(
+            store.poll_enrollment(&old.request_id, &old_secret),
+            Err(EnrollmentError::Refused(EnrollmentRefusal::Superseded))
+        ));
+        let old_hash: Option<String> = store
+            .with_raw_conn(|conn| {
+                conn.query_row(
+                    "SELECT token_hash FROM enrolled_consumers WHERE enrollment_id = ?1",
+                    [&old_enrollment],
+                    |row| row.get(0),
+                )
+            })
+            .expect("old token hash");
+        assert_eq!(old_hash, None);
+
+        let new_secret = enrollment_secret(21);
+        let new = store
+            .propose_enrollment("reused-name", &enrollment_secret_hash(&new_secret).unwrap())
+            .expect("new proposal");
+        store
+            .approve_enrollment(&new.request_id, "reused-name", "operator")
+            .expect("approve new incarnation");
+        assert!(matches!(
+            store.poll_enrollment(&old.request_id, &old_secret),
+            Err(EnrollmentError::Refused(EnrollmentRefusal::Superseded))
+        ));
+        assert!(matches!(
+            store.poll_enrollment(&new.request_id, &new_secret),
+            Ok(EnrollmentPoll::Approved { name, .. }) if name == "reused-name"
+        ));
+
+        let reissue_secret = enrollment_secret(22);
+        let reissue_request = store
+            .propose_enrollment(
+                "repair-proposal",
+                &enrollment_secret_hash(&reissue_secret).unwrap(),
+            )
+            .expect("repair proposal");
+        let reissue_id = store
+            .approve_enrollment(&reissue_request.request_id, "repair-name", "operator")
+            .expect("approve repair");
+        let reissued = store
+            .reissue_enrollment("repair-name", "operator")
+            .expect("operator reissue");
+        assert_eq!(reissued.token_generation, 1);
+        let reissued_hash = enrollment_secret_hash(&reissued.token).unwrap();
+        assert!(matches!(
+            store.poll_enrollment(&reissue_request.request_id, &reissue_secret),
+            Err(EnrollmentError::Refused(EnrollmentRefusal::Superseded))
+        ));
+        let hash_after_poll: String = store
+            .with_raw_conn(|conn| {
+                conn.query_row(
+                    "SELECT token_hash FROM enrolled_consumers WHERE enrollment_id = ?1",
+                    [&reissue_id],
+                    |row| row.get(0),
+                )
+            })
+            .expect("hash after superseded poll");
+        assert_eq!(hash_after_poll, reissued_hash);
+
+        let expiring_secret = enrollment_secret(23);
+        let expiring = store
+            .propose_enrollment_at(
+                "expiring",
+                &enrollment_secret_hash(&expiring_secret).unwrap(),
+                base,
+            )
+            .expect("expiring proposal");
+        let expiring_id = store
+            .approve_enrollment(&expiring.request_id, "expiring", "operator")
+            .expect("approve expiring request");
+        assert!(matches!(
+            store.poll_enrollment_at(
+                &expiring.request_id,
+                &expiring_secret,
+                base + ENROLLMENT_PENDING_TTL_MS + 1
+            ),
+            Err(EnrollmentError::Refused(EnrollmentRefusal::Superseded))
+        ));
+        let expired_hash: Option<String> = store
+            .with_raw_conn(|conn| {
+                conn.query_row(
+                    "SELECT token_hash FROM enrolled_consumers WHERE enrollment_id = ?1",
+                    [&expiring_id],
+                    |row| row.get(0),
+                )
+            })
+            .expect("expired approval token hash");
+        assert_eq!(expired_hash, None);
+    }
+
+    #[test]
+    fn terminal_rows_and_enrollment_events_stay_bounded_without_chain_growth() {
+        let (_root, store) = rig("enrollment-bounds", 113);
+        let secret = enrollment_secret(11);
+        let secret_hash = enrollment_secret_hash(&secret).expect("hash secret");
+        let base = now_ms();
+        let chain_before_expiry = store.read_audit(None).expect("audit").len();
+        for index in 0..1000_i64 {
+            store
+                .propose_enrollment_at(
+                    "expiry-cycle",
+                    &secret_hash,
+                    base + index * (ENROLLMENT_PENDING_TTL_MS + 1),
+                )
+                .expect("expire then repropose same name");
+        }
+        assert_eq!(
+            store.read_audit(None).expect("audit").len(),
+            chain_before_expiry,
+            "propose and expiry never enter the HMAC chain"
+        );
+
+        let denial_base = base + 1001 * (ENROLLMENT_PENDING_TTL_MS + 1);
+        for index in 0..1000_i64 {
+            let proposal = store
+                .propose_enrollment_at("denial-cycle", &secret_hash, denial_base + index)
+                .expect("terminal rows neither block a name nor consume queue capacity");
+            store
+                .deny_enrollment(&proposal.request_id, "operator")
+                .expect("deny");
+        }
+        let count: i64 = store
+            .with_raw_conn(|conn| {
+                conn.query_row("SELECT COUNT(*) FROM pending_enrollments", [], |row| {
+                    row.get(0)
+                })
+            })
+            .expect("count bounded table");
+        assert!(count <= ENROLLMENT_TERMINAL_MAX_ROWS, "count was {count}");
+        let old_terminal: i64 = store
+            .with_raw_conn(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM pending_enrollments \
+                     WHERE state IN ('denied','consumed','expired') AND created_at_ms < ?1",
+                    [denial_base - ENROLLMENT_TERMINAL_RETENTION_MS],
+                    |row| row.get(0),
+                )
+            })
+            .expect("count old terminal rows");
+        assert_eq!(old_terminal, 0);
+
+        let legitimate = store
+            .propose_enrollment_at("legitimate", &secret_hash, denial_base + 2_000)
+            .expect("legitimate pending row");
+        let chain_before_wrong_secrets = store.read_audit(None).expect("audit").len();
+        let wrong = enrollment_secret(12);
+        for _ in 0..1000 {
+            assert!(matches!(
+                store.poll_enrollment_at(&legitimate.request_id, &wrong, denial_base + 2_001),
+                Err(EnrollmentError::Refused(EnrollmentRefusal::NotFound))
+            ));
+        }
+        assert_eq!(
+            store.read_audit(None).expect("audit").len(),
+            chain_before_wrong_secrets,
+            "wrong-secret polls never enter the HMAC chain"
+        );
+
+        let events: Vec<(String, String, Option<String>)> = store
+            .with_raw_conn(|conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT credential_id, kind, detail FROM auth_events \
+                     WHERE kind = 'enrollment' ORDER BY seq",
+                )?;
+                let rows = stmt
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                    .collect();
+                rows
+            })
+            .expect("read enrollment events");
+        for subject in [
+            ENROLL_PROPOSE_SUBJECT,
+            ENROLL_POLL_SUBJECT,
+            ENROLL_EXPIRE_SUBJECT,
+        ] {
+            assert!(events.iter().filter(|event| event.0 == subject).count() <= 64);
+        }
+        let rendered = serde_json::to_string(&events).expect("render events");
+        for forbidden in [
+            "expiry-cycle",
+            "denial-cycle",
+            legitimate.request_id.as_str(),
+            secret.as_str(),
+            wrong.as_str(),
+            secret_hash.as_str(),
+        ] {
+            assert!(!rendered.contains(forbidden), "event leaked {forbidden}");
+        }
+    }
+
+    #[test]
+    fn lease_free_readers_leave_expired_pending_rows_untouched_until_writer_reopens() {
+        let (root, store) = rig("enrollment-read-only", 114);
+        let secret_hash = enrollment_secret_hash(&enrollment_secret(13)).unwrap();
+        store
+            .propose_enrollment_at("expired-reader", &secret_hash, 1)
+            .expect("seed old pending row");
+        let path = root.join("store.db");
+        let key = MasterKey::from_bytes([114; 32]);
+        drop(store);
+
+        assert!(read_auth_events_read_only(&path, 100).is_ok());
+        assert!(verify_audit_chain_read_only(&path, &key).is_ok());
+        let read_only = rusqlite::Connection::open_with_flags(
+            &path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("open lease-free read-only connection");
+        let state: String = read_only
+            .query_row(
+                "SELECT state FROM pending_enrollments WHERE proposed_name = 'expired-reader'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read untouched row");
+        assert_eq!(state, "pending");
+        drop(read_only);
+
+        let descriptor = StorageDescriptor {
+            module_id: "cortexkit-credentials".into(),
+            storage_namespace: "vault".into(),
+            isolation: Isolation::Module,
+            backend: StorageBackend::Sqlite {
+                path: path.to_string_lossy().into_owned(),
+            },
+        };
+        let sqlite = open_sqlite(&descriptor).expect("reopen writer");
+        let reopened = EncryptedStore::open(sqlite, key).expect("writer sweeps on open");
+        let remaining: i64 = reopened
+            .with_raw_conn(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM pending_enrollments WHERE proposed_name = 'expired-reader'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .expect("read swept row count");
+        assert_eq!(
+            remaining, 0,
+            "the writer expires then retention-deletes the old row"
+        );
     }
 
     /// Every row count a read path could plausibly move, so a write that lands anywhere

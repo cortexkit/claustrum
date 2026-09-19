@@ -87,6 +87,7 @@ getrandom = "0.2"
 zeroize = { version = "1", features = ["zeroize_derive", "serde"] }
 sha2 = "0.10"
 hmac = "0.12"
+subtle = "2.6"
 
 # ES256 (ECDSA P-256 + SHA-256) for APNs provider tokens. APNs accepts NO other
 # algorithm for token auth, and it wants the raw 64-byte r||s signature rather

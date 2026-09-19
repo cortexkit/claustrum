@@ -1,6 +1,6 @@
 # OpenCode xAI enrolment runbook
 
-Status: RUNBOOK v1 · commands verified against branch feat/oauth-half-xai @ 6861c94 and deployed ck-auth 90b69a3 on 2026-09-19 · live enrolment NOT YET RUN
+Status: RUNBOOK v1 · commands verified against branch feat/oauth-half-xai and deployed ck-auth 90b69a3 on 2026-09-19 · live enrolment RUN 2026-09-19T09:53:24Z on this host (receipt `~/.local/share/cortexkit/claustrum-instruments/2026-09-19-xai-live-enrolment.json`)
 
 ## Roll back before changing login state
 
@@ -107,9 +107,19 @@ The manifest is shared with `anthropic-auth` and `openai-auth`. This branch adds
 | tenant | ack | file:line checked |
 | --- | --- | --- |
 | anthropic-auth | ACK 2026-09-19T08:35Z, probed with a positive control (their control B fails per-row, never whole-file); writer round-trips the key; 48 h waived | reader `packages/core/src/claustrum.ts:482` (`readCustodyHandles`, provider filter at :501-506 runs before account parsing); writer `:1119` |
-| openai-auth | pending (sent 2026-09-19T09:07Z; 48 h silence = proceed) | pending |
+| openai-auth | pending at flip time; their reader skips foreign blocks before account parsing, checked by the operator side | `packages/core/src/custody-manifest.ts:255-257` @ 77c2be9 |
 
 Fill in the acknowledgements and checked locations before enrolment.
+
+## Consumers that read the local entry
+
+Any monitor that reads a provider's quota from the local `auth.json` entry loses that lane when the tombstone lands. On this host Insula reads xAI quota that way. Mint it its own capability handle (a distinct handle, so revoking either side never cuts the other) and install it in its handle file BEFORE the tombstone; done in that order on 2026-09-19 (handle 09:31Z, tombstone 09:53Z) Insula's grok row flipped to `source=vault` within a second and never sampled degraded. In the reverse order the lane is dark for the gap.
+
+A custody flip logs nothing on either side: the wire is the only witness. Capture a before/after quota snapshot on purpose if the flip is to be verifiable afterwards.
+
+## Verifying the serve
+
+`credential.get` through the plugin writes one `served` row per provider per process to the custody log. When probing, leave `CLAUSTRUM_CUSTODY_LOG` UNSET — an empty value is treated as a file path today (claustrum#62) and the row goes nowhere. Negative control that proves the plugin is the serving path: the same request with `CLAUSTRUM_CUSTODY_DISABLE=1` fails with `xAI token refresh failed (400) invalid_grant`, because the shipped loader can only try the sentinel.
 
 ## Partial failures
 

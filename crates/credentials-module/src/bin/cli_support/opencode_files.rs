@@ -1491,9 +1491,44 @@ mod manifest_lock_aba_regression {
         quarantine
     }
 
+    /// Stamp a directory's mtime, and on failure SAY WHAT THE DISK LOOKED LIKE.
+    ///
+    /// This open has failed with `NotFound` on a path the same thread created two
+    /// statements earlier, under a loaded full gate, repeatedly since 2026-09-18 — and
+    /// every occurrence has been a bare `Os { code: 2 }` with nothing to reason from.
+    /// Two explanations fit it and they need different fixes: the directory was created
+    /// and then REMOVED by something, or the create returned success without the entry
+    /// being visible to the next syscall. A bare NotFound cannot tell them apart.
+    ///
+    /// So the failure now reports whether the path exists on a re-stat and what its
+    /// parent actually contains. A deleter leaves an empty or differently-populated
+    /// parent; a visibility problem leaves the entry sitting there while the open that
+    /// just failed says it does not. Deliberately NOT a retry: retrying would make the
+    /// flake disappear and take the evidence with it, and I do not yet know which
+    /// failure I would be papering over.
     fn set_directory_mtime(path: &Path, modified_at_ms: u64) {
         fs::File::open(path)
-            .unwrap()
+            .unwrap_or_else(|error| {
+                let exists = path.exists();
+                let siblings: Vec<String> = path
+                    .parent()
+                    .and_then(|parent| fs::read_dir(parent).ok())
+                    .map(|entries| {
+                        entries
+                            .flatten()
+                            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                panic!(
+                    "opening {path:?} to stamp its mtime failed with {error:?}; \
+                     re-stat says exists={exists}; parent holds {siblings:?}. \
+                     exists=true means the entry is there and the open disagreed \
+                     (a visibility problem); exists=false with a populated parent \
+                     means something removed this one specifically; an empty parent \
+                     means the whole fixture directory went."
+                )
+            })
             .set_times(
                 fs::FileTimes::new()
                     .set_modified(UNIX_EPOCH + Duration::from_millis(modified_at_ms)),

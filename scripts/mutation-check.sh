@@ -163,13 +163,21 @@ run_arm() {
           '        let wants_refresh = force_refresh || self.is_stale(&initial, min_ttl_ms);'
         ;;
       3)
+        # RE-ANCHORED when get_scoped gained min_ttl_ms: the engine call moved from
+        # `engine.get(id, None, false)` to `get_with_refresh_status(id,
+        # params.min_ttl_ms, false)` and the bound name changed from `record` to
+        # `refreshed.record`. The arm REFUSED rather than passing vacuously.
+        #
+        # Anchored on the KIND CHECK alone rather than on the surrounding call, so the
+        # next change to how the record is fetched does not invalidate it again. The
+        # mutation is the whole condition replaced by `false`, never a conjunct: a
+        # neighbouring clause in a disjunction absorbs a `false &&` prefix and leaves the
+        # code completely unmutated while every applied-evidence check still passes.
         replace_exact "$source" \
-          '        match self.engine.get(&params.credential_id, None, false).await {
-            Ok(record) => {
-                if record.kind == credentials_core::record::CredentialKind::SigningKey {' \
-          '        match self.engine.get(&params.credential_id, None, false).await {
-            Ok(record) => {
-                if false {'
+          '                if record.kind == credentials_core::record::CredentialKind::SigningKey {
+                    // The caller'"'"'s read grant already authorized this record, so this is not' \
+          '                if false {
+                    // The caller'"'"'s read grant already authorized this record, so this is not'
         ;;
       4)
         replace_exact "$source" \

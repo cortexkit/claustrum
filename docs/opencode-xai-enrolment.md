@@ -65,12 +65,12 @@ The installed `SOURCE.txt` currently says `rev=568333d built=2026-09-18T22:46:23
 
 ## Create the vault record
 
-The deployed vault/CLI is `ck-auth 0.1.2`, built from master `90b69a3` on 2026-09-07. It lacks `mint-handle --out`, so capture the handle printed to stdout into a caller-owned file with `umask 077` and a redirect. It also lacks `remove --yes`; remove without that flag. Check `ck-auth mint-handle --help` on the deployed binary before relying on either interface, because master newer than `90b69a3` has `--out`.
+The deployed vault/CLI is `ck-auth 0.1.2`, built from master `90b69a3` on 2026-09-07. On this host it is not on PATH: the deployed binary is the build-is-deploy checkout's `~/projects/cortexkit/claustrum/target/release/ck-auth` (the same file the running daemon's `ck-claustrum` sits beside); every `ck-auth` below means that path. Do not build in that checkout — it would rebuild the running daemon's binary in place. It lacks `mint-handle --out`, so capture the handle printed to stdout into a caller-owned file with `umask 077` and a redirect. It also lacks `remove --yes`; remove without that flag. Check `ck-auth mint-handle --help` on the deployed binary before relying on either interface, because master newer than `90b69a3` has `--out`.
 
 For xAI on this host, pass the master key explicitly:
 
 ```sh
-ck-auth login --provider xai --id oauth:xai --key-path /etc/cortexkit/master.key
+~/projects/cortexkit/claustrum/target/release/ck-auth login --provider xai --id oauth:xai --key-path /etc/cortexkit/master.key
 ```
 
 Default keychain resolution resolves the master key after the browser callback and burns the one-time authorization code. If manual paste is needed, paste the whole callback URL from the address bar. Pasting only the code is refused harmlessly. A loopback listener may complete the callback instead.
@@ -92,7 +92,7 @@ To repeat the labelled measurement after a binary or provider change:
 3. Run refresh-free `credential.get(handle, 0)` to measure lifetime.
 4. Use isolated XDG state for `/login` to create a discardable local family.
 5. Rotate once, then replay R0 once to measure predecessor revocation.
-6. Remove the measurement record with `ck-auth remove --id <measurement id> --key-path /etc/cortexkit/master.key`. Do not use `logout`: it leaves `needs_reauth`, which the latch monitor alarms on every 30 minutes.
+6. Remove the measurement record with `~/projects/cortexkit/claustrum/target/release/ck-auth remove --id <measurement id> --key-path /etc/cortexkit/master.key`. Do not use `logout`: it leaves `needs_reauth`, which the latch monitor alarms on every 30 minutes.
 
 The scripts are host-local at `~/.local/share/cortexkit/claustrum-instruments/xai-measure/`. They are not in this repository.
 

@@ -9287,6 +9287,78 @@ mod migration_10_tests {
     use super::*;
     use crate::store::taxonomy_tests::{api_record, rig, sqlite};
 
+    /// *** `SelectorKind::Exact` IS NOT YET EXACT, AND THE NEXT SLICE MUST NOT ASSUME IT
+    /// IS. *** This test exists to redden when someone narrows the coverage predicate,
+    /// so that they read this comment before their change ships.
+    ///
+    /// Migration 10 converts the stored kind literal `prefix` to `exact` and leaves the
+    /// selector TEXT untouched, so every grant reaches byte-for-byte what it reached
+    /// before. The predicate is still `starts_with`. That is deliberate: narrowing reach
+    /// belongs with the conversion table and the reach-preservation guard, which are a
+    /// later slice.
+    ///
+    /// THE HAZARD, stated because it is silent and it removes authorization. On the live
+    /// store when this was written, `reserved:broca` holds a grant whose selector text is
+    /// `apikey:opencode-`, and the credential it reaches is `apikey:opencode-go`. NO
+    /// CREDENTIAL IS LITERALLY NAMED `apikey:opencode-`. So a slice that flips this
+    /// predicate to byte equality without first rewriting that row's text to
+    /// `apikey:opencode-go` leaves a grant that matches NOTHING: the consumer's reads
+    /// begin answering the uniform unresolved-address refusal, which is
+    /// indistinguishable from a revoked grant and from a credential that never existed.
+    /// Nothing fails, nothing logs a defect, and the operator sees a grant row that looks
+    /// correct.
+    ///
+    /// So the obligation is: THE TEXT CONVERSION AND THE PREDICATE FLIP SHIP IN THE SAME
+    /// CHANGE. If you are here because this test went red, that is the question to answer
+    /// before you update it.
+    #[test]
+    fn an_exact_selector_still_covers_by_prefix_until_the_conversion_table_lands() {
+        let (_root, store) = rig("exact-is-not-yet-exact", 97);
+        store
+            .create_audited(
+                "apikey:opencode-go",
+                &api_record(),
+                AuditCtx::admin(AuditOp::Put),
+            )
+            .unwrap();
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "broca",
+                SelectorKind::Exact,
+                "apikey:opencode-",
+                GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .unwrap();
+
+        // The shape the live store carries: selector text that is a strict prefix of the
+        // id it reaches, stored under the kind `exact`.
+        let covered = store
+            .evaluate_scoped_coverage(
+                "reserved",
+                "broca",
+                "apikey:opencode-go",
+                GrantOperation::Read,
+            )
+            .expect("an exact-kind grant is evaluated in phase 1");
+        assert!(
+            covered.covered,
+            "migration 10 renamed the kind and preserved the text, so this grant must \
+             still reach the credential it reached at schema 9. If this assertion is the \
+             one that failed, reach has already been lost: rewrite the selector text in \
+             the same migration that narrows the predicate."
+        );
+
+        // The control that makes the assertion above mean something: the selector text is
+        // NOT the credential id, so byte equality would not cover it.
+        assert_ne!(
+            "apikey:opencode-", "apikey:opencode-go",
+            "if these were equal this test would pass under either predicate and prove \
+             nothing about the pending narrowing"
+        );
+    }
+
     /// One credential the way a real store carries it: a row whose `updated_at_ms` is a
     /// LATER write time than its deposit, a chain deposit entry that dates it, an
     /// earlier non-deposit entry and a later one.

@@ -137,6 +137,31 @@ describe("custody logger", () => {
     expect(existsSync(disabled)).toBe(false);
   });
 
+  test("an empty CLAUSTRUM_CUSTODY_LOG is unset, not a path and not off", () => {
+    // Three states, two intentional: unset -> default path; off/0/false/no -> disabled.
+    // An empty string is the shell slip `CLAUSTRUM_CUSTODY_LOG=`; it must fall to the
+    // default path (toward visibility), never be taken as a path named "" and never
+    // disable. Sibling env reads in the package (detect.ts, handles.ts, defaultFilePath)
+    // already coerce empty to unset; this pins log.ts to the same convention.
+    const root = join(tmpdir(), `claustrum-log-${crypto.randomUUID()}`);
+    const state = join(root, ".local", "state");
+    const expected = join(state, "cortexkit", "opencode-plugin", "custody.jsonl");
+    createLogger(createFileLogSink({ env: { CLAUSTRUM_CUSTODY_LOG: "", XDG_STATE_HOME: state } })).info({ provider: "x" });
+    expect(existsSync(expected)).toBe(true);
+    expect(readFileSync(expected, "utf8")).toContain('"provider":"x"');
+  });
+
+  test("the off-list still disables after the empty-string coercion", () => {
+    // Guards the fix against widening: coercing "" to unset must not make "off" (or any
+    // listed token) fall through to the default path.
+    for (const token of ["off", "0", "false", "no"]) {
+      const root = join(tmpdir(), `claustrum-log-${crypto.randomUUID()}`);
+      const state = join(root, ".local", "state");
+      createLogger(createFileLogSink({ env: { CLAUSTRUM_CUSTODY_LOG: token, XDG_STATE_HOME: state } })).info({ provider: "x" });
+      expect(existsSync(join(state, "cortexkit", "opencode-plugin", "custody.jsonl"))).toBe(false);
+    }
+  });
+
   test("file sink writes only FILE_FIELDS", () => {
     const root = tempRoot();
     const path = join(root, "custody.jsonl");

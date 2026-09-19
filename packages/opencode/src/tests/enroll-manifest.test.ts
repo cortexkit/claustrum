@@ -68,7 +68,7 @@ describe("xai enrollment manifest", () => {
     const path = await fresh();
     await writeEnrollmentManifest(path, input);
     const before = await raw(path);
-    await expect(writeEnrollmentManifest(path, { ...input, handle: otherHandle })).rejects.toThrow("xai main handle differs; remove first, then re-enrol");
+    await expect(writeEnrollmentManifest(path, { ...input, handle: otherHandle })).rejects.toThrow("xai main handle differs; remove first, then enroll");
     expect(await raw(path)).toEqual(before);
     await seed(path, { version: 1, providers: [{ provider: "xai", shape: "oauth", serve: "someone-else", accounts: [{ label: "main", handle, credential_id: "oauth:xai" }] }] });
     const foreignBefore = await raw(path);
@@ -133,10 +133,10 @@ describe("xai enrollment manifest", () => {
 
   test("rejects invalid input before acquiring a lock", async () => {
     const path = await fresh();
-    await expect(writeEnrollmentManifest(path, { ...input, credentialId: "oauth:openai" as "oauth:xai" })).rejects.toThrow();
-    await expect(writeEnrollmentManifest(path, { ...input, handle: "bad" })).rejects.toThrow();
-    await expect(writeEnrollmentManifest(path, { ...input, minTtlMs: -1 })).rejects.toThrow();
-    await expect(writeEnrollmentManifest(path, { ...input, minTtlMs: 1.5 })).rejects.toThrow();
+    await expect(writeEnrollmentManifest(path, { ...input, credentialId: "oauth:openai" as "oauth:xai" })).rejects.toThrow("invalid xai enrollment credential");
+    await expect(writeEnrollmentManifest(path, { ...input, handle: "bad" })).rejects.toThrow("invalid xai enrollment handle");
+    await expect(writeEnrollmentManifest(path, { ...input, minTtlMs: -1 })).rejects.toThrow("invalid xai enrollment minTtlMs");
+    await expect(writeEnrollmentManifest(path, { ...input, minTtlMs: 1.5 })).rejects.toThrow("invalid xai enrollment minTtlMs");
     // "Before acquiring a lock" is observable only while someone else HOLDS it: a writer that
     // validated first rejects immediately; one that locked first would block on the held lock.
     // (A post-hoc "no lock dir" check cannot tell them apart -- release removes the dir either way.)

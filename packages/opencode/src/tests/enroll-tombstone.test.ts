@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isProviderTombstone, tombstoneFor } from "../tombstone";
 import { writeOAuthTombstone, type AuthTombstoneIo } from "../enroll-tombstone";
+import { AuthFileValidationError } from "../errors";
 
 const provider = "xai";
 const canonical = Buffer.from(JSON.stringify({ [provider]: tombstoneFor("oauth", provider) }) + "\n");
@@ -18,7 +19,7 @@ function fake(initial: Buffer | null) {
   return { io, writes, get disk() { return disk; }, set disk(value: Buffer | null) { disk = value; } };
 }
 
-describe("OAuth tombstone enrolment", () => {
+describe("OAuth tombstone enrollment", () => {
   test("writes stable auth once", async () => {
     const f = fake(null);
     expect(await writeOAuthTombstone("auth.json", provider, f.io)).toEqual({ writes: 1 });
@@ -150,6 +151,7 @@ describe("OAuth tombstone real IO", () => {
     const path = join(dir, "auth.json");
     await writeFile(path, Buffer.alloc(1024 * 1024 + 1, 65), { mode: 0o600 });
     await expect(writeOAuthTombstone(path, provider)).rejects.toThrow("auth file exceeds 1 MiB");
+    await expect(writeOAuthTombstone(path, provider)).rejects.toBeInstanceOf(AuthFileValidationError);
   });
 
   test("refuses insecure mode", async () => {
@@ -157,6 +159,7 @@ describe("OAuth tombstone real IO", () => {
     const path = join(dir, "auth.json");
     await writeFile(path, "{}\n", { mode: 0o644 });
     await expect(writeOAuthTombstone(path, provider)).rejects.toThrow("auth file must be a regular 0600 file");
+    await expect(writeOAuthTombstone(path, provider)).rejects.toBeInstanceOf(AuthFileValidationError);
   });
 
   test("refuses a directory at the auth path", async () => {
@@ -179,5 +182,22 @@ describe("OAuth tombstone real IO", () => {
     }
     expect(await readFile(path)).toEqual(original);
     expect((await readdir(dir)).filter((entry) => /^\.auth\.json\..*\.tmp$/.test(entry))).toHaveLength(0);
+  });
+
+  test("preserves destination validation when a directory replaces the path", async () => {
+    dir = await mkdtemp(join(tmpdir(), "enroll-tombstone-"));
+    const path = join(dir, "auth.json");
+    const watcher = (async () => {
+      for (;;) {
+        const entries = await readdir(dir);
+        if (entries.some((entry) => entry.startsWith(".auth.json.") && entry.endsWith(".tmp"))) {
+          await mkdir(path);
+          return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1));
+      }
+    })();
+    await expect(writeOAuthTombstone(path, provider)).rejects.toThrow("auth file must be a regular 0600 file");
+    await watcher;
   });
 });

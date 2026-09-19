@@ -3,6 +3,8 @@ import { lstat, mkdir, open, rename, stat, unlink } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { identifierIsValid } from "@cortexkit/claustrum-client";
+import { readBounded } from "./bounded-read";
+import { AuthFileValidationError } from "./errors";
 import { parseSecretJson } from "./secret-json";
 import { isProviderTombstone, tombstoneFor } from "./tombstone";
 
@@ -18,14 +20,9 @@ export async function writeOAuthTombstone(path: string, provider: string, io?: A
   const effective = io ?? defaultIo();
   const before = await effective.read(path);
   let auth: Record<string, unknown>;
-  try {
-    const parsed = parseSecretJson(before?.toString("utf8") ?? "{}", "auth file");
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("auth file must contain a JSON object");
-    auth = parsed as Record<string, unknown>;
-  } catch (error) {
-    if (error instanceof Error && error.message === "auth file must contain a JSON object") throw error;
-    throw error;
-  }
+  const parsed = parseSecretJson(before?.toString("utf8") ?? "{}", "auth file");
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new AuthFileValidationError("auth file must contain a JSON object");
+  auth = parsed as Record<string, unknown>;
   if (isProviderTombstone(auth[provider], provider)) return { writes: 0 };
   const next = Buffer.from(JSON.stringify({ ...auth, [provider]: tombstoneFor("oauth", provider) }) + "\n");
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -50,14 +47,15 @@ async function readAuth(path: string): Promise<Buffer | null> {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw new Error("unable to inspect auth file");
   }
-  if (!metadata.isFile() || metadata.uid !== process.getuid?.() || (metadata.mode & 0o777) !== 0o600) throw new Error("auth file must be a regular 0600 file");
+  // Parent and ancestor checks are omitted because caller-owned 0600 plus O_NOFOLLOW defeats the swap they guard against.
+  // handles.ts retains those checks because its broader reader contract does not require caller ownership.
+  if (!metadata.isFile() || metadata.uid !== process.getuid?.() || (metadata.mode & 0o777) !== 0o600) throw new AuthFileValidationError("auth file must be a regular 0600 file");
   let handle: Awaited<ReturnType<typeof open>> | undefined;
   try {
     handle = await open(path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
-    const bytes = Buffer.alloc(1024 * 1024 + 1);
-    const { bytesRead } = await handle.read(bytes, 0, bytes.length, 0);
-    if (bytesRead > 1024 * 1024) throw new Error("auth file exceeds 1 MiB");
-    return bytes.subarray(0, bytesRead);
+    const { buffer, bytes } = await readBounded(handle, 1024 * 1024);
+    if (bytes === -1) throw new AuthFileValidationError("auth file exceeds 1 MiB");
+    return buffer.subarray(0, bytes);
   } finally {
     await handle?.close().catch(() => {});
   }
@@ -65,10 +63,10 @@ async function readAuth(path: string): Promise<Buffer | null> {
 
 async function prepareParent(path: string): Promise<void> {
   const parent = dirname(path);
-  try { await mkdir(parent, { recursive: true, mode: 0o700 }); } catch { throw new Error("auth file parent cannot be created"); }
+  try { await mkdir(parent, { recursive: true, mode: 0o700 }); } catch { throw new AuthFileValidationError("auth file parent cannot be created"); }
   let metadata;
-  try { metadata = await stat(parent); } catch { throw new Error("auth file parent is unavailable"); }
-  if (!metadata.isDirectory() || ((metadata.mode & 0o002) !== 0 && (metadata.mode & 0o1000) === 0) || (metadata.mode & 0o022) !== 0) throw new Error("auth file parent must be private");
+  try { metadata = await stat(parent); } catch { throw new AuthFileValidationError("auth file parent is unavailable"); }
+  if (!metadata.isDirectory() || ((metadata.mode & 0o002) !== 0 && (metadata.mode & 0o1000) === 0) || (metadata.mode & 0o022) !== 0) throw new AuthFileValidationError("auth file parent must be private");
 }
 
 async function writeAuth(path: string, bytes: Buffer): Promise<void> {
@@ -84,9 +82,18 @@ async function writeAuth(path: string, bytes: Buffer): Promise<void> {
     handle = undefined;
     let destination;
     try { destination = await lstat(path); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-    if (destination && (!destination.isFile() || (destination.mode & 0o777) !== 0o600)) throw new Error("auth file must be a regular 0600 file");
+    if (destination && (!destination.isFile() || (destination.mode & 0o777) !== 0o600)) throw new AuthFileValidationError("auth file must be a regular 0600 file");
     await rename(temporary, path);
-  } catch {
+  } catch (error) {
+    if (error instanceof AuthFileValidationError) throw error;
+    try {
+      const destination = await lstat(path);
+      if (!destination.isFile() || (destination.mode & 0o777) !== 0o600) {
+        throw new AuthFileValidationError("auth file must be a regular 0600 file");
+      }
+    } catch (destinationError) {
+      if (destinationError instanceof AuthFileValidationError) throw destinationError;
+    }
     throw new Error("auth file replacement failed");
   } finally {
     await handle?.close().catch(() => {});

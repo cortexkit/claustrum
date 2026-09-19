@@ -4,6 +4,7 @@ import { parseArgs } from "node:util";
 import { defaultHandleFilePath, HANDLE_FILE_CONTRACT, credentialIdMatchesProvider, ClaustrumClient, type ServedCredential } from "@cortexkit/claustrum-client";
 import { writeEnrollmentManifest, removeEnrollmentManifest, type XaiEnrollment } from "./enroll-manifest";
 import { writeOAuthTombstone, type TombstoneResult } from "./enroll-tombstone";
+import { readBounded } from "./bounded-read";
 import { defaultAuthPath } from "./plugin";
 
 export type EnrollArgs = { provider: "xai"; credentialId: "oauth:xai"; main: boolean; remove: boolean; handleFile?: string; minTtlMs?: number; tokenLifetimeMs?: number; manifestPath: string; authPath: string; };
@@ -85,10 +86,11 @@ export async function readEnrollmentHandle(path: string): Promise<string> {
     descriptor = await open(path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
     const metadata = await descriptor.stat();
     if (!metadata.isFile() || metadata.uid !== process.getuid?.() || (metadata.mode & 0o777) !== 0o600) throw new Error("unsafe handle file");
-    const bytes = Buffer.alloc(257);
-    const { bytesRead } = await descriptor.read(bytes, 0, bytes.length, 0);
-    if (bytesRead > 256) throw new Error("handle file exceeds limit");
-    const handle = bytes.subarray(0, bytesRead).toString("utf8").replace(/^\s+|\s+$/g, "");
+    // Parent and ancestor checks are omitted because caller-owned 0600 plus O_NOFOLLOW defeats the swap they guard against.
+    // handles.ts retains those checks because its broader reader contract does not require caller ownership.
+    const { buffer, bytes } = await readBounded(descriptor, 256);
+    if (bytes === -1) throw new Error("handle file exceeds limit");
+    const handle = buffer.subarray(0, bytes).toString("utf8").replace(/^\s+|\s+$/g, "");
     if (!HANDLE_FILE_CONTRACT.handleRe.test(handle)) throw new Error("invalid handle file");
     return handle;
   } finally { await descriptor?.close().catch(() => {}); }

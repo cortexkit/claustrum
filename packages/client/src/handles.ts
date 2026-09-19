@@ -122,7 +122,7 @@ export function parseHandleFile(value: unknown): OpenCodeHandleFileV1 {
       // the emptiness guard. NO TEST DISTINGUISHES THAT ONE (empty rejects with or
       // without it, verified by removal), so it is kept for a future reader who loosens
       // the comparison, not for an arm it could never redden. The non-empty-SEGMENT
-      // rule below is different: it reddens, and is pinned.
+      // rule in credentialIdMatchesProvider is different: it reddens, and is pinned.
       if (!credentialIdMatchesProvider(account.credential_id, item.provider)) {
         invalid(`provider ${index} account ${account.label} has invalid credential id`)
       }

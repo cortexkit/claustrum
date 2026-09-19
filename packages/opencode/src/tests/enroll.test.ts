@@ -63,7 +63,7 @@ describe("enroll argument parsing", () => {
     expect(parsed.minTtlMs).toBe(0);
     expect(parsed.manifestPath).toBe(join("/home/test", ".config", "cortexkit", "opencode-handles.json"));
     expect(parsed.authPath).toBe(join("/home/test", ".local", "share", "opencode", "auth.json"));
-    expect(() => parseEnrollArgs(["--", "--", "--provider", "xai", "--id", "oauth:xai", "--main"])).toThrow();
+    expect(() => parseEnrollArgs(["--", "--", "--provider", "xai", "--id", "oauth:xai", "--main"])).toThrow("invalid enrollment arguments");
   });
 });
 
@@ -129,12 +129,12 @@ describe("capability handle reader", () => {
     const root = await fresh(); const path = join(root, "handle");
     await writeFile(path, `\n${handle}\n`, { mode: 0o600 }); await chmod(path, 0o600);
     await expect(readEnrollmentHandle(path)).resolves.toBe(handle);
-    await chmod(path, 0o644); await expect(readEnrollmentHandle(path)).rejects.toThrow();
-    await chmod(path, 0o600); await writeFile(path, "x".repeat(300)); await expect(readEnrollmentHandle(path)).rejects.toThrow();
-    await writeFile(path, `${handle}\n${handle}`); await expect(readEnrollmentHandle(path)).rejects.toThrow();
-    await writeFile(path, "garbage"); await expect(readEnrollmentHandle(path)).rejects.toThrow();
-    await writeFile(path, handle, { mode: 0o600 }); await symlink(path, join(root, "link")); await expect(readEnrollmentHandle(join(root, "link"))).rejects.toThrow();
-    await expect(readEnrollmentHandle(root)).rejects.toThrow();
+    await chmod(path, 0o644); await expect(readEnrollmentHandle(path)).rejects.toThrow("unsafe handle file");
+    await chmod(path, 0o600); await writeFile(path, "x".repeat(300)); await expect(readEnrollmentHandle(path)).rejects.toThrow("handle file exceeds limit");
+    await writeFile(path, `${handle}\n${handle}`); await expect(readEnrollmentHandle(path)).rejects.toThrow("invalid handle file");
+    await writeFile(path, "garbage"); await expect(readEnrollmentHandle(path)).rejects.toThrow("invalid handle file");
+    await writeFile(path, handle, { mode: 0o600 }); await symlink(path, join(root, "link")); await expect(readEnrollmentHandle(join(root, "link"))).rejects.toThrow("ELOOP: too many symbolic links encountered, open");
+    await expect(readEnrollmentHandle(root)).rejects.toThrow("unsafe handle file");
   });
 });
 

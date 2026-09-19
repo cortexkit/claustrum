@@ -343,6 +343,7 @@ fn run() -> Result<(), CliError> {
         "approve" => cmd_approve(&global, &args),
         "list" => cmd_list(&global),
         "grants" => cmd_grants(&global),
+        "categories" => cmd_categories(&global),
         "enroll" => cmd_enroll(&global, &args),
         "audit" => cmd_audit(&global, &args),
         "events" => cmd_events(&global, &args),
@@ -523,6 +524,7 @@ fn usage_short() -> String {
        list                credential ids + lifecycle state (no secrets)\n\
        grants              principal-scoped grants (no secrets)\n\
        enroll              admit, revoke or reissue a consumer enrollment\n\
+       categories          which categories exist and what they cover\n\
        approve             record a master-key approval before a signing window\n\
          put                 ingest an api key, session cookie, or opaque secret\n\
          mint-signing-key    generate and custody a new Ed25519 signing key\n\
@@ -650,6 +652,19 @@ fn help_verb(verb: &str) -> String {
              id, credential prefix, operation, and creation time. Read-only; it uses the\n\
              authenticated admin.status path, reading the running daemon when available and\n\
              the offline lease path otherwise. An empty grant table prints `no grants`."
+        }
+        "categories" => {
+            "ck auth categories\n\
+             \n\
+             NOTES\n\
+             Print every category that exists, how many credentials carry it, and which\n\
+             principals hold a grant naming it. Read-only; it takes no lease and uses the\n\
+             same authenticated admin.status path as `grants`.\n\
+             A category NAMED BY A GRANT but carried by no credential is listed at zero\n\
+             rather than omitted: that row is why a grant reaches nothing, and hiding it\n\
+             would leave the operator with a correct-looking grant and no explanation.\n\
+             `(uncategorized)` counts credentials carrying no category at all. Some are\n\
+             deliberate, so the count is information rather than an error."
         }
         "approve" => {
             "ck auth approve --id <signing-credential-id> --file <path> --approver <name>\n\
@@ -4298,6 +4313,118 @@ fn pending_proposed_name(global: &GlobalArgs, request_id: &str) -> Result<String
                 "no pending request {request_id} (list them with `ck auth enroll list`)"
             ))
         })
+}
+
+/// Render every category that exists, what it covers, and which grants name it.
+///
+/// THE OTHER HALF OF THE REACH COLUMN. That column tells an operator a grant reaches
+/// nothing AFTER they create it; this tells them what is there BEFORE. Both exist because
+/// a category selector fails CLOSED and SILENTLY: a grant naming a category nothing
+/// carries is syntactically valid, accepted without complaint, and authorizes zero
+/// credentials, which is indistinguishable from a working grant by reading it.
+///
+/// Not hypothetical. On 2026-09-19 a `category:llm-provider` grant was created on the live
+/// vault while the only category in the store was `forge-identity` -- registry defaults
+/// apply at CREATION and every credential predated the migration that introduced
+/// categories. Nothing on either side said so; a consumer asking me to double-check a
+/// selector is the only reason it surfaced.
+///
+/// UNCATEGORIZED IS A ROW, not an omission. Some credentials carry no category
+/// deliberately, so hiding the count would make a FORGOTTEN assignment indistinguishable
+/// from an INTENDED one -- the same silence one level up.
+///
+/// Lease-free, like every other read verb, and for the same reason: the moment an operator
+/// asks is the moment the vault is running.
+fn cmd_categories(global: &GlobalArgs) -> Result<(), CliError> {
+    let (result, store_schema) = request_admin_status_with_schema(global)?;
+    for line in render_categories(&result)? {
+        println!("{line}");
+    }
+    print_store_behind_note(store_schema);
+    Ok(())
+}
+
+/// Build the category table. Split from printing so a test drives the real formatter
+/// rather than a hand-built copy of its arithmetic.
+fn render_categories(result: &serde_json::Value) -> Result<Vec<String>, CliError> {
+    let inventory = parse_credential_categories(result);
+    if inventory.is_empty() {
+        return Ok(vec!["no credentials".to_owned()]);
+    }
+    let grants = parse_grants(result)?;
+
+    let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut uncategorized = 0usize;
+    for categories in inventory.values() {
+        if categories.is_empty() {
+            uncategorized += 1;
+            continue;
+        }
+        for category in categories {
+            *counts.entry(category.clone()).or_default() += 1;
+        }
+    }
+
+    // A category NAMED BY A GRANT but carried by no credential must appear, at zero.
+    // Omitting it hides exactly the row an operator is looking for: the reach column says
+    // a grant reaches nothing, and this is where they come to find out why.
+    for grant in &grants {
+        if grant.selector_kind == "category" {
+            let name = grant
+                .credential_prefix
+                .strip_prefix("category:")
+                .unwrap_or(&grant.credential_prefix);
+            counts.entry(name.to_owned()).or_insert(0);
+        }
+    }
+
+    let namers = |category: &str| -> String {
+        let mut who: Vec<String> = grants
+            .iter()
+            .filter(|g| {
+                g.selector_kind == "category"
+                    && g.credential_prefix
+                        .strip_prefix("category:")
+                        .unwrap_or(&g.credential_prefix)
+                        == category
+            })
+            .map(|g| format!("{}:{}", g.principal_kind, g.principal_id))
+            .collect();
+        who.sort();
+        who.dedup();
+        if who.is_empty() {
+            "-".to_owned()
+        } else {
+            who.join(" ")
+        }
+    };
+
+    let wn = counts
+        .keys()
+        .map(|c| c.chars().count())
+        .chain(std::iter::once("CATEGORY".len()))
+        .chain(std::iter::once("(uncategorized)".len()))
+        .max()
+        .unwrap_or(8);
+    let mut lines = vec![format!(
+        "{:<wn$}  {:>11}  GRANTED TO",
+        "CATEGORY", "CREDENTIALS"
+    )];
+    for (category, count) in &counts {
+        lines.push(format!(
+            "{:<wn$}  {:>11}  {}",
+            category,
+            count,
+            namers(category)
+        ));
+    }
+    if uncategorized > 0 {
+        lines.push(format!(
+            "{:<wn$}  {:>11}  {}",
+            "(uncategorized)", uncategorized, "-"
+        ));
+    }
+    Ok(lines)
 }
 
 fn cmd_grants(global: &GlobalArgs) -> Result<(), CliError> {

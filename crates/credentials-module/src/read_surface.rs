@@ -1161,6 +1161,27 @@ impl ReadSurface {
     }
 
     /// Enumerate every row covered by the caller's own grants from one store snapshot.
+    ///
+    /// *** NO OPERATOR TOOL CAN CALL THIS, SO ITS LIVE EXERCISE IS NOT OURS. ***
+    /// The match below accepts `Principal::Reserved` only, and that principal requires a
+    /// supervisor-issued launch nonce. `ck-auth` and `vault_read_probe` both bind as
+    /// `Direct`, so neither the CLI nor the acceptance ladder in `scripts/accept-deploy.sh`
+    /// can reach this op at all — the ladder is not missing a leg someone forgot to write,
+    /// it is structurally incapable of proving this one. A reader who assumes otherwise
+    /// will write an acceptance step that cannot exist; that mistake has already been made
+    /// here once.
+    ///
+    /// WHAT THAT LEAVES. This op shipped in v0.1.3 and, as of 2026-09-19, has never served
+    /// a live request on any vault: the only consumer that wants it is BROCA's credential
+    /// audit, and it needs category grants that are not migrated in yet. Its correctness
+    /// is therefore warranted by a SUPERVISED CONSUMER IN ANOTHER REPOSITORY, running on a
+    /// schedule this repository does not control. That is invisible from inside this tree
+    /// no matter how carefully it is read — the tests below look like the evidence and are
+    /// not, because they were written against the behaviour their author imagined.
+    ///
+    /// So: if BROCA's audit stops running, this op silently returns to never-called, and
+    /// nothing here will say so. Their detector failing is the signal for both seats, which
+    /// is why it must not be disabled at either end as a local cleanup.
     pub fn list_scoped(
         &self,
         principal: Option<&Principal>,

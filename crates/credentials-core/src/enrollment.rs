@@ -142,9 +142,10 @@ pub fn decode_lower_hex_32(value: &str) -> Option<[u8; 32]> {
     if !is_lower_hex_32(value) {
         return None;
     }
+    let encoded = value.as_bytes();
     let mut decoded = [0_u8; 32];
-    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
-        decoded[index] = (hex_nibble(pair[0])? << 4) | hex_nibble(pair[1])?;
+    for (index, byte) in decoded.iter_mut().enumerate() {
+        *byte = (hex_nibble(encoded[index * 2])? << 4) | hex_nibble(encoded[index * 2 + 1])?;
     }
     Some(decoded)
 }

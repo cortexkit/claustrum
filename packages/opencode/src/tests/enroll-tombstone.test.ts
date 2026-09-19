@@ -3,7 +3,7 @@ import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, wri
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isProviderTombstone, tombstoneFor } from "../tombstone";
-import { writeOAuthTombstone, type AuthTombstoneIo } from "../enroll-tombstone";
+import { defaultIo, writeOAuthTombstone, type AuthTombstoneIo } from "../enroll-tombstone";
 import { AuthFileValidationError } from "../errors";
 
 const provider = "xai";
@@ -13,6 +13,7 @@ function fake(initial: Buffer | null) {
   let disk = initial?.subarray() ?? null;
   const writes: Buffer[] = [];
   const io: AuthTombstoneIo = {
+    ...defaultIo(),
     async read() { return disk?.subarray() ?? null; },
     async write(_path, bytes) { writes.push(bytes.subarray()); disk = bytes.subarray(); },
   };
@@ -87,7 +88,7 @@ describe("OAuth tombstone enrollment", () => {
 
   test("rejects invalid provider before read", async () => {
     let reads = 0;
-    const io: AuthTombstoneIo = { async read() { reads++; return null; }, async write() {} };
+    const io: AuthTombstoneIo = { ...defaultIo(), async read() { reads++; return null; }, async write() {} };
     for (const invalid of ["x y", "constructor", "prototype"]) {
       await expect(writeOAuthTombstone("auth.json", invalid, io)).rejects.toThrow("invalid auth provider identifier");
     }
@@ -185,33 +186,23 @@ describe("OAuth tombstone real IO", () => {
   });
 
   test("preserves destination validation when a directory replaces the path mid-write", async () => {
-    // The refusal under test lives in writeAuth's catch: it fires only when the
-    // destination becomes a directory between the pre-rename lstat and the rename.
-    // No IO seam sits in that window, so the race is driven from outside and BOUNDED:
-    // the watcher stops after 2 s whether or not it caught the temp file. If it did not,
-    // the write completes and the test reports the miss by name instead of hanging or
-    // passing vacuously. Two sites answer this race with the same refusal — the pre-rename
-    // check and the catch's destination re-check — so only removing BOTH reddens this test;
-    // a single-site mutation is answered by the other site and stays green by design.
+    // Two sites answer this race with the same refusal, so only removing both reddens this
+    // test; a single-site mutation is answered by the other site and stays green by design.
     dir = await mkdtemp(join(tmpdir(), "enroll-tombstone-"));
     const path = join(dir, "auth.json");
     let planted = false;
-    const deadline = Date.now() + 2000;
-    const watcher = (async () => {
-      while (Date.now() < deadline) {
-        const entries = await readdir(dir).catch(() => [] as string[]);
-        if (entries.some((entry) => entry.startsWith(".auth.json.") && entry.endsWith(".tmp"))) {
-          await mkdir(path).catch(() => {});
+    const io = defaultIo();
+    const racing: AuthTombstoneIo = {
+      ...io,
+      async lstat(candidate) {
+        if (candidate === path && !planted && (await readdir(dir)).some((entry) => entry.startsWith(".auth.json.") && entry.endsWith(".tmp"))) {
+          await mkdir(path);
           planted = true;
-          return;
         }
-        await new Promise((resolve) => setTimeout(resolve, 0));
-      }
-    })();
-    const outcome = await writeOAuthTombstone(path, provider).then(() => "wrote" as const, (error: unknown) => error);
-    await watcher;
-    if (!planted) throw new Error("race window missed: watcher never saw the temp file (inconclusive, not a pass)");
-    expect(outcome).toBeInstanceOf(AuthFileValidationError);
-    expect((outcome as Error).message).toBe("auth file must be a regular 0600 file");
+        return io.lstat(candidate);
+      },
+    };
+    await expect(writeOAuthTombstone(path, provider, racing)).rejects.toThrow("auth file must be a regular 0600 file");
+    expect(planted).toBe(true);
   });
 });

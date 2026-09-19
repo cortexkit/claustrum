@@ -1,4 +1,4 @@
-import { constants as fsConstants } from "node:fs";
+import { constants as fsConstants, type Stats } from "node:fs";
 import { lstat, mkdir, open, rename, stat, unlink } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
@@ -11,6 +11,8 @@ import { isProviderTombstone, tombstoneFor } from "./tombstone";
 export type AuthTombstoneIo = {
   read(path: string): Promise<Buffer | null>;
   write(path: string, bytes: Buffer): Promise<void>;
+  lstat(path: string): Promise<Stats>;
+  rename(from: string, to: string): Promise<void>;
 };
 
 export type TombstoneResult = { writes: 0 | 1 | 2 };
@@ -37,13 +39,18 @@ export async function writeOAuthTombstone(path: string, provider: string, io?: A
   throw new Error("unreachable reconciliation state");
 }
 
-function defaultIo(): AuthTombstoneIo {
-  return { read: readAuth, write: writeAuth };
+export function defaultIo(): AuthTombstoneIo {
+  return {
+    lstat,
+    rename,
+    async read(this: AuthTombstoneIo, path) { return readAuth(path, this); },
+    async write(this: AuthTombstoneIo, path, bytes) { return writeAuth(path, bytes, this); },
+  };
 }
 
-async function readAuth(path: string): Promise<Buffer | null> {
+async function readAuth(path: string, io: AuthTombstoneIo): Promise<Buffer | null> {
   let metadata;
-  try { metadata = await lstat(path); } catch (error) {
+  try { metadata = await io.lstat(path); } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw new Error("unable to inspect auth file");
   }
@@ -69,7 +76,7 @@ async function prepareParent(path: string): Promise<void> {
   if (!metadata.isDirectory() || ((metadata.mode & 0o002) !== 0 && (metadata.mode & 0o1000) === 0) || (metadata.mode & 0o022) !== 0) throw new AuthFileValidationError("auth file parent must be private");
 }
 
-async function writeAuth(path: string, bytes: Buffer): Promise<void> {
+async function writeAuth(path: string, bytes: Buffer, io: AuthTombstoneIo): Promise<void> {
   await prepareParent(path);
   const temporary = join(dirname(path), `.${basename(path)}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`);
   let handle: Awaited<ReturnType<typeof open>> | undefined;
@@ -81,13 +88,13 @@ async function writeAuth(path: string, bytes: Buffer): Promise<void> {
     await handle.close();
     handle = undefined;
     let destination;
-    try { destination = await lstat(path); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    try { destination = await io.lstat(path); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
     if (destination && (!destination.isFile() || (destination.mode & 0o777) !== 0o600)) throw new AuthFileValidationError("auth file must be a regular 0600 file");
-    await rename(temporary, path);
+    await io.rename(temporary, path);
   } catch (error) {
     if (error instanceof AuthFileValidationError) throw error;
     try {
-      const destination = await lstat(path);
+      const destination = await io.lstat(path);
       if (!destination.isFile() || (destination.mode & 0o777) !== 0o600) {
         throw new AuthFileValidationError("auth file must be a regular 0600 file");
       }

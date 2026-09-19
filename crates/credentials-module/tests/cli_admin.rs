@@ -870,7 +870,7 @@ fn offline_grants_lists_a_newly_minted_grant_with_creation_time() {
     let fields = grant_row_fields(&stdout, "operator:");
     assert_eq!(
         &fields[..5],
-        &["reserved", "agent", "prefix", "operator:", "read"],
+        &["reserved", "agent", "exact", "operator:", "read"],
         "grant rows must expose each requested column: {stdout}"
     );
     assert_eq!(fields.len(), 7, "timestamp should be two formatted columns");
@@ -915,18 +915,9 @@ fn grants_keep_read_and_sign_rows_separate_and_sort_by_prefix_then_operation() {
         .map(|line| line.split_whitespace().collect())
         .collect();
     assert_eq!(rows.len(), 3, "every grant needs its own row: {stdout}");
-    assert_eq!(
-        &rows[0][..5],
-        &["reserved", "agent", "prefix", "a:", "sign"]
-    );
-    assert_eq!(
-        &rows[1][..5],
-        &["reserved", "agent", "prefix", "z:", "read"]
-    );
-    assert_eq!(
-        &rows[2][..5],
-        &["reserved", "agent", "prefix", "z:", "sign"]
-    );
+    assert_eq!(&rows[0][..5], &["reserved", "agent", "exact", "a:", "sign"]);
+    assert_eq!(&rows[1][..5], &["reserved", "agent", "exact", "z:", "read"]);
+    assert_eq!(&rows[2][..5], &["reserved", "agent", "exact", "z:", "sign"]);
 }
 
 #[test]
@@ -4289,7 +4280,7 @@ fn list_reads_a_store_one_migration_behind_and_says_so_on_stderr_only() {
     assert!(stdout.contains("apikey:behind-two"), "stdout: {stdout}");
     assert_eq!(
         stderr.trim(),
-        "note: store schema 8 is behind this binary's 9; categories and category grants \
+        "note: store schema 8 is behind this binary's 10; categories and category grants \
          appear after the daemon restarts (migration 9)",
         "the note must be verbatim and on stderr"
     );

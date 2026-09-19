@@ -132,7 +132,7 @@ fn v012_release_artifact_reads_migration_n_without_a_read_write_open() {
                 "--principal",
                 "consumer",
                 "--selector-kind",
-                "prefix",
+                "exact",
                 "--selector",
                 "operator:",
                 "--operation",

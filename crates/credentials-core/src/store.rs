@@ -10727,6 +10727,16 @@ mod migration_10_tests {
                 ))
             ));
         }
+        let full_count: i64 = store
+            .with_raw_conn(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM pending_enrollments WHERE state IN ('pending','approved')",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .expect("count full queue after refused floods");
+        assert_eq!(full_count, ENROLLMENT_LIVE_LIMIT);
         assert!(matches!(
             store.poll_enrollment_at(&oldest.request_id, &secret, base + 200),
             Ok(EnrollmentPoll::Approved { .. })
@@ -10780,6 +10790,13 @@ mod migration_10_tests {
         let enrollment_id = store
             .approve_enrollment(&proposal.request_id, "consumer", "operator")
             .expect("approve");
+        let pending_secret = enrollment_secret(14);
+        let pending = store
+            .propose_enrollment(
+                "pending-restart",
+                &enrollment_secret_hash(&pending_secret).expect("hash pending secret"),
+            )
+            .expect("pending proposal before restart");
         let before_restart: (Option<String>, i64) = store
             .with_raw_conn(|conn| {
                 conn.query_row(
@@ -10805,6 +10822,10 @@ mod migration_10_tests {
             EncryptedStore::open(sqlite, MasterKey::from_bytes([112; 32])).expect("reopen vault"),
         );
         let chain_before_poll = store.read_audit(None).expect("audit").len();
+        assert!(matches!(
+            store.poll_enrollment(&pending.request_id, &pending_secret),
+            Ok(EnrollmentPoll::Pending)
+        ));
 
         let wrong = enrollment_secret(9);
         assert!(matches!(

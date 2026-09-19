@@ -2940,7 +2940,32 @@ impl EncryptedStore {
                 &AuditRecord {
                     op: AuditOp::MintHandle,
                     credential_id: Some(credential_id.to_string()),
-                    payload_hash: None,
+                    // The handle hash, so a LIVE handle can be traced back to the mint
+                    // that created it. Without it the chain records that a door was cut
+                    // for a credential and not WHICH door, so a handle found live in the
+                    // store has no minting actor and no minting time -- the exact
+                    // question an audit of accumulated bearer material asks.
+                    //
+                    // This is the mirror of the gap the revoke path carried for two
+                    // months (see `revoke_handle` below): there the caller's input named
+                    // a handle and not a credential, here it names both and one was
+                    // dropped. Measured on the live store when this was written: 205
+                    // mint rows, ALL with a null payload hash, against 97 of 105 revoke
+                    // rows carrying one and 87 still joining. So revocation was
+                    // attributable and creation was not, which is backwards -- a
+                    // revocation closes access and a mint opens it.
+                    //
+                    // No secrecy cost, by the same argument the revoke path already
+                    // makes: the raw handle is never stored, the hash is what the
+                    // `handles` table holds, and `credential_id` is here already.
+                    //
+                    // Historical rows stay null and are NOT backfilled: the chain is
+                    // HMAC-linked, so rewriting an entry breaks verification from that
+                    // point on. Attribution for handles minted before this is a
+                    // timestamp correlation between `handles.created_at_ms` and this
+                    // op's `ts_ms`, which is a correlation and not a join -- two mints
+                    // in the same second are indistinguishable.
+                    payload_hash: Some(handle_hash_hex.to_string()),
                     actor: ctx.actor.to_string(),
                     alarm: ctx.alarm,
                 },
@@ -6743,6 +6768,47 @@ mod tests {
                 .is_err());
         }
         assert_eq!(store.read_audit(None).unwrap().len(), before);
+    }
+
+    /// A minted handle must be traceable to its mint by the SAME join that already
+    /// works for revocations, so an operator auditing live bearer material can name
+    /// the actor and the moment for each one.
+    ///
+    /// The second arm is the load-bearing half: it asserts the row carries the hash
+    /// of THIS handle rather than merely a non-null value, so filling the field with
+    /// anything else still fails. Without it the test passes on a mint that records
+    /// the wrong door.
+    #[test]
+    fn a_mint_names_the_handle_it_created() {
+        let (_root, store) = tmp_store(113);
+        store.create("opencode:anthropic", &oauth_record()).unwrap();
+        let mine = mint_handle().unwrap();
+        let other = mint_handle().unwrap();
+        store
+            .put_handle_hash(
+                &mine.hash,
+                "opencode:anthropic",
+                AuditCtx::admin(AuditOp::MintHandle),
+            )
+            .unwrap();
+
+        let mint = store
+            .read_audit(None)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.op == AuditOp::MintHandle.as_str())
+            .expect("the mint is in the chain");
+        assert_eq!(
+            mint.payload_hash.as_deref(),
+            Some(mine.hash.as_str()),
+            "the mint row must carry THIS handle's hash, so it joins handles.handle_hash"
+        );
+        assert_ne!(
+            mint.payload_hash.as_deref(),
+            Some(other.hash.as_str()),
+            "a mint must not be attributable to a handle it did not create"
+        );
+        assert_eq!(mint.credential_id.as_deref(), Some("opencode:anthropic"));
     }
 
     #[test]

@@ -809,8 +809,9 @@ fn help_verb(verb: &str) -> String {
              \n\
              \x20 --handle <raw>  the raw ckh_ bearer token\n\
              \x20 --hash <hex>    64 lowercase hex; when the raw value is gone, use the\n\
-             \x20                 handle_hash column, also audit payload_hash on its mint row\n\
-             \x20                 (ck auth audit)\n\
+             \x20                 handle_hash column. Mint rows carry it too from the\n\
+             \x20                 2026-09-19 build on; older mints name only the\n\
+             \x20                 credential and the time (ck auth audit)\n\
              \n\
              NOTES\n\
              Revoke one capability handle (audited). The credential and its other handles\n\

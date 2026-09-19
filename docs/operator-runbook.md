@@ -738,6 +738,11 @@ These values come from the closed `AuditOp` enum and name the mutation or chain 
 | `fetch_anomaly` | Record a read-surface fetch-rate or enumeration anomaly. |
 | `grant_create` | Create a principal-scoped exact or category operation grant. |
 | `grant_revoke` | Revoke a principal-scoped exact or category operation grant. |
+| `enroll.approve` | Approve a pending enrolled-consumer incarnation. |
+| `enroll.deny` | Deny a pending enrollment request. |
+| `enroll.revoke` | Revoke one enrolled-consumer incarnation. |
+| `enroll.rotate` | Rotate a live enrollment token at its current generation. |
+| `enroll.reissue` | Operator-reissue a replacement enrollment token. |
 | `category.migrate` | Record migration 10's audited category backfill. |
 | `approval` | Record an approver's approval of the exact artifact bytes identified by a hash. |
 
@@ -778,6 +783,7 @@ diagnostics table, not the tamper-evident audit chain:
 | `scoped_read_refusal` | A principal-scoped read was refused; `detail` names the internal refusal reason. |
 | `reconcile_needs_reauth` | Startup reconciliation forced a credential to `needs_reauth`. |
 | `github_app_permissions_changed` | A successful GitHub App mint observed changed installation permissions. |
+| `enrollment` | A bounded enrollment proposal, poll, or expiry diagnostic under a fixed `auth.enroll_*` subject. |
 
 **Retired values you will still meet in the data.** The table above documents what the
 CODE WRITES; the table on disk also holds what OLDER binaries wrote, and this table is

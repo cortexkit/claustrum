@@ -30,6 +30,7 @@ pub mod device_flow;
 pub mod engine;
 #[cfg(test)]
 mod engine_tests;
+pub mod enrollment;
 pub mod envelope;
 pub mod google_login;
 pub mod health;
@@ -67,6 +68,12 @@ pub use device_flow::{
     DeviceFlowConfig, DeviceTokens,
 };
 pub use engine::{EngineError, ReauthReason, Reconciliation, RefreshEngine};
+pub use enrollment::{
+    constant_time_hash_eq, decode_lower_hex_32, enrollment_secret_hash, is_lower_hex_32,
+    valid_enrollment_name, EnrollmentDisposition, EnrollmentError, EnrollmentPoll,
+    EnrollmentProposal, EnrollmentRefusal, EnrollmentRotation, ENROLLMENT_LIVE_LIMIT,
+    ENROLLMENT_PENDING_TTL_MS,
+};
 pub use envelope::{open, seal, EnvelopeError, RecordBinding};
 pub use health::{VaultHealth, VaultHealthStatus};
 pub use http::ReqwestTransport;

@@ -1,7 +1,9 @@
 //! The capability-handle read surface plus its separate principal-scoped operation.
 //!
-//! This is READ-ONLY — there is deliberately no unauthenticated write op here (writes
-//! live in the admin surface). Handle operations take a capability HANDLE, never a
+//! Credential reads remain read-only. The enrollment proposal, poll, and rotation
+//! operations are the narrow exceptions: they write only bounded enrollment state and
+//! are kept out of the untrimmable audit chain except for successful token rotation.
+//! Handle operations take a capability HANDLE, never a
 //! public alias, and resolve it to a credential id before anything else; an unknown or
 //! revoked handle is a uniform `not_found` so a probe cannot enumerate.
 //!
@@ -46,6 +48,9 @@ use credentials_core::audit::{
 };
 use credentials_core::credential_id::{default_refresh_adapter, parse_credential_id};
 use credentials_core::engine::{EngineError, RefreshEngine};
+use credentials_core::enrollment::{
+    EnrollmentError, EnrollmentPoll, EnrollmentProposal, EnrollmentRotation,
+};
 use credentials_core::health::VaultHealth;
 use credentials_core::refresh_adapters::RefreshError;
 use credentials_core::store::{
@@ -55,6 +60,34 @@ use credentials_core::store::{
 use subc_protocol::Principal;
 
 use crate::limiter::{Admission, FetchLimiter, GET_MANY_MAX};
+
+/// Exact parameters for `auth.enroll_propose`.
+#[cfg_attr(test, derive(Serialize))]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnrollProposeParams {
+    pub proposed_name: String,
+    pub request_secret_hash: String,
+}
+
+/// Exact parameters for `auth.enroll_poll`. The request secret is the only resumption
+/// value besides the request id; neither the proposed name nor any host identity belongs here.
+#[cfg_attr(test, derive(Serialize))]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnrollPollParams {
+    pub request_id: String,
+    pub request_secret: String,
+}
+
+/// Exact parameters for `auth.enroll_rotate`.
+#[cfg_attr(test, derive(Serialize))]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnrollRotateParams {
+    pub token: String,
+    pub expected_token_generation: u64,
+}
 
 /// A `credential.get` request.
 ///
@@ -827,6 +860,33 @@ impl ReadSurface {
             #[cfg(test)]
             scoped_grant_lookup_error_for_test: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    pub fn enroll_propose(
+        &self,
+        params: &EnrollProposeParams,
+    ) -> Result<EnrollmentProposal, EnrollmentError> {
+        self.engine
+            .store()
+            .propose_enrollment(&params.proposed_name, &params.request_secret_hash)
+    }
+
+    pub fn enroll_poll(
+        &self,
+        params: &EnrollPollParams,
+    ) -> Result<EnrollmentPoll, EnrollmentError> {
+        self.engine
+            .store()
+            .poll_enrollment(&params.request_id, &params.request_secret)
+    }
+
+    pub fn enroll_rotate(
+        &self,
+        params: &EnrollRotateParams,
+    ) -> Result<EnrollmentRotation, EnrollmentError> {
+        self.engine
+            .store()
+            .rotate_enrollment(&params.token, params.expected_token_generation)
     }
 
     /// Sign exact bytes with a signing-key credential. THE KEY NEVER LEAVES THIS

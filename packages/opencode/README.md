@@ -49,7 +49,7 @@ OpenCode's provider API and UI serialize `Provider.Info.key`, so a tombstone can
 
 `OPENCODE_EXPERIMENTAL_NATIVE_LLM` bypasses this plugin's generic fetch seam when set to an enabling or unrecognized value on stock OpenCode 1.18.25. The plugin serves only when it is absent or exactly `false`, `no`, `off`, `0`, or `n`; it otherwise refuses observed custody entries and names the observed value.
 
-Run `ck auth migrate-opencode` to create or repair the tombstones and handle file. `superseded` handles remain in the file for migration history. They are not servable accounts.
+Run `ck auth migrate-opencode` to create or repair the tombstones and handle file. `superseded` handles remain in the file for migration history. They are not servable accounts. For xAI, use the [xAI enrolment runbook](../../docs/opencode-xai-enrolment.md) instead; do not use `migrate-opencode` or import.
 
 ## Maintenance
 

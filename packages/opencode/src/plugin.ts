@@ -51,7 +51,7 @@ export type ConfigHookDependencies = {
   clearInterval?: (timer: { unref?: () => unknown }) => void;
 };
 
-function defaultAuthPath(env: NodeJS.ProcessEnv = process.env): string {
+export function defaultAuthPath(env: NodeJS.ProcessEnv = process.env): string {
   const dataHome = env.XDG_DATA_HOME || (env.HOME ? join(env.HOME, ".local", "share") : ".local/share");
   return join(dataHome, "opencode", "auth.json");
 }

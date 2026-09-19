@@ -7,6 +7,7 @@ export type FreshnessAccount = {
   label: string;
   handle: string;
   credential_id?: string;
+  minTtlMs?: number;
 };
 
 export type FreshnessClient = {
@@ -196,7 +197,7 @@ export class FreshnessController {
     const slot = this.#slot(account);
     if (!force && this.#isFresh(slot)) return Promise.resolve(slot.cached);
     if (slot.inFlight) return slot.inFlight;
-    const minTtlMs = this.#shape === "oauth" ? this.#minTtlMs : undefined;
+    const minTtlMs = this.#shape === "oauth" ? (account.minTtlMs ?? this.#minTtlMs) : undefined;
     const version = this.#version;
     const generation = ++slot.generation;
     const inFlight = this.#client.getCredential(account.handle, minTtlMs)

@@ -10697,11 +10697,24 @@ mod migration_10_tests {
         let oldest = store
             .propose_enrollment_at("oldest", &secret_hash, base)
             .expect("oldest proposal");
-        for index in 0..15 {
+        for index in 0..14 {
             store
                 .propose_enrollment_at(&format!("n{index}"), &secret_hash, base + index)
-                .expect("fill queue");
+                .expect("fill queue below the limit");
         }
+        let below_limit: i64 = store
+            .with_raw_conn(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM pending_enrollments WHERE state IN ('pending','approved')",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .expect("count queue below the limit");
+        assert_eq!(below_limit, ENROLLMENT_LIVE_LIMIT - 1);
+        store
+            .propose_enrollment_at("n14", &secret_hash, base + 14)
+            .expect("the sixteenth live row is accepted");
         store
             .approve_enrollment(&oldest.request_id, "oldest", "operator")
             .expect("approve oldest without consuming it");
@@ -11074,6 +11087,8 @@ mod migration_10_tests {
         );
 
         let denial_base = base + 1001 * (ENROLLMENT_PENDING_TTL_MS + 1);
+        let mut saw_below_terminal_cap = false;
+        let mut saw_terminal_cap = false;
         for index in 0..1000_i64 {
             let proposal = store
                 .propose_enrollment_at("denial-cycle", &secret_hash, denial_base + index)
@@ -11081,7 +11096,30 @@ mod migration_10_tests {
             store
                 .deny_enrollment(&proposal.request_id, "operator")
                 .expect("deny");
+            if !saw_terminal_cap {
+                let boundary_count: i64 = store
+                    .with_raw_conn(|conn| {
+                        conn.query_row("SELECT COUNT(*) FROM pending_enrollments", [], |row| {
+                            row.get(0)
+                        })
+                    })
+                    .expect("count terminal boundary");
+                if boundary_count == ENROLLMENT_TERMINAL_MAX_ROWS - 1 {
+                    saw_below_terminal_cap = true;
+                }
+                if boundary_count == ENROLLMENT_TERMINAL_MAX_ROWS {
+                    assert!(
+                        saw_below_terminal_cap,
+                        "the terminal-row boundary skipped its just-below control"
+                    );
+                    saw_terminal_cap = true;
+                }
+            }
         }
+        assert!(
+            saw_terminal_cap,
+            "the cycle must reach the terminal-row cap"
+        );
         let count: i64 = store
             .with_raw_conn(|conn| {
                 conn.query_row("SELECT COUNT(*) FROM pending_enrollments", [], |row| {
@@ -11089,7 +11127,7 @@ mod migration_10_tests {
                 })
             })
             .expect("count bounded table");
-        assert!(count <= ENROLLMENT_TERMINAL_MAX_ROWS, "count was {count}");
+        assert_eq!(count, ENROLLMENT_TERMINAL_MAX_ROWS);
         let old_terminal: i64 = store
             .with_raw_conn(|conn| {
                 conn.query_row(

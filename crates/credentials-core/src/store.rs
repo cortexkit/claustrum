@@ -721,6 +721,20 @@ pub struct ScopedListRow {
     pub record_version: u64,
     pub operations: Vec<GrantOperation>,
     pub identity: Option<crate::record::RecordIdentity>,
+    /// The record's OWN refresh adapter, read from the sealed record rather than parsed
+    /// from the id.
+    ///
+    /// It is the only exact answer to "which provider protocol does this credential
+    /// speak", and `serves` cannot substitute for it: `serves` names the model vendors a
+    /// credential can reach, so `apikey:openrouter`, `antigravity:google` and
+    /// `oauth:cursor` all serve Anthropic models while speaking three protocols that are
+    /// not Anthropic's. A consumer that sends a Claude OAuth token to a native Anthropic
+    /// endpoint needs the adapter, not the vendor list.
+    ///
+    /// Non-secret: it is a short protocol label, already published on `credential.get`
+    /// indirectly through behaviour, and it names no account and no material. Reading it
+    /// costs nothing here because the row is already unsealed for identity.
+    pub refresh_adapter: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2552,7 +2566,7 @@ impl EncryptedStore {
                     if operations.is_empty() {
                         continue;
                     }
-                    let identity = if operations.contains(&GrantOperation::Read) {
+let decoded_record = if operations.contains(&GrantOperation::Read) {
                         let plaintext = envelope::open(
                             &self.key,
                             &envelope_bytes,
@@ -2568,8 +2582,7 @@ impl EncryptedStore {
                                 Box::new(error),
                             )
                         })?;
-                        Some(
-                            VaultRecord::decode(&plaintext)
+                        let record = VaultRecord::decode(&plaintext)
                                 .map_err(|error| {
                                     rusqlite::Error::FromSqlConversionFailure(
                                         3,
@@ -2579,11 +2592,14 @@ impl EncryptedStore {
                                             error.to_string(),
                                         )),
                                     )
-                                })?
-                                .identity,
-                        )
+                                })?;
+                        Some((record.identity, record.refresh_adapter))
                     } else {
                         None
+                    };
+                    let (identity, refresh_adapter) = match decoded_record {
+                        Some((identity, adapter)) => (Some(identity), adapter),
+                        None => (None, None),
                     };
                     rows.push(ScopedListRow {
                         id,
@@ -2592,6 +2608,7 @@ impl EncryptedStore {
                         record_version,
                         operations: operations.into_iter().collect(),
                         identity,
+                        refresh_adapter,
                     });
                 }
                 tx.commit()?;

@@ -213,6 +213,19 @@ pub struct ListScopedCredential {
     #[serde(rename = "type")]
     pub credential_type: String,
     pub serves: Vec<String>,
+    /// Which provider protocol this credential speaks, from the record itself.
+    ///
+    /// `serves` AND `refresh_adapter` ANSWER DIFFERENT QUESTIONS AND A CONSUMER NEEDS
+    /// BOTH. `serves` names the model vendors reachable through a credential; the adapter
+    /// names the protocol it speaks. On this vault eight rows serve Anthropic models and
+    /// only five are Claude OAuth: `apikey:openrouter`, `antigravity:google` and
+    /// `oauth:cursor` reach Anthropic models through their own APIs. A consumer sending a
+    /// token to Anthropic's native endpoints must select on the adapter; one choosing
+    /// where a model can be reached selects on `serves`.
+    ///
+    /// Absent for static credentials, which have no refresh protocol at all.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refresh_adapter: Option<String>,
     pub state: String,
     pub record_version: u64,
     pub operations: Vec<String>,
@@ -866,6 +879,7 @@ fn project_list_scoped(snapshot: ScopedListSnapshot) -> ListScopedResult {
                     .iter()
                     .map(|vendor| vendor.as_str().to_string())
                     .collect(),
+                refresh_adapter: row.refresh_adapter.clone(),
                 id: row.id,
                 categories: row.categories,
                 state: row.state.as_str().to_string(),
@@ -2413,6 +2427,10 @@ mod list_scoped_tests {
             record_version: 7,
             operations: operations.to_vec(),
             identity,
+            // The fixture mirrors a native Claude OAuth record, which is the case the
+            // adapter field exists to separate from the three rows that merely SERVE
+            // Anthropic models through their own protocols.
+            refresh_adapter: Some("anthropic".to_owned()),
         }
     }
 
@@ -2464,6 +2482,79 @@ mod list_scoped_tests {
             classify_scoped_coverage(row(1, false, true, false, None)),
             Some(ScopedReadRefusal::NoGrant),
             "clause 5"
+        );
+    }
+
+    fn scoped_row_with_adapter(id: &str, adapter: Option<&str>) -> ScopedListRow {
+        ScopedListRow {
+            id: id.to_owned(),
+            categories: vec!["llm-provider".to_owned()],
+            state: RecordState::Active,
+            record_version: 1,
+            operations: vec![GrantOperation::Read],
+            identity: None,
+            refresh_adapter: adapter.map(str::to_owned),
+        }
+    }
+
+    /// SERVES AND THE ADAPTER ANSWER DIFFERENT QUESTIONS, AND A CONSUMER NEEDS BOTH.
+    ///
+    /// Measured on the live vault: filtering `serves` for "anthropic" returns EIGHT rows,
+    /// of which only five are Claude OAuth. `apikey:openrouter`, `antigravity:google` and
+    /// `oauth:cursor` reach Anthropic models through their own APIs, so a consumer that
+    /// sends one of those tokens to Anthropic's native endpoints sends a credential the
+    /// endpoint cannot accept.
+    ///
+    /// The id spelling cannot substitute either, in BOTH directions: two of those three
+    /// contain no "anthropic" anywhere, and `type == "oauth"` does not separate them
+    /// because Antigravity and Cursor are OAuth too.
+    ///
+    /// Reported by the anthropic-auth seat after reading leg 5 of the live acceptance,
+    /// where my own probe printed all eight under an "anthropic" filter.
+    #[test]
+    fn the_adapter_separates_native_anthropic_from_rows_that_merely_serve_anthropic() {
+        let rows = project_list_scoped(ScopedListSnapshot {
+            rows: vec![
+                scoped_row_with_adapter("oauth:anthropic", Some("anthropic")),
+                scoped_row_with_adapter("oauth:cursor", Some("cursor")),
+                scoped_row_with_adapter("antigravity:google", Some("antigravity")),
+                scoped_row_with_adapter("apikey:openrouter", None),
+            ],
+            grants: Vec::new(),
+        });
+
+        let adapter = |id: &str| -> Option<String> {
+            rows.credentials
+                .iter()
+                .find(|row| row.id == id)
+                .unwrap_or_else(|| panic!("no row for {id}"))
+                .refresh_adapter
+                .clone()
+        };
+
+        assert_eq!(adapter("oauth:anthropic").as_deref(), Some("anthropic"));
+        // The three that serve Anthropic models and are NOT Claude OAuth.
+        assert_eq!(adapter("oauth:cursor").as_deref(), Some("cursor"));
+        assert_eq!(
+            adapter("antigravity:google").as_deref(),
+            Some("antigravity")
+        );
+        assert_eq!(
+            adapter("apikey:openrouter"),
+            None,
+            "a static key speaks no refresh protocol, and absent is the honest answer"
+        );
+
+        let native: Vec<&str> = rows
+            .credentials
+            .iter()
+            .filter(|row| row.refresh_adapter.as_deref() == Some("anthropic"))
+            .map(|row| row.id.as_str())
+            .collect();
+        assert_eq!(
+            native,
+            vec!["oauth:anthropic"],
+            "selecting on the adapter must yield ONLY native Claude OAuth"
         );
     }
 

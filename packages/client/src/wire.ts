@@ -236,6 +236,120 @@ export class ClaustrumClient {
     if (result?.accepted !== true) throw asCredentialError(response, 'invalid_response', this.#logger)
   }
 
+  /**
+   * Enumerate what this caller's grants cover.
+   *
+   * `params` is `{}` and must be PRESENT: the vault rejects an absent or null params
+   * object, so a caller cannot ask a different question by omitting it.
+   */
+  async listScoped(enrollmentToken?: string): Promise<readonly ScopedInventoryRow[]> {
+    const response = await this.#call(
+      'credential.list_scoped',
+      enrollmentToken === undefined ? {} : { enrollment_token: enrollmentToken },
+    )
+    return decodeScopedInventory(response, this.#logger)
+  }
+
+  /**
+   * Fetch by credential id, authorized by a grant rather than a bearer handle.
+   *
+   * `minTtlMs` is a DEMAND, not a hint: if a real upstream exchange still cannot satisfy
+   * it, the vault refuses with `ttl_unsatisfiable` (class `context_overflow`) rather than
+   * serving a token that will die inside the caller's own margin. That class means
+   * reduce-and-retry, never wait-and-retry.
+   */
+  async getScoped(input: {
+    credentialId: string
+    enrollmentToken?: string
+    minTtlMs?: number
+  }): Promise<ServedCredential> {
+    const response = await this.#call('credential.get_scoped', {
+      credential_id: input.credentialId,
+      enrollment_token: input.enrollmentToken,
+      min_ttl_ms: input.minTtlMs,
+    })
+    return decodeCredential(response, this.#logger)
+  }
+
+  /**
+   * Report a served credential dead, addressed by id rather than by handle.
+   *
+   * VERSION-FENCED: `recordVersion` must be the one this caller was SERVED. A report
+   * against a since-refreshed version is accepted and does nothing, which is the point --
+   * a stale report must not kill a fresh token. `accepted: true` is the receipt that the
+   * report was taken, never evidence that it applied.
+   */
+  async reportAuthFailureScoped(input: {
+    credentialId: string
+    enrollmentToken?: string
+    providerStatus: number
+    recordVersion: number
+    reporterSource: ClaustrumReporterSource
+  }): Promise<void> {
+    const response = await this.#call('credential.report_auth_failure', {
+      credential_id: input.credentialId,
+      enrollment_token: input.enrollmentToken,
+      provider_status: input.providerStatus,
+      record_version: input.recordVersion,
+      reporter_source: input.reporterSource,
+    })
+    if (hasCredentialError(response)) throw asCredentialError(response, 'invalid_response', this.#logger)
+    const result = isRecord(response) && isRecord(response.result) ? response.result : undefined
+    if (result?.accepted !== true) throw asCredentialError(response, 'invalid_response', this.#logger)
+  }
+
+  /**
+   * Propose an enrollment. The consumer mints `requestSecret` itself and sends only its
+   * hash; the raw secret NEVER leaves the process, and it is what authorizes the poll.
+   *
+   * IDEMPOTENT ON (name, secret): re-proposing with the same secret returns the SAME
+   * `requestId`. That exists because `requestId` is minted server-side, so a consumer
+   * cannot persist it before proposing -- a crash in that window would otherwise leave it
+   * holding a secret it cannot poll with and a name held until TTL. Persist the secret
+   * BEFORE calling this, and a crash costs nothing.
+   *
+   * A different secret on the same name is a different caller and is refused.
+   */
+  async enrollPropose(input: { name: string; requestSecretHash: string }): Promise<{ requestId: string }> {
+    const response = await this.#call('auth.enroll_propose', {
+      proposed_name: input.name,
+      request_secret_hash: input.requestSecretHash,
+    })
+    const result = decodeEnrollmentResult(response, this.#logger)
+    const requestId = result.request_id
+    if (typeof requestId !== 'string' || requestId.length === 0) {
+      throw asCredentialError(response, 'invalid_response', this.#logger)
+    }
+    return { requestId }
+  }
+
+  /**
+   * Poll a proposal. Returns `pending` until an operator decides, then exactly once
+   * returns the token.
+   *
+   * THE TOKEN IS RETURNED ONCE. Persist it before doing anything else with it; a lost
+   * token needs a fresh ceremony, not a second poll.
+   */
+  async enrollPoll(input: { requestId: string; requestSecret: string }): Promise<EnrollmentPollOutcome> {
+    const response = await this.#call('auth.enroll_poll', {
+      request_id: input.requestId,
+      request_secret: input.requestSecret,
+    })
+    return decodeEnrollmentPoll(response, this.#logger)
+  }
+
+  /** Exchange a live token for its successor. The old token dies when the new one is issued. */
+  async enrollRotate(input: { token: string }): Promise<{ token: string; tokenGeneration: number }> {
+    const response = await this.#call('auth.enroll_rotate', { token: input.token })
+    const result = decodeEnrollmentResult(response, this.#logger)
+    const token = result.token
+    const generation = result.token_generation
+    if (typeof token !== 'string' || token.length === 0 || typeof generation !== 'number') {
+      throw asCredentialError(response, 'invalid_response', this.#logger)
+    }
+    return { token, tokenGeneration: generation }
+  }
+
   close(): void {
     this.#closed = true
     this.#client.close()
@@ -310,4 +424,132 @@ export class ClaustrumClient {
       })
     await this.#reconnecting
   }
+}
+
+/**
+ * A row from the caller's own grant-covered inventory.
+ *
+ * `serves` is the ROUTING AXIS, not the id spelling. `apikey:openrouter` and
+ * `antigravity:google` both serve Anthropic models and contain no "anthropic"
+ * anywhere in their ids, so a consumer that filters on the id segment silently
+ * drops working accounts. Measured on a live vault: 8 Anthropic-capable rows, 3 of
+ * them invisible to an id-substring filter.
+ */
+export interface ScopedInventoryRow {
+  readonly id: string
+  readonly categories: readonly string[]
+  readonly credentialType: string
+  readonly serves: readonly string[]
+  /**
+   * Which provider protocol this credential speaks. Absent for static keys.
+   *
+   * SELECT ON THIS, NOT ON `serves`, WHEN THE TOKEN GOES TO A PROVIDER'S OWN ENDPOINTS.
+   * Measured on a live vault: eight rows serve Anthropic models and only five are Claude
+   * OAuth -- openrouter, antigravity and cursor reach Anthropic models through their own
+   * APIs. The id spelling does not separate them either: two contain no "anthropic" at
+   * all, and `credentialType === 'oauth'` catches antigravity and cursor too.
+   */
+  readonly refreshAdapter?: string
+  readonly state: string
+  readonly recordVersion: number
+  readonly operations: readonly string[]
+  readonly createdAtMs: number | null
+  readonly accountId?: string
+  readonly email?: string
+  readonly orgName?: string
+}
+
+function decodeScopedInventory(
+  response: unknown,
+  logUnknownClass: (errorClass: string) => void,
+): readonly ScopedInventoryRow[] {
+  if (hasCredentialError(response)) throw asCredentialError(response, 'invalid_response', logUnknownClass)
+  const result = isRecord(response) && isRecord(response.result) ? response.result : undefined
+  const rows = result?.credentials
+  if (!Array.isArray(rows)) throw asCredentialError(response, 'invalid_response', logUnknownClass)
+  return rows.map((row) => {
+    if (!isRecord(row)) throw asCredentialError(response, 'invalid_response', logUnknownClass)
+    const recordVersion = asRecordVersion(row.record_version)
+    if (recordVersion === undefined) {
+      throw asCredentialError(response, 'invalid_record_version', logUnknownClass)
+    }
+    const strings = (value: unknown): readonly string[] => {
+      if (!Array.isArray(value) || !value.every((entry) => typeof entry === 'string')) {
+        throw asCredentialError(response, 'invalid_response', logUnknownClass)
+      }
+      return value
+    }
+    // THE FIELD IS `id`, NOT `credential_id`. `get` and `status` echo `credential_id`
+    // for binding verification; an inventory row IS the credential, so it does not name
+    // the concept twice. Reading the wrong key yields undefined for every row and says
+    // nothing about why -- which is exactly what it did to my own probe.
+    if (typeof row.id !== 'string' || typeof row.credential_type !== 'string' || typeof row.state !== 'string') {
+      throw asCredentialError(response, 'invalid_response', logUnknownClass)
+    }
+    const createdAtMs =
+      row.created_at_ms === undefined || row.created_at_ms === null
+        ? null
+        : typeof row.created_at_ms === 'number' && Number.isFinite(row.created_at_ms)
+          ? row.created_at_ms
+          : undefined
+    if (createdAtMs === undefined) throw asCredentialError(response, 'invalid_response', logUnknownClass)
+    if (!isOptionalString(row.refresh_adapter)) {
+      throw asCredentialError(response, 'invalid_response', logUnknownClass)
+    }
+    if (!isOptionalString(row.account_id) || !isOptionalString(row.email) || !isOptionalString(row.org_name)) {
+      throw asCredentialError(response, 'invalid_response', logUnknownClass)
+    }
+    return {
+      id: row.id,
+      categories: strings(row.categories),
+      credentialType: row.credential_type,
+      serves: strings(row.serves),
+      state: row.state,
+      refreshAdapter: row.refresh_adapter,
+      recordVersion,
+      operations: strings(row.operations),
+      createdAtMs,
+      accountId: row.account_id,
+      email: row.email,
+      orgName: row.org_name,
+    }
+  })
+}
+
+/** What a poll found. `pending` is not an error: the operator has not decided yet. */
+export type EnrollmentPollOutcome =
+  | { readonly status: 'pending' }
+  | { readonly status: 'approved'; readonly name: string; readonly token: string; readonly tokenGeneration: number }
+  | { readonly status: 'denied' }
+
+function decodeEnrollmentResult(
+  response: unknown,
+  logUnknownClass: (errorClass: string) => void,
+): Record<string, unknown> {
+  if (hasCredentialError(response)) throw asCredentialError(response, 'invalid_response', logUnknownClass)
+  const result = isRecord(response) && isRecord(response.result) ? response.result : undefined
+  if (result === undefined) throw asCredentialError(response, 'invalid_response', logUnknownClass)
+  return result
+}
+
+function decodeEnrollmentPoll(
+  response: unknown,
+  logUnknownClass: (errorClass: string) => void,
+): EnrollmentPollOutcome {
+  const result = decodeEnrollmentResult(response, logUnknownClass)
+  const status = result.status
+  if (status === 'pending') return { status: 'pending' }
+  if (status === 'denied') return { status: 'denied' }
+  if (status !== 'approved') throw asCredentialError(response, 'invalid_response', logUnknownClass)
+  const { name, token, token_generation: generation } = result
+  if (
+    typeof name !== 'string' ||
+    typeof token !== 'string' ||
+    token.length === 0 ||
+    typeof generation !== 'number' ||
+    !Number.isInteger(generation)
+  ) {
+    throw asCredentialError(response, 'invalid_response', logUnknownClass)
+  }
+  return { status: 'approved', name, token, tokenGeneration: generation }
 }

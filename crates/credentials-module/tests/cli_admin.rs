@@ -2601,9 +2601,8 @@ fn test_escape_hatches_are_absent_from_a_release_build() {
     // seam env vars against this test's ONE asserted string is what exposed the
     // shape -- the scan would have passed while shipping all four.
     //
-    // Today the derived population is 1 and equals the old hardcoded string, so this
-    // changes nothing about what is checked NOW. That is the point: the property was
-    // holding by luck and now holds by construction.
+    // The point is that the population follows source additions instead of relying on
+    // a reviewer to remember a second hardcoded list.
     let hatches = shipped_test_hatch_env_names();
 
     // Floor: an extractor that silently matches nothing would make every assertion
@@ -2614,15 +2613,18 @@ fn test_escape_hatches_are_absent_from_a_release_build() {
         "derived zero test-hatch env names from source -- the extractor is broken, not \
          the source clean; this repo has carried at least one since c380352"
     );
-    // Anchor: prove the extractor finds the instance we know about, so a pattern that
-    // matches nothing useful cannot pass the floor on unrelated hits.
-    assert!(
-        hatches
-            .iter()
-            .any(|h| h == "CORTEXKIT_TEST_BYPASS_VALIDATION"),
-        "the extractor missed the known hatch CORTEXKIT_TEST_BYPASS_VALIDATION; it is \
-         reading something other than the shipped source. Derived: {hatches:?}"
-    );
+    // Anchors: prove the extractor finds known instances from both the established
+    // TEST convention and the SCRIPT convention used by interactive test drivers.
+    for known in [
+        "CORTEXKIT_TEST_BYPASS_VALIDATION",
+        "CK_AUTH_IMPORT_PROMPT_SCRIPT",
+    ] {
+        assert!(
+            hatches.iter().any(|h| h == known),
+            "the extractor missed the known hatch {known}; it is reading something other \
+             than the shipped source. Derived: {hatches:?}"
+        );
+    }
 
     for hatch in &hatches {
         assert!(
@@ -2636,8 +2638,8 @@ fn test_escape_hatches_are_absent_from_a_release_build() {
 /// Every test-hatch env name in the SHIPPED source of the two crates.
 ///
 /// WHAT THIS CAN AND CANNOT CLAIM, stated because a guard that implies completeness is
-/// worse than none: it finds every hatch whose name carries `TEST`, `BYPASS` or `SEAM`,
-/// which is this repo's convention. A hatch named outside that convention is invisible
+/// worse than none: it finds every hatch whose name carries `TEST`, `BYPASS`, `SEAM`,
+/// or `SCRIPT`, which is this repo's convention. A hatch outside it is invisible
 /// to it. The convention is therefore load-bearing, not cosmetic.
 ///
 /// The scan is SHAPE-FREE -- it matches SCREAMING_CASE string literals rather than
@@ -2668,7 +2670,9 @@ fn shipped_test_hatch_env_names() -> Vec<String> {
                             .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
                         && token.starts_with(|c: char| c.is_ascii_uppercase());
                     if looks_like_a_name
-                        && ["TEST", "BYPASS", "SEAM"].iter().any(|k| token.contains(k))
+                        && ["TEST", "BYPASS", "SEAM", "SCRIPT"]
+                            .iter()
+                            .any(|keyword| token.contains(keyword))
                         && !out.iter().any(|existing| existing == token)
                     {
                         out.push(token.to_string());
@@ -4103,4 +4107,46 @@ fn every_verb_help_uses_a_flags_table_and_notes_layout() {
         }
     }
     assert!(violations.is_empty(), "{}", violations.join("\n"));
+}
+
+#[test]
+fn import_help_page_is_byte_exact_with_the_bare_picker_line() {
+    let output = cli()
+        .args(["help", "import"])
+        .output()
+        .expect("import help");
+    assert!(output.status.success());
+    let expected = r#"ck auth import --source <opencode|pi|gemini-cli|antigravity> --id <id>
+ck auth import  pick detected accounts to import (no flags)
+               [--json <file>] [--provider <entry>] [--adapter <adapter>]
+               [--replace]
+               [--account-id <id>] [--email <email>] [--org-name <name>]
+               [--clear-identity]
+
+  --source <source>    which harness to read
+  --id <id>            vault credential id to create
+  --json <file>        read that file instead of the source's default path
+  --provider <entry>   opencode/pi: pick one auth.json entry; antigravity: pick
+                       an account by email or index; not used for gemini-cli
+  --adapter <adapter>  override the refresh adapter the method implies
+  --replace            overwrite an existing id, keeping its handles; keeps
+                       prior identity only when the incoming token belongs to
+                       the same account
+  --account-id <id>    attach non-secret account metadata; required with email
+                       or org-name
+  --email <email>      account email metadata
+  --org-name <name>    account organization metadata
+  --clear-identity     remove non-secret account metadata
+
+SOURCES
+  opencode, pi    auth.json. An apikey:<p> id imports a {type:api,key}
+                  entry as a static key; an oauth id imports tokens.
+  gemini-cli      ~/.gemini/oauth_creds.json, one credential
+  antigravity     antigravity-accounts.json, defaults to activeIndex
+
+NOTES
+A detectable account mismatch refuses until you pass identity flags to override
+or clear it.
+"#;
+    assert_eq!(output.stdout, expected.as_bytes());
 }

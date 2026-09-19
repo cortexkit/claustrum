@@ -336,6 +336,7 @@ dependencies = [
  "cortexkit-store",
  "credentials-core",
  "dialoguer",
+ "libc",
  "reqwest",
  "ring",
  "rusqlite",

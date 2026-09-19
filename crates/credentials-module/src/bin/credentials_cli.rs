@@ -47,10 +47,14 @@ mod admin_client;
 #[path = "cli_support/api_key_login.rs"]
 mod api_key_login;
 #[allow(dead_code)]
+mod cli_support;
+#[allow(dead_code)]
 #[path = "cli_support/credential_client.rs"]
 mod credential_client;
 #[path = "cli_support/google_login.rs"]
 mod google_login;
+#[path = "cli_support/import_picker.rs"]
+mod import_picker;
 #[path = "cli_support/login_listener.rs"]
 mod login_listener;
 #[path = "cli_support/opencode_accounts.rs"]
@@ -649,6 +653,7 @@ fn help_verb(verb: &str) -> String {
         }
         "import" => {
             "ck auth import --source <opencode|pi|gemini-cli|antigravity> --id <id>\n\
+             ck auth import  pick detected accounts to import (no flags)\n\
              \x20              [--json <file>] [--provider <entry>] [--adapter <adapter>]\n\
              \x20              [--replace]\n\
              \x20              [--account-id <id>] [--email <email>] [--org-name <name>]\n\
@@ -1026,6 +1031,25 @@ fn open_for_admin_with_key(
     EncryptedStore::open(store, key).map_err(CliError::Store)
 }
 
+/// Resolve the key for the destination store before an interactive flow opens a prompt.
+/// A missing store uses the configured current key, while an existing store selects the
+/// key whose fingerprint the database records.
+fn resolve_store_key(global: &GlobalArgs) -> Result<MasterKey, CliError> {
+    let path = store_path(global);
+    let db_key_id = if path.exists() {
+        let conn = credentials_core::usable::open_store_read_only(&path)
+            .map_err(|error| CliError::Io(error.to_string()))?;
+        credentials_core::usable::read_db_key_id_read_only(&conn)
+    } else {
+        None
+    };
+    match db_key_id {
+        Some(key_id) => resolver::resolve_for_db(&resolver_config(global), key_id),
+        None => resolver::resolve(&resolver_config(global), None),
+    }
+    .map_err(CliError::MasterKey)
+}
+
 /// Refuse login failures that are knowable before an authorization code or device
 /// code is spent. The read-only probes take no writer lease, so this stays compatible
 /// with both the online commit path and the daemon-stopped fallback.
@@ -1036,18 +1060,7 @@ fn preflight_login(
     already_exists_message: String,
 ) -> Result<MasterKey, CliError> {
     let path = store_path(global);
-    let db_key_id = if path.exists() {
-        let conn = credentials_core::usable::open_store_read_only(&path)
-            .map_err(|error| CliError::Io(error.to_string()))?;
-        credentials_core::usable::read_db_key_id_read_only(&conn)
-    } else {
-        None
-    };
-    let key = match db_key_id {
-        Some(key_id) => resolver::resolve_for_db(&resolver_config(global), key_id),
-        None => resolver::resolve(&resolver_config(global), None),
-    }
-    .map_err(CliError::MasterKey)?;
+    let key = resolve_store_key(global)?;
 
     let exists = if path.exists() {
         match credentials_core::store::list_meta_read_only(&path) {
@@ -1514,90 +1527,113 @@ fn identity_flags(
     Ok(flags)
 }
 
-fn cmd_import(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
-    let source = required(args, "--source")?;
-    let id = required(args, "--id")?;
-    let json_path = required(args, "--json")?;
-    let requested_identity = identity_flags(args, "--clear-identity", false)?;
-    let raw =
-        std::fs::read(&json_path).map_err(|e| CliError::Io(format!("reading {json_path}: {e}")))?;
-    let provider_sel = optional(args, "--provider");
-
-    // The credential id (<method>:<provider>[:<account>], or legacy <provider>...)
-    // determines whether this is an api-key (static) or an oauth import, and which
-    // refresh adapter to STORE. The adapter is set EXPLICITLY here, never parsed from
-    // the id suffix — `--adapter` overrides the method's default.
-    let parsed = parse_credential_id(&id);
+/// Convert one isolated harness entry into the vault record used by both import forms.
+/// Identity is deliberately returned as metadata so attachment remains a separate step.
+fn build_import_record(
+    source: &str,
+    entry_payload: &[u8],
+    id: &str,
+    provider_selection: Option<&str>,
+    adapter_override: Option<String>,
+) -> Result<(VaultRecord, Option<String>), CliError> {
+    let parsed = parse_credential_id(id);
     if matches!(parsed.method, Some(AuthMethod::Signing)) {
         return Err(CliError::Usage(
             "signing keys must be generated with mint-signing-key, not imported".to_string(),
         ));
     }
-    let mut imported_email = None;
-    let mut record = if matches!(parsed.method, Some(AuthMethod::ApiKey)) {
-        // API key → a static record (no adapter, no refresh). `--provider` selects the
-        // entry from a multi-provider auth.json; default to the parsed provider.
-        let provider = provider_sel
-            .clone()
-            .unwrap_or_else(|| parsed.provider.clone());
-        let key = credentials_core::oauth::import_api_key(&source, &raw, &provider)
-            .map_err(|e| CliError::Usage(format!("api-key import: {e}")))?;
-        VaultRecord::new_static(CredentialKind::ApiKey, source, key, None)
-    } else {
-        // OAuth (incl. antigravity / chatgpt / legacy) → a refreshable record. The
-        // stored adapter is the method's default, overridable with --adapter.
-        // Antigravity carries an identity the other import sources do not: its access
-        // tokens are opaque, so the email in the plugin store is the only thing that
-        // can distinguish two accounts downstream.
-        let oauth = if source == "antigravity" {
-            // For antigravity the credentials live in the plugin's accounts-array
-            // store instead of the normal provider auth.json file — read the selected
-            // account and pack its refresh.
-            credentials_core::oauth::import_antigravity_account(&raw, provider_sel.as_deref()).map(
-                |imported| {
-                    imported_email = imported.email;
-                    imported.oauth
-                },
-            )
-        } else {
-            match &provider_sel {
-                Some(provider) => credentials_core::oauth::OAuthCredential::import_provider(
-                    &source, &raw, provider,
-                ),
-                None => credentials_core::oauth::OAuthCredential::import(&source, &raw),
-            }
-        }
-        .map_err(|e| CliError::Usage(format!("import parse: {e}")))?;
-        let adapter = optional(args, "--adapter")
-            .or_else(|| default_refresh_adapter(parsed.method, &parsed.provider))
-            .ok_or_else(|| {
-                CliError::Usage(format!(
-                    "no refresh adapter for id '{id}'; pass --adapter <name>"
-                ))
-            })?;
-        let payload = credentials_core::secret::SecretBytes::new(
-            oauth.access_token.expose().as_bytes().to_vec(),
-        );
-        VaultRecord::new_oauth(source, adapter, oauth, payload)
-    };
-
-    if !requested_identity.clear {
-        record = match requested_identity.account_id {
-            Some(account_id) => record.with_identity(RecordIdentity {
-                account_id: Some(account_id),
-                email: requested_identity.email.or(imported_email),
-                org_name: requested_identity.org_name,
-            }),
-            None => match imported_email {
-                Some(email) => record.with_identity(RecordIdentity {
-                    account_id: Some(email.clone()),
-                    email: Some(email),
-                    org_name: None,
-                }),
-                None => record,
-            },
-        };
+    if matches!(parsed.method, Some(AuthMethod::ApiKey)) {
+        let provider = provider_selection.unwrap_or(&parsed.provider);
+        let key = credentials_core::oauth::import_api_key(source, entry_payload, provider)
+            .map_err(|error| CliError::Usage(format!("api-key import: {error}")))?;
+        return Ok((
+            VaultRecord::new_static(CredentialKind::ApiKey, source, key, None),
+            None,
+        ));
     }
+
+    let mut imported_email = None;
+    let oauth = if source == "antigravity" {
+        credentials_core::oauth::import_antigravity_account(entry_payload, provider_selection).map(
+            |imported| {
+                imported_email = imported.email;
+                imported.oauth
+            },
+        )
+    } else {
+        match provider_selection {
+            Some(provider) => credentials_core::oauth::OAuthCredential::import_provider(
+                source,
+                entry_payload,
+                provider,
+            ),
+            None => credentials_core::oauth::OAuthCredential::import(source, entry_payload),
+        }
+    }
+    .map_err(|error| CliError::Usage(format!("import parse: {error}")))?;
+    let adapter = adapter_override
+        .or_else(|| default_refresh_adapter(parsed.method, &parsed.provider))
+        .ok_or_else(|| {
+            CliError::Usage(format!(
+                "no refresh adapter for id '{id}'; pass --adapter <name>"
+            ))
+        })?;
+    let payload =
+        credentials_core::secret::SecretBytes::new(oauth.access_token.expose().as_bytes().to_vec());
+    Ok((
+        VaultRecord::new_oauth(source, adapter, oauth, payload),
+        imported_email,
+    ))
+}
+
+/// Apply the import identity policy after record construction. Keeping this separate
+/// ensures the picker and flag form attach antigravity identity in the same order.
+fn attach_import_identity(
+    record: VaultRecord,
+    requested_identity: IdentityFlags,
+    imported_email: Option<String>,
+) -> VaultRecord {
+    if requested_identity.clear {
+        return record;
+    }
+    match requested_identity.account_id {
+        Some(account_id) => record.with_identity(RecordIdentity {
+            account_id: Some(account_id),
+            email: requested_identity.email.or(imported_email),
+            org_name: requested_identity.org_name,
+        }),
+        None => match imported_email {
+            Some(email) => record.with_identity(RecordIdentity {
+                account_id: Some(email.clone()),
+                email: Some(email),
+                org_name: None,
+            }),
+            None => record,
+        },
+    }
+}
+
+fn cmd_import(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
+    if args.is_empty() {
+        return import_picker::run(global);
+    }
+
+    let source = required(args, "--source")?;
+    let id = required(args, "--id")?;
+    let json_path = required(args, "--json")?;
+    let requested_identity = identity_flags(args, "--clear-identity", false)?;
+    let clear_identity = requested_identity.clear;
+    let raw =
+        std::fs::read(&json_path).map_err(|e| CliError::Io(format!("reading {json_path}: {e}")))?;
+    let provider_selection = optional(args, "--provider");
+    let (record, imported_email) = build_import_record(
+        &source,
+        &raw,
+        &id,
+        provider_selection.as_deref(),
+        optional(args, "--adapter"),
+    )?;
+    let record = attach_import_identity(record, requested_identity, imported_email);
 
     // `--replace` overwrites an existing credential UNCONDITIONALLY (re-seal at
     // version+1, reset to active, keep the handle), for fixing a credential imported
@@ -1611,7 +1647,7 @@ fn cmd_import(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
                 id: id.clone(),
                 record: Box::new(record),
                 audit_op: AdminAuditOp::Import,
-                clear_identity: requested_identity.clear,
+                clear_identity,
             },
         )?;
         println!("replaced {id}");

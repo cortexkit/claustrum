@@ -922,12 +922,33 @@ impl EncryptedStore {
 
         let outcome = store.migrate(SCHEMA_NAMESPACE, MIGRATIONS)?;
         if outcome.store_ahead() {
+            // NAME THE BINARY THAT IS REFUSING. Two binaries open this store -- the
+            // daemon and the CLI -- and each carries its own migration chain, so the
+            // ordinary cause of this refusal is that they were built at different
+            // times rather than that anything is wrong with the vault.
+            //
+            // Reported by a consumer 2026-09-19: their sibling checkout had ck-auth
+            // rebuilt at 10:05 (writing schema 9) and ck-claustrum still the 02:24
+            // artifact (reading 8), and the message read as a vault defect. Without
+            // the executable name the operator cannot tell WHICH half is behind, and
+            // "roll forward" is unactionable when you do not know what to roll.
+            //
+            // current_exe() rather than a build-time constant: this crate is linked
+            // into both binaries and into test helpers, so the answer has to come from
+            // the running process. A failure here is not worth failing the refusal
+            // over, so it degrades to the old wording.
+            let who = std::env::current_exe()
+                .ok()
+                .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+                .unwrap_or_else(|| "this binary".to_string());
             return Err(StoreError::Backend(format!(
-                "store schema {} is newer than this binary's {} -- refusing to serve. \
-                 This binary predates migrations already applied to this vault; one of \
-                 them rebuilt a table, so writes would fail later rather than now. \
-                 Roll forward to a binary at or above {}, or restore the store from the \
-                 backup that matches this binary.",
+                "{who}: store schema {} is newer than this binary's {} -- refusing to \
+                 serve. This binary predates migrations already applied to this vault; \
+                 one of them rebuilt a table, so writes would fail later rather than \
+                 now. Roll {who} forward to a binary at or above {}, or restore the \
+                 store from the backup that matches it. If ck-auth and ck-claustrum \
+                 were built separately they can carry different chains -- rebuild both \
+                 from one revision.",
                 outcome.recorded, outcome.chain_max, outcome.recorded,
             )));
         }
@@ -4943,6 +4964,25 @@ mod tests {
             rendered.contains(&ahead.to_string())
                 && rendered.contains(&newest_migration_version().to_string()),
             "the refusal must name BOTH versions so the operator knows the target: {rendered}"
+        );
+        // AND WHICH BINARY IS BEHIND. Two artifacts open this store and each carries
+        // its own chain, so the ordinary cause is that they were built at different
+        // times. A consumer hit exactly that on 2026-09-19 -- ck-auth rebuilt hours
+        // after ck-claustrum -- and read the refusal as a vault defect, because
+        // "roll forward" cannot be acted on without knowing what to roll.
+        let exe = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .expect("a test binary has a name");
+        assert!(
+            rendered.contains(&exe),
+            "the refusal must name the running executable ({exe}), or the operator \
+             cannot tell which of ck-auth and ck-claustrum is behind: {rendered}"
+        );
+        assert!(
+            rendered.contains("ck-auth") && rendered.contains("ck-claustrum"),
+            "the refusal must name both artifacts, since the fix is to rebuild them \
+             from one revision: {rendered}"
         );
         let _ = std::fs::remove_dir_all(root);
     }

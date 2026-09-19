@@ -459,6 +459,17 @@ fn run_terminal_picker(fixture: &Fixture, input: &[u8]) -> (std::process::ExitSt
             if libc::setsid() == -1 {
                 return Err(failure(b"setsid failed"));
             }
+            // Claim the slave as this session's controlling terminal, preserving real
+            // terminal job control and terminal-generated signals such as SIGINT.
+            // NO TEST DEFENDS THIS CLAIM: the picker's is_terminal() predicate uses
+            // isatty(fd), which observes a tty descriptor, not a controlling terminal.
+            // Removing TIOCSCTTY costs no test coverage today (all eight still pass),
+            // but changes behavior once the widget depends on terminal-generated signals.
+            // Keep the claim; if that dependency appears, add a signal-driven test.
+            // The discriminating control for this helper is withholding PTY input bytes:
+            // real_terminal_adapter_exercises_submit_controls_drop_and_attempt_bound
+            // fails by name, with the other seven tests passing, and exercises the
+            // eight-second SIGKILL deadline. That proves PTY IO, not this ioctl.
             if libc::ioctl(libc::STDIN_FILENO, libc::TIOCSCTTY as _, 0) == -1 {
                 return Err(failure(b"ioctl(TIOCSCTTY) failed"));
             }

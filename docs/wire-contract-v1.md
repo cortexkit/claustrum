@@ -145,6 +145,8 @@ returned rows and tuples; changes outside the caller's visibility do not move it
 
 Category transitions use audit op `set_category` and target
 `category:<credential-id>|<sorted-comma-list>`; clearing the set leaves the trailing `|`.
+Migration 10's one category backfill row uses audit op `category.migrate`, actor
+`migration:10`, and target `category:forge-identity|<sorted-comma-list-of-credential-ids>`.
 New grant targets use
 `grant:<operation>:<principal-kind>:<principal-id>:<selector-kind>|<stored-selector>`.
 Both formats parse by splitting on the first `|`. Historical grant targets without `|`

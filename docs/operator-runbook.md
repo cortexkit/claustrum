@@ -736,8 +736,9 @@ These values come from the closed `AuditOp` enum and name the mutation or chain 
 | `mint_handle` | Mint a capability handle for a credential. |
 | `revoke_handle` | Revoke one or all capability handles for a credential. |
 | `fetch_anomaly` | Record a read-surface fetch-rate or enumeration anomaly. |
-| `grant_create` | Create a principal-scoped credential-prefix read grant. |
-| `grant_revoke` | Revoke a principal-scoped credential-prefix read grant. |
+| `grant_create` | Create a principal-scoped exact or category operation grant. |
+| `grant_revoke` | Revoke a principal-scoped exact or category operation grant. |
+| `category.migrate` | Record migration 10's audited category backfill. |
 | `approval` | Record an approver's approval of the exact artifact bytes identified by a hash. |
 
 #### `audit_log.alarm`

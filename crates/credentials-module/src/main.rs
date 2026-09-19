@@ -448,10 +448,9 @@ async fn build_surface(
     );
     let resolver_config = resolver_config_from_env(data_dir);
 
-    // Open + migrate the store first, then read the database's plaintext key
-    // fingerprint and resolve the master key crash-safely: pick whichever key-store
-    // slot matches the database (so a rotation that crashed mid-handover still
-    // opens). A locked keychain / no matching key is a clean fail-closed exit.
+    // Open the store, resolve the master key from its plaintext fingerprint, then
+    // migrate. Migration 10 needs the key before it can append its category-backfill
+    // audit row; a brand-new store has no fingerprint yet and resolves Current.
     // An immediate lease collision makes the supervisor restart the module and returns
     // `Transient` to every consumer whose fetch is in that window. Waiting up to roughly
     // half a second is cheaper than that observable outage, while a persistent writer
@@ -467,7 +466,6 @@ async fn build_surface(
             Err(error) => return Err(ModuleError::Message(format!("open store: {error}"))),
         }
     };
-    EncryptedStore::migrate(&store).map_err(|e| ModuleError::Message(format!("migrate: {e}")))?;
     let key = match EncryptedStore::read_db_key_id(&store)
         .map_err(|e| ModuleError::Message(format!("read db key id: {e}")))?
     {
@@ -476,6 +474,8 @@ async fn build_surface(
         None => resolver::resolve(&resolver_config, None),
     }
     .map_err(|e| ModuleError::Message(format!("master key: {e}")))?;
+    EncryptedStore::migrate_with_key(&store, &key)
+        .map_err(|e| ModuleError::Message(format!("migrate: {e}")))?;
 
     // Derive the admin-op authority material from the master key BEFORE it is moved
     // into the store: the MAC key (Gate 2's authority root) and this key's non-secret
@@ -2450,7 +2450,7 @@ mod tests {
                 "reserved",
                 "prefrontal-core",
                 SelectorKind::Exact,
-                "github_app:",
+                "github_app:fleet-a",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
             )
@@ -2500,7 +2500,7 @@ mod tests {
                 "reserved",
                 "prefrontal-core",
                 SelectorKind::Exact,
-                "github_app:",
+                "github_app:fleet-a",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantRevoke),
             )
@@ -2530,7 +2530,7 @@ mod tests {
                 "reserved",
                 "consumer",
                 SelectorKind::Category,
-                "category:llm-provider",
+                "llm-provider",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
             )
@@ -2540,7 +2540,7 @@ mod tests {
                 "reserved",
                 "consumer",
                 SelectorKind::Exact,
-                "apikey:",
+                "apikey:zai",
                 GrantOperation::Sign,
                 AuditCtx::admin(AuditOp::GrantCreate),
             )
@@ -2789,7 +2789,7 @@ mod tests {
                 "reserved",
                 "prefrontal-core",
                 SelectorKind::Exact,
-                "github_app:",
+                credential_id,
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
             )
@@ -3105,41 +3105,21 @@ mod tests {
                 )
                 .expect("create credential");
         }
-        for prefix in ["github_app:", "apikey:"] {
-            credentials_core::admin_ops::apply(
-                &store,
-                credentials_core::admin_ops::AdminOpBody::GrantCreate {
-                    v: credentials_core::admin_ops::ADMIN_OP_SCHEMA_V1,
-                    principal_id: "prefrontal-core".into(),
-                    credential_prefix: prefix.into(),
-                    operation: GrantOperation::Read,
-                },
-                "test",
-            )
-            .expect("create grant");
+        for selector in ["apikey:active", "github_app:a"] {
+            for operation in [GrantOperation::Read, GrantOperation::Sign] {
+                credentials_core::admin_ops::apply(
+                    &store,
+                    credentials_core::admin_ops::AdminOpBody::GrantCreate {
+                        v: credentials_core::admin_ops::ADMIN_OP_SCHEMA_V1,
+                        principal_id: "prefrontal-core".into(),
+                        credential_prefix: selector.into(),
+                        operation,
+                    },
+                    "test",
+                )
+                .expect("create exact grant");
+            }
         }
-        credentials_core::admin_ops::apply(
-            &store,
-            credentials_core::admin_ops::AdminOpBody::GrantCreate {
-                v: credentials_core::admin_ops::ADMIN_OP_SCHEMA_V1,
-                principal_id: "prefrontal-core".into(),
-                credential_prefix: "github_app:".into(),
-                operation: GrantOperation::Sign,
-            },
-            "test",
-        )
-        .expect("create sign grant");
-        credentials_core::admin_ops::apply(
-            &store,
-            credentials_core::admin_ops::AdminOpBody::GrantCreate {
-                v: credentials_core::admin_ops::ADMIN_OP_SCHEMA_V1,
-                principal_id: "prefrontal-core".into(),
-                credential_prefix: "apikey:".into(),
-                operation: GrantOperation::Sign,
-            },
-            "test",
-        )
-        .expect("create apikey sign grant");
         let status = credentials_core::admin_ops::apply(
             &store,
             credentials_core::admin_ops::AdminOpBody::Status {
@@ -3168,33 +3148,33 @@ mod tests {
                 "principal_kind": "reserved",
                 "principal_id": "prefrontal-core",
                 "selector_kind": "exact",
-                "credential_prefix": "apikey:",
+                "credential_prefix": "apikey:active",
                 "operation": "read",
-                "covered_credential_ids": ["apikey:active", "apikey:dead"],
+                "covered_credential_ids": ["apikey:active"],
             },
             {
                 "principal_kind": "reserved",
                 "principal_id": "prefrontal-core",
                 "selector_kind": "exact",
-                "credential_prefix": "apikey:",
+                "credential_prefix": "apikey:active",
                 "operation": "sign",
-                "covered_credential_ids": ["apikey:active", "apikey:dead"],
+                "covered_credential_ids": ["apikey:active"],
             },
             {
                 "principal_kind": "reserved",
                 "principal_id": "prefrontal-core",
                 "selector_kind": "exact",
-                "credential_prefix": "github_app:",
+                "credential_prefix": "github_app:a",
                 "operation": "read",
-                "covered_credential_ids": ["github_app:a", "github_app:z"],
+                "covered_credential_ids": ["github_app:a"],
             },
             {
                 "principal_kind": "reserved",
                 "principal_id": "prefrontal-core",
                 "selector_kind": "exact",
-                "credential_prefix": "github_app:",
+                "credential_prefix": "github_app:a",
                 "operation": "sign",
-                "covered_credential_ids": ["github_app:a", "github_app:z"],
+                "covered_credential_ids": ["github_app:a"],
             },
         ]);
         assert_eq!(
@@ -4771,7 +4751,7 @@ mod tests {
                 "reserved",
                 "prefrontal-core",
                 SelectorKind::Exact,
-                "signing:scoped:",
+                credential_id,
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
             )
@@ -5001,16 +4981,18 @@ mod tests {
                 &VaultRecord::new_static(CredentialKind::ApiKey, "test", pem.into_bytes(), None),
             )
             .expect("create non-signing credential");
-        store
-            .create_read_grant_audited(
-                "reserved",
-                "prefrontal-core",
-                SelectorKind::Exact,
-                "signing:operations:",
-                GrantOperation::Sign,
-                AuditCtx::admin(AuditOp::GrantCreate),
-            )
-            .expect("create sign grant");
+        for credential_id in ["signing:operations:real", "signing:operations:impostor"] {
+            store
+                .create_read_grant_audited(
+                    "reserved",
+                    "prefrontal-core",
+                    SelectorKind::Exact,
+                    credential_id,
+                    GrantOperation::Sign,
+                    AuditCtx::admin(AuditOp::GrantCreate),
+                )
+                .expect("create exact sign grant");
+        }
         admin.record_bind(
             84,
             subc_protocol::Principal::Reserved {
@@ -5060,7 +5042,7 @@ mod tests {
                 "reserved",
                 "prefrontal-core",
                 SelectorKind::Exact,
-                "signing:public-key:",
+                credential_id,
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
             )
@@ -5192,7 +5174,7 @@ mod tests {
                 "reserved",
                 "prefrontal-core",
                 SelectorKind::Exact,
-                "apikey:public-key:",
+                credential_id,
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
             )

@@ -94,6 +94,101 @@ pub const SELECTOR_SCHEMA_VERSION: u32 = 10;
 /// entry an older writer spelled differently.
 const CHAIN_BIRTH_OPS: [&str; 5] = ["put", "import", "login", "create", "store"];
 
+/// Schema-9 grants whose old and replacement selectors were verified to cover the
+/// same credential ids when migration 10 was designed. The migration recomputes both
+/// covered sets from the store it opens and converts only when they remain identical.
+#[derive(Clone, Copy)]
+struct Migration10Conversion {
+    principal_kind: &'static str,
+    principal_id: &'static str,
+    old_selector: &'static str,
+    operation: GrantOperation,
+    replacement: Migration10Replacement,
+}
+
+#[derive(Clone, Copy)]
+enum Migration10Replacement {
+    Exact {
+        selector: &'static str,
+    },
+    Category {
+        selector: &'static str,
+        assignments: &'static [&'static str],
+    },
+}
+
+const MIGRATION_10_CONVERSION_TABLE: &[Migration10Conversion] = &[
+    Migration10Conversion {
+        principal_kind: "reserved",
+        principal_id: "broca",
+        old_selector: "apikey:opencode-",
+        operation: GrantOperation::Read,
+        replacement: Migration10Replacement::Exact {
+            selector: "apikey:opencode-go",
+        },
+    },
+    Migration10Conversion {
+        principal_kind: "reserved",
+        principal_id: "prefrontal-routing",
+        old_selector: "apikey:artificial-analysis",
+        operation: GrantOperation::Read,
+        replacement: Migration10Replacement::Exact {
+            selector: "apikey:artificial-analysis",
+        },
+    },
+    Migration10Conversion {
+        principal_kind: "reserved",
+        principal_id: "prefrontal-core",
+        old_selector: "signing:agent-assertion:",
+        operation: GrantOperation::Read,
+        replacement: Migration10Replacement::Exact {
+            selector: "signing:agent-assertion:1",
+        },
+    },
+    Migration10Conversion {
+        principal_kind: "reserved",
+        principal_id: "prefrontal-core",
+        old_selector: "signing:agent-assertion:",
+        operation: GrantOperation::Sign,
+        replacement: Migration10Replacement::Exact {
+            selector: "signing:agent-assertion:1",
+        },
+    },
+    Migration10Conversion {
+        principal_kind: "reserved",
+        principal_id: "prefrontal-core",
+        old_selector: "github_app:",
+        operation: GrantOperation::Read,
+        replacement: Migration10Replacement::Category {
+            selector: "forge-identity",
+            assignments: &[
+                "github_app:aft-alfonso",
+                "github_app:alf-alfonso",
+                "github_app:astro-alfonso",
+                "github_app:ava-alfonso",
+                "github_app:broca-alfonso",
+                "github_app:callo-alfonso",
+                "github_app:cereb-alfonso",
+                "github_app:ckcred-alfonso",
+                "github_app:ckdesk-alfonso",
+                "github_app:cke2e-alfonso",
+                "github_app:ckios-alfonso",
+                "github_app:cktui-alfonso",
+                "github_app:engram-alfonso",
+                "github_app:fusi-alfonso",
+                "github_app:magic-alfonso",
+                "github_app:oaiauth-alfonso",
+                "github_app:plex-alfonso",
+                "github_app:qta-alfonso",
+                "github_app:subc-alfonso",
+                "github_app:synapse-alfonso",
+                "github_app:thalamus-alfonso",
+                "github_app:werni-alfonso",
+            ],
+        },
+    },
+];
+
 /// The vault schema. The fence table is created lazily by `with_conn_fenced` on
 /// the first fenced write and is not declared here.
 ///
@@ -352,12 +447,12 @@ const MIGRATIONS: &[Migration] = &[
                      ); \
                      INSERT INTO read_grants_v10 \
                          (principal_kind, principal_id, selector_kind, selector, operation, created_at_ms) \
-                     SELECT principal_kind, principal_id, \
-                            CASE selector_kind WHEN 'prefix' THEN 'exact' ELSE selector_kind END, \
-                            credential_prefix, operation, created_at_ms \
-                     FROM read_grants; \
+                     SELECT principal_kind, principal_id, selector_kind, selector, operation, created_at_ms \
+                     FROM migration_10_grant_plan; \
                      DROP TABLE read_grants; \
                      ALTER TABLE read_grants_v10 RENAME TO read_grants; \
+                     INSERT OR IGNORE INTO credential_categories (credential_id, category) \
+                     SELECT credential_id, category FROM migration_10_category_plan; \
                      CREATE TABLE enrolled_consumers (\
                          enrollment_id    TEXT PRIMARY KEY, \
                          name             TEXT NOT NULL, \
@@ -390,6 +485,7 @@ const MIGRATIONS: &[Migration] = &[
                           WHERE audit_log.credential_id = credentials.credential_id \
                             AND audit_log.op IN ('put', 'import', 'login', 'create', 'store')\
                      ); \
+                     /* Rust appends category.migrate before creating grants_generation. */ \
                      CREATE TABLE grants_generation (\
                          id    INTEGER PRIMARY KEY CHECK (id = 1), \
                          value INTEGER NOT NULL\
@@ -439,6 +535,9 @@ pub const fn newest_migration_version() -> u32 {
 /// and the drift would stay invisible until the day it mattered.
 #[cfg(any(test, feature = "test-support"))]
 pub fn migrate_through_for_test(store: &SqliteStore, version: u32) -> Result<(), StoreError> {
+    if version >= SELECTOR_SCHEMA_VERSION {
+        return EncryptedStore::migrate(store);
+    }
     let chain: Vec<Migration> = MIGRATIONS
         .iter()
         .copied()
@@ -550,6 +649,52 @@ pub struct ReadGrant {
     pub selector: String,
     pub operation: GrantOperation,
     pub created_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Schema9GrantRow {
+    principal_kind: String,
+    principal_id: String,
+    selector_kind: String,
+    selector: String,
+    operation: String,
+    created_at_ms: i64,
+}
+
+impl Schema9GrantRow {
+    fn label(&self) -> String {
+        format!(
+            "(principal_kind={}, principal_id={}, selector_kind={}, selector={}, operation={})",
+            self.principal_kind,
+            self.principal_id,
+            self.selector_kind,
+            self.selector,
+            self.operation
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Migration10GrantPlanRow {
+    principal_kind: String,
+    principal_id: String,
+    selector_kind: String,
+    selector: String,
+    operation: String,
+    created_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Migration10Plan {
+    grants: Vec<Migration10GrantPlanRow>,
+    assignments: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Migration10State {
+    credential_ids: BTreeSet<String>,
+    categories: BTreeMap<String, BTreeSet<String>>,
+    grants: Vec<Schema9GrantRow>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -808,6 +953,337 @@ pub fn payload_hash(payload: &[u8]) -> [u8; 32] {
 /// Holds the master key (in its zeroizing newtype) for the store's lifetime so
 /// every read/write can seal/open records. The underlying [`SqliteStore`] holds
 /// the single-writer lease and carries the fence epoch.
+fn migration_10_conversion(row: &Schema9GrantRow) -> Option<&'static Migration10Conversion> {
+    MIGRATION_10_CONVERSION_TABLE.iter().find(|entry| {
+        row.selector_kind == "prefix"
+            && row.principal_kind == entry.principal_kind
+            && row.principal_id == entry.principal_id
+            && row.selector == entry.old_selector
+            && row.operation == entry.operation.as_str()
+    })
+}
+
+fn schema_9_covered_set(state: &Migration10State, row: &Schema9GrantRow) -> BTreeSet<String> {
+    match row.selector_kind.as_str() {
+        "prefix" => state
+            .credential_ids
+            .iter()
+            .filter(|credential_id| credential_id.starts_with(&row.selector))
+            .cloned()
+            .collect(),
+        "category" => {
+            let category = row
+                .selector
+                .strip_prefix("category:")
+                .unwrap_or(&row.selector);
+            state
+                .credential_ids
+                .iter()
+                .filter(|credential_id| {
+                    state
+                        .categories
+                        .get(*credential_id)
+                        .is_some_and(|categories| categories.contains(category))
+                })
+                .cloned()
+                .collect()
+        }
+        _ => BTreeSet::new(),
+    }
+}
+
+fn migration_10_plan(state: Migration10State) -> Result<Migration10Plan, StoreError> {
+    let mut assignments = BTreeSet::new();
+    for row in &state.grants {
+        if let Some(Migration10Conversion {
+            replacement:
+                Migration10Replacement::Category {
+                    selector,
+                    assignments: ids,
+                },
+            ..
+        }) = migration_10_conversion(row)
+        {
+            for credential_id in *ids {
+                if state.credential_ids.contains(*credential_id) {
+                    assignments.insert(((*credential_id).to_string(), (*selector).to_string()));
+                }
+            }
+        }
+    }
+
+    let mut categories_after = state.categories.clone();
+    for (credential_id, category) in &assignments {
+        categories_after
+            .entry(credential_id.clone())
+            .or_default()
+            .insert(category.clone());
+    }
+
+    let mut grants = Vec::with_capacity(state.grants.len());
+    for row in &state.grants {
+        let before = schema_9_covered_set(&state, row);
+        let (selector_kind, selector) = match row.selector_kind.as_str() {
+            "prefix" => match migration_10_conversion(row).map(|entry| entry.replacement) {
+                Some(Migration10Replacement::Exact { selector }) => {
+                    (SelectorKind::Exact.as_str(), selector.to_string())
+                }
+                Some(Migration10Replacement::Category { selector, .. }) => {
+                    (SelectorKind::Category.as_str(), selector.to_string())
+                }
+                None if before.len() == 1 => (
+                    SelectorKind::Exact.as_str(),
+                    before.iter().next().expect("one prefix match").clone(),
+                ),
+                None => {
+                    return Err(StoreError::Backend(format!(
+                        "migration 10 refused prefix row {}: match set {:?}; expected exactly one credential",
+                        row.label(),
+                        before.iter().collect::<Vec<_>>()
+                    )))
+                }
+            },
+            "category" => (
+                SelectorKind::Category.as_str(),
+                row.selector
+                    .strip_prefix("category:")
+                    .unwrap_or(&row.selector)
+                    .to_string(),
+            ),
+            other => {
+                return Err(StoreError::Backend(format!(
+                    "migration 10 refused row {}: unsupported schema-9 selector kind {other:?}",
+                    row.label()
+                )))
+            }
+        };
+
+        let after: BTreeSet<String> = match selector_kind {
+            "exact" => state
+                .credential_ids
+                .iter()
+                .filter(|credential_id| credential_id.as_str() == selector)
+                .cloned()
+                .collect(),
+            "category" => state
+                .credential_ids
+                .iter()
+                .filter(|credential_id| {
+                    categories_after
+                        .get(*credential_id)
+                        .is_some_and(|categories| categories.contains(&selector))
+                })
+                .cloned()
+                .collect(),
+            _ => unreachable!("the migration plan emits only schema-10 selector kinds"),
+        };
+        if before != after {
+            let removed: Vec<&String> = before.difference(&after).collect();
+            let added: Vec<&String> = after.difference(&before).collect();
+            return Err(StoreError::Backend(format!(
+                "migration 10 refused reach change for row {}: before covered set {:?}; after covered set {:?}; difference removed {:?}, added {:?}",
+                row.label(),
+                before.iter().collect::<Vec<_>>(),
+                after.iter().collect::<Vec<_>>(),
+                removed,
+                added
+            )));
+        }
+
+        grants.push(Migration10GrantPlanRow {
+            principal_kind: row.principal_kind.clone(),
+            principal_id: row.principal_id.clone(),
+            selector_kind: selector_kind.to_string(),
+            selector,
+            operation: row.operation.clone(),
+            created_at_ms: row.created_at_ms,
+        });
+    }
+
+    Ok(Migration10Plan {
+        grants,
+        assignments: assignments.into_iter().collect(),
+    })
+}
+
+fn load_migration_10_state(store: &SqliteStore) -> Result<Migration10State, StoreError> {
+    store.with_conn(|conn| {
+        let credential_ids = conn
+            .prepare("SELECT credential_id FROM credentials ORDER BY credential_id")?
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<BTreeSet<_>>>()?;
+
+        let mut categories = BTreeMap::<String, BTreeSet<String>>::new();
+        let mut categories_stmt = conn.prepare(
+            "SELECT credential_id, category FROM credential_categories ORDER BY credential_id, category",
+        )?;
+        for row in categories_stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })? {
+            let (credential_id, category) = row?;
+            categories.entry(credential_id).or_default().insert(category);
+        }
+        drop(categories_stmt);
+
+        let mut grants_stmt = conn.prepare(
+            "SELECT principal_kind, principal_id, selector_kind, credential_prefix, operation, created_at_ms \
+             FROM read_grants ORDER BY principal_kind, principal_id, selector_kind, credential_prefix, operation",
+        )?;
+        let grants = grants_stmt
+            .query_map([], |row| {
+                Ok(Schema9GrantRow {
+                    principal_kind: row.get(0)?,
+                    principal_id: row.get(1)?,
+                    selector_kind: row.get(2)?,
+                    selector: row.get(3)?,
+                    operation: row.get(4)?,
+                    created_at_ms: row.get(5)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        Ok(Migration10State {
+            credential_ids,
+            categories,
+            grants,
+        })
+    })
+}
+
+fn load_migration_10_audit_key(
+    store: &SqliteStore,
+    key: Option<&MasterKey>,
+) -> Result<Zeroizing<[u8; 32]>, StoreError> {
+    let Some(key) = key else {
+        return Err(StoreError::Backend(
+            "migration 10 refused: audit chain key unavailable; no category assignment was written"
+                .to_string(),
+        ));
+    };
+    let envelope_bytes: Option<Vec<u8>> = store.with_conn(|conn| {
+        conn.query_row(
+            "SELECT envelope FROM vault_secrets WHERE name = ?1",
+            rusqlite::params![AUDIT_KEY_SECRET_NAME],
+            |row| row.get(0),
+        )
+        .optional()
+    })?;
+    let Some(envelope_bytes) = envelope_bytes else {
+        return Err(StoreError::Backend(
+            "migration 10 refused: audit chain key unavailable; no category assignment was written"
+                .to_string(),
+        ));
+    };
+    let plaintext = envelope::open(
+        key,
+        &envelope_bytes,
+        &RecordBinding {
+            credential_id: AUDIT_KEY_SECRET_NAME,
+            record_version: AUDIT_KEY_RECORD_VERSION,
+        },
+    )
+    .map_err(|_| {
+        StoreError::Backend(
+            "migration 10 refused: audit chain key unavailable; no category assignment was written"
+                .to_string(),
+        )
+    })?;
+    let bytes: [u8; 32] = plaintext.as_slice().try_into().map_err(|_| {
+        StoreError::Backend(
+            "migration 10 refused: audit chain key is corrupt; no category assignment was written"
+                .to_string(),
+        )
+    })?;
+    Ok(Zeroizing::new(bytes))
+}
+
+fn apply_migration_10(
+    store: &SqliteStore,
+    plan: &Migration10Plan,
+    audit_key: Option<&[u8; 32]>,
+) -> Result<(), StoreError> {
+    store.with_conn(|conn| {
+        let tx = conn.unchecked_transaction()?;
+        tx.execute_batch(
+            "CREATE TEMP TABLE migration_10_grant_plan (\
+                 principal_kind TEXT NOT NULL, principal_id TEXT NOT NULL, \
+                 selector_kind TEXT NOT NULL, selector TEXT NOT NULL, \
+                 operation TEXT NOT NULL, created_at_ms INTEGER NOT NULL\
+             ); \
+             CREATE TEMP TABLE migration_10_category_plan (\
+                 credential_id TEXT NOT NULL, category TEXT NOT NULL\
+             );",
+        )?;
+        for grant in &plan.grants {
+            tx.execute(
+                "INSERT INTO migration_10_grant_plan \
+                 (principal_kind, principal_id, selector_kind, selector, operation, created_at_ms) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![
+                    grant.principal_kind,
+                    grant.principal_id,
+                    grant.selector_kind,
+                    grant.selector,
+                    grant.operation,
+                    grant.created_at_ms
+                ],
+            )?;
+        }
+        for (credential_id, category) in &plan.assignments {
+            tx.execute(
+                "INSERT INTO migration_10_category_plan (credential_id, category) VALUES (?1, ?2)",
+                rusqlite::params![credential_id, category],
+            )?;
+        }
+
+        let statements = MIGRATIONS
+            .iter()
+            .find(|migration| migration.version == SELECTOR_SCHEMA_VERSION)
+            .expect("migration 10 is present")
+            .statements;
+        // The audit append belongs after the assignments but before the generation seed,
+        // so split the declarative batch at the explicit Rust insertion boundary.
+        let (before_generation, generation) = statements
+            .split_once("/* Rust appends category.migrate before creating grants_generation. */")
+            .expect("migration 10 carries its audit insertion marker");
+        tx.execute_batch(before_generation)?;
+
+        if !plan.assignments.is_empty() {
+            let audit_key = audit_key.expect("an assignment plan requires a loaded audit key");
+            let category = &plan.assignments[0].1;
+            let ids = plan
+                .assignments
+                .iter()
+                .map(|(credential_id, _)| credential_id.as_str())
+                .collect::<Vec<_>>()
+                .join(",");
+            append_audit_tx(
+                &tx,
+                audit_key,
+                &AuditRecord {
+                    op: AuditOp::CategoryMigrate,
+                    credential_id: Some(format!("category:{category}|{ids}")),
+                    payload_hash: None,
+                    actor: "migration:10".to_string(),
+                    alarm: None,
+                },
+            )?;
+        }
+
+        tx.execute_batch(generation)?;
+        tx.execute(
+            "INSERT INTO cortexkit_schema_version (namespace, version, applied_at_unix) \
+             VALUES (?1, ?2, ?3)",
+            rusqlite::params![SCHEMA_NAMESPACE, SELECTOR_SCHEMA_VERSION, now_ms() / 1_000],
+        )?;
+        tx.execute_batch(
+            "DROP TABLE migration_10_grant_plan; DROP TABLE migration_10_category_plan;",
+        )?;
+        tx.commit()?;
+        Ok(())
+    })
+}
+
 pub struct EncryptedStore {
     store: SqliteStore,
     key: MasterKey,
@@ -955,6 +1431,11 @@ impl EncryptedStore {
                 .map(Some)
                 .or_else(|e| match e {
                     rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                    rusqlite::Error::SqliteFailure(_, Some(ref message))
+                        if message.contains("no such table: vault_secrets") =>
+                    {
+                        Ok(None)
+                    }
                     other => Err(other),
                 })
             })
@@ -975,157 +1456,123 @@ impl EncryptedStore {
         }
     }
 
-    /// Apply the schema chain, and REFUSE A STORE THAT IS AHEAD OF THIS BINARY.
+    /// Apply the schema chain and refuse a store newer than this binary.
     ///
-    /// The migrator deliberately does not refuse on its own: a store newer than the
-    /// running binary is exactly what a deliberate rollback produces, and refusing at
-    /// that layer would brick every rollback in the fleet. It reports, and each module
-    /// decides. This is the vault deciding.
-    ///
-    /// *** THIS CHAIN IS NOT ADDITIVE-ONLY, WHICH IS THE WHOLE ARGUMENT. *** Migration 6
-    /// rebuilds `read_grants` -- create, copy, DROP, rename -- to add a NOT NULL
-    /// `operation` column inside a compound primary key. A pre-6 binary reading that
-    /// store looks fine and INSERTS a grant without `operation`, which fails on the NOT
-    /// NULL. So an old binary on a new store is not a reduced-feature vault; it is one
-    /// that works until the first write of the wrong shape, at a moment nobody connects
-    /// to the rollback.
-    ///
-    /// A refused start is loud, immediate, and attributable: the supervisor reports it,
-    /// the operator sees both versions, and no consumer is served from a schema this
-    /// binary cannot reason about. The remedy is to roll forward, or to restore the
-    /// store alongside the binary -- backups capture it, so that is a real procedure
-    /// rather than a shrug.
-    ///
-    /// NO OVERRIDE FLAG, deliberately. An override here would be reached for during an
-    /// incident, which is precisely when serving credentials from an unknown schema is
-    /// least affordable.
-    ///
-    /// Read-only paths are unaffected and that matters more than it looks: `events`,
-    /// `audit`, `verify-audit`, `usable`, and the offline `list`/`status`/`grants` open
-    /// with `mode=ro` and never migrate, so an operator can still inspect a vault that
-    /// refuses to serve. Diagnosis stays available exactly when it is needed.
+    /// Migration 10 is planned in Rust before its transaction starts because selector
+    /// conversion must be total and reach preserving. Call [`Self::migrate_with_key`]
+    /// when the schema-9 store contains the category backfill: its audit entry cannot be
+    /// written without first decrypting the existing chain key.
     pub fn migrate(store: &SqliteStore) -> Result<(), StoreError> {
-        // Migration 9 reserves lowercase `category:` byte-for-byte. SQLite LIKE is
-        // case-insensitive for ASCII by default, so the predicate must stay in Rust:
-        // `Category:example` is valid and must not be named by this guard.
-        let offending_ids = store.with_conn(|conn| {
-            let has_credentials: bool = conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'credentials')",
-                [],
-                |row| row.get(0),
-            )?;
-            let already_migrated: bool = conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'credential_categories')",
-                [],
-                |row| row.get(0),
-            )?;
-            if !has_credentials || already_migrated {
-                return Ok(Vec::new());
-            }
-            let mut stmt = conn.prepare("SELECT credential_id FROM credentials ORDER BY credential_id")?;
-            let ids = stmt.query_map([], |row| row.get::<_, String>(0))?;
-            ids.filter_map(|id| match id {
-                Ok(id) if id.starts_with("category:") => Some(Ok(id)),
-                Ok(_) => None,
-                Err(error) => Some(Err(error)),
-            })
-            .collect::<rusqlite::Result<Vec<_>>>()
-        })?;
-        if !offending_ids.is_empty() {
+        Self::migrate_inner(store, None)
+    }
+
+    /// Apply the schema chain with the master key available for migration 10's single
+    /// `category.migrate` chain entry.
+    pub fn migrate_with_key(store: &SqliteStore, key: &MasterKey) -> Result<(), StoreError> {
+        Self::migrate_inner(store, Some(key))
+    }
+
+    fn migrate_inner(store: &SqliteStore, key: Option<&MasterKey>) -> Result<(), StoreError> {
+        let recorded = store.with_conn(read_schema_version)?;
+        let newest = newest_migration_version();
+        if recorded > newest {
+            let who = std::env::current_exe()
+                .ok()
+                .and_then(|path| {
+                    path.file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                })
+                .unwrap_or_else(|| "this binary".to_string());
             return Err(StoreError::Backend(format!(
-                "migration 9 refused reserved credential ids: {}",
-                offending_ids.join(", ")
+                "{who}: store schema {recorded} is newer than this binary's {newest} -- refusing to serve. This binary predates migrations already applied to this vault; one of them rebuilt a table, so writes would fail later rather than now. Roll {who} forward to a binary at or above {recorded}, or restore the store from the backup that matches it. If ck-auth and ck-claustrum were built separately they can carry different chains -- rebuild both from one revision."
             )));
         }
 
-        // Migration 10 dates every existing credential from its own chain birth row,
-        // and the declarative migration runner has no refusal hook, so the totality of
-        // that backfill is proved HERE, before a single statement runs.
-        //
-        // A credential whose chain holds no deposit entry cannot be dated, and the
-        // alternatives are both worse than stopping: a uniform fallback makes every
-        // pre-existing credential look simultaneously new (or simultaneously ancient)
-        // to a consumer keyed on creation time, and leaving the column NULL moves the
-        // same decision to whichever reader meets it first. Refusing names the ids so
-        // an operator can look at them.
-        let (recorded_version, undatable_ids) = store.with_conn(|conn| {
-            let recorded = read_schema_version(conn)?;
-            if recorded >= SELECTOR_SCHEMA_VERSION || !table_exists(conn, "credentials")? {
-                return Ok((recorded, Vec::new()));
+        // Migration 9 reserves lowercase `category:` byte-for-byte. SQLite LIKE is
+        // case-insensitive for ASCII by default, so the predicate stays in Rust.
+        if recorded < CATEGORY_SCHEMA_VERSION {
+            let offending_ids = store.with_conn(|conn| {
+                if !table_exists(conn, "credentials")? {
+                    return Ok(Vec::new());
+                }
+                let mut stmt =
+                    conn.prepare("SELECT credential_id FROM credentials ORDER BY credential_id")?;
+                let ids = stmt
+                    .query_map([], |row| row.get::<_, String>(0))?
+                    .filter_map(|id| match id {
+                        Ok(id) if id.starts_with("category:") => Some(Ok(id)),
+                        Ok(_) => None,
+                        Err(error) => Some(Err(error)),
+                    })
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(ids)
+            })?;
+            if !offending_ids.is_empty() {
+                return Err(StoreError::Backend(format!(
+                    "migration 9 refused reserved credential ids: {}",
+                    offending_ids.join(", ")
+                )));
             }
-            // No chain table at all means no credential can be dated, so every id is
-            // named rather than the query failing on a missing table.
-            let birth_filter = if table_exists(conn, "audit_log")? {
-                let list = CHAIN_BIRTH_OPS
+        }
+
+        // The shared runner applies the declarative chain through schema 9. Migration
+        // 10 is run below in one custom transaction so its computed grant plan, category
+        // assignments, audit append, DDL, and version row either all commit or none do.
+        if recorded < CATEGORY_SCHEMA_VERSION {
+            let before_selector: Vec<Migration> = MIGRATIONS
+                .iter()
+                .copied()
+                .filter(|migration| migration.version < SELECTOR_SCHEMA_VERSION)
+                .collect();
+            store.migrate(SCHEMA_NAMESPACE, &before_selector)?;
+        }
+
+        let recorded = store.with_conn(read_schema_version)?;
+        if recorded < SELECTOR_SCHEMA_VERSION {
+            // Every existing credential is dated from its own chain birth row. The
+            // declarative runner cannot refuse with the offending ids, so establish
+            // totality before the migration transaction starts.
+            let undatable_ids = store.with_conn(|conn| {
+                if !table_exists(conn, "credentials")? {
+                    return Ok(Vec::new());
+                }
+                let birth_ops = CHAIN_BIRTH_OPS
                     .iter()
                     .map(|op| format!("'{op}'"))
                     .collect::<Vec<_>>()
                     .join(", ");
-                format!(
-                    " WHERE credential_id NOT IN (\
+                let mut stmt = conn.prepare(&format!(
+                    "SELECT credential_id FROM credentials WHERE credential_id NOT IN (\
                          SELECT credential_id FROM audit_log \
-                          WHERE credential_id IS NOT NULL AND op IN ({list})\
-                     )"
-                )
+                          WHERE credential_id IS NOT NULL AND op IN ({birth_ops})\
+                     ) ORDER BY credential_id"
+                ))?;
+                let ids = stmt
+                    .query_map([], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(ids)
+            })?;
+            if !undatable_ids.is_empty() {
+                return Err(StoreError::Backend(format!(
+                    "migration 10 refused: {} credential(s) have no birth row in the audit chain, so their creation time cannot be derived: {}. A birth row is the earliest audit entry naming the credential with op in [{}]. The store is untouched and still at schema {recorded}; restore the chain that dates these credentials, or remove them, and migrate again.",
+                    undatable_ids.len(),
+                    undatable_ids.join(", "),
+                    CHAIN_BIRTH_OPS.join(", "),
+                )));
+            }
+
+            let plan = migration_10_plan(load_migration_10_state(store)?)?;
+            let audit_key = if plan.assignments.is_empty() {
+                None
             } else {
-                String::new()
+                Some(load_migration_10_audit_key(store, key)?)
             };
-            let mut stmt = conn.prepare(&format!(
-                "SELECT credential_id FROM credentials{birth_filter} ORDER BY credential_id"
-            ))?;
-            let ids = stmt
-                .query_map([], |row| row.get::<_, String>(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok((recorded, ids))
-        })?;
-        if !undatable_ids.is_empty() {
-            return Err(StoreError::Backend(format!(
-                "migration 10 refused: {} credential(s) have no birth row in the audit \
-                 chain, so their creation time cannot be derived: {}. A birth row is the \
-                 earliest audit entry naming the credential with op in [{}]. The store is \
-                 untouched and still at schema {recorded_version}; restore the chain that \
-                 dates these credentials, or remove them, and migrate again.",
-                undatable_ids.len(),
-                undatable_ids.join(", "),
-                CHAIN_BIRTH_OPS.join(", "),
-            )));
+            apply_migration_10(store, &plan, audit_key.as_deref())?;
         }
 
-        let outcome = store.migrate(SCHEMA_NAMESPACE, MIGRATIONS)?;
-        if outcome.store_ahead() {
-            // NAME THE BINARY THAT IS REFUSING. Two binaries open this store -- the
-            // daemon and the CLI -- and each carries its own migration chain, so the
-            // ordinary cause of this refusal is that they were built at different
-            // times rather than that anything is wrong with the vault.
-            //
-            // Reported by a consumer 2026-09-19: their sibling checkout had ck-auth
-            // rebuilt at 10:05 (writing schema 9) and ck-claustrum still the 02:24
-            // artifact (reading 8), and the message read as a vault defect. Without
-            // the executable name the operator cannot tell WHICH half is behind, and
-            // "roll forward" is unactionable when you do not know what to roll.
-            //
-            // current_exe() rather than a build-time constant: this crate is linked
-            // into both binaries and into test helpers, so the answer has to come from
-            // the running process. A failure here is not worth failing the refusal
-            // over, so it degrades to the old wording.
-            let who = std::env::current_exe()
-                .ok()
-                .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
-                .unwrap_or_else(|| "this binary".to_string());
-            return Err(StoreError::Backend(format!(
-                "{who}: store schema {} is newer than this binary's {} -- refusing to \
-                 serve. This binary predates migrations already applied to this vault; \
-                 one of them rebuilt a table, so writes would fail later rather than \
-                 now. Roll {who} forward to a binary at or above {}, or restore the \
-                 store from the backup that matches it. If ck-auth and ck-claustrum \
-                 were built separately they can carry different chains -- rebuild both \
-                 from one revision.",
-                outcome.recorded, outcome.chain_max, outcome.recorded,
-            )));
-        }
         store
-            .with_conn(|c| c.pragma_update(None, "synchronous", "FULL"))
-            .map_err(|e| StoreError::Backend(e.to_string()))
+            .with_conn(|conn| conn.pragma_update(None, "synchronous", "FULL"))
+            .map_err(|error| StoreError::Backend(error.to_string()))
     }
 
     /// The fingerprint of the master key this store seals under.
@@ -1199,13 +1646,9 @@ impl EncryptedStore {
         if selector.is_empty() {
             return Err(StoreOpError::InvalidCategoryName);
         }
-        if selector_kind == SelectorKind::Category {
-            let Some(name) = selector.strip_prefix("category:") else {
-                return Err(StoreOpError::InvalidCategoryName);
-            };
-            if !crate::catalog::valid_category_name(name) {
-                return Err(StoreOpError::InvalidCategoryName);
-            }
+        if selector_kind == SelectorKind::Category && !crate::catalog::valid_category_name(selector)
+        {
+            return Err(StoreOpError::InvalidCategoryName);
         }
         let now = now_ms();
         let audit_key = self.audit_key.clone();
@@ -1322,7 +1765,7 @@ impl EncryptedStore {
     }
 
     /// Evaluate all facts used by scoped authorization. Category rows are read only
-    /// when a prefix did not cover and this operation has a category selector.
+    /// when no exact selector covered and this operation has a category selector.
     pub fn evaluate_scoped_coverage(
         &self,
         principal_kind: &str,
@@ -1349,7 +1792,7 @@ impl EncryptedStore {
                     .iter()
                     .any(|(kind, _)| kind == SelectorKind::Category.as_str());
                 let mut covered = grants.iter().any(|(kind, selector)| {
-                    kind == SelectorKind::Exact.as_str() && credential_id.starts_with(selector)
+                    kind == SelectorKind::Exact.as_str() && credential_id == selector
                 });
                 let id_exists = conn.query_row(
                     "SELECT EXISTS(SELECT 1 FROM credentials WHERE credential_id = ?1)",
@@ -1366,9 +1809,7 @@ impl EncryptedStore {
                         .collect::<rusqlite::Result<Vec<_>>>()?;
                     covered = grants.iter().any(|(kind, selector)| {
                         kind == SelectorKind::Category.as_str()
-                            && categories
-                                .iter()
-                                .any(|category| selector == &format!("category:{category}"))
+                            && categories.iter().any(|category| selector == category)
                     });
                     Some(categories.len() as u32)
                 } else {
@@ -1476,10 +1917,10 @@ impl EncryptedStore {
                     let operations: BTreeSet<GrantOperation> = grants
                         .iter()
                         .filter(|grant| match grant.selector_kind {
-                            SelectorKind::Exact => id.starts_with(&grant.selector),
+                            SelectorKind::Exact => id == grant.selector,
                             SelectorKind::Category => categories
                                 .iter()
-                                .any(|category| grant.selector == format!("category:{category}")),
+                                .any(|category| grant.selector == category.as_str()),
                         })
                         .map(|grant| grant.operation)
                         .collect();
@@ -5155,7 +5596,7 @@ mod tests {
                 ("z:".to_string(), "read".to_string()),
                 ("z:".to_string(), "sign".to_string()),
             ],
-            "every grant needs its own row, ordered by prefix then operation; collapsing \
+            "every grant needs its own row, ordered by selector then operation; collapsing \
              read and sign hides half an authority set from the operator reading it"
         );
         let _ = std::fs::remove_dir_all(root);
@@ -8321,17 +8762,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// A grant prefix is ordinary text, not a SQL pattern: `%` and `_` in a credential
-    /// id family must never authorize unrelated ids by acting as wildcards.
+    /// An exact selector is ordinary text, not a SQL pattern: `%` and `_` must never
+    /// authorize an unrelated id by acting as wildcards.
     #[test]
-    fn read_grant_prefixes_are_literal_not_like_patterns() {
+    fn exact_selectors_are_literal_not_like_patterns() {
         let (root, store) = tmp_store(51);
         store
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
                 SelectorKind::Exact,
-                "github%_app:",
+                "github%_app:agent",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
             )
@@ -8345,8 +8786,8 @@ mod tests {
                     "github%_app:agent",
                     GrantOperation::Read,
                 )
-                .expect("check literal prefix"),
-            "the exact literal prefix must cover its family"
+                .expect("check exact literal"),
+            "the byte-equal id must be covered"
         );
         assert!(
             !store
@@ -8359,7 +8800,7 @@ mod tests {
                 .expect("check unrelated id"),
             "percent and underscore in a grant must not widen it as SQL LIKE wildcards"
         );
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// PINS THE LITERAL, deliberately, so adding a migration REDDENS rather than
@@ -8570,7 +9011,7 @@ mod taxonomy_tests {
                 "reserved",
                 "agent",
                 SelectorKind::Category,
-                "category:llm-provider",
+                "llm-provider",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
             )
@@ -8792,7 +9233,7 @@ mod taxonomy_tests {
                 "reserved",
                 "consumer",
                 SelectorKind::Exact,
-                "category:llm-provider",
+                "llm-provider",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
             )
@@ -8802,7 +9243,7 @@ mod taxonomy_tests {
                 "reserved",
                 "consumer",
                 SelectorKind::Category,
-                "category:llm-provider",
+                "llm-provider",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
             )
@@ -8812,7 +9253,7 @@ mod taxonomy_tests {
                 "reserved",
                 "consumer",
                 SelectorKind::Category,
-                "category:llm-provider",
+                "llm-provider",
                 GrantOperation::Sign,
                 AuditCtx::admin(AuditOp::GrantCreate),
             )
@@ -8851,14 +9292,14 @@ mod taxonomy_tests {
                 "reserved",
                 "consumer",
                 SelectorKind::Category,
-                "category:llm-provider",
+                "llm-provider",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantRevoke),
             )
             .unwrap();
         let remaining = store.list_read_grants().unwrap();
         assert!(remaining.iter().any(|grant| {
-            grant.selector_kind == SelectorKind::Exact && grant.selector == "category:llm-provider"
+            grant.selector_kind == SelectorKind::Exact && grant.selector == "llm-provider"
         }));
         assert!(store
             .read_grant_covers(
@@ -9099,7 +9540,7 @@ mod list_scoped_snapshot_tests {
                 "reserved",
                 "consumer",
                 SelectorKind::Category,
-                "category:llm-provider",
+                "llm-provider",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
             )
@@ -9145,7 +9586,7 @@ mod list_scoped_snapshot_tests {
                 "reserved",
                 "consumer",
                 SelectorKind::Exact,
-                "operator:",
+                "operator:identity",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
             )
@@ -9165,7 +9606,7 @@ mod list_scoped_snapshot_tests {
                 "reserved",
                 "consumer",
                 SelectorKind::Exact,
-                "operator:",
+                "operator:identity",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantRevoke),
             )
@@ -9175,7 +9616,7 @@ mod list_scoped_snapshot_tests {
                 "reserved",
                 "consumer",
                 SelectorKind::Exact,
-                "operator:",
+                "operator:identity",
                 GrantOperation::Sign,
                 AuditCtx::admin(AuditOp::GrantCreate),
             )
@@ -9200,7 +9641,7 @@ mod list_scoped_snapshot_tests {
                 "reserved",
                 "consumer",
                 SelectorKind::Exact,
-                "operator:",
+                "operator:identity",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
             )
@@ -9218,7 +9659,7 @@ mod coverage_phase_tests {
     use crate::store::taxonomy_tests::{api_record, rig};
 
     #[test]
-    fn scoped_reads_skip_category_phase_after_prefix_coverage_but_list_scoped_is_exempt() {
+    fn scoped_reads_skip_category_phase_after_exact_coverage_but_list_scoped_is_exempt() {
         let (_root, store) = rig("coverage-phase", 91);
         for id in ["operator:prefix", "other:category"] {
             store
@@ -9230,7 +9671,7 @@ mod coverage_phase_tests {
                 "reserved",
                 "consumer",
                 SelectorKind::Exact,
-                "operator:",
+                "operator:prefix",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
             )
@@ -9240,7 +9681,7 @@ mod coverage_phase_tests {
                 "reserved",
                 "consumer",
                 SelectorKind::Category,
-                "category:monitoring",
+                "monitoring",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
             )
@@ -9252,16 +9693,16 @@ mod coverage_phase_tests {
             })
             .unwrap();
 
-        let prefix = store
+        let exact = store
             .evaluate_scoped_coverage(
                 "reserved",
                 "consumer",
                 "operator:prefix",
                 GrantOperation::Read,
             )
-            .expect("covered prefix never enters phase 2");
-        assert!(prefix.covered);
-        assert_eq!(prefix.id_category_count, None);
+            .expect("an exact match never enters phase 2");
+        assert!(exact.covered);
+        assert_eq!(exact.id_category_count, None);
         assert!(
             store
                 .evaluate_scoped_coverage(
@@ -9287,75 +9728,496 @@ mod migration_10_tests {
     use super::*;
     use crate::store::taxonomy_tests::{api_record, rig, sqlite};
 
-    /// *** `SelectorKind::Exact` IS NOT YET EXACT, AND THE NEXT SLICE MUST NOT ASSUME IT
-    /// IS. *** This test exists to redden when someone narrows the coverage predicate,
-    /// so that they read this comment before their change ships.
-    ///
-    /// Migration 10 converts the stored kind literal `prefix` to `exact` and leaves the
-    /// selector TEXT untouched, so every grant reaches byte-for-byte what it reached
-    /// before. The predicate is still `starts_with`. That is deliberate: narrowing reach
-    /// belongs with the conversion table and the reach-preservation guard, which are a
-    /// later slice.
-    ///
-    /// THE HAZARD, stated because it is silent and it removes authorization. On the live
-    /// store when this was written, `reserved:broca` holds a grant whose selector text is
-    /// `apikey:opencode-`, and the credential it reaches is `apikey:opencode-go`. NO
-    /// CREDENTIAL IS LITERALLY NAMED `apikey:opencode-`. So a slice that flips this
-    /// predicate to byte equality without first rewriting that row's text to
-    /// `apikey:opencode-go` leaves a grant that matches NOTHING: the consumer's reads
-    /// begin answering the uniform unresolved-address refusal, which is
-    /// indistinguishable from a revoked grant and from a credential that never existed.
-    /// Nothing fails, nothing logs a defect, and the operator sees a grant row that looks
-    /// correct.
-    ///
-    /// So the obligation is: THE TEXT CONVERSION AND THE PREDICATE FLIP SHIP IN THE SAME
-    /// CHANGE. If you are here because this test went red, that is the question to answer
-    /// before you update it.
+    /// Exact selectors are byte equality, so adding another id with the same leading
+    /// bytes cannot widen an existing grant.
     #[test]
-    fn an_exact_selector_still_covers_by_prefix_until_the_conversion_table_lands() {
-        let (_root, store) = rig("exact-is-not-yet-exact", 97);
-        store
-            .create_audited(
-                "apikey:opencode-go",
-                &api_record(),
-                AuditCtx::admin(AuditOp::Put),
-            )
-            .unwrap();
+    fn an_exact_selector_matches_only_the_byte_equal_credential_id() {
+        let (_root, store) = rig("exact-is-byte-equality", 97);
+        for credential_id in ["apikey:opencode", "apikey:opencode-zed"] {
+            store
+                .create_audited(credential_id, &api_record(), AuditCtx::admin(AuditOp::Put))
+                .unwrap();
+        }
         store
             .create_read_grant_audited(
                 "reserved",
                 "broca",
                 SelectorKind::Exact,
-                "apikey:opencode-",
+                "apikey:opencode",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
             )
             .unwrap();
 
-        // The shape the live store carries: selector text that is a strict prefix of the
-        // id it reaches, stored under the kind `exact`.
-        let covered = store
-            .evaluate_scoped_coverage(
-                "reserved",
-                "broca",
-                "apikey:opencode-go",
-                GrantOperation::Read,
-            )
-            .expect("an exact-kind grant is evaluated in phase 1");
+        assert!(store
+            .read_grant_covers("reserved", "broca", "apikey:opencode", GrantOperation::Read,)
+            .unwrap());
         assert!(
-            covered.covered,
-            "migration 10 renamed the kind and preserved the text, so this grant must \
-             still reach the credential it reached at schema 9. If this assertion is the \
-             one that failed, reach has already been lost: rewrite the selector text in \
-             the same migration that narrows the predicate."
+            !store
+                .read_grant_covers(
+                    "reserved",
+                    "broca",
+                    "apikey:opencode-zed",
+                    GrantOperation::Read,
+                )
+                .unwrap(),
+            "a longer id with the same leading bytes must not inherit exact authority"
+        );
+    }
+
+    #[test]
+    fn migration_10_converts_every_non_table_prefix_or_refuses_atomically() {
+        for (label, ids, should_migrate) in [
+            ("total-zero", Vec::<&str>::new(), false),
+            ("total-one", vec!["service:only"], true),
+            (
+                "total-three",
+                vec!["service:one", "service:three", "service:two"],
+                false,
+            ),
+        ] {
+            let (_root, store) = sqlite(label, 120);
+            migrate_through_for_test(&store, 9).expect("migrate through schema 9");
+            seed_schema_9_ids(&store, &ids);
+            store
+                .with_conn(|conn| {
+                    conn.execute(
+                        "INSERT INTO read_grants \
+                         (principal_kind, principal_id, selector_kind, credential_prefix, operation, created_at_ms) \
+                         VALUES ('reserved', 'synthetic', 'prefix', 'service:', 'read', 7)",
+                        [],
+                    )?;
+                    Ok(())
+                })
+                .expect("insert synthetic prefix grant");
+            let before = schema_9_grants(&store);
+
+            if should_migrate {
+                EncryptedStore::migrate(&store).expect("one match converts to exact");
+                assert_eq!(
+                    schema_10_grants(&store),
+                    vec![(
+                        "reserved".to_string(),
+                        "synthetic".to_string(),
+                        "exact".to_string(),
+                        "service:only".to_string(),
+                        "read".to_string(),
+                    )]
+                );
+            } else {
+                let error = EncryptedStore::migrate(&store)
+                    .expect_err("zero and multiple prefix matches must refuse")
+                    .to_string();
+                assert!(
+                    error.contains("principal_id=synthetic")
+                        && error.contains("selector=service:")
+                        && error.contains("match set"),
+                    "the refusal must name the row and its match set: {error}"
+                );
+                for id in &ids {
+                    assert!(
+                        error.contains(id),
+                        "the refusal must name every computed match {id}: {error}"
+                    );
+                }
+                assert_eq!(schema_version_of(&store), 9);
+                assert_eq!(schema_9_grants(&store), before);
+            }
+        }
+    }
+
+    #[test]
+    fn conversion_table_rows_refuse_every_computed_reach_change() {
+        let family = category_conversion();
+        let (category, listed_ids) = category_conversion_parts();
+
+        // An additional family member enlarges the old prefix set but is absent from
+        // the approved category assignment set.
+        let (_root, extra_family) = sqlite("conversion-extra-family", 121);
+        migrate_through_for_test(&extra_family, 9).unwrap();
+        let mut family_ids = listed_ids.to_vec();
+        family_ids.push("github_app:twenty-third");
+        seed_schema_9_ids(&extra_family, &family_ids);
+        extra_family
+            .with_conn(|conn| {
+                insert_schema_9_grant(conn, family);
+                Ok(())
+            })
+            .unwrap();
+        let before = schema_9_grants(&extra_family);
+        let error = EncryptedStore::migrate(&extra_family)
+            .expect_err("an extra family member changes reach")
+            .to_string();
+        assert!(
+            error.contains("before covered set")
+                && error.contains("after covered set")
+                && error.contains("difference")
+                && error.contains("github_app:twenty-third"),
+            "the refusal must show both sets and their difference: {error}"
+        );
+        assert_eq!(schema_version_of(&extra_family), 9);
+        assert_eq!(schema_9_grants(&extra_family), before);
+
+        // A pre-existing assignment outside the approved list enlarges the replacement
+        // category even though the old family prefix does not reach it.
+        let (_root, outside_category) = sqlite("conversion-outside-category", 122);
+        migrate_through_for_test(&outside_category, 9).unwrap();
+        let mut category_ids = listed_ids.to_vec();
+        category_ids.push("gitlab:outside");
+        seed_schema_9_ids(&outside_category, &category_ids);
+        outside_category
+            .with_conn(|conn| {
+                insert_schema_9_grant(conn, family);
+                conn.execute(
+                    "INSERT INTO credential_categories (credential_id, category) VALUES ('gitlab:outside', ?1)",
+                    rusqlite::params![category],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let before_grants = schema_9_grants(&outside_category);
+        let before_categories = category_assignments(&outside_category);
+        let error = EncryptedStore::migrate(&outside_category)
+            .expect_err("an outside category member changes reach")
+            .to_string();
+        assert!(
+            error.contains("before covered set")
+                && error.contains("after covered set")
+                && error.contains("difference")
+                && error.contains("gitlab:outside"),
+            "the refusal must show the unexpected category member: {error}"
+        );
+        assert_eq!(schema_version_of(&outside_category), 9);
+        assert_eq!(schema_9_grants(&outside_category), before_grants);
+        assert_eq!(category_assignments(&outside_category), before_categories);
+
+        // A listed exact conversion is also checked against this store's actual prefix
+        // set rather than trusted merely because its row key is listed.
+        let exact = MIGRATION_10_CONVERSION_TABLE
+            .iter()
+            .find(|entry| entry.old_selector.ends_with('-'))
+            .expect("the ruling table has a strict-prefix exact conversion");
+        let exact_target = match exact.replacement {
+            Migration10Replacement::Exact { selector } => selector,
+            Migration10Replacement::Category { .. } => unreachable!(),
+        };
+        let (_root, widened_exact) = sqlite("conversion-widened-exact", 123);
+        migrate_through_for_test(&widened_exact, 9).unwrap();
+        seed_schema_9_ids(&widened_exact, &[exact_target, "apikey:opencode-second"]);
+        widened_exact
+            .with_conn(|conn| {
+                insert_schema_9_grant(conn, exact);
+                Ok(())
+            })
+            .unwrap();
+        let before = schema_9_grants(&widened_exact);
+        let error = EncryptedStore::migrate(&widened_exact)
+            .expect_err("a listed exact prefix that reaches twice must refuse")
+            .to_string();
+        assert!(
+            error.contains("before covered set")
+                && error.contains("after covered set")
+                && error.contains("difference")
+                && error.contains("apikey:opencode-second"),
+            "the listed row must still prove reach preservation: {error}"
+        );
+        assert_eq!(schema_version_of(&widened_exact), 9);
+        assert_eq!(schema_9_grants(&widened_exact), before);
+    }
+
+    #[test]
+    fn category_backfill_reach_guard_checks_every_grant_row() {
+        let family = category_conversion();
+        let (category, listed_ids) = category_conversion_parts();
+        let (_root, store) = sqlite("all-row-reach-guard", 124);
+        migrate_through_for_test(&store, 9).unwrap();
+        seed_schema_9_ids(&store, listed_ids);
+        store
+            .with_conn(|conn| {
+                insert_schema_9_grant(conn, family);
+                conn.execute(
+                    "INSERT INTO read_grants \
+                     (principal_kind, principal_id, selector_kind, credential_prefix, operation, created_at_ms) \
+                     VALUES ('reserved', 'different-principal', 'category', ?1, 'read', 8)",
+                    rusqlite::params![format!("category:{category}")],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        let before = schema_9_grants(&store);
+        let error = EncryptedStore::migrate(&store)
+            .expect_err("the unrelated empty category row would widen")
+            .to_string();
+        assert!(
+            error.contains("principal_id=different-principal")
+                && error.contains("before covered set []")
+                && error.contains("after covered set")
+                && listed_ids.iter().all(|id| error.contains(id)),
+            "the refusal must name the unrelated row and its 22 new matches: {error}"
+        );
+        assert_eq!(schema_version_of(&store), 9);
+        assert_eq!(schema_9_grants(&store), before);
+        assert!(category_assignments(&store).is_empty());
+    }
+
+    #[test]
+    fn existing_category_rows_strip_the_marker_without_changing_reach() {
+        let (_root, store) = sqlite("category-marker-strip", 125);
+        migrate_through_for_test(&store, 9).unwrap();
+        seed_schema_9_ids(&store, &["service:member", "service:other"]);
+        store
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO credential_categories (credential_id, category) \
+                     VALUES ('service:member', 'shared-category')",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO read_grants \
+                     (principal_kind, principal_id, selector_kind, credential_prefix, operation, created_at_ms) \
+                     VALUES ('reserved', 'category-holder', 'category', 'category:shared-category', 'read', 9)",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        EncryptedStore::migrate(&store).expect("reach-neutral category row migrates");
+        assert_eq!(
+            schema_10_grants(&store),
+            vec![(
+                "reserved".to_string(),
+                "category-holder".to_string(),
+                "category".to_string(),
+                "shared-category".to_string(),
+                "read".to_string(),
+            )]
+        );
+        let covered: Vec<String> = store
+            .with_conn(|conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT cc.credential_id FROM credential_categories cc \
+                     JOIN read_grants rg ON rg.selector_kind = 'category' AND rg.selector = cc.category \
+                     ORDER BY cc.credential_id",
+                )?;
+                let rows = stmt
+                    .query_map([], |row| row.get(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(rows)
+            })
+            .unwrap();
+        assert_eq!(covered, ["service:member"]);
+    }
+
+    #[test]
+    fn live_conversion_table_lands_cell_for_cell_and_audits_the_22_assignments() {
+        let (_root, store) = sqlite("live-conversion", 126);
+        migrate_through_for_test(&store, 9).unwrap();
+        let key = MasterKey::from_bytes([126; 32]);
+        let credential_ids = live_conversion_credential_ids();
+        seed_verified_schema_9_ids(&store, &key, &credential_ids);
+        store
+            .with_conn(|conn| {
+                for conversion in MIGRATION_10_CONVERSION_TABLE {
+                    insert_schema_9_grant(conn, conversion);
+                }
+                Ok(())
+            })
+            .unwrap();
+
+        EncryptedStore::migrate_with_key(&store, &key).expect("the live fixture migrates");
+
+        let mut expected_rows: Vec<(String, String, String, String, String)> =
+            MIGRATION_10_CONVERSION_TABLE
+                .iter()
+                .map(|entry| {
+                    let (kind, selector) = match entry.replacement {
+                        Migration10Replacement::Exact { selector } => ("exact", selector),
+                        Migration10Replacement::Category { selector, .. } => ("category", selector),
+                    };
+                    (
+                        entry.principal_kind.to_string(),
+                        entry.principal_id.to_string(),
+                        kind.to_string(),
+                        selector.to_string(),
+                        entry.operation.as_str().to_string(),
+                    )
+                })
+                .collect();
+        expected_rows.sort();
+        assert_eq!(
+            schema_10_grants(&store),
+            expected_rows,
+            "the migrated rows must match the ruling-9 table cell for cell"
+        );
+        for entry in MIGRATION_10_CONVERSION_TABLE {
+            let (selector_kind, selector, expected_reach) = match entry.replacement {
+                Migration10Replacement::Exact { selector } => ("exact", selector, 1),
+                Migration10Replacement::Category {
+                    selector,
+                    assignments,
+                } => ("category", selector, assignments.len() as i64),
+            };
+            let reach: i64 = store
+                .with_conn(|conn| match selector_kind {
+                    "exact" => conn.query_row(
+                        "SELECT COUNT(*) FROM credentials WHERE credential_id = ?1",
+                        rusqlite::params![selector],
+                        |row| row.get(0),
+                    ),
+                    "category" => conn.query_row(
+                        "SELECT COUNT(*) FROM credential_categories WHERE category = ?1",
+                        rusqlite::params![selector],
+                        |row| row.get(0),
+                    ),
+                    _ => unreachable!(),
+                })
+                .unwrap();
+            assert_eq!(
+                reach, expected_reach,
+                "{} {} must retain the ruling-9 reach",
+                entry.principal_id, entry.old_selector
+            );
+        }
+
+        let (category, listed_ids) = category_conversion_parts();
+        assert_eq!(
+            category_assignments(&store),
+            listed_ids
+                .iter()
+                .map(|credential_id| ((*credential_id).to_string(), category.to_string()))
+                .collect::<Vec<_>>()
         );
 
-        // The control that makes the assertion above mean something: the selector text is
-        // NOT the credential id, so byte equality would not cover it.
-        assert_ne!(
-            "apikey:opencode-", "apikey:opencode-go",
-            "if these were equal this test would pass under either predicate and prove \
-             nothing about the pending narrowing"
+        let migration_audit: Vec<AuditEntry> = store
+            .with_conn(|conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT seq, ts_ms, op, credential_id, payload_hash, actor, alarm, alarm_reason, prev_mac, entry_mac \
+                     FROM audit_log WHERE op = 'category.migrate' ORDER BY seq",
+                )?;
+                let rows = stmt
+                    .query_map([], row_to_audit)?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(rows)
+            })
+            .unwrap();
+        assert_eq!(migration_audit.len(), 1);
+        assert_eq!(migration_audit[0].op, "category.migrate");
+        assert_eq!(migration_audit[0].actor, "migration:10");
+        let target = migration_audit[0]
+            .credential_id
+            .as_deref()
+            .expect("the category migration names its assignments");
+        assert!(
+            listed_ids
+                .iter()
+                .all(|credential_id| target.contains(credential_id)),
+            "the one audit row must name all assigned credentials: {target}"
+        );
+
+        let encrypted = EncryptedStore::open(store, key).expect("open the migrated fixture");
+        assert_eq!(
+            encrypted.verify_audit_chain().expect("verify the chain"),
+            None,
+            "the category migration append must preserve the HMAC chain"
+        );
+    }
+
+    #[test]
+    fn missing_chain_key_refuses_before_any_category_or_grant_write() {
+        let family = category_conversion();
+        let (_, listed_ids) = category_conversion_parts();
+        let (_root, store) = sqlite("missing-migration-chain-key", 127);
+        migrate_through_for_test(&store, 9).unwrap();
+        seed_schema_9_ids(&store, listed_ids);
+        store
+            .with_conn(|conn| {
+                insert_schema_9_grant(conn, family);
+                Ok(())
+            })
+            .unwrap();
+        let before = schema_9_grants(&store);
+
+        let error = EncryptedStore::migrate(&store)
+            .expect_err("the backfill cannot be unaudited")
+            .to_string();
+        assert!(
+            error.contains("audit chain key unavailable"),
+            "the refusal must name the unavailable chain key: {error}"
+        );
+        assert_eq!(schema_version_of(&store), 9);
+        assert_eq!(schema_9_grants(&store), before);
+        assert!(category_assignments(&store).is_empty());
+        let migration_rows: i64 = store
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM audit_log WHERE op = 'category.migrate'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(migration_rows, 0);
+    }
+
+    #[test]
+    fn migrated_and_fresh_stores_hold_identical_grant_keys() {
+        let (_root, migrated) = sqlite("grant-parity-migrated", 128);
+        migrate_through_for_test(&migrated, 9).unwrap();
+        let key = MasterKey::from_bytes([128; 32]);
+        let credential_ids = live_conversion_credential_ids();
+        seed_verified_schema_9_ids(&migrated, &key, &credential_ids);
+        migrated
+            .with_conn(|conn| {
+                for conversion in MIGRATION_10_CONVERSION_TABLE {
+                    insert_schema_9_grant(conn, conversion);
+                }
+                Ok(())
+            })
+            .unwrap();
+        EncryptedStore::migrate_with_key(&migrated, &key).unwrap();
+
+        let (_root, fresh) = sqlite("grant-parity-fresh", 129);
+        EncryptedStore::migrate(&fresh).unwrap();
+        fresh
+            .with_conn(|conn| {
+                for credential_id in &credential_ids {
+                    conn.execute(
+                        "INSERT INTO credentials \
+                         (credential_id, record_version, key_id, state, envelope, updated_at_ms, created_at_ms) \
+                         VALUES (?1, 1, '00', 'active', X'00', 9, 10)",
+                        rusqlite::params![credential_id],
+                    )?;
+                }
+                for entry in MIGRATION_10_CONVERSION_TABLE {
+                    let (kind, selector) = match entry.replacement {
+                        Migration10Replacement::Exact { selector } => ("exact", selector),
+                        Migration10Replacement::Category { selector, .. } => {
+                            ("category", selector)
+                        }
+                    };
+                    conn.execute(
+                        "INSERT INTO read_grants \
+                         (principal_kind, principal_id, selector_kind, selector, operation, created_at_ms) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, 99)",
+                        rusqlite::params![
+                            entry.principal_kind,
+                            entry.principal_id,
+                            kind,
+                            selector,
+                            entry.operation.as_str()
+                        ],
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(
+            schema_10_grants(&migrated),
+            schema_10_grants(&fresh),
+            "created_at_ms is excluded by name because migrated rows retain their schema-9 timestamp"
         );
     }
 
@@ -9403,6 +10265,161 @@ mod migration_10_tests {
             rusqlite::params![ts_ms, op, credential_id],
         )?;
         Ok(())
+    }
+
+    fn seed_schema_9_ids(store: &SqliteStore, credential_ids: &[&str]) {
+        store
+            .with_conn(|conn| {
+                for (index, credential_id) in credential_ids.iter().enumerate() {
+                    seed_credential_at_schema_9(
+                        conn,
+                        credential_id,
+                        1_700_000_000_000 + index as i64,
+                    )?;
+                }
+                Ok(())
+            })
+            .expect("seed schema-9 credentials");
+    }
+
+    fn insert_schema_9_grant(conn: &rusqlite::Connection, row: &Migration10Conversion) {
+        conn.execute(
+            "INSERT INTO read_grants \
+             (principal_kind, principal_id, selector_kind, credential_prefix, operation, created_at_ms) \
+             VALUES (?1, ?2, 'prefix', ?3, ?4, 7)",
+            rusqlite::params![
+                row.principal_kind,
+                row.principal_id,
+                row.old_selector,
+                row.operation.as_str()
+            ],
+        )
+        .expect("insert schema-9 conversion-table grant");
+    }
+
+    fn schema_9_grants(store: &SqliteStore) -> Vec<(String, String, String, String, String)> {
+        store
+            .with_conn(|conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT principal_kind, principal_id, selector_kind, credential_prefix, operation \
+                     FROM read_grants ORDER BY principal_kind, principal_id, selector_kind, credential_prefix, operation",
+                )?;
+                let rows = stmt
+                    .query_map([], |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                        ))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(rows)
+            })
+            .expect("read schema-9 grants")
+    }
+
+    fn schema_10_grants(store: &SqliteStore) -> Vec<(String, String, String, String, String)> {
+        store
+            .with_conn(|conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT principal_kind, principal_id, selector_kind, selector, operation \
+                     FROM read_grants ORDER BY principal_kind, principal_id, selector_kind, selector, operation",
+                )?;
+                let rows = stmt
+                    .query_map([], |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                        ))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(rows)
+            })
+            .expect("read schema-10 grants")
+    }
+
+    fn category_assignments(store: &SqliteStore) -> Vec<(String, String)> {
+        store
+            .with_conn(|conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT credential_id, category FROM credential_categories ORDER BY credential_id, category",
+                )?;
+                let rows = stmt
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(rows)
+            })
+            .expect("read category assignments")
+    }
+
+    fn category_conversion() -> &'static Migration10Conversion {
+        MIGRATION_10_CONVERSION_TABLE
+            .iter()
+            .find(|entry| matches!(entry.replacement, Migration10Replacement::Category { .. }))
+            .expect("the ruling-9 table has one category conversion")
+    }
+
+    fn category_conversion_parts() -> (&'static str, &'static [&'static str]) {
+        match category_conversion().replacement {
+            Migration10Replacement::Category {
+                selector,
+                assignments,
+            } => (selector, assignments),
+            Migration10Replacement::Exact { .. } => unreachable!(),
+        }
+    }
+
+    fn seed_verified_schema_9_ids(
+        store: &SqliteStore,
+        key: &MasterKey,
+        credential_ids: &BTreeSet<&'static str>,
+    ) {
+        let audit_key = load_or_create_audit_key(store, key).expect("create the fixture audit key");
+        store
+            .with_conn(|conn| {
+                let tx = conn.unchecked_transaction()?;
+                for credential_id in credential_ids {
+                    tx.execute(
+                        "INSERT INTO credentials \
+                         (credential_id, record_version, key_id, state, envelope, updated_at_ms) \
+                         VALUES (?1, 1, '00', 'active', X'00', 9)",
+                        rusqlite::params![credential_id],
+                    )?;
+                    append_audit_tx(
+                        &tx,
+                        &audit_key,
+                        &AuditRecord {
+                            op: AuditOp::Put,
+                            credential_id: Some((*credential_id).to_string()),
+                            payload_hash: None,
+                            actor: "fixture".to_string(),
+                            alarm: None,
+                        },
+                    )?;
+                }
+                tx.commit()
+            })
+            .expect("seed credentials with a verifiable birth chain");
+    }
+
+    fn live_conversion_credential_ids() -> BTreeSet<&'static str> {
+        let mut ids = BTreeSet::new();
+        for entry in MIGRATION_10_CONVERSION_TABLE {
+            match entry.replacement {
+                Migration10Replacement::Exact { selector } => {
+                    ids.insert(selector);
+                }
+                Migration10Replacement::Category { assignments, .. } => {
+                    ids.extend(assignments.iter().copied());
+                }
+            }
+        }
+        ids
     }
 
     /// Every schema object this vault owns, as (type, name, sql), name-ordered.

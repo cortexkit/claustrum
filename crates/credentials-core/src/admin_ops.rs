@@ -692,15 +692,12 @@ pub fn apply(
             operation,
             ..
         } => {
-            let stored_selector = match selector_kind {
-                SelectorKind::Exact => selector,
-                SelectorKind::Category => {
-                    if !crate::catalog::valid_category_name(&selector) {
-                        return Err(StoreOpError::InvalidCategoryName);
-                    }
-                    format!("category:{selector}")
-                }
-            };
+            if selector_kind == SelectorKind::Category
+                && !crate::catalog::valid_category_name(&selector)
+            {
+                return Err(StoreOpError::InvalidCategoryName);
+            }
+            let stored_selector = selector;
             store.create_read_grant_audited(
                 &principal_kind,
                 &principal_id,
@@ -719,15 +716,12 @@ pub fn apply(
             operation,
             ..
         } => {
-            let stored_selector = match selector_kind {
-                SelectorKind::Exact => selector,
-                SelectorKind::Category => {
-                    if !crate::catalog::valid_category_name(&selector) {
-                        return Err(StoreOpError::InvalidCategoryName);
-                    }
-                    format!("category:{selector}")
-                }
-            };
+            if selector_kind == SelectorKind::Category
+                && !crate::catalog::valid_category_name(&selector)
+            {
+                return Err(StoreOpError::InvalidCategoryName);
+            }
+            let stored_selector = selector;
             store.revoke_read_grant_audited(
                 &principal_kind,
                 &principal_id,
@@ -794,21 +788,20 @@ pub fn status_result(
         })
         .collect();
     // Both source lists are SQL-sorted, and the filter retains credential order.
-    // Grants are ordered by principal, prefix, then operation so the complete
-    // authority set is stable across repeated status reads. Stable covered-set
-    // output makes an added credential under an existing prefix
-    // visible in a status diff instead of silently widening access.
+    // Grants are ordered by principal, selector kind, selector, then operation so the
+    // complete authority set is stable across repeated status reads. Stable covered-set
+    // output makes a category assignment visible in a status diff.
     let read_grants: Vec<serde_json::Value> = grants
         .iter()
         .map(|grant| {
             let covered_credential_ids: Vec<&str> = metas
                 .iter()
                 .filter(|(id, meta)| match grant.selector_kind {
-                    SelectorKind::Exact => id.starts_with(&grant.selector),
+                    SelectorKind::Exact => id == &grant.selector,
                     SelectorKind::Category => meta
                         .categories
                         .iter()
-                        .any(|category| grant.selector == format!("category:{category}")),
+                        .any(|category| grant.selector == category.as_str()),
                 })
                 .map(|(id, _)| id.as_str())
                 .collect();

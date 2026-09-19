@@ -2193,11 +2193,7 @@ mod list_scoped_tests {
                 ),
             ],
             grants: vec![
-                grant(
-                    SelectorKind::Category,
-                    "category:llm-provider",
-                    GrantOperation::Sign,
-                ),
+                grant(SelectorKind::Category, "llm-provider", GrantOperation::Sign),
                 grant(SelectorKind::Exact, "", GrantOperation::Read),
             ],
         };
@@ -2205,7 +2201,7 @@ mod list_scoped_tests {
         assert_eq!(result.grants, result.grant_tuples.len());
         assert_eq!(
             result.view,
-            "mTmtdFT6RyEC3Ddnzn36OYTizrjClQKb29P0FV3/Slg=",
+            "ymfBXY4hu+RcsKhEzW2CExWRK1mhqCplTSWkJqcagSA=",
             "state/operation/selector enums are length-prefixed strings; lists carry counts; optionals carry presence bytes"
         );
         assert_eq!(result.credentials[0].id, "a-active");

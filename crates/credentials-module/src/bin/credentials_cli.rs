@@ -433,13 +433,13 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
         "invalidate" | "reactivate" | "mint-handle" | "revoke-all-handles" | "remove" => &["--id"],
         "logout" => &["--provider", "--id"],
         "revoke-handle" => &["--handle", "--hash"],
+        "enroll" => &["--request-id", "--name"],
+        "approve" => &["--id", "--file", "--approver"],
         // `--prefix` stays in this table DELIBERATELY although it is refused. Removing it
         // would make an operator who types the old flag hit the generic
         // unknown-argument error, which says nothing about what replaced it. Listed
         // here, it reaches `parse_grant_selector`'s refusal, which names the successor
         // and explains why a former prefix is a category rather than an exact selector.
-        "enroll" => &["--request-id", "--name"],
-        "approve" => &["--id", "--file", "--approver"],
         "grant" | "revoke-grant" => &[
             "--principal",
             "--prefix",
@@ -472,7 +472,20 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
     };
     while i < args.len() {
         let arg = &args[i];
-        if command == "opencode-account" && matches!(arg.as_str(), "add" | "remove" | "list") {
+        // VERBS WITH POSITIONAL SUBCOMMANDS must name them here, or this check eats the
+        // subcommand before dispatch and the verb is unusable.
+        //
+        // `enroll` shipped that way and the whole suite stayed green: every help and
+        // flag test drives FLAGS, and no test invoked `ck auth enroll list`. It failed
+        // on the live daemon at the first probe, during a migration window, which is the
+        // most expensive place to find it. A table rather than a second `command ==`
+        // chain because there are two now and the next one should only have to add a row.
+        let subcommands: &[&str] = match command {
+            "opencode-account" => &["add", "remove", "list"],
+            "enroll" => &["list", "approve", "deny", "revoke", "reissue"],
+            _ => &[],
+        };
+        if subcommands.contains(&arg.as_str()) {
             i += 1;
             continue;
         }

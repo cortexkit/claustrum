@@ -633,6 +633,38 @@ fn grant_verbs_accept_the_canonical_reserved_spelling_and_refuse_other_kinds() {
 const KNOWN_BUT_UNADVERTISED: &[(&str, &str)] =
     &[("grant", "--prefix"), ("revoke-grant", "--prefix")];
 
+/// A VERB WITH POSITIONAL SUBCOMMANDS IS ACTUALLY INVOCABLE.
+///
+/// `reject_unknown_args` runs BEFORE dispatch and refuses any argument that is not a
+/// declared flag, so a verb whose first argument is a bare subcommand is unusable unless
+/// that subcommand is named in its exemption. `enroll` shipped exactly that way and the
+/// entire suite stayed green: every help and flag test drives FLAGS, and nothing invoked
+/// `ck auth enroll list`. It failed on the live daemon at the first probe of a migration
+/// window.
+///
+/// Asserts the argument check ACCEPTS the subcommand — not that the command succeeds,
+/// which needs a vault. A refusal naming the subcommand as unexpected is the defect.
+#[test]
+fn verbs_with_positional_subcommands_accept_them_before_dispatch() {
+    for (verb, subs) in [
+        (
+            "enroll",
+            &["list", "approve", "deny", "revoke", "reissue"][..],
+        ),
+        ("opencode-account", &["add", "remove", "list"][..]),
+    ] {
+        for sub in subs {
+            let output = cli().args([verb, sub]).output().expect("run");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                !stderr.contains(&format!("unexpected argument '{sub}'")),
+                "{verb} {sub}: the argument check ate the subcommand, so the verb cannot \
+                 be invoked at all: {stderr}"
+            );
+        }
+    }
+}
+
 /// EVERY DISPATCHABLE VERB IS IN THE TOP-LEVEL VERB TABLE.
 ///
 /// This exists because `enroll` shipped dispatchable and undiscoverable, and the whole

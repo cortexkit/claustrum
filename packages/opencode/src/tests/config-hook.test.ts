@@ -777,7 +777,7 @@ async function hook(cfg: TestConfig, deps: ConfigHookDependencies = {}) {
     await writeAuth(files.auth, { xai: tombstoneFor("oauth", "xai") });
     const gets: Array<{ handle: string; minTtlMs?: number }> = [];
     const cfg = config("xai");
-    const hooks = await createOpencodeClaustrumPlugin({
+    await hook(cfg, {
       log: () => {},
       oauthMinTtlMs: 999,
       detect: async () => ({ status: "available", schema: 1, wireVersion: 1, endpoints: [] }),
@@ -788,12 +788,10 @@ async function hook(cfg: TestConfig, deps: ConfigHookDependencies = {}) {
         },
         reportAuthFailure: async () => {},
       }) as never,
-      fetch: async () => new Response("ok"),
+      fetch: (async () => new Response("ok")) as never,
       setInterval: () => ({ unref: () => {} }),
       clearInterval: () => {},
-    })({} as never);
-
-    await hooks.config?.(cfg as never);
+    });
     expect(gets).toHaveLength(0);
     const fetch = cfg.provider.xai.options?.fetch as typeof globalThis.fetch;
     expect((await fetch("https://xai.example")).status).toBe(200);

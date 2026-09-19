@@ -130,7 +130,9 @@ export function createFileLogSink(options: FileLogSinkOptions = {}): LogSink {
   if (options.path === undefined && ["off", "0", "false", "no"].includes(env.CLAUSTRUM_CUSTODY_LOG ?? "")) {
     return () => {};
   }
-  const path = options.path ?? env.CLAUSTRUM_CUSTODY_LOG ?? defaultFilePath(env);
+  // Empty is unset, matching detect.ts / handles.ts / defaultFilePath: `CLAUSTRUM_CUSTODY_LOG=`
+  // (a shell slip) must fall to the default path, not name a file "" (claustrum#62).
+  const path = options.path ?? (env.CLAUSTRUM_CUSTODY_LOG || undefined) ?? defaultFilePath(env);
   const warn = options.warn ?? ((message: string) => console.error(JSON.stringify({
     level: "warn",
     errorCode: "custody_log_unavailable",

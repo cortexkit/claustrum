@@ -57,6 +57,8 @@ mod google_login;
 mod import_picker;
 #[path = "cli_support/login_listener.rs"]
 mod login_listener;
+#[path = "cli_support/login_wire.rs"]
+mod login_wire;
 #[path = "cli_support/opencode_accounts.rs"]
 mod opencode_accounts;
 #[allow(dead_code)]
@@ -2170,9 +2172,8 @@ fn cmd_device_login(
 
 fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     use credentials_core::oauth_login::{
-        build_authorize_url, decode_jwt_claims, exchange_authorization_code,
-        exchange_authorization_code_form, extract_chatgpt_account_id, generate_pkce,
-        generate_state, parse_callback,
+        decode_jwt_claims, exchange_authorization_code, exchange_authorization_code_form,
+        extract_chatgpt_account_id, generate_pkce, generate_state, parse_callback,
     };
 
     // With --provider the flow is fully flag-driven (scriptable); without it, the
@@ -2402,7 +2403,8 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     )?;
 
     // Generate the PKCE pair and the CSPRNG state (state is independent of the
-    // verifier), build the authorize URL, and present it to the operator.
+    // verifier), pick the wire, build the authorize URL, and present it to the
+    // operator.
     let pkce = generate_pkce().map_err(|e| CliError::Io(format!("csprng: {e}")))?;
     let state = generate_state().map_err(|e| CliError::Io(format!("csprng: {e}")))?;
     // An OIDC provider (xAI) requires a fresh per-flow nonce in the authorize request;
@@ -2418,21 +2420,17 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     if let Some(nonce) = nonce.as_deref() {
         authorize_params.push(("nonce", nonce));
     }
-    let authorize_url = build_authorize_url(
-        wire.authorize_url,
-        wire.client_id,
-        wire.redirect_uri,
-        wire.scopes,
-        &pkce.challenge,
-        &state,
-        &authorize_params,
-    )
-    .map_err(|e| CliError::Io(format!("building authorize url: {e}")))?;
 
     // Every login provider registers a loopback redirect, so bind a one-shot
     // CLI-local listener on the EXACT redirect address BEFORE opening the browser
     // (the redirect can't race an unbound socket). `--no-listener` forces the paste
     // path. The listener is a pure convenience over paste; the daemon never listens.
+    //
+    // THE BIND COMES BEFORE THE URL IS BUILT because the URL depends on its outcome:
+    // with no socket holding the loopback address, a redirect there can only land on
+    // a connection error, so a provider that also registers a code-display redirect
+    // is sent to that one instead. Bind-before-browser-open is preserved — the open
+    // is still below.
     let listener = if has_flag(args, "--no-listener") {
         None
     } else {
@@ -2440,23 +2438,40 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             .and_then(|addr| login_listener::capture_callback(&addr))
     };
 
+    // ONE redirect for the whole flow. The token exchange replays the redirect, and
+    // the provider refuses the exchange unless it byte-matches the one in the
+    // authorize URL — a refusal that lands AFTER the operator has already approved in
+    // the browser, which is the most expensive place to fail. So the authorize URL
+    // and both exchange arms below read this plan, and nothing past here works out a
+    // redirect of its own.
+    let plan = login_wire::plan_login_wire(
+        wire,
+        listener.is_some(),
+        &pkce.challenge,
+        &state,
+        &authorize_params,
+    )
+    .map_err(|e| CliError::Io(format!("building authorize url: {e}")))?;
+
     println!("Open this URL in a browser signed into the account to custody:");
     println!();
-    println!("  {authorize_url}");
+    println!("  {}", plan.authorize_url);
     println!();
     // Best-effort browser open; the printed URL is the source of truth if it fails.
-    let _ = open_in_browser(args, &authorize_url);
+    let _ = open_in_browser(args, &plan.authorize_url);
 
     // Prefer the listener: if it captured the redirect, use it; otherwise (bind
     // failed, timed out, or a non-loopback redirect) fall back to paste. The pasted
     // value never touches argv — it is a secret-grade code read from stdin only.
     let captured = match listener {
         Some(l) => {
-            println!("Approve in the browser — the login completes here automatically.");
+            // A bound listener completes the login automatically only for a browser on
+            // THIS machine, so the banner states that condition and names the wait an
+            // operator on another machine is about to sit through before being asked to
+            // paste.
             println!(
-                "(The provider's page may show a code or tell you to paste something: \
-                 IGNORE that, it is the no-listener fallback. Paste only if this \
-                 command asks you to.)"
+                "{}",
+                login_wire::listener_wait_banner(login_listener::LISTEN_TIMEOUT)
             );
             let got = l.wait();
             if got.is_some() {
@@ -2472,7 +2487,7 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     let raw_callback = match captured {
         Some(query) => query,
         None => {
-            println!("{}", wire.paste_prompt);
+            println!("{}", plan.paste_prompt);
             let mut pasted = String::new();
             std::io::stdin()
                 .read_line(&mut pasted)
@@ -2494,7 +2509,7 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             &http,
             wire.token_url,
             wire.client_id,
-            wire.redirect_uri,
+            plan.redirect_uri,
             &callback,
             &state,
             &pkce.verifier,
@@ -2515,7 +2530,7 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
                 &http,
                 wire.token_url,
                 wire.client_id,
-                wire.redirect_uri,
+                plan.redirect_uri,
                 &callback,
                 &state,
                 &pkce.verifier,

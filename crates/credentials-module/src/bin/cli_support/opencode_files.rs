@@ -95,15 +95,38 @@ impl ManifestLease {
     fn commit(&mut self) -> Result<(), OpenCodeFilesError> {
         self.stop_renewal();
         let owner = read_lock_owner(&self.lock.join("owner")).ok();
-        let ours_and_fresh = owner.is_some_and(|owner| {
-            owner.nonce == self.nonce
-                && self.clock.now_ms().is_ok_and(|now| {
-                    now.saturating_sub(owner.claimed_at_ms) < self.ttl.as_millis() as u64
-                })
-        });
-        if self.renewal_failed.load(Ordering::SeqCst) || !ours_and_fresh {
+        // SAY WHICH CONDITION REFUSED. Three different things end this write and they had
+        // one message between them: the renewal thread died, the owner file no longer
+        // names us, or our claim aged past the ttl. A caller — and every test asserting
+        // on this refusal — could not tell them apart, so a failure at any of the three
+        // read as whichever one the reader was already suspecting. That cost a real
+        // investigation: a test named for the CLOCK property failed during a loaded gate
+        // run, its message said the clock had been read, and the actual cause was a
+        // different arm of this same `if`.
+        //
+        // The condition is known one line above the refusal in each case, which is the
+        // whole defect: the information was in hand and thrown away.
+        if self.renewal_failed.load(Ordering::SeqCst) {
             return Err(OpenCodeFilesError::Invalid(
-                "manifest lock renewal failed; write aborted".into(),
+                "manifest lock renewal thread failed; write aborted".into(),
+            ));
+        }
+        let Some(owner) = owner else {
+            return Err(OpenCodeFilesError::Invalid(
+                "manifest lock owner file is unreadable or gone; write aborted".into(),
+            ));
+        };
+        if owner.nonce != self.nonce {
+            return Err(OpenCodeFilesError::Invalid(
+                "manifest lock owner names another claimant; write aborted".into(),
+            ));
+        }
+        let now = self.clock.now_ms().map_err(|_| {
+            OpenCodeFilesError::Invalid("manifest lock clock unreadable; write aborted".into())
+        })?;
+        if now.saturating_sub(owner.claimed_at_ms) >= self.ttl.as_millis() as u64 {
+            return Err(OpenCodeFilesError::Invalid(
+                "manifest lock claim is expired against its own clock; write aborted".into(),
             ));
         }
         Ok(())
@@ -2142,11 +2165,27 @@ mod manifest_lock_aba_regression {
                 lease.commit()
             },
         );
-        assert!(
-            result.is_ok(),
-            "commit read the wall clock against an injected claim stamp and refused a lease \
-             whose injected age is 0"
-        );
+        // ASSERT ON THE ERROR, NOT ONLY ON is_ok. `now_override_ms` is a FROZEN instant,
+        // so the injected age is 0 no matter how long the 300ms sleep really takes, and
+        // the clock can only be implicated by a lease-expiry error. Every other failure
+        // here — a busy lock, an IO error, a reclaim that could not read the directory —
+        // is something else entirely, and the old message named the clock for all of
+        // them. That is how this test reported a clock defect during a gate run at load
+        // 111 while passing 20 of 20 in isolation, and it sent me looking at a fix I had
+        // already landed.
+        if let Err(error) = &result {
+            let rendered = format!("{error:?}");
+            let blames_the_clock = rendered.contains("expired") || rendered.contains("stale");
+            assert!(
+                !blames_the_clock,
+                "commit read the wall clock against an injected claim stamp and refused a \
+                 lease whose injected age is 0: {rendered}"
+            );
+            panic!(
+                "the lock failed for a reason that is NOT the clock under test, so this \
+                 failure says nothing about the property this test pins: {rendered}"
+            );
+        }
         let _ = fs::remove_dir_all(root);
     }
 

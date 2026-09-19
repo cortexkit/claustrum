@@ -336,7 +336,11 @@ async fn main() {
             &mut stream,
             route_channel,
             route_epoch,
-            &handle,
+            ReportAddress {
+                handle: &handle,
+                credential_id: scoped_id.as_deref(),
+                enrollment_token: enrollment_token.as_deref(),
+            },
             provider_status,
             version,
             reporter_source.as_deref(),
@@ -916,20 +920,48 @@ async fn route_open(
 
 /// Send `credential.report_auth_failure`. See the `--report-auth-failure` arm for why
 /// this exists and why a stale `record_version` is the safe way to drive it.
+/// Report a served credential dead.
+///
+/// THREE ADDRESSING SHAPES, and the third is why this arm exists: `handle` for an
+/// anonymous bearer, `credential_id` for a supervised caller holding a `Read` grant, and
+/// `credential_id` + `enrollment_token` for a host-launched consumer that holds neither.
+/// Until the token was accepted here, an enrolled consumer could discover a credential and
+/// fetch it and then had NO WAY TO SAY IT WAS DEAD -- the recovery loop broken for exactly
+/// the caller enrollment creates.
+/// How the caller is addressing the report. A struct rather than three more parameters,
+/// because the three are mutually constrained -- a token is meaningless without an id, and
+/// an id with a handle is refused -- and separate arguments let a caller express
+/// combinations the vault rejects.
+struct ReportAddress<'a> {
+    handle: &'a str,
+    credential_id: Option<&'a str>,
+    enrollment_token: Option<&'a str>,
+}
+
 async fn credential_report_auth_failure(
     stream: &mut TcpStream,
     route_channel: u16,
     route_epoch: u32,
-    handle: &str,
+    address: ReportAddress<'_>,
     provider_status: u16,
     record_version: u64,
     reporter_source: Option<&str>,
 ) -> Frame {
     let mut params = json!({
-        "handle": handle,
         "provider_status": provider_status,
         "record_version": record_version,
     });
+    // EXACTLY ONE ADDRESS. `handle` and `credential_id` together are refused by the vault
+    // as `not_found` -- two addresses is a caller that does not know what it is holding.
+    match address.credential_id {
+        Some(id) => {
+            params["credential_id"] = json!(id);
+            if let Some(token) = address.enrollment_token {
+                params["enrollment_token"] = json!(token);
+            }
+        }
+        None => params["handle"] = json!(address.handle),
+    }
     // Absent unless asked for, because ABSENT IS THE CONTRACT for every consumer that
     // predates the field: a probe that always sent it would prove the accepting path
     // and say nothing about whether omitting it still works.

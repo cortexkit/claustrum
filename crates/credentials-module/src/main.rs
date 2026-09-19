@@ -4146,6 +4146,7 @@ mod tests {
             read_surface::ReportAuthFailureParams {
                 handle: Some("ckh_request_shape".to_owned()),
                 credential_id: Some("apikey:request-shape".to_owned()),
+                enrollment_token: Some("t".repeat(64)),
                 provider_status: 401,
                 record_version: 7,
                 reporter_source: Some("probe".to_owned()),
@@ -4153,6 +4154,11 @@ mod tests {
             &[
                 "handle",
                 "credential_id",
+                // Added for the consumer class enrollment creates: a host-launched caller
+                // binds as Direct, holds no handle, and could therefore discover and fetch
+                // a credential with no way to report it dead. Exercised by
+                // `vault_read_probe --report-id ... --enrollment-token`.
+                "enrollment_token",
                 "provider_status",
                 "record_version",
                 "reporter_source",
@@ -5682,12 +5688,26 @@ mod tests {
                 .is_some_and(|key| !key.is_empty()),
             "a read grant must publish the signing key's public material"
         );
+        // ASSERT ON THE REFUSAL, NOT ON AN EMPTY TABLE. This read `.is_empty()` until a
+        // success row existed, which was a valid proxy only while a refusal was the ONLY
+        // scoped event -- and it failed the moment first-use recording landed, correctly.
+        //
+        // The stronger form is here: no refusal AND the success is instrumented. The
+        // second half is what this test could never say before, and it is the one that
+        // catches a scoped op that authorizes without leaving any trace that it ran.
+        let events = store.recent_auth_events(10).expect("read auth events");
         assert!(
-            store
-                .recent_auth_events(10)
-                .expect("read auth events")
-                .is_empty(),
+            !events
+                .iter()
+                .any(|e| e.kind == AuthEventKind::ScopedReadRefusal.as_str()),
             "a grant-authorized public-key request must not record a refusal"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| e.kind == AuthEventKind::ScopedFirstUse.as_str()),
+            "and the first exercise of the grant must be recorded, or an unused grant is \
+             indistinguishable from one in constant use"
         );
     }
 
@@ -6471,6 +6491,7 @@ mod tests {
                 &read_surface::ReportAuthFailureParams {
                     handle: Some(handle.raw.clone()),
                     credential_id: None,
+                    enrollment_token: None,
                     provider_status: 401,
                     record_version: 1,
                     reporter_source: None,
@@ -6612,6 +6633,7 @@ mod tests {
                 &read_surface::ReportAuthFailureParams {
                     handle: Some(raw.raw.clone()),
                     credential_id: None,
+                    enrollment_token: None,
                     provider_status: 401,
                     record_version: 1,
                     reporter_source: None,
@@ -7068,6 +7090,7 @@ mod tests {
             read_surface::ReportAuthFailureParams {
                 handle: Some(handle.clone()),
                 credential_id: None,
+                enrollment_token: None,
                 provider_status: status,
                 record_version: version,
                 reporter_source: reporter_source.map(str::to_owned),
@@ -7181,6 +7204,7 @@ mod tests {
                 &read_surface::ReportAuthFailureParams {
                     handle: Some("ckh_not_a_handle".to_string()),
                     credential_id: None,
+                    enrollment_token: None,
                     provider_status: 401,
                     record_version: 1,
                     reporter_source: None,
@@ -7260,6 +7284,7 @@ mod tests {
                 &read_surface::ReportAuthFailureParams {
                     handle: Some(handle.raw),
                     credential_id: None,
+                    enrollment_token: None,
                     provider_status: 401,
                     record_version: 1,
                     reporter_source: None,
@@ -7274,6 +7299,7 @@ mod tests {
                 &read_surface::ReportAuthFailureParams {
                     handle: None,
                     credential_id: Some("oauth:twin-scoped".to_owned()),
+                    enrollment_token: None,
                     provider_status: 401,
                     record_version: 1,
                     reporter_source: None,
@@ -7332,6 +7358,7 @@ mod tests {
                         &read_surface::ReportAuthFailureParams {
                             handle: Some(raw),
                             credential_id: None,
+                            enrollment_token: None,
                             provider_status: status,
                             record_version: 1,
                             reporter_source: None,
@@ -7408,6 +7435,7 @@ mod tests {
                 &read_surface::ReportAuthFailureParams {
                     handle: None,
                     credential_id: Some("apikey:audited-scope".to_owned()),
+                    enrollment_token: None,
                     provider_status: 401,
                     record_version: 1,
                     reporter_source: None,
@@ -7480,6 +7508,7 @@ mod tests {
                 &read_surface::ReportAuthFailureParams {
                     handle: None,
                     credential_id: Some("oauth:fenced".to_owned()),
+                    enrollment_token: None,
                     provider_status: 401,
                     // The record is at version 1; the caller claims it was served 99.
                     record_version: 99,
@@ -7542,6 +7571,7 @@ mod tests {
                         &read_surface::ReportAuthFailureParams {
                             handle: None,
                             credential_id: Some(id.to_owned()),
+                            enrollment_token: None,
                             provider_status: 401,
                             record_version: 1,
                             reporter_source: None,
@@ -7576,6 +7606,7 @@ mod tests {
                     &read_surface::ReportAuthFailureParams {
                         handle,
                         credential_id,
+                        enrollment_token: None,
                         provider_status: 401,
                         record_version: 1,
                         reporter_source: None,
@@ -7628,6 +7659,7 @@ mod tests {
                 &read_surface::ReportAuthFailureParams {
                     handle: Some(handle.raw),
                     credential_id: None,
+                    enrollment_token: None,
                     provider_status: 401,
                     record_version: 1,
                     reporter_source: None,
@@ -7689,6 +7721,7 @@ mod tests {
                 &read_surface::ReportAuthFailureParams {
                     handle: Some(handle.raw.clone()),
                     credential_id: None,
+                    enrollment_token: None,
                     provider_status: 401,
                     record_version: 1,
                     reporter_source: None,

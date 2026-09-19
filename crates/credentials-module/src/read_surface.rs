@@ -388,6 +388,20 @@ pub struct ReportAuthFailureParams {
     /// something the caller was already entitled to fetch.
     #[serde(default)]
     pub credential_id: Option<String>,
+    /// An enrollment token, for the consumer class that holds no handle.
+    ///
+    /// WITHOUT THIS THE RECOVERY LOOP IS BROKEN FOR EXACTLY THE CALLER ENROLLMENT
+    /// CREATES. A host-launched consumer binds as `Principal::Direct`, so the
+    /// `credential_id` path's grant check cannot authorize it, and it holds no handle
+    /// because not needing one is the entire point. It could discover credentials with
+    /// `list_scoped`, fetch them with `get_scoped`, and then had no way to say "this one
+    /// is dead" -- a revoked credential retried until an operator noticed.
+    ///
+    /// Reported by the openai-auth seat while reading the contract, before writing a line
+    /// against it. Ignored when `handle` is used: a handle holder is anonymous by design,
+    /// and presenting both would be claiming two identities for one report.
+    #[serde(default)]
+    pub enrollment_token: Option<String>,
     pub provider_status: u16,
     /// The `record_version` the consumer was SERVED for this handle (from the `get`
     /// result it acted on). Required: the vault invalidates only if this still matches
@@ -1307,17 +1321,14 @@ impl ReadSurface {
         credential_id: &str,
         operation: GrantOperation,
     ) -> Result<(), ReadError> {
-        let coverage = match self.scoped_principal(principal, enrollment_token) {
-            Some((kind, id)) => {
-                self.engine
-                    .store()
-                    .evaluate_scoped_coverage(kind, &id, credential_id, operation)
-            }
-            None => {
-                self.record_scoped_refusal(principal, credential_id, ScopedReadRefusal::NoGrant);
-                return Err(ReadError::NotFound);
-            }
+        let Some((kind, id)) = self.scoped_principal(principal, enrollment_token) else {
+            self.record_scoped_refusal(principal, credential_id, ScopedReadRefusal::NoGrant);
+            return Err(ReadError::NotFound);
         };
+        let coverage =
+            self.engine
+                .store()
+                .evaluate_scoped_coverage(kind, &id, credential_id, operation);
         #[cfg(test)]
         let coverage = if self
             .scoped_grant_lookup_error_for_test
@@ -1338,6 +1349,22 @@ impl ReadSurface {
             self.record_scoped_refusal(principal, credential_id, refusal);
             return Err(ReadError::NotFound);
         }
+        // THE ONE CHOKEPOINT EVERY SCOPED OP PASSES THROUGH, which is why the record sits
+        // here rather than at `get_scoped`, `sign` and `public_key` separately: three
+        // call sites is three chances for the next scoped op to be added without one.
+        //
+        // Records the RESOLVED principal (`kind`, `id`) rather than the bus principal the
+        // refusal path logs. For an enrollment token those differ -- the bus says
+        // `direct` and the grant was matched against `enrolled:<name>` -- and the useful
+        // answer is which principal's grant was exercised, not which socket it arrived on.
+        //
+        // Best-effort, deliberately: a diagnostic that could fail an authorized read
+        // would be worse than the blindness it cures. The store call is idempotent, so
+        // this is one INSERT ever and a cheap NOT EXISTS thereafter.
+        let _ =
+            self.engine
+                .store()
+                .record_scoped_first_use(credential_id, kind, Some(&id), operation);
         Ok(())
     }
 
@@ -1378,11 +1405,24 @@ impl ReadSurface {
             );
             return Err(ReadError::NotFound);
         };
-        let module_id = &principal_id;
-        let _ = principal_kind;
+        // PASS THE RESOLVED KIND, NOT A LITERAL. This read `list_scoped_snapshot("reserved",
+        // ...)` with `let _ = principal_kind;` one line above -- the resolved kind computed
+        // and then explicitly discarded. An enrollment token resolves to `enrolled`, so an
+        // enrolled consumer's grants were looked up under a principal kind it does not
+        // have: every row filtered out, an empty inventory, and NO REFUSAL EVENT, because
+        // authorization succeeded and the query simply matched nothing.
+        //
+        // That is the worst available shape. An empty list is a legitimate answer for a
+        // caller whose grants cover nothing, so the consumer sees "you have access to
+        // nothing" and the vault sees a successful call. Nothing on either side is wrong.
+        //
+        // It survived because the token path was tested on `get_scoped` and not on
+        // `list_scoped`, and the two resolve their principal through the same helper --
+        // so reading either one in isolation shows correct code. Found by the consumer
+        // that would have hit it, before they wrote a line against it.
         self.engine
             .store()
-            .list_scoped_snapshot("reserved", module_id)
+            .list_scoped_snapshot(principal_kind, &principal_id)
             .map(project_list_scoped)
             .map_err(|_| ReadError::StoreError)
     }
@@ -1537,7 +1577,12 @@ impl ReadSurface {
                 // the same reason they are on `get_scoped` and `status`: telling them
                 // apart turns this into an inventory oracle. `authorize_scoped` records
                 // the discriminated reason in `auth_events` locally and returns one code.
-                self.authorize_scoped(principal, credential_id, GrantOperation::Read)?;
+                self.authorize_scoped_as(
+                    principal,
+                    params.enrollment_token.as_deref(),
+                    credential_id,
+                    GrantOperation::Read,
+                )?;
                 (credential_id.clone(), true)
             }
             // Both or neither is a malformed request, not an addressing question. It

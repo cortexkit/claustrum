@@ -3478,6 +3478,62 @@ impl EncryptedStore {
             .map_err(StoreOpError::from)
     }
 
+    /// Record the FIRST successful scoped use of a credential by a principal.
+    ///
+    /// Idempotent by construction: the INSERT is conditioned on no prior row for the
+    /// same (credential, principal, operation), so a consumer calling ten thousand times
+    /// writes exactly one row. That is the whole design, and the reason is EVICTION
+    /// rather than growth -- `auth_events` trims to the newest 64 rows per credential, so
+    /// a per-call success would push out the refusal rows that answer why something
+    /// stopped working. The least interesting row would evict the most interesting.
+    ///
+    /// WHY IT EXISTS: the audit recorded only refusals, which leaves two states
+    /// indistinguishable -- a consumer whose scoped calls work, and one that never makes
+    /// any. Measured 2026-09-19: `prefrontal-core` held three grants over 22 credentials
+    /// with 467 refreshes in 24h, and 23 live capability handles on those same
+    /// credentials explained every refresh equally well. Nothing in the store could say
+    /// whether one scoped call had ever succeeded.
+    ///
+    /// Best-effort at the call site, like the refusal path: a diagnostic that could fail
+    /// a read would be worse than the blindness it cures.
+    pub fn record_scoped_first_use(
+        &self,
+        credential_id: &str,
+        principal_kind: &str,
+        principal_id: Option<&str>,
+        operation: GrantOperation,
+    ) -> Result<(), StoreOpError> {
+        self.store
+            .with_conn(|c| {
+                let tx = c.unchecked_transaction()?;
+                // The operation rides in `detail` rather than a new column: it is the
+                // same shape the refusal path uses for its reason, and a migration for a
+                // diagnostic field would cost more than it buys.
+                tx.execute(
+                    "INSERT INTO auth_events \
+                     (ts_ms, credential_id, kind, provider_status, detail, record_version, applied, principal_kind, principal_id) \
+                     SELECT ?1, ?2, ?3, NULL, ?4, NULL, 1, ?5, ?6 \
+                     WHERE NOT EXISTS ( \
+                       SELECT 1 FROM auth_events \
+                       WHERE credential_id = ?2 AND kind = ?3 AND detail = ?4 \
+                         AND principal_kind = ?5 \
+                         AND (principal_id IS ?6) \
+                     )",
+                    rusqlite::params![
+                        now_ms(),
+                        credential_id,
+                        AuthEventKind::ScopedFirstUse.as_str(),
+                        operation.as_str(),
+                        principal_kind,
+                        principal_id,
+                    ],
+                )?;
+                trim_auth_events_tx(&tx, credential_id)?;
+                tx.commit()
+            })
+            .map_err(StoreOpError::from)
+    }
+
     /// Read recent authentication events, newest first. Diagnostics for an operator
     /// asking why a credential stopped working; never an authority for what happened.
     pub fn recent_auth_events(&self, limit: u32) -> Result<Vec<AuthEvent>, StoreOpError> {
@@ -6051,6 +6107,78 @@ fn row_to_intent(row: &rusqlite::Row<'_>) -> rusqlite::Result<RefreshIntent> {
 #[cfg(test)]
 mod tests {
     use crate::test_support::TestTempDir;
+    /// A SCOPED FIRST USE IS RECORDED ONCE, NOT PER CALL.
+    ///
+    /// The idempotence is the whole design, and the reason is EVICTION rather than
+    /// growth: `auth_events` trims to the newest 64 rows per credential, so a per-call
+    /// success row would push out the refusal rows that answer why something stopped
+    /// working. The least interesting row would evict the most interesting.
+    ///
+    /// Both arms are load-bearing and fail differently. Without the FIRST arm, a method
+    /// that writes nothing at all passes -- and writing nothing is the status quo this
+    /// exists to change. Without the REPEAT arm, a plain INSERT passes, which is the
+    /// defect: 467 calls a day against one credential would clear the table's forensic
+    /// window in hours.
+    #[test]
+    fn a_scoped_first_use_is_recorded_once_however_many_times_it_is_exercised() {
+        let (_root, store) = tmp_store(0x77);
+        let id = "apikey:first-use-probe";
+        let record = VaultRecord::new_static(CredentialKind::ApiKey, "test", b"k".to_vec(), None);
+        store
+            .create_audited(id, &record, AuditCtx::admin(AuditOp::Put))
+            .expect("seed");
+
+        let count = |op: &str| -> i64 {
+            store
+                .recent_auth_events(256)
+                .expect("events")
+                .iter()
+                .filter(|e| {
+                    e.credential_id == id
+                        && e.kind == AuthEventKind::ScopedFirstUse.as_str()
+                        && e.detail.as_deref() == Some(op)
+                })
+                .count() as i64
+        };
+
+        assert_eq!(count("read"), 0, "nothing exercised it yet");
+        for _ in 0..25 {
+            store
+                .record_scoped_first_use(id, "reserved", Some("probe"), GrantOperation::Read)
+                .expect("record");
+        }
+        assert_eq!(
+            count("read"),
+            1,
+            "twenty-five exercises must leave ONE row: a per-call row would evict the \
+             refusal rows this table exists to keep"
+        );
+
+        // A DIFFERENT OPERATION IS A DIFFERENT FACT. `read` and `sign` are separate
+        // authorities, so "this principal has ever read it" does not answer "has it ever
+        // signed with it", and collapsing them would hide the stronger one.
+        store
+            .record_scoped_first_use(id, "reserved", Some("probe"), GrantOperation::Sign)
+            .expect("record sign");
+        assert_eq!(count("sign"), 1);
+        assert_eq!(
+            count("read"),
+            1,
+            "the sign row must not disturb the read row"
+        );
+
+        // A DIFFERENT PRINCIPAL IS ALSO A DIFFERENT FACT, and this is the arm that
+        // catches a dedup keyed on the credential alone -- which would make the second
+        // consumer's first use invisible forever.
+        store
+            .record_scoped_first_use(id, "enrolled", Some("other"), GrantOperation::Read)
+            .expect("record other");
+        assert_eq!(
+            count("read"),
+            2,
+            "a second principal's first use is its own fact, not a duplicate of the first"
+        );
+    }
 
     /// The scrub shape leaves a WRITABLE store, which was the one claim in the restore
     /// contract I had only read at source rather than exercised.

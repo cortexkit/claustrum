@@ -159,6 +159,26 @@ pub enum AuthEventKind {
     ConsumerReportLatch,
     /// A principal-scoped read was refused; the detail names the internal reason.
     ScopedReadRefusal,
+    /// The FIRST time a principal successfully exercised a grant over a credential.
+    ///
+    /// Written once per (principal, credential, operation) and never again. This is not
+    /// a log: the table trims at 64 rows per credential, so a per-call success row would
+    /// EVICT the refusal rows that answer why something stopped working -- a high-volume
+    /// success is the least interesting thing in the table and would push out the most
+    /// interesting.
+    ///
+    /// It exists because the audit could record only REFUSALS, which makes two states
+    /// indistinguishable: a consumer whose scoped calls work, and a consumer that never
+    /// makes any. Measured 2026-09-19: `prefrontal-core` held three grants over 22
+    /// credentials with 467 refreshes in 24h, and 23 live capability handles on the same
+    /// credentials explained every one of them equally well. The data could not answer
+    /// whether a single scoped call had ever succeeded.
+    ///
+    /// The operator question it answers is "is this grant actually exercised, or is the
+    /// consumer silently on another path" -- the reach column's question one level up.
+    /// A grant reaching 17 credentials that nothing has ever used looks, today, exactly
+    /// like one in constant use.
+    ScopedFirstUse,
     /// Startup reconciliation forced a credential to `needs_reauth`.
     ReconcileNeedsReauth,
     /// A successful GitHub App mint observed changed installation permissions.
@@ -209,6 +229,7 @@ impl AuthEventKind {
             AuthEventKind::ConsumerReportStale => "consumer_report_stale",
             AuthEventKind::ConsumerReportLatch => "consumer_report_latch",
             AuthEventKind::ScopedReadRefusal => "scoped_read_refusal",
+            AuthEventKind::ScopedFirstUse => "scoped_first_use",
             AuthEventKind::ReconcileNeedsReauth => "reconcile_needs_reauth",
             AuthEventKind::GithubAppPermissionsChanged => "github_app_permissions_changed",
             AuthEventKind::Enrollment => "enrollment",
@@ -717,6 +738,7 @@ mod vocabulary_documentation_tests {
                 AuthEventKind::ConsumerReportStale => AuthEventKind::ConsumerReportStale.as_str(),
                 AuthEventKind::ConsumerReportLatch => AuthEventKind::ConsumerReportLatch.as_str(),
                 AuthEventKind::ScopedReadRefusal => AuthEventKind::ScopedReadRefusal.as_str(),
+                AuthEventKind::ScopedFirstUse => AuthEventKind::ScopedFirstUse.as_str(),
                 AuthEventKind::ReconcileNeedsReauth => AuthEventKind::ReconcileNeedsReauth.as_str(),
                 AuthEventKind::GithubAppPermissionsChanged => {
                     AuthEventKind::GithubAppPermissionsChanged.as_str()
@@ -749,6 +771,11 @@ mod vocabulary_documentation_tests {
             section,
             "auth_events.kind",
             value(AuthEventKind::ScopedReadRefusal),
+        );
+        assert_documented(
+            section,
+            "auth_events.kind",
+            value(AuthEventKind::ScopedFirstUse),
         );
         assert_documented(
             section,

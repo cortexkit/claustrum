@@ -4925,8 +4925,32 @@ fn discover_subc_connection_file() -> Option<PathBuf> {
 /// files belong to different users and picking one could point an admin op at
 /// another user's daemon.
 fn temp_dir_connection_file() -> Option<PathBuf> {
-    let dir = std::env::temp_dir();
+    temp_dir_connection_file_in(std::env::temp_dir())
+}
 
+/// The rule itself, with the directory passed in.
+///
+/// SPLIT OUT BECAUSE DRIVING IT THROUGH `TMPDIR` RACES EVERY OTHER TEST IN THE BINARY,
+/// and that is not theoretical -- it cost two gate runs before I traced it. The old test
+/// set TMPDIR/TMP/TEMP to a scratch root and restored them; the Rust harness runs tests as
+/// threads in ONE process, so during that window any concurrent test calling
+/// `env::temp_dir()` read the scratch root, created a directory inside it, and then had it
+/// deleted underneath by this test's own cleanup.
+///
+/// THE VICTIMS WERE THE MANIFEST-LOCK TESTS, which touch no environment variable at all
+/// and had no way to know. That is why a mutex over the MUTATORS -- which is how I fixed
+/// the `SUBC_CONNECTION_FILE` race this morning -- does not solve this one: it protects
+/// mutators from each other and leaves every innocent reader exposed. The only fix that
+/// covers a reader that does not participate is not to mutate the variable.
+///
+/// Both observed error codes fall out of one cause, which is what made it hard to read:
+/// ENOENT when the scratch root was already deleted, and EINVAL from a torn `getenv`
+/// during a concurrent `setenv` (the reason `set_var` is unsafe in edition 2024). Two
+/// different-looking failures, two different tests, one race.
+///
+/// The pattern is already in this file: `resolve_data_home_from` takes its inputs as
+/// parameters for exactly this reason, two hundred lines away.
+fn temp_dir_connection_file_in(dir: PathBuf) -> Option<PathBuf> {
     // THE EXACT PATH FIRST, FROM THE SIBLING'S OWN DERIVATION. `user_connection_token`
     // is the token the daemon uses when it writes this file (subc-transport 0.6.0), so
     // calling it names the file rather than searching for something shaped like it.
@@ -5062,7 +5086,7 @@ mod discovery_tests {
     }
 
     use super::{
-        connection_file_in, discover_subc_connection_file, temp_dir_connection_file,
+        connection_file_in, discover_subc_connection_file, temp_dir_connection_file_in,
         ConnectionSearch,
     };
 
@@ -5117,31 +5141,25 @@ mod discovery_tests {
         // A second daemon's file: same shape, different token. The glob sees two.
         std::fs::write(root.join("subc-otheruser.connection.json"), "{}").expect("second");
 
-        // ALL THREE, because `env::temp_dir()` reads TMPDIR on unix and TMP/TEMP on
-        // windows. Setting only TMPDIR redirects on macOS and linux and SILENTLY DOES
-        // NOT on windows, so the test would pass here and assert nothing there -- which
-        // is exactly what it did until CI said so. Third instance of this class today.
-        let prev: Vec<(&str, Option<std::ffi::OsString>)> = ["TMPDIR", "TMP", "TEMP"]
-            .iter()
-            .map(|k| (*k, std::env::var_os(k)))
-            .collect();
-        let prev_named = std::env::var_os("SUBC_CONNECTION_FILE");
-        for (k, _) in &prev {
-            std::env::set_var(k, &root);
-        }
-        std::env::remove_var("SUBC_CONNECTION_FILE");
-
-        let got = temp_dir_connection_file();
-
-        for (k, v) in prev {
-            match v {
-                Some(v) => std::env::set_var(k, v),
-                None => std::env::remove_var(k),
-            }
-        }
-        if let Some(v) = prev_named {
-            std::env::set_var("SUBC_CONNECTION_FILE", v);
-        }
+        // THE DIRECTORY IS PASSED IN, NOT SET IN THE ENVIRONMENT.
+        //
+        // This test used to set TMPDIR/TMP/TEMP to `root` and restore them afterwards. It
+        // asserted the right thing and it BROKE OTHER TESTS: the harness runs tests as
+        // threads in one process, so during that window any concurrent test calling
+        // `env::temp_dir()` -- the manifest-lock suite, which touches no environment
+        // variable and had no way to know -- read this scratch root, created a directory
+        // in it, and had it deleted underneath by the cleanup below.
+        //
+        // It cost two gate runs and presented as two unrelated flakes with different
+        // error codes: ENOENT where the root was already gone, EINVAL from a torn
+        // `getenv` racing a `setenv`. One cause, two symptoms, neither in this file.
+        //
+        // A mutex over the mutators would NOT have fixed it, which is the part worth
+        // keeping: that is how I fixed the `SUBC_CONNECTION_FILE` race this morning, and
+        // it protects mutators from each other while leaving every innocent reader
+        // exposed. The only fix that reaches a victim who does not participate is to stop
+        // mutating the variable.
+        let got = temp_dir_connection_file_in(root.clone());
         let _ = std::fs::remove_dir_all(&root);
 
         assert_eq!(

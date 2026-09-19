@@ -781,6 +781,7 @@ diagnostics table, not the tamper-evident audit chain:
 | `consumer_report_stale` | A consumer report marked a refreshable credential stale for its next read. |
 | `consumer_report_latch` | A consumer report immediately latched a non-refreshable credential. |
 | `scoped_read_refusal` | A principal-scoped read was refused; `detail` names the internal refusal reason. |
+| `scoped_first_use` | The FIRST time a principal successfully exercised a grant over a credential. Written once per (principal, credential, operation) and never again, so it is a fact rather than a log. Its absence answers a question the refusal rows cannot: a grant that is never exercised looks exactly like one in constant use. |
 | `reconcile_needs_reauth` | Startup reconciliation forced a credential to `needs_reauth`. |
 | `github_app_permissions_changed` | A successful GitHub App mint observed changed installation permissions. |
 | `enrollment` | A bounded enrollment proposal, poll, or expiry diagnostic under a fixed `auth.enroll_*` subject. |

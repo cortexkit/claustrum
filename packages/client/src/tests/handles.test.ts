@@ -3,6 +3,7 @@ import { chmod, mkdir, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  credentialIdMatchesProvider,
   HANDLE_FILE_CONTRACT,
   defaultHandleFilePath,
   handleFileRevision,
@@ -117,6 +118,45 @@ describe('client handle-file contract', () => {
     const path = join(root, 'handles.json')
     await writeFile(path, 'x'.repeat(262145), { mode: 0o600 })
     await expect(readHandleFile(path)).rejects.toThrow('exceeds 256 KiB')
+  })
+
+  test('rejects invalid account minTtlMs values', () => {
+    const provider = validFile().providers[0]
+    for (const minTtlMs of [-1, 0.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, '100', null]) {
+      const account = { ...provider.accounts[0], minTtlMs }
+      expect(() => parseHandleFile({ version: 1, providers: [{ ...provider, accounts: [account] }] })).toThrow(
+        'provider 0 account main has invalid minTtlMs',
+      )
+    }
+  })
+
+  test('preserves an explicit zero minTtlMs floor', () => {
+    const provider = validFile().providers[0]
+    const account = { ...provider.accounts[0], minTtlMs: 0 }
+    expect(parseHandleFile({ version: 1, providers: [{ ...provider, accounts: [account] }] }).providers[0].accounts[0]).toEqual(account)
+  })
+
+  test('accepts omitted and distinct finite account minTtlMs floors', () => {
+    const provider = validFile().providers[0]
+    const second = { ...provider.accounts[0], label: 'backup', handle: `ckh_${'b'.repeat(43)}`, minTtlMs: 120000 }
+    const parsed = parseHandleFile({ version: 1, providers: [{ ...provider, accounts: [provider.accounts[0], second] }] })
+    expect(parsed.providers[0].accounts[0]).toEqual(provider.accounts[0])
+    expect(parsed.providers[0].accounts[1]).toEqual(second)
+  })
+
+  test('preserves unknown account keys through the account spread', () => {
+    const provider = validFile().providers[0]
+    const account = { ...provider.accounts[0], tenant_extra: { region: 'eu' } }
+    expect(parseHandleFile({ version: 1, providers: [{ ...provider, accounts: [account] }] }).providers[0].accounts[0]).toEqual(account)
+  })
+
+  test('matches credential IDs by provider segment without restricting kinds', () => {
+    for (const value of ['oauth:xai', 'oauth:xai:work', 'chatgpt:openai', 'apikey:deepseek:main']) {
+      expect(credentialIdMatchesProvider(value, value.split(':')[1])).toBe(true)
+    }
+    for (const value of ['oauth:openai', ':xai', 'oauth:xai:', 'oauth::xai', '', 3, null]) {
+      expect(credentialIdMatchesProvider(value, 'xai')).toBe(false)
+    }
   })
 
   test('preserves the historical parser fixture outcomes and exact messages', () => {

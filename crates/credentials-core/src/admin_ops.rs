@@ -126,6 +126,47 @@ pub enum AdminOpBody {
         selector: String,
         operation: GrantOperation,
     },
+    /// Approve a pending enrollment request under the master key, optionally renaming it.
+    ///
+    /// GATE 2 IS THE WHOLE POINT OF THIS OP. Anything on the machine can PROPOSE an
+    /// enrollment -- the request queue is reachable from the anonymous read plane by
+    /// design, because a consumer has no identity yet. Only the master key can turn a
+    /// proposal into a principal that grants can name. Without that asymmetry the
+    /// ceremony would be self-service.
+    ///
+    /// Approval does NOT mint the token: the first successful poll does, against the
+    /// request secret the proposer minted. So an operator approving a request cannot
+    /// learn the token, and a squatter who proposed a name it does not hold cannot
+    /// collect one even if an operator approves by mistake.
+    #[serde(rename = "admin.enroll_approve")]
+    EnrollApprove {
+        v: u32,
+        request_id: String,
+        /// The name to admit. Usually the proposed one; an operator may correct it,
+        /// because a name a stranger chose is a claim rather than a fact.
+        final_name: String,
+    },
+    /// Deny a pending enrollment request.
+    #[serde(rename = "admin.enroll_deny")]
+    EnrollDeny { v: u32, request_id: String },
+    /// Revoke a live enrollment, keeping its grant rows.
+    ///
+    /// The grants stay DELIBERATELY. They record what reach existed, and they block
+    /// re-enrolment of the name until an operator revokes them too -- otherwise a
+    /// different consumer could enrol under a freed name and silently inherit the reach
+    /// of the one that was revoked, which is the failure that makes revocation look
+    /// complete while leaving a loaded slot behind.
+    #[serde(rename = "admin.enroll_revoke")]
+    EnrollRevoke { v: u32, name: String },
+    /// Mint a fresh token for a live enrollment, invalidating the previous one.
+    ///
+    /// The reply CARRIES THE TOKEN, which no other admin op does. That is unavoidable --
+    /// an operator re-issuing on behalf of a consumer that lost its file has to deliver
+    /// it somehow -- and it is why this op's result is the one place an admin reply holds
+    /// bearer material. It must never be logged, and the generation bump is what makes
+    /// the old token stop working rather than merely being superseded.
+    #[serde(rename = "admin.enroll_reissue")]
+    EnrollReissue { v: u32, name: String },
     #[serde(rename = "admin.set_category")]
     SetCategory {
         v: u32,
@@ -289,6 +330,31 @@ impl std::fmt::Debug for AdminOpBody {
                 .field("credential_prefix", credential_prefix)
                 .field("operation", operation)
                 .finish(),
+            AdminOpBody::EnrollApprove {
+                v,
+                request_id,
+                final_name,
+            } => f
+                .debug_struct("EnrollApprove")
+                .field("v", v)
+                .field("request_id", request_id)
+                .field("final_name", final_name)
+                .finish(),
+            AdminOpBody::EnrollDeny { v, request_id } => f
+                .debug_struct("EnrollDeny")
+                .field("v", v)
+                .field("request_id", request_id)
+                .finish(),
+            AdminOpBody::EnrollRevoke { v, name } => f
+                .debug_struct("EnrollRevoke")
+                .field("v", v)
+                .field("name", name)
+                .finish(),
+            AdminOpBody::EnrollReissue { v, name } => f
+                .debug_struct("EnrollReissue")
+                .field("v", v)
+                .field("name", name)
+                .finish(),
             AdminOpBody::GrantCreateV2 {
                 v,
                 principal_kind,
@@ -377,6 +443,10 @@ impl AdminOpBody {
             | AdminOpBody::SetCategory { v, .. }
             | AdminOpBody::Reclassify { v, .. }
             | AdminOpBody::Approval { v, .. }
+            | AdminOpBody::EnrollApprove { v, .. }
+            | AdminOpBody::EnrollDeny { v, .. }
+            | AdminOpBody::EnrollRevoke { v, .. }
+            | AdminOpBody::EnrollReissue { v, .. }
             | AdminOpBody::Status { v } => *v,
         }
     }
@@ -388,7 +458,11 @@ impl AdminOpBody {
             AdminOpBody::GrantCreateV2 { .. }
             | AdminOpBody::GrantRevokeV2 { .. }
             | AdminOpBody::SetCategory { .. }
-            | AdminOpBody::Reclassify { .. } => ADMIN_OP_SCHEMA_V2,
+            | AdminOpBody::Reclassify { .. }
+            | AdminOpBody::EnrollApprove { .. }
+            | AdminOpBody::EnrollDeny { .. }
+            | AdminOpBody::EnrollRevoke { .. }
+            | AdminOpBody::EnrollReissue { .. } => ADMIN_OP_SCHEMA_V2,
             AdminOpBody::Store { .. }
             | AdminOpBody::StoreWithIdentityPolicy { .. }
             | AdminOpBody::SetIdentity { .. }
@@ -444,6 +518,13 @@ impl AdminOpBody {
             | AdminOpBody::GrantCreateV2 { .. }
             | AdminOpBody::GrantRevokeV2 { .. }
             | AdminOpBody::Reclassify { .. }
+            // Enrollment ops take NO per-credential lock: they mutate the consumer
+            // ledger, not any credential's record, so there is no id to serialize on.
+            // The store's fenced write is what orders them against each other.
+            | AdminOpBody::EnrollApprove { .. }
+            | AdminOpBody::EnrollDeny { .. }
+            | AdminOpBody::EnrollRevoke { .. }
+            | AdminOpBody::EnrollReissue { .. }
             | AdminOpBody::Status { .. } => None,
         }
     }
@@ -500,6 +581,39 @@ pub fn apply(
         )));
     }
     match op {
+        AdminOpBody::EnrollApprove {
+            request_id,
+            final_name,
+            ..
+        } => {
+            let enrollment_id = store.approve_enrollment(&request_id, &final_name, actor)?;
+            // The token is deliberately absent: approval admits a NAME, and only the
+            // consumer's own poll -- authenticated by the request secret it minted --
+            // turns that into bearer material.
+            Ok(serde_json::json!({
+                "enrollment_id": enrollment_id,
+                "name": final_name,
+            }))
+        }
+        AdminOpBody::EnrollDeny { request_id, .. } => {
+            store.deny_enrollment(&request_id, actor)?;
+            Ok(serde_json::json!({ "denied": true }))
+        }
+        AdminOpBody::EnrollRevoke { name, .. } => {
+            store.revoke_enrollment(&name, actor)?;
+            Ok(serde_json::json!({ "revoked": true }))
+        }
+        AdminOpBody::EnrollReissue { name, .. } => {
+            let rotation = store.reissue_enrollment(&name, actor)?;
+            // THE ONE ADMIN REPLY THAT CARRIES BEARER MATERIAL. The generation rides
+            // beside it so the operator can tell the consumer which incarnation they
+            // now hold, and so a forensic reader can date a spend to one side of the
+            // rotation rather than seeing one undifferentiated name.
+            Ok(serde_json::json!({
+                "token": rotation.token,
+                "token_generation": rotation.token_generation,
+            }))
+        }
         AdminOpBody::Approval {
             credential_id,
             artifact_sha256,

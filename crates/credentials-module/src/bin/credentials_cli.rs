@@ -343,6 +343,7 @@ fn run() -> Result<(), CliError> {
         "approve" => cmd_approve(&global, &args),
         "list" => cmd_list(&global),
         "grants" => cmd_grants(&global),
+        "enroll" => cmd_enroll(&global, &args),
         "audit" => cmd_audit(&global, &args),
         "events" => cmd_events(&global, &args),
         "usable" => cmd_usable(&global),
@@ -437,6 +438,8 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
         // unknown-argument error, which says nothing about what replaced it. Listed
         // here, it reaches `parse_grant_selector`'s refusal, which names the successor
         // and explains why a former prefix is a category rather than an exact selector.
+        "enroll" => &["--request-id", "--name"],
+        "approve" => &["--id", "--file", "--approver"],
         "grant" | "revoke-grant" => &[
             "--principal",
             "--prefix",
@@ -444,7 +447,6 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
             "--selector",
             "--operation",
         ],
-        "approve" => &["--id", "--file", "--approver"],
         "audit" => &["--limit"],
         "events" => &["--limit"],
         // bootstrap / rotate-master-key / verify-audit take no per-command flags.
@@ -507,6 +509,8 @@ fn usage_short() -> String {
        status              vault health + credential inventory (no secrets)\n\
        list                credential ids + lifecycle state (no secrets)\n\
        grants              principal-scoped grants (no secrets)\n\
+       enroll              admit, revoke or reissue a consumer enrollment\n\
+       approve             record a master-key approval before a signing window\n\
          put                 ingest an api key, session cookie, or opaque secret\n\
          mint-signing-key    generate and custody a new Ed25519 signing key\n\
          import              import from opencode/pi/gemini-cli/antigravity\n\
@@ -633,6 +637,46 @@ fn help_verb(verb: &str) -> String {
              id, credential prefix, operation, and creation time. Read-only; it uses the\n\
              authenticated admin.status path, reading the running daemon when available and\n\
              the offline lease path otherwise. An empty grant table prints `no grants`."
+        }
+        "approve" => {
+            "ck auth approve --id <signing-credential-id> --file <path> --approver <name>\n\
+             \n\
+             \x20 --id <id>                     signing credential the window will use\n\
+             \x20 --file <path>                 artifact being approved; its sha256 is recorded\n\
+             \x20 --approver <name>             who is approving, recorded in the chain\n\
+             \n\
+             NOTES\n\
+             Record a master-key approval in the audit chain before opening a signing\n\
+             window. The chain entry binds the approver, the artifact's exact sha256, and\n\
+             the signing credential, so a later reader can prove WHICH bytes were approved\n\
+             rather than that an approval happened.\n\
+             It signs nothing. Approval and signature are separate acts on purpose: a\n\
+             recorded approval that is never exercised leaves a chain entry with no\n\
+             signature beside it, which is the state an auditor needs to be able to see."
+        }
+        "enroll" => {
+            "ck auth enroll list\n\
+             \x20             approve --request-id <id> [--name <name>]\n\
+             \x20             deny --request-id <id>\n\
+             \x20             revoke --name <name>\n\
+             \x20             reissue --name <name>\n\
+             \n\
+             \x20 --request-id <id>             pending request, from `enroll list`\n\
+             \x20 --name <name>                 consumer name to admit, revoke or reissue\n\
+             \n\
+             NOTES\n\
+             The operator half of consumer enrollment. A consumer proposes a name over the\n\
+             read plane and waits; only the master key can admit it.\n\
+             approve admits a NAME and mints no token: the consumer's own poll mints it,\n\
+             authenticated by the request secret it generated, so neither an operator nor a\n\
+             squatter can collect a token for a name they do not hold. --name overrides the\n\
+             proposed spelling, which is a stranger's claim rather than a fact.\n\
+             revoke keeps the consumer's grants: they record what reach existed and they\n\
+             block re-enrolling the name, so a later consumer cannot inherit that reach.\n\
+             reissue prints the new token on stdout ALONE so it can be piped into a 0600\n\
+             file; the previous token stops working the moment it is minted.\n\
+             list is read-only and takes no lease. awaiting-poll means admitted but never\n\
+             collected, which is a stalled handover rather than a live consumer."
         }
         "mint-signing-key" => {
             "ck auth mint-signing-key --id signing:<provider>[:<generation>] [--replace]\n\
@@ -3528,15 +3572,31 @@ fn cmd_revoke_all_handles(global: &GlobalArgs, args: &[String]) -> Result<(), Cl
     Ok(())
 }
 
-fn parse_reserved_principal(principal: &str) -> Result<String, CliError> {
+/// Parse a grant principal into its `(kind, id)` pair.
+///
+/// TWO KINDS, AND THE BARE SPELLING MEANS `reserved` FOR COMPATIBILITY. `reserved:<id>`
+/// names a supervised module, attested by the supervisor's launch nonce. `enrolled:<name>`
+/// names a consumer this vault admitted through the enrollment ceremony. A bare `<id>`
+/// with no colon is read as `reserved`, because that was the only kind when the flag was
+/// introduced and every existing script spells it that way.
+///
+/// The bare default is deliberately the NARROWER of the two to fail safe: a typo that
+/// drops the prefix grants to a module principal that probably does not exist, reaching
+/// nothing, rather than to an enrolled name that might.
+fn parse_grant_principal(principal: &str) -> Result<(String, String), CliError> {
     if principal.contains('|') {
         return Err(CliError::Usage("invalid_principal: '|' is reserved".into()));
     }
     match principal.split_once(':') {
-        None if !principal.is_empty() => Ok(principal.to_string()),
-        Some(("reserved", id)) if !id.is_empty() && !id.contains(':') => Ok(id.to_string()),
+        None if !principal.is_empty() => Ok(("reserved".to_string(), principal.to_string())),
+        Some(("reserved", id)) if !id.is_empty() && !id.contains(':') => {
+            Ok(("reserved".to_string(), id.to_string()))
+        }
+        Some(("enrolled", name)) if !name.is_empty() && !name.contains(':') => {
+            Ok(("enrolled".to_string(), name.to_string()))
+        }
         Some((kind, _)) => Err(CliError::Usage(format!(
-            "invalid_principal: only reserved principals are supported (got {kind})"
+            "invalid_principal: expected reserved:<module> or enrolled:<name> (got {kind})"
         ))),
         None => Err(CliError::Usage("invalid_principal: empty principal".into())),
     }
@@ -3586,7 +3646,7 @@ fn parse_grant_selector(args: &[String]) -> Result<(SelectorKind, String), CliEr
 }
 
 fn cmd_grant(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
-    let principal_id = parse_reserved_principal(&required(args, "--principal")?)?;
+    let (principal_kind, principal_id) = parse_grant_principal(&required(args, "--principal")?)?;
     let (selector_kind, selector) = parse_grant_selector(args)?;
     let operation = required(args, "--operation")?
         .parse::<GrantOperation>()
@@ -3595,7 +3655,7 @@ fn cmd_grant(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
         global,
         AdminOpBody::GrantCreateV2 {
             v: ADMIN_OP_SCHEMA_V2,
-            principal_kind: "reserved".into(),
+            principal_kind: principal_kind.clone(),
             principal_id: principal_id.clone(),
             selector_kind,
             selector: selector.clone(),
@@ -3603,7 +3663,7 @@ fn cmd_grant(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
         },
     )?;
     println!(
-        "granted reserved:{principal_id} {} {}:{selector}",
+        "granted {principal_kind}:{principal_id} {} {}:{selector}",
         operation.as_str(),
         selector_kind.as_str()
     );
@@ -3611,7 +3671,7 @@ fn cmd_grant(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
 }
 
 fn cmd_revoke_grant(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
-    let principal_id = parse_reserved_principal(&required(args, "--principal")?)?;
+    let (principal_kind, principal_id) = parse_grant_principal(&required(args, "--principal")?)?;
     let (selector_kind, selector) = parse_grant_selector(args)?;
     let operation = required(args, "--operation")?
         .parse::<GrantOperation>()
@@ -3620,7 +3680,7 @@ fn cmd_revoke_grant(global: &GlobalArgs, args: &[String]) -> Result<(), CliError
         global,
         AdminOpBody::GrantRevokeV2 {
             v: ADMIN_OP_SCHEMA_V2,
-            principal_kind: "reserved".into(),
+            principal_kind: principal_kind.clone(),
             principal_id: principal_id.clone(),
             selector_kind,
             selector: selector.clone(),
@@ -3628,7 +3688,7 @@ fn cmd_revoke_grant(global: &GlobalArgs, args: &[String]) -> Result<(), CliError
         },
     )?;
     println!(
-        "revoked reserved:{principal_id} {} {}:{selector}",
+        "revoked {principal_kind}:{principal_id} {} {}:{selector}",
         operation.as_str(),
         selector_kind.as_str()
     );
@@ -3975,6 +4035,170 @@ fn cmd_list(global: &GlobalArgs) -> Result<(), CliError> {
     print_inventory(&rows);
     print_store_behind_note(store_schema);
     Ok(())
+}
+
+/// `ck auth enroll <list|approve|deny|revoke|reissue>` — the operator half of consumer
+/// enrollment.
+///
+/// WITHOUT THIS THE CEREMONY IS UNREACHABLE. A consumer can propose, and the store can
+/// approve, deny, revoke and reissue — but nothing could CALL those, so a pending
+/// request sat in the queue forever and the vault admitted nobody. The consumer-facing
+/// routes shipped first because they are what a plugin builds against; this is the half
+/// that makes them mean something.
+///
+/// Every mutating subcommand is master-key gated (Gate 2) through `commit_admin`.
+/// `list` is not: it reads the pending queue and the live roster, both plaintext, so it
+/// works against a running daemon without the key and without taking the write lease.
+fn cmd_enroll(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
+    let sub = args
+        .first()
+        .filter(|value| !value.starts_with("--"))
+        .ok_or_else(|| {
+            CliError::Usage("enroll requires a subcommand: list|approve|deny|revoke|reissue".into())
+        })?
+        .clone();
+    let rest = &args[1..];
+    match sub.as_str() {
+        "list" => cmd_enroll_list(global),
+        "approve" => {
+            let request_id = required(rest, "--request-id")?;
+            // The name defaults to what was proposed, and `--name` is how an operator
+            // corrects it. A name a stranger chose is a claim, not a fact.
+            let final_name = match optional(rest, "--name") {
+                Some(name) => name,
+                None => pending_proposed_name(global, &request_id)?,
+            };
+            commit_admin(
+                global,
+                AdminOpBody::EnrollApprove {
+                    v: ADMIN_OP_SCHEMA_V2,
+                    request_id: request_id.clone(),
+                    final_name: final_name.clone(),
+                },
+            )?;
+            println!("approved {request_id} as enrolled:{final_name}");
+            eprintln!(
+                "(no token was minted here: the consumer's own poll mints it, \
+                 authenticated by the request secret it holds)"
+            );
+            Ok(())
+        }
+        "deny" => {
+            let request_id = required(rest, "--request-id")?;
+            commit_admin(
+                global,
+                AdminOpBody::EnrollDeny {
+                    v: ADMIN_OP_SCHEMA_V2,
+                    request_id: request_id.clone(),
+                },
+            )?;
+            println!("denied {request_id}");
+            Ok(())
+        }
+        "revoke" => {
+            let name = required(rest, "--name")?;
+            commit_admin(
+                global,
+                AdminOpBody::EnrollRevoke {
+                    v: ADMIN_OP_SCHEMA_V2,
+                    name: name.clone(),
+                },
+            )?;
+            println!("revoked enrolled:{name}");
+            eprintln!(
+                "(its grants are kept and still name this principal; revoke them too \
+                 before re-enrolling the name, or a different consumer inherits its reach)"
+            );
+            Ok(())
+        }
+        "reissue" => {
+            let name = required(rest, "--name")?;
+            let reply = commit_admin(
+                global,
+                AdminOpBody::EnrollReissue {
+                    v: ADMIN_OP_SCHEMA_V2,
+                    name: name.clone(),
+                },
+            )?;
+            let token = reply
+                .get("token")
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| CliError::Usage("reissue returned no token".into()))?;
+            // Stdout carries the token ALONE so it can be piped into a 0600 file
+            // without a shell dance; everything else goes to stderr.
+            println!("{token}");
+            eprintln!(
+                "reissued enrolled:{name} at generation {}. The previous token stopped \
+                 working the moment this one was minted.",
+                reply
+                    .get("token_generation")
+                    .and_then(|value| value.as_u64())
+                    .unwrap_or_default()
+            );
+            Ok(())
+        }
+        other => Err(CliError::Usage(format!(
+            "unknown enroll subcommand {other}: expected list|approve|deny|revoke|reissue"
+        ))),
+    }
+}
+
+/// Render pending requests and live enrollments, lease-free.
+fn cmd_enroll_list(global: &GlobalArgs) -> Result<(), CliError> {
+    let db = store_path(global);
+    if !db.exists() {
+        return Err(CliError::Usage(format!(
+            "no vault at {} (run `ck auth bootstrap` first)",
+            db.display()
+        )));
+    }
+    let rows = credentials_core::store::list_enrollments_read_only(&db)
+        .map_err(|error| CliError::Usage(format!("read enrollments: {error}")))?;
+    if rows.is_empty() {
+        println!("no pending requests and no live enrollments");
+        return Ok(());
+    }
+    let width = rows
+        .iter()
+        .map(|row| row.key.chars().count())
+        .max()
+        .unwrap_or(3)
+        .max(3);
+    println!("{:<width$}  {:<13}  NAME", "KEY", "STATE", width = width);
+    for row in &rows {
+        let suffix = if row.token_generation > 0 {
+            format!("  (generation {})", row.token_generation)
+        } else {
+            String::new()
+        };
+        println!(
+            "{:<width$}  {:<13}  {}{suffix}",
+            row.key,
+            row.state,
+            row.name,
+            width = width
+        );
+    }
+    Ok(())
+}
+
+/// Read the proposed name for a pending request so `approve` can default to it.
+///
+/// Reading it here rather than defaulting inside the store keeps the DECISION visible:
+/// the operator sees the name in the success line and can override it with `--name`.
+/// A store-side default would admit whatever a stranger proposed with nothing printed.
+fn pending_proposed_name(global: &GlobalArgs, request_id: &str) -> Result<String, CliError> {
+    let db = store_path(global);
+    let rows = credentials_core::store::list_enrollments_read_only(&db)
+        .map_err(|error| CliError::Usage(format!("read enrollments: {error}")))?;
+    rows.into_iter()
+        .find(|row| row.key == request_id && row.state == "pending")
+        .map(|row| row.name)
+        .ok_or_else(|| {
+            CliError::Usage(format!(
+                "no pending request {request_id} (list them with `ck auth enroll list`)"
+            ))
+        })
 }
 
 fn cmd_grants(global: &GlobalArgs) -> Result<(), CliError> {
@@ -5276,10 +5500,30 @@ mod taxonomy_cli_tests {
 
     #[test]
     fn grant_principal_and_selector_parsers_pin_legacy_and_v2_forms() {
-        assert_eq!(parse_reserved_principal("agent").unwrap(), "agent");
-        assert_eq!(parse_reserved_principal("reserved:agent").unwrap(), "agent");
-        for invalid in ["direct:agent", "reserved:a|b", ""] {
-            assert!(parse_reserved_principal(invalid).is_err(), "{invalid:?}");
+        // A BARE ID MEANS `reserved`, which is the narrower of the two kinds. A typo
+        // that drops the prefix must not silently grant to an enrolled consumer.
+        assert_eq!(
+            parse_grant_principal("agent").unwrap(),
+            ("reserved".to_string(), "agent".to_string())
+        );
+        assert_eq!(
+            parse_grant_principal("reserved:agent").unwrap(),
+            ("reserved".to_string(), "agent".to_string())
+        );
+        assert_eq!(
+            parse_grant_principal("enrolled:anthropic-auth").unwrap(),
+            ("enrolled".to_string(), "anthropic-auth".to_string())
+        );
+        // `direct` is refused rather than merely unknown: a grant to an unattested
+        // caller is a grant to every same-UID process, with nothing to revoke.
+        for invalid in [
+            "direct:agent",
+            "reserved:a|b",
+            "enrolled:a|b",
+            "enrolled:",
+            "",
+        ] {
+            assert!(parse_grant_principal(invalid).is_err(), "{invalid:?}");
         }
 
         // `--prefix` is REFUSED, not aliased to exact. Aliasing would succeed while

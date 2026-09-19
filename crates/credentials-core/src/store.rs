@@ -5176,6 +5176,91 @@ pub fn list_read_grants_read_only(
     list_read_grants_read_only_with_schema(store_path).map(|(grants, _)| grants)
 }
 
+/// One row of the enrollment ledger, as an operator reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnrollmentRow {
+    /// `pending` requests carry their request id; live consumers carry their name.
+    pub key: String,
+    pub name: String,
+    pub state: String,
+    pub created_at_ms: i64,
+    pub token_generation: i64,
+}
+
+/// List pending requests and live enrollments WITHOUT a lease or a master key.
+///
+/// LEASE-FREE FOR THE SAME REASON EVERY OTHER READ VERB IS: the moment an operator asks
+/// who is waiting for approval is the moment the vault is running, and a diagnostic that
+/// needs an outage to read is useless exactly when it is needed. Nothing here is sealed —
+/// request ids, names and states are plaintext columns by design, because an operator
+/// approving an enrollment has to be able to see what they are approving.
+///
+/// TOKEN HASHES ARE NOT RETURNED and no caller should add them. They are not secrets, but
+/// publishing them invites a reader to treat one as an identifier for a consumer, and the
+/// only legitimate use of that column is the resolver's equality check.
+pub fn list_enrollments_read_only(
+    store_path: &std::path::Path,
+) -> Result<Vec<EnrollmentRow>, StoreOpError> {
+    let map = |e: rusqlite::Error| StoreOpError::from(StoreError::Backend(e.to_string()));
+    let conn = rusqlite::Connection::open_with_flags(
+        format!("file:{}?mode=ro", store_path.display()),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+    )
+    .map_err(map)?;
+    let mut rows: Vec<EnrollmentRow> = Vec::new();
+
+    let mut pending = conn
+        .prepare(
+            "SELECT request_id, proposed_name, state, created_at_ms FROM pending_enrollments \
+             WHERE state = 'pending' ORDER BY created_at_ms",
+        )
+        .map_err(map)?;
+    let mapped = pending
+        .query_map([], |row| {
+            Ok(EnrollmentRow {
+                key: row.get(0)?,
+                name: row.get(1)?,
+                state: row.get(2)?,
+                created_at_ms: row.get(3)?,
+                token_generation: 0,
+            })
+        })
+        .map_err(map)?;
+    for row in mapped {
+        rows.push(row.map_err(map)?);
+    }
+
+    let mut live = conn
+        .prepare(
+            "SELECT name, approved_at_ms, token_generation, token_hash FROM enrolled_consumers \
+             WHERE revoked_at_ms IS NULL ORDER BY approved_at_ms",
+        )
+        .map_err(map)?;
+    let mapped = live
+        .query_map([], |row| {
+            let has_token: Option<String> = row.get(3)?;
+            Ok(EnrollmentRow {
+                key: row.get::<_, String>(0)?,
+                name: row.get::<_, String>(0)?,
+                // An approved enrollment that has never been polled holds no token, and
+                // that is a state an operator needs to see: the consumer was admitted and
+                // has not collected. Rendering it as `live` would hide a stalled handover.
+                state: if has_token.is_some() {
+                    "live".to_string()
+                } else {
+                    "awaiting-poll".to_string()
+                },
+                created_at_ms: row.get(1)?,
+                token_generation: row.get(2)?,
+            })
+        })
+        .map_err(map)?;
+    for row in mapped {
+        rows.push(row.map_err(map)?);
+    }
+    Ok(rows)
+}
+
 /// Count open refresh intents from a store file WITHOUT a lease or a master key.
 pub fn count_refresh_intents_read_only(
     store_path: &std::path::Path,

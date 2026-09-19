@@ -633,6 +633,68 @@ fn grant_verbs_accept_the_canonical_reserved_spelling_and_refuse_other_kinds() {
 const KNOWN_BUT_UNADVERTISED: &[(&str, &str)] =
     &[("grant", "--prefix"), ("revoke-grant", "--prefix")];
 
+/// EVERY DISPATCHABLE VERB IS IN THE TOP-LEVEL VERB TABLE.
+///
+/// This exists because `enroll` shipped dispatchable and undiscoverable, and the whole
+/// existing battery of help checks stayed green: they iterate HAND-KEPT verb lists, so a
+/// new verb joins no check by being written. It was reachable by anyone who already knew
+/// the word, which is the population that does not need a table.
+///
+/// The verb list here is derived from the DISPATCHER, not typed, so the next verb cannot
+/// repeat it. The extractor's own floor guards the derivation: a broken scan yields few
+/// verbs and fails rather than passing on an empty set.
+#[test]
+fn every_dispatchable_verb_appears_in_the_top_level_verb_table() {
+    let src = include_str!("../src/bin/credentials_cli.rs");
+    // Anchored on the dispatcher, whose arms ARE the dispatchable set. Reading the
+    // source rather than a list is the point: a hand-kept list is what let `enroll` ship
+    // undiscoverable while every help check stayed green.
+    let start = src
+        .find("match command.as_str() {")
+        .expect("the dispatcher match must be findable");
+    let body = &src[start..];
+    let end = body
+        .find("\n    }")
+        .expect("dispatcher match must terminate");
+    let mut verbs: Vec<String> = Vec::new();
+    for line in body[..end].lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix('"') else {
+            continue;
+        };
+        let Some((verb, tail)) = rest.split_once('"') else {
+            continue;
+        };
+        if tail.trim_start().starts_with("=>")
+            && !verb.is_empty()
+            && !verbs.contains(&verb.to_string())
+        {
+            verbs.push(verb.to_string());
+        }
+    }
+    assert!(
+        verbs.len() >= 20,
+        "extractor found only {} verbs; a broken scan would pass this vacuously",
+        verbs.len()
+    );
+
+    let rendered = cli().arg("help").output().expect("top-level help");
+    let table = String::from_utf8_lossy(&rendered.stdout).to_string();
+    let missing: Vec<&String> = verbs
+        .iter()
+        .filter(|verb| {
+            !table
+                .lines()
+                .any(|line| line.trim_start().starts_with(&format!("{verb} ")))
+        })
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "dispatchable but absent from the verb table, so only someone who already knows \
+         the word can find them: {missing:?}"
+    );
+}
+
 fn accepted_help_flags(verb: &str) -> Vec<String> {
     let src = include_str!("../src/bin/credentials_cli.rs");
     let mut out: Vec<String> = Vec::new();
@@ -4128,9 +4190,13 @@ fn every_verb_help_uses_a_flags_table_and_notes_layout() {
         .take_while(|line| !line.trim().is_empty())
         .map(|line| line.split_whitespace().next().expect("verb"))
         .collect();
+    // 29 = 27 + `enroll` + `approve`. `approve` is not new: it has been dispatchable
+    // since August and was never in the table, which is exactly what
+    // `every_dispatchable_verb_appears_in_the_top_level_verb_table` found on its first
+    // run. This number is an anti-narrowing floor for the SCAN, not a budget for verbs.
     assert_eq!(
         verbs.len(),
-        27,
+        29,
         "the rendered verb-table scan narrowed; set-category and reclassify are public verbs"
     );
     assert!(accepted_help_flags("login").contains(&"--no-browser".to_string()));

@@ -3267,7 +3267,7 @@ mod tests {
         loop {
             let got = tokio::time::timeout(
                 std::time::Duration::from_secs(5),
-                subc_core::read_frame(&mut server),
+                subc_transport::read_frame(&mut server),
             )
             .await
             .expect("wire stalled: control frame never arrived (starved)")

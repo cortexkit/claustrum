@@ -54,7 +54,6 @@ dialoguer = { version = "0.12", features = ["fuzzy-select"] }
 credentials-core = { path = "../credentials-core", features = ["test-support"] }
 # Unix PTY smoke coverage drives dialoguer's real terminal adapter under the gate.
 libc = "0.2"
-subc-core = { workspace = true }
 # Read the audit_log directly (after stopping the daemon to release the lease) so
 # the on-the-wire malicious-client conformance test can assert the durable alarm
 # rows its adversarial traffic raised actually landed.

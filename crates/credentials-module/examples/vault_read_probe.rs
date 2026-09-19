@@ -20,9 +20,8 @@
 use std::{path::PathBuf, time::Duration};
 
 use serde_json::{json, Value};
-use subc_core::{read_frame, write_frame, Frame};
-use subc_protocol::{BindIdentity, Flags, FrameType, Priority, RouteTarget};
-use subc_transport::{authenticate_client, connection_file};
+use subc_protocol::{BindIdentity, Flags, Frame, FrameType, Priority, RouteTarget};
+use subc_transport::{authenticate_client, connection_file, read_frame, write_frame};
 use tokio::{net::TcpStream, time::Instant};
 
 const MODULE_ID: &str = "claustrum";

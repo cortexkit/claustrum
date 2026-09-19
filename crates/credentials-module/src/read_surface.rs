@@ -166,6 +166,25 @@ pub struct GetScopedParams {
     /// back to it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enrollment_token: Option<String>,
+    /// The caller's guaranteed-life demand, identical in meaning to `credential.get`'s.
+    ///
+    /// NOT A NICETY, AND THE REASON IS A CONSUMER'S, NOT MINE. A caller that treats a
+    /// served-bearer 401 as evidence the credential is dead needs "alive when I started"
+    /// to imply "alive when the upstream answered". The insula seat fences that with
+    /// `min_ttl_ms` 120s against a 35s fetch deadline: 85s of margin is what makes the
+    /// implication hold. Without a floor, a token with a second left is servable, the
+    /// upstream answers 401 mid-request, and the consumer cannot distinguish that from a
+    /// revoked credential -- so it reports a HEALTHY credential dead and the account
+    /// needs an operator re-login for what was a race.
+    ///
+    /// That failure is self-concealing: it presents as "this account randomly needs
+    /// re-auth", which is the shape people blame on the provider for months.
+    ///
+    /// This op shipped WITHOUT it (hardcoded `None`) and the omission was invisible from
+    /// in here: nine of their call sites pass 120s and none of them could reach this op
+    /// yet. It was found by the consumer pricing a cutover, not by any test.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_ttl_ms: Option<i64>,
     pub credential_id: String,
 }
 
@@ -1385,8 +1404,28 @@ impl ReadSurface {
             return err(code);
         }
 
-        match self.engine.get(&params.credential_id, None, false).await {
-            Ok(record) => {
+        match self
+            .engine
+            // `force_refresh` stays hardcoded off: no scoped caller can ask for it, and
+            // it is a lever that spends an upstream mint on demand. It is a deliberate
+            // omission rather than an oversight -- the same consumer that needs
+            // `min_ttl_ms` confirmed its own trait cannot express force_refresh at all.
+            .get_with_refresh_status(&params.credential_id, params.min_ttl_ms, false)
+            .await
+        {
+            Ok(refreshed) => {
+                // Identical to the handle path: a refusal is sound only after THIS
+                // request minted once for its stated demand. Static reads and
+                // single-flight followers are excluded, because neither proves a fresh
+                // token fails this caller.
+                if refreshed.refreshed_for_min_ttl
+                    && params
+                        .min_ttl_ms
+                        .is_some_and(|min_ttl_ms| !meets_min_ttl(&refreshed.record, min_ttl_ms))
+                {
+                    return err(ReadError::TtlUnsatisfiable);
+                }
+                let record = refreshed.record;
                 if record.kind == credentials_core::record::CredentialKind::SigningKey {
                     // The caller's read grant already authorized this record, so this is not
                     // an absence verdict: the signing key remains serviceable through `sign`

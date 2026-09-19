@@ -3878,6 +3878,7 @@ mod tests {
             read_surface::GetScopedParams {
                 credential_id: "apikey:request-shape".to_owned(),
                 enrollment_token: None,
+                min_ttl_ms: None,
             },
             &["credential_id"],
             "credential.get_scoped",
@@ -3886,9 +3887,80 @@ mod tests {
             read_surface::GetScopedParams {
                 credential_id: "apikey:request-shape".to_owned(),
                 enrollment_token: Some("cke_request_shape".to_owned()),
+                min_ttl_ms: Some(120_000),
             },
-            &["credential_id", "enrollment_token"],
+            &["credential_id", "enrollment_token", "min_ttl_ms"],
             "credential.get_scoped",
+        );
+    }
+
+    /// A SCOPED READ HONOURS `min_ttl_ms` EXACTLY AS THE HANDLE PATH DOES.
+    ///
+    /// The consumer-visible half of the cutover from handle-addressed `credential.get` to
+    /// grant-addressed `credential.get_scoped`. Nine production call sites on the insula
+    /// seat pass 120_000 against a 35s fetch deadline; that 85s of margin is what makes
+    /// "the token was alive when I started" imply "alive when the upstream answered". A
+    /// scoped op that silently dropped the floor would let a mid-request 401 be
+    /// indistinguishable from a revoked credential, so a HEALTHY credential gets reported
+    /// dead and needs an operator re-login for what was a race.
+    ///
+    /// Mirrors `impossible_min_ttl_refuses_after_one_exchange_with_paired_wire_error`
+    /// deliberately: same harness, same record shape, scoped addressing. Parity is the
+    /// property, so the two must be comparable line by line.
+    ///
+    /// MY FIRST VERSION OF THIS TEST ASSERTED A REFUSAL ON A STATIC CREDENTIAL AND FAILED,
+    /// correctly. A static record cannot refresh, so `refreshed_for_min_ttl` is false and
+    /// no refusal is sound -- the tree already pinned that as
+    /// `static_credential_with_oversized_min_ttl_is_served_without_a_refusal`. The
+    /// refusal exists only after a real exchange provably fails the demand.
+    #[tokio::test]
+    async fn a_scoped_read_refuses_an_unsatisfiable_min_ttl_after_one_exchange() {
+        const INITIAL_TTL_MS: i64 = 10 * 60 * 1000;
+        const FRESH_TTL_MS: i64 = 60 * 60 * 1000;
+        const DEMAND_MS: i64 = 2 * 60 * 60 * 1000;
+
+        let (surface, store, calls) = ttl_surface(199, FRESH_TTL_MS);
+        let _handle = seed_ttl_refreshable(&store, "oauth:ttl-scoped", INITIAL_TTL_MS);
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "ttl-probe",
+                credentials_core::store::SelectorKind::Exact,
+                "oauth:ttl-scoped",
+                GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .expect("grant");
+        let principal = subc_protocol::Principal::Reserved {
+            module_id: "ttl-probe".to_owned(),
+        };
+
+        let outcome = surface
+            .get_scoped(
+                Some(&principal),
+                &read_surface::GetScopedParams {
+                    credential_id: "oauth:ttl-scoped".to_owned(),
+                    enrollment_token: None,
+                    min_ttl_ms: Some(DEMAND_MS),
+                },
+            )
+            .await;
+
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the demand must trigger exactly one upstream exchange on the scoped path \
+             too: a scoped op that ignored min_ttl_ms would make ZERO"
+        );
+        let read_surface::GetOutcome::Err { error } = outcome else {
+            panic!("a fresh token shorter than the demand must refuse on the scoped path");
+        };
+        assert_eq!(error.code, read_surface::ReadError::TtlUnsatisfiable);
+        assert_eq!(
+            error.class,
+            read_surface::ErrorClass::ContextOverflow,
+            "reduce-and-retry, never permanent: a permanent class here would license a \
+             consumer to discard a credential that is merely short-lived"
         );
     }
 
@@ -3949,6 +4021,7 @@ mod tests {
                 &read_surface::GetScopedParams {
                     credential_id: "apikey:enrolled-read".to_owned(),
                     enrollment_token: Some(token.clone()),
+                    min_ttl_ms: None,
                 },
             )
             .await;
@@ -3970,6 +4043,7 @@ mod tests {
                 &read_surface::GetScopedParams {
                     credential_id: "apikey:enrolled-read".to_owned(),
                     enrollment_token: Some(token.clone()),
+                    min_ttl_ms: None,
                 },
             )
             .await;

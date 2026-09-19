@@ -56,6 +56,19 @@ use crate::record::{CredentialKind, VaultRecord};
 /// other domain chain in the same database).
 const SCHEMA_NAMESPACE: &str = "credentials";
 
+/// The migration that added `credential_categories` and the `selector_kind` column on
+/// `read_grants`.
+///
+/// The lease-free readers branch on it, because they must read a store that is BEHIND
+/// this binary: a CLI-only change is placed first and the daemon, which migrates, is
+/// restarted later, so between the two every offline read meets a store one migration
+/// behind. At or above this version the new shape is read; below it the pre-9 shape is.
+///
+/// Published because the CLI's behind-store note names this migration as the one that
+/// brings categories, which stays true after a later migration raises the binary's own
+/// version.
+pub const CATEGORY_SCHEMA_VERSION: u32 = 9;
+
 /// The vault schema. The fence table is created lazily by `with_conn_fenced` on
 /// the first fenced write and is not declared here.
 ///
@@ -298,6 +311,24 @@ pub const fn newest_migration_version() -> u32 {
         i += 1;
     }
     newest
+}
+
+/// Apply the migration chain only through `version`, so a test can build a store
+/// sitting at an older schema.
+///
+/// The placement window this reproduces is a store one migration behind the binary,
+/// and the faithful way to build one is to run the REAL chain up to the previous
+/// version. A hand-written schema would drift from the migrations it stands in for,
+/// and the drift would stay invisible until the day it mattered.
+#[cfg(any(test, feature = "test-support"))]
+pub fn migrate_through_for_test(store: &SqliteStore, version: u32) -> Result<(), StoreError> {
+    let chain: Vec<Migration> = MIGRATIONS
+        .iter()
+        .copied()
+        .filter(|migration| migration.version <= version)
+        .collect();
+    store.migrate(SCHEMA_NAMESPACE, &chain)?;
+    Ok(())
 }
 
 /// The `vault_secrets` row name for the audit-chain HMAC key. The audit key is a
@@ -953,7 +984,7 @@ impl EncryptedStore {
     /// List every record's id and non-secret metadata without decrypting.
     pub fn list_meta(&self) -> Result<Vec<(String, RecordMeta)>, StoreOpError> {
         self.store
-            .with_conn(list_meta_from_conn)
+            .with_conn(|conn| list_meta_from_conn(conn, read_schema_version(conn)?))
             .map_err(StoreOpError::from)
     }
 
@@ -1159,7 +1190,7 @@ impl EncryptedStore {
     /// List every grant in deterministic principal/kind/selector/operation order.
     pub fn list_read_grants(&self) -> Result<Vec<ReadGrant>, StoreOpError> {
         self.store
-            .with_conn(|conn| read_grants_from_conn(conn, None, None))
+            .with_conn(|conn| read_grants_from_conn(conn, None, None, read_schema_version(conn)?))
             .map_err(StoreOpError::from)
     }
 
@@ -1197,7 +1228,12 @@ impl EncryptedStore {
         self.store
             .with_conn(|conn| {
                 let tx = conn.unchecked_transaction()?;
-                let grants = read_grants_from_conn(&tx, Some(principal_kind), Some(principal_id))?;
+                let grants = read_grants_from_conn(
+                    &tx,
+                    Some(principal_kind),
+                    Some(principal_id),
+                    read_schema_version(&tx)?,
+                )?;
                 after_grants()?;
                 let mut stmt = tx.prepare(
                     "SELECT credential_id, record_version, state, envelope, \
@@ -3531,14 +3567,56 @@ fn split_categories(categories: String) -> Vec<String> {
     }
 }
 
-fn list_meta_from_conn(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<(String, RecordMeta)>> {
-    let mut stmt = conn.prepare(
+/// Read the vault's recorded schema version from a connection that may be read-only.
+///
+/// `MAX(version)` over this namespace's rows, or 0 when the namespace has no rows. A
+/// file with no version table at all is not a vault; it reports 0 so the caller takes
+/// the pre-9 path and the missing `credentials` table is what it reports, exactly as
+/// before this check existed.
+///
+/// *** THE TOLERANCE THIS ENABLES IS FOR THE PLACEMENT WINDOW, NOT A GENERAL
+/// OLD-STORE READER. *** A CLI-only change is placed first and the daemon, which
+/// migrates, is restarted later, so between the two every offline read meets a store
+/// exactly ONE migration behind. That is the case the readers below handle. A store
+/// two or more migrations behind (schema 7 or lower) is out of scope and may fail as
+/// it did before: the pre-9 shape is read, and nothing promises that the columns the
+/// migrations between that store and 9 added are present.
+fn read_schema_version(conn: &rusqlite::Connection) -> rusqlite::Result<u32> {
+    let version: Option<i64> = conn
+        .query_row(
+            "SELECT MAX(version) FROM cortexkit_schema_version WHERE namespace = ?1",
+            rusqlite::params![SCHEMA_NAMESPACE],
+            |row| row.get(0),
+        )
+        .or_else(|error| match error {
+            rusqlite::Error::SqliteFailure(_, Some(ref message))
+                if message.contains("no such table") =>
+            {
+                Ok(None)
+            }
+            other => Err(other),
+        })?;
+    Ok(version.unwrap_or(0).max(0) as u32)
+}
+
+fn list_meta_from_conn(
+    conn: &rusqlite::Connection,
+    schema_version: u32,
+) -> rusqlite::Result<Vec<(String, RecordMeta)>> {
+    // Below migration 9 there is no `credential_categories` table, so the category
+    // subquery would fail the whole read. Reading the pre-9 shape and reporting an
+    // empty category list is the TRUE reading of that store: no categories exist yet.
+    let sql = if schema_version >= CATEGORY_SCHEMA_VERSION {
         "SELECT credential_id, record_version, key_id, state, stale_pending, \
          COALESCE((SELECT group_concat(category, ',') FROM (\
              SELECT category FROM credential_categories WHERE credential_id = credentials.credential_id ORDER BY category\
          )), '') \
-         FROM credentials ORDER BY credential_id",
-    )?;
+         FROM credentials ORDER BY credential_id"
+    } else {
+        "SELECT credential_id, record_version, key_id, state, stale_pending, '' \
+         FROM credentials ORDER BY credential_id"
+    };
+    let mut stmt = conn.prepare(sql)?;
     let rows = stmt
         .query_map([], |row| {
             let categories: String = row.get(5)?;
@@ -3557,17 +3635,25 @@ fn list_meta_from_conn(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<(Str
     Ok(rows)
 }
 
-/// List credential metadata from a store file WITHOUT a lease or a master key.
-pub fn list_meta_read_only(
+/// List credential metadata from a store file WITHOUT a lease or a master key, with
+/// the store's recorded schema version.
+///
+/// The version rides along so a caller can say what the store is MISSING rather than
+/// silently rendering a reduced view: a store one migration behind has no categories
+/// yet, and an empty category column there is a fact about the store, not about the
+/// credentials.
+pub fn list_meta_read_only_with_schema(
     store_path: &std::path::Path,
-) -> Result<Vec<(String, RecordMeta)>, StoreOpError> {
+) -> Result<(Vec<(String, RecordMeta)>, u32), StoreOpError> {
     let map = |e: rusqlite::Error| StoreOpError::from(StoreError::Backend(e.to_string()));
     let conn = rusqlite::Connection::open_with_flags(
         format!("file:{}?mode=ro", store_path.display()),
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
     )
     .map_err(map)?;
-    list_meta_from_conn(&conn)
+    let schema_version = read_schema_version(&conn).map_err(map)?;
+    list_meta_from_conn(&conn, schema_version)
+        .map(|rows| (rows, schema_version))
         .map_err(map)
         .map_err(|error| match error {
             StoreOpError::Store(message) if message.contains("no such table: credentials") => {
@@ -3577,20 +3663,45 @@ pub fn list_meta_read_only(
         })
 }
 
+/// List credential metadata from a store file WITHOUT a lease or a master key.
+///
+/// A thin wrapper over [`list_meta_read_only_with_schema`] for callers that want only
+/// the rows. Reach for the version-aware reader when the caller has to say anything
+/// about what the store is missing; do not add a third reader beside these two.
+pub fn list_meta_read_only(
+    store_path: &std::path::Path,
+) -> Result<Vec<(String, RecordMeta)>, StoreOpError> {
+    list_meta_read_only_with_schema(store_path).map(|(rows, _)| rows)
+}
+
 fn read_grants_from_conn(
     conn: &rusqlite::Connection,
     principal_kind: Option<&str>,
     principal_id: Option<&str>,
+    schema_version: u32,
 ) -> rusqlite::Result<Vec<ReadGrant>> {
-    let sql = if principal_kind.is_some() && principal_id.is_some() {
-        "SELECT principal_kind, principal_id, selector_kind, credential_prefix, operation, created_at_ms \
-         FROM read_grants WHERE principal_kind = ?1 AND principal_id = ?2 \
-         ORDER BY selector_kind, credential_prefix, operation"
+    // Below migration 9 there is no `selector_kind` column, so selecting it fails the
+    // whole read. Every grant in a pre-9 store IS a prefix grant -- migration 9 is what
+    // introduced the category kind -- so reporting `Prefix` for each row is the TRUE
+    // reading of that store rather than a default standing in for an unknown.
+    let selector_kind_column = if schema_version >= CATEGORY_SCHEMA_VERSION {
+        "selector_kind"
     } else {
-        "SELECT principal_kind, principal_id, selector_kind, credential_prefix, operation, created_at_ms \
-         FROM read_grants ORDER BY principal_kind, principal_id, selector_kind, credential_prefix, operation"
+        "'prefix'"
     };
-    let mut stmt = conn.prepare(sql)?;
+    let sql = if principal_kind.is_some() && principal_id.is_some() {
+        format!(
+            "SELECT principal_kind, principal_id, {selector_kind_column}, credential_prefix, operation, created_at_ms \
+             FROM read_grants WHERE principal_kind = ?1 AND principal_id = ?2 \
+             ORDER BY {selector_kind_column}, credential_prefix, operation"
+        )
+    } else {
+        format!(
+            "SELECT principal_kind, principal_id, {selector_kind_column}, credential_prefix, operation, created_at_ms \
+             FROM read_grants ORDER BY principal_kind, principal_id, {selector_kind_column}, credential_prefix, operation"
+        )
+    };
+    let mut stmt = conn.prepare(&sql)?;
     let parse = |row: &rusqlite::Row<'_>| {
         let selector_kind = row
             .get::<_, String>(2)?
@@ -3636,17 +3747,24 @@ fn read_grants_from_conn(
     }
 }
 
-/// List operation grants from a store file WITHOUT a lease or a master key.
-pub fn list_read_grants_read_only(
+/// List operation grants from a store file WITHOUT a lease or a master key, with the
+/// store's recorded schema version.
+///
+/// The version rides along for the same reason as the metadata reader: a store one
+/// migration behind has no category grants yet, and a caller that renders the grant
+/// set has to be able to say so rather than present a prefix-only view as complete.
+pub fn list_read_grants_read_only_with_schema(
     store_path: &std::path::Path,
-) -> Result<Vec<ReadGrant>, StoreOpError> {
+) -> Result<(Vec<ReadGrant>, u32), StoreOpError> {
     let map = |e: rusqlite::Error| StoreOpError::from(StoreError::Backend(e.to_string()));
     let conn = rusqlite::Connection::open_with_flags(
         format!("file:{}?mode=ro", store_path.display()),
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
     )
     .map_err(map)?;
-    read_grants_from_conn(&conn, None, None)
+    let schema_version = read_schema_version(&conn).map_err(map)?;
+    read_grants_from_conn(&conn, None, None, schema_version)
+        .map(|grants| (grants, schema_version))
         .map_err(map)
         .map_err(|error| match error {
             StoreOpError::Store(message) if message.contains("no such table: read_grants") => {
@@ -3654,6 +3772,17 @@ pub fn list_read_grants_read_only(
             }
             other => other,
         })
+}
+
+/// List operation grants from a store file WITHOUT a lease or a master key.
+///
+/// A thin wrapper over [`list_read_grants_read_only_with_schema`] for callers that want
+/// only the rows. Reach for the version-aware reader when the caller has to say
+/// anything about what the store is missing; do not add a third reader beside these two.
+pub fn list_read_grants_read_only(
+    store_path: &std::path::Path,
+) -> Result<Vec<ReadGrant>, StoreOpError> {
+    list_read_grants_read_only_with_schema(store_path).map(|(grants, _)| grants)
 }
 
 /// Count open refresh intents from a store file WITHOUT a lease or a master key.
@@ -7871,6 +8000,109 @@ mod taxonomy_tests {
                 Ok(())
             })
             .expect("inspect migrated store");
+    }
+
+    #[test]
+    fn lease_free_readers_tolerate_a_store_one_migration_behind() {
+        // *** THE PLACEMENT WINDOW, REPRODUCED. *** A CLI-only change is placed first
+        // and the daemon, which migrates on boot, is restarted later. Between the two
+        // every offline read meets a store exactly one migration behind, and these
+        // readers must read it truthfully rather than fail on a table and a column that
+        // do not exist yet.
+        let (root, sqlite) = sqlite("behind-readers", 83);
+        migrate_through_for_test(&sqlite, 8).expect("migrate through version 8");
+        let path = root.join("store.db");
+        sqlite
+            .with_conn(|conn| {
+                for id in ["apikey:one", "apikey:two"] {
+                    conn.execute(
+                        "INSERT INTO credentials \
+                         (credential_id, record_version, key_id, state, envelope, updated_at_ms) \
+                         VALUES (?1, 1, '00', 'active', X'00', 0)",
+                        rusqlite::params![id],
+                    )?;
+                }
+                conn.execute(
+                    "INSERT INTO read_grants \
+                     (principal_kind, principal_id, credential_prefix, operation, created_at_ms) \
+                     VALUES ('reserved', 'agent', 'apikey:', 'read', 7)",
+                    [],
+                )?;
+                Ok(())
+            })
+            .expect("seed schema-8 rows");
+
+        let (metas, meta_schema) =
+            list_meta_read_only_with_schema(&path).expect("metadata read on a schema-8 store");
+        assert_eq!(
+            meta_schema, 8,
+            "the reader must report the store's own version"
+        );
+        assert_eq!(
+            metas.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(),
+            ["apikey:one", "apikey:two"],
+            "every credential must be listed, not just the ones a new column happens to fit"
+        );
+        assert!(
+            metas.iter().all(|(_, meta)| meta.categories.is_empty()),
+            "a schema-8 store has no categories, so an empty list is the true reading"
+        );
+
+        let (grants, grant_schema) =
+            list_read_grants_read_only_with_schema(&path).expect("grant read on a schema-8 store");
+        assert_eq!(grant_schema, 8);
+        assert_eq!(grants.len(), 1, "every grant must be listed");
+        assert_eq!(grants[0].credential_prefix, "apikey:");
+        assert_eq!(
+            grants[0].selector_kind,
+            SelectorKind::Prefix,
+            "migration 9 is what introduced the category kind, so every pre-9 grant is a \
+             prefix grant -- this is a reading, not a default"
+        );
+
+        // POSITIVE CONTROL FOR EVERY ABSENT ASSERTION ABOVE. The same reads against a
+        // migrated store must find the thing present, or the assertions above would pass
+        // just as well against a reader that never returns anything.
+        let (migrated_root, store) = rig("behind-readers-migrated", 84);
+        store
+            .create_audited("apikey:zai", &api_record(), AuditCtx::admin(AuditOp::Put))
+            .expect("seed a classified credential");
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "agent",
+                SelectorKind::Category,
+                "category:llm-provider",
+                GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .expect("seed a category grant");
+        let migrated_path = migrated_root.join("store.db");
+
+        let (metas, meta_schema) = list_meta_read_only_with_schema(&migrated_path)
+            .expect("metadata read on a migrated store");
+        assert_eq!(
+            meta_schema,
+            newest_migration_version(),
+            "a migrated store reports the binary's own version (the literal is pinned by \
+             the_newest_migration_version_is_pinned_because_the_manifest_declares_it)"
+        );
+        assert!(meta_schema >= CATEGORY_SCHEMA_VERSION);
+        assert_eq!(
+            metas[0].1.categories,
+            ["llm-provider"],
+            "the migrated arm must read REAL categories, or the empty list above proves nothing"
+        );
+
+        let (grants, grant_schema) = list_read_grants_read_only_with_schema(&migrated_path)
+            .expect("grant read on a migrated store");
+        assert_eq!(grant_schema, newest_migration_version());
+        assert_eq!(
+            grants[0].selector_kind,
+            SelectorKind::Category,
+            "the migrated arm must read the stored selector kind, or the Prefix assertion \
+             above would hold for a reader that hardcodes it"
+        );
     }
 
     #[test]

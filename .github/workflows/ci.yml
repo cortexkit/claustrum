@@ -301,6 +301,15 @@ jobs:
         if: matrix.os == 'ubuntu'
         run: cargo test --locked -p credentials-module --test cli_admin test_escape_hatches_are_absent -- --ignored
 
+      # The released v0.1.2 artifact must keep reading a store that carries every
+      # later migration: it predates the store-ahead refusal, so it is the binary a
+      # rollback would run. The test downloads the artifact, which is why it is
+      # #[ignore]'d and runs as its own step; the compiled matrix covers darwin-arm64
+      # and linux-x64, the two the test knows how to fetch.
+      - name: Released v0.1.2 reads a migration-N store
+        if: matrix.os == 'ubuntu'
+        run: cargo test --locked -p credentials-module --test v012_release_compat -- --ignored --nocapture
+
   # WHAT A FORK PR CAN ACTUALLY BE TOLD, given that the job above cannot run for it.
   #
   # The cargo suite cannot run for a fork, but the public Bun workspace can. A green

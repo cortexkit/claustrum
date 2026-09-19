@@ -96,7 +96,11 @@ fn download_release(root: &Path) -> PathBuf {
     binary
 }
 
+/// Runs only as its own gate arm: it downloads the published v0.1.2 artifact from
+/// GitHub, so inside the workspace suite an offline machine would read a network
+/// failure as a test regression. The arm fails loudly rather than skipping.
 #[test]
+#[ignore = "downloads the released v0.1.2 artifact; run explicitly or as the release-compat gate arm"]
 fn v012_release_artifact_reads_migration_n_without_a_read_write_open() {
     let root = TestTempDir::new(format!("v012-compat-{}", std::process::id()));
     let artifact_dir = root.join("artifact");

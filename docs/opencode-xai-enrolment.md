@@ -83,6 +83,8 @@ The xAI access-token lifetime measured on 2026-09-19 was 6.00 hours. Three indep
 
 Revocation measured as `predecessor_survives`: replaying a rotated-away refresh token returned HTTP 200 and a third distinct family. xAI does not revoke a predecessor refresh token on rotation. A fresh vault login therefore does not burn an older local or backed-up xAI lineage. Provider-side revocation, if wanted, is a separate operator action in the xAI console. There is no CLI for it here.
 
+This applies to the local family in `auth.json` too: the tombstone overwrites the entry, but the refresh token it held stays valid until its own expiry in any copy that exists (backups, the pre-flip `OPENCODE_AUTH_CONTENT` of a still-running workspace child). Enrolment moves serving into the vault; it does not retire the old lineage.
+
 To repeat the labelled measurement after a binary or provider change:
 
 1. Log in to `oauth:xai:measure-<UTC stamp>`, never the main id.

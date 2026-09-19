@@ -2449,7 +2449,7 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
-                SelectorKind::Prefix,
+                SelectorKind::Exact,
                 "github_app:",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -2499,7 +2499,7 @@ mod tests {
             .revoke_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
-                SelectorKind::Prefix,
+                SelectorKind::Exact,
                 "github_app:",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantRevoke),
@@ -2539,7 +2539,7 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "consumer",
-                SelectorKind::Prefix,
+                SelectorKind::Exact,
                 "apikey:",
                 GrantOperation::Sign,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -2625,7 +2625,7 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
-                SelectorKind::Prefix,
+                SelectorKind::Exact,
                 "github_app:",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -2659,7 +2659,7 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
-                SelectorKind::Prefix,
+                SelectorKind::Exact,
                 "github_app:",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -2693,7 +2693,7 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
-                SelectorKind::Prefix,
+                SelectorKind::Exact,
                 "github_app:",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -2742,7 +2742,7 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
-                SelectorKind::Prefix,
+                SelectorKind::Exact,
                 "github_app:",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -2788,7 +2788,7 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
-                SelectorKind::Prefix,
+                SelectorKind::Exact,
                 "github_app:",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -2883,7 +2883,7 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
-                SelectorKind::Prefix,
+                SelectorKind::Exact,
                 "github_app:",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -2925,7 +2925,7 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
-                SelectorKind::Prefix,
+                SelectorKind::Exact,
                 "apikey:status-",
                 GrantOperation::Sign,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -2970,7 +2970,7 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
-                SelectorKind::Prefix,
+                SelectorKind::Exact,
                 "github_app:",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -3069,7 +3069,7 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
-                SelectorKind::Prefix,
+                SelectorKind::Exact,
                 "github_app:",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -3167,7 +3167,7 @@ mod tests {
             {
                 "principal_kind": "reserved",
                 "principal_id": "prefrontal-core",
-                "selector_kind": "prefix",
+                "selector_kind": "exact",
                 "credential_prefix": "apikey:",
                 "operation": "read",
                 "covered_credential_ids": ["apikey:active", "apikey:dead"],
@@ -3175,7 +3175,7 @@ mod tests {
             {
                 "principal_kind": "reserved",
                 "principal_id": "prefrontal-core",
-                "selector_kind": "prefix",
+                "selector_kind": "exact",
                 "credential_prefix": "apikey:",
                 "operation": "sign",
                 "covered_credential_ids": ["apikey:active", "apikey:dead"],
@@ -3183,7 +3183,7 @@ mod tests {
             {
                 "principal_kind": "reserved",
                 "principal_id": "prefrontal-core",
-                "selector_kind": "prefix",
+                "selector_kind": "exact",
                 "credential_prefix": "github_app:",
                 "operation": "read",
                 "covered_credential_ids": ["github_app:a", "github_app:z"],
@@ -3191,7 +3191,7 @@ mod tests {
             {
                 "principal_kind": "reserved",
                 "principal_id": "prefrontal-core",
-                "selector_kind": "prefix",
+                "selector_kind": "exact",
                 "credential_prefix": "github_app:",
                 "operation": "sign",
                 "covered_credential_ids": ["github_app:a", "github_app:z"],
@@ -4770,7 +4770,7 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
-                SelectorKind::Prefix,
+                SelectorKind::Exact,
                 "signing:scoped:",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -4911,7 +4911,7 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
-                SelectorKind::Prefix,
+                SelectorKind::Exact,
                 "signing:operations:",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -4955,7 +4955,7 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
-                SelectorKind::Prefix,
+                SelectorKind::Exact,
                 "apikey:operations:",
                 GrantOperation::Sign,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -5005,7 +5005,7 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
-                SelectorKind::Prefix,
+                SelectorKind::Exact,
                 "signing:operations:",
                 GrantOperation::Sign,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -5059,7 +5059,7 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
-                SelectorKind::Prefix,
+                SelectorKind::Exact,
                 "signing:public-key:",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -5108,7 +5108,7 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
-                SelectorKind::Prefix,
+                SelectorKind::Exact,
                 "signing:public-key:",
                 GrantOperation::Sign,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -5191,7 +5191,7 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
-                SelectorKind::Prefix,
+                SelectorKind::Exact,
                 "apikey:public-key:",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -5237,7 +5237,7 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
-                SelectorKind::Prefix,
+                SelectorKind::Exact,
                 "signing:public-key:",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -5292,7 +5292,7 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
-                SelectorKind::Prefix,
+                SelectorKind::Exact,
                 "signing:public-key:",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),

@@ -732,7 +732,7 @@ fn project_list_scoped(snapshot: ScopedListSnapshot) -> ListScopedResult {
         .into_iter()
         .map(|grant| GrantTuple {
             selector_kind: grant.selector_kind.as_str().to_string(),
-            selector: grant.credential_prefix,
+            selector: grant.selector,
             operation: grant.operation.as_str().to_string(),
         })
         .collect();
@@ -2081,7 +2081,7 @@ mod list_scoped_tests {
             principal_kind: "reserved".into(),
             principal_id: "consumer".into(),
             selector_kind: kind,
-            credential_prefix: selector.into(),
+            selector: selector.into(),
             operation,
             created_at_ms: 1,
         }
@@ -2177,14 +2177,14 @@ mod list_scoped_tests {
                     "category:llm-provider",
                     GrantOperation::Sign,
                 ),
-                grant(SelectorKind::Prefix, "", GrantOperation::Read),
+                grant(SelectorKind::Exact, "", GrantOperation::Read),
             ],
         };
         let result = project_list_scoped(snapshot);
         assert_eq!(result.grants, result.grant_tuples.len());
         assert_eq!(
             result.view,
-            "jxpGFOH6OpL/mq0u8vgFtjZY8iJIob3BodaijqA260U=",
+            "mTmtdFT6RyEC3Ddnzn36OYTizrjClQKb29P0FV3/Slg=",
             "state/operation/selector enums are length-prefixed strings; lists carry counts; optionals carry presence bytes"
         );
         assert_eq!(result.credentials[0].id, "a-active");
@@ -2196,7 +2196,7 @@ mod list_scoped_tests {
 
     #[test]
     fn list_scoped_view_is_injective_for_strings_and_optional_presence() {
-        let base_grants = vec![grant(SelectorKind::Prefix, "", GrantOperation::Read)];
+        let base_grants = vec![grant(SelectorKind::Exact, "", GrantOperation::Read)];
         let left = project_list_scoped(ScopedListSnapshot {
             rows: vec![row(
                 "a",

@@ -660,7 +660,7 @@ pub fn apply(
             store.create_read_grant_audited(
                 "reserved",
                 &principal_id,
-                SelectorKind::Prefix,
+                SelectorKind::Exact,
                 &credential_prefix,
                 operation,
                 ctx,
@@ -677,7 +677,7 @@ pub fn apply(
             store.revoke_read_grant_audited(
                 "reserved",
                 &principal_id,
-                SelectorKind::Prefix,
+                SelectorKind::Exact,
                 &credential_prefix,
                 operation,
                 ctx,
@@ -693,7 +693,7 @@ pub fn apply(
             ..
         } => {
             let stored_selector = match selector_kind {
-                SelectorKind::Prefix => selector,
+                SelectorKind::Exact => selector,
                 SelectorKind::Category => {
                     if !crate::catalog::valid_category_name(&selector) {
                         return Err(StoreOpError::InvalidCategoryName);
@@ -720,7 +720,7 @@ pub fn apply(
             ..
         } => {
             let stored_selector = match selector_kind {
-                SelectorKind::Prefix => selector,
+                SelectorKind::Exact => selector,
                 SelectorKind::Category => {
                     if !crate::catalog::valid_category_name(&selector) {
                         return Err(StoreOpError::InvalidCategoryName);
@@ -804,11 +804,11 @@ pub fn status_result(
             let covered_credential_ids: Vec<&str> = metas
                 .iter()
                 .filter(|(id, meta)| match grant.selector_kind {
-                    SelectorKind::Prefix => id.starts_with(&grant.credential_prefix),
+                    SelectorKind::Exact => id.starts_with(&grant.selector),
                     SelectorKind::Category => meta
                         .categories
                         .iter()
-                        .any(|category| grant.credential_prefix == format!("category:{category}")),
+                        .any(|category| grant.selector == format!("category:{category}")),
                 })
                 .map(|(id, _)| id.as_str())
                 .collect();
@@ -816,7 +816,7 @@ pub fn status_result(
                 "principal_kind": grant.principal_kind,
                 "principal_id": grant.principal_id,
                 "selector_kind": grant.selector_kind.as_str(),
-                "credential_prefix": grant.credential_prefix,
+                "credential_prefix": grant.selector,
                 "operation": grant.operation.as_str(),
                 "created_at_ms": grant.created_at_ms,
                 "covered_credential_ids": covered_credential_ids,

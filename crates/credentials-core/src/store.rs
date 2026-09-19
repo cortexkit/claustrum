@@ -69,6 +69,31 @@ const SCHEMA_NAMESPACE: &str = "credentials";
 /// version.
 pub const CATEGORY_SCHEMA_VERSION: u32 = 9;
 
+/// The migration that renamed `read_grants.credential_prefix` to `selector`, narrowed
+/// the selector vocabulary, and added the enrollment and grant-generation tables.
+///
+/// The readers that open the store file without the write lease (`grants`, `list`,
+/// `status`) branch on it for the same reason they branch on
+/// [`CATEGORY_SCHEMA_VERSION`]: a new CLI is placed before the daemon that migrates is
+/// restarted, so between the two every such read meets a store one migration behind,
+/// where the grant table still carries the old column name.
+pub const SELECTOR_SCHEMA_VERSION: u32 = 10;
+
+/// The audit ops that DEPOSIT a credential, so the earliest entry carrying one of
+/// them is that credential's birth instant.
+///
+/// Migration 10 dates every existing credential from this set and the guard in
+/// [`EncryptedStore::migrate`] refuses a credential the set cannot date. The literals
+/// are repeated verbatim inside that migration's own `UPDATE`, and a test pins the two
+/// lists together: a set that drifted apart would refuse rows the migration can date,
+/// or date rows the guard never checked.
+///
+/// Two of them (`create`, `store`) are not written by this binary's op vocabulary. They
+/// stay in the set because the chain is historical data written by every version that
+/// has ever held the store, and a narrower set would refuse a credential whose birth
+/// entry an older writer spelled differently.
+const CHAIN_BIRTH_OPS: [&str; 5] = ["put", "import", "login", "create", "store"];
+
 /// The vault schema. The fence table is created lazily by `with_conn_fenced` on
 /// the first fenced write and is not declared here.
 ///
@@ -279,6 +304,98 @@ const MIGRATIONS: &[Migration] = &[
                      ); \
                      CREATE INDEX idx_credential_categories_id ON credential_categories(credential_id);",
     },
+    // Enrolled consumers, their pending ceremonies, and the store-wide grant
+    // generation -- plus the selector vocabulary the grant table now keys on.
+    //
+    // `read_grants` is rebuilt (create, copy, DROP, rename) rather than altered
+    // because the two CHECK constraints and the renamed `selector` column all land
+    // inside its compound primary key, which SQLite cannot alter in place. The
+    // selector column carries bare selector text for both kinds; the kind column
+    // says how to read it, so the historical `credential_prefix` name no longer
+    // describes what is stored.
+    //
+    // `principal_kind` becomes a closed allowlist: a grant belongs either to a
+    // launch-nonce module (`reserved`) or to an enrolled consumer (`enrolled`), and
+    // a third value in that column would be a principal no authorization path can
+    // evaluate.
+    //
+    // PARTIAL UNIQUENESS IS A SEPARATE STATEMENT, NOT A COLUMN CONSTRAINT: SQLite
+    // accepts no `WHERE` clause on an in-table `UNIQUE`, and uniqueness here is a
+    // property of LIVE rows only. A revoked enrollment row stays readable forever
+    // (the audit join to its grants must survive), so a name may repeat across
+    // incarnations while at most one incarnation is live; the same holds for a
+    // proposed name across terminal ceremony rows.
+    //
+    // `credentials.created_at_ms` is backfilled from each row's own chain birth
+    // entry -- the earliest audit row that deposited it -- and deliberately NOT from
+    // `updated_at_ms`, which is a WRITE time: an actively refreshing credential
+    // rewrites it several times a day, so a consumer keyed on it would see every
+    // refreshing credential as newly created. A credential the chain cannot date is
+    // refused by the guard in `EncryptedStore::migrate` rather than given a default,
+    // so no uniform value is ever written here.
+    //
+    // The generation seed is the LAST statement of this migration on purpose. It is
+    // a single store-wide counter that every later grant and category mutation
+    // increments, and this migration's own writes are not such a mutation: seeding
+    // after them means a migrated store and a store created fresh at this version
+    // both observe exactly 1, and the first mutation afterwards is the first bump.
+    Migration {
+        version: 10,
+        statements: "CREATE TABLE read_grants_v10 (\
+                         principal_kind    TEXT NOT NULL CHECK (principal_kind IN ('reserved','enrolled')), \
+                         principal_id      TEXT NOT NULL, \
+                         selector_kind     TEXT NOT NULL CHECK (selector_kind IN ('exact','category')), \
+                         selector          TEXT NOT NULL, \
+                         operation         TEXT NOT NULL CHECK(operation IN ('read', 'sign')), \
+                         created_at_ms     INTEGER NOT NULL, \
+                         PRIMARY KEY (principal_kind, principal_id, selector_kind, selector, operation)\
+                     ); \
+                     INSERT INTO read_grants_v10 \
+                         (principal_kind, principal_id, selector_kind, selector, operation, created_at_ms) \
+                     SELECT principal_kind, principal_id, \
+                            CASE selector_kind WHEN 'prefix' THEN 'exact' ELSE selector_kind END, \
+                            credential_prefix, operation, created_at_ms \
+                     FROM read_grants; \
+                     DROP TABLE read_grants; \
+                     ALTER TABLE read_grants_v10 RENAME TO read_grants; \
+                     CREATE TABLE enrolled_consumers (\
+                         enrollment_id    TEXT PRIMARY KEY, \
+                         name             TEXT NOT NULL, \
+                         token_hash       TEXT, \
+                         token_generation INTEGER NOT NULL DEFAULT 0, \
+                         approved_at_ms   INTEGER NOT NULL, \
+                         approved_by      TEXT NOT NULL, \
+                         revoked_at_ms    INTEGER\
+                     ); \
+                     CREATE UNIQUE INDEX enrolled_consumers_live_name \
+                         ON enrolled_consumers(name) WHERE revoked_at_ms IS NULL; \
+                     CREATE TABLE pending_enrollments (\
+                         request_id          TEXT PRIMARY KEY, \
+                         proposed_name       TEXT NOT NULL, \
+                         final_name          TEXT, \
+                         enrollment_id       TEXT, \
+                         request_secret_hash TEXT NOT NULL, \
+                         state               TEXT NOT NULL \
+                             CHECK (state IN ('pending','approved','denied','consumed','expired')), \
+                         approved_by         TEXT, \
+                         approved_at_ms      INTEGER, \
+                         created_at_ms       INTEGER NOT NULL, \
+                         expires_at_ms       INTEGER NOT NULL\
+                     ); \
+                     CREATE UNIQUE INDEX pending_enrollments_live_name \
+                         ON pending_enrollments(proposed_name) WHERE state IN ('pending','approved'); \
+                     ALTER TABLE credentials ADD COLUMN created_at_ms INTEGER; \
+                     UPDATE credentials SET created_at_ms = (\
+                         SELECT MIN(ts_ms) FROM audit_log \
+                          WHERE audit_log.credential_id = credentials.credential_id \
+                            AND audit_log.op IN ('put', 'import', 'login', 'create', 'store')\
+                     ); \
+                     CREATE TABLE grants_generation (\
+                         id    INTEGER PRIMARY KEY CHECK (id = 1), \
+                         value INTEGER NOT NULL\
+                     ); \
+                     INSERT INTO grants_generation (id, value) VALUES (1, 1);",
+    },
 ];
 
 /// The newest store migration THIS BINARY knows how to apply.
@@ -389,20 +506,21 @@ impl std::str::FromStr for GrantOperation {
     }
 }
 
-/// How a grant selector is evaluated.
+/// How a grant selector is evaluated: against one credential id, or against the
+/// categories a credential carries.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum SelectorKind {
-    Prefix,
+    Exact,
     Category,
 }
 
 impl SelectorKind {
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Prefix => "prefix",
+            Self::Exact => "exact",
             Self::Category => "category",
         }
     }
@@ -413,23 +531,23 @@ impl std::str::FromStr for SelectorKind {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
-            "prefix" => Ok(Self::Prefix),
+            "exact" => Ok(Self::Exact),
             "category" => Ok(Self::Category),
             _ => Err(format!(
-                "unknown selector kind '{value}' (expected prefix or category)"
+                "unknown selector kind '{value}' (expected exact or category)"
             )),
         }
     }
 }
 
-/// One durable principal-scoped operation grant. `credential_prefix` retains its
-/// historical column name, but stores the selector text for both selector kinds.
+/// One durable principal-scoped operation grant. `selector` holds the selector text
+/// for both selector kinds, and `selector_kind` says how to read it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadGrant {
     pub principal_kind: String,
     pub principal_id: String,
     pub selector_kind: SelectorKind,
-    pub credential_prefix: String,
+    pub selector: String,
     pub operation: GrantOperation,
     pub created_at_ms: i64,
 }
@@ -920,6 +1038,59 @@ impl EncryptedStore {
             )));
         }
 
+        // Migration 10 dates every existing credential from its own chain birth row,
+        // and the declarative migration runner has no refusal hook, so the totality of
+        // that backfill is proved HERE, before a single statement runs.
+        //
+        // A credential whose chain holds no deposit entry cannot be dated, and the
+        // alternatives are both worse than stopping: a uniform fallback makes every
+        // pre-existing credential look simultaneously new (or simultaneously ancient)
+        // to a consumer keyed on creation time, and leaving the column NULL moves the
+        // same decision to whichever reader meets it first. Refusing names the ids so
+        // an operator can look at them.
+        let (recorded_version, undatable_ids) = store.with_conn(|conn| {
+            let recorded = read_schema_version(conn)?;
+            if recorded >= SELECTOR_SCHEMA_VERSION || !table_exists(conn, "credentials")? {
+                return Ok((recorded, Vec::new()));
+            }
+            // No chain table at all means no credential can be dated, so every id is
+            // named rather than the query failing on a missing table.
+            let birth_filter = if table_exists(conn, "audit_log")? {
+                let list = CHAIN_BIRTH_OPS
+                    .iter()
+                    .map(|op| format!("'{op}'"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    " WHERE credential_id NOT IN (\
+                         SELECT credential_id FROM audit_log \
+                          WHERE credential_id IS NOT NULL AND op IN ({list})\
+                     )"
+                )
+            } else {
+                String::new()
+            };
+            let mut stmt = conn.prepare(&format!(
+                "SELECT credential_id FROM credentials{birth_filter} ORDER BY credential_id"
+            ))?;
+            let ids = stmt
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok((recorded, ids))
+        })?;
+        if !undatable_ids.is_empty() {
+            return Err(StoreError::Backend(format!(
+                "migration 10 refused: {} credential(s) have no birth row in the audit \
+                 chain, so their creation time cannot be derived: {}. A birth row is the \
+                 earliest audit entry naming the credential with op in [{}]. The store is \
+                 untouched and still at schema {recorded_version}; restore the chain that \
+                 dates these credentials, or remove them, and migrate again.",
+                undatable_ids.len(),
+                undatable_ids.join(", "),
+                CHAIN_BIRTH_OPS.join(", "),
+            )));
+        }
+
         let outcome = store.migrate(SCHEMA_NAMESPACE, MIGRATIONS)?;
         if outcome.store_ahead() {
             // NAME THE BINARY THAT IS REFUSING. Two binaries open this store -- the
@@ -1046,7 +1217,7 @@ impl EncryptedStore {
         let changed = self.fenced_write(|tx| {
             let changed = tx.execute(
                 "INSERT INTO read_grants \
-                 (principal_kind, principal_id, selector_kind, credential_prefix, operation, created_at_ms) \
+                 (principal_kind, principal_id, selector_kind, selector, operation, created_at_ms) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT DO NOTHING",
                 rusqlite::params![
                     principal_kind,
@@ -1069,6 +1240,7 @@ impl EncryptedStore {
                         alarm: ctx.alarm,
                     },
                 )?;
+                bump_grants_generation_tx(tx)?;
             }
             Ok(changed)
         })?;
@@ -1104,7 +1276,7 @@ impl EncryptedStore {
             let changed = tx.execute(
                 "DELETE FROM read_grants \
                   WHERE principal_kind = ?1 AND principal_id = ?2 \
-                    AND selector_kind = ?3 AND credential_prefix = ?4 AND operation = ?5",
+                    AND selector_kind = ?3 AND selector = ?4 AND operation = ?5",
                 rusqlite::params![
                     principal_kind,
                     principal_id,
@@ -1125,6 +1297,7 @@ impl EncryptedStore {
                         alarm: ctx.alarm,
                     },
                 )?;
+                bump_grants_generation_tx(tx)?;
             }
             Ok(changed)
         })?;
@@ -1160,7 +1333,7 @@ impl EncryptedStore {
         self.store
             .with_conn(|conn| {
                 let mut stmt = conn.prepare(
-                    "SELECT selector_kind, credential_prefix FROM read_grants \
+                    "SELECT selector_kind, selector FROM read_grants \
                      WHERE principal_kind = ?1 AND principal_id = ?2 AND operation = ?3",
                 )?;
                 let rows = stmt.query_map(
@@ -1169,10 +1342,15 @@ impl EncryptedStore {
                 )?;
                 let grants = rows.collect::<rusqlite::Result<Vec<_>>>()?;
                 let caller_active_grants = grants.len() as u32;
-                let holds_category_selector = grants.iter().any(|(kind, _)| kind == "category");
-                let mut covered = grants
+                // The stored kind text is compared through the enum rather than against a
+                // literal spelled again here: this predicate reads raw columns, so a
+                // vocabulary change that misses it would silently cover nothing.
+                let holds_category_selector = grants
                     .iter()
-                    .any(|(kind, selector)| kind == "prefix" && credential_id.starts_with(selector));
+                    .any(|(kind, _)| kind == SelectorKind::Category.as_str());
+                let mut covered = grants.iter().any(|(kind, selector)| {
+                    kind == SelectorKind::Exact.as_str() && credential_id.starts_with(selector)
+                });
                 let id_exists = conn.query_row(
                     "SELECT EXISTS(SELECT 1 FROM credentials WHERE credential_id = ?1)",
                     rusqlite::params![credential_id],
@@ -1187,7 +1365,7 @@ impl EncryptedStore {
                         .query_map(rusqlite::params![credential_id], |row| row.get::<_, String>(0))?
                         .collect::<rusqlite::Result<Vec<_>>>()?;
                     covered = grants.iter().any(|(kind, selector)| {
-                        kind == "category"
+                        kind == SelectorKind::Category.as_str()
                             && categories
                                 .iter()
                                 .any(|category| selector == &format!("category:{category}"))
@@ -1204,6 +1382,24 @@ impl EncryptedStore {
                     id_exists,
                     id_category_count,
                 })
+            })
+            .map_err(StoreOpError::from)
+    }
+
+    /// The store-wide grant generation: every grant and category mutation advances it
+    /// in its own transaction, so a consumer that observes a changed value knows the
+    /// set of credentials it may reach has moved and re-enumerates.
+    ///
+    /// Seeded to 1 by the migration that creates the row, and a store row rather than
+    /// a process counter, so it never regresses across a restart.
+    pub fn grants_generation(&self) -> Result<u64, StoreOpError> {
+        self.store
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT value FROM grants_generation WHERE id = 1",
+                    [],
+                    |row| row.get::<_, i64>(0).map(|value| value as u64),
+                )
             })
             .map_err(StoreOpError::from)
     }
@@ -1280,10 +1476,10 @@ impl EncryptedStore {
                     let operations: BTreeSet<GrantOperation> = grants
                         .iter()
                         .filter(|grant| match grant.selector_kind {
-                            SelectorKind::Prefix => id.starts_with(&grant.credential_prefix),
-                            SelectorKind::Category => categories.iter().any(|category| {
-                                grant.credential_prefix == format!("category:{category}")
-                            }),
+                            SelectorKind::Exact => id.starts_with(&grant.selector),
+                            SelectorKind::Category => categories
+                                .iter()
+                                .any(|category| grant.selector == format!("category:{category}")),
                         })
                         .map(|grant| grant.operation)
                         .collect();
@@ -1421,6 +1617,9 @@ impl EncryptedStore {
                     alarm: ctx.alarm,
                 },
             )?;
+            // An assignment changes what every category grant naming it reaches, so it
+            // advances the same counter a grant mutation does.
+            bump_grants_generation_tx(tx)?;
             Ok(Some(true))
         })?;
         outcome.ok_or(StoreOpError::NotFound)
@@ -1485,6 +1684,11 @@ impl EncryptedStore {
                 )?;
                 changed += 1;
             }
+            // One call is one mutation however many rows it refilled, and a call that
+            // changed nothing is not a mutation at all.
+            if changed > 0 {
+                bump_grants_generation_tx(tx)?;
+            }
             Ok(changed)
         })
         .map_err(StoreOpError::from)
@@ -1530,9 +1734,14 @@ impl EncryptedStore {
         // existence query, no error-string matching). Zero changed => AlreadyExists.
         let changed = self.fenced_write(|tx| {
             let n = tx.execute(
+                // `created_at_ms` is written once, here, and never updated again:
+                // every later write path sets `updated_at_ms` instead, so a refresh
+                // that rewrites the envelope three times a day leaves the deposit
+                // instant intact. Existing rows got theirs from their chain birth
+                // entry when the column was added.
                 "INSERT INTO credentials \
-                 (credential_id, record_version, key_id, state, envelope, updated_at_ms) \
-                 VALUES (?1, ?2, ?3, 'active', ?4, ?5) \
+                 (credential_id, record_version, key_id, state, envelope, updated_at_ms, created_at_ms) \
+                 VALUES (?1, ?2, ?3, 'active', ?4, ?5, ?5) \
                  ON CONFLICT(credential_id) DO NOTHING",
                 rusqlite::params![
                     credential_id,
@@ -3645,6 +3854,32 @@ fn read_schema_version(conn: &rusqlite::Connection) -> rusqlite::Result<u32> {
     Ok(version.unwrap_or(0).max(0) as u32)
 }
 
+/// Advance the store-wide grant generation inside the caller's own transaction.
+///
+/// Grant and category mutations change what a principal reaches, and a consumer
+/// enumerating its credentials reads the rows and this counter from one snapshot. The
+/// bump therefore commits with the mutation that caused it: a counter advanced in a
+/// separate transaction could be observed alongside the row set it predates, and a
+/// consumer holding that pairing would record a high-water mark for state it never saw
+/// and stop re-enumerating.
+fn bump_grants_generation_tx(tx: &rusqlite::Transaction) -> rusqlite::Result<()> {
+    tx.execute(
+        "UPDATE grants_generation SET value = value + 1 WHERE id = 1",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Whether a table of this name exists, so a guard that runs BEFORE the migration
+/// chain can query a store whose shape it does not yet know.
+fn table_exists(conn: &rusqlite::Connection, name: &str) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+        rusqlite::params![name],
+        |row| row.get(0),
+    )
+}
+
 fn list_meta_from_conn(
     conn: &rusqlite::Connection,
     schema_version: u32,
@@ -3727,24 +3962,37 @@ fn read_grants_from_conn(
     schema_version: u32,
 ) -> rusqlite::Result<Vec<ReadGrant>> {
     // Below migration 9 there is no `selector_kind` column, so selecting it fails the
-    // whole read. Every grant in a pre-9 store IS a prefix grant -- migration 9 is what
-    // introduced the category kind -- so reporting `Prefix` for each row is the TRUE
-    // reading of that store rather than a default standing in for an unknown.
+    // whole read. Every grant in a pre-9 store selects by credential-id text -- migration
+    // 9 is what introduced the category kind -- so reporting `Exact` for each row is the
+    // TRUE reading of that store rather than a default standing in for an unknown.
     let selector_kind_column = if schema_version >= CATEGORY_SCHEMA_VERSION {
         "selector_kind"
     } else {
-        "'prefix'"
+        "'exact'"
+    };
+    // The selector column was named `credential_prefix` until migration 10 renamed it,
+    // and an offline read can meet a store that has not been migrated yet. Selecting it
+    // under its old name AS the new one keeps one row parser for both shapes.
+    let selector_column = if schema_version >= SELECTOR_SCHEMA_VERSION {
+        "selector"
+    } else {
+        "credential_prefix AS selector"
+    };
+    let selector_order = if schema_version >= SELECTOR_SCHEMA_VERSION {
+        "selector"
+    } else {
+        "credential_prefix"
     };
     let sql = if principal_kind.is_some() && principal_id.is_some() {
         format!(
-            "SELECT principal_kind, principal_id, {selector_kind_column}, credential_prefix, operation, created_at_ms \
+            "SELECT principal_kind, principal_id, {selector_kind_column}, {selector_column}, operation, created_at_ms \
              FROM read_grants WHERE principal_kind = ?1 AND principal_id = ?2 \
-             ORDER BY {selector_kind_column}, credential_prefix, operation"
+             ORDER BY {selector_kind_column}, {selector_order}, operation"
         )
     } else {
         format!(
-            "SELECT principal_kind, principal_id, {selector_kind_column}, credential_prefix, operation, created_at_ms \
-             FROM read_grants ORDER BY principal_kind, principal_id, {selector_kind_column}, credential_prefix, operation"
+            "SELECT principal_kind, principal_id, {selector_kind_column}, {selector_column}, operation, created_at_ms \
+             FROM read_grants ORDER BY principal_kind, principal_id, {selector_kind_column}, {selector_order}, operation"
         )
     };
     let mut stmt = conn.prepare(&sql)?;
@@ -3779,7 +4027,7 @@ fn read_grants_from_conn(
             principal_kind: row.get(0)?,
             principal_id: row.get(1)?,
             selector_kind,
-            credential_prefix: row.get(3)?,
+            selector: row.get(3)?,
             operation,
             created_at_ms: row.get(5)?,
         })
@@ -4886,7 +5134,7 @@ mod tests {
                 .create_read_grant_audited(
                     "reserved",
                     "agent",
-                    SelectorKind::Prefix,
+                    SelectorKind::Exact,
                     prefix,
                     op,
                     AuditCtx::admin(AuditOp::GrantCreate),
@@ -4897,12 +5145,7 @@ mod tests {
         let listed = store.list_read_grants().expect("list");
         let seen: Vec<(String, String)> = listed
             .iter()
-            .map(|g| {
-                (
-                    g.credential_prefix.clone(),
-                    g.operation.as_str().to_string(),
-                )
-            })
+            .map(|g| (g.selector.clone(), g.operation.as_str().to_string()))
             .collect();
 
         assert_eq!(
@@ -8087,7 +8330,7 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
-                SelectorKind::Prefix,
+                SelectorKind::Exact,
                 "github%_app:",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -8130,7 +8373,7 @@ mod tests {
     fn the_newest_migration_version_is_pinned_because_the_manifest_declares_it() {
         assert_eq!(
             newest_migration_version(),
-            9,
+            10,
             "the newest migration changed. This value is DECLARED in the module manifest \
              as store_schema_version, so a supervisor comparing declared-against-actual \
              sees it. Update the literal, and note the manifest consequence."
@@ -8158,7 +8401,7 @@ mod taxonomy_tests {
     use crate::test_support::TestTempDir;
     use cortexkit_store::{open_sqlite, Isolation, StorageBackend, StorageDescriptor};
 
-    fn sqlite(label: &str, seed: u8) -> (TestTempDir, SqliteStore) {
+    pub(super) fn sqlite(label: &str, seed: u8) -> (TestTempDir, SqliteStore) {
         let root = TestTempDir::new(format!("taxonomy-{label}-{}-{seed}", std::process::id()));
         let descriptor = StorageDescriptor {
             module_id: "claustrum".into(),
@@ -8190,12 +8433,22 @@ mod taxonomy_tests {
             .expect("migrate through version 8");
         sqlite
             .with_conn(|conn| {
-                for id in ["Category:example", "category:example"] {
+                for (seq, id) in ["Category:example", "category:example"].iter().enumerate() {
                     conn.execute(
                         "INSERT INTO credentials \
                          (credential_id, record_version, key_id, state, envelope, updated_at_ms) \
                          VALUES (?1, 1, '00', 'active', X'00', 0)",
                         rusqlite::params![id],
+                    )?;
+                    // A deposit row, because a real store never holds a credential the
+                    // chain cannot date and the migration that adds `created_at_ms`
+                    // refuses one that it cannot. The MACs are placeholders: nothing
+                    // here verifies the chain.
+                    conn.execute(
+                        "INSERT INTO audit_log \
+                         (seq, ts_ms, op, credential_id, payload_hash, actor, alarm, alarm_reason, prev_mac, entry_mac) \
+                         VALUES (?1, ?2, 'put', ?3, NULL, 'test', 0, NULL, 'previous', 'entry')",
+                        rusqlite::params![seq as i64 + 1, seq as i64 + 1, id],
                     )?;
                 }
                 Ok(())
@@ -8297,10 +8550,10 @@ mod taxonomy_tests {
             list_read_grants_read_only_with_schema(&path).expect("grant read on a schema-8 store");
         assert_eq!(grant_schema, 8);
         assert_eq!(grants.len(), 1, "every grant must be listed");
-        assert_eq!(grants[0].credential_prefix, "apikey:");
+        assert_eq!(grants[0].selector, "apikey:");
         assert_eq!(
             grants[0].selector_kind,
-            SelectorKind::Prefix,
+            SelectorKind::Exact,
             "migration 9 is what introduced the category kind, so every pre-9 grant is a \
              prefix grant -- this is a reading, not a default"
         );
@@ -8538,7 +8791,7 @@ mod taxonomy_tests {
             .create_read_grant_audited(
                 "reserved",
                 "consumer",
-                SelectorKind::Prefix,
+                SelectorKind::Exact,
                 "category:llm-provider",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -8605,8 +8858,7 @@ mod taxonomy_tests {
             .unwrap();
         let remaining = store.list_read_grants().unwrap();
         assert!(remaining.iter().any(|grant| {
-            grant.selector_kind == SelectorKind::Prefix
-                && grant.credential_prefix == "category:llm-provider"
+            grant.selector_kind == SelectorKind::Exact && grant.selector == "category:llm-provider"
         }));
         assert!(store
             .read_grant_covers(
@@ -8634,7 +8886,7 @@ mod taxonomy_tests {
         assert!(targets
             .iter()
             .all(|target| target.split_once('|').is_some()));
-        assert!(targets.iter().any(|target| target.contains(":prefix|")));
+        assert!(targets.iter().any(|target| target.contains(":exact|")));
         assert!(targets.iter().any(|target| target.contains(":category|")));
     }
 
@@ -8784,7 +9036,7 @@ mod audit_target_delimiter_tests {
             .create_read_grant_audited(
                 "reserved",
                 "consumer",
-                SelectorKind::Prefix,
+                SelectorKind::Exact,
                 "apikey:|tenant",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -8800,7 +9052,7 @@ mod audit_target_delimiter_tests {
             .unwrap()
             .to_string();
         let (left, right) = target.split_once('|').expect("new target delimiter");
-        assert_eq!(left, "grant:read:reserved:consumer:prefix");
+        assert_eq!(left, "grant:read:reserved:consumer:exact");
         assert_eq!(
             right, "apikey:|tenant",
             "later separators belong to the selector"
@@ -8810,7 +9062,7 @@ mod audit_target_delimiter_tests {
             store.create_read_grant_audited(
                 "reserved",
                 "bad|principal",
-                SelectorKind::Prefix,
+                SelectorKind::Exact,
                 "apikey:",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -8892,7 +9144,7 @@ mod list_scoped_snapshot_tests {
             .create_read_grant_audited(
                 "reserved",
                 "consumer",
-                SelectorKind::Prefix,
+                SelectorKind::Exact,
                 "operator:",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -8912,7 +9164,7 @@ mod list_scoped_snapshot_tests {
             .revoke_read_grant_audited(
                 "reserved",
                 "consumer",
-                SelectorKind::Prefix,
+                SelectorKind::Exact,
                 "operator:",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantRevoke),
@@ -8922,7 +9174,7 @@ mod list_scoped_snapshot_tests {
             .create_read_grant_audited(
                 "reserved",
                 "consumer",
-                SelectorKind::Prefix,
+                SelectorKind::Exact,
                 "operator:",
                 GrantOperation::Sign,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -8947,7 +9199,7 @@ mod list_scoped_snapshot_tests {
             .create_read_grant_audited(
                 "reserved",
                 "consumer",
-                SelectorKind::Prefix,
+                SelectorKind::Exact,
                 "operator:",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -8977,7 +9229,7 @@ mod coverage_phase_tests {
             .create_read_grant_audited(
                 "reserved",
                 "consumer",
-                SelectorKind::Prefix,
+                SelectorKind::Exact,
                 "operator:",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -9025,5 +9277,734 @@ mod coverage_phase_tests {
             store.list_scoped_snapshot("reserved", "consumer").is_err(),
             "list_scoped intentionally reads categories in its one snapshot"
         );
+    }
+}
+
+/// Migration 10: the enrollment tables, the selector column, the dated credential rows
+/// and the grant generation.
+#[cfg(test)]
+mod migration_10_tests {
+    use super::*;
+    use crate::store::taxonomy_tests::{api_record, rig, sqlite};
+
+    /// One credential the way a real store carries it: a row whose `updated_at_ms` is a
+    /// LATER write time than its deposit, a chain deposit entry that dates it, an
+    /// earlier non-deposit entry and a later one.
+    ///
+    /// Each decoy is a different wrong answer. Reading the row's own write time gives
+    /// `birth_ms + 500_000`; taking the minimum over every op in the chain gives
+    /// `birth_ms - 1_000`; only the earliest DEPOSIT entry gives `birth_ms`.
+    fn seed_credential_at_schema_9(
+        conn: &rusqlite::Connection,
+        credential_id: &str,
+        birth_ms: i64,
+    ) -> rusqlite::Result<()> {
+        conn.execute(
+            "INSERT INTO credentials \
+             (credential_id, record_version, key_id, state, envelope, updated_at_ms) \
+             VALUES (?1, 1, '00', 'active', X'00', ?2)",
+            rusqlite::params![credential_id, birth_ms + 500_000],
+        )?;
+        for (ts_ms, op) in [
+            (birth_ms - 1_000, "fetch_anomaly"),
+            (birth_ms, "put"),
+            (birth_ms + 500_000, "overwrite"),
+        ] {
+            append_unverified_chain_row(conn, ts_ms, op, credential_id)?;
+        }
+        Ok(())
+    }
+
+    /// Append a chain row with placeholder MACs. Every test using this one asks what the
+    /// migration DERIVES from the chain, never whether the chain verifies, and the real
+    /// append path needs an unsealed audit key this fixture has no use for.
+    fn append_unverified_chain_row(
+        conn: &rusqlite::Connection,
+        ts_ms: i64,
+        op: &str,
+        credential_id: &str,
+    ) -> rusqlite::Result<()> {
+        conn.execute(
+            "INSERT INTO audit_log \
+             (ts_ms, op, credential_id, payload_hash, actor, alarm, alarm_reason, prev_mac, entry_mac) \
+             VALUES (?1, ?2, ?3, NULL, 'test', 0, NULL, 'previous', 'entry')",
+            rusqlite::params![ts_ms, op, credential_id],
+        )?;
+        Ok(())
+    }
+
+    /// Every schema object this vault owns, as (type, name, sql), name-ordered.
+    ///
+    /// `cortexkit`-prefixed objects are excluded because they belong to the storage
+    /// crate rather than to this schema: the version table it writes, and the fence
+    /// table it creates lazily on the first fenced write, so its presence says which
+    /// paths a store has exercised rather than which migrations it carries.
+    fn vault_schema_objects(store: &SqliteStore) -> Vec<(String, String, String)> {
+        store
+            .with_conn(|conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT type, name, COALESCE(sql, '') FROM sqlite_master \
+                      WHERE name NOT LIKE 'cortexkit%' ORDER BY name",
+                )?;
+                let objects = stmt
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(objects)
+            })
+            .expect("read sqlite_master")
+    }
+
+    fn object_sql(objects: &[(String, String, String)], name: &str) -> String {
+        objects
+            .iter()
+            .find(|(_, object, _)| object == name)
+            .unwrap_or_else(|| {
+                let names: Vec<&str> = objects.iter().map(|(_, n, _)| n.as_str()).collect();
+                panic!("{name} is absent from the schema; it holds {names:?}")
+            })
+            .2
+            .clone()
+    }
+
+    /// (name, declared type, NOT NULL, default, part of the primary key) per column.
+    fn columns_of(
+        store: &SqliteStore,
+        table: &str,
+    ) -> Vec<(String, String, bool, Option<String>, bool)> {
+        store
+            .with_conn(|conn| {
+                let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+                let columns = stmt
+                    .query_map([], |row| {
+                        Ok((
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, i64>(3)? != 0,
+                            row.get::<_, Option<String>>(4)?,
+                            row.get::<_, i64>(5)? != 0,
+                        ))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(columns)
+            })
+            .expect("read table_info")
+    }
+
+    fn generation_of(store: &SqliteStore) -> i64 {
+        store
+            .with_conn(|conn| {
+                conn.query_row("SELECT value FROM grants_generation", [], |r| r.get(0))
+            })
+            .expect("read the grant generation")
+    }
+
+    fn schema_version_of(store: &SqliteStore) -> u32 {
+        store
+            .with_conn(read_schema_version)
+            .expect("read the schema version")
+    }
+
+    #[test]
+    fn migration_10_applies_to_a_schema_9_store_and_lands_the_ddl_a_fresh_store_carries() {
+        let (_migrated_root, migrated) = sqlite("ddl-migrated", 101);
+        migrate_through_for_test(&migrated, 9).expect("migrate through version 9");
+        migrated
+            .with_conn(|conn| {
+                seed_credential_at_schema_9(conn, "apikey:one", 1_700_000_000_000)?;
+                conn.execute(
+                    "INSERT INTO read_grants \
+                     (principal_kind, principal_id, selector_kind, credential_prefix, operation, created_at_ms) \
+                     VALUES ('reserved', 'agent', 'prefix', 'apikey:one', 'read', 7)",
+                    [],
+                )?;
+                Ok(())
+            })
+            .expect("seed a schema-9 store");
+
+        EncryptedStore::migrate(&migrated).expect("migration 10 applies to a schema-9 store");
+        assert_eq!(schema_version_of(&migrated), 10);
+
+        let (_fresh_root, fresh) = sqlite("ddl-fresh", 102);
+        EncryptedStore::migrate(&fresh).expect("a store created fresh at schema 10");
+
+        let objects = vault_schema_objects(&migrated);
+        assert_eq!(
+            objects,
+            vault_schema_objects(&fresh),
+            "a store that upgraded and a store created today serve the same binary, so \
+             their schema must be identical object for object"
+        );
+
+        let read_grants = object_sql(&objects, "read_grants");
+        assert!(
+            read_grants.contains("CHECK (selector_kind IN ('exact','category'))"),
+            "the selector vocabulary must be closed in the table itself: {read_grants}"
+        );
+        assert!(
+            read_grants.contains("CHECK (principal_kind IN ('reserved','enrolled'))"),
+            "the principal vocabulary must be closed in the table itself: {read_grants}"
+        );
+        assert!(
+            !read_grants.contains("credential_prefix"),
+            "the selector column must not keep its historical name: {read_grants}"
+        );
+
+        for (index, target, predicate) in [
+            (
+                "enrolled_consumers_live_name",
+                "enrolled_consumers(name)",
+                "WHERE revoked_at_ms IS NULL",
+            ),
+            (
+                "pending_enrollments_live_name",
+                "pending_enrollments(proposed_name)",
+                "WHERE state IN ('pending','approved')",
+            ),
+        ] {
+            let sql = object_sql(&objects, index);
+            // A separate statement, because SQLite accepts no WHERE clause on an
+            // in-table UNIQUE and would therefore make the uniqueness total.
+            assert!(
+                sql.starts_with("CREATE UNIQUE INDEX")
+                    && sql.contains(target)
+                    && sql.contains(predicate),
+                "{index} must be a partial unique index over live rows: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_new_tables_carry_the_columns_defaults_and_nullability_the_schema_declares() {
+        let (_root, store) = sqlite("shape", 103);
+        EncryptedStore::migrate(&store).expect("migrate");
+
+        let column = |name: &str, kind: &str, not_null: bool, default: Option<&str>, pk: bool| {
+            (
+                name.to_string(),
+                kind.to_string(),
+                not_null,
+                default.map(str::to_string),
+                pk,
+            )
+        };
+
+        assert_eq!(
+            columns_of(&store, "enrolled_consumers"),
+            vec![
+                column("enrollment_id", "TEXT", false, None, true),
+                column("name", "TEXT", true, None, false),
+                column("token_hash", "TEXT", false, None, false),
+                column("token_generation", "INTEGER", true, Some("0"), false),
+                column("approved_at_ms", "INTEGER", true, None, false),
+                column("approved_by", "TEXT", true, None, false),
+                column("revoked_at_ms", "INTEGER", false, None, false),
+            ],
+            "an incarnation carries no token until one is minted, so token_hash is \
+             nullable and the generation starts at 0"
+        );
+
+        assert_eq!(
+            columns_of(&store, "pending_enrollments"),
+            vec![
+                column("request_id", "TEXT", false, None, true),
+                column("proposed_name", "TEXT", true, None, false),
+                column("final_name", "TEXT", false, None, false),
+                column("enrollment_id", "TEXT", false, None, false),
+                column("request_secret_hash", "TEXT", true, None, false),
+                column("state", "TEXT", true, None, false),
+                column("approved_by", "TEXT", false, None, false),
+                column("approved_at_ms", "INTEGER", false, None, false),
+                column("created_at_ms", "INTEGER", true, None, false),
+                column("expires_at_ms", "INTEGER", true, None, false),
+            ],
+            "everything an approval fills in is nullable at proposal time"
+        );
+
+        assert_eq!(
+            columns_of(&store, "grants_generation"),
+            vec![
+                column("id", "INTEGER", false, None, true),
+                column("value", "INTEGER", true, None, false),
+            ]
+        );
+
+        assert!(
+            columns_of(&store, "credentials").contains(&column(
+                "created_at_ms",
+                "INTEGER",
+                false,
+                None,
+                false
+            )),
+            "credentials must carry a nullable creation time"
+        );
+
+        // The state vocabulary is DRIVEN rather than read off the DDL text: a CHECK
+        // that names five states and rejects a sixth is the observable.
+        for state in ["pending", "approved", "denied", "consumed", "expired"] {
+            store
+                .with_conn(|conn| {
+                    conn.execute(
+                        "INSERT INTO pending_enrollments \
+                         (request_id, proposed_name, request_secret_hash, state, created_at_ms, expires_at_ms) \
+                         VALUES (?1, ?1, 'ff', ?2, 1, 2)",
+                        rusqlite::params![format!("request-{state}"), state],
+                    )
+                })
+                .unwrap_or_else(|error| panic!("state {state} must be accepted: {error}"));
+        }
+        let rejected = store.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO pending_enrollments \
+                 (request_id, proposed_name, request_secret_hash, state, created_at_ms, expires_at_ms) \
+                 VALUES ('request-bogus', 'bogus', 'ff', 'bogus', 1, 2)",
+                [],
+            )
+        });
+        assert!(
+            rejected.is_err(),
+            "a state outside the five must be refused by the table"
+        );
+    }
+
+    #[test]
+    fn the_migration_seeds_the_grant_generation_last_and_reads_nothing_it_must_not() {
+        let statements = MIGRATIONS
+            .iter()
+            .find(|migration| migration.version == 10)
+            .expect("migration 10")
+            .statements;
+
+        assert!(
+            !statements.contains("updated_at_ms"),
+            "a write time is not a creation time, so no statement here may reach for one"
+        );
+        for op in CHAIN_BIRTH_OPS {
+            assert!(
+                statements.contains(&format!("'{op}'")),
+                "the backfill must date rows from the same deposit vocabulary the guard \
+                 checks, and {op} is missing from it"
+            );
+        }
+        assert!(
+            statements
+                .trim_end()
+                .ends_with("INSERT INTO grants_generation (id, value) VALUES (1, 1);"),
+            "the seed must be the LAST statement, so this migration's own writes cannot \
+             be mistaken for the first mutation after it"
+        );
+    }
+
+    #[test]
+    fn the_grant_generation_reads_one_on_a_fresh_store_and_on_a_migrated_one() {
+        let (_fresh_root, fresh) = sqlite("generation-fresh", 104);
+        EncryptedStore::migrate(&fresh).expect("fresh store at schema 10");
+        assert_eq!(generation_of(&fresh), 1);
+
+        // A store with rows for this migration to convert and date: its writes must not
+        // move the counter either.
+        let (_migrated_root, migrated) = sqlite("generation-migrated", 105);
+        migrate_through_for_test(&migrated, 9).expect("migrate through version 9");
+        migrated
+            .with_conn(|conn| {
+                for (index, id) in ["apikey:one", "apikey:two", "github_app:one"]
+                    .iter()
+                    .enumerate()
+                {
+                    seed_credential_at_schema_9(conn, id, 1_700_000_000_000 + index as i64)?;
+                    conn.execute(
+                        "INSERT INTO read_grants \
+                         (principal_kind, principal_id, selector_kind, credential_prefix, operation, created_at_ms) \
+                         VALUES ('reserved', 'agent', 'prefix', ?1, 'read', 7)",
+                        rusqlite::params![id],
+                    )?;
+                }
+                Ok(())
+            })
+            .expect("seed a schema-9 store");
+        EncryptedStore::migrate(&migrated).expect("migrate to 10");
+        assert_eq!(
+            generation_of(&migrated),
+            1,
+            "the conversion and the backfill are this migration's own writes, so a \
+             consumer cannot tell a migrated store from a fresh one by this value"
+        );
+    }
+
+    #[test]
+    fn the_first_mutation_after_the_migration_bumps_the_generation_through_the_fenced_path() {
+        let (root, store) = rig("generation-bump", 106);
+        assert_eq!(store.grants_generation().expect("read generation"), 1);
+
+        store
+            .create_audited("apikey:one", &api_record(), AuditCtx::admin(AuditOp::Put))
+            .expect("deposit");
+        assert_eq!(
+            store.grants_generation().expect("read generation"),
+            1,
+            "a deposit changes no grant and no category"
+        );
+
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "agent",
+                SelectorKind::Exact,
+                "apikey:one",
+                GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .expect("create grant");
+        assert_eq!(store.grants_generation().expect("read generation"), 2);
+
+        store
+            .set_categories_audited(
+                "apikey:one",
+                SetCategoryMode::Set,
+                &["llm-provider".to_string()],
+                AuditCtx::admin(AuditOp::SetCategory),
+            )
+            .expect("assign a category");
+        assert_eq!(
+            store.grants_generation().expect("read generation"),
+            3,
+            "an assignment changes what a category grant reaches"
+        );
+
+        store
+            .revoke_read_grant_audited(
+                "reserved",
+                "agent",
+                SelectorKind::Exact,
+                "apikey:one",
+                GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantRevoke),
+            )
+            .expect("revoke grant");
+        assert_eq!(store.grants_generation().expect("read generation"), 4);
+
+        // The bump rides the fenced write rather than sitting beside it: a superseded
+        // writer moves neither the rows nor the counter.
+        store
+            .with_raw_conn(|conn| {
+                conn.execute("UPDATE cortexkit_fence SET epoch = 999 WHERE id = 0", [])
+            })
+            .expect("simulate a newer writer");
+        match store.create_read_grant_audited(
+            "reserved",
+            "agent",
+            SelectorKind::Exact,
+            "apikey:one",
+            GrantOperation::Read,
+            AuditCtx::admin(AuditOp::GrantCreate),
+        ) {
+            Err(StoreOpError::Fenced { .. }) => {}
+            other => panic!("a superseded writer must be fenced, got {other:?}"),
+        }
+        assert_eq!(
+            store.grants_generation().expect("read generation"),
+            4,
+            "a rejected write must leave the counter where it was"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn every_credential_is_dated_from_its_own_chain_deposit_entry() {
+        let (_root, store) = sqlite("backfill", 107);
+        migrate_through_for_test(&store, 9).expect("migrate through version 9");
+        // Sixty rows, the size of the store this rule was measured against, each with a
+        // distinct deposit instant except for one deliberate same-millisecond pair.
+        let expected: Vec<(String, i64)> = (0..60)
+            .map(|index: i64| {
+                let birth = if index == 59 {
+                    1_700_000_000_000 + 58
+                } else {
+                    1_700_000_000_000 + index
+                };
+                (format!("apikey:{index:02}"), birth)
+            })
+            .collect();
+        store
+            .with_conn(|conn| {
+                for (id, birth) in &expected {
+                    seed_credential_at_schema_9(conn, id, *birth)?;
+                }
+                Ok(())
+            })
+            .expect("seed sixty credentials");
+
+        EncryptedStore::migrate(&store).expect("migrate to 10");
+
+        let dated: Vec<(String, Option<i64>)> = store
+            .with_conn(|conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT credential_id, created_at_ms FROM credentials ORDER BY credential_id",
+                )?;
+                let dated = stmt
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(dated)
+            })
+            .expect("read the dated rows");
+        assert_eq!(dated.len(), 60);
+        for (id, birth) in &expected {
+            let actual = dated
+                .iter()
+                .find(|(dated_id, _)| dated_id == id)
+                .map(|(_, value)| *value)
+                .expect("every credential keeps its row");
+            assert_eq!(
+                actual,
+                Some(*birth),
+                "{id} must be dated from its own deposit entry"
+            );
+        }
+        let distinct: BTreeSet<Option<i64>> = dated.iter().map(|(_, value)| *value).collect();
+        assert_eq!(
+            distinct.len(),
+            59,
+            "the values must be as distinct as the deposits are -- 59 instants over 60 \
+             rows, because two were deposited in the same millisecond"
+        );
+    }
+
+    #[test]
+    fn a_credential_the_chain_cannot_date_stops_the_migration_and_changes_nothing() {
+        let (_root, store) = sqlite("undatable", 108);
+        migrate_through_for_test(&store, 9).expect("migrate through version 9");
+        store
+            .with_conn(|conn| {
+                seed_credential_at_schema_9(conn, "apikey:dated", 1_700_000_000_000)?;
+                // A row whose only chain entries are writes, never a deposit.
+                conn.execute(
+                    "INSERT INTO credentials \
+                     (credential_id, record_version, key_id, state, envelope, updated_at_ms) \
+                     VALUES ('apikey:undated', 1, '00', 'active', X'00', 9)",
+                    [],
+                )?;
+                append_unverified_chain_row(conn, 5, "overwrite", "apikey:undated")?;
+                conn.execute(
+                    "INSERT INTO read_grants \
+                     (principal_kind, principal_id, selector_kind, credential_prefix, operation, created_at_ms) \
+                     VALUES ('reserved', 'agent', 'prefix', 'apikey:', 'read', 7)",
+                    [],
+                )?;
+                Ok(())
+            })
+            .expect("seed a schema-9 store");
+        let before = table_dump(&store);
+
+        let error = EncryptedStore::migrate(&store)
+            .expect_err("a credential the chain cannot date must stop the migration");
+        let message = error.to_string();
+        assert!(
+            message.contains("apikey:undated"),
+            "the refusal must name the offending id: {message}"
+        );
+        assert!(
+            !message.contains("apikey:dated"),
+            "the refusal must name only the rows it cannot date: {message}"
+        );
+
+        assert_eq!(schema_version_of(&store), 9, "the store stays where it was");
+        assert_eq!(
+            table_dump(&store),
+            before,
+            "a refused migration leaves the credentials and the grants untouched"
+        );
+        let objects = vault_schema_objects(&store);
+        for absent in [
+            "enrolled_consumers",
+            "pending_enrollments",
+            "grants_generation",
+        ] {
+            assert!(
+                !objects.iter().any(|(_, name, _)| name == absent),
+                "{absent} must not exist after a refused migration"
+            );
+        }
+    }
+
+    /// The credential and grant rows, as text, so a refused migration can be compared
+    /// against the store it started from.
+    fn table_dump(store: &SqliteStore) -> Vec<String> {
+        store
+            .with_conn(|conn| {
+                let mut rows = Vec::new();
+                let mut credentials = conn.prepare(
+                    "SELECT credential_id, record_version, state, updated_at_ms \
+                      FROM credentials ORDER BY credential_id",
+                )?;
+                for row in credentials.query_map([], |row| {
+                    Ok(format!(
+                        "credential {} {} {} {}",
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?
+                    ))
+                })? {
+                    rows.push(row?);
+                }
+                drop(credentials);
+                let mut grants = conn.prepare(
+                    "SELECT principal_kind, principal_id, selector_kind, credential_prefix, operation \
+                      FROM read_grants ORDER BY principal_kind, principal_id, credential_prefix, operation",
+                )?;
+                for row in grants.query_map([], |row| {
+                    Ok(format!(
+                        "grant {} {} {} {} {}",
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?
+                    ))
+                })? {
+                    rows.push(row?);
+                }
+                Ok(rows)
+            })
+            .expect("dump the credential and grant rows")
+    }
+
+    #[test]
+    fn a_name_is_unique_among_live_rows_and_free_among_terminal_ones() {
+        let (_root, store) = sqlite("live-names", 109);
+        EncryptedStore::migrate(&store).expect("migrate");
+
+        let enrollment = |id: &str, name: &str, revoked: Option<i64>| {
+            store.with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO enrolled_consumers \
+                     (enrollment_id, name, approved_at_ms, approved_by, revoked_at_ms) \
+                     VALUES (?1, ?2, 1, 'operator', ?3)",
+                    rusqlite::params![id, name, revoked],
+                )
+            })
+        };
+        enrollment("one", "broca", None).expect("the first live incarnation");
+        assert!(
+            enrollment("two", "broca", None).is_err(),
+            "two live incarnations of one name would let a grant reach two consumers"
+        );
+        enrollment("three", "broca", Some(2)).expect("a revoked incarnation keeps the name");
+        enrollment("four", "broca", Some(3)).expect("revoked incarnations do not collide");
+        assert_eq!(
+            store
+                .with_conn(|conn| conn.query_row(
+                    "SELECT COUNT(*) FROM enrolled_consumers WHERE name = 'broca'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                ))
+                .expect("count incarnations"),
+            3,
+            "a revoked row and the live one share the name"
+        );
+
+        let pending = |request: &str, name: &str, state: &str| {
+            store.with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO pending_enrollments \
+                     (request_id, proposed_name, request_secret_hash, state, created_at_ms, expires_at_ms) \
+                     VALUES (?1, ?2, 'ff', ?3, 1, 2)",
+                    rusqlite::params![request, name, state],
+                )
+            })
+        };
+        pending("r1", "broca", "pending").expect("the first request");
+        assert!(
+            pending("r2", "broca", "pending").is_err(),
+            "one live request per proposed name"
+        );
+        assert!(
+            pending("r3", "broca", "approved").is_err(),
+            "an approved request holds the name until it is consumed"
+        );
+        for (request, state) in [("r4", "denied"), ("r5", "consumed"), ("r6", "expired")] {
+            pending(request, "broca", state)
+                .unwrap_or_else(|error| panic!("a {state} row must not block the name: {error}"));
+        }
+    }
+
+    #[test]
+    fn opening_a_migrated_store_without_the_write_lease_writes_nothing() {
+        let (root, store) = rig("unleased", 110);
+        store
+            .create_audited("apikey:one", &api_record(), AuditCtx::admin(AuditOp::Put))
+            .expect("deposit");
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "agent",
+                SelectorKind::Exact,
+                "apikey:one",
+                GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .expect("create grant");
+        let path = root.join("store.db");
+        let key = MasterKey::from_bytes([110; 32]);
+
+        let counts_before = row_counts(&store.store);
+        let mtime_before = std::fs::metadata(&path)
+            .expect("stat store")
+            .modified()
+            .expect("store mtime");
+
+        // The lease-free readers, on the same file, with no write lease held.
+        let (metas, schema) =
+            list_meta_read_only_with_schema(&path).expect("lease-free metadata read");
+        assert_eq!(schema, 10);
+        assert_eq!(metas.len(), 1);
+        let (grants, _) = list_read_grants_read_only_with_schema(&path).expect("lease-free grants");
+        assert_eq!(grants.len(), 1);
+        assert_eq!(grants[0].selector, "apikey:one");
+        assert_eq!(grants[0].selector_kind, SelectorKind::Exact);
+        assert_eq!(
+            verify_audit_chain_read_only(&path, &key).expect("lease-free chain verification"),
+            None,
+            "the chain must verify after a lease-free open, with no repair and no append"
+        );
+
+        assert_eq!(
+            row_counts(&store.store),
+            counts_before,
+            "a lease-free open must write no row"
+        );
+        assert_eq!(
+            std::fs::metadata(&path)
+                .expect("stat store")
+                .modified()
+                .expect("store mtime"),
+            mtime_before,
+            "a lease-free open must not touch the store file"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Every row count a read path could plausibly move, so a write that lands anywhere
+    /// shows up rather than only one that lands where the test looked.
+    fn row_counts(store: &SqliteStore) -> Vec<(String, i64)> {
+        store
+            .with_conn(|conn| {
+                let mut names_stmt = conn
+                    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")?;
+                let names = names_stmt
+                    .query_map([], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                drop(names_stmt);
+                let mut counts = Vec::new();
+                for name in names {
+                    let count: i64 =
+                        conn.query_row(&format!("SELECT COUNT(*) FROM \"{name}\""), [], |row| {
+                            row.get(0)
+                        })?;
+                    counts.push((name, count));
+                }
+                Ok(counts)
+            })
+            .expect("count every table")
     }
 }

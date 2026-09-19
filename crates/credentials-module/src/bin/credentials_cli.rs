@@ -829,13 +829,13 @@ fn help_verb(verb: &str) -> String {
         "grant" => {
             "ck auth grant --principal <id|reserved:id>\n\
              \x20             [--prefix <prefix>]\n\
-             \x20             [--selector-kind <prefix|category> --selector <value>]\n\
+             \x20             [--selector-kind <exact|category> --selector <value>]\n\
              \x20             --operation <read|sign>\n\
              \n\
              \x20 --principal <id|reserved:id>  reserved module principal\n\
-             \x20 --prefix <prefix>             compatibility spelling for a prefix selector\n\
-             \x20 --selector-kind <kind>        prefix (default) or category\n\
-             \x20 --selector <value>            literal prefix or bare category name\n\
+             \x20 --prefix <prefix>             compatibility spelling for an id selector\n\
+             \x20 --selector-kind <kind>        exact (default) or category\n\
+             \x20 --selector <value>            credential id text or bare category name\n\
              \x20 --operation <read|sign>       authority to grant (`--op` is accepted)\n\
              \n\
              NOTES\n\
@@ -845,13 +845,13 @@ fn help_verb(verb: &str) -> String {
         "revoke-grant" => {
             "ck auth revoke-grant --principal <id|reserved:id>\n\
              \x20                    [--prefix <prefix>]\n\
-             \x20                    [--selector-kind <prefix|category> --selector <value>]\n\
+             \x20                    [--selector-kind <exact|category> --selector <value>]\n\
              \x20                    --operation <read|sign>\n\
              \n\
              \x20 --principal <id|reserved:id>  reserved module principal\n\
-             \x20 --prefix <prefix>             compatibility spelling for a prefix selector\n\
-             \x20 --selector-kind <kind>        prefix (default) or category\n\
-             \x20 --selector <value>            literal prefix or bare category name\n\
+             \x20 --prefix <prefix>             compatibility spelling for an id selector\n\
+             \x20 --selector-kind <kind>        exact (default) or category\n\
+             \x20 --selector <value>            credential id text or bare category name\n\
              \x20 --operation <read|sign>       authority to revoke (`--op` is accepted)\n\
              \n\
              NOTES\n\
@@ -3113,8 +3113,8 @@ fn parse_grants(result: &serde_json::Value) -> Result<Vec<GrantRow>, CliError> {
         let selector_kind = grant
             .get("selector_kind")
             .and_then(serde_json::Value::as_str)
-            .unwrap_or("prefix");
-        if !matches!(selector_kind, "prefix" | "category") {
+            .unwrap_or("exact");
+        if !matches!(selector_kind, "exact" | "category") {
             return Err(CliError::RouteRefused(format!(
                 "admin.status returned an invalid selector kind at row {index}"
             )));
@@ -3278,9 +3278,9 @@ fn print_read_grants(result: &serde_json::Value) -> Result<(), CliError> {
                     "admin.status returned an invalid covered credential at grant row {index}, row {covered_index}"
                 ))
             })?;
-            if grant.selector_kind == "prefix" && !id.starts_with(&grant.credential_prefix) {
+            if grant.selector_kind == "exact" && !id.starts_with(&grant.credential_prefix) {
                 return Err(CliError::RouteRefused(format!(
-                    "admin.status listed a credential outside its grant prefix at grant row {index}"
+                    "admin.status listed a credential outside its grant selector at grant row {index}"
                 )));
             }
             if prior_id.is_some_and(|prior| prior >= id) {
@@ -3532,10 +3532,10 @@ fn parse_grant_selector(args: &[String]) -> Result<(SelectorKind, String), CliEr
         ));
     }
     let selector_kind = optional(args, "--selector-kind")
-        .unwrap_or_else(|| "prefix".into())
+        .unwrap_or_else(|| "exact".into())
         .parse::<SelectorKind>()
         .map_err(CliError::Usage)?;
-    if prefix.is_some() && selector_kind != SelectorKind::Prefix {
+    if prefix.is_some() && selector_kind != SelectorKind::Exact {
         return Err(CliError::Usage(
             "--prefix cannot be combined with --selector-kind category".into(),
         ));
@@ -5246,7 +5246,7 @@ mod taxonomy_cli_tests {
         let legacy = args(&["--prefix", "apikey:"]);
         assert_eq!(
             parse_grant_selector(&legacy).unwrap(),
-            (SelectorKind::Prefix, "apikey:".to_string())
+            (SelectorKind::Exact, "apikey:".to_string())
         );
         let category = args(&["--selector-kind", "category", "--selector", "llm-provider"]);
         assert_eq!(
@@ -5271,7 +5271,7 @@ mod taxonomy_cli_tests {
                 "covered_credential_ids": []
             }]
         });
-        assert_eq!(parse_grants(&v1).unwrap()[0].selector_kind, "prefix");
+        assert_eq!(parse_grants(&v1).unwrap()[0].selector_kind, "exact");
         let v2 = serde_json::json!({
             "read_grants": [{
                 "principal_kind": "reserved",

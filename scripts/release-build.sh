@@ -55,6 +55,36 @@ if [ "$BRANCH" != "master" ]; then
   echo "*** BUILDING FROM BRANCH '${BRANCH}', NOT master -- override in effect ***" >&2
 fi
 
+# THIRD GUARD: is this commit one that CI has ever seen?
+#
+# The clean-tree check catches UNCOMMITTED work. The branch check catches COMMITTED work
+# on the wrong branch. Neither catches a commit that is on master locally and nowhere
+# else -- a clean tree, the right branch, ahead of the remote, every other guard green.
+#
+# MEASURED, not hypothetical. On 2026-09-19 I committed 773db75, staged it, and placed it
+# on the running daemon at 20:42:40. It reached origin/master at 20:54:36. So this vault
+# served a binary for twelve minutes that no CI run had ever evaluated. It passed later,
+# which is ordering luck rather than a property of the process.
+#
+# The sharper half is the consumer's: a deployed binary is a CLAIM ABOUT WHAT OTHERS CAN
+# FETCH AND REPRODUCE. A local-only commit cannot be fetched, so the claim is false even
+# when the code is perfect.
+#
+# Placed HERE, above the mutation arms, because those take minutes -- a guard that
+# refuses after the expensive work teaches people to skip the script.
+git fetch --quiet origin master 2>/dev/null || true
+if ! git merge-base --is-ancestor HEAD origin/master 2>/dev/null; then
+  if [ "${CK_RELEASE_ALLOW_UNLANDED:-}" != "1" ]; then
+    echo "REFUSING: HEAD is not an ancestor of origin/master." >&2
+    echo "  HEAD           $(git rev-parse --short HEAD)" >&2
+    echo "  origin/master  $(git rev-parse --short origin/master 2>/dev/null || echo '<unknown>')" >&2
+    echo "  A clean tree on master can still be a commit CI has never seen. Land it first" >&2
+    echo "  with scripts/train-push.sh, or re-run with CK_RELEASE_ALLOW_UNLANDED=1." >&2
+    exit 1
+  fi
+  echo "*** STAGING A COMMIT CI HAS NOT EVALUATED -- override in effect ***" >&2
+fi
+
 bash scripts/mutation-check.sh
 
 # FULL 40-HEX, NOT --short. This value is stamped into CK_BUILD_REV and becomes the

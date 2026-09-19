@@ -292,6 +292,17 @@ jobs:
           CRED_REQUIRE_DAEMON: "1"
         run: cargo test --locked -p credentials-module --test real_daemon_e2e -- --ignored --test-threads=1
 
+      # Match the local gate: probe a default-feature release artifact separately
+      # from the seam-enabled binary. CI covers Linux; the pre-train local gate
+      # covers macOS without adding a full CI runner leg.
+      - name: Interactive import picker + real-terminal smoke
+        if: matrix.os == 'ubuntu'
+        shell: bash
+        run: |
+          cargo build --release --locked -p credentials-module --bin ck-auth
+          export CK_AUTH_IMPORT_SHIPPED_BINARY="$PWD/target/release/ck-auth"
+          cargo test --locked -p credentials-module --features import-prompt-seam --test import_picker -- --test-threads=1
+
       # Assert test-only environment hatches are absent from a REAL release binary. It
       # is #[ignore]'d because it builds the release profile, so without this step it
       # would never run and the guarantee would be nominal. Ubuntu-only: the property

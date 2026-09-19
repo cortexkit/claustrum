@@ -1501,11 +1501,25 @@ mod manifest_lock_aba_regression {
             .unwrap();
     }
 
-    fn reclaim_options(ttl: Duration) -> ManifestLockOptions {
-        reclaim_options_at(ttl, now_ms())
-    }
-
     /// PIN THE RECLAIM CLOCK, so a fixture's verdict is arithmetic rather than a race.
+    ///
+    /// *** THERE IS DELIBERATELY NO UNPINNED SIBLING. *** One existed, `reclaim_options(ttl)`,
+    /// which called this with `now_ms()`, and it reintroduced the exact race this helper was
+    /// written to remove: the FIXTURE reads the clock to seed an mtime and the helper then
+    /// reads it AGAIN, so the age under test is `101ms + however long the test body took`. A
+    /// retention fixture ages past its own threshold under load and the verdict flips. It
+    /// survived the first pass at this bug because the three tests it was added for were
+    /// converted and the three calling it were not.
+    ///
+    /// Measured when that was found: `quarantine_past_ttl_but_inside_margin_is_retained` seeds
+    /// `now - 101` against a 100ms ttl, so its whole budget is the reclaim margin minus one
+    /// millisecond. It passed in isolation every time and failed inside a loaded full gate.
+    /// `quarantine_younger_than_reclaim_age_is_retained` has the same defect with ~900ms of
+    /// slack, which buys a lower failure rate rather than correctness.
+    ///
+    /// Requiring an explicit instant at every call site makes the double read impossible
+    /// rather than merely discouraged: a caller must hold ONE `at` and use it for both the
+    /// mtime and the verdict, which is the property these fixtures need.
     ///
     /// Without this the reclaim path reads the wall clock while the fixture seeds an mtime
     /// relative to its own earlier reading of that clock, so the answer depends on how long
@@ -1731,9 +1745,10 @@ mod manifest_lock_aba_regression {
         let path = root.join("opencode-handles.json");
         let ttl = Duration::from_millis(100);
         let quarantine = seed_quarantine(&path, 1, "young_nonce");
-        set_directory_mtime(&quarantine, now_ms() - 4_100);
+        let at = now_ms();
+        set_directory_mtime(&quarantine, at - 4_100);
 
-        with_manifest_lock_with_options(&path, "claimant", reclaim_options(ttl), |_| Ok(()))
+        with_manifest_lock_with_options(&path, "claimant", reclaim_options_at(ttl, at), |_| Ok(()))
             .unwrap();
 
         assert!(quarantine.exists());
@@ -1751,9 +1766,10 @@ mod manifest_lock_aba_regression {
         let path = root.join("opencode-handles.json");
         let ttl = Duration::from_millis(100);
         let quarantine = seed_quarantine(&path, 1, "old_nonce");
-        set_directory_mtime(&quarantine, now_ms() - 5_101);
+        let at = now_ms();
+        set_directory_mtime(&quarantine, at - 5_101);
 
-        with_manifest_lock_with_options(&path, "claimant", reclaim_options(ttl), |_| Ok(()))
+        with_manifest_lock_with_options(&path, "claimant", reclaim_options_at(ttl, at), |_| Ok(()))
             .unwrap();
 
         assert!(!quarantine.exists());
@@ -1771,9 +1787,10 @@ mod manifest_lock_aba_regression {
         let path = root.join("opencode-handles.json");
         let ttl = Duration::from_millis(100);
         let quarantine = seed_quarantine(&path, 1, "margin_nonce");
-        set_directory_mtime(&quarantine, now_ms() - 101);
+        let at = now_ms();
+        set_directory_mtime(&quarantine, at - 101);
 
-        with_manifest_lock_with_options(&path, "claimant", reclaim_options(ttl), |_| Ok(()))
+        with_manifest_lock_with_options(&path, "claimant", reclaim_options_at(ttl, at), |_| Ok(()))
             .unwrap();
 
         assert!(quarantine.exists());

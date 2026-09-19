@@ -44,6 +44,12 @@ async fn main() {
     // Repeatable: `--status-id A --status-id B` compares two scoped answers in ONE bind,
     // because the anti-enumeration property is about whether two bodies agree.
     let mut status_ids: Option<Vec<String>> = None;
+    let mut scoped_id: Option<String> = None;
+    let mut enroll_propose: Option<String> = None;
+    let mut enroll_poll: Option<String> = None;
+    let mut enroll_secret: Option<String> = None;
+    let mut enrollment_token: Option<String> = None;
+    let mut scoped_min_ttl_ms: Option<i64> = None;
     let mut sign_payload: Option<String> = None;
     let mut sign_payload_bytes: Option<Vec<u8>> = None;
     let mut public_key = false;
@@ -115,6 +121,54 @@ async fn main() {
             "--status" => status = true,
             "--reporter-source" => {
                 reporter_source = args.next();
+            }
+            "--enroll-propose" => {
+                let Some(name) = args.next() else {
+                    eprintln!("vault_read_probe: --enroll-propose needs a consumer name");
+                    std::process::exit(2);
+                };
+                enroll_propose = Some(name);
+            }
+            "--enroll-poll" => {
+                let Some(id) = args.next() else {
+                    eprintln!("vault_read_probe: --enroll-poll needs a request id");
+                    std::process::exit(2);
+                };
+                enroll_poll = Some(id);
+            }
+            "--enroll-secret" => {
+                let Some(secret) = args.next() else {
+                    eprintln!("vault_read_probe: --enroll-secret needs the request secret");
+                    std::process::exit(2);
+                };
+                enroll_secret = Some(secret);
+            }
+            "--enrollment-token" => {
+                let Some(token) = args.next() else {
+                    eprintln!("vault_read_probe: --enrollment-token needs a token");
+                    std::process::exit(2);
+                };
+                enrollment_token = Some(token);
+            }
+            "--scoped-id" => {
+                let Some(id) = args.next() else {
+                    eprintln!("vault_read_probe: --scoped-id needs a credential id");
+                    std::process::exit(2);
+                };
+                scoped_id = Some(id);
+            }
+            "--scoped-min-ttl-ms" => {
+                let Some(raw) = args.next() else {
+                    eprintln!("vault_read_probe: --scoped-min-ttl-ms needs a value");
+                    std::process::exit(2);
+                };
+                match raw.parse::<i64>() {
+                    Ok(ms) => scoped_min_ttl_ms = Some(ms),
+                    Err(_) => {
+                        eprintln!("vault_read_probe: --scoped-min-ttl-ms must be an integer");
+                        std::process::exit(2);
+                    }
+                }
             }
             "--status-id" => {
                 let id = args.next().unwrap_or_else(|| {
@@ -189,8 +243,24 @@ async fn main() {
             }
             trimmed.to_string()
         }
+        (None, None)
+            if scoped_id.is_some()
+                || status_ids.is_some()
+                || enroll_propose.is_some()
+                || enroll_poll.is_some() =>
+        {
+            // GRANT-ADDRESSED ARMS NEED NO HANDLE, and requiring one would misrepresent
+            // the surface: `get_scoped` and scoped `status` are authorized by the
+            // caller's grants, and the whole point of the cutover this probe exercises is
+            // that a consumer stops holding capabilities at all. Demanding one here would
+            // have meant the only way to test the handle-free path was to hold a handle.
+            String::new()
+        }
         (None, None) => {
-            eprintln!("vault_read_probe: --handle <ckh_...> or --handle-file <path> is required");
+            eprintln!(
+                "vault_read_probe: --handle <ckh_...> or --handle-file <path> is required \
+                 (grant-addressed arms --scoped-id / --status-id need no handle)"
+            );
             std::process::exit(2);
         }
     };
@@ -275,6 +345,9 @@ async fn main() {
     if public_key
         || status
         || status_ids.is_some()
+        || scoped_id.is_some()
+        || enroll_propose.is_some()
+        || enroll_poll.is_some()
         || sign_payload.is_some()
         || sign_payload_bytes.is_some()
     {
@@ -322,6 +395,120 @@ async fn main() {
                      for ids this principal cannot reach; a difference is an enumeration \
                      oracle, not a cosmetic one"
                 );
+            }
+        }
+        if let Some(name) = enroll_propose.as_ref() {
+            // The request secret is MINTED HERE and only its hash is sent. That asymmetry
+            // is what stops a squatter who proposed a name it does not hold from
+            // collecting the token even if an operator approves by mistake: the poll is
+            // authenticated by the secret, which never left this process.
+            // Entropy from the clock plus the pid, then hashed by the CORE's own
+            // function rather than a re-derivation here. A probe that re-implemented the
+            // domain separator could disagree with the vault and the disagreement would
+            // present as "the ceremony is broken" rather than "the probe is wrong".
+            let seed = format!(
+                "{}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("clock")
+                    .as_nanos(),
+                name
+            );
+            let secret_hex = credentials_core::enrollment::enrollment_secret_hash(
+                &credentials_core::enrollment::enrollment_secret_hash(&{
+                    use std::collections::hash_map::DefaultHasher;
+                    use std::hash::{Hash, Hasher};
+                    let mut h = DefaultHasher::new();
+                    seed.hash(&mut h);
+                    format!(
+                        "{:016x}{:016x}{:016x}{:016x}",
+                        h.finish(),
+                        h.finish().rotate_left(17),
+                        h.finish().rotate_left(31),
+                        h.finish().rotate_left(47)
+                    )
+                })
+                .expect("seed is 32 hex bytes"),
+            )
+            .expect("hash is 32 hex bytes");
+            let hash = credentials_core::enrollment::enrollment_secret_hash(&secret_hex)
+                .expect("secret is 32 hex bytes");
+            let body = enroll_call(
+                &mut stream,
+                route_channel,
+                route_epoch,
+                "auth.enroll_propose",
+                json!({ "proposed_name": name, "request_secret_hash": hash }),
+                60,
+            )
+            .await;
+            let parsed: Value = serde_json::from_slice(&body.body).unwrap_or(Value::Null);
+            eprintln!(
+                "[probe] enroll_propose({name}) -> {}",
+                serde_json::to_string(&parsed).unwrap_or_default()
+            );
+            eprintln!("[probe] request_secret (keep, needed to poll): {secret_hex}");
+        }
+        if let Some(request_id) = enroll_poll.as_ref() {
+            let Some(secret) = enroll_secret.as_ref() else {
+                eprintln!("vault_read_probe: --enroll-poll needs --enroll-secret");
+                std::process::exit(2);
+            };
+            let body = enroll_call(
+                &mut stream,
+                route_channel,
+                route_epoch,
+                "auth.enroll_poll",
+                json!({ "request_id": request_id, "request_secret": secret }),
+                61,
+            )
+            .await;
+            let parsed: Value = serde_json::from_slice(&body.body).unwrap_or(Value::Null);
+            eprintln!(
+                "[probe] enroll_poll -> {}",
+                serde_json::to_string(&parsed).unwrap_or_default()
+            );
+        }
+        if let Some(id) = scoped_id.as_ref() {
+            let body = credential_get_scoped(
+                &mut stream,
+                route_channel,
+                route_epoch,
+                id,
+                scoped_min_ttl_ms,
+                enrollment_token.as_deref(),
+                50,
+            )
+            .await;
+            let parsed: Value = serde_json::from_slice(&body.body).unwrap_or(Value::Null);
+            // Print the FINGERPRINT and length, never the payload: this arm is run against
+            // production credentials and its output lands in a terminal scrollback.
+            let served = parsed.pointer("/result/payload").and_then(Value::as_array);
+            match served {
+                Some(bytes) => {
+                    let raw: Vec<u8> = bytes
+                        .iter()
+                        .filter_map(Value::as_u64)
+                        .map(|b| b as u8)
+                        .collect();
+                    // fnv1a64, the same dependency-free fingerprint the handle arm uses:
+                    // enough to compare two reads for equality, never enough to recover
+                    // the secret from a terminal scrollback.
+                    eprintln!(
+                        "[probe] get_scoped(id={id}) -> {} bytes, fnv1a64 {:016x}, credential_id={}",
+                        raw.len(),
+                        fnv1a64(&raw),
+                        parsed
+                            .pointer("/result/credential_id")
+                            .and_then(Value::as_str)
+                            .unwrap_or("<absent>")
+                    );
+                }
+                None => eprintln!(
+                    "[probe] get_scoped(id={id}) -> {}",
+                    serde_json::to_string(&parsed).unwrap_or_default()
+                ),
             }
         }
         if public_key {
@@ -389,6 +576,95 @@ async fn main() {
 /// they ever differ, the surface has become an oracle for which credential ids exist,
 /// which is a stop-the-deploy finding rather than a cosmetic one. The happy path needs
 /// the granted principal and belongs to that consumer's seat.
+/// Drive one enrollment ceremony step.
+///
+/// THE PROBE BINDS AS `Principal::Direct`, WHICH EVERY SCOPED OP REFUSES. That is not a
+/// limitation to work around — it is the exact situation enrollment exists for, and it is
+/// why a `--scoped-id` run without a token correctly answers `not_found`. A host-launched
+/// consumer has no launch nonce and can never have one; the ceremony is how it acquires a
+/// name the vault's grants can reach.
+///
+/// So these three arms make the probe the first thing on this host that can exercise the
+/// campaign end to end: propose, wait for a master-key approval, poll, then spend.
+async fn enroll_call(
+    stream: &mut TcpStream,
+    route_channel: u16,
+    route_epoch: u32,
+    method: &str,
+    params: Value,
+    corr: u64,
+) -> Frame {
+    let frame = Frame::build(
+        FrameType::Request,
+        Flags::new(false, Priority::Interactive, false),
+        route_channel,
+        route_epoch,
+        corr,
+        serde_json::to_vec(&json!({ "method": method, "params": params })).unwrap(),
+    )
+    .unwrap();
+    write_frame(stream, &frame).await.unwrap();
+    loop {
+        let frame = read_frame_timeout(stream).await;
+        if frame.header.corr == corr
+            && matches!(frame.header.ty, FrameType::Response | FrameType::Error)
+        {
+            return frame;
+        }
+    }
+}
+
+/// Exercise `credential.get_scoped` — the grant-addressed fetch.
+///
+/// THIS ARM EXISTS BECAUSE THE OP HAD NO OPERATOR EXERCISE PATH AT ALL. It shipped in
+/// v0.1.3, gained an `enrollment_token` parameter, then a `min_ttl_ms` parameter, and
+/// across all three changes no tool on this host could call it. Its first live request
+/// anywhere will be a consumer's, which means "it works" rested entirely on tests written
+/// against the behaviour their author imagined.
+///
+/// `min_ttl_ms` is optional here rather than defaulted: a probe that always sent a floor
+/// could not distinguish "the op honours a demand" from "the op applies one of its own",
+/// and an absent demand is the shape most callers send.
+async fn credential_get_scoped(
+    stream: &mut TcpStream,
+    route_channel: u16,
+    route_epoch: u32,
+    credential_id: &str,
+    min_ttl_ms: Option<i64>,
+    enrollment_token: Option<&str>,
+    corr: u64,
+) -> Frame {
+    let mut params = json!({ "credential_id": credential_id });
+    if let Some(ms) = min_ttl_ms {
+        params["min_ttl_ms"] = json!(ms);
+    }
+    if let Some(token) = enrollment_token {
+        params["enrollment_token"] = json!(token);
+    }
+    let frame = Frame::build(
+        FrameType::Request,
+        Flags::new(false, Priority::Interactive, false),
+        route_channel,
+        route_epoch,
+        corr,
+        serde_json::to_vec(&json!({
+            "method": "credential.get_scoped",
+            "params": params,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    write_frame(stream, &frame).await.unwrap();
+    loop {
+        let frame = read_frame_timeout(stream).await;
+        if frame.header.corr == corr
+            && matches!(frame.header.ty, FrameType::Response | FrameType::Error)
+        {
+            return frame;
+        }
+    }
+}
+
 async fn credential_status(
     stream: &mut TcpStream,
     route_channel: u16,

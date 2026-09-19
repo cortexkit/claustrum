@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
-# Prove that a config hook owns the SDK fetch after OpenCode's provider loaders run.
-#
-# The fixture is deliberately disposable: no vendor endpoint, credential, or user
-# XDG directory is touched. The mutation arm proves the assertion can observe the
-# missing wrapper rather than passing because the stub answered successfully.
+# Prove that the config hook owns SDK fetches without allowing a stale OAuth
+# fixture to hide a shipped-loader refresh attempt.
 set -euo pipefail
 
 umask 077
@@ -30,11 +27,31 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 
-version="$(opencode --version)"
-if [[ "$version" != "1.18.25" ]]; then
-  printf 'SPIKE FAIL stock_version=%s expected=1.18.25\n' "$version" >&2
+failures=0
+fail() {
+  failures=$((failures + 1))
+  printf 'SPIKE FAIL %s\n' "$*" >&2
+}
+finish() {
+  printf '%s fail\n' "$failures"
+}
+count_lines() {
+  local pattern="$1"
+  local path="$2"
+  local count
+  count="$(grep -c -- "$pattern" "$path" 2>/dev/null || true)"
+  printf '%s\n' "${count:-0}"
+}
+
+OPENCODE_BIN="${OPENCODE_BIN:-opencode}"
+version="$($OPENCODE_BIN --version 2>/dev/null || true)"
+if [[ -z "$version" ]]; then
+  fail 'stock_version=empty'
+  finish
   exit 1
 fi
+printf 'SPIKE stock=%s\n' "$version"
+printf '%s\n' "$version" > "$ROOT/stock-version"
 
 cat > "$ROOT/stub.ts" <<'EOF'
 const root = Bun.argv[2]
@@ -113,10 +130,22 @@ EOF
 cat > "$ROOT/plugin.ts" <<'EOF'
 const root = process.env.XDG_STATE_HOME?.replace(/\/state$/, "") ?? "/tmp/opencode/oc-spike"
 const providers = ["deepseek", "xai"]
+const refreshOrigin = "https://auth.x.ai"
+const refreshPath = "/oauth2/token"
 
-function authorization(input: any, init: any) {
+type ProviderConfig = { options?: Record<string, unknown> }
+type OpenCodeConfig = { provider?: Record<string, ProviderConfig> }
+type FetchState = { original: typeof globalThis.fetch }
+type FetchGlobal = typeof globalThis & { __claustrumSpikeFetchState?: FetchState }
+
+function authorization(input: RequestInfo | URL, init?: RequestInit) {
   const source = init?.headers ?? (input instanceof Request ? input.headers : undefined)
   return new Headers(source).get("authorization") ?? ""
+}
+
+function requestUrl(input: RequestInfo | URL) {
+  if (input instanceof Request) return new URL(input.url)
+  return new URL(typeof input === "string" ? input : input.toString())
 }
 
 async function log(path: string, line: string) {
@@ -124,17 +153,45 @@ async function log(path: string, line: string) {
   await Bun.write(path, prior + line + "\n")
 }
 
-export const SpikePlugin = async (input: any) => ({
-  config: async (cfg: any) => {
+const fetchGlobal = globalThis as FetchGlobal
+if (!fetchGlobal.__claustrumSpikeFetchState) {
+  const original = globalThis.fetch.bind(globalThis)
+  fetchGlobal.__claustrumSpikeFetchState = { original }
+  globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = requestUrl(input)
+    if (url.origin === refreshOrigin && url.pathname === refreshPath) {
+      await log(`${root}/refresh.log`, "SHIPPED_REFRESH_ATTEMPT")
+      return new Response(JSON.stringify({ error: "invalid_grant" }), {
+        status: 400,
+        headers: { "content-type": "application/json" },
+      })
+    }
+    if (url.hostname !== "127.0.0.1" && url.hostname !== "localhost" && url.hostname !== "[::1]") {
+      throw new Error("spike blocked non-loopback egress")
+    }
+    return original(input, init)
+  }
+}
+
+if (process.env.SPIKE_PROBE_REFRESH_COUNTER === "1") {
+  await globalThis.fetch(`${refreshOrigin}${refreshPath}`, { method: "POST" })
+}
+
+export const SpikePlugin = async (_input: unknown) => ({
+  config: async (cfg: OpenCodeConfig) => {
     for (const provider of providers) {
       const configured = cfg.provider?.[provider]
       if (!configured) continue
       configured.options = { ...(configured.options ?? {}) }
       configured.options.apiKey = `claustrum-tombstone:v1:${provider}`
       if (process.env.SPIKE_DISABLE_CUSTOM_FETCH === "1") continue
-      const upstream = globalThis.fetch
-      configured.options.fetch = async (request: any, init?: any) => {
-        await log(`${root}/fetch.log`, `SPIKE_FETCH provider=${provider} auth=${authorization(request, init)}`)
+      if (provider === "xai" && process.env.SPIKE_COVERAGE_ARM === "1") continue
+      const upstream = fetchGlobal.__claustrumSpikeFetchState.original
+      configured.options.fetch = async (request: RequestInfo | URL, init?: RequestInit) => {
+        const url = requestUrl(request)
+        if (url.pathname.endsWith("/chat/completions") || url.pathname.endsWith("/responses")) {
+          await log(`${root}/fetch.log`, `SPIKE_FETCH provider=${provider} auth=${authorization(request, init)}`)
+        }
         return upstream(request, init)
       }
     }
@@ -149,7 +206,8 @@ for _ in {1..100}; do
   sleep 0.01
 done
 if [[ ! -s "$ROOT/port" ]]; then
-  printf 'SPIKE FAIL stub_not_ready\n' >&2
+  fail 'stub_not_ready'
+  finish
   exit 1
 fi
 PORT="$(< "$ROOT/port")"
@@ -162,114 +220,173 @@ cat > "$XDG_CONFIG_HOME/opencode/opencode.json" <<EOF
     "deepseek": {
       "npm": "@ai-sdk/openai-compatible",
       "options": { "baseURL": "${BASE_URL}" },
-      "models": {
-        "spike": {
-          "name": "Spike",
-          "id": "spike",
-          "limit": { "context": 4096, "output": 256 },
-          "modalities": { "input": ["text"], "output": ["text"] }
-        }
-      }
+      "models": { "spike": { "name": "Spike", "id": "spike", "limit": { "context": 4096, "output": 256 }, "modalities": { "input": ["text"], "output": ["text"] } } }
     },
     "xai": {
       "npm": "@ai-sdk/xai",
       "options": { "baseURL": "${BASE_URL}" },
-      "models": {
-        "spike": {
-          "name": "Spike",
-          "id": "spike",
-          "limit": { "context": 4096, "output": 256 },
-          "modalities": { "input": ["text"], "output": ["text"] }
-        }
-      }
+      "models": { "spike": { "name": "Spike", "id": "spike", "limit": { "context": 4096, "output": 256 }, "modalities": { "input": ["text"], "output": ["text"] } } }
     }
   }
 }
 EOF
 
-cat > "$XDG_DATA_HOME/opencode/auth.json" <<'EOF'
+write_auth() {
+  local access="$1"
+  local refresh="$2"
+  local expires="$3"
+  cat > "$XDG_DATA_HOME/opencode/auth.json" <<EOF
 {
   "deepseek": { "type": "api", "key": "claustrum-tombstone:v1:deepseek" },
-  "xai": { "type": "oauth", "refresh": "claustrum-tombstone:v1:xai", "access": "claustrum-tombstone:v1:xai", "expires": 0 }
+  "xai": { "type": "oauth", "access": "${access}", "refresh": "${refresh}", "expires": ${expires} }
 }
 EOF
-chmod 600 "$XDG_DATA_HOME/opencode/auth.json"
+  chmod 600 "$XDG_DATA_HOME/opencode/auth.json"
+}
 
-run_provider() {
-  local provider="$1"
-  local output
-  if ! output="$(timeout 120 opencode run -m "${provider}/spike" 'Return the stub response.' 2>&1)"; then
-    printf '%s\n' "$output" > "$ROOT/run-${provider}.log"
-    printf 'SPIKE FAIL %s run_failed\n' "$provider" >&2
-    printf '%s\n' "$output" >&2
-    exit 1
-  fi
-  printf '%s\n' "$output" > "$ROOT/run-${provider}.log"
-  if ! grep -q 'SPIKE_OK' "$ROOT/run-${provider}.log"; then
-    printf 'SPIKE FAIL %s missing_stub_response\n' "$provider" >&2
-    exit 1
+write_auth '' 'claustrum-tombstone:v1:xai' 0
+cp "$XDG_DATA_HOME/opencode/auth.json" "$ROOT/canonical-auth.json"
+
+run_child() {
+  local name="$1"
+  local provider="$2"
+  local coverage="$3"
+  local output status
+  set +e
+  output="$(env -i \
+    PATH="$PATH" HOME="$HOME" USER="${USER:-}" \
+    XDG_CONFIG_HOME="$XDG_CONFIG_HOME" XDG_DATA_HOME="$XDG_DATA_HOME" \
+    XDG_CACHE_HOME="$XDG_CACHE_HOME" XDG_STATE_HOME="$XDG_STATE_HOME" \
+    SPIKE_COVERAGE_ARM="$coverage" SPIKE_DISABLE_CUSTOM_FETCH="${SPIKE_DISABLE_CUSTOM_FETCH:-0}" \
+    timeout 60 "$OPENCODE_BIN" run --title spike -m "${provider}/spike" 'Return the stub response.' 2>&1)"
+  status=$?
+  set -e
+  printf '%s\n' "$output" > "$ROOT/run-${name}.log"
+  printf '%s\n' "$status" > "$ROOT/run-${name}.status"
+}
+
+probe_refresh_counter() {
+  : > "$ROOT/refresh.log"
+  set +e
+  env -i PATH="$PATH" HOME="$HOME" USER="${USER:-}" \
+    XDG_CONFIG_HOME="$XDG_CONFIG_HOME" XDG_DATA_HOME="$XDG_DATA_HOME" \
+    XDG_CACHE_HOME="$XDG_CACHE_HOME" XDG_STATE_HOME="$XDG_STATE_HOME" \
+    SPIKE_PROBE_REFRESH_COUNTER=1 bun "$ROOT/plugin.ts" > "$ROOT/probe.log" 2>&1
+  local status=$?
+  set -e
+  local count vendor
+  count="$(count_lines '^SHIPPED_REFRESH_ATTEMPT$' "$ROOT/refresh.log")"
+  vendor="$(count_lines 'auth.x.ai' "$ROOT/stub-headers.log")"
+  printf 'SPIKE probe shipped_refresh=%s vendor_requests=%s exit=%s\n' "$count" "$vendor" "$status"
+  if [[ "$status" != 0 || "$count" != 1 || "$vendor" != 0 ]]; then
+    fail "probe shipped_refresh=${count} vendor_requests=${vendor} exit=${status}"
   fi
 }
 
-run_provider deepseek
-
-if [[ "${SPIKE_DISABLE_CUSTOM_FETCH:-0}" == "1" ]]; then
-  fetch_log="$(cat "$ROOT/fetch.log" 2>/dev/null || true)"
-  if grep -q 'SPIKE_FETCH provider=deepseek ' <<<"$fetch_log"; then
-    printf 'SPIKE FAIL deepseek custom_fetch=1\n' >&2
-    exit 1
+run_control() {
+  local provider="$1"
+  : > "$ROOT/fetch.log"
+  : > "$ROOT/stub-headers.log"
+  : > "$ROOT/stub-requests.log"
+  run_child "control-${provider}" "$provider" 0
+  local status fetch_count ok
+  status="$(< "$ROOT/run-control-${provider}.status")"
+  fetch_count="$(count_lines "^SPIKE_FETCH provider=${provider} " "$ROOT/fetch.log")"
+  ok="$(count_lines 'SPIKE_OK' "$ROOT/run-control-${provider}.log")"
+  printf 'SPIKE %s control custom_fetch=%s stub_ok=%s exit=%s\n' "$provider" "$fetch_count" "$ok" "$status"
+  if [[ "$fetch_count" != 1 || "$ok" == 0 || "$status" != 0 ]]; then
+    fail "${provider} control custom_fetch=${fetch_count} stub_ok=${ok} exit=${status}"
   fi
-  printf 'SPIKE FAIL deepseek custom_fetch=0\n'
-  exit 1
+}
+
+coverage_fixture=""
+coverage_count=0
+run_coverage_fixture() {
+  local name="$1"
+  local access="$2"
+  : > "$ROOT/refresh.log"
+  write_auth "$access" 'spike-dummy-refresh' 1
+  run_child "coverage-${name}" xai 1
+  coverage_count="$(count_lines '^SHIPPED_REFRESH_ATTEMPT$' "$ROOT/refresh.log")"
+  local status outcome
+  status="$(< "$ROOT/run-coverage-${name}.status")"
+  outcome='silent_failure'
+  [[ "$status" == 124 ]] && outcome='provider_wedged'
+  printf 'SPIKE coverage fixture=%s count=%s outcome=%s exit=%s\n' "$name" "$coverage_count" "$outcome" "$status"
+  if (( coverage_count >= 1 )); then
+    coverage_fixture="$name"
+  fi
+}
+
+run_tombstone() {
+  : > "$ROOT/fetch.log"
+  : > "$ROOT/refresh.log"
+  : > "$ROOT/stub-headers.log"
+  : > "$ROOT/stub-requests.log"
+  cp "$ROOT/canonical-auth.json" "$XDG_DATA_HOME/opencode/auth.json"
+  run_child tombstone xai 0
+  local status fetch_count refresh_count ok
+  status="$(< "$ROOT/run-tombstone.status")"
+  fetch_count="$(count_lines '^SPIKE_FETCH provider=xai ' "$ROOT/fetch.log")"
+  refresh_count="$(count_lines '^SHIPPED_REFRESH_ATTEMPT$' "$ROOT/refresh.log")"
+  ok="$(count_lines 'SPIKE_OK' "$ROOT/run-tombstone.log")"
+  if ! cmp -s "$ROOT/canonical-auth.json" "$XDG_DATA_HOME/opencode/auth.json"; then
+    fail 'xai auth_fixture_mutated=1'
+  fi
+  if [[ "$refresh_count" != 0 ]]; then
+    local outcome='silent_failure'
+    [[ "$status" == 124 ]] && outcome='provider_wedged'
+    printf 'SPIKE xai refresh_attempted=1 %s\n' "$outcome" >&2
+    fail "xai shipped_refresh=${refresh_count} ${outcome}"
+  fi
+  if [[ "$status" != 0 || "$ok" == 0 || "$fetch_count" != 1 ]]; then
+    fail "xai tombstone custom_fetch=${fetch_count} stub_ok=${ok} exit=${status}"
+  fi
+  printf 'SPIKE xai custom_fetch=%s shipped_refresh=%s stock=%s\n' "$fetch_count" "$refresh_count" "$version"
+}
+
+if [[ "${SPIKE_PROBE_REFRESH_COUNTER:-0}" == 1 ]]; then
+  probe_refresh_counter
+  finish
+  if (( failures != 0 )); then exit 1; fi
+  exit 0
 fi
 
-run_provider xai
+selected="${SPIKE_CONTROL_PROVIDER:-all}"
+case "$selected" in
+  all)
+    run_control deepseek
+    ;;
+  deepseek)
+    run_control deepseek
+    finish
+    if (( failures != 0 )); then exit 1; fi
+    exit 0
+    ;;
+  xai)
+    run_control xai
+    finish
+    if (( failures != 0 )); then exit 1; fi
+    exit 0
+    ;;
+  *)
+    fail "unknown_control_provider=${selected}"
+    finish
+    exit 1
+    ;;
+esac
 
-fetch_log="$(cat "$ROOT/fetch.log" 2>/dev/null || true)"
-stub_summary="$(python3 - "$ROOT/stub-requests.log" "$ROOT/stub-headers.log" <<'PY'
-import json
-import pathlib
-import sys
-
-header_lines = pathlib.Path(sys.argv[2]).read_text().splitlines() if pathlib.Path(sys.argv[2]).exists() else []
-request_lines = [line for line in header_lines if json.loads(line).get("path") in ("/v1/chat/completions", "/v1/responses")]
-for provider, sentinel in (("deepseek", "claustrum-tombstone:v1:deepseek"), ("xai", "claustrum-tombstone:v1:xai")):
-    matches = [line for line in request_lines if sentinel in json.loads(line).get("headers", {}).get("authorization", "")]
-    auth = ""
-    for line in matches:
-        headers = json.loads(line)["headers"]
-        auth = headers.get("authorization", auth)
-    print(f"{provider}\t{len(matches)}\t{auth}")
-print(f"requests\t{len(request_lines)}")
-PY
-)"
-
-deepseek_fetch=0
-xai_fetch=0
-grep -q '^SPIKE_FETCH provider=deepseek ' <<<"$fetch_log" && deepseek_fetch=1
-grep -q '^SPIKE_FETCH provider=xai ' <<<"$fetch_log" && xai_fetch=1
-deepseek_auth="$(grep '^SPIKE_FETCH provider=deepseek ' <<<"$fetch_log" | head -1 | sed 's/.* auth=//')"
-xai_auth="$(grep '^SPIKE_FETCH provider=xai ' <<<"$fetch_log" | head -1 | sed 's/.* auth=//')"
-deepseek_wire="$(awk -F '\t' '$1 == "deepseek" { print $2 }' <<<"$stub_summary")"
-xai_wire="$(awk -F '\t' '$1 == "xai" { print $2 }' <<<"$stub_summary")"
-stub_requests="$(awk -F '\t' '$1 == "requests" { print $2 }' <<<"$stub_summary")"
-
-if [[ "$deepseek_fetch" != 1 || "$deepseek_auth" != 'Bearer claustrum-tombstone:v1:deepseek' || "$deepseek_wire" != 1 ]]; then
-  printf 'SPIKE FAIL deepseek custom_fetch=%s auth=%s stub_requests=%s\n' "$deepseek_fetch" "$deepseek_auth" "$deepseek_wire" >&2
-  exit 1
+run_coverage_fixture empty-access ''
+if (( coverage_count == 0 )); then
+  run_coverage_fixture stale-access 'spike-dummy-access'
 fi
-if [[ "$xai_fetch" != 1 || "$xai_auth" != 'Bearer claustrum-tombstone:v1:xai' || "$xai_wire" != 1 ]]; then
-  printf 'SPIKE FAIL xai custom_fetch=%s auth=%s stub_requests=%s\n' "$xai_fetch" "$xai_auth" "$xai_wire" >&2
-  exit 1
+if [[ -z "$coverage_fixture" ]]; then
+  printf 'SPIKE STOP coverage=unverified fixtures=empty-access,stale-access\n' >&2
+  fail 'coverage=unverified'
+  finish
+  exit 2
 fi
-if [[ "$stub_requests" != 2 ]]; then
-  printf 'SPIKE FAIL total_stub_requests=%s\n' "$stub_requests" >&2
-  exit 1
-fi
-
-printf 'SPIKE deepseek stub_saw_sentinel=1\n'
-printf 'SPIKE xai stub_saw_sentinel=1\n'
-printf 'SPIKE deepseek custom_fetch=1 auth=%s stub_requests=1\n' "$deepseek_auth"
-printf 'SPIKE xai custom_fetch=1 auth=%s stub_requests=1\n' "$xai_auth"
-printf 'SPIKE xai shipped_refresh=0 proof=expired-oauth-succeeded-offline\n'
-printf 'SPIKE PASS 2/2 stock=%s\n' "$version"
+printf 'SPIKE coverage=fired fixture=%s count=%s\n' "$coverage_fixture" "$coverage_count"
+run_tombstone
+finish
+if (( failures != 0 )); then exit 1; fi

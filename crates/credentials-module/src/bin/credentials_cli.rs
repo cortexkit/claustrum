@@ -1061,9 +1061,8 @@ fn open_for_admin_with_key(
         StoreError::Lease(_) => CliError::DaemonRunning { route_path_exists },
         other => CliError::StoreOpen(other),
     })?;
-    EncryptedStore::migrate(&store).map_err(CliError::StoreOpen)?;
-    // Crash-safe resolve: pick the key-store slot matching the database's recorded
-    // fingerprint (so a vault left mid-rotation still opens under the right key).
+    // Crash-safe resolve happens before migration because migration 10 must decrypt
+    // the existing audit-chain key before it writes category assignments.
     let db_key_id = EncryptedStore::read_db_key_id(&store).map_err(CliError::StoreOpen)?;
     let key = match (db_key_id, preflighted_key) {
         (Some(db_key_id), Some(key)) if key.key_id() == db_key_id => key,
@@ -1074,6 +1073,7 @@ fn open_for_admin_with_key(
             resolver::resolve(&resolver_config(global), None).map_err(CliError::MasterKey)?
         }
     };
+    EncryptedStore::migrate_with_key(&store, &key).map_err(CliError::StoreOpen)?;
     EncryptedStore::open(store, key).map_err(CliError::Store)
 }
 
@@ -3195,11 +3195,10 @@ fn parse_grants(result: &serde_json::Value) -> Result<Vec<GrantRow>, CliError> {
 /// Print one stable row per principal-scoped grant, including the creation time.
 ///
 /// WIDTHS ARE MEASURED FROM THE ROWS, NOT FIXED. The fixed `{:<24}` this replaced was
-/// narrower than real data: `apikey:artificial-analysis` is 26 characters, so that one row
-/// pushed its last two columns right while every other row stayed aligned. A table where
-/// one row is offset reads as a rendering fault in the VALUE -- I misread a correct
-/// 16-character prefix as truncated output on the strength of it, and only the store
-/// settled it.
+/// narrower than a measured 26-character selector, so that row pushed its last two
+/// columns right while every other row stayed aligned. A table where one row is offset
+/// reads as a rendering fault in the VALUE -- I misread a correct selector as truncated
+/// output on the strength of it, and only the store settled it.
 ///
 /// The header is here for the same reason. Without it the operation column (`read` /
 /// `sign`) and the principal kind are both short lowercase words, and nothing on screen
@@ -5292,7 +5291,7 @@ mod taxonomy_cli_tests {
                 "principal_kind": "reserved",
                 "principal_id": "agent",
                 "selector_kind": "category",
-                "credential_prefix": "category:llm-provider",
+                "credential_prefix": "llm-provider",
                 "operation": "read",
                 "created_at_ms": 1,
                 "covered_credential_ids": []

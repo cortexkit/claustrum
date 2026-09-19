@@ -67,12 +67,14 @@ pub enum AuditOp {
     /// A read-surface fetch anomaly was detected (an enumeration/rate alarm). Not a
     /// mutation, but recorded durably so the anomaly survives the connection.
     FetchAnomaly,
-    /// A principal-scoped credential-prefix read grant was created.
+    /// A principal-scoped operation grant was created.
     GrantCreate,
-    /// A principal-scoped credential-prefix read grant was revoked.
+    /// A principal-scoped operation grant was revoked.
     GrantRevoke,
     /// A credential's authorization categories changed.
     SetCategory,
+    /// Migration 10 assigned a category while converting schema-9 selectors.
+    CategoryMigrate,
     /// A named approver approved a specific artifact, identified by the SHA-256 of its
     /// EXACT BYTES, before a signing window was opened for it.
     ///
@@ -118,6 +120,7 @@ impl AuditOp {
             AuditOp::GrantCreate => "grant_create",
             AuditOp::GrantRevoke => "grant_revoke",
             AuditOp::SetCategory => "set_category",
+            AuditOp::CategoryMigrate => "category.migrate",
             AuditOp::Approval => "approval",
         }
     }
@@ -604,6 +607,7 @@ mod vocabulary_documentation_tests {
                 AuditOp::GrantCreate => AuditOp::GrantCreate.as_str(),
                 AuditOp::GrantRevoke => AuditOp::GrantRevoke.as_str(),
                 AuditOp::SetCategory => AuditOp::SetCategory.as_str(),
+                AuditOp::CategoryMigrate => AuditOp::CategoryMigrate.as_str(),
                 AuditOp::Approval => AuditOp::Approval.as_str(),
             }
         }
@@ -627,6 +631,10 @@ mod vocabulary_documentation_tests {
         assert!(
             WIRE_CONTRACT.contains(value(AuditOp::SetCategory)),
             "the new category audit op must be documented in the slice wire contract"
+        );
+        assert!(
+            WIRE_CONTRACT.contains(value(AuditOp::CategoryMigrate)),
+            "the category migration audit op must be documented in the slice wire contract"
         );
         assert_documented(section, "audit_log.op", value(AuditOp::Approval));
     }

@@ -136,14 +136,24 @@ run_arm() {
 
     case "$arm" in
       1)
+        # RE-ANCHORED TWICE for the selector vocabulary (migration 10), and the first
+        # attempt was wrong in a way worth recording.
+        #
+        # The query moved and gained a `selector_kind` column, so the original anchor
+        # matched 0 times and the arm REFUSED -- "found 0, refusing an unmeasured arm" --
+        # which is the guard working. My first re-anchor then searched for
+        # "FROM read_grants ORDER BY" and took the first plausible hit, which lives in
+        # `load_migration_10_state`: a migration PLANNER, not the listing. The mutation
+        # applied cleanly, the named test passed, and the arm reported "expected to
+        # redden, but it passed" -- a true edit to the wrong function.
+        #
+        # The listing the test drives is `read_grants_from_conn`, whose SQL is built by
+        # format! so the mutable text is the ORDER BY fragment rather than a whole
+        # statement. Collapsing it to a GROUP BY hides one of a same-selector read/sign
+        # pair, which is precisely what the named test asserts cannot happen.
         replace_exact "$source" \
-          '                    "SELECT principal_kind, principal_id, credential_prefix, operation, created_at_ms \
-                     FROM read_grants \
-                     ORDER BY principal_kind, principal_id, credential_prefix, operation",' \
-          '                    "SELECT principal_kind, principal_id, credential_prefix, operation, created_at_ms \
-                     FROM read_grants \
-                     GROUP BY credential_prefix \
-                     ORDER BY principal_kind, principal_id, credential_prefix, operation",'
+          '             FROM read_grants ORDER BY principal_kind, principal_id, {selector_kind_column}, {selector_order}, operation"' \
+          '             FROM read_grants GROUP BY {selector_order} ORDER BY principal_kind, principal_id, {selector_kind_column}, {selector_order}, operation"'
         ;;
       2)
         # Without this stale marker forcing a refresh, the named test never reaches the

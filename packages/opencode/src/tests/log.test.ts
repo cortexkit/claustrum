@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -49,11 +49,28 @@ describe("custody logger", () => {
     };
   });
 
+  // Every root this suite creates goes through `tempRoot()` and is removed here.
+  //
+  // WHY A HELPER RATHER THAN A LINE IN EACH TEST: seventeen tests each built their own
+  // root inline and not one removed it, so a forgotten `rm` was indistinguishable from
+  // the other sixteen. Measured 2026-09-19: 326 orphaned `claustrum-log-*` directories
+  // in $TMPDIR, part of 3,275 this repo had left there and 291,480 fleet-wide -- enough
+  // that an unbounded readdir of that directory ran for minutes and starved another
+  // module's bind path until new clients could not connect. Test litter stopped being
+  // free, and a helper is the only version of this that a new test cannot forget.
+  const roots: string[] = [];
+  const tempRoot = () => {
+    const root = join(tmpdir(), `claustrum-log-${crypto.randomUUID()}`);
+    roots.push(root);
+    return root;
+  };
+
   afterEach(() => {
     console.debug = originalDebug;
     console.log = originalLog;
     console.error = originalError;
     console.warn = originalWarn;
+    while (roots.length) rmSync(roots.pop()!, { recursive: true, force: true });
   });
 
   test("NO level reaches the console: warn and error are file-only alongside info and debug", () => {
@@ -93,7 +110,7 @@ describe("custody logger", () => {
   });
 
   test("file sink writes metadata and creates private parent and file", () => {
-    const root = join(tmpdir(), `claustrum-log-${crypto.randomUUID()}`);
+    const root = tempRoot();
     const path = join(root, "nested", "custody.jsonl");
     const logger = createLogger(createFileLogSink({ path }));
 
@@ -109,7 +126,7 @@ describe("custody logger", () => {
   });
 
   test("file sink honors override and off disable", () => {
-    const root = join(tmpdir(), `claustrum-log-${crypto.randomUUID()}`);
+    const root = tempRoot();
     const override = join(root, "override.jsonl");
 
     createLogger(createFileLogSink({ env: { CLAUSTRUM_CUSTODY_LOG: override } })).info({ provider: "x" });
@@ -121,7 +138,7 @@ describe("custody logger", () => {
   });
 
   test("file sink writes only FILE_FIELDS", () => {
-    const root = join(tmpdir(), `claustrum-log-${crypto.randomUUID()}`);
+    const root = tempRoot();
     const path = join(root, "custody.jsonl");
     createLogger(createFileLogSink({ path })).info({ provider: "openai", state: "serving" });
 
@@ -130,7 +147,7 @@ describe("custody logger", () => {
   });
 
   test("file sink writes credential ids but refuses capability handles in served credential id", () => {
-    const root = join(tmpdir(), `claustrum-log-${crypto.randomUUID()}`);
+    const root = tempRoot();
     const path = join(root, "custody.jsonl");
     const handle = `ckh_${"a".repeat(43)}`;
     const logger = createLogger(createFileLogSink({ path }));
@@ -152,7 +169,7 @@ describe("custody logger", () => {
   });
 
   test("file sink tightens existing directory and rotated file modes", () => {
-    const root = join(tmpdir(), `claustrum-log-${crypto.randomUUID()}`);
+    const root = tempRoot();
     const path = join(root, "custody.jsonl");
     mkdirSync(root, { recursive: true, mode: 0o755 });
     writeFileSync(path, "x".repeat(5 * 1024 * 1024 + 1), { mode: 0o644 });
@@ -164,7 +181,7 @@ describe("custody logger", () => {
   });
 
   test("file sink rotates at five MiB", () => {
-    const root = join(tmpdir(), `claustrum-log-${crypto.randomUUID()}`);
+    const root = tempRoot();
     const path = join(root, "custody.jsonl");
     mkdirSync(root, { recursive: true });
     writeFileSync(path, "x".repeat(5 * 1024 * 1024 + 1), { mode: 0o600 });
@@ -175,7 +192,7 @@ describe("custody logger", () => {
   });
 
   test("file sink degrades with one console warning when path is unwritable", () => {
-    const root = join(tmpdir(), `claustrum-log-${crypto.randomUUID()}`);
+    const root = tempRoot();
     mkdirSync(root, { recursive: true });
     const blocked = join(root, "blocked");
     writeFileSync(blocked, "not a directory");
@@ -195,7 +212,7 @@ describe("custody logger", () => {
     // must not promise a console that carries faults, and warn/error must genuinely produce no
     // console output once the file is unavailable. Re-adding a console fallback reddens arm 2;
     // restoring the old sentence reddens arm 1.
-    const root = join(tmpdir(), `claustrum-log-${crypto.randomUUID()}`);
+    const root = tempRoot();
     mkdirSync(root, { recursive: true });
     const blocked = join(root, "blocked");
     writeFileSync(blocked, "not a directory");
@@ -218,7 +235,7 @@ describe("custody logger", () => {
   });
 
   test("file sink excludes free-text error messages", () => {
-    const root = join(tmpdir(), `claustrum-log-${crypto.randomUUID()}`);
+    const root = tempRoot();
     const path = join(root, "custody.jsonl");
     const handle = `ckh_${"A".repeat(43)}`;
     const key = "sk-fake-secret-key";
@@ -230,7 +247,7 @@ describe("custody logger", () => {
   });
 
   test("file sink rejects secret-bearing values routed into allowlisted shapes", () => {
-    const root = join(tmpdir(), `claustrum-log-${crypto.randomUUID()}`);
+    const root = tempRoot();
     const path = join(root, "custody.jsonl");
     const handle = `ckh_${"A".repeat(43)}`;
     const syntaxError = `Unexpected identifier "${handle}"`;
@@ -249,7 +266,7 @@ describe("custody logger", () => {
   });
 
   test("file sink rejects parser-forbidden provider identifiers", () => {
-    const root = join(tmpdir(), `claustrum-log-${crypto.randomUUID()}`);
+    const root = tempRoot();
     const path = join(root, "custody.jsonl");
     const logger = createLogger(createFileLogSink({ path }));
     for (const provider of ["__proto__", "constructor", "openai"]) {
@@ -261,7 +278,7 @@ describe("custody logger", () => {
   });
 
   test("file sink rejects parser-forbidden account labels", () => {
-    const root = join(tmpdir(), `claustrum-log-${crypto.randomUUID()}`);
+    const root = tempRoot();
     const path = join(root, "custody.jsonl");
     const logger = createLogger(createFileLogSink({ path }));
     for (const label of ["__proto__", "prototype", "work-alt"]) {
@@ -273,7 +290,7 @@ describe("custody logger", () => {
   });
 
   test("file sink excludes handle-shaped labels and providers without excluding ordinary identifiers", () => {
-    const root = join(tmpdir(), `claustrum-log-${crypto.randomUUID()}`);
+    const root = tempRoot();
     const path = join(root, "custody.jsonl");
     // Keep this 47-character fixture lowercase: a 45-character stand-in passes identifierIsValid
     // but misses the anchored handleRe, while mixed case is already rejected by labelRe; either
@@ -326,7 +343,7 @@ describe("custody logger", () => {
   });
 
   test("producer error classes and codes retain their real shapes", () => {
-    const root = join(tmpdir(), `claustrum-log-${crypto.randomUUID()}`);
+    const root = tempRoot();
     const path = join(root, "custody.jsonl");
     const classes = ["SyntaxError", "HandleFileValidationError", "UpstreamFetchError", "FreshnessTickError", "AbortError", "credential_warm", "transient", "permanent", "auth_required", "context_overflow", "other_owner"];
     const codes = ["ENOENT", "EACCES", "ERR_INVALID_ARG_TYPE", "not_found", "needs_reauth", "kind_not_gettable", "sentinel_in_request", "timeout", "transport_error"];
@@ -340,7 +357,7 @@ describe("custody logger", () => {
   });
 
   test("realistic credential shapes are rejected by both error rules", () => {
-    const root = join(tmpdir(), `claustrum-log-${crypto.randomUUID()}`);
+    const root = tempRoot();
     const path = join(root, "custody.jsonl");
     const handle = `ckh_${"A".repeat(43)}`;
     const handlePunctuated = `ckh_${"A".repeat(20)}-${"B".repeat(10)}_${"C".repeat(13)}`;
@@ -368,7 +385,7 @@ describe("custody logger", () => {
   });
 
   test("a code-shaped token is indistinguishable from a code and is written as-is (declared residual)", () => {
-    const root = join(tmpdir(), `claustrum-log-${crypto.randomUUID()}`);
+    const root = tempRoot();
     const path = join(root, "custody.jsonl");
     const residual = "sk_fake_secret";
     const logger = createLogger(createFileLogSink({ path }));
@@ -385,7 +402,7 @@ describe("custody logger", () => {
   });
 
   test("file sink rejects objects routed into allowlisted fields", () => {
-    const root = join(tmpdir(), `claustrum-log-${crypto.randomUUID()}`);
+    const root = tempRoot();
     const path = join(root, "custody.jsonl");
     const handle = `ckh_${"A".repeat(43)}`;
     createLogger(createFileLogSink({ path })).error({

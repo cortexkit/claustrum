@@ -78,9 +78,33 @@ Three ways to be authorized, and they differ in what they prove.
 there is no principal check. Treat it as a secret: it belongs in a `0600` file, never in
 a log line, an error message, or a shell history. The vault never logs one.
 
-**A supervised module principal** is the supervisor's attestation, stamped at route-bind
-from a launch nonce your module echoes. You do not present it; it is ambient on your
-connection. A host-launched plugin has none and can never have one.
+**A supervised module principal** is the supervisor's attestation, stamped at route-bind —
+but it is NOT ambient, and that sentence used to say it was. A supervised module's calls to
+another module's route surface carry `Principal::Reserved { module_id }` only when its
+`route.open` presents the `consumer_identity` (`SUBC_MODULE_ID`, `SUBC_LAUNCH_NONCE`) that
+the daemon injected at spawn; the daemon verifies the nonce against the live supervisor and
+stamps the principal into the `route.bind` it relays here. A `route.open` WITHOUT it is
+`Direct` regardless of who sent it, and a mismatched nonce is refused
+`bad_consumer_identity` rather than downgraded. The auth handshake proves connection-file
+access and carries no identity at all.
+
+`subc-client-rs` attaches the pair for you (`ConnectOptions.consumer_identity` reads both
+variables when non-empty). A HAND-ROLLED CLIENT MUST SEND IT, and that is the entire
+difference between a scoped call that works and one that answers `not_found`: a consumer
+dialling over a raw socket plus `authenticate_client` arrives `Direct` and every scoped op
+refuses it correctly.
+
+One precondition that bites silently: the nonce lives only in the environment of the
+process the daemon SPAWNED. A child process, a pool that scrubbed the environment, or
+anything after an `env_clear` has lost it, and the open arrives `Direct` with nothing said.
+That is deliberate — the nonce is kept out of grandchildren so a module cannot lend
+`Reserved` to a helper it spawned.
+
+A host-launched plugin has no nonce and can never have one; it uses an enrollment token.
+
+The earlier wording here said this principal was "ambient on your connection", which is
+true of what the vault SEES and false about what a caller must DO. A consumer read it,
+dialled correctly, and could not understand why every scoped call refused.
 
 **An enrollment token** is the vault's OWN attestation: it minted it, holds only its
 hash, and can revoke it. This is how a host-launched consumer gets a name that grants can

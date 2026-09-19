@@ -95,15 +95,38 @@ impl ManifestLease {
     fn commit(&mut self) -> Result<(), OpenCodeFilesError> {
         self.stop_renewal();
         let owner = read_lock_owner(&self.lock.join("owner")).ok();
-        let ours_and_fresh = owner.is_some_and(|owner| {
-            owner.nonce == self.nonce
-                && self.clock.now_ms().is_ok_and(|now| {
-                    now.saturating_sub(owner.claimed_at_ms) < self.ttl.as_millis() as u64
-                })
-        });
-        if self.renewal_failed.load(Ordering::SeqCst) || !ours_and_fresh {
+        // SAY WHICH CONDITION REFUSED. Three different things end this write and they had
+        // one message between them: the renewal thread died, the owner file no longer
+        // names us, or our claim aged past the ttl. A caller — and every test asserting
+        // on this refusal — could not tell them apart, so a failure at any of the three
+        // read as whichever one the reader was already suspecting. That cost a real
+        // investigation: a test named for the CLOCK property failed during a loaded gate
+        // run, its message said the clock had been read, and the actual cause was a
+        // different arm of this same `if`.
+        //
+        // The condition is known one line above the refusal in each case, which is the
+        // whole defect: the information was in hand and thrown away.
+        if self.renewal_failed.load(Ordering::SeqCst) {
             return Err(OpenCodeFilesError::Invalid(
-                "manifest lock renewal failed; write aborted".into(),
+                "manifest lock renewal thread failed; write aborted".into(),
+            ));
+        }
+        let Some(owner) = owner else {
+            return Err(OpenCodeFilesError::Invalid(
+                "manifest lock owner file is unreadable or gone; write aborted".into(),
+            ));
+        };
+        if owner.nonce != self.nonce {
+            return Err(OpenCodeFilesError::Invalid(
+                "manifest lock owner names another claimant; write aborted".into(),
+            ));
+        }
+        let now = self.clock.now_ms().map_err(|_| {
+            OpenCodeFilesError::Invalid("manifest lock clock unreadable; write aborted".into())
+        })?;
+        if now.saturating_sub(owner.claimed_at_ms) >= self.ttl.as_millis() as u64 {
+            return Err(OpenCodeFilesError::Invalid(
+                "manifest lock claim is expired against its own clock; write aborted".into(),
             ));
         }
         Ok(())
@@ -731,6 +754,30 @@ where
     let lock = lock_path(path);
     let owner_path = lock.join("owner");
     let nonce = random_nonce()?;
+    // THE ACQUISITION DEADLINE IS WALL CLOCK, AND `now_override_ms` DOES NOT REACH IT.
+    //
+    // A test that pins the clock controls what the lock believes about STALENESS and
+    // controls nothing about how long this loop is allowed to run. So a test written
+    // with `ttl: Duration::from_millis(20)` has twenty milliseconds of REAL time to
+    // reach whatever state it asserts, however loaded the machine is.
+    //
+    // That is the mechanism behind this suite's load-correlated failures, measured
+    // 2026-09-19 at load 17-31 on a machine shared with other seats' test runs: the loop
+    // exits at its deadline before the state under test is reached, and the caller sees
+    // a timeout where the test named a specific refusal. It is NOT nondeterminism --
+    // every such test is a real-time budget in the low tens of milliseconds, and the
+    // question is only whether the machine was busy.
+    //
+    // DELIBERATELY NOT "FIXED" BY ROUTING THIS THROUGH THE INJECTED CLOCK. A pinned
+    // clock does not advance, so a deadline read from it never arrives and the loop
+    // spins forever; making it advance would reintroduce exactly the wall-clock/injected
+    // mixing that produced two separate defects in this file earlier the same day (the
+    // reclaim seed and `ManifestLease::commit`). The clock model needs one decision
+    // rather than a third local patch.
+    //
+    // Until then: a failure in this suite that reports a TIMEOUT where a specific
+    // refusal was named is this, not the property under test. Re-run alone before
+    // reporting it as a defect.
     let deadline = Instant::now() + options.ttl;
     loop {
         match fs::create_dir(&lock) {
@@ -1491,9 +1538,44 @@ mod manifest_lock_aba_regression {
         quarantine
     }
 
+    /// Stamp a directory's mtime, and on failure SAY WHAT THE DISK LOOKED LIKE.
+    ///
+    /// This open has failed with `NotFound` on a path the same thread created two
+    /// statements earlier, under a loaded full gate, repeatedly since 2026-09-18 — and
+    /// every occurrence has been a bare `Os { code: 2 }` with nothing to reason from.
+    /// Two explanations fit it and they need different fixes: the directory was created
+    /// and then REMOVED by something, or the create returned success without the entry
+    /// being visible to the next syscall. A bare NotFound cannot tell them apart.
+    ///
+    /// So the failure now reports whether the path exists on a re-stat and what its
+    /// parent actually contains. A deleter leaves an empty or differently-populated
+    /// parent; a visibility problem leaves the entry sitting there while the open that
+    /// just failed says it does not. Deliberately NOT a retry: retrying would make the
+    /// flake disappear and take the evidence with it, and I do not yet know which
+    /// failure I would be papering over.
     fn set_directory_mtime(path: &Path, modified_at_ms: u64) {
         fs::File::open(path)
-            .unwrap()
+            .unwrap_or_else(|error| {
+                let exists = path.exists();
+                let siblings: Vec<String> = path
+                    .parent()
+                    .and_then(|parent| fs::read_dir(parent).ok())
+                    .map(|entries| {
+                        entries
+                            .flatten()
+                            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                panic!(
+                    "opening {path:?} to stamp its mtime failed with {error:?}; \
+                     re-stat says exists={exists}; parent holds {siblings:?}. \
+                     exists=true means the entry is there and the open disagreed \
+                     (a visibility problem); exists=false with a populated parent \
+                     means something removed this one specifically; an empty parent \
+                     means the whole fixture directory went."
+                )
+            })
             .set_times(
                 fs::FileTimes::new()
                     .set_modified(UNIX_EPOCH + Duration::from_millis(modified_at_ms)),
@@ -2107,11 +2189,27 @@ mod manifest_lock_aba_regression {
                 lease.commit()
             },
         );
-        assert!(
-            result.is_ok(),
-            "commit read the wall clock against an injected claim stamp and refused a lease \
-             whose injected age is 0"
-        );
+        // ASSERT ON THE ERROR, NOT ONLY ON is_ok. `now_override_ms` is a FROZEN instant,
+        // so the injected age is 0 no matter how long the 300ms sleep really takes, and
+        // the clock can only be implicated by a lease-expiry error. Every other failure
+        // here — a busy lock, an IO error, a reclaim that could not read the directory —
+        // is something else entirely, and the old message named the clock for all of
+        // them. That is how this test reported a clock defect during a gate run at load
+        // 111 while passing 20 of 20 in isolation, and it sent me looking at a fix I had
+        // already landed.
+        if let Err(error) = &result {
+            let rendered = format!("{error:?}");
+            let blames_the_clock = rendered.contains("expired") || rendered.contains("stale");
+            assert!(
+                !blames_the_clock,
+                "commit read the wall clock against an injected claim stamp and refused a \
+                 lease whose injected age is 0: {rendered}"
+            );
+            panic!(
+                "the lock failed for a reason that is NOT the clock under test, so this \
+                 failure says nothing about the property this test pins: {rendered}"
+            );
+        }
         let _ = fs::remove_dir_all(root);
     }
 

@@ -478,7 +478,9 @@ fn grants_columns_hold_their_positions_when_a_prefix_is_wider_than_the_others() 
             "grant",
             "--principal",
             principal,
-            "--prefix",
+            "--selector-kind",
+            "exact",
+            "--selector",
             prefix,
             "--operation",
             "read",
@@ -596,7 +598,7 @@ fn grant_verbs_accept_the_canonical_reserved_spelling_and_refuse_other_kinds() {
             .args(["--key-path", key_path.to_str().unwrap()])
             .arg(verb)
             .args(["--principal", "reserved:probe"])
-            .args(["--prefix", "apikey:"])
+            .args(["--selector-kind", "exact", "--selector", "apikey:"])
             .args(["--operation", "read"])
             .output()
             .expect("run canonical verb");
@@ -608,13 +610,89 @@ fn grant_verbs_accept_the_canonical_reserved_spelling_and_refuse_other_kinds() {
                 .args(["--key-path", key_path.to_str().unwrap()])
                 .arg(verb)
                 .args(["--principal", principal])
-                .args(["--prefix", "apikey:"])
+                .args(["--selector-kind", "exact", "--selector", "apikey:"])
                 .args(["--operation", "read"])
                 .output()
                 .expect("run refused verb");
             assert!(!refused.status.success(), "{verb} accepted {principal}");
         }
     }
+}
+
+/// Flags the parser KNOWS but deliberately does not advertise, because knowing them is
+/// how the operator gets a useful refusal instead of a generic one.
+///
+/// `--prefix` is the only member. It is refused with a message naming its replacement
+/// and explaining why a former prefix is a category rather than an exact selector; that
+/// message is only reachable if the flag is in the accept-list, since an unknown
+/// argument dies earlier with text that says nothing about the migration.
+///
+/// This list must stay SHORT and each entry must be genuinely refused. A flag parked
+/// here that still WORKS is an undocumented working flag, which is the exact defect the
+/// caller of this function exists to catch.
+const KNOWN_BUT_UNADVERTISED: &[(&str, &str)] =
+    &[("grant", "--prefix"), ("revoke-grant", "--prefix")];
+
+/// EVERY DISPATCHABLE VERB IS IN THE TOP-LEVEL VERB TABLE.
+///
+/// This exists because `enroll` shipped dispatchable and undiscoverable, and the whole
+/// existing battery of help checks stayed green: they iterate HAND-KEPT verb lists, so a
+/// new verb joins no check by being written. It was reachable by anyone who already knew
+/// the word, which is the population that does not need a table.
+///
+/// The verb list here is derived from the DISPATCHER, not typed, so the next verb cannot
+/// repeat it. The extractor's own floor guards the derivation: a broken scan yields few
+/// verbs and fails rather than passing on an empty set.
+#[test]
+fn every_dispatchable_verb_appears_in_the_top_level_verb_table() {
+    let src = include_str!("../src/bin/credentials_cli.rs");
+    // Anchored on the dispatcher, whose arms ARE the dispatchable set. Reading the
+    // source rather than a list is the point: a hand-kept list is what let `enroll` ship
+    // undiscoverable while every help check stayed green.
+    let start = src
+        .find("match command.as_str() {")
+        .expect("the dispatcher match must be findable");
+    let body = &src[start..];
+    let end = body
+        .find("\n    }")
+        .expect("dispatcher match must terminate");
+    let mut verbs: Vec<String> = Vec::new();
+    for line in body[..end].lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix('"') else {
+            continue;
+        };
+        let Some((verb, tail)) = rest.split_once('"') else {
+            continue;
+        };
+        if tail.trim_start().starts_with("=>")
+            && !verb.is_empty()
+            && !verbs.contains(&verb.to_string())
+        {
+            verbs.push(verb.to_string());
+        }
+    }
+    assert!(
+        verbs.len() >= 20,
+        "extractor found only {} verbs; a broken scan would pass this vacuously",
+        verbs.len()
+    );
+
+    let rendered = cli().arg("help").output().expect("top-level help");
+    let table = String::from_utf8_lossy(&rendered.stdout).to_string();
+    let missing: Vec<&String> = verbs
+        .iter()
+        .filter(|verb| {
+            !table
+                .lines()
+                .any(|line| line.trim_start().starts_with(&format!("{verb} ")))
+        })
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "dispatchable but absent from the verb table, so only someone who already knows \
+         the word can find them: {missing:?}"
+    );
 }
 
 fn accepted_help_flags(verb: &str) -> Vec<String> {
@@ -635,7 +713,48 @@ fn accepted_help_flags(verb: &str) -> Vec<String> {
             }
         }
     }
+    out.retain(|flag| !KNOWN_BUT_UNADVERTISED.contains(&(verb, flag.as_str())));
     out
+}
+
+/// `--prefix` is REFUSED with a message that names its replacement, and the refusal is
+/// only reachable because the flag stays in the parser's accept-list.
+///
+/// Both halves matter and they pull against each other: drop it from the accept-list and
+/// an operator typing the old flag gets a generic unknown-argument error that says
+/// nothing about the migration; alias it to `exact` and the command SUCCEEDS while
+/// granting nothing, because `apikey:` reached seventeen credentials as a prefix and
+/// names none of them exactly. Refusing-but-known is the only arrangement where the
+/// operator's belief and the stored row cannot diverge.
+#[test]
+fn the_retired_prefix_flag_refuses_with_a_message_that_routes_to_its_replacement() {
+    let vault = GrantCliVault::new("retired-prefix-flag");
+    vault.bootstrap();
+    for verb in ["grant", "revoke-grant"] {
+        let output = vault.run(&[
+            verb,
+            "--principal",
+            "reserved:probe",
+            "--prefix",
+            "apikey:",
+            "--operation",
+            "read",
+        ]);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success(),
+            "{verb} must refuse --prefix, not accept it"
+        );
+        assert!(
+            stderr.contains("--prefix is gone"),
+            "{verb}: the refusal must name the retired flag: {stderr}"
+        );
+        assert!(
+            stderr.contains("--selector-kind category"),
+            "{verb}: and must route a former family to a category, since aliasing it to \
+             exact would grant nothing: {stderr}"
+        );
+    }
 }
 
 // EVERY FLAG THE PARSER ACCEPTS IS NAMED ON ITS HELP PAGE. This is the defence for the
@@ -853,7 +972,9 @@ fn offline_grants_lists_a_newly_minted_grant_with_creation_time() {
         "grant",
         "--principal",
         "agent",
-        "--prefix",
+        "--selector-kind",
+        "exact",
+        "--selector",
         "operator:",
         "--operation",
         "read",
@@ -870,7 +991,7 @@ fn offline_grants_lists_a_newly_minted_grant_with_creation_time() {
     let fields = grant_row_fields(&stdout, "operator:");
     assert_eq!(
         &fields[..5],
-        &["reserved", "agent", "prefix", "operator:", "read"],
+        &["reserved", "agent", "exact", "operator:", "read"],
         "grant rows must expose each requested column: {stdout}"
     );
     assert_eq!(fields.len(), 7, "timestamp should be two formatted columns");
@@ -894,7 +1015,9 @@ fn grants_keep_read_and_sign_rows_separate_and_sort_by_prefix_then_operation() {
             "grant",
             "--principal",
             "agent",
-            "--prefix",
+            "--selector-kind",
+            "exact",
+            "--selector",
             prefix,
             "--operation",
             operation,
@@ -915,18 +1038,9 @@ fn grants_keep_read_and_sign_rows_separate_and_sort_by_prefix_then_operation() {
         .map(|line| line.split_whitespace().collect())
         .collect();
     assert_eq!(rows.len(), 3, "every grant needs its own row: {stdout}");
-    assert_eq!(
-        &rows[0][..5],
-        &["reserved", "agent", "prefix", "a:", "sign"]
-    );
-    assert_eq!(
-        &rows[1][..5],
-        &["reserved", "agent", "prefix", "z:", "read"]
-    );
-    assert_eq!(
-        &rows[2][..5],
-        &["reserved", "agent", "prefix", "z:", "sign"]
-    );
+    assert_eq!(&rows[0][..5], &["reserved", "agent", "exact", "a:", "sign"]);
+    assert_eq!(&rows[1][..5], &["reserved", "agent", "exact", "z:", "read"]);
+    assert_eq!(&rows[2][..5], &["reserved", "agent", "exact", "z:", "sign"]);
 }
 
 #[test]
@@ -937,7 +1051,9 @@ fn revoked_grant_disappears_from_the_grants_listing() {
         "grant",
         "--principal",
         "agent",
-        "--prefix",
+        "--selector-kind",
+        "exact",
+        "--selector",
         "operator:",
         "--operation",
         "read",
@@ -949,7 +1065,9 @@ fn revoked_grant_disappears_from_the_grants_listing() {
         "revoke-grant",
         "--principal",
         "agent",
-        "--prefix",
+        "--selector-kind",
+        "exact",
+        "--selector",
         "operator:",
         "--operation",
         "read",
@@ -2493,7 +2611,9 @@ fn read_only_inventory_verbs_succeed_while_exclusive_lease_is_held() {
         "grant",
         "--principal",
         "agent",
-        "--prefix",
+        "--selector-kind",
+        "exact",
+        "--selector",
         "apikey:",
         "--operation",
         "read",
@@ -4070,9 +4190,13 @@ fn every_verb_help_uses_a_flags_table_and_notes_layout() {
         .take_while(|line| !line.trim().is_empty())
         .map(|line| line.split_whitespace().next().expect("verb"))
         .collect();
+    // 29 = 27 + `enroll` + `approve`. `approve` is not new: it has been dispatchable
+    // since August and was never in the table, which is exactly what
+    // `every_dispatchable_verb_appears_in_the_top_level_verb_table` found on its first
+    // run. This number is an anti-narrowing floor for the SCAN, not a budget for verbs.
     assert_eq!(
         verbs.len(),
-        27,
+        29,
         "the rendered verb-table scan narrowed; set-category and reclassify are public verbs"
     );
     assert!(accepted_help_flags("login").contains(&"--no-browser".to_string()));
@@ -4349,7 +4473,7 @@ fn list_reads_a_store_one_migration_behind_and_says_so_on_stderr_only() {
     assert!(stdout.contains("apikey:behind-two"), "stdout: {stdout}");
     assert_eq!(
         stderr.trim(),
-        "note: store schema 8 is behind this binary's 9; categories and category grants \
+        "note: store schema 8 is behind this binary's 10; categories and category grants \
          appear after the daemon restarts (migration 9)",
         "the note must be verbatim and on stderr"
     );

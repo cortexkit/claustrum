@@ -58,6 +58,7 @@ cannot be met; retrying unchanged buys another one against the provider's mint b
 | `invalid_category_name` | permanent | a category is outside `^[a-z][a-z0-9-]{1,31}$` |
 | `invalid_credential_id` | permanent | an id begins with reserved `category:` or contains `|` |
 | `invalid_principal` | permanent | a grant principal is not `reserved` or contains `|` |
+| `report_status_not_credential_death` | permanent | `report_auth_failure` carried a `provider_status` outside {401, 403} |
 | `too_many_items` | context_overflow | a batch exceeded the per-request cap |
 | `sign_payload_too_large` | context_overflow | a sign payload exceeded 1 MiB (`MAX_SIGN_PAYLOAD`) |
 | `ttl_unsatisfiable` | context_overflow | a freshly minted token still cannot satisfy your `min_ttl_ms` |
@@ -71,41 +72,87 @@ wrong one (prompting a human for a transient network failure) is worse than sayi
 
 ## 2. Addressing
 
-Two ways to name a credential, and they authorize differently.
+Three ways to be authorized, and they differ in what they prove.
 
 **A capability handle** (`ckh_…`) is a bearer token. Possession is the authorization;
 there is no principal check. Treat it as a secret: it belongs in a `0600` file, never in
 a log line, an error message, or a shell history. The vault never logs one.
 
-**A credential id under a grant** (`credential_id`) is principal-scoped. An operator
-mints a grant over an id PREFIX for a named reserved module principal, per operation:
+**A supervised module principal** is the supervisor's attestation, stamped at route-bind
+from a launch nonce your module echoes. You do not present it; it is ambient on your
+connection. A host-launched plugin has none and can never have one.
 
-    ck auth grant --principal <id|reserved:id> --selector-kind prefix --selector <prefix> --operation read
-    ck auth grant --principal <id|reserved:id> --selector-kind category --selector <bare-name> --operation read
-    ck auth grant --principal <module> --prefix <prefix> --operation sign
+**An enrollment token** is the vault's OWN attestation: it minted it, holds only its
+hash, and can revoke it. This is how a host-launched consumer gets a name that grants can
+reach. Present it in the params (`enrollment_token`) on `credential.get_scoped` and
+`credential.list_scoped`; see § 2.1.
 
-`--prefix X` is the compatibility spelling of `--selector-kind prefix --selector X`.
-A category selector is stored as `category:<bare-name>`. New category and grant audit
-targets split on the **first** `|`; a selector may contain later `|` bytes, while principal
-and credential ids may not. `--selector-kind` defaults to `prefix`.
+Grants name one of the two principal kinds, per operation:
+
+    ck auth grant --principal reserved:<module> --selector-kind exact --selector <id-text> --operation read
+    ck auth grant --principal enrolled:<name>   --selector-kind category --selector <bare-name> --operation read
+
+**`--prefix` is gone and is REFUSED, not aliased.** Its reach changed whenever someone
+named a new credential. A former `--prefix` that named a family is a **category** now; a
+former one that named a single credential is `exact`. Aliasing it to `exact` would have
+succeeded while granting nothing, because a prefix like `apikey:` names no credential
+exactly.
+
+Selectors are stored as **bare text** — an `exact` selector is the credential id, a
+`category` selector is the bare category name. Neither carries a kind marker; the kind is
+its own column. (Audit TARGETS do carry `category|<name>`, and split on the **first**
+`|`.)
+
+**`exact` means byte equality.** A grant on `signing:agent-assertion:1` covers exactly
+that id and does NOT cover `…:10`. This is narrower than the old prefix behaviour, which
+is the point: a grant whose reach can grow when someone else names a credential is not a
+grant you can reason about. Use `category` when you want a set that moves, and it moves
+only when an operator assigns the category under the master key.
 
 `read` and `sign` are distinct: a `read` grant does not authorize signing, and a `sign`
-grant does not authorize `credential.public_key`. Prefix matching is a literal
-`starts_with`, so `signing:agent-assertion:1` also covers `…:10` — grant at family
-level deliberately, not at a leaf you expect to be exact.
+grant does not authorize `credential.public_key`.
 
-| operation | handle | credential_id |
-|---|---|---|
-| `credential.get` | yes | — |
-| `credential.get_many` | yes | — |
-| `credential.get_scoped` | — | yes (`read`) |
-| `credential.list_scoped` | — | principal-addressed; all of the caller's `read` and `sign` grants |
-| `credential.sign` | yes | yes (`sign`) |
-| `credential.public_key` | yes | yes (`read`) |
-| `credential.status` | yes | yes (`read`) |
-| `credential.report_auth_failure` | yes | — |
+| operation | handle | credential_id | enrollment token |
+|---|---|---|---|
+| `credential.get` | yes | — | — |
+| `credential.get_many` | yes | — | — |
+| `credential.get_scoped` | — | yes (`read`) | yes |
+| `credential.list_scoped` | — | principal-addressed; all of the caller's grants | yes |
+| `credential.sign` | yes | yes (`sign`) | — |
+| `credential.public_key` | yes | yes (`read`) | — |
+| `credential.status` | yes | yes (`read`) | — |
+| `credential.report_auth_failure` | yes | yes (`read`) | — |
 
----
+### 2.1 Enrollment, for a consumer with no supervised identity
+
+The ceremony is `auth.enroll_propose` → operator approval → `auth.enroll_poll`, with
+`auth.enroll_rotate` for later rotation.
+
+1. **Propose.** You mint a 32-byte request secret, send only its hash, and receive a
+   request id. **Persist both before you send**, so a crash between the call and its reply
+   does not leave you unable to poll a request that exists.
+2. **Wait.** An operator approves with the master key (`ck auth enroll approve`).
+   Approval admits a NAME and mints nothing — which is what stops a squatter who proposed
+   a name it does not hold from collecting a token even if approval is granted by mistake.
+3. **Poll.** The first successful poll, authenticated by your request secret, mints the
+   token. Only `pending` means keep polling; every other outcome is terminal.
+4. **Persist at `0600`** with a parent directory that is not group- or world-writable.
+
+Then present the token on the scoped ops. Three properties worth knowing:
+
+- **A presented token decides who you are**, overriding any ambient bus principal. If you
+  send one, you meant it.
+- **A token that does not resolve REFUSES.** It does not fall back to your bus principal.
+  Otherwise a revoked consumer would keep working from whatever identity its transport
+  happens to carry, which would make revocation a property of your process rather than of
+  the vault.
+- **A revoked enrollment answers exactly like an unknown token** (`not_found`,
+  `permanent`), so you cannot distinguish "revoked" from "never existed" — and neither
+  can anyone enumerating consumer names.
+
+An older daemon REFUSES a token-bearing call at decode rather than ignoring the token: the
+params struct is `deny_unknown_fields`. You will see an explicit decode refusal, not a
+plausible list computed for grants you do not hold.
 
 ## 3. Reading a credential
 
@@ -144,6 +191,8 @@ returned rows and tuples; changes outside the caller's visibility do not move it
 
 Category transitions use audit op `set_category` and target
 `category:<credential-id>|<sorted-comma-list>`; clearing the set leaves the trailing `|`.
+Migration 10's one category backfill row uses audit op `category.migrate`, actor
+`migration:10`, and target `category:forge-identity|<sorted-comma-list-of-credential-ids>`.
 New grant targets use
 `grant:<operation>:<principal-kind>:<principal-id>:<selector-kind>|<stored-selector>`.
 Both formats parse by splitting on the first `|`. Historical grant targets without `|`
@@ -228,6 +277,32 @@ cases have been seen side by side.
 
 *(Contributed by a consumer seat, 2026-09-17, after a real 401 cluster where the vault
 could not name the reporting consumer and the fence was the only thing that held.)*
+
+### A status outside {401, 403} is REFUSED, not ignored
+
+The vault has only ever acted on `401` and `403`. A report carrying `429`, `402` or a
+`5xx` was accepted and its mark silently did nothing — so a consumer classifying quota
+refusals as credential deaths got back success and no signal, and the defect survived in
+the one place it could not be seen. Those now refuse with
+`report_status_not_credential_death` (`permanent`), so a wrong classification is
+diagnosed on its first report.
+
+Refusing costs you nothing you can observe: you already hold the credential, and the
+report is advisory. That is why this is a refusal where a refused *fetch* would be an
+outage.
+
+**`403` is still honoured, and deliberately.** It is genuinely ambiguous across
+providers — GitHub uses it for permission refusals on a perfectly live token, and xAI has
+used it for a real credential death (measured: one such report, followed by an operator
+re-login, then clean refreshes ever since). This surface sees only the number. Refusing
+`403` would fail toward a dead credential that looks healthy, which is the worse
+direction, so the judgement stays with you: report only when you believe the credential
+itself is invalid.
+
+*(The refusal was proposed by a consumer seat arguing that a rate bound would convert a
+loud classification defect into a quiet one. That argument is right and is why this is a
+refusal rather than a throttle. Their stronger version — refuse everything but `401` —
+was refuted by the one real `403`.)*
 
 ---
 

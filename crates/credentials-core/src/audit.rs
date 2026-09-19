@@ -67,12 +67,25 @@ pub enum AuditOp {
     /// A read-surface fetch anomaly was detected (an enumeration/rate alarm). Not a
     /// mutation, but recorded durably so the anomaly survives the connection.
     FetchAnomaly,
-    /// A principal-scoped credential-prefix read grant was created.
+    /// A principal-scoped operation grant was created.
     GrantCreate,
-    /// A principal-scoped credential-prefix read grant was revoked.
+    /// A principal-scoped operation grant was revoked.
     GrantRevoke,
     /// A credential's authorization categories changed.
     SetCategory,
+    /// Migration 10 assigned a category while converting schema-9 selectors.
+    /// An operator approved a pending consumer enrollment.
+    EnrollApprove,
+    /// An operator denied a pending consumer enrollment.
+    EnrollDeny,
+    /// An operator revoked one enrolled-consumer incarnation.
+    EnrollRevoke,
+    /// A consumer rotated its own bearer token.
+    EnrollRotate,
+    /// An operator minted a replacement enrollment token.
+    EnrollReissue,
+    /// Migration 10 applied the category backfill.
+    CategoryMigrate,
     /// A named approver approved a specific artifact, identified by the SHA-256 of its
     /// EXACT BYTES, before a signing window was opened for it.
     ///
@@ -118,6 +131,12 @@ impl AuditOp {
             AuditOp::GrantCreate => "grant_create",
             AuditOp::GrantRevoke => "grant_revoke",
             AuditOp::SetCategory => "set_category",
+            AuditOp::EnrollApprove => "enroll.approve",
+            AuditOp::EnrollDeny => "enroll.deny",
+            AuditOp::EnrollRevoke => "enroll.revoke",
+            AuditOp::EnrollRotate => "enroll.rotate",
+            AuditOp::EnrollReissue => "enroll.reissue",
+            AuditOp::CategoryMigrate => "category.migrate",
             AuditOp::Approval => "approval",
         }
     }
@@ -144,6 +163,8 @@ pub enum AuthEventKind {
     ReconcileNeedsReauth,
     /// A successful GitHub App mint observed changed installation permissions.
     GithubAppPermissionsChanged,
+    /// A bounded consumer-enrollment diagnostic with a fixed, non-secret subject.
+    Enrollment,
 }
 
 /// The consumer-asserted, unverified source of a reported authentication failure.
@@ -190,6 +211,7 @@ impl AuthEventKind {
             AuthEventKind::ScopedReadRefusal => "scoped_read_refusal",
             AuthEventKind::ReconcileNeedsReauth => "reconcile_needs_reauth",
             AuthEventKind::GithubAppPermissionsChanged => "github_app_permissions_changed",
+            AuthEventKind::Enrollment => "enrollment",
         }
     }
 }
@@ -604,6 +626,12 @@ mod vocabulary_documentation_tests {
                 AuditOp::GrantCreate => AuditOp::GrantCreate.as_str(),
                 AuditOp::GrantRevoke => AuditOp::GrantRevoke.as_str(),
                 AuditOp::SetCategory => AuditOp::SetCategory.as_str(),
+                AuditOp::EnrollApprove => AuditOp::EnrollApprove.as_str(),
+                AuditOp::EnrollDeny => AuditOp::EnrollDeny.as_str(),
+                AuditOp::EnrollRevoke => AuditOp::EnrollRevoke.as_str(),
+                AuditOp::EnrollRotate => AuditOp::EnrollRotate.as_str(),
+                AuditOp::EnrollReissue => AuditOp::EnrollReissue.as_str(),
+                AuditOp::CategoryMigrate => AuditOp::CategoryMigrate.as_str(),
                 AuditOp::Approval => AuditOp::Approval.as_str(),
             }
         }
@@ -628,6 +656,20 @@ mod vocabulary_documentation_tests {
             WIRE_CONTRACT.contains(value(AuditOp::SetCategory)),
             "the new category audit op must be documented in the slice wire contract"
         );
+        assert!(
+            WIRE_CONTRACT.contains(value(AuditOp::CategoryMigrate)),
+            "the category migration audit op must be documented in the slice wire contract"
+        );
+        for op in [
+            AuditOp::EnrollApprove,
+            AuditOp::EnrollDeny,
+            AuditOp::EnrollRevoke,
+            AuditOp::EnrollRotate,
+            AuditOp::EnrollReissue,
+            AuditOp::CategoryMigrate,
+        ] {
+            assert_documented(section, "audit_log.op", value(op));
+        }
         assert_documented(section, "audit_log.op", value(AuditOp::Approval));
     }
 
@@ -679,6 +721,7 @@ mod vocabulary_documentation_tests {
                 AuthEventKind::GithubAppPermissionsChanged => {
                     AuthEventKind::GithubAppPermissionsChanged.as_str()
                 }
+                AuthEventKind::Enrollment => AuthEventKind::Enrollment.as_str(),
             }
         }
 
@@ -716,6 +759,11 @@ mod vocabulary_documentation_tests {
             section,
             "auth_events.kind",
             value(AuthEventKind::GithubAppPermissionsChanged),
+        );
+        assert_documented(
+            section,
+            "auth_events.kind",
+            value(AuthEventKind::Enrollment),
         );
     }
 

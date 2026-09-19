@@ -1,7 +1,9 @@
 //! The capability-handle read surface plus its separate principal-scoped operation.
 //!
-//! This is READ-ONLY — there is deliberately no unauthenticated write op here (writes
-//! live in the admin surface). Handle operations take a capability HANDLE, never a
+//! Credential reads remain read-only. The enrollment proposal, poll, and rotation
+//! operations are the narrow exceptions: they write only bounded enrollment state and
+//! are kept out of the untrimmable audit chain except for successful token rotation.
+//! Handle operations take a capability HANDLE, never a
 //! public alias, and resolve it to a credential id before anything else; an unknown or
 //! revoked handle is a uniform `not_found` so a probe cannot enumerate.
 //!
@@ -46,6 +48,9 @@ use credentials_core::audit::{
 };
 use credentials_core::credential_id::{default_refresh_adapter, parse_credential_id};
 use credentials_core::engine::{EngineError, RefreshEngine};
+use credentials_core::enrollment::{
+    EnrollmentError, EnrollmentPoll, EnrollmentProposal, EnrollmentRotation,
+};
 use credentials_core::health::VaultHealth;
 use credentials_core::refresh_adapters::RefreshError;
 use credentials_core::store::{
@@ -55,6 +60,34 @@ use credentials_core::store::{
 use subc_protocol::Principal;
 
 use crate::limiter::{Admission, FetchLimiter, GET_MANY_MAX};
+
+/// Exact parameters for `auth.enroll_propose`.
+#[cfg_attr(test, derive(Serialize))]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnrollProposeParams {
+    pub proposed_name: String,
+    pub request_secret_hash: String,
+}
+
+/// Exact parameters for `auth.enroll_poll`. The request secret is the only resumption
+/// value besides the request id; neither the proposed name nor any host identity belongs here.
+#[cfg_attr(test, derive(Serialize))]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnrollPollParams {
+    pub request_id: String,
+    pub request_secret: String,
+}
+
+/// Exact parameters for `auth.enroll_rotate`.
+#[cfg_attr(test, derive(Serialize))]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnrollRotateParams {
+    pub token: String,
+    pub expected_token_generation: u64,
+}
 
 /// A `credential.get` request.
 ///
@@ -127,13 +160,32 @@ pub struct GetParams {
 #[cfg_attr(test, derive(Serialize))]
 #[derive(Debug, Deserialize)]
 pub struct GetScopedParams {
+    /// Present for a host-launched consumer; absent for a supervised module, which is
+    /// identified by its bus principal instead. See `scoped_principal` for why a
+    /// presented token wins over the ambient identity and why a bad one does not fall
+    /// back to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enrollment_token: Option<String>,
     pub credential_id: String,
 }
 
-/// `credential.list_scoped` accepts no parameters and lists every row covered by the caller's grants.
+/// `credential.list_scoped` lists every row covered by the caller's grants.
+///
+/// `enrollment_token` is how a host-launched consumer says who it is. A supervised module
+/// omits it and is identified by its bus principal; a consumer that holds a token presents
+/// it and is identified by that. There is no third way in.
+///
+/// `deny_unknown_fields` does real work on the compatibility edge: a daemon predating this
+/// field REFUSES a token-bearing call rather than ignoring the token and answering from
+/// whatever ambient principal the connection carries. A silently ignored token would
+/// return a list computed for the wrong grants, which reads as "my grants are wrong"
+/// rather than "this daemon is too old".
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ListScopedParams {}
+pub struct ListScopedParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enrollment_token: Option<String>,
+}
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ListScopedCredential {
@@ -295,7 +347,28 @@ impl StatusParams {
 #[cfg_attr(test, derive(Serialize))]
 #[derive(Debug, Deserialize)]
 pub struct ReportAuthFailureParams {
-    pub handle: String,
+    /// The capability handle the consumer was served through. Anonymous addressing,
+    /// unchanged. Exactly one of this and [`Self::credential_id`] must be present.
+    #[serde(default)]
+    pub handle: Option<String>,
+    /// The credential id, for a caller holding a `Read` grant covering it and no
+    /// handle at all.
+    ///
+    /// WHY THIS EXISTS. Enrollment creates a consumer that holds a bearer token and a
+    /// category grant and ZERO capability handles. Without this address it could
+    /// discover credentials and fetch them and then had no way to say one was dead --
+    /// the recovery loop broken for exactly the consumer class enrollment creates, with
+    /// the credential looking healthy until a background refresh happened to fail. The
+    /// gap was found by the anthropic-auth seat tracing one consumer through its whole
+    /// lifecycle INCLUDING failure; enrollment, discovery and fetch each look complete
+    /// on their own.
+    ///
+    /// The gate is `GrantOperation::Read`, not a new operation: reporting that a
+    /// credential you may read was refused upstream is strictly LESS authority than
+    /// reading it, because the report is version-fenced and can only mark stale
+    /// something the caller was already entitled to fetch.
+    #[serde(default)]
+    pub credential_id: Option<String>,
     pub provider_status: u16,
     /// The `record_version` the consumer was SERVED for this handle (from the `get`
     /// result it acted on). Required: the vault invalidates only if this still matches
@@ -376,6 +449,13 @@ pub enum ReadError {
     Corrupt,
     /// `get_many` exceeded the cap.
     TooManyItems,
+    /// `report_auth_failure` carried a `provider_status` the contract does not treat as
+    /// evidence the credential is dead. Refused rather than accepted-and-discarded, so a
+    /// consumer whose classification is wrong is told on its first wrong report instead
+    /// of at a mark that silently does nothing. `permanent`: the same status will never
+    /// become a credential death, so a retry cannot succeed. The consumer's repair is to
+    /// stop reporting that status, not to send it again.
+    ReportStatusNotCredentialDeath,
     /// A fresh token minted for this request still misses its supplied `min_ttl_ms`.
     /// The credential remains usable for callers that ask for less time.
     TtlUnsatisfiable,
@@ -446,7 +526,8 @@ impl ReadError {
             | ReadError::Corrupt
             | ReadError::RefreshUnsupported
             | ReadError::KindNotGettable
-            | ReadError::KindNotSignable => ErrorClass::Permanent,
+            | ReadError::KindNotSignable
+            | ReadError::ReportStatusNotCredentialDeath => ErrorClass::Permanent,
             // The refresh token is dead; a human must run a fresh login.
             ReadError::NeedsReauth => ErrorClass::AuthRequired,
             // A refresh attempt failed (provider may recover) or the master key is
@@ -732,7 +813,7 @@ fn project_list_scoped(snapshot: ScopedListSnapshot) -> ListScopedResult {
         .into_iter()
         .map(|grant| GrantTuple {
             selector_kind: grant.selector_kind.as_str().to_string(),
-            selector: grant.credential_prefix,
+            selector: grant.selector,
             operation: grant.operation.as_str().to_string(),
         })
         .collect();
@@ -827,6 +908,33 @@ impl ReadSurface {
             #[cfg(test)]
             scoped_grant_lookup_error_for_test: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    pub fn enroll_propose(
+        &self,
+        params: &EnrollProposeParams,
+    ) -> Result<EnrollmentProposal, EnrollmentError> {
+        self.engine
+            .store()
+            .propose_enrollment(&params.proposed_name, &params.request_secret_hash)
+    }
+
+    pub fn enroll_poll(
+        &self,
+        params: &EnrollPollParams,
+    ) -> Result<EnrollmentPoll, EnrollmentError> {
+        self.engine
+            .store()
+            .poll_enrollment(&params.request_id, &params.request_secret)
+    }
+
+    pub fn enroll_rotate(
+        &self,
+        params: &EnrollRotateParams,
+    ) -> Result<EnrollmentRotation, EnrollmentError> {
+        self.engine
+            .store()
+            .rotate_enrollment(&params.token, params.expected_token_generation)
     }
 
     /// Sign exact bytes with a signing-key credential. THE KEY NEVER LEAVES THIS
@@ -1120,6 +1228,47 @@ impl ReadSurface {
         );
     }
 
+    /// Resolve who is asking: a supervised module, or a consumer holding an enrollment
+    /// token.
+    ///
+    /// TWO PRINCIPAL SOURCES, AND THEY ARE NOT EQUIVALENT. `Principal::Reserved` is the
+    /// supervisor's attestation, delivered as a launch nonce in the module's environment
+    /// — the vault trusts it because the daemon stamps it at route-bind. An enrollment
+    /// token is the vault's OWN attestation: it minted it, hashed it, and can revoke it.
+    /// Neither derives from the other, which is the point — a host-launched plugin has no
+    /// launch nonce and can never have one, so without this arm it could hold a category
+    /// grant and still be refused for not being a supervised module.
+    ///
+    /// THE TOKEN IS CHECKED BEFORE THE BUS PRINCIPAL, and deliberately. Presenting a
+    /// token is an explicit claim about identity; the bus principal is ambient. A
+    /// supervised module that also presents a token means it, and honouring the ambient
+    /// identity instead would silently route the operation to different grants than the
+    /// caller named.
+    ///
+    /// A BAD TOKEN IS NOT A FALLBACK TO THE BUS PRINCIPAL. If a token is presented and
+    /// does not resolve, the call refuses. Falling back would mean a consumer whose token
+    /// was revoked keeps working from whatever ambient identity it happens to have, which
+    /// makes revocation conditional on the caller's transport rather than on the vault.
+    fn scoped_principal(
+        &self,
+        principal: Option<&Principal>,
+        enrollment_token: Option<&str>,
+    ) -> Option<(&'static str, String)> {
+        if let Some(token) = enrollment_token {
+            return match self.engine.store().resolve_enrollment_token(token) {
+                Ok(Some((name, _generation))) => Some(("enrolled", name)),
+                // An unresolvable token and a store failure are the same answer to the
+                // caller. They differ in `auth_events`, which is where the operator can
+                // tell a revoked consumer from a broken store.
+                Ok(None) | Err(_) => None,
+            };
+        }
+        match principal {
+            Some(Principal::Reserved { module_id }) => Some(("reserved", module_id.clone())),
+            Some(Principal::Direct) | Some(Principal::Unverified) | None => None,
+        }
+    }
+
     /// Evaluate the one operation-scoped coverage predicate before loading sealed data.
     fn authorize_scoped(
         &self,
@@ -1127,12 +1276,25 @@ impl ReadSurface {
         credential_id: &str,
         operation: GrantOperation,
     ) -> Result<(), ReadError> {
-        let coverage = match principal {
-            Some(Principal::Reserved { module_id }) => self
-                .engine
-                .store()
-                .evaluate_scoped_coverage("reserved", module_id, credential_id, operation),
-            Some(Principal::Direct) | Some(Principal::Unverified) | None => {
+        self.authorize_scoped_as(principal, None, credential_id, operation)
+    }
+
+    /// `authorize_scoped` with an optional enrollment token, which is the only way a
+    /// host-launched consumer can be authorized at all.
+    fn authorize_scoped_as(
+        &self,
+        principal: Option<&Principal>,
+        enrollment_token: Option<&str>,
+        credential_id: &str,
+        operation: GrantOperation,
+    ) -> Result<(), ReadError> {
+        let coverage = match self.scoped_principal(principal, enrollment_token) {
+            Some((kind, id)) => {
+                self.engine
+                    .store()
+                    .evaluate_scoped_coverage(kind, &id, credential_id, operation)
+            }
+            None => {
                 self.record_scoped_refusal(principal, credential_id, ScopedReadRefusal::NoGrant);
                 return Err(ReadError::NotFound);
             }
@@ -1185,19 +1347,20 @@ impl ReadSurface {
     pub fn list_scoped(
         &self,
         principal: Option<&Principal>,
-        _params: &ListScopedParams,
+        params: &ListScopedParams,
     ) -> Result<ListScopedResult, ReadError> {
-        let module_id = match principal {
-            Some(Principal::Reserved { module_id }) => module_id,
-            Some(Principal::Direct) | Some(Principal::Unverified) | None => {
-                self.record_scoped_refusal(
-                    principal,
-                    "credential.list_scoped",
-                    ScopedReadRefusal::NoGrant,
-                );
-                return Err(ReadError::NotFound);
-            }
+        let Some((principal_kind, principal_id)) =
+            self.scoped_principal(principal, params.enrollment_token.as_deref())
+        else {
+            self.record_scoped_refusal(
+                principal,
+                "credential.list_scoped",
+                ScopedReadRefusal::NoGrant,
+            );
+            return Err(ReadError::NotFound);
         };
+        let module_id = &principal_id;
+        let _ = principal_kind;
         self.engine
             .store()
             .list_scoped_snapshot("reserved", module_id)
@@ -1213,9 +1376,12 @@ impl ReadSurface {
         principal: Option<&Principal>,
         params: &GetScopedParams,
     ) -> GetOutcome {
-        if let Err(code) =
-            self.authorize_scoped(principal, &params.credential_id, GrantOperation::Read)
-        {
+        if let Err(code) = self.authorize_scoped_as(
+            principal,
+            params.enrollment_token.as_deref(),
+            &params.credential_id,
+            GrantOperation::Read,
+        ) {
             return err(code);
         }
 
@@ -1310,14 +1476,35 @@ impl ReadSurface {
         principal: Option<&Principal>,
         params: &ReportAuthFailureParams,
     ) -> Result<(), ReadError> {
-        // Rate-limit on the presented handle (before resolution), like get — a flood
-        // of report_auth_failure (malicious invalidation DoS) is itself an anomaly.
-        self.check_limiter(connection_id, &params.handle).await;
-
-        let credential_id = match self.engine.store().resolve_handle(&params.handle) {
-            Ok(id) => id,
-            Err(StoreOpError::NotFound) => return Err(ReadError::NotFound),
-            Err(e) => return Err(map_store_error(&e)),
+        // TWO ADDRESSES, EXACTLY ONE OF THEM, mirroring `status` above rather than
+        // inventing a second dispatch shape. `scoped` is carried forward because it
+        // decides the audit actor: a handle holder is anonymous and the channel number is
+        // all there is, while a scoped caller has a principal that is KNOWN HERE and must
+        // not be discarded.
+        let (credential_id, scoped) = match (&params.handle, &params.credential_id) {
+            (Some(handle), None) => {
+                // Rate-limit on the presented handle (before resolution), like get — a
+                // flood of report_auth_failure (malicious invalidation DoS) is itself an
+                // anomaly.
+                self.check_limiter(connection_id, handle).await;
+                match self.engine.store().resolve_handle(handle) {
+                    Ok(id) => (id, false),
+                    Err(StoreOpError::NotFound) => return Err(ReadError::NotFound),
+                    Err(e) => return Err(map_store_error(&e)),
+                }
+            }
+            (None, Some(credential_id)) => {
+                // An unknown id and an ungranted id must be INDISTINGUISHABLE here, for
+                // the same reason they are on `get_scoped` and `status`: telling them
+                // apart turns this into an inventory oracle. `authorize_scoped` records
+                // the discriminated reason in `auth_events` locally and returns one code.
+                self.authorize_scoped(principal, credential_id, GrantOperation::Read)?;
+                (credential_id.clone(), true)
+            }
+            // Both or neither is a malformed request, not an addressing question. It
+            // answers as `NotFound` rather than a distinct code so that a caller cannot
+            // use the difference to probe which of two ids exists by pairing them.
+            (Some(_), Some(_)) | (None, None) => return Err(ReadError::NotFound),
         };
 
         // Only an authentication failure (401/403) invalidates; a 5xx/429 is a
@@ -1352,7 +1539,38 @@ impl ReadSurface {
         // (and a consumer can only ever kill the exact version it saw, not whatever is
         // current). The invalidate audits the revocation feedback in the chain atomically
         // (actor = the route channel; see below for why that is not a caller identity).
-        if params.provider_status == 401 || params.provider_status == 403 {
+        // A STATUS THE CONTRACT SAYS IS NOT A CREDENTIAL DEATH IS REFUSED, NOT IGNORED.
+        //
+        // This handler has only ever acted on 401 and 403, so a consumer reporting a 429
+        // quota refusal or a 5xx provider hiccup was already having its report discarded
+        // -- correctly, and INVISIBLY. A consumer whose classification is wrong got back
+        // success and a mark that silently did nothing, so the defect survived in the
+        // only place it could not be seen.
+        //
+        // Refusing costs the consumer nothing it can observe: it already holds the
+        // credential, and the report is advisory. That asymmetry is why this is not the
+        // same decision as the limiter's alarm-and-serve on the fetch path -- refusing a
+        // FETCH is an outage, refusing a redundant REPORT denies nothing. I had both
+        // under one rule because they share a limiter call, not because the argument
+        // carried across.
+        //
+        // 403 STAYS HONOURED, and this is the part measured rather than reasoned. Across
+        // every report this vault has taken (72 on 2026-09-19), exactly one real
+        // consumer 403 exists: `oauth:xai` at 2026-08-21 08:05, v156, applied. It was a
+        // GENUINE DEATH -- an operator re-logged in at 14:54 and it has refreshed cleanly
+        // every six hours since, and nothing repairs a misclassification. So xAI does use
+        // 403 as a credential signal while GitHub uses it for permission refusals, and
+        // this surface sees only the number. Refusing 403 would fail toward a dead
+        // credential that looks healthy, which is the worse direction.
+        //
+        // The resolution when a SECOND provider turns up using 403: a per-adapter
+        // declared policy rather than one global list, with a PERMISSIVE default so an
+        // adapter that has not spoken behaves exactly as today. One 403 in seventy-two
+        // does not justify that table yet.
+        if !matches!(params.provider_status, 401 | 403) {
+            return Err(ReadError::ReportStatusNotCredentialDeath);
+        }
+        {
             // The actor names the ROUTE CHANNEL, not the consumer. The number is
             // assigned to a route binding and reused as bindings come and go, so two
             // entries sharing `conn-1` are not evidence of the same reporter, and one
@@ -1384,7 +1602,24 @@ impl ReadSurface {
             // construction. A per-bind incarnation tag (derived, non-secret)
             // distinguishes a restarted process from a long-lived one without putting
             // an authentication token in a readable column.
-            let actor = format!("conn-{connection_id}");
+            //
+            // AND FOR THE SCOPED ARM THAT QUESTION IS NOW SETTLED, which is why `scoped`
+            // is carried down here. A scoped report is authorized BY the principal: the
+            // grant lookup that admitted this call already read the name, so recording it
+            // discloses nothing the write did not already depend on, and it is not the
+            // "should we identify anonymous reporters" question above. Writing `conn-N`
+            // for a caller whose identity authorized the write would discard a value held
+            // one line up -- this repo has three separate instances of that defect on
+            // record (`mint_handle` naming a credential but not which handle, a peer's
+            // limiter holding a principal and writing `conn-N`, a slot pin recording the
+            // slot rather than its occupant) and is not adding a fourth.
+            let actor = match (scoped, principal) {
+                (true, Some(Principal::Reserved { module_id })) => module_id.clone(),
+                // Scoped with no reserved principal cannot happen -- `authorize_scoped`
+                // refused above -- but the actor must stay a total function rather than
+                // panicking on a route-plane input, so it degrades to the channel form.
+                _ => format!("conn-{connection_id}"),
+            };
             let parsed = parse_credential_id(&credential_id);
             let refreshable = default_refresh_adapter(parsed.method, &parsed.provider).is_some();
             let audit = AuditCtx {
@@ -2102,7 +2337,7 @@ mod list_scoped_tests {
             principal_kind: "reserved".into(),
             principal_id: "consumer".into(),
             selector_kind: kind,
-            credential_prefix: selector.into(),
+            selector: selector.into(),
             operation,
             created_at_ms: 1,
         }
@@ -2193,19 +2428,15 @@ mod list_scoped_tests {
                 ),
             ],
             grants: vec![
-                grant(
-                    SelectorKind::Category,
-                    "category:llm-provider",
-                    GrantOperation::Sign,
-                ),
-                grant(SelectorKind::Prefix, "", GrantOperation::Read),
+                grant(SelectorKind::Category, "llm-provider", GrantOperation::Sign),
+                grant(SelectorKind::Exact, "", GrantOperation::Read),
             ],
         };
         let result = project_list_scoped(snapshot);
         assert_eq!(result.grants, result.grant_tuples.len());
         assert_eq!(
             result.view,
-            "jxpGFOH6OpL/mq0u8vgFtjZY8iJIob3BodaijqA260U=",
+            "ymfBXY4hu+RcsKhEzW2CExWRK1mhqCplTSWkJqcagSA=",
             "state/operation/selector enums are length-prefixed strings; lists carry counts; optionals carry presence bytes"
         );
         assert_eq!(result.credentials[0].id, "a-active");
@@ -2217,7 +2448,7 @@ mod list_scoped_tests {
 
     #[test]
     fn list_scoped_view_is_injective_for_strings_and_optional_presence() {
-        let base_grants = vec![grant(SelectorKind::Prefix, "", GrantOperation::Read)];
+        let base_grants = vec![grant(SelectorKind::Exact, "", GrantOperation::Read)];
         let left = project_list_scoped(ScopedListSnapshot {
             rows: vec![row(
                 "a",

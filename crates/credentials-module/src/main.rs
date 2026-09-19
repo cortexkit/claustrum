@@ -32,6 +32,7 @@ use std::sync::Arc;
 use cortexkit_store::{open_sqlite, StorageDescriptor, StoreError};
 use credentials_core::audit::AuthEventKind;
 use credentials_core::engine::RefreshEngine;
+use credentials_core::enrollment::{EnrollmentDisposition, EnrollmentError, EnrollmentRefusal};
 use credentials_core::http::ReqwestTransport;
 use credentials_core::refresh_adapters::{
     anthropic::AnthropicAdapter, antigravity::AntigravityAdapter, cursor::CursorAdapter,
@@ -43,7 +44,7 @@ use credentials_core::resolver::{self, KeySource, ResolverConfig};
 use credentials_core::store::EncryptedStore;
 #[cfg(test)]
 use credentials_core::store::SelectorKind;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use subc_protocol::manifest::Concurrency;
 use subc_protocol::manifest::{
@@ -70,8 +71,9 @@ use tokio::{
 
 use limiter::{Caps, FetchLimiter};
 use read_surface::{
-    GetManyParams, GetParams, GetScopedParams, ListScopedParams, PublicKeyParams, ReadSurface,
-    ReportAuthFailureParams, StatusParams,
+    EnrollPollParams, EnrollProposeParams, EnrollRotateParams, GetManyParams, GetParams,
+    GetScopedParams, ListScopedParams, PublicKeyParams, ReadSurface, ReportAuthFailureParams,
+    StatusParams,
 };
 
 // The vault's module id — re-exported from the single cross-binary definition site
@@ -105,6 +107,9 @@ const OP_STATUS: &str = "credential.status";
 const OP_REPORT_AUTH_FAILURE: &str = "credential.report_auth_failure";
 const OP_SIGN: &str = "credential.sign";
 const OP_PUBLIC_KEY: &str = "credential.public_key";
+const OP_ENROLL_PROPOSE: &str = "auth.enroll_propose";
+const OP_ENROLL_POLL: &str = "auth.enroll_poll";
+const OP_ENROLL_ROTATE: &str = "auth.enroll_rotate";
 /// Admin ops on the running module (authenticated: direct principal + master-key
 /// challenge-response). `admin.challenge` issues a nonce; `admin.op` carries the
 /// authenticated op body + tag.
@@ -448,10 +453,9 @@ async fn build_surface(
     );
     let resolver_config = resolver_config_from_env(data_dir);
 
-    // Open + migrate the store first, then read the database's plaintext key
-    // fingerprint and resolve the master key crash-safely: pick whichever key-store
-    // slot matches the database (so a rotation that crashed mid-handover still
-    // opens). A locked keychain / no matching key is a clean fail-closed exit.
+    // Open the store, resolve the master key from its plaintext fingerprint, then
+    // migrate. Migration 10 needs the key before it can append its category-backfill
+    // audit row; a brand-new store has no fingerprint yet and resolves Current.
     // An immediate lease collision makes the supervisor restart the module and returns
     // `Transient` to every consumer whose fetch is in that window. Waiting up to roughly
     // half a second is cheaper than that observable outage, while a persistent writer
@@ -467,7 +471,6 @@ async fn build_surface(
             Err(error) => return Err(ModuleError::Message(format!("open store: {error}"))),
         }
     };
-    EncryptedStore::migrate(&store).map_err(|e| ModuleError::Message(format!("migrate: {e}")))?;
     let key = match EncryptedStore::read_db_key_id(&store)
         .map_err(|e| ModuleError::Message(format!("read db key id: {e}")))?
     {
@@ -476,6 +479,8 @@ async fn build_surface(
         None => resolver::resolve(&resolver_config, None),
     }
     .map_err(|e| ModuleError::Message(format!("master key: {e}")))?;
+    EncryptedStore::migrate_with_key(&store, &key)
+        .map_err(|e| ModuleError::Message(format!("migrate: {e}")))?;
 
     // Derive the admin-op authority material from the master key BEFORE it is moved
     // into the store: the MAC key (Gate 2's authority root) and this key's non-secret
@@ -985,6 +990,63 @@ async fn handle_read_request(
     };
 
     let result = match request.method.as_str() {
+        OP_ENROLL_PROPOSE => match serde_json::from_value::<EnrollProposeParams>(request.params) {
+            Ok(params) => match surface.enroll_propose(&params) {
+                Ok(result) => wrap_result(result),
+                Err(error) => {
+                    return send_enrollment_error(writer, ver, channel, epoch, corr, &error).await
+                }
+            },
+            Err(_) => {
+                return send_enrollment_refusal(
+                    writer,
+                    ver,
+                    channel,
+                    epoch,
+                    corr,
+                    EnrollmentRefusal::InvalidParams,
+                )
+                .await
+            }
+        },
+        OP_ENROLL_POLL => match serde_json::from_value::<EnrollPollParams>(request.params) {
+            Ok(params) => match surface.enroll_poll(&params) {
+                Ok(result) => wrap_result(result),
+                Err(error) => {
+                    return send_enrollment_error(writer, ver, channel, epoch, corr, &error).await
+                }
+            },
+            Err(_) => {
+                return send_enrollment_refusal(
+                    writer,
+                    ver,
+                    channel,
+                    epoch,
+                    corr,
+                    EnrollmentRefusal::InvalidParams,
+                )
+                .await
+            }
+        },
+        OP_ENROLL_ROTATE => match serde_json::from_value::<EnrollRotateParams>(request.params) {
+            Ok(params) => match surface.enroll_rotate(&params) {
+                Ok(result) => wrap_result(result),
+                Err(error) => {
+                    return send_enrollment_error(writer, ver, channel, epoch, corr, &error).await
+                }
+            },
+            Err(_) => {
+                return send_enrollment_refusal(
+                    writer,
+                    ver,
+                    channel,
+                    epoch,
+                    corr,
+                    EnrollmentRefusal::InvalidParams,
+                )
+                .await
+            }
+        },
         OP_GET => match serde_json::from_value::<GetParams>(request.params) {
             Ok(p) => wrap_result(surface.get(connection_id, &p).await),
             Err(e) => {
@@ -1183,6 +1245,76 @@ async fn handle_read_request(
     )
     .map_err(|e| ModuleError::Message(e.to_string()))?;
     send(writer, response).await
+}
+
+#[derive(Serialize)]
+struct EnrollmentErrorBody<'a> {
+    code: &'a str,
+    disposition: EnrollmentDisposition,
+}
+
+async fn send_enrollment_error(
+    writer: &mpsc::Sender<Frame>,
+    ver: u8,
+    channel: u16,
+    epoch: u32,
+    corr: u64,
+    error: &EnrollmentError,
+) -> Result<(), ModuleError> {
+    send_enrollment_error_body(
+        writer,
+        ver,
+        channel,
+        epoch,
+        corr,
+        error.code(),
+        error.disposition(),
+    )
+    .await
+}
+
+async fn send_enrollment_refusal(
+    writer: &mpsc::Sender<Frame>,
+    ver: u8,
+    channel: u16,
+    epoch: u32,
+    corr: u64,
+    refusal: EnrollmentRefusal,
+) -> Result<(), ModuleError> {
+    send_enrollment_error_body(
+        writer,
+        ver,
+        channel,
+        epoch,
+        corr,
+        refusal.code(),
+        refusal.disposition(),
+    )
+    .await
+}
+
+async fn send_enrollment_error_body(
+    writer: &mpsc::Sender<Frame>,
+    ver: u8,
+    channel: u16,
+    epoch: u32,
+    corr: u64,
+    code: &str,
+    disposition: EnrollmentDisposition,
+) -> Result<(), ModuleError> {
+    let body = serde_json::to_vec(&EnrollmentErrorBody { code, disposition })
+        .map_err(ModuleError::Json)?;
+    let frame = Frame::build_with_version(
+        ver,
+        FrameType::Error,
+        Flags::new(false, Priority::Interactive, false),
+        channel,
+        epoch,
+        corr,
+        body,
+    )
+    .map_err(|error| ModuleError::Message(error.to_string()))?;
+    send(writer, frame).await
 }
 
 async fn invalid_params(
@@ -1506,6 +1638,21 @@ fn manifest(module_id: &str) -> ModuleManifest {
         // what it is.
         concurrency: Concurrency::ModuleManaged,
         operations: vec![
+            ManagementOperation {
+                name: OP_ENROLL_PROPOSE.to_string(),
+                description: Some("Propose one bounded consumer enrollment using a pre-hashed resumption secret.".to_string()),
+                kind: ManagementOperationKind::Mutate,
+            },
+            ManagementOperation {
+                name: OP_ENROLL_POLL.to_string(),
+                description: Some("Poll one enrollment using only its request id and resumption secret.".to_string()),
+                kind: ManagementOperationKind::Mutate,
+            },
+            ManagementOperation {
+                name: OP_ENROLL_ROTATE.to_string(),
+                description: Some("Replace a live enrollment token at its current generation.".to_string()),
+                kind: ManagementOperationKind::Mutate,
+            },
             ManagementOperation {
                 name: OP_GET.to_string(),
                 description: Some("Serve a credential's secret bytes to the holder of a capability handle. Refuses signing keys.".to_string()),
@@ -2240,6 +2387,30 @@ mod tests {
         serde_json::from_slice(&response.body).expect("decode response")
     }
 
+    async fn enrollment_route_frame(
+        surface: &Arc<ReadSurface>,
+        admin: &Arc<admin_surface::AdminSurface>,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Frame {
+        let (writer, mut responses) = mpsc::channel(1);
+        let frame = Frame::build_with_version(
+            PROTOCOL_VERSION,
+            FrameType::Request,
+            Flags::new(false, Priority::Interactive, false),
+            77,
+            1,
+            1,
+            serde_json::to_vec(&json!({ "method": method, "params": params }))
+                .expect("encode enrollment request"),
+        )
+        .expect("build enrollment request");
+        handle_read_request(frame, &writer, surface, admin, None)
+            .await
+            .expect("serve enrollment request");
+        responses.recv().await.expect("enrollment response")
+    }
+
     async fn scoped_request(
         surface: &Arc<ReadSurface>,
         admin: &Arc<admin_surface::AdminSurface>,
@@ -2449,8 +2620,8 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
-                SelectorKind::Prefix,
-                "github_app:",
+                SelectorKind::Exact,
+                "github_app:fleet-a",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
             )
@@ -2499,8 +2670,8 @@ mod tests {
             .revoke_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
-                SelectorKind::Prefix,
-                "github_app:",
+                SelectorKind::Exact,
+                "github_app:fleet-a",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantRevoke),
             )
@@ -2530,7 +2701,7 @@ mod tests {
                 "reserved",
                 "consumer",
                 SelectorKind::Category,
-                "category:llm-provider",
+                "llm-provider",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
             )
@@ -2539,8 +2710,8 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "consumer",
-                SelectorKind::Prefix,
-                "apikey:",
+                SelectorKind::Exact,
+                "apikey:zai",
                 GrantOperation::Sign,
                 AuditCtx::admin(AuditOp::GrantCreate),
             )
@@ -2625,7 +2796,7 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
-                SelectorKind::Prefix,
+                SelectorKind::Exact,
                 "github_app:",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -2659,7 +2830,7 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
-                SelectorKind::Prefix,
+                SelectorKind::Exact,
                 "github_app:",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -2693,7 +2864,7 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
-                SelectorKind::Prefix,
+                SelectorKind::Exact,
                 "github_app:",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -2742,7 +2913,7 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
-                SelectorKind::Prefix,
+                SelectorKind::Exact,
                 "github_app:",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -2788,8 +2959,8 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
-                SelectorKind::Prefix,
-                "github_app:",
+                SelectorKind::Exact,
+                credential_id,
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
             )
@@ -2883,7 +3054,7 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
-                SelectorKind::Prefix,
+                SelectorKind::Exact,
                 "github_app:",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -2925,7 +3096,7 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
-                SelectorKind::Prefix,
+                SelectorKind::Exact,
                 "apikey:status-",
                 GrantOperation::Sign,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -2970,7 +3141,7 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
-                SelectorKind::Prefix,
+                SelectorKind::Exact,
                 "github_app:",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -3069,7 +3240,7 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
-                SelectorKind::Prefix,
+                SelectorKind::Exact,
                 "github_app:",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -3105,41 +3276,21 @@ mod tests {
                 )
                 .expect("create credential");
         }
-        for prefix in ["github_app:", "apikey:"] {
-            credentials_core::admin_ops::apply(
-                &store,
-                credentials_core::admin_ops::AdminOpBody::GrantCreate {
-                    v: credentials_core::admin_ops::ADMIN_OP_SCHEMA_V1,
-                    principal_id: "prefrontal-core".into(),
-                    credential_prefix: prefix.into(),
-                    operation: GrantOperation::Read,
-                },
-                "test",
-            )
-            .expect("create grant");
+        for selector in ["apikey:active", "github_app:a"] {
+            for operation in [GrantOperation::Read, GrantOperation::Sign] {
+                credentials_core::admin_ops::apply(
+                    &store,
+                    credentials_core::admin_ops::AdminOpBody::GrantCreate {
+                        v: credentials_core::admin_ops::ADMIN_OP_SCHEMA_V1,
+                        principal_id: "prefrontal-core".into(),
+                        credential_prefix: selector.into(),
+                        operation,
+                    },
+                    "test",
+                )
+                .expect("create exact grant");
+            }
         }
-        credentials_core::admin_ops::apply(
-            &store,
-            credentials_core::admin_ops::AdminOpBody::GrantCreate {
-                v: credentials_core::admin_ops::ADMIN_OP_SCHEMA_V1,
-                principal_id: "prefrontal-core".into(),
-                credential_prefix: "github_app:".into(),
-                operation: GrantOperation::Sign,
-            },
-            "test",
-        )
-        .expect("create sign grant");
-        credentials_core::admin_ops::apply(
-            &store,
-            credentials_core::admin_ops::AdminOpBody::GrantCreate {
-                v: credentials_core::admin_ops::ADMIN_OP_SCHEMA_V1,
-                principal_id: "prefrontal-core".into(),
-                credential_prefix: "apikey:".into(),
-                operation: GrantOperation::Sign,
-            },
-            "test",
-        )
-        .expect("create apikey sign grant");
         let status = credentials_core::admin_ops::apply(
             &store,
             credentials_core::admin_ops::AdminOpBody::Status {
@@ -3167,34 +3318,34 @@ mod tests {
             {
                 "principal_kind": "reserved",
                 "principal_id": "prefrontal-core",
-                "selector_kind": "prefix",
-                "credential_prefix": "apikey:",
+                "selector_kind": "exact",
+                "credential_prefix": "apikey:active",
                 "operation": "read",
-                "covered_credential_ids": ["apikey:active", "apikey:dead"],
+                "covered_credential_ids": ["apikey:active"],
             },
             {
                 "principal_kind": "reserved",
                 "principal_id": "prefrontal-core",
-                "selector_kind": "prefix",
-                "credential_prefix": "apikey:",
+                "selector_kind": "exact",
+                "credential_prefix": "apikey:active",
                 "operation": "sign",
-                "covered_credential_ids": ["apikey:active", "apikey:dead"],
+                "covered_credential_ids": ["apikey:active"],
             },
             {
                 "principal_kind": "reserved",
                 "principal_id": "prefrontal-core",
-                "selector_kind": "prefix",
-                "credential_prefix": "github_app:",
+                "selector_kind": "exact",
+                "credential_prefix": "github_app:a",
                 "operation": "read",
-                "covered_credential_ids": ["github_app:a", "github_app:z"],
+                "covered_credential_ids": ["github_app:a"],
             },
             {
                 "principal_kind": "reserved",
                 "principal_id": "prefrontal-core",
-                "selector_kind": "prefix",
-                "credential_prefix": "github_app:",
+                "selector_kind": "exact",
+                "credential_prefix": "github_app:a",
                 "operation": "sign",
-                "covered_credential_ids": ["github_app:a", "github_app:z"],
+                "covered_credential_ids": ["github_app:a"],
             },
         ]);
         assert_eq!(
@@ -3458,6 +3609,257 @@ mod tests {
     }
 
     #[test]
+    fn enrollment_wire_fixture_pins_exact_requests_successes_and_nine_refusals() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/enrollment_wire_contract.json"
+        ))
+        .expect("decode enrollment wire fixture");
+        let operations = fixture["operations"].as_array().expect("operation rows");
+        let operation = |name: &str| {
+            operations
+                .iter()
+                .find(|row| row["op"] == name)
+                .unwrap_or_else(|| panic!("missing {name} fixture row"))
+        };
+        let raw = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+
+        assert_eq!(
+            serde_json::to_string(&EnrollProposeParams {
+                proposed_name: "consumer".into(),
+                request_secret_hash: "0".repeat(64),
+            })
+            .unwrap(),
+            operation(OP_ENROLL_PROPOSE)["request"]
+        );
+        assert_eq!(
+            serde_json::to_string(&EnrollPollParams {
+                request_id: "request-id".into(),
+                request_secret: raw.into(),
+            })
+            .unwrap(),
+            operation(OP_ENROLL_POLL)["request"]
+        );
+        assert_eq!(
+            serde_json::to_string(&EnrollRotateParams {
+                token: raw.into(),
+                expected_token_generation: 1,
+            })
+            .unwrap(),
+            operation(OP_ENROLL_ROTATE)["request"]
+        );
+        assert!(
+            serde_json::from_value::<EnrollPollParams>(json!({
+                "request_id": "request-id",
+                "request_secret": raw,
+                "proposed_name": "consumer"
+            }))
+            .is_err(),
+            "poll accepts only request_id and request_secret"
+        );
+
+        let proposal = serde_json::to_string(&wrap_result(
+            credentials_core::enrollment::EnrollmentProposal {
+                request_id: "request-id".into(),
+            },
+        ))
+        .unwrap();
+        assert_eq!(proposal, operation(OP_ENROLL_PROPOSE)["success"][0]);
+        let poll_successes = [
+            credentials_core::enrollment::EnrollmentPoll::Pending,
+            credentials_core::enrollment::EnrollmentPoll::Denied,
+            credentials_core::enrollment::EnrollmentPoll::Approved {
+                name: "consumer".into(),
+                token: raw.into(),
+                token_generation: 1,
+            },
+        ];
+        for (index, success) in poll_successes.into_iter().enumerate() {
+            assert_eq!(
+                serde_json::to_string(&wrap_result(success)).unwrap(),
+                operation(OP_ENROLL_POLL)["success"][index]
+            );
+        }
+        let rotation = serde_json::to_string(&wrap_result(
+            credentials_core::enrollment::EnrollmentRotation {
+                token: "f".repeat(64),
+                token_generation: 2,
+            },
+        ))
+        .unwrap();
+        assert_eq!(rotation, operation(OP_ENROLL_ROTATE)["success"][0]);
+
+        let refusal_rows = fixture["refusals"].as_array().expect("refusal rows");
+        assert_eq!(
+            refusal_rows.len(),
+            9,
+            "the consumer decision table has nine rows"
+        );
+        let refusals = [
+            EnrollmentRefusal::PendingExists,
+            EnrollmentRefusal::PendingQueueFull,
+            EnrollmentRefusal::InvalidParams,
+            EnrollmentRefusal::NotFound,
+            EnrollmentRefusal::InvalidParams,
+            EnrollmentRefusal::AlreadyConsumed,
+            EnrollmentRefusal::Superseded,
+            EnrollmentRefusal::StaleGeneration,
+            EnrollmentRefusal::NotFound,
+        ];
+        for (row, refusal) in refusal_rows.iter().zip(refusals) {
+            assert_eq!(row["transport_status"], "error");
+            assert_eq!(
+                serde_json::to_string(&EnrollmentErrorBody {
+                    code: refusal.code(),
+                    disposition: refusal.disposition(),
+                })
+                .unwrap(),
+                row["body"]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn enrollment_route_uses_transport_errors_and_keeps_unknown_and_wrong_secret_identical() {
+        let (surface, admin, store) = scoped_rig(116);
+        let secret = "11".repeat(32);
+        let secret_hash = credentials_core::enrollment::enrollment_secret_hash(&secret).unwrap();
+
+        let invalid = enrollment_route_frame(
+            &surface,
+            &admin,
+            OP_ENROLL_PROPOSE,
+            json!({"proposed_name":"bad:name","request_secret_hash":secret_hash.clone()}),
+        )
+        .await;
+        assert_eq!(invalid.header.ty, FrameType::Error);
+        assert_eq!(
+            invalid.body,
+            br#"{"code":"invalid_params","disposition":"permanent"}"#
+        );
+
+        let proposed = enrollment_route_frame(
+            &surface,
+            &admin,
+            OP_ENROLL_PROPOSE,
+            json!({"proposed_name":"consumer","request_secret_hash":secret_hash.clone()}),
+        )
+        .await;
+        assert_eq!(proposed.header.ty, FrameType::Response);
+        let proposed_body: serde_json::Value = serde_json::from_slice(&proposed.body).unwrap();
+        let request_id = proposed_body["result"]["request_id"]
+            .as_str()
+            .expect("request id")
+            .to_string();
+
+        let duplicate = enrollment_route_frame(
+            &surface,
+            &admin,
+            OP_ENROLL_PROPOSE,
+            json!({"proposed_name":"consumer","request_secret_hash":secret_hash.clone()}),
+        )
+        .await;
+        assert_eq!(duplicate.header.ty, FrameType::Error);
+        assert_eq!(
+            duplicate.body,
+            br#"{"code":"pending_exists","disposition":"permanent"}"#
+        );
+
+        let unknown = enrollment_route_frame(
+            &surface,
+            &admin,
+            OP_ENROLL_POLL,
+            json!({"request_id":"ff".repeat(32),"request_secret":secret.clone()}),
+        )
+        .await;
+        let wrong_secret = enrollment_route_frame(
+            &surface,
+            &admin,
+            OP_ENROLL_POLL,
+            json!({"request_id":request_id.clone(),"request_secret":"22".repeat(32)}),
+        )
+        .await;
+        assert_eq!(unknown.header.ty, FrameType::Error);
+        assert_eq!(wrong_secret.header.ty, FrameType::Error);
+        assert_eq!(unknown.body, wrong_secret.body);
+        assert_eq!(
+            unknown.body,
+            br#"{"code":"not_found","disposition":"permanent"}"#
+        );
+
+        let pending = enrollment_route_frame(
+            &surface,
+            &admin,
+            OP_ENROLL_POLL,
+            json!({"request_id":request_id.clone(),"request_secret":secret.clone()}),
+        )
+        .await;
+        assert_eq!(pending.header.ty, FrameType::Response);
+        assert_eq!(pending.body, br#"{"result":{"status":"pending"}}"#);
+
+        store
+            .approve_enrollment(&request_id, "consumer", "operator")
+            .expect("approve");
+        let approved = enrollment_route_frame(
+            &surface,
+            &admin,
+            OP_ENROLL_POLL,
+            json!({"request_id":request_id.clone(),"request_secret":secret.clone()}),
+        )
+        .await;
+        assert_eq!(approved.header.ty, FrameType::Response);
+        let approved_body: serde_json::Value = serde_json::from_slice(&approved.body).unwrap();
+        assert_eq!(approved_body["result"]["status"], "approved");
+        assert_eq!(approved_body["result"]["token_generation"], 1);
+        let token = approved_body["result"]["token"]
+            .as_str()
+            .expect("token")
+            .to_string();
+
+        let consumed = enrollment_route_frame(
+            &surface,
+            &admin,
+            OP_ENROLL_POLL,
+            json!({"request_id":request_id.clone(),"request_secret":secret.clone()}),
+        )
+        .await;
+        assert_eq!(consumed.header.ty, FrameType::Error);
+        assert_eq!(
+            consumed.body,
+            br#"{"code":"already_consumed","disposition":"permanent"}"#
+        );
+
+        let stale = enrollment_route_frame(
+            &surface,
+            &admin,
+            OP_ENROLL_ROTATE,
+            json!({"token":token.clone(),"expected_token_generation":2}),
+        )
+        .await;
+        assert_eq!(stale.header.ty, FrameType::Error);
+        assert_eq!(
+            stale.body,
+            br#"{"code":"stale_generation","disposition":"permanent"}"#
+        );
+        let rotated = enrollment_route_frame(
+            &surface,
+            &admin,
+            OP_ENROLL_ROTATE,
+            json!({"token":token.clone(),"expected_token_generation":1}),
+        )
+        .await;
+        assert_eq!(rotated.header.ty, FrameType::Response);
+        let old_token = enrollment_route_frame(
+            &surface,
+            &admin,
+            OP_ENROLL_ROTATE,
+            json!({"token":token.clone(),"expected_token_generation":1}),
+        )
+        .await;
+        assert_eq!(old_token.header.ty, FrameType::Error);
+        assert_eq!(old_token.body, unknown.body);
+    }
+
+    #[test]
     fn credential_get_request_key_set_is_pinned() {
         assert_request_key_set(
             read_surface::GetParams {
@@ -3475,17 +3877,139 @@ mod tests {
         assert_request_key_set(
             read_surface::GetScopedParams {
                 credential_id: "apikey:request-shape".to_owned(),
+                enrollment_token: None,
             },
             &["credential_id"],
             "credential.get_scoped",
         );
+        assert_request_key_set(
+            read_surface::GetScopedParams {
+                credential_id: "apikey:request-shape".to_owned(),
+                enrollment_token: Some("cke_request_shape".to_owned()),
+            },
+            &["credential_id", "enrollment_token"],
+            "credential.get_scoped",
+        );
     }
 
+    /// AN ENROLLMENT TOKEN AUTHORIZES A SCOPED READ, AND A REVOKED ONE DOES NOT.
+    ///
+    /// This is the property that makes the ceremony worth having: until the resolver
+    /// existed, a consumer could complete enrollment, persist a token, and find that no
+    /// operation accepted it — a credential that proved nothing, which is worse than no
+    /// credential because it looks like access.
+    ///
+    /// The revoked arm is the load-bearing half. A token that keeps working after
+    /// revocation is not a smaller defect than one that never worked; it is the one that
+    /// matters, because revocation is the only control the operator has over a consumer
+    /// they no longer trust.
+    #[tokio::test]
+    async fn an_enrollment_token_authorizes_a_scoped_read_until_it_is_revoked() {
+        let (surface, store, _db, _root) = tmp_surface_with_store(197);
+        store
+            .create(
+                "apikey:enrolled-read",
+                &VaultRecord::new_static(CredentialKind::ApiKey, "test", b"secret".to_vec(), None),
+            )
+            .expect("create record");
+        store
+            .create_read_grant_audited(
+                "enrolled",
+                "probe-consumer",
+                credentials_core::store::SelectorKind::Exact,
+                "apikey:enrolled-read",
+                GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .expect("grant");
+
+        // The request secret is minted by the CONSUMER and only its hash reaches the
+        // vault, which is what stops a squatter from collecting a token for a name it
+        // proposed but does not hold.
+        let request_secret = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
+        let secret_hash = credentials_core::enrollment::enrollment_secret_hash(request_secret)
+            .expect("hashable secret");
+        let request = store
+            .propose_enrollment("probe-consumer", &secret_hash)
+            .expect("propose");
+        store
+            .approve_enrollment(&request.request_id, "probe-consumer", "operator")
+            .expect("approve");
+        let token = match store
+            .poll_enrollment(&request.request_id, request_secret)
+            .expect("poll")
+        {
+            credentials_core::enrollment::EnrollmentPoll::Approved { token, .. } => token,
+            other => panic!("an approved request must poll Approved, got {other:?}"),
+        };
+
+        let served = surface
+            .get_scoped(
+                None,
+                &read_surface::GetScopedParams {
+                    credential_id: "apikey:enrolled-read".to_owned(),
+                    enrollment_token: Some(token.clone()),
+                },
+            )
+            .await;
+        let read_surface::GetOutcome::Ok(served) = served else {
+            panic!("a live enrollment token must authorize the read its grant covers: {served:?}");
+        };
+        assert_eq!(
+            served.credential_id.as_deref(),
+            Some("apikey:enrolled-read"),
+            "and the reply names the credential it resolved, for binding verification"
+        );
+
+        store
+            .revoke_enrollment("probe-consumer", "operator")
+            .expect("revoke");
+        let refused = surface
+            .get_scoped(
+                None,
+                &read_surface::GetScopedParams {
+                    credential_id: "apikey:enrolled-read".to_owned(),
+                    enrollment_token: Some(token.clone()),
+                },
+            )
+            .await;
+        let read_surface::GetOutcome::Err { error } = refused else {
+            panic!("a revoked token must stop working immediately: {refused:?}");
+        };
+        assert_eq!(
+            error.code,
+            read_surface::ReadError::NotFound,
+            "and must be indistinguishable from an unknown token, so a caller cannot \
+             enumerate which consumer names ever existed"
+        );
+    }
+
+    /// `credential.list_scoped` carries exactly one optional parameter.
+    ///
+    /// This test used to be named ..._is_exactly_an_empty_object and asserted `&[]`. The
+    /// rename is the point: `enrollment_token` is how a host-launched consumer identifies
+    /// itself, and `skip_serializing_if` means a supervised module still sends `{}` on
+    /// the wire. So the empty-object case survives as the ABSENT arm below rather than as
+    /// the whole contract.
+    ///
+    /// Both arms are pinned because they are different claims. The absent arm says a
+    /// module's call did not grow a field; the present arm says the token is spelled
+    /// `enrollment_token` and nothing else, which is what a consumer's client must match
+    /// byte for byte.
     #[test]
-    fn credential_list_scoped_request_is_exactly_an_empty_object() {
+    fn credential_list_scoped_request_key_set_is_pinned() {
         assert_request_key_set(
-            read_surface::ListScopedParams {},
+            read_surface::ListScopedParams {
+                enrollment_token: None,
+            },
             &[],
+            "credential.list_scoped",
+        );
+        assert_request_key_set(
+            read_surface::ListScopedParams {
+                enrollment_token: Some("cke_request_shape".to_owned()),
+            },
+            &["enrollment_token"],
             "credential.list_scoped",
         );
     }
@@ -3546,13 +4070,15 @@ mod tests {
     fn credential_report_auth_failure_request_key_set_is_pinned() {
         assert_request_key_set(
             read_surface::ReportAuthFailureParams {
-                handle: "ckh_request_shape".to_owned(),
+                handle: Some("ckh_request_shape".to_owned()),
+                credential_id: Some("apikey:request-shape".to_owned()),
                 provider_status: 401,
                 record_version: 7,
                 reporter_source: Some("probe".to_owned()),
             },
             &[
                 "handle",
+                "credential_id",
                 "provider_status",
                 "record_version",
                 "reporter_source",
@@ -4770,8 +5296,8 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
-                SelectorKind::Prefix,
-                "signing:scoped:",
+                SelectorKind::Exact,
+                credential_id,
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
             )
@@ -4911,7 +5437,7 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
-                SelectorKind::Prefix,
+                SelectorKind::Exact,
                 "signing:operations:",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -4955,7 +5481,7 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
-                SelectorKind::Prefix,
+                SelectorKind::Exact,
                 "apikey:operations:",
                 GrantOperation::Sign,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -5001,16 +5527,18 @@ mod tests {
                 &VaultRecord::new_static(CredentialKind::ApiKey, "test", pem.into_bytes(), None),
             )
             .expect("create non-signing credential");
-        store
-            .create_read_grant_audited(
-                "reserved",
-                "prefrontal-core",
-                SelectorKind::Prefix,
-                "signing:operations:",
-                GrantOperation::Sign,
-                AuditCtx::admin(AuditOp::GrantCreate),
-            )
-            .expect("create sign grant");
+        for credential_id in ["signing:operations:real", "signing:operations:impostor"] {
+            store
+                .create_read_grant_audited(
+                    "reserved",
+                    "prefrontal-core",
+                    SelectorKind::Exact,
+                    credential_id,
+                    GrantOperation::Sign,
+                    AuditCtx::admin(AuditOp::GrantCreate),
+                )
+                .expect("create exact sign grant");
+        }
         admin.record_bind(
             84,
             subc_protocol::Principal::Reserved {
@@ -5059,8 +5587,8 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
-                SelectorKind::Prefix,
-                "signing:public-key:",
+                SelectorKind::Exact,
+                credential_id,
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
             )
@@ -5108,7 +5636,7 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
-                SelectorKind::Prefix,
+                SelectorKind::Exact,
                 "signing:public-key:",
                 GrantOperation::Sign,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -5191,8 +5719,8 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
-                SelectorKind::Prefix,
-                "apikey:public-key:",
+                SelectorKind::Exact,
+                credential_id,
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
             )
@@ -5237,7 +5765,7 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
-                SelectorKind::Prefix,
+                SelectorKind::Exact,
                 "signing:public-key:",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -5292,7 +5820,7 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
-                SelectorKind::Prefix,
+                SelectorKind::Exact,
                 "signing:public-key:",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -5867,7 +6395,8 @@ mod tests {
                 1,
                 None,
                 &read_surface::ReportAuthFailureParams {
-                    handle: handle.raw.clone(),
+                    handle: Some(handle.raw.clone()),
+                    credential_id: None,
                     provider_status: 401,
                     record_version: 1,
                     reporter_source: None,
@@ -6007,7 +6536,8 @@ mod tests {
                 11,
                 None,
                 &read_surface::ReportAuthFailureParams {
-                    handle: raw.raw.clone(),
+                    handle: Some(raw.raw.clone()),
+                    credential_id: None,
                     provider_status: 401,
                     record_version: 1,
                     reporter_source: None,
@@ -6462,7 +6992,8 @@ mod tests {
         };
         let params = |status: u16, version: u64, reporter_source: Option<&str>| {
             read_surface::ReportAuthFailureParams {
-                handle: handle.clone(),
+                handle: Some(handle.clone()),
+                credential_id: None,
                 provider_status: status,
                 record_version: version,
                 reporter_source: reporter_source.map(str::to_owned),
@@ -6470,11 +7001,20 @@ mod tests {
         };
 
         // A NON-AUTH status must not invalidate: a provider 500 is a hiccup, not a dead
-        // credential.
-        surface
+        // credential. It is now REFUSED rather than accepted-and-discarded — the record
+        // outcome is the same, and the consumer is told. This assertion used to read
+        // `.expect("a non-auth status is accepted")`, which was true and was the defect:
+        // a consumer classifying 5xx as a credential death got back success and a mark
+        // that did nothing.
+        let refusal = surface
             .report_auth_failure(7, None, &params(500, 1, None))
             .await
-            .expect("a non-auth status is accepted");
+            .expect_err("a non-auth status is refused, not accepted");
+        assert_eq!(
+            refusal,
+            read_surface::ReadError::ReportStatusNotCredentialDeath,
+            "and it refuses with the code that names why"
+        );
         assert_eq!(
             state_of(&store),
             RecordState::Active,
@@ -6565,7 +7105,8 @@ mod tests {
                 7,
                 None,
                 &read_surface::ReportAuthFailureParams {
-                    handle: "ckh_not_a_handle".to_string(),
+                    handle: Some("ckh_not_a_handle".to_string()),
+                    credential_id: None,
                     provider_status: 401,
                     record_version: 1,
                     reporter_source: None,
@@ -6576,6 +7117,399 @@ mod tests {
             matches!(unknown, Err(read_surface::ReadError::NotFound)),
             "an unknown handle must be a uniform not_found, got {unknown:?}"
         );
+    }
+
+    /// THE LOAD-BEARING TEST OF THE SCOPED ADDRESS: both addressing forms produce ONE
+    /// store outcome.
+    ///
+    /// Written this way because the failure it guards is not a wrong answer, it is
+    /// DRIFT. Two addresses reaching two code paths that each look correct is how one
+    /// of them silently stops fencing on version, or stops marking stale, or starts
+    /// latching where the other marks -- and nothing fails, because each path has its
+    /// own test asserting its own behaviour. Asserting the two outcomes are EQUAL is
+    /// the only shape that cannot be satisfied by two correct-looking implementations.
+    #[tokio::test]
+    async fn a_scoped_report_and_a_handle_report_reach_the_same_store_outcome() {
+        use credentials_core::oauth::OAuthCredential;
+
+        // Two identical credentials so each address can be exercised on its own record
+        // without the first report changing what the second one sees.
+        let (surface, store, _db, _root) = tmp_surface_with_store(191);
+        let record = || {
+            VaultRecord::new_oauth(
+                "stub",
+                "stub",
+                OAuthCredential {
+                    access_token: "live".to_string().into(),
+                    refresh_token: "refresh".to_string().into(),
+                    expires_at_ms: Some(i64::MAX),
+                    token_url: "https://example.invalid/token".into(),
+                    client_id: None,
+                    scopes: Vec::new(),
+                },
+                b"live".to_vec(),
+            )
+        };
+        store
+            .create("oauth:twin-handle", &record())
+            .expect("create handle-addressed twin");
+        store
+            .create("oauth:twin-scoped", &record())
+            .expect("create scope-addressed twin");
+
+        let handle = credentials_core::store::mint_handle().expect("mint handle");
+        store
+            .put_handle_hash(
+                &handle.hash,
+                "oauth:twin-handle",
+                AuditCtx::admin(AuditOp::MintHandle),
+            )
+            .expect("bind handle");
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "twin-reporter",
+                credentials_core::store::SelectorKind::Exact,
+                "oauth:twin-scoped",
+                credentials_core::store::GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .expect("grant read on the scoped twin");
+        let principal = subc_protocol::Principal::Reserved {
+            module_id: "twin-reporter".into(),
+        };
+
+        surface
+            .report_auth_failure(
+                1,
+                None,
+                &read_surface::ReportAuthFailureParams {
+                    handle: Some(handle.raw),
+                    credential_id: None,
+                    provider_status: 401,
+                    record_version: 1,
+                    reporter_source: None,
+                },
+            )
+            .await
+            .expect("handle-addressed report");
+        surface
+            .report_auth_failure(
+                2,
+                Some(&principal),
+                &read_surface::ReportAuthFailureParams {
+                    handle: None,
+                    credential_id: Some("oauth:twin-scoped".to_owned()),
+                    provider_status: 401,
+                    record_version: 1,
+                    reporter_source: None,
+                },
+            )
+            .await
+            .expect("scope-addressed report");
+
+        let by_handle = store.meta("oauth:twin-handle").expect("handle twin meta");
+        let by_scope = store.meta("oauth:twin-scoped").expect("scoped twin meta");
+        assert_eq!(
+            (by_handle.state, by_handle.record_version),
+            (by_scope.state, by_scope.record_version),
+            "the two addressing forms must reach one store outcome; if they diverge, one \
+             of them has stopped fencing or stopped marking and no single-path test can \
+             see it"
+        );
+    }
+
+    /// A status the contract does not treat as a credential death is REFUSED, and the
+    /// two that are stay honoured.
+    ///
+    /// The refusing half is the new behaviour; the honouring half is what stops a future
+    /// tidy-up from collapsing this into "401 only". 403 is genuinely ambiguous across
+    /// providers — GitHub uses it for permission refusals on a live token, and xAI has
+    /// used it for a real death. Measured on the live store 2026-09-19: of 72 consumer
+    /// reports ever taken, exactly one was a real 403, on `oauth:xai`, and it WAS a death
+    /// — an operator re-logged in three hours later and it has refreshed cleanly since.
+    /// Refusing 403 would fail toward a dead credential that looks healthy.
+    #[tokio::test]
+    async fn a_report_status_outside_the_contract_is_refused_and_401_403_are_not() {
+        let (surface, store, _db, _root) = tmp_surface_with_store(196);
+        store
+            .create(
+                "apikey:status-gate",
+                &VaultRecord::new_static(CredentialKind::ApiKey, "test", b"key".to_vec(), None),
+            )
+            .expect("create record");
+        let handle = credentials_core::store::mint_handle().expect("mint handle");
+        store
+            .put_handle_hash(
+                &handle.hash,
+                "apikey:status-gate",
+                AuditCtx::admin(AuditOp::MintHandle),
+            )
+            .expect("bind handle");
+
+        let report = |status: u16| {
+            let raw = handle.raw.clone();
+            let surface = &surface;
+            async move {
+                surface
+                    .report_auth_failure(
+                        6,
+                        None,
+                        &read_surface::ReportAuthFailureParams {
+                            handle: Some(raw),
+                            credential_id: None,
+                            provider_status: status,
+                            record_version: 1,
+                            reporter_source: None,
+                        },
+                    )
+                    .await
+            }
+        };
+
+        for status in [429, 402, 500, 200, 404] {
+            let refusal = report(status)
+                .await
+                .expect_err("a status the contract does not treat as a death must refuse");
+            assert_eq!(
+                refusal,
+                read_surface::ReadError::ReportStatusNotCredentialDeath,
+                "status {status} must refuse with the naming code, not be accepted and \
+                 discarded: a consumer whose classification is wrong learns nothing from \
+                 a success that did nothing"
+            );
+            assert_eq!(
+                refusal.class(),
+                read_surface::ErrorClass::Permanent,
+                "the same status will never become a credential death, so a retry cannot \
+                 succeed and the class must say so"
+            );
+        }
+
+        for status in [401, 403] {
+            report(status)
+                .await
+                .unwrap_or_else(|e| panic!("status {status} must still be honoured, got {e:?}"));
+        }
+    }
+
+    /// The audit row for a scoped report names the PRINCIPAL, not the route channel.
+    ///
+    /// This exists because mutation found nothing guarding it: replacing the principal
+    /// arm with `conn-N` left the entire suite green. The handle form legitimately
+    /// writes `conn-N` -- a handle holder is anonymous by design and the channel number
+    /// is all there is -- but a scoped caller's identity is what AUTHORIZED the write,
+    /// read one line above by the grant lookup that admitted the call. Writing `conn-N`
+    /// there would discard a value already in hand, which is a defect this repo has met
+    /// three times (mint rows naming a credential but not which handle, a peer's limiter
+    /// holding a principal and writing `conn-N`, a pin recording a slot rather than its
+    /// occupant). All three were found by accident, months later, from the outside.
+    #[tokio::test]
+    async fn a_scoped_report_audits_under_the_principal_not_the_channel() {
+        let (surface, store, _db, _root) = tmp_surface_with_store(195);
+        store
+            .create(
+                "apikey:audited-scope",
+                &VaultRecord::new_static(CredentialKind::ApiKey, "test", b"key".to_vec(), None),
+            )
+            .expect("create record");
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "named-reporter",
+                credentials_core::store::SelectorKind::Exact,
+                "apikey:audited-scope",
+                credentials_core::store::GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .expect("grant read");
+
+        surface
+            .report_auth_failure(
+                // A channel number that would be unmistakable in the row if it leaked in.
+                4242,
+                Some(&subc_protocol::Principal::Reserved {
+                    module_id: "named-reporter".into(),
+                }),
+                &read_surface::ReportAuthFailureParams {
+                    handle: None,
+                    credential_id: Some("apikey:audited-scope".to_owned()),
+                    provider_status: 401,
+                    record_version: 1,
+                    reporter_source: None,
+                },
+            )
+            .await
+            .expect("scoped report");
+
+        let entry = store
+            .read_audit(None)
+            .expect("read chain")
+            .into_iter()
+            .find(|e| {
+                e.credential_id.as_deref() == Some("apikey:audited-scope")
+                    && e.op == AuditOp::ReportAuthFailure.as_str()
+            })
+            .expect("the scoped report appended a chain row");
+        assert_eq!(
+            entry.actor, "named-reporter",
+            "a scoped report must be attributable to the principal that authorized it; \
+             `conn-4242` here would mean the identity was held and thrown away"
+        );
+    }
+
+    /// A scoped report at a version the caller was NOT served changes nothing and the
+    /// credential keeps serving. The fence is the whole defence against a buggy retry
+    /// loop killing a token that refreshed while it was failing, so it must hold on the
+    /// new address exactly as it does on the old one.
+    #[tokio::test]
+    async fn a_scoped_report_at_a_stale_version_is_a_no_op() {
+        use credentials_core::oauth::OAuthCredential;
+        use credentials_core::store::RecordState;
+
+        let (surface, store, _db, _root) = tmp_surface_with_store(192);
+        store
+            .create(
+                "oauth:fenced",
+                &VaultRecord::new_oauth(
+                    "stub",
+                    "stub",
+                    OAuthCredential {
+                        access_token: "live".to_string().into(),
+                        refresh_token: "refresh".to_string().into(),
+                        expires_at_ms: Some(i64::MAX),
+                        token_url: "https://example.invalid/token".into(),
+                        client_id: None,
+                        scopes: Vec::new(),
+                    },
+                    b"live".to_vec(),
+                ),
+            )
+            .expect("create record");
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "fence-reporter",
+                credentials_core::store::SelectorKind::Exact,
+                "oauth:fenced",
+                credentials_core::store::GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .expect("grant read");
+
+        surface
+            .report_auth_failure(
+                3,
+                Some(&subc_protocol::Principal::Reserved {
+                    module_id: "fence-reporter".into(),
+                }),
+                &read_surface::ReportAuthFailureParams {
+                    handle: None,
+                    credential_id: Some("oauth:fenced".to_owned()),
+                    provider_status: 401,
+                    // The record is at version 1; the caller claims it was served 99.
+                    record_version: 99,
+                    reporter_source: None,
+                },
+            )
+            .await
+            .expect("a stale report is accepted and ignored, never an error");
+
+        // ASSERTED ON stale_pending, NOT ON state, AND THAT IS THE WHOLE TEST.
+        //
+        // The first version of this asserted `state == Active` and PASSED under a mutant
+        // that bypassed the fence entirely -- because an applied report on a refreshable
+        // record does not change `state` at all: it sets `stale_pending` and lets the
+        // next get do the work. So `state` reads Active in both the fenced and the
+        // unfenced world, and the assertion could not fail. Caught by mutation, not by
+        // review, and it is the exact defect this repo keeps meeting: an assertion on a
+        // value the mechanism does not move.
+        let meta = store.meta("oauth:fenced").expect("meta");
+        assert!(
+            !meta.stale_pending,
+            "a report carrying a version the caller was never served must not mark the \
+             record stale: that is what stops a buggy retry loop from killing a token \
+             that refreshed while it was failing"
+        );
+        assert_eq!(
+            meta.state,
+            RecordState::Active,
+            "and it must not latch the record either"
+        );
+        assert_eq!(meta.record_version, 1, "and it must not bump the version");
+    }
+
+    /// An unknown credential id and one the caller holds no grant for must be
+    /// INDISTINGUISHABLE. Asserted on the error values themselves rather than on both
+    /// merely being errors: two different refusals are still two refusals, and the
+    /// difference is exactly what turns this surface into an inventory oracle.
+    #[tokio::test]
+    async fn a_scoped_report_cannot_tell_unknown_from_ungranted() {
+        let (surface, store, _db, _root) = tmp_surface_with_store(193);
+        store
+            .create(
+                "apikey:exists-but-ungranted",
+                &VaultRecord::new_static(CredentialKind::ApiKey, "test", b"key".to_vec(), None),
+            )
+            .expect("create an ungranted credential");
+        let principal = subc_protocol::Principal::Reserved {
+            module_id: "no-grants-at-all".into(),
+        };
+        let mut refusals = Vec::new();
+        for id in [
+            "apikey:exists-but-ungranted",
+            "apikey:no-such-credential-anywhere",
+        ] {
+            refusals.push(
+                surface
+                    .report_auth_failure(
+                        4,
+                        Some(&principal),
+                        &read_surface::ReportAuthFailureParams {
+                            handle: None,
+                            credential_id: Some(id.to_owned()),
+                            provider_status: 401,
+                            record_version: 1,
+                            reporter_source: None,
+                        },
+                    )
+                    .await
+                    .expect_err("both must refuse"),
+            );
+        }
+        let (ungranted, unknown) = (refusals[0], refusals[1]);
+        assert_eq!(
+            format!("{ungranted:?}"),
+            format!("{unknown:?}"),
+            "an existing-but-ungranted id and a nonexistent one must answer identically; \
+             a caller that can tell them apart can enumerate the vault one guess at a time"
+        );
+    }
+
+    /// Both addresses, and neither, are malformed requests rather than addressing
+    /// questions.
+    #[tokio::test]
+    async fn a_report_supplying_both_addresses_or_neither_is_refused() {
+        let (surface, _store, _db, _root) = tmp_surface_with_store(194);
+        for (handle, credential_id) in [
+            (Some("ckh_whatever".to_owned()), Some("apikey:x".to_owned())),
+            (None, None),
+        ] {
+            surface
+                .report_auth_failure(
+                    5,
+                    None,
+                    &read_surface::ReportAuthFailureParams {
+                        handle,
+                        credential_id,
+                        provider_status: 401,
+                        record_version: 1,
+                        reporter_source: None,
+                    },
+                )
+                .await
+                .expect_err("exactly one address, or the request is malformed");
+        }
     }
 
     /// A refreshable report keeps the credential active and schedules its existing
@@ -6618,7 +7552,8 @@ mod tests {
                 8,
                 None,
                 &read_surface::ReportAuthFailureParams {
-                    handle: handle.raw,
+                    handle: Some(handle.raw),
+                    credential_id: None,
                     provider_status: 401,
                     record_version: 1,
                     reporter_source: None,
@@ -6678,7 +7613,8 @@ mod tests {
                 9,
                 None,
                 &read_surface::ReportAuthFailureParams {
-                    handle: handle.raw.clone(),
+                    handle: Some(handle.raw.clone()),
+                    credential_id: None,
                     provider_status: 401,
                     record_version: 1,
                     reporter_source: None,

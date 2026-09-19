@@ -347,6 +347,19 @@ assert_floor_not_lowered() {
 # released-v0.1.2 behavior, and rendered per-verb help checks; it is not the sum
 # of branch-specific test changes.
 #
+# Raised 714 -> 724 on 2026-09-19 with the enrollment ceremony. Measured on the
+# merged campaign tree with the exact command below: 394 + 2 + 9 + 53 + 121 + 49 +
+# 77 + 19 passing tests across the non-empty targets. Zero-test and ignored-only
+# targets contribute zero; the number was not derived by adding a planned test delta.
+#
+# Raised 704 -> 714 on 2026-09-19 on campaign/enrollment-selectors, with migration 10
+# and the enrollment tables. MEASURED on the merged tree, not summed: the slice's own
+# suite reported 707 against a 696 line it left alone, master reached 704 independently
+# from the login work, and neither number was right for the merge of the two. The
+# ratchet caught the branch carrying a floor BELOW master's, which is the case the
+# ratchet exists for and the reason a floor cannot simply be 'left for later' on a
+# long-lived branch: master moves underneath it.
+#
 # Raised 696 -> 704 on 2026-09-19 with the login-redirect work (one redirect for the
 # authorize URL and the token exchange, plus the code-display redirect used when no
 # listener is bound). Read off the final tree with the command below, NOT by adding
@@ -369,7 +382,7 @@ assert_floor_not_lowered() {
 #
 # THE FLOOR IS RATCHETED AGAINST THE MERGE TARGET BY `assert_floor_not_lowered` BELOW,
 # because a floor alone does not defend the property it exists for. See that function.
-run_expect 704 "workspace unit + integration" \
+run_expect 724 "workspace unit + integration" \
   cargo test --locked --workspace --features credentials-core/test-support
 
 assert_floor_not_lowered "$(dirname "$0")/gate.sh"

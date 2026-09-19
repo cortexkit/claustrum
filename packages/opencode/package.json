@@ -19,6 +19,7 @@
     }
   },
   "scripts": {
+    "enroll": "bun ./src/enroll.ts",
     "build": "rm -rf dist && tsc -p tsconfig.build.json && bun build ./src/opencode-plugin.ts --outfile ./dist/opencode-plugin.js --target=bun",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },

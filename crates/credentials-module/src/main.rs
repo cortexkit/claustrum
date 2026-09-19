@@ -3631,6 +3631,44 @@ mod tests {
             .unwrap(),
             operation(OP_ENROLL_PROPOSE)["request"]
         );
+
+        // THE THREE OPS A CONSUMER ACTUALLY SPENDS, not just the ceremony that gets it a
+        // token. The ceremony rows were pinned first because they were built first, and an
+        // enrolled consumer that can enrol and then cannot read is not a consumer.
+        //
+        // These are REQUEST shapes only. The success bodies are deliberately absent: a
+        // `get_scoped` result carries decrypted payload bytes, and a fixture with a real
+        // one in it is a secret in the repository. The request shape is what a decoder has
+        // to agree on; the reply shape is pinned by the wire-key contract tests next to
+        // each op, which assert presence AND absence without materialising a payload.
+        assert_eq!(
+            serde_json::to_string(&read_surface::ListScopedParams {
+                enrollment_token: Some("t".repeat(64)),
+            })
+            .unwrap(),
+            operation("credential.list_scoped")["request"]
+        );
+        assert_eq!(
+            serde_json::to_string(&read_surface::GetScopedParams {
+                credential_id: "oauth:anthropic".into(),
+                enrollment_token: Some("t".repeat(64)),
+                min_ttl_ms: Some(300_000),
+            })
+            .unwrap(),
+            operation("credential.get_scoped")["request"]
+        );
+        assert_eq!(
+            serde_json::to_string(&read_surface::ReportAuthFailureParams {
+                handle: None,
+                credential_id: Some("oauth:anthropic".into()),
+                enrollment_token: Some("t".repeat(64)),
+                provider_status: 401,
+                record_version: 12,
+                reporter_source: Some("direct".into()),
+            })
+            .unwrap(),
+            operation("credential.report_auth_failure")["request"]
+        );
         assert_eq!(
             serde_json::to_string(&EnrollPollParams {
                 request_id: "request-id".into(),

@@ -368,7 +368,7 @@ impl StatusParams {
 pub struct ReportAuthFailureParams {
     /// The capability handle the consumer was served through. Anonymous addressing,
     /// unchanged. Exactly one of this and [`Self::credential_id`] must be present.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handle: Option<String>,
     /// The credential id, for a caller holding a `Read` grant covering it and no
     /// handle at all.
@@ -386,7 +386,7 @@ pub struct ReportAuthFailureParams {
     /// credential you may read was refused upstream is strictly LESS authority than
     /// reading it, because the report is version-fenced and can only mark stale
     /// something the caller was already entitled to fetch.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_id: Option<String>,
     /// An enrollment token, for the consumer class that holds no handle.
     ///
@@ -400,7 +400,7 @@ pub struct ReportAuthFailureParams {
     /// Reported by the openai-auth seat while reading the contract, before writing a line
     /// against it. Ignored when `handle` is used: a handle holder is anonymous by design,
     /// and presenting both would be claiming two identities for one report.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enrollment_token: Option<String>,
     pub provider_status: u16,
     /// The `record_version` the consumer was SERVED for this handle (from the `get`
@@ -412,7 +412,7 @@ pub struct ReportAuthFailureParams {
     /// Optional consumer-asserted observation-path label from the closed [`ReporterSource`]
     /// vocabulary. Unknown labels are recorded as `unrecognised`, never stored raw; older
     /// consumers may omit this field.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reporter_source: Option<String>,
 }
 

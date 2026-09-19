@@ -1,8 +1,17 @@
 # Principal-scoped read grants
 
-**Status: DESIGN ONLY. NOTHING IN THIS FILE IS BUILT.** No grant table exists, no
-route op exists, and no principal authorizes any read today. Read this as what is
-proposed, not as what the vault does. Measured 2026-08-21.
+**Status: historical design, implemented and superseded for the live contract.**
+The prefix-grant design below shipped first; migration 9 extends it with typed prefix and
+category selectors plus `credential.list_scoped`. The live wire and operational contracts
+are now `wire-contract-v1.md` and
+`runbooks/credential-taxonomy-and-list-scoped.md`. Read the rest of this file as the
+security rationale for the original prefix-only slice, not as a current inventory.
+
+The current implementation keeps `credential.get_scoped` and adds operation-scoped
+coverage shared by get, sign, public-key, status, and list. Category selectors are stored
+with a `category:` marker. List returns every row covered by the caller's `read` or `sign`
+grants in one snapshot and publishes identity only for read-covered rows. Refusal details
+remain local in bounded `auth_events`; successful scoped reads and lists remain silent.
 
 This file exists to be argued with before the code lands, because it relaxes a
 property this module has held since it shipped.
@@ -186,7 +195,7 @@ Two hardenings that make the mitigation mechanical rather than attentive:
   touch handles, and revoking handles does not touch the grant — two independent
   authorization paths, deliberately.
 
-## 8. What is owed before this lands
+## 8. Historical landing checklist (completed by the prefix-grant release)
 
 - The grant table and its admin operations (create, revoke, list).
 - `credential.get_scoped` with the principal check, and a test pair proving a

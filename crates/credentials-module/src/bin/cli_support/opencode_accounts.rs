@@ -118,7 +118,7 @@ fn add(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
 
     let exists = super::parse_inventory(&super::request_admin_status(global)?)?
         .iter()
-        .any(|(_, _, candidate)| candidate == &id);
+        .any(|(_, _, candidate, _)| candidate == &id);
     if exists {
         opencode_migration::with_scoped_handle(global, &id, |verification_handle| {
             let existing = opencode_migration::get_material(global, verification_handle)?
@@ -230,7 +230,7 @@ fn list(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     let status = super::parse_inventory(&request_admin_status(global)?)?;
     let metadata: BTreeMap<String, (String, u64)> = status
         .into_iter()
-        .map(|(state, version, id)| (id, (state, version)))
+        .map(|(state, version, id, _)| (id, (state, version)))
         .collect();
 
     for provider_entry in handles.providers {

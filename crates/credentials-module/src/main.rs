@@ -41,6 +41,8 @@ use credentials_core::refresh_adapters::{
 };
 use credentials_core::resolver::{self, KeySource, ResolverConfig};
 use credentials_core::store::EncryptedStore;
+#[cfg(test)]
+use credentials_core::store::SelectorKind;
 use serde::Deserialize;
 use serde_json::json;
 use subc_protocol::manifest::Concurrency;
@@ -68,7 +70,7 @@ use tokio::{
 
 use limiter::{Caps, FetchLimiter};
 use read_surface::{
-    GetManyParams, GetParams, GetScopedParams, PublicKeyParams, ReadSurface,
+    GetManyParams, GetParams, GetScopedParams, ListScopedParams, PublicKeyParams, ReadSurface,
     ReportAuthFailureParams, StatusParams,
 };
 
@@ -97,6 +99,7 @@ const HEALTH_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_s
 // Capability-handle read-surface operations plus the separate principal-scoped read.
 const OP_GET: &str = "credential.get";
 const OP_GET_SCOPED: &str = "credential.get_scoped";
+const OP_LIST_SCOPED: &str = "credential.list_scoped";
 const OP_GET_MANY: &str = "credential.get_many";
 const OP_STATUS: &str = "credential.status";
 const OP_REPORT_AUTH_FAILURE: &str = "credential.report_auth_failure";
@@ -994,6 +997,17 @@ async fn handle_read_request(
                 return invalid_params(writer, ver, channel, epoch, corr, &e.to_string()).await
             }
         },
+        OP_LIST_SCOPED => match serde_json::from_value::<ListScopedParams>(request.params) {
+            Ok(params) => match surface.list_scoped(principal.as_ref(), &params) {
+                Ok(result) => wrap_result(result),
+                Err(code) => wrap_result(json!({
+                    "error": read_surface::ErrorBody { code, class: code.class() }
+                })),
+            },
+            Err(error) => {
+                return invalid_params(writer, ver, channel, epoch, corr, &error.to_string()).await
+            }
+        },
         OP_GET_MANY => match serde_json::from_value::<GetManyParams>(request.params) {
             Ok(p) => json!({ "results": surface.get_many(connection_id, &p).await }),
             Err(e) => {
@@ -1500,6 +1514,11 @@ fn manifest(module_id: &str) -> ModuleManifest {
             ManagementOperation {
                 name: OP_GET_SCOPED.to_string(),
                 description: Some("Serve a credential's secret bytes by id to a reserved principal holding a read grant. Refuses signing keys.".to_string()),
+                kind: ManagementOperationKind::Query,
+            },
+            ManagementOperation {
+                name: OP_LIST_SCOPED.to_string(),
+                description: Some("List the non-secret credentials and caller grants visible to one reserved principal. Never returns credential material.".to_string()),
                 kind: ManagementOperationKind::Query,
             },
             ManagementOperation {
@@ -2430,6 +2449,7 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
+                SelectorKind::Prefix,
                 "github_app:",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -2479,6 +2499,7 @@ mod tests {
             .revoke_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
+                SelectorKind::Prefix,
                 "github_app:",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantRevoke),
@@ -2495,6 +2516,103 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_scoped_is_snapshot_shaped_silent_on_success_and_records_only_rejected_principals()
+    {
+        let (surface, admin, store) = scoped_rig(94);
+        store
+            .create(
+                "apikey:zai",
+                &VaultRecord::new_static(CredentialKind::ApiKey, "test", b"key".to_vec(), None),
+            )
+            .expect("create classified credential");
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "consumer",
+                SelectorKind::Category,
+                "category:llm-provider",
+                GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .unwrap();
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "consumer",
+                SelectorKind::Prefix,
+                "apikey:",
+                GrantOperation::Sign,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .unwrap();
+        admin.record_bind(
+            94,
+            subc_protocol::Principal::Reserved {
+                module_id: "consumer".into(),
+            },
+        );
+        let audit_count = store.read_audit(None).unwrap().len();
+        let event_count = store.recent_auth_events(100).unwrap().len();
+        let listed = scoped_route_request(&surface, &admin, 94, OP_LIST_SCOPED, json!({})).await;
+        assert_eq!(listed["result"]["grants"], 2);
+        assert_eq!(
+            listed["result"]["grant_tuples"].as_array().unwrap().len(),
+            2
+        );
+        let row = listed["result"]["credentials"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == "apikey:zai")
+            .expect("classified row");
+        assert_eq!(row["id"], "apikey:zai");
+        assert_eq!(row["categories"], json!(["llm-provider"]));
+        assert_eq!(row["operations"], json!(["read", "sign"]));
+        assert!(listed["result"]["view"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty()));
+        assert_eq!(store.read_audit(None).unwrap().len(), audit_count);
+        assert_eq!(store.recent_auth_events(100).unwrap().len(), event_count);
+
+        let invalid = scoped_route_request(
+            &surface,
+            &admin,
+            94,
+            OP_LIST_SCOPED,
+            json!({ "token": "forbidden" }),
+        )
+        .await;
+        assert_eq!(invalid["code"], "invalid_params", "{invalid}");
+
+        admin.record_bind(95, subc_protocol::Principal::Direct);
+        let refused = scoped_route_request(&surface, &admin, 95, OP_LIST_SCOPED, json!({})).await;
+        assert_scoped_not_found(&refused);
+        let event = store
+            .recent_auth_events(100)
+            .unwrap()
+            .into_iter()
+            .find(|event| event.credential_id == OP_LIST_SCOPED)
+            .expect("rejected list event");
+        assert_eq!(event.principal_kind.as_deref(), Some("direct"));
+        assert_eq!(event.principal_id.as_deref(), None);
+
+        admin.record_bind(
+            96,
+            subc_protocol::Principal::Reserved {
+                module_id: "grantless".into(),
+            },
+        );
+        let empty = scoped_route_request(&surface, &admin, 96, OP_LIST_SCOPED, json!({})).await;
+        assert_eq!(empty["result"]["credentials"], json!([]));
+        assert_eq!(empty["result"]["grants"], 0);
+        assert_eq!(empty["result"]["grant_tuples"], json!([]));
+        assert_eq!(
+            empty["result"]["view"],
+            "vGTW0lomfgTvnoZoEYxkS/nUmfm76KhATUyAQCXGpPY="
+        );
+    }
+
+    #[tokio::test]
     async fn scoped_get_refuses_both_wrong_principal_kind_and_wrong_reserved_id() {
         let (surface, admin, store) = scoped_rig(73);
         store
@@ -2507,6 +2625,7 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
+                SelectorKind::Prefix,
                 "github_app:",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -2540,6 +2659,7 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
+                SelectorKind::Prefix,
                 "github_app:",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -2573,6 +2693,7 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
+                SelectorKind::Prefix,
                 "github_app:",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -2621,6 +2742,7 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
+                SelectorKind::Prefix,
                 "github_app:",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -2666,6 +2788,7 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
+                SelectorKind::Prefix,
                 "github_app:",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -2760,6 +2883,7 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
+                SelectorKind::Prefix,
                 "github_app:",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -2801,6 +2925,7 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
+                SelectorKind::Prefix,
                 "apikey:status-",
                 GrantOperation::Sign,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -2845,6 +2970,7 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
+                SelectorKind::Prefix,
                 "github_app:",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -2943,6 +3069,7 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
+                SelectorKind::Prefix,
                 "github_app:",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -3040,6 +3167,7 @@ mod tests {
             {
                 "principal_kind": "reserved",
                 "principal_id": "prefrontal-core",
+                "selector_kind": "prefix",
                 "credential_prefix": "apikey:",
                 "operation": "read",
                 "covered_credential_ids": ["apikey:active", "apikey:dead"],
@@ -3047,6 +3175,7 @@ mod tests {
             {
                 "principal_kind": "reserved",
                 "principal_id": "prefrontal-core",
+                "selector_kind": "prefix",
                 "credential_prefix": "apikey:",
                 "operation": "sign",
                 "covered_credential_ids": ["apikey:active", "apikey:dead"],
@@ -3054,6 +3183,7 @@ mod tests {
             {
                 "principal_kind": "reserved",
                 "principal_id": "prefrontal-core",
+                "selector_kind": "prefix",
                 "credential_prefix": "github_app:",
                 "operation": "read",
                 "covered_credential_ids": ["github_app:a", "github_app:z"],
@@ -3061,6 +3191,7 @@ mod tests {
             {
                 "principal_kind": "reserved",
                 "principal_id": "prefrontal-core",
+                "selector_kind": "prefix",
                 "credential_prefix": "github_app:",
                 "operation": "sign",
                 "covered_credential_ids": ["github_app:a", "github_app:z"],
@@ -3347,6 +3478,15 @@ mod tests {
             },
             &["credential_id"],
             "credential.get_scoped",
+        );
+    }
+
+    #[test]
+    fn credential_list_scoped_request_is_exactly_an_empty_object() {
+        assert_request_key_set(
+            read_surface::ListScopedParams {},
+            &[],
+            "credential.list_scoped",
         );
     }
 
@@ -4226,6 +4366,7 @@ mod tests {
                     key_id_hex: "00".repeat(8),
                     state,
                     stale_pending: false,
+                    categories: Vec::new(),
                 },
             )
         }
@@ -4629,6 +4770,7 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
+                SelectorKind::Prefix,
                 "signing:scoped:",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -4769,6 +4911,7 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
+                SelectorKind::Prefix,
                 "signing:operations:",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -4812,6 +4955,7 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
+                SelectorKind::Prefix,
                 "apikey:operations:",
                 GrantOperation::Sign,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -4861,6 +5005,7 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
+                SelectorKind::Prefix,
                 "signing:operations:",
                 GrantOperation::Sign,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -4914,6 +5059,7 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
+                SelectorKind::Prefix,
                 "signing:public-key:",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -4962,6 +5108,7 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
+                SelectorKind::Prefix,
                 "signing:public-key:",
                 GrantOperation::Sign,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -5044,6 +5191,7 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
+                SelectorKind::Prefix,
                 "apikey:public-key:",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -5089,6 +5237,7 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
+                SelectorKind::Prefix,
                 "signing:public-key:",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -5143,6 +5292,7 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
+                SelectorKind::Prefix,
                 "signing:public-key:",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),

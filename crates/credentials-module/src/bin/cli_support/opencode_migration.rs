@@ -291,7 +291,7 @@ fn migrate_one(
 ) -> Result<(), CliError> {
     let id = format!("apikey:{provider}:{ACCOUNT}");
     let status = parse_inventory(&request_admin_status(global)?)?;
-    let exists = status.iter().any(|(_, _, candidate)| candidate == &id);
+    let exists = status.iter().any(|(_, _, candidate, _)| candidate == &id);
     let mut handles = read_handles_or_empty(&args.handle_file)?;
     if !args.dry_run {
         finalize_superseded(global, &mut handles, provider, &args.handle_file)?;

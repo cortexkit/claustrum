@@ -23,6 +23,7 @@ pub mod admin_ops;
 pub mod apns;
 pub mod apns_submit;
 pub mod audit;
+pub mod catalog;
 pub mod contract;
 pub mod credential_id;
 pub mod device_flow;
@@ -50,8 +51,13 @@ pub use admin_auth::{
     generate_admin_nonce, vault_id_for_canonical_dir, AdminMacKey, TranscriptParts,
     ADMIN_NONCE_LEN, ADMIN_TAG_LEN, VAULT_ID_LEN,
 };
-pub use admin_ops::{AdminAuditOp, AdminOpBody, StoreMode, ADMIN_OP_SCHEMA_V1};
+pub use admin_ops::{AdminAuditOp, AdminOpBody, StoreMode, ADMIN_OP_SCHEMA_V1, ADMIN_OP_SCHEMA_V2};
 pub use audit::{AlarmReason, AuditEntry, AuditOp, AuditRecord, AuthEventKind, ReporterSource};
+pub use catalog::{
+    category_defaults, credential_type, login_provider, serves_for, ApiKeyProvider,
+    AuthHeaderScheme, CredentialCategory, DeviceKind, ExchangeWire, KeyValidation, LoginProvider,
+    ModelVendor, API_KEY_PROVIDERS, LOGIN_PROVIDERS,
+};
 pub use contract::{keychain_service_for, vault_id_for, MODULE_ID, STORAGE_NAMESPACE};
 pub use credential_id::{
     default_refresh_adapter, parse_credential_id, AuthMethod, ParsedCredentialId,
@@ -87,6 +93,7 @@ pub use resolver::{
     ResolverConfig,
 };
 pub use store::{
-    handle_hash, mint_handle, payload_hash, refresh_token_hash, EncryptedStore, MintedHandle,
-    ReadGrant, RecordMeta, RecordState, RefreshIntent, ScopedReadRefusal, StoreOpError,
+    handle_hash, mint_handle, payload_hash, refresh_token_hash, EncryptedStore, GrantOperation,
+    MintedHandle, ReadGrant, RecordMeta, RecordState, RefreshIntent, ScopedCoverage, ScopedListRow,
+    ScopedListSnapshot, ScopedReadRefusal, SelectorKind, SetCategoryMode, StoreOpError,
 };

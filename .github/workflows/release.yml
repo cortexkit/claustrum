@@ -45,6 +45,48 @@ jobs:
     name: Ensure the release exists
     runs-on: ubuntu-latest
     steps:
+      # A TAG CAN POINT AT A COMMIT THAT IS NOT ON master, and nothing else here notices.
+      #
+      # Every other guard in this repo protects a LOCAL artefact: the staging script
+      # refuses a dirty tree, a wrong branch, and a commit CI has never seen. The release
+      # path is the one that produces PUBLIC binaries other seats install, and it had none
+      # of them, because tags are made by hand.
+      #
+      # Measured before writing this: v0.1.0, v0.1.1, v0.1.2 and v0.1.3 are all ancestors
+      # of master. Four for four, by care rather than by construction -- which is exactly
+      # the state that reads as a working process right up until the one time it is not.
+      #
+      # NOT the same failure as the staging guard's. Pushing a tag pushes the object, so a
+      # released binary is always fetchable and reproducible. What a non-ancestor tag
+      # breaks is the claim that the released code passed the master CI matrix: this
+      # workflow verifies the tag-version match and runs `--version` on the signed binary,
+      # and it is NOT the ubuntu + windows suite.
+      #
+      # No override. A release is the one act here with no legitimate off-master case: a
+      # binary other people install from a commit that is not on the branch is a
+      # supply-chain shape rather than a convenience.
+      # fetch-depth 0 because merge-base needs history: the default shallow checkout has
+      # one commit, and `--is-ancestor` against it answers about a graph that is not there.
+      # A shallow clone would make this guard fail OPEN or CLOSED depending on luck, which
+      # is worse than not having it.
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - name: Refuse a tag that is not on master
+        run: |
+          set -euo pipefail
+          git fetch --quiet origin master
+          if ! git merge-base --is-ancestor HEAD origin/master; then
+            echo "REFUSING: $(git rev-parse --short HEAD) is not an ancestor of origin/master." >&2
+            echo "  A released binary is installed by other seats. Off master it has not" >&2
+            echo "  passed the ubuntu + windows suite, and this workflow does not run it." >&2
+            echo "  Land the commit first, then move the tag." >&2
+            exit 1
+          fi
+          echo "tag commit $(git rev-parse --short HEAD) is on master"
+
       - name: Create the release if it does not exist
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

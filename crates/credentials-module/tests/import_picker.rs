@@ -393,57 +393,145 @@ fn flag_shaped_imports_never_open_the_picker_and_keep_validation_errors() {
 
 #[cfg(unix)]
 fn run_terminal_picker(fixture: &Fixture, input: &[u8]) -> (std::process::ExitStatus, String) {
-    use std::io::{Read, Write};
+    use std::fs::File;
+    use std::io::{self, Read, Write};
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::process::CommandExt;
     use std::thread;
     use std::time::{Duration, Instant};
 
-    let mut command = Command::new("script");
-    command
-        .arg("-q")
-        .arg("/dev/null")
-        .arg(env!("CARGO_BIN_EXE_ck-auth"))
-        .arg("import");
+    // Keep diagnostic bytes static: pre_exec must not allocate or format errors.
+    let failure = |call: &[u8]| {
+        let error = io::Error::last_os_error();
+        // SAFETY: stderr is the open slave and call is valid for its stated length.
+        let written = unsafe { libc::write(libc::STDERR_FILENO, call.as_ptr().cast(), call.len()) };
+        if written == -1 {
+            return io::Error::last_os_error();
+        }
+        error
+    };
+    let (mut master_fd, mut slave_fd) = (-1, -1);
+    // SAFETY: both output pointers are valid; null optional arguments request defaults.
+    let opened = unsafe {
+        libc::openpty(
+            &mut master_fd,
+            &mut slave_fd,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    assert_eq!(opened, 0, "openpty failed: {}", io::Error::last_os_error());
+    // SAFETY: successful openpty returned two distinct owned descriptors.
+    let (mut master, slave) =
+        unsafe { (File::from_raw_fd(master_fd), File::from_raw_fd(slave_fd)) };
+    for fd in [master.as_raw_fd(), slave.as_raw_fd()] {
+        // SAFETY: fd is an open descriptor owned by a live File.
+        let result = unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+        assert_ne!(
+            result,
+            -1,
+            "fcntl(F_SETFD) failed: {}",
+            io::Error::last_os_error()
+        );
+    }
+    // SAFETY: master is open; openpty supplies a blocking descriptor with no other status flags.
+    let result = unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) };
+    assert_ne!(
+        result,
+        -1,
+        "fcntl(F_SETFL) failed: {}",
+        io::Error::last_os_error()
+    );
+
+    let mut command = fixture.command(env!("CARGO_BIN_EXE_ck-auth"));
+    command.arg("import");
     fixture.global(&mut command);
     command
-        .env("XDG_DATA_HOME", fixture.root.join("data"))
-        .env("XDG_CONFIG_HOME", fixture.root.join("config"))
-        .env("HOME", fixture.root.join("home"))
         .env_remove(PROMPT_ENV)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = command.spawn().expect("spawn picker under script(1) pty");
-    child.stdin.take().unwrap().write_all(input).unwrap();
+        .stdin(slave.try_clone().expect("clone PTY stdin"))
+        .stdout(slave.try_clone().expect("clone PTY stdout"))
+        .stderr(slave);
+    // SAFETY: after fork this closure uses only async-signal-safe setsid/ioctl/write and
+    // nonallocating error bookkeeping. Stdin has already been attached to the slave.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::setsid() == -1 {
+                return Err(failure(b"setsid failed"));
+            }
+            if libc::ioctl(libc::STDIN_FILENO, libc::TIOCSCTTY as _, 0) == -1 {
+                return Err(failure(b"ioctl(TIOCSCTTY) failed"));
+            }
+            Ok(())
+        });
+    }
+    let spawned = command.spawn();
+    // Command retains its Stdio handles after spawn; release every parent slave copy.
+    drop(command);
+    let mut child = spawned.unwrap_or_else(|error| {
+        let mut diagnostic = String::new();
+        let _ = master.read_to_string(&mut diagnostic);
+        if diagnostic.is_empty() {
+            panic!("spawn picker / write(pre_exec diagnostic) failed: {error}");
+        }
+        panic!("{diagnostic}: {error}");
+    });
 
     let deadline = Instant::now() + Duration::from_secs(8);
-    let status = loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            break status;
-        }
-        if Instant::now() >= deadline {
-            // libc is the test-only PTY dependency; script(1) supplies the controlling
-            // terminal and this signal keeps a broken widget from hanging the gate.
-            // SAFETY: the pid belongs to the child spawned immediately above.
-            unsafe {
-                libc::kill(child.id() as libc::pid_t, libc::SIGKILL);
+    let mut bytes = Vec::new();
+    let mut remaining = input;
+    let mut status = None;
+    loop {
+        let mut buffer = [0; 4096];
+        let eof = match master.read(&mut buffer) {
+            Ok(0) => true,
+            Ok(n) => {
+                bytes.extend_from_slice(&buffer[..n]);
+                false
             }
-            break child.wait().unwrap();
+            // Linux reports EIO when the last slave closes; macOS reports EOF.
+            Err(error) if error.raw_os_error() == Some(libc::EIO) => true,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                ) =>
+            {
+                false
+            }
+            Err(error) => panic!("read PTY master failed: {error}"),
+        };
+        if status.is_none() {
+            status = child.try_wait().expect("poll picker");
+        }
+        if status.is_some() {
+            if eof {
+                break;
+            }
+        } else if Instant::now() >= deadline {
+            // SAFETY: the child has not been reaped, so its pid cannot have been reused.
+            let killed = unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGKILL) };
+            assert_eq!(
+                killed,
+                0,
+                "kill(SIGKILL) failed: {}",
+                io::Error::last_os_error()
+            );
+            status = Some(child.wait().expect("reap killed picker"));
+        } else if !remaining.is_empty() {
+            match master.write(remaining) {
+                Ok(n) => remaining = &remaining[n..],
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                    ) => {}
+                Err(error) => panic!("write PTY master failed: {error}"),
+            }
         }
         thread::sleep(Duration::from_millis(25));
-    };
-    let mut bytes = Vec::new();
-    child
-        .stdout
-        .take()
-        .unwrap()
-        .read_to_end(&mut bytes)
-        .unwrap();
-    child
-        .stderr
-        .take()
-        .unwrap()
-        .read_to_end(&mut bytes)
-        .unwrap();
+    }
+    let status = child.wait().expect("reap picker");
     (status, String::from_utf8_lossy(&bytes).into_owned())
 }
 

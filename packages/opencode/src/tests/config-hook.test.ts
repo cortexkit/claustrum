@@ -763,6 +763,43 @@ async function hook(cfg: TestConfig, deps: ConfigHookDependencies = {}) {
     expect(cfg.provider.deepseek.options?.apiKey).toBe(sentinel("deepseek"));
   });
 
+  test("propagates an oauth account manifest floor without warming during config", async () => {
+    const files = await fixture("oauth-min-ttl");
+    await writeHandles(files.handles, {
+      version: 1,
+      providers: [{
+        provider: "xai",
+        shape: "oauth",
+        serve: "opencode-claustrum",
+        accounts: [{ label: "main", handle: HANDLE, credential_id: "oauth:xai:main", minTtlMs: 42 }],
+      }],
+    });
+    await writeAuth(files.auth, { xai: tombstoneFor("oauth", "xai") });
+    const gets: Array<{ handle: string; minTtlMs?: number }> = [];
+    const cfg = config("xai");
+    const hooks = await createOpencodeClaustrumPlugin({
+      log: () => {},
+      oauthMinTtlMs: 999,
+      detect: async () => ({ status: "available", schema: 1, wireVersion: 1, endpoints: [] }),
+      clientFactory: async () => ({
+        getCredential: async (handle: string, minTtlMs?: number) => {
+          gets.push({ handle, minTtlMs });
+          return { material: "oauth-material", recordVersion: 1, expiresAtMs: null };
+        },
+        reportAuthFailure: async () => {},
+      }) as never,
+      fetch: async () => new Response("ok"),
+      setInterval: () => ({ unref: () => {} }),
+      clearInterval: () => {},
+    })({} as never);
+
+    await hooks.config?.(cfg as never);
+    expect(gets).toHaveLength(0);
+    const fetch = cfg.provider.xai.options?.fetch as typeof globalThis.fetch;
+    expect((await fetch("https://xai.example")).status).toBe(200);
+    expect(gets).toEqual([{ handle: HANDLE, minTtlMs: 42 }]);
+  });
+
   test("leaves a tombstone owned by another plugin for that owner", async () => {
     const files = await fixture("other-owner");
     await writeHandles(files.handles, handles("anthropic", "anthropic-auth"));

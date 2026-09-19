@@ -80,19 +80,20 @@ a log line, an error message, or a shell history. The vault never logs one.
 **A credential id under a grant** (`credential_id`) is principal-scoped. An operator
 mints a grant over an id PREFIX for a named reserved module principal, per operation:
 
-    ck auth grant --principal <id|reserved:id> --selector-kind prefix --selector <prefix> --operation read
+    ck auth grant --principal <id|reserved:id> --selector-kind exact --selector <id-text> --operation read
     ck auth grant --principal <id|reserved:id> --selector-kind category --selector <bare-name> --operation read
     ck auth grant --principal <module> --prefix <prefix> --operation sign
 
-`--prefix X` is the compatibility spelling of `--selector-kind prefix --selector X`.
+`--prefix X` is the compatibility spelling of `--selector-kind exact --selector X`.
 A category selector is stored as `category:<bare-name>`. New category and grant audit
 targets split on the **first** `|`; a selector may contain later `|` bytes, while principal
-and credential ids may not. `--selector-kind` defaults to `prefix`.
+and credential ids may not. `--selector-kind` defaults to `exact`, and `prefix` is no
+longer accepted: the stored kinds are `exact` and `category` only.
 
 `read` and `sign` are distinct: a `read` grant does not authorize signing, and a `sign`
-grant does not authorize `credential.public_key`. Prefix matching is a literal
-`starts_with`, so `signing:agent-assertion:1` also covers `…:10` — grant at family
-level deliberately, not at a leaf you expect to be exact.
+grant does not authorize `credential.public_key`. An `exact` selector is still evaluated
+with a literal `starts_with`, so `signing:agent-assertion:1` also covers `…:10` — grant
+at family level deliberately, not at a leaf you expect to be exact.
 
 | operation | handle | credential_id |
 |---|---|---|

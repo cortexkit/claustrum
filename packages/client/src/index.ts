@@ -39,6 +39,7 @@ export {
 export {
   HANDLE_FILE_CONTRACT,
   HandleFileValidationError,
+  credentialIdMatchesProvider,
   defaultHandleFilePath,
   handleFileRevision,
   identifierIsValid,

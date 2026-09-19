@@ -12,7 +12,7 @@ const PROVIDER = "deepseek";
 const MAIN_HANDLE = `ckh_${"a".repeat(43)}`;
 const BACKUP_HANDLE = `ckh_${"b".repeat(43)}`;
 
-type Account = { label: string; handle: string; credential_id: string };
+type Account = { label: string; handle: string; credential_id: string; minTtlMs?: number };
 type IntervalCallback = () => void;
 
 const apiAccounts: Account[] = [
@@ -74,6 +74,7 @@ function controller(input: {
   handleVersion?: () => string;
   intervals?: ReturnType<typeof fakeInterval>;
   setTimeout?: (callback: () => void, ms: number) => unknown;
+  minTtlMs?: number;
 }) {
   return new FreshnessController({
     shape: input.shape ?? "api",
@@ -81,6 +82,7 @@ function controller(input: {
     client: input.client,
     now: input.now,
     handleVersion: input.handleVersion,
+    minTtlMs: input.minTtlMs,
     setInterval: input.intervals?.setInterval,
     clearInterval: input.intervals?.clearInterval,
     setTimeout: input.setTimeout,
@@ -123,6 +125,73 @@ describe("custody freshness", () => {
       { handle: MAIN_HANDLE, minTtlMs: 270 * 60_000 },
       { handle: BACKUP_HANDLE, minTtlMs: 270 * 60_000 },
     ]);
+  });
+
+  test("uses each oauth account's manifest floor on warm ticks", async () => {
+    const intervals = fakeInterval();
+    const accounts = [
+      { ...apiAccounts[0]!, minTtlMs: 0 },
+      { ...apiAccounts[1]!, minTtlMs: 1234 },
+    ];
+    const client = new FakeClient(async () => credential("oauth-material"));
+    const freshness = controller({ shape: "oauth", accounts, client, intervals, minTtlMs: 999 });
+    try {
+      await intervals.callbacks[0]!();
+      expect(client.gets).toEqual([
+        { handle: MAIN_HANDLE, minTtlMs: 0 },
+        { handle: BACKUP_HANDLE, minTtlMs: 1234 },
+      ]);
+    } finally {
+      freshness.dispose();
+    }
+  });
+
+  test("uses an oauth account's manifest floor on a cold resolve", async () => {
+    const account = { ...apiAccounts[0]!, minTtlMs: 1234 };
+    const client = new FakeClient(async () => credential("oauth-material"));
+    const freshness = controller({ shape: "oauth", accounts: [account], client, minTtlMs: 999 });
+    try {
+      await freshness.resolve(account);
+      expect(client.gets).toEqual([{ handle: MAIN_HANDLE, minTtlMs: 1234 }]);
+    } finally {
+      freshness.dispose();
+    }
+  });
+
+  test("uses the global oauth minimum TTL when an account has no manifest floor", async () => {
+    const client = new FakeClient(async () => credential("oauth-material"));
+    const account = apiAccounts[0]!;
+    const freshness = controller({ shape: "oauth", accounts: [account], client, minTtlMs: 999 });
+    try {
+      await freshness.resolve(account);
+      expect(client.gets).toEqual([{ handle: MAIN_HANDLE, minTtlMs: 999 }]);
+    } finally {
+      freshness.dispose();
+    }
+  });
+
+  test("uses the default minimum TTL when neither account nor controller sets one", async () => {
+    const client = new FakeClient(async () => credential("oauth-material"));
+    const account = apiAccounts[0]!;
+    const freshness = controller({ shape: "oauth", accounts: [account], client });
+    try {
+      await freshness.resolve(account);
+      expect(client.gets).toEqual([{ handle: MAIN_HANDLE, minTtlMs: 270 * 60_000 }]);
+    } finally {
+      freshness.dispose();
+    }
+  });
+
+  test("never sends a declared manifest floor for api accounts", async () => {
+    const client = new FakeClient(async () => credential("api-material"));
+    const account = { ...apiAccounts[0]!, minTtlMs: 1234 };
+    const freshness = controller({ shape: "api", accounts: [account], client, minTtlMs: 999 });
+    try {
+      await freshness.resolve(account);
+      expect(client.gets).toEqual([{ handle: MAIN_HANDLE, minTtlMs: undefined }]);
+    } finally {
+      freshness.dispose();
+    }
   });
 
   test("bounds a cold warm to 100ms while the get continues detached", async () => {

@@ -24,6 +24,7 @@ export type HandleAccount = {
   handle: string
   credential_id: string
   superseded?: string[]
+  minTtlMs?: number
 }
 export type HandleProvider = {
   provider: string
@@ -48,6 +49,12 @@ function handleIsValid(handle: unknown): handle is string {
 
 export function identifierIsValid(value: unknown): value is string {
   return typeof value === 'string' && HANDLE_FILE_CONTRACT.labelRe.test(value) && !FORBIDDEN_IDENTIFIERS.has(value)
+}
+
+export function credentialIdMatchesProvider(value: unknown, provider: string): value is string {
+  if (typeof value !== 'string') return false
+  const segments = value.split(':')
+  return value.length > 0 && segments[1] === provider && segments.every((segment) => segment.length > 0)
 }
 
 function invalid(message: string): never {
@@ -78,6 +85,9 @@ export function parseHandleFile(value: unknown): OpenCodeHandleFileV1 {
       if (labels.has(account.label)) invalid(`provider ${index} duplicates account label ${account.label}`)
       labels.add(account.label)
       if (!handleIsValid(account.handle)) invalid(`provider ${index} account ${account.label} has invalid handle`)
+      if (account.minTtlMs !== undefined && !(Number.isSafeInteger(account.minTtlMs) && account.minTtlMs >= 0)) {
+        invalid(`provider ${index} account ${account.label} has invalid minTtlMs`)
+      }
       // Segment 2 of the credential id must BE the provider block it sits in. Without
       // this the check was non-empty-string only, so an `oauth:openai` binding parsed
       // cleanly inside an `anthropic` block -- a cross-provider smuggle that every
@@ -112,9 +122,8 @@ export function parseHandleFile(value: unknown): OpenCodeHandleFileV1 {
       // the emptiness guard. NO TEST DISTINGUISHES THAT ONE (empty rejects with or
       // without it, verified by removal), so it is kept for a future reader who loosens
       // the comparison, not for an arm it could never redden. The non-empty-SEGMENT
-      // rule below is different: it reddens, and is pinned.
-      const segments = account.credential_id.split(':')
-      if (!account.credential_id || segments[1] !== item.provider || segments.some((segment) => segment.length === 0)) {
+      // rule in credentialIdMatchesProvider is different: it reddens, and is pinned.
+      if (!credentialIdMatchesProvider(account.credential_id, item.provider)) {
         invalid(`provider ${index} account ${account.label} has invalid credential id`)
       }
       if (account.superseded?.some((handle) => !handleIsValid(handle))) {

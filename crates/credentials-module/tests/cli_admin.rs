@@ -504,7 +504,7 @@ fn grants_columns_hold_their_positions_when_a_prefix_is_wider_than_the_others() 
 
     let header = stdout.lines().next().unwrap_or("");
     assert!(
-        header.contains("CREDENTIAL PREFIX") && header.contains("OP"),
+        header.contains("SELECTOR KIND") && header.contains("SELECTOR") && header.contains("OP"),
         "the table needs a header; two short lowercase columns are otherwise unlabelled:\n{stdout}"
     );
 }
@@ -576,7 +576,7 @@ fn invalidate_does_not_claim_success_when_nothing_changed() {
 // spelling that can never match the row it means to remove -- reporting success while
 // leaving the grant in place, which is the worse direction for a revocation.
 #[test]
-fn a_kind_prefixed_principal_is_refused_on_both_grant_verbs() {
+fn grant_verbs_accept_the_canonical_reserved_spelling_and_refuse_other_kinds() {
     let root = tmp_root("grant-principal");
     let data_dir = root.join("vault");
     let key_path = root.join("master.key");
@@ -591,7 +591,7 @@ fn a_kind_prefixed_principal_is_refused_on_both_grant_verbs() {
     assert!(boot.status.success(), "bootstrap failed");
 
     for verb in ["grant", "revoke-grant"] {
-        let out = cli()
+        let accepted = cli()
             .args(["--data-dir", data_dir.to_str().unwrap()])
             .args(["--key-path", key_path.to_str().unwrap()])
             .arg(verb)
@@ -599,16 +599,21 @@ fn a_kind_prefixed_principal_is_refused_on_both_grant_verbs() {
             .args(["--prefix", "apikey:"])
             .args(["--operation", "read"])
             .output()
-            .expect("run verb");
-        assert!(
-            !out.status.success(),
-            "{verb} accepted a kind-prefixed principal"
-        );
-        let err = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            err.contains("bare module id") && err.contains("can never fire"),
-            "{verb} refused without explaining why the grant would be dead:\n{err}"
-        );
+            .expect("run canonical verb");
+        assert!(accepted.status.success(), "{verb} rejected reserved:<id>");
+
+        for principal in ["direct:probe", "reserved:bad|principal"] {
+            let refused = cli()
+                .args(["--data-dir", data_dir.to_str().unwrap()])
+                .args(["--key-path", key_path.to_str().unwrap()])
+                .arg(verb)
+                .args(["--principal", principal])
+                .args(["--prefix", "apikey:"])
+                .args(["--operation", "read"])
+                .output()
+                .expect("run refused verb");
+            assert!(!refused.status.success(), "{verb} accepted {principal}");
+        }
     }
 }
 
@@ -665,6 +670,8 @@ fn every_verb_names_on_its_help_page_each_flag_its_parser_accepts() {
         "login",
         "grant",
         "set-identity",
+        "set-category",
+        "reclassify",
         "revoke-handle",
     ];
     let mut total = 0usize;
@@ -862,17 +869,17 @@ fn offline_grants_lists_a_newly_minted_grant_with_creation_time() {
     assert!(listed.status.success(), "grants failed: {stdout}");
     let fields = grant_row_fields(&stdout, "operator:");
     assert_eq!(
-        &fields[..4],
-        &["reserved", "agent", "operator:", "read"],
+        &fields[..5],
+        &["reserved", "agent", "prefix", "operator:", "read"],
         "grant rows must expose each requested column: {stdout}"
     );
-    assert_eq!(fields.len(), 6, "timestamp should be two formatted columns");
+    assert_eq!(fields.len(), 7, "timestamp should be two formatted columns");
     assert!(
-        fields[4].len() == 10 && fields[4].as_bytes()[4] == b'-' && fields[4].as_bytes()[7] == b'-',
+        fields[5].len() == 10 && fields[5].as_bytes()[4] == b'-' && fields[5].as_bytes()[7] == b'-',
         "creation date must use the CLI time-column format: {stdout}"
     );
     assert!(
-        fields[5].len() == 8 && fields[5].as_bytes()[2] == b':' && fields[5].as_bytes()[5] == b':',
+        fields[6].len() == 8 && fields[6].as_bytes()[2] == b':' && fields[6].as_bytes()[5] == b':',
         "creation time must use the CLI time-column format: {stdout}"
     );
 }
@@ -908,9 +915,18 @@ fn grants_keep_read_and_sign_rows_separate_and_sort_by_prefix_then_operation() {
         .map(|line| line.split_whitespace().collect())
         .collect();
     assert_eq!(rows.len(), 3, "every grant needs its own row: {stdout}");
-    assert_eq!(&rows[0][..4], &["reserved", "agent", "a:", "sign"]);
-    assert_eq!(&rows[1][..4], &["reserved", "agent", "z:", "read"]);
-    assert_eq!(&rows[2][..4], &["reserved", "agent", "z:", "sign"]);
+    assert_eq!(
+        &rows[0][..5],
+        &["reserved", "agent", "prefix", "a:", "sign"]
+    );
+    assert_eq!(
+        &rows[1][..5],
+        &["reserved", "agent", "prefix", "z:", "read"]
+    );
+    assert_eq!(
+        &rows[2][..5],
+        &["reserved", "agent", "prefix", "z:", "sign"]
+    );
 }
 
 #[test]
@@ -3990,7 +4006,11 @@ fn every_verb_help_uses_a_flags_table_and_notes_layout() {
         .take_while(|line| !line.trim().is_empty())
         .map(|line| line.split_whitespace().next().expect("verb"))
         .collect();
-    assert_eq!(verbs.len(), 25, "the rendered verb-table scan narrowed");
+    assert_eq!(
+        verbs.len(),
+        27,
+        "the rendered verb-table scan narrowed; set-category and reclassify are public verbs"
+    );
     assert!(accepted_help_flags("login").contains(&"--no-browser".to_string()));
     assert!(accepted_help_flags("revoke-handle").contains(&"--hash".to_string()));
     let mut violations = Vec::new();
@@ -4103,4 +4123,64 @@ fn every_verb_help_uses_a_flags_table_and_notes_layout() {
         }
     }
     assert!(violations.is_empty(), "{}", violations.join("\n"));
+}
+
+#[test]
+fn category_cli_lists_mutates_reclassifies_and_renders_category_grants() {
+    let vault = GrantCliVault::new("category-cli");
+    vault.bootstrap();
+    let put = vault.run(&["put", "--id", "apikey:zai", "--payload", "secret"]);
+    assert!(
+        put.status.success(),
+        "put failed: {}",
+        String::from_utf8_lossy(&put.stderr)
+    );
+    let listed = vault.run(&["list"]);
+    let stdout = String::from_utf8_lossy(&listed.stdout);
+    assert!(listed.status.success(), "list failed: {stdout}");
+    assert!(stdout.contains("CATEGORIES"));
+    assert!(stdout.contains("llm-provider"));
+
+    let set = vault.run(&["set-category", "apikey:zai", "--set", "monitoring"]);
+    assert!(
+        set.status.success(),
+        "set-category failed: {}",
+        String::from_utf8_lossy(&set.stderr)
+    );
+    let listed = vault.run(&["list"]);
+    assert!(String::from_utf8_lossy(&listed.stdout).contains("monitoring"));
+
+    let clear = vault.run(&["set-category", "apikey:zai", "--set", ""]);
+    assert!(clear.status.success(), "clear failed");
+    let refill = vault.run(&["reclassify", "--from-registry"]);
+    assert!(
+        refill.status.success(),
+        "reclassify failed: {}",
+        String::from_utf8_lossy(&refill.stderr)
+    );
+    let listed = vault.run(&["list"]);
+    assert!(String::from_utf8_lossy(&listed.stdout).contains("llm-provider"));
+
+    let grant = vault.run(&[
+        "grant",
+        "--principal",
+        "reserved:consumer",
+        "--selector-kind",
+        "category",
+        "--selector",
+        "llm-provider",
+        "--operation",
+        "read",
+    ]);
+    assert!(
+        grant.status.success(),
+        "category grant failed: {}",
+        String::from_utf8_lossy(&grant.stderr)
+    );
+    let grants = vault.run(&["grants"]);
+    let stdout = String::from_utf8_lossy(&grants.stdout);
+    assert!(grants.status.success(), "grants failed: {stdout}");
+    assert!(stdout.contains("category"));
+    assert!(stdout.contains("llm-provider"));
+    assert!(!stdout.contains("category:llm-provider"));
 }

@@ -54,6 +54,10 @@ cannot be met; retrying unchanged buys another one against the provider's mint b
 | `needs_reauth` | auth_required | the credential is latched dead, or deliberately retired |
 | `refresh_failed` | transient | the provider refused or the exchange failed |
 | `vault_locked` | transient | the master key could not be resolved |
+| `store_error` | transient | `credential.list_scoped` could not read one complete snapshot |
+| `invalid_category_name` | permanent | a category is outside `^[a-z][a-z0-9-]{1,31}$` |
+| `invalid_credential_id` | permanent | an id begins with reserved `category:` or contains `|` |
+| `invalid_principal` | permanent | a grant principal is not `reserved` or contains `|` |
 | `too_many_items` | context_overflow | a batch exceeded the per-request cap |
 | `sign_payload_too_large` | context_overflow | a sign payload exceeded 1 MiB (`MAX_SIGN_PAYLOAD`) |
 | `ttl_unsatisfiable` | context_overflow | a freshly minted token still cannot satisfy your `min_ttl_ms` |
@@ -76,8 +80,14 @@ a log line, an error message, or a shell history. The vault never logs one.
 **A credential id under a grant** (`credential_id`) is principal-scoped. An operator
 mints a grant over an id PREFIX for a named reserved module principal, per operation:
 
-    ck auth grant --principal <module> --prefix <prefix> --op read
-    ck auth grant --principal <module> --prefix <prefix> --op sign
+    ck auth grant --principal <id|reserved:id> --selector-kind prefix --selector <prefix> --operation read
+    ck auth grant --principal <id|reserved:id> --selector-kind category --selector <bare-name> --operation read
+    ck auth grant --principal <module> --prefix <prefix> --operation sign
+
+`--prefix X` is the compatibility spelling of `--selector-kind prefix --selector X`.
+A category selector is stored as `category:<bare-name>`. New category and grant audit
+targets split on the **first** `|`; a selector may contain later `|` bytes, while principal
+and credential ids may not. `--selector-kind` defaults to `prefix`.
 
 `read` and `sign` are distinct: a `read` grant does not authorize signing, and a `sign`
 grant does not authorize `credential.public_key`. Prefix matching is a literal
@@ -89,6 +99,7 @@ level deliberately, not at a leaf you expect to be exact.
 | `credential.get` | yes | — |
 | `credential.get_many` | yes | — |
 | `credential.get_scoped` | — | yes (`read`) |
+| `credential.list_scoped` | — | principal-addressed; all of the caller's `read` and `sign` grants |
 | `credential.sign` | yes | yes (`sign`) |
 | `credential.public_key` | yes | yes (`read`) |
 | `credential.status` | yes | yes (`read`) |
@@ -112,6 +123,31 @@ Two optional levers, and they are the same lever pointed differently:
 `min_ttl_ms` is evaluated **only when you supply it**. There is no implicit floor, and
 the refusal (`ttl_unsatisfiable`) fires only after a real exchange has proven the demand
 unmeetable — never speculatively.
+
+### `credential.list_scoped`
+
+`credential.list_scoped` takes exactly `params: {}` and returns
+`{ credentials, grants, grant_tuples, view }`. Unknown fields, including filters and
+`token`, are `invalid_params`. Rows are sorted by id. `categories`, lifecycle `state`,
+`record_version`, derived `type`/`serves`, and the caller's covering `operations` are
+non-secret; no credential payload is returned. Identity is projected only when the caller
+holds `read` for that row, never for a sign-only row.
+
+`operations` is an **authorization fact**: it says which of this caller's grant rows cover
+the id. It does not promise that the sealed record kind or lifecycle state can serve that
+operation; record-level refusals such as `kind_not_signable` still apply after coverage.
+`grant_tuples` returns the caller's own `{selector_kind, selector, operation}` rows and
+`grants == grant_tuples.length`. `view` is the deterministic SHA-256 validator over the
+returned rows and tuples; changes outside the caller's visibility do not move it.
+
+### Category and grant audit targets
+
+Category transitions use audit op `set_category` and target
+`category:<credential-id>|<sorted-comma-list>`; clearing the set leaves the trailing `|`.
+New grant targets use
+`grant:<operation>:<principal-kind>:<principal-id>:<selector-kind>|<stored-selector>`.
+Both formats parse by splitting on the first `|`. Historical grant targets without `|`
+remain valid audit-chain strings and are never rewritten.
 
 ---
 

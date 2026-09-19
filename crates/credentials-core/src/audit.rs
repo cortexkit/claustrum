@@ -71,6 +71,8 @@ pub enum AuditOp {
     GrantCreate,
     /// A principal-scoped credential-prefix read grant was revoked.
     GrantRevoke,
+    /// A credential's authorization categories changed.
+    SetCategory,
     /// A named approver approved a specific artifact, identified by the SHA-256 of its
     /// EXACT BYTES, before a signing window was opened for it.
     ///
@@ -115,6 +117,7 @@ impl AuditOp {
             AuditOp::FetchAnomaly => "fetch_anomaly",
             AuditOp::GrantCreate => "grant_create",
             AuditOp::GrantRevoke => "grant_revoke",
+            AuditOp::SetCategory => "set_category",
             AuditOp::Approval => "approval",
         }
     }
@@ -546,6 +549,10 @@ mod vocabulary_documentation_tests {
         env!("CARGO_MANIFEST_DIR"),
         "/../../docs/operator-runbook.md"
     ));
+    const WIRE_CONTRACT: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/wire-contract-v1.md"
+    ));
 
     // These tests pin membership and spelling only. Finding a value somewhere in its
     // subsection cannot verify that the accompanying one-line meaning is correct.
@@ -596,6 +603,7 @@ mod vocabulary_documentation_tests {
                 AuditOp::FetchAnomaly => AuditOp::FetchAnomaly.as_str(),
                 AuditOp::GrantCreate => AuditOp::GrantCreate.as_str(),
                 AuditOp::GrantRevoke => AuditOp::GrantRevoke.as_str(),
+                AuditOp::SetCategory => AuditOp::SetCategory.as_str(),
                 AuditOp::Approval => AuditOp::Approval.as_str(),
             }
         }
@@ -616,6 +624,10 @@ mod vocabulary_documentation_tests {
         assert_documented(section, "audit_log.op", value(AuditOp::FetchAnomaly));
         assert_documented(section, "audit_log.op", value(AuditOp::GrantCreate));
         assert_documented(section, "audit_log.op", value(AuditOp::GrantRevoke));
+        assert!(
+            WIRE_CONTRACT.contains(value(AuditOp::SetCategory)),
+            "the new category audit op must be documented in the slice wire contract"
+        );
         assert_documented(section, "audit_log.op", value(AuditOp::Approval));
     }
 

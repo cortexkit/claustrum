@@ -67,13 +67,18 @@ mod route_client;
 
 use base64::Engine;
 use cortexkit_store::{open_sqlite, Isolation, StorageBackend, StorageDescriptor, StoreError};
-use credentials_core::admin_ops::{AdminAuditOp, AdminOpBody, StoreMode, ADMIN_OP_SCHEMA_V1};
+use credentials_core::admin_ops::{
+    AdminAuditOp, AdminOpBody, StoreMode, ADMIN_OP_SCHEMA_V1, ADMIN_OP_SCHEMA_V2,
+};
+use credentials_core::catalog::{login_provider, DeviceKind, ExchangeWire, LoginProvider};
 use credentials_core::contract::{MODULE_ID, STORAGE_NAMESPACE};
 use credentials_core::credential_id::{default_refresh_adapter, parse_credential_id, AuthMethod};
 use credentials_core::key::MasterKey;
 use credentials_core::record::{CredentialKind, RecordIdentity, VaultRecord};
 use credentials_core::resolver::{self, KeySource, MasterKeyError, ResolverConfig};
-use credentials_core::store::{EncryptedStore, GrantOperation, StoreOpError};
+use credentials_core::store::{
+    EncryptedStore, GrantOperation, SelectorKind, SetCategoryMode, StoreOpError,
+};
 use ring::rand::SystemRandom;
 use ring::signature::Ed25519KeyPair;
 
@@ -313,6 +318,8 @@ fn run() -> Result<(), CliError> {
         "mint-signing-key" => cmd_mint_signing_key(&global, &args),
         "import" => cmd_import(&global, &args),
         "set-identity" => cmd_set_identity(&global, &args),
+        "set-category" => cmd_set_category(&global, &args),
+        "reclassify" => cmd_reclassify(&global, &args),
         "migrate-opencode" => opencode_migration::cmd_migrate_opencode(&global, &args),
         "opencode-account" => opencode_accounts::cmd_opencode_account(&global, &args),
         "login" => cmd_login(&global, &args),
@@ -400,6 +407,7 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
             "--org-name",
         ],
         "set-identity" => &["--account-id", "--email", "--org-name"],
+        "set-category" => &["--set", "--add", "--remove"],
         "migrate-opencode" => &[
             "--restore",
             "--auth-file",
@@ -418,7 +426,13 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
         "invalidate" | "reactivate" | "mint-handle" | "revoke-all-handles" | "remove" => &["--id"],
         "logout" => &["--provider", "--id"],
         "revoke-handle" => &["--handle", "--hash"],
-        "grant" | "revoke-grant" => &["--principal", "--prefix", "--operation"],
+        "grant" | "revoke-grant" => &[
+            "--principal",
+            "--prefix",
+            "--selector-kind",
+            "--selector",
+            "--operation",
+        ],
         "approve" => &["--id", "--file", "--approver"],
         "audit" => &["--limit"],
         "events" => &["--limit"],
@@ -431,16 +445,18 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
         "mint-signing-key" => &["--replace"],
         "import" => &["--replace", "--clear-identity"],
         "set-identity" => &["--clear"],
+        "reclassify" => &["--from-registry", "--force"],
         "login" => &["--replace", "--no-listener", "--no-browser", "--device"],
         "migrate-opencode" => &["--dry-run", "--replace", "--force-shape"],
         _ => &[],
     };
-    let mut i =
-        if command == "set-identity" && args.first().is_some_and(|arg| !arg.starts_with("--")) {
-            1
-        } else {
-            0
-        };
+    let mut i = if matches!(command, "set-identity" | "set-category")
+        && args.first().is_some_and(|arg| !arg.starts_with("--"))
+    {
+        1
+    } else {
+        0
+    };
     while i < args.len() {
         let arg = &args[i];
         if command == "opencode-account" && matches!(arg.as_str(), "add" | "remove" | "list") {
@@ -480,17 +496,19 @@ fn usage_short() -> String {
        status              vault health + credential inventory (no secrets)\n\
        list                credential ids + lifecycle state (no secrets)\n\
        grants              principal-scoped grants (no secrets)\n\
-        put                 ingest an api key, session cookie, or opaque secret\n\
-        mint-signing-key    generate and custody a new Ed25519 signing key\n\
-        import              import from opencode/pi/gemini-cli/antigravity\n\
-        set-identity        attach non-secret account metadata to one credential\n\
-        migrate-opencode    custody OpenCode api auth entries idempotently\n\
-        opencode-account    add/remove/list labeled OpenCode api accounts\n\
-       mint-handle         mint a capability handle for a credential\n\
-       revoke-handle       revoke one capability handle\n\
-       revoke-all-handles  revoke every handle for a credential\n\
-       grant               grant a reserved module a credential-id prefix\n\
-       revoke-grant        revoke a reserved module's credential-id prefix\n\
+         put                 ingest an api key, session cookie, or opaque secret\n\
+         mint-signing-key    generate and custody a new Ed25519 signing key\n\
+         import              import from opencode/pi/gemini-cli/antigravity\n\
+         set-identity        attach non-secret account metadata to one credential\n\
+         set-category        replace/add/remove authorization categories\n\
+         reclassify          apply registry category defaults atomically\n\
+         migrate-opencode    custody OpenCode api auth entries idempotently\n\
+         opencode-account    add/remove/list labeled OpenCode api accounts\n\
+        mint-handle         mint a capability handle for a credential\n\
+        revoke-handle       revoke one capability handle\n\
+        revoke-all-handles  revoke every handle for a credential\n\
+        grant               grant a reserved module a prefix or category selector\n\
+        revoke-grant        revoke a reserved module's prefix or category selector\n\
        invalidate          mark a credential needs-reauth\n\
        reactivate          clear needs-reauth without replacing the secret\n\
        audit               print the audit chain\n\
@@ -694,6 +712,28 @@ fn help_verb(verb: &str) -> String {
              bumps record_version because the encrypted envelope changed. Works for any\n\
              decryptable record, including needs-reauth or retired records."
         }
+        "set-category" => {
+            "ck auth set-category <credential-id>\n\
+             \x20             (--set <csv> | --add <csv> | --remove <csv>)\n\
+             \n\
+             \x20 --set <csv>     replace the category set; an empty value clears it\n\
+             \x20 --add <csv>     add normalized category names\n\
+             \x20 --remove <csv>  remove category names\n\
+             \n\
+             NOTES\n\
+             Names match ^[a-z][a-z0-9-]{1,31}$. A transition appends one set_category\n\
+             audit row; a no-op is silent."
+        }
+        "reclassify" => {
+            "ck auth reclassify --from-registry [--force]\n\
+             \n\
+             \x20 --from-registry  required acknowledgement of the catalog source\n\
+             \x20 --force          replace non-empty differing sets; without it only empty\n\
+             \x20                  sets are refilled\n\
+             \n\
+             NOTES\n\
+             Enumeration and all category transitions use one fenced transaction."
+        }
         "migrate-opencode" => {
             "ck auth migrate-opencode [--dry-run] [--replace] [--force-shape]\n\
              \x20                        [--restore <provider>] [--auth-file <path>]\n\
@@ -781,32 +821,35 @@ fn help_verb(verb: &str) -> String {
              itself is untouched (still refreshable; mint new handles later)."
         }
         "grant" => {
-            "ck auth grant --principal <module-id> --prefix <credential-prefix>\n\
+            "ck auth grant --principal <id|reserved:id>\n\
+             \x20             [--prefix <prefix>]\n\
+             \x20             [--selector-kind <prefix|category> --selector <value>]\n\
              \x20             --operation <read|sign>\n\
              \n\
-             \x20 --principal <module-id>       reserved module principal (bare module id)\n\
-             \x20 --prefix <credential-prefix>  literal credential-id prefix\n\
-             \x20 --operation <read|sign>       authority to grant\n\
+             \x20 --principal <id|reserved:id>  reserved module principal\n\
+             \x20 --prefix <prefix>             compatibility spelling for a prefix selector\n\
+             \x20 --selector-kind <kind>        prefix (default) or category\n\
+             \x20 --selector <value>            literal prefix or bare category name\n\
+             \x20 --operation <read|sign>       authority to grant (`--op` is accepted)\n\
              \n\
              NOTES\n\
-             Grant one reserved module principal either ordinary reads or signing for\n\
-             credential ids beginning with the literal prefix. Read and sign are separate\n\
-             authorities: neither operation implies the other. Status enumerates the ids\n\
-             currently covered; review that set whenever a credential is added under the\n\
-             prefix."
+             Category selectors are stored with the category: marker. Read and sign are\n\
+             separate authorities; neither operation implies the other."
         }
         "revoke-grant" => {
-            "ck auth revoke-grant --principal <module-id> --prefix <credential-prefix>\n\
+            "ck auth revoke-grant --principal <id|reserved:id>\n\
+             \x20                    [--prefix <prefix>]\n\
+             \x20                    [--selector-kind <prefix|category> --selector <value>]\n\
              \x20                    --operation <read|sign>\n\
              \n\
-             \x20 --principal <module-id>       reserved module principal (bare module id)\n\
-             \x20 --prefix <credential-prefix>  literal credential-id prefix\n\
-             \x20 --operation <read|sign>       authority to revoke\n\
+             \x20 --principal <id|reserved:id>  reserved module principal\n\
+             \x20 --prefix <prefix>             compatibility spelling for a prefix selector\n\
+             \x20 --selector-kind <kind>        prefix (default) or category\n\
+             \x20 --selector <value>            literal prefix or bare category name\n\
+             \x20 --operation <read|sign>       authority to revoke (`--op` is accepted)\n\
              \n\
              NOTES\n\
-             Revoke one reserved module principal's literal-prefix read or sign grant. The\n\
-             change takes effect on the next scoped operation and does not affect capability\n\
-             handles."
+             Revocation is exact over principal, selector kind, selector, and operation."
         }
         "reactivate" => {
             "ck auth reactivate --id <id>\n\
@@ -1655,257 +1698,74 @@ fn cmd_set_identity(global: &GlobalArgs, args: &[String]) -> Result<(), CliError
     Ok(())
 }
 
-/// Vault-native first-party OAuth login: drive an interactive authorization-code +
-/// PKCE flow so the vault mints and SOLELY custodies an INDEPENDENT refresh token,
-/// eliminating the dual-custody rotation race by construction. The operator opens a
-/// printed URL, approves in the browser, and pastes the resulting `code#state` back;
-/// the vault exchanges it and stores the tokens as a normal oauth record (which the
-/// existing refresh adapter then refreshes with no per-record client override).
-///
-/// This is an admin write — same offline-CLI-while-daemon-stopped discipline as every
-/// other mutation. The daemon opens no browser and runs no listener; the manual
-/// code-paste redirect means there is no inbound network surface here at all.
-/// The per-provider login wire: everything `cmd_login` needs to drive one provider's
-/// authorization-code or device flow. Each provider's values are pinned in its adapter
-/// module; adding a login provider = adding one row to `login_provider()`.
-#[derive(Debug, Clone, Copy)]
-enum DeviceKind {
-    Xai,
-    OpenAi,
-    GithubCopilot,
-    Kimi,
-}
-
-struct LoginProvider {
-    authorize_url: &'static str,
-    token_url: &'static str,
-    client_id: &'static str,
-    redirect_uri: &'static str,
-    scopes: &'static [&'static str],
-    extra_authorize_params: &'static [(&'static str, &'static str)],
-    adapter_name: &'static str,
-    /// The default credential id (the method-scoped id consumers key on).
-    default_id: &'static str,
-    /// Which token-exchange wire the provider speaks: Anthropic's JSON body with an
-    /// embedded state, or the standard RFC form-encoded body (OpenAI / xAI).
-    exchange: ExchangeWire,
-    /// Whether to append a fresh per-flow OIDC `nonce` to the authorize URL. Required
-    /// by providers whose scope set includes `openid` (xAI); the nonce is CSPRNG per
-    /// request. We do not verify it (the vault does not consume the id_token) — it is
-    /// sent only to satisfy the provider's OIDC authorize contract.
-    needs_oidc_nonce: bool,
-    /// Whether the RFC form token exchange must echo `code_challenge` +
-    /// `code_challenge_method` alongside `code_verifier`. xAI's public-client token
-    /// endpoint expects it (matching the Grok CLI / Hermes flow); OpenAI does not.
-    exchange_echoes_challenge: bool,
-    /// The operator instruction for capturing the callback (the flows present the code
-    /// differently).
-    paste_prompt: &'static str,
-    /// Device wire, when the provider supports headless authorization.
-    device: Option<DeviceKind>,
-}
-
-enum ExchangeWire {
-    AnthropicJson,
-    RfcForm,
-}
-
-fn login_provider(provider: &str) -> Option<LoginProvider> {
-    use credentials_core::google_login as google;
-    use credentials_core::refresh_adapters::{
-        anthropic, cursor, devin, digitalocean, github_copilot, kimi, openai, snowflake, xai,
-    };
-    match provider {
-        "anthropic" => Some(LoginProvider {
-            authorize_url: anthropic::AUTHORIZE_URL,
-            token_url: anthropic::LOGIN_TOKEN_URL,
-            client_id: anthropic::CLAUDE_CODE_CLIENT_ID,
-            // The Claude Code loopback redirect: the CLI's one-shot listener captures
-            // the code automatically (same flow as openai/xai). Paste stays the
-            // fallback when the port is busy.
-            redirect_uri: anthropic::LOGIN_REDIRECT_URI,
-            scopes: anthropic::LOGIN_SCOPES,
-            extra_authorize_params: anthropic::LOGIN_EXTRA_AUTHORIZE_PARAMS,
-            adapter_name: anthropic::ADAPTER_NAME,
-            default_id: "oauth:anthropic",
-            exchange: ExchangeWire::AnthropicJson,
-            needs_oidc_nonce: false,
-            exchange_echoes_challenge: false,
-            paste_prompt: "After approving, the browser will fail to connect to localhost:54545 \
-                            — that is expected (nothing listens there).\n\
-                            Copy the FULL URL from the browser's address bar (or the code#state if \
-                            shown) and paste it here, then Enter:",
-            device: None,
-        }),
-        "openai" => Some(LoginProvider {
-            authorize_url: openai::AUTHORIZE_URL,
-            token_url: openai::TOKEN_URL,
-            client_id: openai::CODEX_CLIENT_ID,
-            redirect_uri: openai::LOGIN_REDIRECT_URI,
-            scopes: openai::LOGIN_SCOPES,
-            extra_authorize_params: openai::LOGIN_EXTRA_AUTHORIZE_PARAMS,
-            adapter_name: openai::ADAPTER_NAME,
-            // The ChatGPT-subscription credential: method `chatgpt` (the id the
-            // llm-runner chatgpt wire family consumes; the prod handle points here).
-            default_id: "chatgpt:openai",
-            exchange: ExchangeWire::RfcForm,
-            needs_oidc_nonce: false,
-            exchange_echoes_challenge: false,
-            // No listener runs on the registered localhost redirect, so the browser
-            // lands on a connection-refused page whose ADDRESS BAR carries the code.
-            paste_prompt: "After approving, the browser will fail to connect to localhost:1455 \
-                            — that is expected (nothing listens there).\n\
-                            Copy the FULL URL from the browser's address bar and paste it here, then Enter:",
-            device: Some(DeviceKind::OpenAi),
-        }),
-        "xai" => Some(LoginProvider {
-            authorize_url: xai::AUTHORIZE_URL,
-            token_url: xai::TOKEN_URL,
-            client_id: xai::GROK_CLI_CLIENT_ID,
-            redirect_uri: xai::LOGIN_REDIRECT_URI,
-            scopes: xai::LOGIN_SCOPES,
-            extra_authorize_params: xai::LOGIN_EXTRA_AUTHORIZE_PARAMS,
-            adapter_name: xai::ADAPTER_NAME,
-            default_id: "oauth:xai",
-            exchange: ExchangeWire::RfcForm,
-            // xAI's scope set includes `openid`, so its authorize contract wants a
-            // per-flow nonce, and its public-client token endpoint echoes the PKCE
-            // challenge in the exchange (matching the Grok CLI / Hermes flow).
-            needs_oidc_nonce: true,
-            exchange_echoes_challenge: true,
-            // Same zero-listener posture as OpenAI: the loopback redirect refuses the
-            // connection and the address bar carries the code.
-            paste_prompt: "After approving, the browser will fail to connect to 127.0.0.1:56121 \
-                            — that is expected (nothing listens there).\n\
-                            Copy the FULL URL from the browser's address bar and paste it here, then Enter:",
-            device: Some(DeviceKind::Xai),
-        }),
-        "github-copilot" => Some(LoginProvider {
-            authorize_url: "",
-            token_url: github_copilot::DEVICE_TOKEN_URL,
-            client_id: github_copilot::CLIENT_ID,
-            redirect_uri: "",
-            scopes: &["read:user"],
-            extra_authorize_params: &[],
-            adapter_name: github_copilot::ADAPTER_NAME,
-            default_id: "copilot:github",
-            exchange: ExchangeWire::RfcForm,
-            needs_oidc_nonce: false,
-            exchange_echoes_challenge: false,
-            paste_prompt: "",
-            device: Some(DeviceKind::GithubCopilot),
-        }),
-        "kimi" => Some(LoginProvider {
-            authorize_url: "",
-            token_url: kimi::TOKEN_URL,
-            client_id: kimi::CLIENT_ID,
-            redirect_uri: "",
-            scopes: &[],
-            extra_authorize_params: &[],
-            adapter_name: kimi::ADAPTER_NAME,
-            default_id: "oauth:kimi",
-            exchange: ExchangeWire::RfcForm,
-            needs_oidc_nonce: false,
-            exchange_echoes_challenge: false,
-            paste_prompt: "",
-            device: Some(DeviceKind::Kimi),
-        }),
-        // The Google-family driver handles these entries before the generic PKCE
-        // path, but keeping their metadata in the provider table makes picker,
-        // logout, and direct provider lookups describe the same credential ids.
-        "google" => Some(LoginProvider {
-            authorize_url: google::AUTHORIZE_URL,
-            token_url: google::TOKEN_URL,
-            client_id: "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com",
-            redirect_uri: google::GEMINI_REDIRECT_URI,
-            scopes: google::SCOPES,
-            extra_authorize_params: google::AUTHORIZE_EXTRA_PARAMS,
-            adapter_name: "google",
-            default_id: "oauth:google",
-            exchange: ExchangeWire::RfcForm,
-            needs_oidc_nonce: false,
-            exchange_echoes_challenge: false,
-            paste_prompt: "After approving, the browser may fail to connect to 127.0.0.1:8085 — that is expected. Copy the FULL URL from the address bar and paste it here, then Enter:",
-            device: None,
-        }),
-        "antigravity" => Some(LoginProvider {
-            authorize_url: google::AUTHORIZE_URL,
-            token_url: google::TOKEN_URL,
-            client_id: "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com",
-            redirect_uri: google::ANTIGRAVITY_REDIRECT_URI,
-            scopes: google::SCOPES,
-            extra_authorize_params: google::AUTHORIZE_EXTRA_PARAMS,
-            adapter_name: "antigravity",
-            default_id: "antigravity:google",
-            exchange: ExchangeWire::RfcForm,
-            needs_oidc_nonce: false,
-            exchange_echoes_challenge: false,
-            paste_prompt: "After approving, the browser may fail to connect to 127.0.0.1:51121 — that is expected. Copy the FULL URL from the address bar and paste it here, then Enter:",
-            device: None,
-        }),
-        "cursor" => Some(LoginProvider {
-            authorize_url: cursor::LOGIN_URL,
-            token_url: cursor::TOKEN_URL,
-            client_id: "",
-            redirect_uri: "",
-            scopes: &[],
-            extra_authorize_params: &[],
-            adapter_name: cursor::ADAPTER_NAME,
-            default_id: cursor::DEFAULT_ID,
-            exchange: ExchangeWire::RfcForm,
-            needs_oidc_nonce: false,
-            exchange_echoes_challenge: false,
-            paste_prompt: "Cursor login is completed by browser polling.",
-            device: None,
-        }),
-        "devin" => Some(LoginProvider {
-            authorize_url: devin::AUTHORIZE_URL,
-            token_url: devin::TOKEN_URL,
-            client_id: "",
-            redirect_uri: devin::LOGIN_REDIRECT_URI,
-            scopes: &[],
-            extra_authorize_params: &[],
-            adapter_name: devin::ADAPTER_NAME,
-            default_id: devin::DEFAULT_ID,
-            exchange: ExchangeWire::RfcForm,
-            needs_oidc_nonce: false,
-            exchange_echoes_challenge: false,
-            paste_prompt: "After approving Devin, paste the callback URL.",
-            device: None,
-        }),
-        "snowflake" => Some(LoginProvider {
-            authorize_url: snowflake::TOKEN_URL_BASE,
-            token_url: snowflake::TOKEN_URL_BASE,
-            client_id: snowflake::CLIENT_ID,
-            redirect_uri: "http://127.0.0.1:0/",
-            scopes: &[],
-            extra_authorize_params: &[],
-            adapter_name: snowflake::ADAPTER_NAME,
-            default_id: "oauth:snowflake",
-            exchange: ExchangeWire::RfcForm,
-            needs_oidc_nonce: false,
-            exchange_echoes_challenge: false,
-            paste_prompt: "After approving Snowflake, paste the callback URL.",
-            device: None,
-        }),
-        "digitalocean" => Some(LoginProvider {
-            authorize_url: digitalocean::AUTHORIZE_URL,
-            token_url: digitalocean::AUTHORIZE_URL,
-            client_id: digitalocean::CLIENT_ID,
-            redirect_uri: digitalocean::REDIRECT_URI,
-            scopes: digitalocean::SCOPES,
-            extra_authorize_params: &[],
-            adapter_name: digitalocean::ADAPTER_NAME,
-            default_id: digitalocean::DEFAULT_ID,
-            exchange: ExchangeWire::RfcForm,
-            needs_oidc_nonce: false,
-            exchange_echoes_challenge: false,
-            paste_prompt: "After approving DigitalOcean, paste the full callback URL including its fragment.",
-            device: None,
-        }),
-        _ => None,
+fn cmd_set_category(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
+    let credential_id = args
+        .first()
+        .filter(|value| !value.starts_with("--"))
+        .ok_or_else(|| {
+            CliError::Usage("set-category requires a positional <credential-id>".into())
+        })?
+        .clone();
+    let modes = [
+        ("--set", SetCategoryMode::Set),
+        ("--add", SetCategoryMode::Add),
+        ("--remove", SetCategoryMode::Remove),
+    ];
+    let mode_count = args
+        .iter()
+        .filter(|value| modes.iter().any(|(flag, _)| value == flag))
+        .count();
+    let selected: Vec<_> = modes
+        .iter()
+        .filter_map(|(flag, mode)| optional(args, flag).map(|value| (*mode, value)))
+        .collect();
+    if mode_count != 1 || selected.len() != 1 {
+        return Err(CliError::Usage(
+            "set-category requires exactly one of --set, --add, or --remove".into(),
+        ));
     }
+    let (mode, raw) = &selected[0];
+    let categories = if raw.is_empty() {
+        Vec::new()
+    } else {
+        raw.split(',').map(str::to_string).collect()
+    };
+    commit_admin(
+        global,
+        AdminOpBody::SetCategory {
+            v: ADMIN_OP_SCHEMA_V2,
+            credential_id: credential_id.clone(),
+            mode: *mode,
+            categories,
+        },
+    )?;
+    println!("updated categories for {credential_id}");
+    Ok(())
 }
+
+fn cmd_reclassify(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
+    if !has_flag(args, "--from-registry") {
+        return Err(CliError::Usage(
+            "reclassify requires --from-registry".into(),
+        ));
+    }
+    let result = commit_admin(
+        global,
+        AdminOpBody::Reclassify {
+            v: ADMIN_OP_SCHEMA_V2,
+            force: has_flag(args, "--force"),
+        },
+    )?;
+    let changed = result
+        .get("credentials_reclassified")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    println!("reclassified {changed} credential(s)");
+    Ok(())
+}
+
+// Vault-native first-party OAuth login uses the shared core catalog so the CLI,
+// creation defaults, reclassification, and scoped listings resolve the same entries.
 
 /// The default credential id for a bare `--provider <name>` login (no `--id`, no
 /// interactive pick). OAuth/subscription logins WIN for the three names that also
@@ -2483,7 +2343,7 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             Some(DeviceKind::GithubCopilot | DeviceKind::Kimi)
         )
     {
-        return cmd_device_login(global, args, &provider, &id, &wire);
+        return cmd_device_login(global, args, &provider, &id, wire);
     }
 
     let replace = has_flag(args, "--replace") || interactive.replace;
@@ -3041,7 +2901,9 @@ fn request_admin_status(global: &GlobalArgs) -> Result<serde_json::Value, CliErr
     ))
 }
 
-fn parse_inventory(result: &serde_json::Value) -> Result<Vec<(String, u64, String)>, CliError> {
+type InventoryRow = (String, u64, String, Vec<String>);
+
+fn parse_inventory(result: &serde_json::Value) -> Result<Vec<InventoryRow>, CliError> {
     let rows = result
         .get("credentials")
         .and_then(serde_json::Value::as_array)
@@ -3078,14 +2940,30 @@ fn parse_inventory(result: &serde_json::Value) -> Result<Vec<(String, u64, Strin
                         "admin.status returned an invalid id at credential row {index}"
                     ))
                 })?;
-            Ok((state.to_string(), version, id.to_string()))
+            let categories = row
+                .get("categories")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|values| {
+                    values
+                        .iter()
+                        .map(|value| value.as_str().map(str::to_string))
+                        .collect::<Option<Vec<_>>>()
+                })
+                .unwrap_or_default();
+            Ok((state.to_string(), version, id.to_string(), categories))
         })
         .collect()
 }
 
-fn print_inventory(rows: &[(String, u64, String)]) {
-    for (state, version, id) in rows {
-        println!("{state:<14} v{version:<4} {id}");
+fn print_inventory(rows: &[InventoryRow]) {
+    println!("STATE          VER   CREDENTIAL  CATEGORIES");
+    for (state, version, id, categories) in rows {
+        let categories = if categories.is_empty() {
+            "-".to_string()
+        } else {
+            categories.join(",")
+        };
+        println!("{state:<14} v{version:<4} {id}  {categories}");
     }
 
     // SAY WHAT `active` DOES NOT MEAN, because the word claims more than the column
@@ -3117,6 +2995,7 @@ fn print_inventory(rows: &[(String, u64, String)]) {
 struct GrantRow {
     principal_kind: String,
     principal_id: String,
+    selector_kind: String,
     credential_prefix: String,
     operation: String,
     created_at_ms: i64,
@@ -3147,6 +3026,15 @@ fn parse_grants(result: &serde_json::Value) -> Result<Vec<GrantRow>, CliError> {
                     "admin.status returned an invalid grant principal at row {index}"
                 ))
             })?;
+        let selector_kind = grant
+            .get("selector_kind")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("prefix");
+        if !matches!(selector_kind, "prefix" | "category") {
+            return Err(CliError::RouteRefused(format!(
+                "admin.status returned an invalid selector kind at row {index}"
+            )));
+        }
         let credential_prefix = grant
             .get("credential_prefix")
             .and_then(serde_json::Value::as_str)
@@ -3176,17 +3064,19 @@ fn parse_grants(result: &serde_json::Value) -> Result<Vec<GrantRow>, CliError> {
         grants.push(GrantRow {
             principal_kind: principal_kind.to_string(),
             principal_id: principal_id.to_string(),
+            selector_kind: selector_kind.to_string(),
             credential_prefix: credential_prefix.to_string(),
             operation: operation.to_string(),
             created_at_ms,
         });
     }
 
-    let mut prior: Option<(String, String, String, String)> = None;
+    let mut prior: Option<(String, String, String, String, String)> = None;
     for grant in &grants {
         let order_key = (
             grant.principal_kind.clone(),
             grant.principal_id.clone(),
+            grant.selector_kind.clone(),
             grant.credential_prefix.clone(),
             grant.operation.clone(),
         );
@@ -3232,18 +3122,24 @@ fn print_grants(result: &serde_json::Value) -> Result<(), CliError> {
     };
     let wk = w("KIND", &|g| g.principal_kind.as_str());
     let wp = w("PRINCIPAL", &|g| g.principal_id.as_str());
-    let wc = w("CREDENTIAL PREFIX", &|g| g.credential_prefix.as_str());
+    let ws = w("SELECTOR KIND", &|g| g.selector_kind.as_str());
+    let wc = w("SELECTOR", &|g| g.credential_prefix.as_str());
     let wo = w("OP", &|g| g.operation.as_str());
     println!(
-        "{:<wk$}  {:<wp$}  {:<wc$}  {:<wo$}  GRANTED",
-        "KIND", "PRINCIPAL", "CREDENTIAL PREFIX", "OP"
+        "{:<wk$}  {:<wp$}  {:<ws$}  {:<wc$}  {:<wo$}  GRANTED",
+        "KIND", "PRINCIPAL", "SELECTOR KIND", "SELECTOR", "OP"
     );
     for grant in grants {
         println!(
-            "{:<wk$}  {:<wp$}  {:<wc$}  {:<wo$}  {}",
+            "{:<wk$}  {:<wp$}  {:<ws$}  {:<wc$}  {:<wo$}  {}",
             grant.principal_kind,
             grant.principal_id,
-            grant.credential_prefix,
+            grant.selector_kind,
+            grant
+                .credential_prefix
+                .strip_prefix("category:")
+                .filter(|_| grant.selector_kind == "category")
+                .unwrap_or(&grant.credential_prefix),
             grant.operation,
             format_ts_ms(grant.created_at_ms)
         );
@@ -3280,8 +3176,16 @@ fn print_read_grants(result: &serde_json::Value) -> Result<(), CliError> {
                 ))
             })?;
         println!(
-            "  {}:{} {} {}",
-            grant.principal_kind, grant.principal_id, grant.operation, grant.credential_prefix
+            "  {}:{} {} {} {}",
+            grant.principal_kind,
+            grant.principal_id,
+            grant.operation,
+            grant.selector_kind,
+            grant
+                .credential_prefix
+                .strip_prefix("category:")
+                .filter(|_| grant.selector_kind == "category")
+                .unwrap_or(&grant.credential_prefix)
         );
         let mut prior_id: Option<&str> = None;
         for (covered_index, id) in covered.iter().enumerate() {
@@ -3290,7 +3194,7 @@ fn print_read_grants(result: &serde_json::Value) -> Result<(), CliError> {
                     "admin.status returned an invalid covered credential at grant row {index}, row {covered_index}"
                 ))
             })?;
-            if !id.starts_with(&grant.credential_prefix) {
+            if grant.selector_kind == "prefix" && !id.starts_with(&grant.credential_prefix) {
                 return Err(CliError::RouteRefused(format!(
                     "admin.status listed a credential outside its grant prefix at grant row {index}"
                 )));
@@ -3480,77 +3384,89 @@ fn cmd_revoke_all_handles(global: &GlobalArgs, args: &[String]) -> Result<(), Cl
     Ok(())
 }
 
-/// REFUSE A `--principal` THAT CARRIES ITS OWN KIND PREFIX, because the grant it would
-/// create can never fire and nothing would ever say so.
-///
-/// The daemon looks a grant up by `("reserved", module_id)` where `module_id` is the bare
-/// id from the route bind -- `broca`, not `reserved:broca`. So `--principal reserved:broca`
-/// stores `principal_id = "reserved:broca"`, which no bind can ever match: every `get_scoped`
-/// from that consumer is refused, the refusal is the anti-enumeration `not_found` shared
-/// with an unknown credential, and `ck auth grants` shows a row that looks correct.
-///
-/// The mistake is easy to make because the DISPLAY form is `reserved  broca` in two columns
-/// and the confirmation line reads `granted reserved:<id>` -- so the prefixed form looks
-/// like what the tool itself prints. Module ids in this fleet never contain a colon, so a
-/// colon here is unambiguously the wrong shape rather than an unusual name.
-///
-/// Refusing rather than stripping: silently accepting `reserved:broca` and storing `broca`
-/// would mean two spellings for one grant, and the operator would never learn which the
-/// vault holds.
-fn reject_kind_prefixed_principal(principal_id: &str) -> Result<(), CliError> {
-    if let Some((kind, rest)) = principal_id.split_once(':') {
-        return Err(CliError::Usage(format!(
-            "--principal takes a bare module id ({rest}), not a kind-prefixed one \
-             ({principal_id}). The vault matches a grant against the module id a consumer \
-             binds with, so a grant stored as '{kind}:{rest}' can never fire and every \
-             scoped read from that consumer would be refused as not_found."
-        )));
+fn parse_reserved_principal(principal: &str) -> Result<String, CliError> {
+    if principal.contains('|') {
+        return Err(CliError::Usage("invalid_principal: '|' is reserved".into()));
     }
-    Ok(())
+    match principal.split_once(':') {
+        None if !principal.is_empty() => Ok(principal.to_string()),
+        Some(("reserved", id)) if !id.is_empty() && !id.contains(':') => Ok(id.to_string()),
+        Some((kind, _)) => Err(CliError::Usage(format!(
+            "invalid_principal: only reserved principals are supported (got {kind})"
+        ))),
+        None => Err(CliError::Usage("invalid_principal: empty principal".into())),
+    }
+}
+
+fn parse_grant_selector(args: &[String]) -> Result<(SelectorKind, String), CliError> {
+    let prefix = optional(args, "--prefix");
+    let selector = optional(args, "--selector");
+    if prefix.is_some() && selector.is_some() {
+        return Err(CliError::Usage(
+            "--prefix and --selector are mutually exclusive".into(),
+        ));
+    }
+    let selector_kind = optional(args, "--selector-kind")
+        .unwrap_or_else(|| "prefix".into())
+        .parse::<SelectorKind>()
+        .map_err(CliError::Usage)?;
+    if prefix.is_some() && selector_kind != SelectorKind::Prefix {
+        return Err(CliError::Usage(
+            "--prefix cannot be combined with --selector-kind category".into(),
+        ));
+    }
+    let selector = prefix
+        .or(selector)
+        .ok_or_else(|| CliError::Usage("grant requires --selector or --prefix".into()))?;
+    Ok((selector_kind, selector))
 }
 
 fn cmd_grant(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
-    let principal_id = required(args, "--principal")?;
-    reject_kind_prefixed_principal(&principal_id)?;
-    let credential_prefix = required(args, "--prefix")?;
+    let principal_id = parse_reserved_principal(&required(args, "--principal")?)?;
+    let (selector_kind, selector) = parse_grant_selector(args)?;
     let operation = required(args, "--operation")?
         .parse::<GrantOperation>()
         .map_err(CliError::Usage)?;
     commit_admin(
         global,
-        AdminOpBody::GrantCreate {
-            v: ADMIN_OP_SCHEMA_V1,
+        AdminOpBody::GrantCreateV2 {
+            v: ADMIN_OP_SCHEMA_V2,
+            principal_kind: "reserved".into(),
             principal_id: principal_id.clone(),
-            credential_prefix: credential_prefix.clone(),
+            selector_kind,
+            selector: selector.clone(),
             operation,
         },
     )?;
     println!(
-        "granted reserved:{principal_id} {} of {credential_prefix}",
-        operation.as_str()
+        "granted reserved:{principal_id} {} {}:{selector}",
+        operation.as_str(),
+        selector_kind.as_str()
     );
     Ok(())
 }
 
 fn cmd_revoke_grant(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
-    let principal_id = required(args, "--principal")?;
-    reject_kind_prefixed_principal(&principal_id)?;
-    let credential_prefix = required(args, "--prefix")?;
+    let principal_id = parse_reserved_principal(&required(args, "--principal")?)?;
+    let (selector_kind, selector) = parse_grant_selector(args)?;
     let operation = required(args, "--operation")?
         .parse::<GrantOperation>()
         .map_err(CliError::Usage)?;
     commit_admin(
         global,
-        AdminOpBody::GrantRevoke {
-            v: ADMIN_OP_SCHEMA_V1,
+        AdminOpBody::GrantRevokeV2 {
+            v: ADMIN_OP_SCHEMA_V2,
+            principal_kind: "reserved".into(),
             principal_id: principal_id.clone(),
-            credential_prefix: credential_prefix.clone(),
+            selector_kind,
+            selector: selector.clone(),
             operation,
         },
     )?;
     println!(
-        "revoked reserved:{principal_id} {} of {credential_prefix}",
-        operation.as_str()
+        "revoked reserved:{principal_id} {} {}:{selector}",
+        operation.as_str(),
+        selector_kind.as_str()
     );
     Ok(())
 }
@@ -5135,7 +5051,12 @@ mod tests {
         });
         assert_eq!(
             parse_inventory(&valid).expect("valid inventory"),
-            vec![("active".to_string(), 7, "apikey:test".to_string())]
+            vec![(
+                "active".to_string(),
+                7,
+                "apikey:test".to_string(),
+                Vec::new(),
+            )]
         );
 
         for malformed in [
@@ -5175,5 +5096,65 @@ mod tests {
             default_login_id("nope-not-a-provider"),
             "nope-not-a-provider"
         );
+    }
+}
+
+#[cfg(test)]
+mod taxonomy_cli_tests {
+    use super::*;
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    #[test]
+    fn grant_principal_and_selector_parsers_pin_legacy_and_v2_forms() {
+        assert_eq!(parse_reserved_principal("agent").unwrap(), "agent");
+        assert_eq!(parse_reserved_principal("reserved:agent").unwrap(), "agent");
+        for invalid in ["direct:agent", "reserved:a|b", ""] {
+            assert!(parse_reserved_principal(invalid).is_err(), "{invalid:?}");
+        }
+
+        let legacy = args(&["--prefix", "apikey:"]);
+        assert_eq!(
+            parse_grant_selector(&legacy).unwrap(),
+            (SelectorKind::Prefix, "apikey:".to_string())
+        );
+        let category = args(&["--selector-kind", "category", "--selector", "llm-provider"]);
+        assert_eq!(
+            parse_grant_selector(&category).unwrap(),
+            (SelectorKind::Category, "llm-provider".to_string())
+        );
+        let conflict = args(&["--prefix", "a:", "--selector", "b:"]);
+        assert!(parse_grant_selector(&conflict).is_err());
+        let wrong_kind = args(&["--prefix", "a:", "--selector-kind", "category"]);
+        assert!(parse_grant_selector(&wrong_kind).is_err());
+    }
+
+    #[test]
+    fn grant_rows_accept_v1_without_selector_kind_and_v2_with_it() {
+        let v1 = serde_json::json!({
+            "read_grants": [{
+                "principal_kind": "reserved",
+                "principal_id": "agent",
+                "credential_prefix": "apikey:",
+                "operation": "read",
+                "created_at_ms": 1,
+                "covered_credential_ids": []
+            }]
+        });
+        assert_eq!(parse_grants(&v1).unwrap()[0].selector_kind, "prefix");
+        let v2 = serde_json::json!({
+            "read_grants": [{
+                "principal_kind": "reserved",
+                "principal_id": "agent",
+                "selector_kind": "category",
+                "credential_prefix": "category:llm-provider",
+                "operation": "read",
+                "created_at_ms": 1,
+                "covered_credential_ids": []
+            }]
+        });
+        assert_eq!(parse_grants(&v2).unwrap()[0].selector_kind, "category");
     }
 }

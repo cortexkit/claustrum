@@ -49,7 +49,8 @@ use credentials_core::engine::{EngineError, RefreshEngine};
 use credentials_core::health::VaultHealth;
 use credentials_core::refresh_adapters::RefreshError;
 use credentials_core::store::{
-    AuthEventPrincipal, GrantOperation, ScopedReadRefusal, StoreOpError,
+    AuthEventPrincipal, GrantOperation, ScopedCoverage, ScopedListSnapshot, ScopedReadRefusal,
+    StoreOpError,
 };
 use subc_protocol::Principal;
 
@@ -127,6 +128,44 @@ pub struct GetParams {
 #[derive(Debug, Deserialize)]
 pub struct GetScopedParams {
     pub credential_id: String,
+}
+
+/// `credential.list_scoped` accepts no parameters and lists every row covered by the caller's grants.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ListScopedParams {}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ListScopedCredential {
+    pub id: String,
+    pub categories: Vec<String>,
+    #[serde(rename = "type")]
+    pub credential_type: String,
+    pub serves: Vec<String>,
+    pub state: String,
+    pub record_version: u64,
+    pub operations: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub org_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct GrantTuple {
+    pub selector_kind: String,
+    pub selector: String,
+    pub operation: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ListScopedResult {
+    pub credentials: Vec<ListScopedCredential>,
+    pub grants: usize,
+    pub grant_tuples: Vec<GrantTuple>,
+    pub view: String,
 }
 
 /// A `credential.sign` request: sign exact bytes with a signing-key credential.
@@ -332,6 +371,7 @@ pub enum ReadError {
     NeedsReauth,
     RefreshUnsupported,
     RefreshFailed,
+    StoreError,
     VaultLocked,
     Corrupt,
     /// `get_many` exceeded the cap.
@@ -411,7 +451,9 @@ impl ReadError {
             ReadError::NeedsReauth => ErrorClass::AuthRequired,
             // A refresh attempt failed (provider may recover) or the master key is
             // unresolvable right now (keychain/lease may recover).
-            ReadError::RefreshFailed | ReadError::VaultLocked => ErrorClass::Transient,
+            ReadError::RefreshFailed | ReadError::StoreError | ReadError::VaultLocked => {
+                ErrorClass::Transient
+            }
             // Over the `get_many` cap, over the signing-payload cap, or a minimum-TTL
             // demand a fresh token cannot meet: reduce the request and retry. All are
             // bounds on ONE request rather than statements about the credential, which
@@ -629,6 +671,112 @@ pub struct ReadSurface {
 /// note.
 const HEALTH_STALE_LIMIT_MS: i64 = 20_000;
 
+fn push_u32(out: &mut Vec<u8>, value: usize) {
+    out.extend_from_slice(&(value as u32).to_be_bytes());
+}
+
+fn push_string(out: &mut Vec<u8>, value: &str) {
+    push_u32(out, value.len());
+    out.extend_from_slice(value.as_bytes());
+}
+
+fn push_optional_string(out: &mut Vec<u8>, value: Option<&str>) {
+    match value {
+        Some(value) => {
+            out.push(1);
+            push_string(out, value);
+        }
+        None => out.push(0),
+    }
+}
+
+fn encoded_grant_tuple(tuple: &GrantTuple) -> Vec<u8> {
+    let mut encoded = Vec::new();
+    push_string(&mut encoded, &tuple.selector_kind);
+    push_string(&mut encoded, &tuple.selector);
+    push_string(&mut encoded, &tuple.operation);
+    encoded
+}
+
+fn list_scoped_view(credentials: &[ListScopedCredential], grants: &[GrantTuple]) -> String {
+    let mut digest_input = b"claustrum.list_scoped.view.v1".to_vec();
+    digest_input.push(1);
+    push_u32(&mut digest_input, credentials.len());
+    for credential in credentials {
+        push_string(&mut digest_input, &credential.id);
+        push_u32(&mut digest_input, credential.categories.len());
+        for category in &credential.categories {
+            push_string(&mut digest_input, category);
+        }
+        push_string(&mut digest_input, &credential.state);
+        push_u32(&mut digest_input, credential.operations.len());
+        for operation in &credential.operations {
+            push_string(&mut digest_input, operation);
+        }
+        push_optional_string(&mut digest_input, credential.account_id.as_deref());
+        push_optional_string(&mut digest_input, credential.email.as_deref());
+        push_optional_string(&mut digest_input, credential.org_name.as_deref());
+    }
+    digest_input.push(2);
+    push_u32(&mut digest_input, grants.len());
+    for grant in grants {
+        digest_input.extend_from_slice(&encoded_grant_tuple(grant));
+    }
+    let digest = ring::digest::digest(&ring::digest::SHA256, &digest_input);
+    base64::engine::general_purpose::STANDARD.encode(digest.as_ref())
+}
+
+fn project_list_scoped(snapshot: ScopedListSnapshot) -> ListScopedResult {
+    let mut grant_tuples: Vec<GrantTuple> = snapshot
+        .grants
+        .into_iter()
+        .map(|grant| GrantTuple {
+            selector_kind: grant.selector_kind.as_str().to_string(),
+            selector: grant.credential_prefix,
+            operation: grant.operation.as_str().to_string(),
+        })
+        .collect();
+    grant_tuples.sort_by_key(encoded_grant_tuple);
+
+    let mut credentials: Vec<ListScopedCredential> = snapshot
+        .rows
+        .into_iter()
+        .map(|row| {
+            let (account_id, email, org_name) = row
+                .identity
+                .map(|identity| (identity.account_id, identity.email, identity.org_name))
+                .unwrap_or((None, None, None));
+            ListScopedCredential {
+                credential_type: credentials_core::catalog::credential_type(&row.id).to_string(),
+                serves: credentials_core::catalog::serves_for(&row.id)
+                    .iter()
+                    .map(|vendor| vendor.as_str().to_string())
+                    .collect(),
+                id: row.id,
+                categories: row.categories,
+                state: row.state.as_str().to_string(),
+                record_version: row.record_version,
+                operations: row
+                    .operations
+                    .iter()
+                    .map(|operation| operation.as_str().to_string())
+                    .collect(),
+                account_id,
+                email,
+                org_name,
+            }
+        })
+        .collect();
+    credentials.sort_by(|left, right| left.id.as_bytes().cmp(right.id.as_bytes()));
+    let view = list_scoped_view(&credentials, &grant_tuples);
+    ListScopedResult {
+        credentials,
+        grants: grant_tuples.len(),
+        grant_tuples,
+        view,
+    }
+}
+
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -644,6 +792,25 @@ fn meets_min_ttl(record: &credentials_core::record::VaultRecord, min_ttl_ms: i64
         .expires_at_ms
         .map(|expires_at_ms| now_ms().saturating_add(min_ttl_ms) < expires_at_ms)
         .unwrap_or(true)
+}
+
+fn classify_scoped_coverage(coverage: ScopedCoverage) -> Option<ScopedReadRefusal> {
+    match coverage {
+        ScopedCoverage {
+            caller_active_grants: 0,
+            ..
+        } => Some(ScopedReadRefusal::NoGrant),
+        ScopedCoverage { covered: true, .. } => None,
+        ScopedCoverage {
+            id_exists: false, ..
+        } => Some(ScopedReadRefusal::NotFound),
+        ScopedCoverage {
+            holds_category_selector: true,
+            id_category_count: Some(0),
+            ..
+        } => Some(ScopedReadRefusal::Uncategorized),
+        _ => Some(ScopedReadRefusal::NoGrant),
+    }
 }
 
 impl ReadSurface {
@@ -953,53 +1120,68 @@ impl ReadSurface {
         );
     }
 
-    /// Check one principal-scoped operation grant before loading the credential. This
-    /// keeps missing coverage and a missing record wire-identical while `auth_events`
-    /// retains the distinction for the operator.
+    /// Evaluate the one operation-scoped coverage predicate before loading sealed data.
     fn authorize_scoped(
         &self,
         principal: Option<&Principal>,
         credential_id: &str,
         operation: GrantOperation,
     ) -> Result<(), ReadError> {
-        let grant_coverage = match principal {
-            Some(Principal::Reserved { module_id }) => {
-                let coverage = self.engine.store().read_grant_covers(
-                    "reserved",
-                    module_id,
-                    credential_id,
-                    operation,
-                );
-                #[cfg(test)]
-                let coverage = if self
-                    .scoped_grant_lookup_error_for_test
-                    .swap(false, std::sync::atomic::Ordering::SeqCst)
-                {
-                    Err(StoreOpError::Store(
-                        "test scoped grant lookup failure".into(),
-                    ))
-                } else {
-                    coverage
-                };
-                coverage
+        let coverage = match principal {
+            Some(Principal::Reserved { module_id }) => self
+                .engine
+                .store()
+                .evaluate_scoped_coverage("reserved", module_id, credential_id, operation),
+            Some(Principal::Direct) | Some(Principal::Unverified) | None => {
+                self.record_scoped_refusal(principal, credential_id, ScopedReadRefusal::NoGrant);
+                return Err(ReadError::NotFound);
             }
-            Some(Principal::Direct) | Some(Principal::Unverified) | None => Ok(false),
         };
-        let refusal = match grant_coverage {
-            Ok(true) => None,
-            Ok(false) => Some(ScopedReadRefusal::NoGrant),
-            Err(_) => {
-                // The caller must not learn whether the vault could read its grant table:
-                // retain `not_found` on the wire while the internal operator record names
-                // the storage failure instead of misdirecting a grant-configuration repair.
-                Some(ScopedReadRefusal::StoreError)
-            }
+        #[cfg(test)]
+        let coverage = if self
+            .scoped_grant_lookup_error_for_test
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            Err(StoreOpError::Store(
+                "test scoped grant lookup failure".into(),
+            ))
+        } else {
+            coverage
+        };
+
+        let refusal = match coverage {
+            Err(_) => Some(ScopedReadRefusal::StoreError),
+            Ok(coverage) => classify_scoped_coverage(coverage),
         };
         if let Some(refusal) = refusal {
             self.record_scoped_refusal(principal, credential_id, refusal);
             return Err(ReadError::NotFound);
         }
         Ok(())
+    }
+
+    /// Enumerate every row covered by the caller's own grants from one store snapshot.
+    pub fn list_scoped(
+        &self,
+        principal: Option<&Principal>,
+        _params: &ListScopedParams,
+    ) -> Result<ListScopedResult, ReadError> {
+        let module_id = match principal {
+            Some(Principal::Reserved { module_id }) => module_id,
+            Some(Principal::Direct) | Some(Principal::Unverified) | None => {
+                self.record_scoped_refusal(
+                    principal,
+                    "credential.list_scoped",
+                    ScopedReadRefusal::NoGrant,
+                );
+                return Err(ReadError::NotFound);
+            }
+        };
+        self.engine
+            .store()
+            .list_scoped_snapshot("reserved", module_id)
+            .map(project_list_scoped)
+            .map_err(|_| ReadError::StoreError)
     }
 
     /// Serve a credential-id read after the route layer captures the bind's principal.
@@ -1865,5 +2047,218 @@ mod error_class_tests {
             json.contains("\"class\":\"context_overflow\""),
             "class tag missing: {json}"
         );
+    }
+}
+
+#[cfg(test)]
+mod list_scoped_tests {
+    use super::*;
+    use credentials_core::record::{RecordIdentity, RecordState};
+    use credentials_core::store::{ReadGrant, ScopedListRow, SelectorKind};
+
+    fn row(
+        id: &str,
+        categories: &[&str],
+        state: RecordState,
+        operations: &[GrantOperation],
+        identity: Option<RecordIdentity>,
+    ) -> ScopedListRow {
+        ScopedListRow {
+            id: id.into(),
+            categories: categories
+                .iter()
+                .map(|value| (*value).to_string())
+                .collect(),
+            state,
+            record_version: 7,
+            operations: operations.to_vec(),
+            identity,
+        }
+    }
+
+    fn grant(kind: SelectorKind, selector: &str, operation: GrantOperation) -> ReadGrant {
+        ReadGrant {
+            principal_kind: "reserved".into(),
+            principal_id: "consumer".into(),
+            selector_kind: kind,
+            credential_prefix: selector.into(),
+            operation,
+            created_at_ms: 1,
+        }
+    }
+
+    #[test]
+    fn five_clause_scoped_coverage_table_is_total_and_ordered() {
+        let row = |caller_active_grants,
+                   covered,
+                   id_exists,
+                   holds_category_selector,
+                   id_category_count| ScopedCoverage {
+            caller_active_grants,
+            covered,
+            id_exists,
+            holds_category_selector,
+            id_category_count,
+        };
+        assert_eq!(
+            classify_scoped_coverage(row(0, false, false, false, None)),
+            Some(ScopedReadRefusal::NoGrant),
+            "clause 1"
+        );
+        assert_eq!(
+            classify_scoped_coverage(row(1, true, true, true, Some(1))),
+            None,
+            "clause 2"
+        );
+        assert_eq!(
+            classify_scoped_coverage(row(1, false, false, true, Some(0))),
+            Some(ScopedReadRefusal::NotFound),
+            "clause 3 precedes uncategorized"
+        );
+        assert_eq!(
+            classify_scoped_coverage(row(1, false, true, true, Some(0))),
+            Some(ScopedReadRefusal::Uncategorized),
+            "clause 4"
+        );
+        assert_eq!(
+            classify_scoped_coverage(row(1, false, true, false, None)),
+            Some(ScopedReadRefusal::NoGrant),
+            "clause 5"
+        );
+    }
+
+    #[test]
+    fn list_scoped_view_golden_vector_pins_every_framing_rule() {
+        let snapshot = ScopedListSnapshot {
+            rows: vec![
+                row(
+                    "d-retired",
+                    &[],
+                    RecordState::Retired,
+                    &[GrantOperation::Read],
+                    None,
+                ),
+                row(
+                    "a-active",
+                    &["llm-provider", "monitoring"],
+                    RecordState::Active,
+                    &[GrantOperation::Read, GrantOperation::Sign],
+                    Some(RecordIdentity {
+                        account_id: Some("acct".into()),
+                        email: Some("a@example.test".into()),
+                        org_name: Some("Example".into()),
+                    }),
+                ),
+                row(
+                    "e-non-opening-active",
+                    &["llm-provider"],
+                    RecordState::Active,
+                    &[GrantOperation::Read],
+                    None,
+                ),
+                row(
+                    "b-needs-reauth",
+                    &["llm-provider"],
+                    RecordState::NeedsReauth,
+                    &[GrantOperation::Sign],
+                    None,
+                ),
+                row(
+                    "c-corrupt",
+                    &["llm-provider"],
+                    RecordState::Corrupt,
+                    &[GrantOperation::Read],
+                    None,
+                ),
+            ],
+            grants: vec![
+                grant(
+                    SelectorKind::Category,
+                    "category:llm-provider",
+                    GrantOperation::Sign,
+                ),
+                grant(SelectorKind::Prefix, "", GrantOperation::Read),
+            ],
+        };
+        let result = project_list_scoped(snapshot);
+        assert_eq!(result.grants, result.grant_tuples.len());
+        assert_eq!(
+            result.view,
+            "jxpGFOH6OpL/mq0u8vgFtjZY8iJIob3BodaijqA260U=",
+            "state/operation/selector enums are length-prefixed strings; lists carry counts; optionals carry presence bytes"
+        );
+        assert_eq!(result.credentials[0].id, "a-active");
+        assert!(result
+            .credentials
+            .iter()
+            .all(|row| !row.operations.is_empty()));
+    }
+
+    #[test]
+    fn list_scoped_view_is_injective_for_strings_and_optional_presence() {
+        let base_grants = vec![grant(SelectorKind::Prefix, "", GrantOperation::Read)];
+        let left = project_list_scoped(ScopedListSnapshot {
+            rows: vec![row(
+                "a",
+                &["bc"],
+                RecordState::Active,
+                &[GrantOperation::Read],
+                None,
+            )],
+            grants: base_grants.clone(),
+        });
+        let right = project_list_scoped(ScopedListSnapshot {
+            rows: vec![row(
+                "ab",
+                &["c"],
+                RecordState::Active,
+                &[GrantOperation::Read],
+                None,
+            )],
+            grants: base_grants.clone(),
+        });
+        assert_ne!(left.view, right.view);
+
+        let absent_then_empty = project_list_scoped(ScopedListSnapshot {
+            rows: vec![row(
+                "same",
+                &[],
+                RecordState::Active,
+                &[GrantOperation::Read],
+                Some(RecordIdentity {
+                    account_id: None,
+                    email: Some(String::new()),
+                    org_name: None,
+                }),
+            )],
+            grants: base_grants.clone(),
+        });
+        let empty_then_absent = project_list_scoped(ScopedListSnapshot {
+            rows: vec![row(
+                "same",
+                &[],
+                RecordState::Active,
+                &[GrantOperation::Read],
+                Some(RecordIdentity {
+                    account_id: Some(String::new()),
+                    email: None,
+                    org_name: None,
+                }),
+            )],
+            grants: base_grants,
+        });
+        assert_ne!(absent_then_empty.view, empty_then_absent.view);
+    }
+
+    #[test]
+    fn grantless_view_is_the_constant_digest_of_two_empty_blocks() {
+        let result = project_list_scoped(ScopedListSnapshot {
+            rows: Vec::new(),
+            grants: Vec::new(),
+        });
+        assert_eq!(result.credentials, []);
+        assert_eq!(result.grants, 0);
+        assert_eq!(result.grant_tuples, []);
+        assert_eq!(result.view, "vGTW0lomfgTvnoZoEYxkS/nUmfm76KhATUyAQCXGpPY=");
     }
 }

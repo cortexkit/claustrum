@@ -239,6 +239,33 @@ const MIGRATIONS: &[Migration] = &[
         version: 8,
         statements: "ALTER TABLE auth_events ADD COLUMN reporter_source TEXT;",
     },
+    // Selector kind is part of grant identity. Preserve every legacy column name so the
+    // previous reader can still render this table from a read-only open.
+    Migration {
+        version: 9,
+        statements: "CREATE TABLE read_grants_v9 (\
+                         principal_kind    TEXT NOT NULL, \
+                         principal_id      TEXT NOT NULL, \
+                         selector_kind     TEXT NOT NULL CHECK(selector_kind IN ('prefix', 'category')), \
+                         credential_prefix TEXT NOT NULL, \
+                         operation         TEXT NOT NULL CHECK(operation IN ('read', 'sign')), \
+                         created_at_ms     INTEGER NOT NULL, \
+                         PRIMARY KEY (principal_kind, principal_id, selector_kind, credential_prefix, operation)\
+                     ); \
+                     INSERT INTO read_grants_v9 \
+                         (principal_kind, principal_id, selector_kind, credential_prefix, operation, created_at_ms) \
+                     SELECT principal_kind, principal_id, 'prefix', credential_prefix, operation, created_at_ms \
+                     FROM read_grants; \
+                     DROP TABLE read_grants; \
+                     ALTER TABLE read_grants_v9 RENAME TO read_grants; \
+                     CREATE TABLE credential_categories (\
+                         credential_id TEXT NOT NULL, \
+                         category TEXT NOT NULL, \
+                         PRIMARY KEY (credential_id, category), \
+                         FOREIGN KEY (credential_id) REFERENCES credentials(credential_id) ON DELETE CASCADE\
+                     ); \
+                     CREATE INDEX idx_credential_categories_id ON credential_categories(credential_id);",
+    },
 ];
 
 /// The newest store migration THIS BINARY knows how to apply.
@@ -294,10 +321,14 @@ pub struct RecordMeta {
     /// A consumer reported the current access token as refused, so the next read must
     /// refresh before serving it. This local assertion is not a provider expiry fact.
     pub stale_pending: bool,
+    /// Sorted non-secret authorization categories.
+    pub categories: Vec<String>,
 }
 
 /// The operation a principal-scoped credential-prefix grant permits.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum GrantOperation {
     Read,
@@ -327,14 +358,82 @@ impl std::str::FromStr for GrantOperation {
     }
 }
 
-/// One durable principal-scoped credential-prefix grant.
+/// How a grant selector is evaluated.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum SelectorKind {
+    Prefix,
+    Category,
+}
+
+impl SelectorKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Prefix => "prefix",
+            Self::Category => "category",
+        }
+    }
+}
+
+impl std::str::FromStr for SelectorKind {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "prefix" => Ok(Self::Prefix),
+            "category" => Ok(Self::Category),
+            _ => Err(format!(
+                "unknown selector kind '{value}' (expected prefix or category)"
+            )),
+        }
+    }
+}
+
+/// One durable principal-scoped operation grant. `credential_prefix` retains its
+/// historical column name, but stores the selector text for both selector kinds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadGrant {
     pub principal_kind: String,
     pub principal_id: String,
+    pub selector_kind: SelectorKind,
     pub credential_prefix: String,
     pub operation: GrantOperation,
     pub created_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopedCoverage {
+    pub covered: bool,
+    pub caller_active_grants: u32,
+    pub holds_category_selector: bool,
+    pub id_exists: bool,
+    pub id_category_count: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopedListRow {
+    pub id: String,
+    pub categories: Vec<String>,
+    pub state: RecordState,
+    pub record_version: u64,
+    pub operations: Vec<GrantOperation>,
+    pub identity: Option<crate::record::RecordIdentity>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopedListSnapshot {
+    pub rows: Vec<ScopedListRow>,
+    pub grants: Vec<ReadGrant>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SetCategoryMode {
+    Set,
+    Add,
+    Remove,
 }
 
 /// A durable refresh-intent row: the fsynced marker that a refresh is in flight
@@ -387,6 +486,12 @@ pub enum StoreOpError {
     AlreadyExists,
     /// A CAS overwrite's `expected_payload_hash` did not match the current record.
     CasMismatch,
+    /// A credential id begins with `category:` or contains `|`, bytes reserved for category selectors and audit targets.
+    InvalidCredentialId,
+    /// A category name does not match `^[a-z][a-z0-9-]{1,31}$`.
+    InvalidCategoryName,
+    /// A grant principal is not a non-empty `reserved` principal id without `|`.
+    InvalidPrincipal,
     /// Identity preservation would attach an existing account label to incoming material
     /// whose provider claim names a different account.
     AccountIdentityMismatch {
@@ -443,6 +548,9 @@ impl std::fmt::Display for StoreOpError {
             StoreOpError::CasMismatch => {
                 f.write_str("compare-and-set failed: expected payload hash did not match")
             }
+            StoreOpError::InvalidCredentialId => f.write_str("invalid_credential_id"),
+            StoreOpError::InvalidCategoryName => f.write_str("invalid_category_name"),
+            StoreOpError::InvalidPrincipal => f.write_str("invalid_principal"),
             StoreOpError::AccountIdentityMismatch {
                 credential_id,
                 retained_account_id,
@@ -479,6 +587,23 @@ impl std::fmt::Display for StoreOpError {
 
 impl std::error::Error for StoreOpError {}
 
+impl StoreOpError {
+    /// Stable refusal code for taxonomy inputs that must never be retried unchanged.
+    pub fn wire_code(&self) -> Option<&'static str> {
+        match self {
+            StoreOpError::InvalidCredentialId => Some("invalid_credential_id"),
+            StoreOpError::InvalidCategoryName => Some("invalid_category_name"),
+            StoreOpError::InvalidPrincipal => Some("invalid_principal"),
+            _ => None,
+        }
+    }
+
+    /// Stable class paired with [`Self::wire_code`].
+    pub fn wire_class(&self) -> Option<&'static str> {
+        self.wire_code().map(|_| "permanent")
+    }
+}
+
 impl From<StoreError> for StoreOpError {
     fn from(e: StoreError) -> Self {
         match e {
@@ -492,6 +617,13 @@ impl From<StoreError> for StoreOpError {
             other => StoreOpError::Store(other.to_string()),
         }
     }
+}
+
+pub(crate) fn validate_deposit_credential_id(credential_id: &str) -> Result<(), StoreOpError> {
+    if credential_id.starts_with("category:") || credential_id.contains('|') {
+        return Err(StoreOpError::InvalidCredentialId);
+    }
+    Ok(())
 }
 
 fn normalize_record_identity(mut record: VaultRecord) -> VaultRecord {
@@ -724,6 +856,39 @@ impl EncryptedStore {
     /// with `mode=ro` and never migrate, so an operator can still inspect a vault that
     /// refuses to serve. Diagnosis stays available exactly when it is needed.
     pub fn migrate(store: &SqliteStore) -> Result<(), StoreError> {
+        // Migration 9 reserves lowercase `category:` byte-for-byte. SQLite LIKE is
+        // case-insensitive for ASCII by default, so the predicate must stay in Rust:
+        // `Category:example` is valid and must not be named by this guard.
+        let offending_ids = store.with_conn(|conn| {
+            let has_credentials: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'credentials')",
+                [],
+                |row| row.get(0),
+            )?;
+            let already_migrated: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'credential_categories')",
+                [],
+                |row| row.get(0),
+            )?;
+            if !has_credentials || already_migrated {
+                return Ok(Vec::new());
+            }
+            let mut stmt = conn.prepare("SELECT credential_id FROM credentials ORDER BY credential_id")?;
+            let ids = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            ids.filter_map(|id| match id {
+                Ok(id) if id.starts_with("category:") => Some(Ok(id)),
+                Ok(_) => None,
+                Err(error) => Some(Err(error)),
+            })
+            .collect::<rusqlite::Result<Vec<_>>>()
+        })?;
+        if !offending_ids.is_empty() {
+            return Err(StoreError::Backend(format!(
+                "migration 9 refused reserved credential ids: {}",
+                offending_ids.join(", ")
+            )));
+        }
+
         let outcome = store.migrate(SCHEMA_NAMESPACE, MIGRATIONS)?;
         if outcome.store_ahead() {
             return Err(StoreError::Backend(format!(
@@ -757,103 +922,85 @@ impl EncryptedStore {
         self.store.with_conn(f).map_err(StoreOpError::from)
     }
 
-    /// Read non-secret metadata for an id WITHOUT decrypting (plaintext columns).
+    /// Read non-secret metadata for an id WITHOUT decrypting.
     pub fn meta(&self, credential_id: &str) -> Result<RecordMeta, StoreOpError> {
         self.store
-            .with_conn(|c| {
-                c.query_row(
-                    "SELECT record_version, key_id, state, stale_pending FROM credentials WHERE credential_id = ?1",
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT record_version, key_id, state, stale_pending, \
+                     COALESCE((SELECT group_concat(category, ',') FROM (\
+                         SELECT category FROM credential_categories WHERE credential_id = ?1 ORDER BY category\
+                     )), '') \
+                     FROM credentials WHERE credential_id = ?1",
                     rusqlite::params![credential_id],
                     |row| {
-                        let version: i64 = row.get(0)?;
-                        let key_id_hex: String = row.get(1)?;
-                        let state: String = row.get(2)?;
-                        let stale_pending: i64 = row.get(3)?;
-                        Ok((version, key_id_hex, state, stale_pending))
+                        let categories: String = row.get(4)?;
+                        Ok(RecordMeta {
+                            record_version: row.get::<_, i64>(0)? as u64,
+                            key_id_hex: row.get(1)?,
+                            state: RecordState::from_str(&row.get::<_, String>(2)?),
+                            stale_pending: row.get::<_, i64>(3)? != 0,
+                            categories: split_categories(categories),
+                        })
                     },
                 )
-                .map(Some)
-                .or_else(|e| match e {
-                    rusqlite::Error::QueryReturnedNoRows => Ok(None),
-                    other => Err(other),
-                })
+                .optional()
             })
             .map_err(StoreOpError::from)?
-            .map(|(version, key_id_hex, state, stale_pending)| RecordMeta {
-                record_version: version as u64,
-                key_id_hex,
-                state: RecordState::from_str(&state),
-                stale_pending: stale_pending != 0,
-            })
             .ok_or(StoreOpError::NotFound)
     }
 
-    /// List every record's id + non-secret metadata, WITHOUT decrypting. Used by
-    /// rotation scans and status.
+    /// List every record's id and non-secret metadata without decrypting.
     pub fn list_meta(&self) -> Result<Vec<(String, RecordMeta)>, StoreOpError> {
         self.store
-            .with_conn(|c| {
-                let mut stmt = c.prepare(
-                    "SELECT credential_id, record_version, key_id, state, stale_pending FROM credentials \
-                     ORDER BY credential_id",
-                )?;
-                let rows = stmt.query_map([], |row| {
-                    let id: String = row.get(0)?;
-                    let version: i64 = row.get(1)?;
-                    let key_id_hex: String = row.get(2)?;
-                    let state: String = row.get(3)?;
-                    let stale_pending: i64 = row.get(4)?;
-                    Ok((
-                        id,
-                        RecordMeta {
-                            record_version: version as u64,
-                            key_id_hex,
-                            state: RecordState::from_str(&state),
-                            stale_pending: stale_pending != 0,
-                        },
-                    ))
-                })?;
-                rows.collect::<rusqlite::Result<Vec<_>>>()
-            })
+            .with_conn(list_meta_from_conn)
             .map_err(StoreOpError::from)
     }
 
     // ---- principal-scoped operation grants ------------------------------
 
     /// Create one reserved-principal operation grant and append its audit transition
-    /// in the same fenced transaction. A duplicate names an existing authority and is
-    /// refused rather than silently accepted as a fresh reviewable change.
+    /// in one transaction so neither change can commit without the other.
     pub fn create_read_grant_audited(
         &self,
         principal_kind: &str,
         principal_id: &str,
-        credential_prefix: &str,
+        selector_kind: SelectorKind,
+        selector: &str,
         operation: GrantOperation,
         ctx: AuditCtx<'_>,
     ) -> Result<(), StoreOpError> {
-        if principal_kind != "reserved" || principal_id.is_empty() || credential_prefix.is_empty() {
-            return Err(StoreOpError::Encode(
-                "grants require a reserved principal and non-empty prefix".into(),
-            ));
+        if principal_kind != "reserved" || principal_id.is_empty() || principal_id.contains('|') {
+            return Err(StoreOpError::InvalidPrincipal);
+        }
+        if selector.is_empty() {
+            return Err(StoreOpError::InvalidCategoryName);
+        }
+        if selector_kind == SelectorKind::Category {
+            let Some(name) = selector.strip_prefix("category:") else {
+                return Err(StoreOpError::InvalidCategoryName);
+            };
+            if !crate::catalog::valid_category_name(name) {
+                return Err(StoreOpError::InvalidCategoryName);
+            }
         }
         let now = now_ms();
         let audit_key = self.audit_key.clone();
-        // The HMAC transcript has no grant-specific columns (adding one would break
-        // verification of historical entries), so preserve the full authority target
-        // in its existing non-secret target field.
         let audit_target = format!(
-            "grant:{}:{principal_kind}:{principal_id}:{credential_prefix}",
-            operation.as_str()
+            "grant:{}:{principal_kind}:{principal_id}:{}|{selector}",
+            operation.as_str(),
+            selector_kind.as_str()
         );
         let changed = self.fenced_write(|tx| {
             let changed = tx.execute(
                 "INSERT INTO read_grants \
-                 (principal_kind, principal_id, credential_prefix, operation, created_at_ms) \
-                 VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT DO NOTHING",
+                 (principal_kind, principal_id, selector_kind, credential_prefix, operation, created_at_ms) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT DO NOTHING",
                 rusqlite::params![
                     principal_kind,
                     principal_id,
-                    credential_prefix,
+                    selector_kind.as_str(),
+                    selector,
                     operation.as_str(),
                     now
                 ],
@@ -879,38 +1026,38 @@ impl EncryptedStore {
         Ok(())
     }
 
-    /// Revoke one reserved-principal operation grant and append the revocation in the
-    /// same fenced transaction. An absent row is not a transition, so it is refused rather
-    /// than producing an audit entry that claims access changed when it did not.
+    /// Revoke exactly one selector-kind-specific grant and audit the transition.
     pub fn revoke_read_grant_audited(
         &self,
         principal_kind: &str,
         principal_id: &str,
-        credential_prefix: &str,
+        selector_kind: SelectorKind,
+        selector: &str,
         operation: GrantOperation,
         ctx: AuditCtx<'_>,
     ) -> Result<(), StoreOpError> {
-        if principal_kind != "reserved" || principal_id.is_empty() || credential_prefix.is_empty() {
-            return Err(StoreOpError::Encode(
-                "grants require a reserved principal and non-empty prefix".into(),
-            ));
+        if principal_kind != "reserved" || principal_id.is_empty() || principal_id.contains('|') {
+            return Err(StoreOpError::InvalidPrincipal);
+        }
+        if selector.is_empty() {
+            return Err(StoreOpError::InvalidCategoryName);
         }
         let audit_key = self.audit_key.clone();
-        // See creation: the historical HMAC transcript cannot gain grant columns, so
-        // this stable target string makes a later revocation attributable.
         let audit_target = format!(
-            "grant:{}:{principal_kind}:{principal_id}:{credential_prefix}",
-            operation.as_str()
+            "grant:{}:{principal_kind}:{principal_id}:{}|{selector}",
+            operation.as_str(),
+            selector_kind.as_str()
         );
         let changed = self.fenced_write(|tx| {
             let changed = tx.execute(
                 "DELETE FROM read_grants \
-                 WHERE principal_kind = ?1 AND principal_id = ?2 \
-                   AND credential_prefix = ?3 AND operation = ?4",
+                  WHERE principal_kind = ?1 AND principal_id = ?2 \
+                    AND selector_kind = ?3 AND credential_prefix = ?4 AND operation = ?5",
                 rusqlite::params![
                     principal_kind,
                     principal_id,
-                    credential_prefix,
+                    selector_kind.as_str(),
+                    selector,
                     operation.as_str()
                 ],
             )?;
@@ -935,33 +1082,8 @@ impl EncryptedStore {
         Ok(())
     }
 
-    /// Whether an operation-specific literal credential-id prefix grant covers this
-    /// request. Prefixes are compared in Rust rather than SQL `LIKE`, whose `%` and `_`
-    /// metacharacters would silently widen a grant stored as ordinary text.
-    ///
-    /// NO GRANT IS SELECTED, AND THAT IS LOAD-BEARING. This folds a boolean OR across
-    /// every covering prefix, so two grants that both cover an id (`github_app:` and
-    /// `github_app:qta-`) are not a conflict to resolve — either suffices. `operation`
-    /// is in the WHERE clause rather than checked afterwards, so a `read` grant is not
-    /// even a candidate for a `sign` request.
-    ///
-    /// *** THE IMMUNITY THAT BUYS IS A PROPERTY OF THE DATA MODEL, NOT OF THIS CODE. ***
-    /// A grant is exactly `(principal_kind, principal_id, credential_prefix,
-    /// operation)` with NO per-grant state — no expiry, no rate cap, no handle binding.
-    /// The fold is safe because there is nothing left to evaluate once a cover is found.
-    ///
-    /// So: A NEW PER-GRANT DIMENSION GOES IN THE WHERE CLAUSE OR INSIDE THE FOLD, NEVER
-    /// AFTER A SELECTION. Add an expiry and implement it as "find the covering grant,
-    /// then check its expiry" and you get a live defect a sibling module measured
-    /// (2026-09-03): with two valid grants the lower id always wins, so every action
-    /// under the other one is refused with a remedy the caller already followed — mint,
-    /// refuse, mint, refuse, while a satisfying grant sits beside the chosen one. If a
-    /// dimension cannot be expressed in either place, resolution must consider all
-    /// covering grants and succeed if ANY satisfies.
-    ///
-    /// The single-use replace authorization sketched on issue #32 would carry per-grant
-    /// state (a nonce and a spend flag) and belongs in its own table for exactly this
-    /// reason, resolved by its own rule rather than bolted onto this one.
+    /// Keep the boolean compatibility API by delegating to `evaluate_scoped_coverage`
+    /// and returning only whether the requested operation is covered.
     pub fn read_grant_covers(
         &self,
         principal_kind: &str,
@@ -969,51 +1091,346 @@ impl EncryptedStore {
         credential_id: &str,
         operation: GrantOperation,
     ) -> Result<bool, StoreOpError> {
+        Ok(self
+            .evaluate_scoped_coverage(principal_kind, principal_id, credential_id, operation)?
+            .covered)
+    }
+
+    /// Evaluate all facts used by scoped authorization. Category rows are read only
+    /// when a prefix did not cover and this operation has a category selector.
+    pub fn evaluate_scoped_coverage(
+        &self,
+        principal_kind: &str,
+        principal_id: &str,
+        credential_id: &str,
+        operation: GrantOperation,
+    ) -> Result<ScopedCoverage, StoreOpError> {
         self.store
-            .with_conn(|c| {
-                let mut stmt = c.prepare(
-                    "SELECT credential_prefix FROM read_grants \
+            .with_conn(|conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT selector_kind, credential_prefix FROM read_grants \
                      WHERE principal_kind = ?1 AND principal_id = ?2 AND operation = ?3",
                 )?;
-                let mut prefixes = stmt.query_map(
+                let rows = stmt.query_map(
                     rusqlite::params![principal_kind, principal_id, operation.as_str()],
-                    |row| row.get::<_, String>(0),
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
                 )?;
-                prefixes.try_fold(false, |covered, prefix| {
-                    Ok(covered || credential_id.starts_with(&prefix?))
+                let grants = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+                let caller_active_grants = grants.len() as u32;
+                let holds_category_selector = grants.iter().any(|(kind, _)| kind == "category");
+                let mut covered = grants
+                    .iter()
+                    .any(|(kind, selector)| kind == "prefix" && credential_id.starts_with(selector));
+                let id_exists = conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM credentials WHERE credential_id = ?1)",
+                    rusqlite::params![credential_id],
+                    |row| row.get::<_, bool>(0),
+                )?;
+
+                let id_category_count = if !covered && holds_category_selector {
+                    let mut categories_stmt = conn.prepare(
+                        "SELECT category FROM credential_categories WHERE credential_id = ?1 ORDER BY category",
+                    )?;
+                    let categories = categories_stmt
+                        .query_map(rusqlite::params![credential_id], |row| row.get::<_, String>(0))?
+                        .collect::<rusqlite::Result<Vec<_>>>()?;
+                    covered = grants.iter().any(|(kind, selector)| {
+                        kind == "category"
+                            && categories
+                                .iter()
+                                .any(|category| selector == &format!("category:{category}"))
+                    });
+                    Some(categories.len() as u32)
+                } else {
+                    None
+                };
+
+                Ok(ScopedCoverage {
+                    covered,
+                    caller_active_grants,
+                    holds_category_selector,
+                    id_exists,
+                    id_category_count,
                 })
             })
             .map_err(StoreOpError::from)
     }
 
-    /// List every grant in deterministic principal/prefix/operation order for admin status.
+    /// List every grant in deterministic principal/kind/selector/operation order.
     pub fn list_read_grants(&self) -> Result<Vec<ReadGrant>, StoreOpError> {
         self.store
-            .with_conn(|c| {
-                let mut stmt = c.prepare(
-                    "SELECT principal_kind, principal_id, credential_prefix, operation, created_at_ms \
-                     FROM read_grants \
-                     ORDER BY principal_kind, principal_id, credential_prefix, operation",
+            .with_conn(|conn| read_grants_from_conn(conn, None, None))
+            .map_err(StoreOpError::from)
+    }
+
+    /// Enumerate one principal's visible rows and grants from one read snapshot.
+    pub fn list_scoped_snapshot(
+        &self,
+        principal_kind: &str,
+        principal_id: &str,
+    ) -> Result<ScopedListSnapshot, StoreOpError> {
+        self.list_scoped_snapshot_inner(principal_kind, principal_id, || Ok(()))
+    }
+
+    #[cfg(test)]
+    fn list_scoped_snapshot_with_hook<F>(
+        &self,
+        principal_kind: &str,
+        principal_id: &str,
+        after_grants: F,
+    ) -> Result<ScopedListSnapshot, StoreOpError>
+    where
+        F: FnOnce() -> rusqlite::Result<()>,
+    {
+        self.list_scoped_snapshot_inner(principal_kind, principal_id, after_grants)
+    }
+
+    fn list_scoped_snapshot_inner<F>(
+        &self,
+        principal_kind: &str,
+        principal_id: &str,
+        after_grants: F,
+    ) -> Result<ScopedListSnapshot, StoreOpError>
+    where
+        F: FnOnce() -> rusqlite::Result<()>,
+    {
+        self.store
+            .with_conn(|conn| {
+                let tx = conn.unchecked_transaction()?;
+                let grants = read_grants_from_conn(&tx, Some(principal_kind), Some(principal_id))?;
+                after_grants()?;
+                let mut stmt = tx.prepare(
+                    "SELECT credential_id, record_version, state, envelope, \
+                     COALESCE((SELECT group_concat(category, ',') FROM (\
+                         SELECT category FROM credential_categories WHERE credential_id = credentials.credential_id ORDER BY category\
+                     )), '') FROM credentials ORDER BY credential_id",
                 )?;
-                let rows = stmt.query_map([], |row| {
-                    let operation = row.get::<_, String>(3)?.parse().map_err(|message: String| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            3,
-                            rusqlite::types::Type::Text,
-                            Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, message)),
+                let candidates = stmt
+                    .query_map([], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, i64>(1)? as u64,
+                            RecordState::from_str(&row.get::<_, String>(2)?),
+                            row.get::<_, Vec<u8>>(3)?,
+                            split_categories(row.get::<_, String>(4)?),
+                        ))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                drop(stmt);
+
+                let mut rows = Vec::new();
+                for (id, record_version, state, envelope_bytes, categories) in candidates {
+                    let operations: BTreeSet<GrantOperation> = grants
+                        .iter()
+                        .filter(|grant| match grant.selector_kind {
+                            SelectorKind::Prefix => id.starts_with(&grant.credential_prefix),
+                            SelectorKind::Category => categories.iter().any(|category| {
+                                grant.credential_prefix == format!("category:{category}")
+                            }),
+                        })
+                        .map(|grant| grant.operation)
+                        .collect();
+                    if operations.is_empty() {
+                        continue;
+                    }
+                    let identity = if operations.contains(&GrantOperation::Read) {
+                        let plaintext = envelope::open(
+                            &self.key,
+                            &envelope_bytes,
+                            &RecordBinding {
+                                credential_id: &id,
+                                record_version,
+                            },
                         )
-                    })?;
-                    Ok(ReadGrant {
-                        principal_kind: row.get(0)?,
-                        principal_id: row.get(1)?,
-                        credential_prefix: row.get(2)?,
-                        operation,
-                        created_at_ms: row.get(4)?,
-                    })
-                })?;
-                rows.collect::<rusqlite::Result<Vec<_>>>()
+                        .map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                3,
+                                rusqlite::types::Type::Blob,
+                                Box::new(error),
+                            )
+                        })?;
+                        Some(
+                            VaultRecord::decode(&plaintext)
+                                .map_err(|error| {
+                                    rusqlite::Error::FromSqlConversionFailure(
+                                        3,
+                                        rusqlite::types::Type::Blob,
+                                        Box::new(std::io::Error::new(
+                                            std::io::ErrorKind::InvalidData,
+                                            error.to_string(),
+                                        )),
+                                    )
+                                })?
+                                .identity,
+                        )
+                    } else {
+                        None
+                    };
+                    rows.push(ScopedListRow {
+                        id,
+                        categories,
+                        state,
+                        record_version,
+                        operations: operations.into_iter().collect(),
+                        identity,
+                    });
+                }
+                tx.commit()?;
+                Ok(ScopedListSnapshot { rows, grants })
             })
             .map_err(StoreOpError::from)
+    }
+
+    /// Return one credential's sorted category set.
+    pub fn categories(&self, credential_id: &str) -> Result<Vec<String>, StoreOpError> {
+        self.store
+            .with_conn(|conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT category FROM credential_categories WHERE credential_id = ?1 ORDER BY category",
+                )?;
+                let categories = stmt
+                    .query_map(rusqlite::params![credential_id], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(categories)
+            })
+            .map_err(StoreOpError::from)
+    }
+
+    /// Apply a normalized category-set transition and append exactly one audit row.
+    /// Returns false for a successful no-op.
+    pub fn set_categories_audited(
+        &self,
+        credential_id: &str,
+        mode: SetCategoryMode,
+        categories: &[String],
+        ctx: AuditCtx<'_>,
+    ) -> Result<bool, StoreOpError> {
+        if credential_id.contains('|') {
+            return Err(StoreOpError::InvalidCredentialId);
+        }
+        let mut requested = BTreeSet::new();
+        for category in categories {
+            if !crate::catalog::valid_category_name(category) {
+                return Err(StoreOpError::InvalidCategoryName);
+            }
+            requested.insert(category.clone());
+        }
+        let audit_key = self.audit_key.clone();
+        let outcome = self.fenced_write(|tx| {
+            let exists = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM credentials WHERE credential_id = ?1)",
+                rusqlite::params![credential_id],
+                |row| row.get::<_, bool>(0),
+            )?;
+            if !exists {
+                return Ok(None);
+            }
+            let mut stmt = tx.prepare(
+                "SELECT category FROM credential_categories WHERE credential_id = ?1 ORDER BY category",
+            )?;
+            let current = stmt
+                .query_map(rusqlite::params![credential_id], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<BTreeSet<_>>>()?;
+            drop(stmt);
+            let resulting = match mode {
+                SetCategoryMode::Set => requested.clone(),
+                SetCategoryMode::Add => current.union(&requested).cloned().collect(),
+                SetCategoryMode::Remove => current.difference(&requested).cloned().collect(),
+            };
+            if resulting == current {
+                return Ok(Some(false));
+            }
+            tx.execute(
+                "DELETE FROM credential_categories WHERE credential_id = ?1",
+                rusqlite::params![credential_id],
+            )?;
+            for category in &resulting {
+                tx.execute(
+                    "INSERT INTO credential_categories (credential_id, category) VALUES (?1, ?2)",
+                    rusqlite::params![credential_id, category],
+                )?;
+            }
+            append_audit_tx(
+                tx,
+                &audit_key,
+                &AuditRecord {
+                    op: ctx.op,
+                    credential_id: Some(format!(
+                        "category:{credential_id}|{}",
+                        resulting.iter().cloned().collect::<Vec<_>>().join(",")
+                    )),
+                    payload_hash: None,
+                    actor: ctx.actor.to_string(),
+                    alarm: ctx.alarm,
+                },
+            )?;
+            Ok(Some(true))
+        })?;
+        outcome.ok_or(StoreOpError::NotFound)
+    }
+
+    /// Refill empty category sets, or replace non-empty sets when forced. Enumeration,
+    /// category writes, and all audit appends share one fenced transaction.
+    pub fn reclassify_audited(
+        &self,
+        force: bool,
+        ctx: AuditCtx<'_>,
+    ) -> Result<usize, StoreOpError> {
+        let audit_key = self.audit_key.clone();
+        self.fenced_write(|tx| {
+            let mut ids_stmt = tx.prepare("SELECT credential_id FROM credentials ORDER BY credential_id")?;
+            let ids = ids_stmt
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            drop(ids_stmt);
+            let mut changed = 0usize;
+            for credential_id in ids {
+                let defaults: BTreeSet<String> = crate::catalog::category_defaults(&credential_id)
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect();
+                if defaults.is_empty() || credential_id.contains('|') {
+                    continue;
+                }
+                let mut categories_stmt = tx.prepare(
+                    "SELECT category FROM credential_categories WHERE credential_id = ?1 ORDER BY category",
+                )?;
+                let current = categories_stmt
+                    .query_map(rusqlite::params![&credential_id], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<BTreeSet<_>>>()?;
+                drop(categories_stmt);
+                if (!force && !current.is_empty()) || current == defaults {
+                    continue;
+                }
+                tx.execute(
+                    "DELETE FROM credential_categories WHERE credential_id = ?1",
+                    rusqlite::params![&credential_id],
+                )?;
+                for category in &defaults {
+                    tx.execute(
+                        "INSERT INTO credential_categories (credential_id, category) VALUES (?1, ?2)",
+                        rusqlite::params![&credential_id, category],
+                    )?;
+                }
+                append_audit_tx(
+                    tx,
+                    &audit_key,
+                    &AuditRecord {
+                        op: ctx.op,
+                        credential_id: Some(format!(
+                            "category:{credential_id}|{}",
+                            defaults.iter().cloned().collect::<Vec<_>>().join(",")
+                        )),
+                        payload_hash: None,
+                        actor: ctx.actor.to_string(),
+                        alarm: ctx.alarm,
+                    },
+                )?;
+                changed += 1;
+            }
+            Ok(changed)
+        })
+        .map_err(StoreOpError::from)
     }
 
     /// Create a record (CREATE-ONLY) with an explicit audit context: fails
@@ -1028,6 +1445,7 @@ impl EncryptedStore {
         record: &VaultRecord,
         ctx: AuditCtx<'_>,
     ) -> Result<(), StoreOpError> {
+        validate_deposit_credential_id(credential_id)?;
         let mut record = normalize_record_identity(record.clone());
         if let Some(derived_account_id) = derived_account_id(&record) {
             match record.identity.account_id.as_deref() {
@@ -1087,6 +1505,12 @@ impl EncryptedStore {
             // reachable writer goes through. Three visible copies under three contracts
             // beat one helper hiding which contract it is serving.
             if n > 0 {
+                for category in crate::catalog::category_defaults(credential_id) {
+                    tx.execute(
+                        "INSERT INTO credential_categories (credential_id, category) VALUES (?1, ?2)",
+                        rusqlite::params![credential_id, category],
+                    )?;
+                }
                 clear_intent_tx(tx, credential_id)?;
                 append_audit_tx(
                     tx,
@@ -1976,6 +2400,12 @@ impl EncryptedStore {
                 // The mint/revoke history stays in the audit chain.
                 handles = tx.execute(
                     "DELETE FROM handles WHERE credential_id = ?1",
+                    rusqlite::params![credential_id],
+                )?;
+                // Do not depend on connection-level foreign-key enforcement: category
+                // rows must not survive an id that can later be deposited again.
+                tx.execute(
+                    "DELETE FROM credential_categories WHERE credential_id = ?1",
                     rusqlite::params![credential_id],
                 )?;
                 // Diagnostic events go WITH the credential, and this is the one
@@ -3093,6 +3523,40 @@ pub fn mint_handle() -> Result<MintedHandle, getrandom::Error> {
     Ok(MintedHandle { raw: value, hash })
 }
 
+fn split_categories(categories: String) -> Vec<String> {
+    if categories.is_empty() {
+        Vec::new()
+    } else {
+        categories.split(',').map(str::to_string).collect()
+    }
+}
+
+fn list_meta_from_conn(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<(String, RecordMeta)>> {
+    let mut stmt = conn.prepare(
+        "SELECT credential_id, record_version, key_id, state, stale_pending, \
+         COALESCE((SELECT group_concat(category, ',') FROM (\
+             SELECT category FROM credential_categories WHERE credential_id = credentials.credential_id ORDER BY category\
+         )), '') \
+         FROM credentials ORDER BY credential_id",
+    )?;
+    let rows = stmt
+        .query_map([], |row| {
+            let categories: String = row.get(5)?;
+            Ok((
+                row.get(0)?,
+                RecordMeta {
+                    record_version: row.get::<_, i64>(1)? as u64,
+                    key_id_hex: row.get(2)?,
+                    state: RecordState::from_str(&row.get::<_, String>(3)?),
+                    stale_pending: row.get::<_, i64>(4)? != 0,
+                    categories: split_categories(categories),
+                },
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
 /// List credential metadata from a store file WITHOUT a lease or a master key.
 pub fn list_meta_read_only(
     store_path: &std::path::Path,
@@ -3103,37 +3567,73 @@ pub fn list_meta_read_only(
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
     )
     .map_err(map)?;
-
-    let mut stmt = conn
-        .prepare(
-            "SELECT credential_id, record_version, key_id, state, stale_pending FROM credentials \
-             ORDER BY credential_id",
-        )
-        .map_err(|e| match e {
-            rusqlite::Error::SqliteFailure(_, Some(ref m)) if m.contains("no such table") => {
+    list_meta_from_conn(&conn)
+        .map_err(map)
+        .map_err(|error| match error {
+            StoreOpError::Store(message) if message.contains("no such table: credentials") => {
                 StoreOpError::NotFound
             }
-            other => map(other),
-        })?;
-    let rows = stmt
-        .query_map([], |row| {
-            let id: String = row.get(0)?;
-            let version: i64 = row.get(1)?;
-            let key_id_hex: String = row.get(2)?;
-            let state: String = row.get(3)?;
-            let stale_pending: i64 = row.get(4)?;
-            Ok((
-                id,
-                RecordMeta {
-                    record_version: version as u64,
-                    key_id_hex,
-                    state: RecordState::from_str(&state),
-                    stale_pending: stale_pending != 0,
-                },
-            ))
+            other => other,
         })
-        .map_err(map)?;
-    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(map)
+}
+
+fn read_grants_from_conn(
+    conn: &rusqlite::Connection,
+    principal_kind: Option<&str>,
+    principal_id: Option<&str>,
+) -> rusqlite::Result<Vec<ReadGrant>> {
+    let sql = if principal_kind.is_some() && principal_id.is_some() {
+        "SELECT principal_kind, principal_id, selector_kind, credential_prefix, operation, created_at_ms \
+         FROM read_grants WHERE principal_kind = ?1 AND principal_id = ?2 \
+         ORDER BY selector_kind, credential_prefix, operation"
+    } else {
+        "SELECT principal_kind, principal_id, selector_kind, credential_prefix, operation, created_at_ms \
+         FROM read_grants ORDER BY principal_kind, principal_id, selector_kind, credential_prefix, operation"
+    };
+    let mut stmt = conn.prepare(sql)?;
+    let parse = |row: &rusqlite::Row<'_>| {
+        let selector_kind = row
+            .get::<_, String>(2)?
+            .parse()
+            .map_err(|message: String| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    2,
+                    rusqlite::types::Type::Text,
+                    Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        message,
+                    )),
+                )
+            })?;
+        let operation = row
+            .get::<_, String>(4)?
+            .parse()
+            .map_err(|message: String| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    4,
+                    rusqlite::types::Type::Text,
+                    Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        message,
+                    )),
+                )
+            })?;
+        Ok(ReadGrant {
+            principal_kind: row.get(0)?,
+            principal_id: row.get(1)?,
+            selector_kind,
+            credential_prefix: row.get(3)?,
+            operation,
+            created_at_ms: row.get(5)?,
+        })
+    };
+    if let (Some(kind), Some(id)) = (principal_kind, principal_id) {
+        stmt.query_map(rusqlite::params![kind, id], parse)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+    } else {
+        stmt.query_map([], parse)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+    }
 }
 
 /// List operation grants from a store file WITHOUT a lease or a master key.
@@ -3146,44 +3646,14 @@ pub fn list_read_grants_read_only(
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
     )
     .map_err(map)?;
-
-    let mut stmt = conn
-        .prepare(
-            "SELECT principal_kind, principal_id, credential_prefix, operation, created_at_ms \
-             FROM read_grants \
-             ORDER BY principal_kind, principal_id, credential_prefix, operation",
-        )
-        .map_err(|e| match e {
-            rusqlite::Error::SqliteFailure(_, Some(ref m)) if m.contains("no such table") => {
+    read_grants_from_conn(&conn, None, None)
+        .map_err(map)
+        .map_err(|error| match error {
+            StoreOpError::Store(message) if message.contains("no such table: read_grants") => {
                 StoreOpError::NotFound
             }
-            other => map(other),
-        })?;
-    let rows = stmt
-        .query_map([], |row| {
-            let operation = row
-                .get::<_, String>(3)?
-                .parse()
-                .map_err(|message: String| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        3,
-                        rusqlite::types::Type::Text,
-                        Box::new(std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            message,
-                        )),
-                    )
-                })?;
-            Ok(ReadGrant {
-                principal_kind: row.get(0)?,
-                principal_id: row.get(1)?,
-                credential_prefix: row.get(2)?,
-                operation,
-                created_at_ms: row.get(4)?,
-            })
+            other => other,
         })
-        .map_err(map)?;
-    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(map)
 }
 
 /// Count open refresh intents from a store file WITHOUT a lease or a master key.
@@ -3660,6 +4130,7 @@ pub struct AuthEvent {
 pub enum ScopedReadRefusal {
     NoGrant,
     NotFound,
+    Uncategorized,
     WrongKind,
     StoreError,
 }
@@ -3669,6 +4140,7 @@ impl ScopedReadRefusal {
         match self {
             ScopedReadRefusal::NoGrant => "no_grant",
             ScopedReadRefusal::NotFound => "not_found",
+            ScopedReadRefusal::Uncategorized => "uncategorized",
             ScopedReadRefusal::WrongKind => "wrong_kind",
             ScopedReadRefusal::StoreError => "store_error",
         }
@@ -4188,6 +4660,7 @@ mod tests {
                 .create_read_grant_audited(
                     "reserved",
                     "agent",
+                    SelectorKind::Prefix,
                     prefix,
                     op,
                     AuditCtx::admin(AuditOp::GrantCreate),
@@ -7240,6 +7713,7 @@ mod tests {
             .create_read_grant_audited(
                 "reserved",
                 "prefrontal-core",
+                SelectorKind::Prefix,
                 "github%_app:",
                 GrantOperation::Read,
                 AuditCtx::admin(AuditOp::GrantCreate),
@@ -7282,7 +7756,7 @@ mod tests {
     fn the_newest_migration_version_is_pinned_because_the_manifest_declares_it() {
         assert_eq!(
             newest_migration_version(),
-            8,
+            9,
             "the newest migration changed. This value is DECLARED in the module manifest \
              as store_schema_version, so a supervisor comparing declared-against-actual \
              sees it. Update the literal, and note the manifest consequence."
@@ -7300,5 +7774,779 @@ mod tests {
                 m.version
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod taxonomy_tests {
+    use super::*;
+    use crate::record::CredentialKind;
+    use crate::test_support::TestTempDir;
+    use cortexkit_store::{open_sqlite, Isolation, StorageBackend, StorageDescriptor};
+
+    fn sqlite(label: &str, seed: u8) -> (TestTempDir, SqliteStore) {
+        let root = TestTempDir::new(format!("taxonomy-{label}-{}-{seed}", std::process::id()));
+        let descriptor = StorageDescriptor {
+            module_id: "claustrum".into(),
+            storage_namespace: format!("taxonomy-{label}"),
+            isolation: Isolation::Module,
+            backend: StorageBackend::Sqlite {
+                path: root.join("store.db").to_string_lossy().into_owned(),
+            },
+        };
+        (root, open_sqlite(&descriptor).expect("open sqlite"))
+    }
+
+    pub(super) fn rig(label: &str, seed: u8) -> (TestTempDir, EncryptedStore) {
+        let (root, sqlite) = sqlite(label, seed);
+        EncryptedStore::migrate(&sqlite).expect("migrate");
+        let store = EncryptedStore::open(sqlite, MasterKey::from_bytes([seed; 32])).expect("store");
+        (root, store)
+    }
+
+    pub(super) fn api_record() -> VaultRecord {
+        VaultRecord::new_static(CredentialKind::ApiKey, "test", b"key".to_vec(), None)
+    }
+
+    #[test]
+    fn migration_n_guard_is_byte_exact_and_leaves_the_previous_schema_untouched() {
+        let (_root, sqlite) = sqlite("guard", 81);
+        sqlite
+            .migrate(SCHEMA_NAMESPACE, &MIGRATIONS[..8])
+            .expect("migrate through version 8");
+        sqlite
+            .with_conn(|conn| {
+                for id in ["Category:example", "category:example"] {
+                    conn.execute(
+                        "INSERT INTO credentials \
+                         (credential_id, record_version, key_id, state, envelope, updated_at_ms) \
+                         VALUES (?1, 1, '00', 'active', X'00', 0)",
+                        rusqlite::params![id],
+                    )?;
+                }
+                Ok(())
+            })
+            .expect("seed ids");
+
+        let error = EncryptedStore::migrate(&sqlite).expect_err("lowercase reservation must block");
+        let message = error.to_string();
+        assert!(message.contains("category:example"));
+        assert!(!message.contains("Category:example"));
+        sqlite
+            .with_conn(|conn| {
+                let version: i64 = conn.query_row(
+                    "SELECT MAX(version) FROM cortexkit_schema_version WHERE namespace = ?1",
+                    rusqlite::params![SCHEMA_NAMESPACE],
+                    |row| row.get(0),
+                )?;
+                assert_eq!(version, 8);
+                let table: bool = conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = 'credential_categories')",
+                    [],
+                    |row| row.get(0),
+                )?;
+                assert!(!table);
+                conn.execute(
+                    "DELETE FROM credentials WHERE credential_id = 'category:example'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .expect("inspect blocked store");
+        EncryptedStore::migrate(&sqlite).expect("mixed-case id survives migration");
+        sqlite
+            .with_conn(|conn| {
+                let survives: bool = conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM credentials WHERE credential_id = 'Category:example')",
+                    [],
+                    |row| row.get(0),
+                )?;
+                assert!(survives);
+                let category_rows: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM credential_categories",
+                    [],
+                    |row| row.get(0),
+                )?;
+                assert_eq!(category_rows, 0, "migration never classifies");
+                Ok(())
+            })
+            .expect("inspect migrated store");
+    }
+
+    #[test]
+    fn creation_defaults_and_set_category_transitions_have_exact_audit_targets() {
+        let (_root, store) = rig("set-category", 82);
+        store
+            .create_audited("apikey:zai", &api_record(), AuditCtx::admin(AuditOp::Put))
+            .expect("create classified credential");
+        assert_eq!(store.categories("apikey:zai").unwrap(), ["llm-provider"]);
+        let audit = store.read_audit(None).unwrap();
+        assert_eq!(audit.len(), 1, "creation has exactly its deposit audit row");
+        assert!(audit.iter().all(|entry| entry.op != "set_category"));
+
+        assert!(store
+            .set_categories_audited(
+                "apikey:zai",
+                SetCategoryMode::Set,
+                &[
+                    "monitoring".into(),
+                    "llm-provider".into(),
+                    "monitoring".into()
+                ],
+                AuditCtx::admin(AuditOp::SetCategory),
+            )
+            .unwrap());
+        assert_eq!(
+            store.categories("apikey:zai").unwrap(),
+            ["llm-provider", "monitoring"]
+        );
+        let audit = store.read_audit(None).unwrap();
+        assert_eq!(
+            audit.last().unwrap().credential_id.as_deref(),
+            Some("category:apikey:zai|llm-provider,monitoring")
+        );
+        assert!(store
+            .set_categories_audited(
+                "apikey:zai",
+                SetCategoryMode::Remove,
+                &["monitoring".into()],
+                AuditCtx::admin(AuditOp::SetCategory),
+            )
+            .unwrap());
+        assert_eq!(store.categories("apikey:zai").unwrap(), ["llm-provider"]);
+        assert!(store
+            .set_categories_audited(
+                "apikey:zai",
+                SetCategoryMode::Add,
+                &["monitoring".into()],
+                AuditCtx::admin(AuditOp::SetCategory),
+            )
+            .unwrap());
+        let count = store.read_audit(None).unwrap().len();
+        assert!(!store
+            .set_categories_audited(
+                "apikey:zai",
+                SetCategoryMode::Add,
+                &["monitoring".into()],
+                AuditCtx::admin(AuditOp::SetCategory),
+            )
+            .unwrap());
+        assert_eq!(
+            store.read_audit(None).unwrap().len(),
+            count,
+            "no-op is silent"
+        );
+
+        assert!(store
+            .set_categories_audited(
+                "apikey:zai",
+                SetCategoryMode::Set,
+                &[],
+                AuditCtx::admin(AuditOp::SetCategory),
+            )
+            .unwrap());
+        assert_eq!(
+            store
+                .read_audit(None)
+                .unwrap()
+                .last()
+                .unwrap()
+                .credential_id
+                .as_deref(),
+            Some("category:apikey:zai|")
+        );
+        for invalid in [
+            "a",
+            "Upper",
+            "under_score",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ] {
+            assert!(matches!(
+                store.set_categories_audited(
+                    "apikey:zai",
+                    SetCategoryMode::Add,
+                    &[invalid.into()],
+                    AuditCtx::admin(AuditOp::SetCategory),
+                ),
+                Err(StoreOpError::InvalidCategoryName)
+            ));
+        }
+        assert!(matches!(
+            store.set_categories_audited(
+                "missing",
+                SetCategoryMode::Set,
+                &["monitoring".into()],
+                AuditCtx::admin(AuditOp::SetCategory),
+            ),
+            Err(StoreOpError::NotFound)
+        ));
+        assert!(matches!(
+            store.set_categories_audited(
+                "legacy|id",
+                SetCategoryMode::Set,
+                &["monitoring".into()],
+                AuditCtx::admin(AuditOp::SetCategory),
+            ),
+            Err(StoreOpError::InvalidCredentialId)
+        ));
+    }
+
+    #[test]
+    fn reclassify_refills_empty_sets_is_idempotent_and_force_changes_only_differences() {
+        let (_root, store) = rig("reclassify", 83);
+        store
+            .create_audited(
+                "oauth:snowflake",
+                &api_record(),
+                AuditCtx::admin(AuditOp::Put),
+            )
+            .unwrap();
+        store
+            .set_categories_audited(
+                "oauth:snowflake",
+                SetCategoryMode::Set,
+                &[],
+                AuditCtx::admin(AuditOp::SetCategory),
+            )
+            .unwrap();
+        let before = store.read_audit(None).unwrap().len();
+        assert_eq!(
+            store
+                .reclassify_audited(false, AuditCtx::admin(AuditOp::SetCategory))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store.categories("oauth:snowflake").unwrap(),
+            ["data-warehouse"]
+        );
+        assert_eq!(store.read_audit(None).unwrap().len(), before + 1);
+        assert_eq!(
+            store
+                .reclassify_audited(false, AuditCtx::admin(AuditOp::SetCategory))
+                .unwrap(),
+            0
+        );
+        store
+            .set_categories_audited(
+                "oauth:snowflake",
+                SetCategoryMode::Set,
+                &["monitoring".into()],
+                AuditCtx::admin(AuditOp::SetCategory),
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .reclassify_audited(true, AuditCtx::admin(AuditOp::SetCategory))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store.categories("oauth:snowflake").unwrap(),
+            ["data-warehouse"]
+        );
+    }
+
+    #[test]
+    fn selector_kinds_coexist_revoke_independently_and_coverage_is_operation_scoped() {
+        let (_root, store) = rig("coverage", 84);
+        store
+            .create_audited(
+                "apikey:deepseek",
+                &api_record(),
+                AuditCtx::admin(AuditOp::Put),
+            )
+            .unwrap();
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "consumer",
+                SelectorKind::Prefix,
+                "category:llm-provider",
+                GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .unwrap();
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "consumer",
+                SelectorKind::Category,
+                "category:llm-provider",
+                GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .unwrap();
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "consumer",
+                SelectorKind::Category,
+                "category:llm-provider",
+                GrantOperation::Sign,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .unwrap();
+
+        let read = store
+            .evaluate_scoped_coverage(
+                "reserved",
+                "consumer",
+                "apikey:deepseek",
+                GrantOperation::Read,
+            )
+            .unwrap();
+        assert!(read.covered);
+        assert_eq!(read.caller_active_grants, 2);
+        assert!(read.holds_category_selector);
+        let unrelated = store
+            .evaluate_scoped_coverage("reserved", "consumer", "missing", GrantOperation::Read)
+            .unwrap();
+        assert!(!unrelated.covered);
+        assert!(!unrelated.id_exists);
+        assert_eq!(unrelated.id_category_count, Some(0));
+
+        let snapshot = store
+            .list_scoped_snapshot("reserved", "consumer")
+            .expect("one snapshot");
+        assert_eq!(snapshot.grants.len(), 3);
+        assert_eq!(snapshot.rows.len(), 1);
+        assert_eq!(
+            snapshot.rows[0].operations,
+            [GrantOperation::Read, GrantOperation::Sign]
+        );
+
+        store
+            .revoke_read_grant_audited(
+                "reserved",
+                "consumer",
+                SelectorKind::Category,
+                "category:llm-provider",
+                GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantRevoke),
+            )
+            .unwrap();
+        let remaining = store.list_read_grants().unwrap();
+        assert!(remaining.iter().any(|grant| {
+            grant.selector_kind == SelectorKind::Prefix
+                && grant.credential_prefix == "category:llm-provider"
+        }));
+        assert!(store
+            .read_grant_covers(
+                "reserved",
+                "consumer",
+                "apikey:deepseek",
+                GrantOperation::Sign,
+            )
+            .unwrap());
+        assert!(!store
+            .read_grant_covers(
+                "reserved",
+                "consumer",
+                "apikey:deepseek",
+                GrantOperation::Read,
+            )
+            .unwrap());
+        let targets: Vec<_> = store
+            .read_audit(None)
+            .unwrap()
+            .into_iter()
+            .filter_map(|entry| entry.credential_id)
+            .filter(|target| target.starts_with("grant:"))
+            .collect();
+        assert!(targets
+            .iter()
+            .all(|target| target.split_once('|').is_some()));
+        assert!(targets.iter().any(|target| target.contains(":prefix|")));
+        assert!(targets.iter().any(|target| target.contains(":category|")));
+    }
+
+    #[test]
+    fn remove_explicitly_deletes_categories_with_foreign_keys_disabled() {
+        let (_root, store) = rig("remove-category", 85);
+        store
+            .create_audited("apikey:zai", &api_record(), AuditCtx::admin(AuditOp::Put))
+            .unwrap();
+        store
+            .with_raw_conn(|conn| conn.pragma_update(None, "foreign_keys", "OFF"))
+            .unwrap();
+        store
+            .remove_audited("apikey:zai", AuditCtx::admin(AuditOp::Remove))
+            .unwrap();
+        assert!(store.categories("apikey:zai").unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod admin_apply_taxonomy_tests {
+    use super::*;
+    use crate::admin_ops::{apply, AdminAuditOp, AdminOpBody, StoreMode, ADMIN_OP_SCHEMA_V1};
+    use crate::store::taxonomy_tests::{api_record, rig};
+
+    #[test]
+    fn every_deposit_arm_refuses_reserved_or_separator_ids_without_writing() {
+        let (_root, store) = rig("invalid-deposit", 86);
+        for id in ["category:anything", "apikey:bad|id"] {
+            let operations = [
+                AdminOpBody::Store {
+                    v: ADMIN_OP_SCHEMA_V1,
+                    id: id.into(),
+                    record: Box::new(api_record()),
+                    audit_op: AdminAuditOp::Put,
+                    mode: StoreMode::Create,
+                },
+                AdminOpBody::Store {
+                    v: ADMIN_OP_SCHEMA_V1,
+                    id: id.into(),
+                    record: Box::new(api_record()),
+                    audit_op: AdminAuditOp::Put,
+                    mode: StoreMode::ReplaceUnconditional,
+                },
+                AdminOpBody::Store {
+                    v: ADMIN_OP_SCHEMA_V1,
+                    id: id.into(),
+                    record: Box::new(api_record()),
+                    audit_op: AdminAuditOp::Put,
+                    mode: StoreMode::ReplaceCas {
+                        expected_hash_hex: "00".repeat(32),
+                    },
+                },
+                AdminOpBody::StoreWithIdentityPolicy {
+                    v: ADMIN_OP_SCHEMA_V1,
+                    id: id.into(),
+                    record: Box::new(api_record()),
+                    audit_op: AdminAuditOp::Put,
+                    clear_identity: false,
+                },
+            ];
+            for operation in operations {
+                let error = apply(&store, operation, "test").expect_err("invalid id");
+                assert!(matches!(&error, StoreOpError::InvalidCredentialId));
+                assert_eq!(error.wire_code(), Some("invalid_credential_id"));
+                assert_eq!(error.wire_class(), Some("permanent"));
+            }
+            assert!(matches!(store.meta(id), Err(StoreOpError::NotFound)));
+        }
+        assert!(store.read_audit(None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn absent_replace_modes_remain_fail_closed_and_only_create_reaches_defaults() {
+        let (_root, store) = rig("replace-contract", 87);
+        for operation in [
+            AdminOpBody::Store {
+                v: ADMIN_OP_SCHEMA_V1,
+                id: "apikey:zai".into(),
+                record: Box::new(api_record()),
+                audit_op: AdminAuditOp::Put,
+                mode: StoreMode::ReplaceUnconditional,
+            },
+            AdminOpBody::StoreWithIdentityPolicy {
+                v: ADMIN_OP_SCHEMA_V1,
+                id: "apikey:zai".into(),
+                record: Box::new(api_record()),
+                audit_op: AdminAuditOp::Put,
+                clear_identity: false,
+            },
+        ] {
+            assert!(matches!(
+                apply(&store, operation, "test"),
+                Err(StoreOpError::NotFound)
+            ));
+        }
+        assert!(store.categories("apikey:zai").unwrap().is_empty());
+        apply(
+            &store,
+            AdminOpBody::Store {
+                v: ADMIN_OP_SCHEMA_V1,
+                id: "apikey:zai".into(),
+                record: Box::new(api_record()),
+                audit_op: AdminAuditOp::Put,
+                mode: StoreMode::Create,
+            },
+            "test",
+        )
+        .unwrap();
+        assert_eq!(store.categories("apikey:zai").unwrap(), ["llm-provider"]);
+        store
+            .set_categories_audited(
+                "apikey:zai",
+                SetCategoryMode::Set,
+                &[],
+                AuditCtx::admin(AuditOp::SetCategory),
+            )
+            .unwrap();
+        apply(
+            &store,
+            AdminOpBody::Store {
+                v: ADMIN_OP_SCHEMA_V1,
+                id: "apikey:zai".into(),
+                record: Box::new(api_record()),
+                audit_op: AdminAuditOp::Overwrite,
+                mode: StoreMode::ReplaceUnconditional,
+            },
+            "test",
+        )
+        .unwrap();
+        assert!(
+            store.categories("apikey:zai").unwrap().is_empty(),
+            "re-login and replacement do not refill an intentionally empty set"
+        );
+    }
+}
+
+#[cfg(test)]
+mod audit_target_delimiter_tests {
+    use super::*;
+    use crate::store::taxonomy_tests::rig;
+
+    #[test]
+    fn new_audit_targets_split_on_first_separator_and_refuse_ambiguous_ids() {
+        let (_root, store) = rig("audit-target-separator", 88);
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "consumer",
+                SelectorKind::Prefix,
+                "apikey:|tenant",
+                GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .unwrap();
+        let target = store
+            .read_audit(None)
+            .unwrap()
+            .last()
+            .unwrap()
+            .credential_id
+            .as_deref()
+            .unwrap()
+            .to_string();
+        let (left, right) = target.split_once('|').expect("new target delimiter");
+        assert_eq!(left, "grant:read:reserved:consumer:prefix");
+        assert_eq!(
+            right, "apikey:|tenant",
+            "later separators belong to the selector"
+        );
+        let count = store.read_audit(None).unwrap().len();
+        assert!(matches!(
+            store.create_read_grant_audited(
+                "reserved",
+                "bad|principal",
+                SelectorKind::Prefix,
+                "apikey:",
+                GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            ),
+            Err(StoreOpError::InvalidPrincipal)
+        ));
+        assert!(matches!(
+            store.set_categories_audited(
+                "bad|credential",
+                SetCategoryMode::Set,
+                &["monitoring".into()],
+                AuditCtx::admin(AuditOp::SetCategory),
+            ),
+            Err(StoreOpError::InvalidCredentialId)
+        ));
+        assert_eq!(store.read_audit(None).unwrap().len(), count);
+    }
+}
+
+#[cfg(test)]
+mod list_scoped_snapshot_tests {
+    use super::*;
+    use crate::record::RecordIdentity;
+    use crate::store::taxonomy_tests::{api_record, rig};
+
+    #[test]
+    fn list_scoped_keeps_grants_candidates_and_categories_in_one_snapshot() {
+        let (root, store) = rig("list-snapshot", 89);
+        store
+            .create_audited("apikey:zai", &api_record(), AuditCtx::admin(AuditOp::Put))
+            .unwrap();
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "consumer",
+                SelectorKind::Category,
+                "category:llm-provider",
+                GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .unwrap();
+        let path = root.join("store.db");
+        let snapshot = store
+            .list_scoped_snapshot_with_hook("reserved", "consumer", || {
+                let writer = rusqlite::Connection::open(&path)?;
+                let tx = writer.unchecked_transaction()?;
+                tx.execute(
+                    "DELETE FROM credential_categories WHERE credential_id = 'apikey:zai'",
+                    [],
+                )?;
+                tx.execute(
+                    "INSERT INTO credential_categories (credential_id, category) VALUES ('apikey:zai', 'monitoring')",
+                    [],
+                )?;
+                tx.commit()
+            })
+            .expect("snapshot remains readable while a later writer commits");
+        assert_eq!(
+            snapshot.rows.len(),
+            1,
+            "the category grant saw the old category set"
+        );
+        assert_eq!(snapshot.rows[0].categories, ["llm-provider"]);
+        assert_eq!(store.categories("apikey:zai").unwrap(), ["monitoring"]);
+    }
+
+    #[test]
+    fn list_scoped_opens_identity_only_for_read_and_fails_the_whole_read_on_bad_material() {
+        let (_root, store) = rig("list-open-policy", 90);
+        let record = api_record().with_identity(RecordIdentity {
+            account_id: Some("account".into()),
+            email: Some("account@example.test".into()),
+            org_name: None,
+        });
+        store
+            .create_audited("operator:identity", &record, AuditCtx::admin(AuditOp::Put))
+            .unwrap();
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "consumer",
+                SelectorKind::Prefix,
+                "operator:",
+                GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .unwrap();
+        let readable = store.list_scoped_snapshot("reserved", "consumer").unwrap();
+        assert_eq!(
+            readable.rows[0]
+                .identity
+                .as_ref()
+                .unwrap()
+                .account_id
+                .as_deref(),
+            Some("account")
+        );
+        store
+            .revoke_read_grant_audited(
+                "reserved",
+                "consumer",
+                SelectorKind::Prefix,
+                "operator:",
+                GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantRevoke),
+            )
+            .unwrap();
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "consumer",
+                SelectorKind::Prefix,
+                "operator:",
+                GrantOperation::Sign,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .unwrap();
+        store
+            .with_raw_conn(|conn| {
+                conn.execute(
+                    "UPDATE credentials SET envelope = X'00' WHERE credential_id = 'operator:identity'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let sign_only = store
+            .list_scoped_snapshot("reserved", "consumer")
+            .expect("sign-only rows never open envelopes");
+        assert_eq!(sign_only.rows.len(), 1);
+        assert_eq!(sign_only.rows[0].identity, None);
+
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "consumer",
+                SelectorKind::Prefix,
+                "operator:",
+                GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .unwrap();
+        assert!(
+            store.list_scoped_snapshot("reserved", "consumer").is_err(),
+            "one unreadable read-covered row fails the whole snapshot"
+        );
+    }
+}
+
+#[cfg(test)]
+mod coverage_phase_tests {
+    use super::*;
+    use crate::store::taxonomy_tests::{api_record, rig};
+
+    #[test]
+    fn scoped_reads_skip_category_phase_after_prefix_coverage_but_list_scoped_is_exempt() {
+        let (_root, store) = rig("coverage-phase", 91);
+        for id in ["operator:prefix", "other:category"] {
+            store
+                .create_audited(id, &api_record(), AuditCtx::admin(AuditOp::Put))
+                .unwrap();
+        }
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "consumer",
+                SelectorKind::Prefix,
+                "operator:",
+                GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .unwrap();
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "consumer",
+                SelectorKind::Category,
+                "category:monitoring",
+                GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .unwrap();
+        store
+            .with_raw_conn(|conn| {
+                conn.execute("DROP TABLE credential_categories", [])
+                    .map(|_| ())
+            })
+            .unwrap();
+
+        let prefix = store
+            .evaluate_scoped_coverage(
+                "reserved",
+                "consumer",
+                "operator:prefix",
+                GrantOperation::Read,
+            )
+            .expect("covered prefix never enters phase 2");
+        assert!(prefix.covered);
+        assert_eq!(prefix.id_category_count, None);
+        assert!(
+            store
+                .evaluate_scoped_coverage(
+                    "reserved",
+                    "consumer",
+                    "other:category",
+                    GrantOperation::Read,
+                )
+                .is_err(),
+            "an uncovered scoped read with a category selector must enter phase 2"
+        );
+        assert!(
+            store.list_scoped_snapshot("reserved", "consumer").is_err(),
+            "list_scoped intentionally reads categories in its one snapshot"
+        );
     }
 }

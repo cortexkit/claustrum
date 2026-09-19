@@ -239,6 +239,7 @@ mod tests {
                 key_id_hex: "deadbeef".to_string(),
                 state,
                 stale_pending: false,
+                categories: Vec::new(),
             },
         )
     }

@@ -27,7 +27,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use credentials_core::admin_auth::{AdminMacKey, TranscriptParts, ADMIN_NONCE_LEN, VAULT_ID_LEN};
-use credentials_core::admin_ops::{AdminOpBody, ADMIN_OP_SCHEMA_V1};
+use credentials_core::admin_ops::AdminOpBody;
+#[cfg(test)]
+use credentials_core::admin_ops::ADMIN_OP_SCHEMA_V1;
 use credentials_core::engine::RefreshEngine;
 use credentials_core::key::KeyId;
 use credentials_core::store::StoreOpError;
@@ -288,11 +290,10 @@ impl AdminSurface {
         // unknown version is refused (never best-effort-parsed) so a future field
         // addition can't be silently dropped by an old module — the caller learns
         // the module is too old rather than getting a partial write.
-        if op.schema_version() != ADMIN_OP_SCHEMA_V1 {
+        if !op.has_valid_schema_version() {
             return AdminOutcome::Refused(format!(
-                "unsupported admin op schema version {} (module speaks {})",
-                op.schema_version(),
-                ADMIN_OP_SCHEMA_V1
+                "unsupported admin op schema version/variant pairing {} (module accepts v1 and v2 only for their declared variants)",
+                op.schema_version()
             ));
         }
         // Apply through the SHARED core applier so the online and offline admin paths
@@ -322,6 +323,9 @@ impl AdminSurface {
 /// more detail than the anonymous read surface is acceptable (the caller holds the
 /// master key), but never secret material.
 fn store_err(e: StoreOpError) -> AdminOutcome {
+    if let (Some(code), Some(class)) = (e.wire_code(), e.wire_class()) {
+        return AdminOutcome::Refused(format!("{code}/{class}"));
+    }
     let reason = match e {
         StoreOpError::NotFound => "credential not found".to_string(),
         StoreOpError::CasMismatch => "version/hash mismatch (concurrent change)".to_string(),

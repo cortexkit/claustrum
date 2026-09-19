@@ -18,12 +18,14 @@ use crate::audit::AuditRecord;
 use crate::audit::{AuditCtx, AuditOp};
 use crate::record::{RecordIdentity, VaultRecord};
 use crate::store::{
-    mint_handle, EncryptedStore, GrantOperation, ReadGrant, RecordMeta, StoreOpError,
+    mint_handle, EncryptedStore, GrantOperation, ReadGrant, RecordMeta, SelectorKind,
+    SetCategoryMode, StoreOpError,
 };
 
 /// The admin-op schema version. Bumped only on a breaking op-body change; the
 /// module refuses any other version rather than best-effort parsing it.
 pub const ADMIN_OP_SCHEMA_V1: u32 = 1;
+pub const ADMIN_OP_SCHEMA_V2: u32 = 2;
 
 /// One authenticated admin operation. `#[serde(tag = "op")]` so the discriminator
 /// is an `op` string inside the same object the transcript covers.
@@ -106,6 +108,33 @@ pub enum AdminOpBody {
         credential_prefix: String,
         operation: GrantOperation,
     },
+    #[serde(rename = "admin.grant_create_v2")]
+    GrantCreateV2 {
+        v: u32,
+        principal_kind: String,
+        principal_id: String,
+        selector_kind: SelectorKind,
+        selector: String,
+        operation: GrantOperation,
+    },
+    #[serde(rename = "admin.grant_revoke_v2")]
+    GrantRevokeV2 {
+        v: u32,
+        principal_kind: String,
+        principal_id: String,
+        selector_kind: SelectorKind,
+        selector: String,
+        operation: GrantOperation,
+    },
+    #[serde(rename = "admin.set_category")]
+    SetCategory {
+        v: u32,
+        credential_id: String,
+        mode: SetCategoryMode,
+        categories: Vec<String>,
+    },
+    #[serde(rename = "admin.reclassify")]
+    Reclassify { v: u32, force: bool },
     /// Record that a NAMED APPROVER approved a specific artifact, identified by the
     /// SHA-256 of its exact bytes, before a signing window is opened for it.
     ///
@@ -260,6 +289,55 @@ impl std::fmt::Debug for AdminOpBody {
                 .field("credential_prefix", credential_prefix)
                 .field("operation", operation)
                 .finish(),
+            AdminOpBody::GrantCreateV2 {
+                v,
+                principal_kind,
+                principal_id,
+                selector_kind,
+                selector,
+                operation,
+            } => f
+                .debug_struct("GrantCreateV2")
+                .field("v", v)
+                .field("principal_kind", principal_kind)
+                .field("principal_id", principal_id)
+                .field("selector_kind", selector_kind)
+                .field("selector", selector)
+                .field("operation", operation)
+                .finish(),
+            AdminOpBody::GrantRevokeV2 {
+                v,
+                principal_kind,
+                principal_id,
+                selector_kind,
+                selector,
+                operation,
+            } => f
+                .debug_struct("GrantRevokeV2")
+                .field("v", v)
+                .field("principal_kind", principal_kind)
+                .field("principal_id", principal_id)
+                .field("selector_kind", selector_kind)
+                .field("selector", selector)
+                .field("operation", operation)
+                .finish(),
+            AdminOpBody::SetCategory {
+                v,
+                credential_id,
+                mode,
+                categories,
+            } => f
+                .debug_struct("SetCategory")
+                .field("v", v)
+                .field("credential_id", credential_id)
+                .field("mode", mode)
+                .field("categories", categories)
+                .finish(),
+            AdminOpBody::Reclassify { v, force } => f
+                .debug_struct("Reclassify")
+                .field("v", v)
+                .field("force", force)
+                .finish(),
             AdminOpBody::Approval {
                 v,
                 credential_id,
@@ -294,9 +372,46 @@ impl AdminOpBody {
             | AdminOpBody::RevokeAllHandles { v, .. }
             | AdminOpBody::GrantCreate { v, .. }
             | AdminOpBody::GrantRevoke { v, .. }
+            | AdminOpBody::GrantCreateV2 { v, .. }
+            | AdminOpBody::GrantRevokeV2 { v, .. }
+            | AdminOpBody::SetCategory { v, .. }
+            | AdminOpBody::Reclassify { v, .. }
             | AdminOpBody::Approval { v, .. }
             | AdminOpBody::Status { v } => *v,
         }
+    }
+
+    /// Version admitted for this exact variant. The exhaustive match is the pairing
+    /// table: adding a variant cannot silently inherit either schema version.
+    pub const fn required_schema_version(&self) -> u32 {
+        match self {
+            AdminOpBody::GrantCreateV2 { .. }
+            | AdminOpBody::GrantRevokeV2 { .. }
+            | AdminOpBody::SetCategory { .. }
+            | AdminOpBody::Reclassify { .. } => ADMIN_OP_SCHEMA_V2,
+            AdminOpBody::Store { .. }
+            | AdminOpBody::StoreWithIdentityPolicy { .. }
+            | AdminOpBody::SetIdentity { .. }
+            | AdminOpBody::Invalidate { .. }
+            | AdminOpBody::Logout { .. }
+            | AdminOpBody::Reactivate { .. }
+            | AdminOpBody::Remove { .. }
+            | AdminOpBody::MintHandle { .. }
+            | AdminOpBody::RevokeHandle { .. }
+            | AdminOpBody::RevokeHandleByHash { .. }
+            | AdminOpBody::RevokeAllHandles { .. }
+            | AdminOpBody::GrantCreate { .. }
+            | AdminOpBody::GrantRevoke { .. }
+            | AdminOpBody::Approval { .. }
+            | AdminOpBody::Status { .. } => ADMIN_OP_SCHEMA_V1,
+        }
+    }
+
+    pub fn has_valid_schema_version(&self) -> bool {
+        matches!(
+            self.schema_version(),
+            ADMIN_OP_SCHEMA_V1 | ADMIN_OP_SCHEMA_V2
+        ) && self.schema_version() == self.required_schema_version()
     }
 
     /// The credential id this op serializes against, for per-credential single-flight
@@ -318,11 +433,17 @@ impl AdminOpBody {
             | AdminOpBody::Reactivate { id, .. }
             | AdminOpBody::Remove { id, .. }
             | AdminOpBody::MintHandle { id, .. }
-            | AdminOpBody::RevokeAllHandles { id, .. } => Some(id),
+            | AdminOpBody::RevokeAllHandles { id, .. }
+            | AdminOpBody::SetCategory {
+                credential_id: id, ..
+            } => Some(id),
             AdminOpBody::RevokeHandle { .. }
             | AdminOpBody::RevokeHandleByHash { .. }
             | AdminOpBody::GrantCreate { .. }
             | AdminOpBody::GrantRevoke { .. }
+            | AdminOpBody::GrantCreateV2 { .. }
+            | AdminOpBody::GrantRevokeV2 { .. }
+            | AdminOpBody::Reclassify { .. }
             | AdminOpBody::Status { .. } => None,
         }
     }
@@ -372,6 +493,12 @@ pub fn apply(
     op: AdminOpBody,
     actor: &str,
 ) -> Result<serde_json::Value, StoreOpError> {
+    if !op.has_valid_schema_version() {
+        return Err(StoreOpError::Encode(format!(
+            "unsupported admin op schema version/variant pairing {}",
+            op.schema_version()
+        )));
+    }
     match op {
         AdminOpBody::Approval {
             credential_id,
@@ -405,6 +532,7 @@ pub fn apply(
             mode,
             ..
         } => {
+            crate::store::validate_deposit_credential_id(&id)?;
             let ctx = AuditCtx::route_admin(audit_op.to_audit_op(), actor);
             match mode {
                 StoreMode::Create => store.create_audited(&id, &record, ctx)?,
@@ -426,6 +554,7 @@ pub fn apply(
             clear_identity,
             ..
         } => {
+            crate::store::validate_deposit_credential_id(&id)?;
             store.overwrite_unconditional_with_identity_policy_audited(
                 &id,
                 &record,
@@ -531,6 +660,7 @@ pub fn apply(
             store.create_read_grant_audited(
                 "reserved",
                 &principal_id,
+                SelectorKind::Prefix,
                 &credential_prefix,
                 operation,
                 ctx,
@@ -547,11 +677,85 @@ pub fn apply(
             store.revoke_read_grant_audited(
                 "reserved",
                 &principal_id,
+                SelectorKind::Prefix,
                 &credential_prefix,
                 operation,
                 ctx,
             )?;
             Ok(serde_json::json!({ "grant_revoked": true }))
+        }
+        AdminOpBody::GrantCreateV2 {
+            principal_kind,
+            principal_id,
+            selector_kind,
+            selector,
+            operation,
+            ..
+        } => {
+            let stored_selector = match selector_kind {
+                SelectorKind::Prefix => selector,
+                SelectorKind::Category => {
+                    if !crate::catalog::valid_category_name(&selector) {
+                        return Err(StoreOpError::InvalidCategoryName);
+                    }
+                    format!("category:{selector}")
+                }
+            };
+            store.create_read_grant_audited(
+                &principal_kind,
+                &principal_id,
+                selector_kind,
+                &stored_selector,
+                operation,
+                AuditCtx::route_admin(AuditOp::GrantCreate, actor),
+            )?;
+            Ok(serde_json::json!({ "grant_created": true }))
+        }
+        AdminOpBody::GrantRevokeV2 {
+            principal_kind,
+            principal_id,
+            selector_kind,
+            selector,
+            operation,
+            ..
+        } => {
+            let stored_selector = match selector_kind {
+                SelectorKind::Prefix => selector,
+                SelectorKind::Category => {
+                    if !crate::catalog::valid_category_name(&selector) {
+                        return Err(StoreOpError::InvalidCategoryName);
+                    }
+                    format!("category:{selector}")
+                }
+            };
+            store.revoke_read_grant_audited(
+                &principal_kind,
+                &principal_id,
+                selector_kind,
+                &stored_selector,
+                operation,
+                AuditCtx::route_admin(AuditOp::GrantRevoke, actor),
+            )?;
+            Ok(serde_json::json!({ "grant_revoked": true }))
+        }
+        AdminOpBody::SetCategory {
+            credential_id,
+            mode,
+            categories,
+            ..
+        } => {
+            let changed = store.set_categories_audited(
+                &credential_id,
+                mode,
+                &categories,
+                AuditCtx::route_admin(AuditOp::SetCategory, actor),
+            )?;
+            Ok(serde_json::json!({ "category_changed": changed }))
+        }
+        AdminOpBody::Reclassify { force, .. } => {
+            let changed = store
+                .reclassify_audited(force, AuditCtx::route_admin(AuditOp::SetCategory, actor))?;
+            Ok(serde_json::json!({ "credentials_reclassified": changed }))
         }
         AdminOpBody::Status { .. } => {
             // A no-decrypt inventory plus the same fail-closed health summary used by
@@ -585,6 +789,7 @@ pub fn status_result(
                 "id": id,
                 "state": m.state.as_str(),
                 "record_version": m.record_version,
+                "categories": m.categories,
             })
         })
         .collect();
@@ -598,12 +803,19 @@ pub fn status_result(
         .map(|grant| {
             let covered_credential_ids: Vec<&str> = metas
                 .iter()
+                .filter(|(id, meta)| match grant.selector_kind {
+                    SelectorKind::Prefix => id.starts_with(&grant.credential_prefix),
+                    SelectorKind::Category => meta
+                        .categories
+                        .iter()
+                        .any(|category| grant.credential_prefix == format!("category:{category}")),
+                })
                 .map(|(id, _)| id.as_str())
-                .filter(|id| id.starts_with(&grant.credential_prefix))
                 .collect();
             serde_json::json!({
                 "principal_kind": grant.principal_kind,
                 "principal_id": grant.principal_id,
+                "selector_kind": grant.selector_kind.as_str(),
                 "credential_prefix": grant.credential_prefix,
                 "operation": grant.operation.as_str(),
                 "created_at_ms": grant.created_at_ms,
@@ -769,5 +981,231 @@ mod tests {
         let raw = b"{\"op\":\"admin.store_with_identity_policy\",\"v\":1,\"id\":\"apikey:x\",\"record\":{\"schema_version\":1,\"kind\":\"api_key\",\"source\":\"t\",\"record_version\":1,\"expires_at_ms\":null,\"refresh_adapter\":null,\"oauth\":null,\"payload\":[107]},\"audit_op\":\"put\",\"clear_identity\":false}";
         let op: AdminOpBody = serde_json::from_slice(raw).expect("new policy op decodes");
         assert_eq!(op.to_bytes().unwrap(), raw);
+    }
+}
+
+#[cfg(test)]
+mod admin_schema_v2_tests {
+    use super::*;
+    use crate::record::CredentialKind;
+
+    fn record() -> Box<VaultRecord> {
+        Box::new(VaultRecord::new_static(
+            CredentialKind::ApiKey,
+            "test",
+            b"key".to_vec(),
+            None,
+        ))
+    }
+
+    #[test]
+    fn every_admin_variant_is_listed_in_version_and_lock_tables() {
+        let v1 = ADMIN_OP_SCHEMA_V1;
+        let v2 = ADMIN_OP_SCHEMA_V2;
+        let variants: Vec<(&str, AdminOpBody, u32, Option<&str>)> = vec![
+            (
+                "Store",
+                AdminOpBody::Store {
+                    v: v1,
+                    id: "id".into(),
+                    record: record(),
+                    audit_op: AdminAuditOp::Put,
+                    mode: StoreMode::Create,
+                },
+                v1,
+                Some("id"),
+            ),
+            (
+                "StoreWithIdentityPolicy",
+                AdminOpBody::StoreWithIdentityPolicy {
+                    v: v1,
+                    id: "id".into(),
+                    record: record(),
+                    audit_op: AdminAuditOp::Put,
+                    clear_identity: false,
+                },
+                v1,
+                Some("id"),
+            ),
+            (
+                "SetIdentity",
+                AdminOpBody::SetIdentity {
+                    v: v1,
+                    id: "id".into(),
+                    identity: RecordIdentity::default(),
+                },
+                v1,
+                Some("id"),
+            ),
+            (
+                "Invalidate",
+                AdminOpBody::Invalidate {
+                    v: v1,
+                    id: "id".into(),
+                },
+                v1,
+                Some("id"),
+            ),
+            (
+                "Logout",
+                AdminOpBody::Logout {
+                    v: v1,
+                    id: "id".into(),
+                },
+                v1,
+                Some("id"),
+            ),
+            (
+                "Reactivate",
+                AdminOpBody::Reactivate {
+                    v: v1,
+                    id: "id".into(),
+                },
+                v1,
+                Some("id"),
+            ),
+            (
+                "Remove",
+                AdminOpBody::Remove {
+                    v: v1,
+                    id: "id".into(),
+                },
+                v1,
+                Some("id"),
+            ),
+            (
+                "MintHandle",
+                AdminOpBody::MintHandle {
+                    v: v1,
+                    id: "id".into(),
+                },
+                v1,
+                Some("id"),
+            ),
+            (
+                "RevokeHandle",
+                AdminOpBody::RevokeHandle {
+                    v: v1,
+                    handle: "secret".into(),
+                },
+                v1,
+                None,
+            ),
+            (
+                "RevokeHandleByHash",
+                AdminOpBody::RevokeHandleByHash {
+                    v: v1,
+                    handle_hash: "hash".into(),
+                },
+                v1,
+                None,
+            ),
+            (
+                "RevokeAllHandles",
+                AdminOpBody::RevokeAllHandles {
+                    v: v1,
+                    id: "id".into(),
+                },
+                v1,
+                Some("id"),
+            ),
+            (
+                "GrantCreate",
+                AdminOpBody::GrantCreate {
+                    v: v1,
+                    principal_id: "p".into(),
+                    credential_prefix: "a:".into(),
+                    operation: GrantOperation::Read,
+                },
+                v1,
+                None,
+            ),
+            (
+                "GrantRevoke",
+                AdminOpBody::GrantRevoke {
+                    v: v1,
+                    principal_id: "p".into(),
+                    credential_prefix: "a:".into(),
+                    operation: GrantOperation::Read,
+                },
+                v1,
+                None,
+            ),
+            (
+                "Approval",
+                AdminOpBody::Approval {
+                    v: v1,
+                    credential_id: "id".into(),
+                    artifact_sha256: "00".repeat(32),
+                    approver: "operator".into(),
+                },
+                v1,
+                Some("id"),
+            ),
+            ("Status", AdminOpBody::Status { v: v1 }, v1, None),
+            (
+                "GrantCreateV2",
+                AdminOpBody::GrantCreateV2 {
+                    v: v2,
+                    principal_kind: "reserved".into(),
+                    principal_id: "p".into(),
+                    selector_kind: SelectorKind::Category,
+                    selector: "llm-provider".into(),
+                    operation: GrantOperation::Read,
+                },
+                v2,
+                None,
+            ),
+            (
+                "GrantRevokeV2",
+                AdminOpBody::GrantRevokeV2 {
+                    v: v2,
+                    principal_kind: "reserved".into(),
+                    principal_id: "p".into(),
+                    selector_kind: SelectorKind::Category,
+                    selector: "llm-provider".into(),
+                    operation: GrantOperation::Read,
+                },
+                v2,
+                None,
+            ),
+            (
+                "SetCategory",
+                AdminOpBody::SetCategory {
+                    v: v2,
+                    credential_id: "id".into(),
+                    mode: SetCategoryMode::Set,
+                    categories: vec!["llm-provider".into()],
+                },
+                v2,
+                Some("id"),
+            ),
+            (
+                "Reclassify",
+                AdminOpBody::Reclassify {
+                    v: v2,
+                    force: false,
+                },
+                v2,
+                None,
+            ),
+        ];
+        for (name, op, version, lock) in variants {
+            assert_eq!(op.schema_version(), version, "{name} schema field");
+            assert_eq!(op.required_schema_version(), version, "{name} pairing row");
+            assert!(op.has_valid_schema_version(), "{name} must be admitted");
+            assert_eq!(op.lock_id(), lock, "{name} lock row");
+        }
+
+        assert!(!AdminOpBody::Invalidate {
+            v: v2,
+            id: "id".into()
+        }
+        .has_valid_schema_version());
+        assert!(!AdminOpBody::Reclassify {
+            v: v1,
+            force: false
+        }
+        .has_valid_schema_version());
     }
 }

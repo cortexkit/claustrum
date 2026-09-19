@@ -2768,6 +2768,66 @@ fn login_key_preflight_refuses_before_printing_the_authorize_url() {
     );
 }
 
+/// The operator who reported this had the browser on a SECOND computer, signed into
+/// the account they wanted to custody. With `--no-listener` nothing holds
+/// localhost:54545, so sending the browser there can only produce a failed page, and
+/// the address bar of a failed page was all they had to carry back. Anthropic
+/// registers a second redirect on the same OAuth app that renders the result as a
+/// short `code#state`, so the no-listener authorize URL must ask for that one.
+///
+/// Asserted on the REAL process's stdout rather than on the builder, because the URL
+/// the operator opens is the only thing the provider sees.
+#[test]
+fn login_without_a_listener_sends_anthropic_the_code_display_redirect() {
+    let root = tmp_root("login-no-listener-redirect");
+    let data_dir = root.join("vault");
+    let key_dir = root.join("keys");
+    std::fs::create_dir_all(&data_dir).expect("create vault dir");
+    std::fs::create_dir_all(&key_dir).expect("create key dir");
+    let key_path = key_dir.join("master.key");
+    std::fs::write(&key_path, "17".repeat(32)).expect("write operator key");
+
+    let mut command = cli();
+    command
+        .arg("login")
+        .arg("--provider")
+        .arg("anthropic")
+        .arg("--no-listener")
+        .arg("--no-browser")
+        .arg("--data-dir")
+        .arg(&data_dir)
+        .arg("--key-path")
+        .arg(&key_path)
+        .stdin(Stdio::null());
+    // Closed stdin makes the pasted callback empty, so the flow stops at parsing
+    // without making a network call — after printing everything under test here.
+    let printed = String::from_utf8_lossy(&command.output().expect("run anthropic login").stdout)
+        .into_owned();
+
+    assert!(
+        printed.contains("Open this URL"),
+        "the flow must reach the browser step, or the assertions below prove nothing: {printed}"
+    );
+    assert!(
+        printed
+            .contains("redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback"),
+        "with no listener the authorize URL must carry the code-display redirect: {printed}"
+    );
+    assert!(
+        !printed.contains("54545"),
+        "nothing is holding the loopback socket, so neither the URL nor the prompt may \
+         send the operator there: {printed}"
+    );
+    assert!(
+        printed.contains("code#state"),
+        "the prompt must describe the artifact the page actually shows: {printed}"
+    );
+    assert!(
+        !printed.contains("THIS machine"),
+        "the listener wait banner belongs to the path where a listener bound: {printed}"
+    );
+}
+
 #[test]
 fn login_existence_preflight_refuses_before_printing_the_authorize_url() {
     let root = tmp_root("login-existence-preflight");

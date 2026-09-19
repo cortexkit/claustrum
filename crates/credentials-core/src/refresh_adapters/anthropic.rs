@@ -64,6 +64,23 @@ pub const LOGIN_EXTRA_AUTHORIZE_PARAMS: &[(&str, &str)] = &[("code", "true")];
 /// (same posture as the OpenAI/xAI loopback redirects).
 pub const LOGIN_REDIRECT_URI: &str = "http://localhost:54545/callback";
 
+/// The SECOND redirect registered on the same OAuth app, which renders the
+/// authorization result as a visible `code#state` on Anthropic's own page instead
+/// of redirecting to a socket.
+///
+/// WHY BOTH EXIST. The loopback redirect above only completes when the browser and
+/// this CLI are on the same machine. An operator who opens the printed URL on a
+/// second computer — the usual case when the account to custody is signed in
+/// elsewhere — approves successfully and then has nothing to carry back except the
+/// address bar of a page that failed to connect. This redirect gives that operator
+/// a short code to type instead, so it is used only when no loopback listener is
+/// bound.
+///
+/// Same client id, same app: the first-party `anthropic-auth` plugin performs its
+/// whole flow against this URL with [`CLAUDE_CODE_CLIENT_ID`], which is how the
+/// registration is known to be live rather than inferred.
+pub const LOGIN_CODE_REDIRECT_URI: &str = "https://platform.claude.com/oauth/code/callback";
+
 /// The OAuth scopes requested at login (the Claude Pro/Max + Claude Code scope set).
 pub const LOGIN_SCOPES: &[&str] = &[
     "org:create_api_key",

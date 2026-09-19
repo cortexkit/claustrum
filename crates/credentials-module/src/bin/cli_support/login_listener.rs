@@ -27,7 +27,11 @@ use std::time::Duration;
 
 /// How long to wait for the browser redirect before giving up and falling back to
 /// paste. Generous: the operator may need to sign in and approve.
-const LISTEN_TIMEOUT: Duration = Duration::from_secs(300);
+///
+/// Public because the wait is also something the OPERATOR is told about: the banner
+/// printed while this runs names the seconds, and it reads them from here so the
+/// promise and the timeout cannot drift apart.
+pub const LISTEN_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// The loopback bind address for a provider's redirect URI, if the redirect is a
 /// loopback URL this CLI can listen on. `None` for a remote redirect (e.g.

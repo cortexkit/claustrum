@@ -342,10 +342,17 @@ assert_floor_not_lowered() {
 # follows it), and any gap between the floor and the real count is how many can go
 # before anyone is told. Measured 402 across the workspace's suites at the time of
 # writing; an earlier floor of 200 left a third of them free to disappear.
-# The 696 count is measured by the same debug test command used below. It is the
+# The 704 count is measured by the same debug test command used below. It is the
 # total workspace test population, including taxonomy, scoped-list golden,
 # released-v0.1.2 behavior, and rendered per-verb help checks; it is not the sum
 # of branch-specific test changes.
+#
+# Raised 696 -> 704 on 2026-09-19 with the login-redirect work (one redirect for the
+# authorize URL and the token exchange, plus the code-display redirect used when no
+# listener is bound). Read off the final tree with the command below, NOT by adding
+# the six tests that change added: running the same command on the parent commit
+# measured 698, so this line had ALREADY drifted two below its population and the
+# arithmetic answer (702) would have carried that slack forward.
 #
 # MEASURED, NOT ARITHMETIC -- and this rebase is the third time it mattered. The branch bumped
 # 564 to 568, master reached 578 independently, and their sum (582) was already wrong because
@@ -362,7 +369,7 @@ assert_floor_not_lowered() {
 #
 # THE FLOOR IS RATCHETED AGAINST THE MERGE TARGET BY `assert_floor_not_lowered` BELOW,
 # because a floor alone does not defend the property it exists for. See that function.
-run_expect 696 "workspace unit + integration" \
+run_expect 704 "workspace unit + integration" \
   cargo test --locked --workspace --features credentials-core/test-support
 
 assert_floor_not_lowered "$(dirname "$0")/gate.sh"

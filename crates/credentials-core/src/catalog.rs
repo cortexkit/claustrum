@@ -349,6 +349,13 @@ pub struct LoginProvider {
     pub needs_oidc_nonce: bool,
     pub exchange_echoes_challenge: bool,
     pub paste_prompt: &'static str,
+    /// A redirect the provider renders as a visible `code#state` instead of
+    /// redirecting to a socket. Used ONLY when no loopback listener is bound, so an
+    /// operator approving on another machine has something short to carry back.
+    /// `None` means this provider has no such URL and paste stays address-bar shaped.
+    pub code_redirect_uri: Option<&'static str>,
+    /// The paste prompt for `code_redirect_uri`. Required when it is `Some`.
+    pub code_paste_prompt: Option<&'static str>,
     pub device: Option<DeviceKind>,
     pub categories: &'static [CredentialCategory],
     pub serves: &'static [ModelVendor],
@@ -369,6 +376,11 @@ pub const LOGIN_PROVIDERS: &[LoginProvider] = &[
         needs_oidc_nonce: false,
         exchange_echoes_challenge: false,
         paste_prompt: "After approving, the browser will fail to connect to localhost:54545 — that is expected (nothing listens there).\nCopy the FULL URL from the browser's address bar (or the code#state if shown) and paste it here, then Enter:",
+        // The only verified code-display redirect in this table: the same OAuth app
+        // registers it, and the first-party anthropic-auth plugin uses it in
+        // production with this client id.
+        code_redirect_uri: Some(refresh_adapters::anthropic::LOGIN_CODE_REDIRECT_URI),
+        code_paste_prompt: Some("After approving, the page shows a short code of the form code#state (a long code, a '#', then a shorter value).\nCopy the WHOLE thing, including the '#', and paste it here, then Enter:"),
         device: None,
         categories: LLM,
         serves: &[Anthropic],
@@ -387,6 +399,8 @@ pub const LOGIN_PROVIDERS: &[LoginProvider] = &[
         needs_oidc_nonce: false,
         exchange_echoes_challenge: false,
         paste_prompt: "After approving, the browser will fail to connect to localhost:1455 — that is expected (nothing listens there).\nCopy the FULL URL from the browser's address bar and paste it here, then Enter:",
+        code_redirect_uri: None,
+        code_paste_prompt: None,
         device: Some(DeviceKind::OpenAi),
         categories: LLM,
         serves: &[OpenAI],
@@ -405,6 +419,8 @@ pub const LOGIN_PROVIDERS: &[LoginProvider] = &[
         needs_oidc_nonce: true,
         exchange_echoes_challenge: true,
         paste_prompt: "After approving, the browser will fail to connect to 127.0.0.1:56121 — that is expected (nothing listens there).\nCopy the FULL URL from the browser's address bar and paste it here, then Enter:",
+        code_redirect_uri: None,
+        code_paste_prompt: None,
         device: Some(DeviceKind::Xai),
         categories: LLM,
         serves: &[XAI],
@@ -423,6 +439,8 @@ pub const LOGIN_PROVIDERS: &[LoginProvider] = &[
         needs_oidc_nonce: false,
         exchange_echoes_challenge: false,
         paste_prompt: "",
+        code_redirect_uri: None,
+        code_paste_prompt: None,
         device: Some(DeviceKind::GithubCopilot),
         categories: LLM,
         serves: &[OpenAI, Anthropic, Google, XAI],
@@ -441,6 +459,8 @@ pub const LOGIN_PROVIDERS: &[LoginProvider] = &[
         needs_oidc_nonce: false,
         exchange_echoes_challenge: false,
         paste_prompt: "",
+        code_redirect_uri: None,
+        code_paste_prompt: None,
         device: Some(DeviceKind::Kimi),
         categories: LLM,
         serves: &[Moonshot],
@@ -459,6 +479,8 @@ pub const LOGIN_PROVIDERS: &[LoginProvider] = &[
         needs_oidc_nonce: false,
         exchange_echoes_challenge: false,
         paste_prompt: "After approving, the browser may fail to connect to 127.0.0.1:8085 — that is expected. Copy the FULL URL from the address bar and paste it here, then Enter:",
+        code_redirect_uri: None,
+        code_paste_prompt: None,
         device: None,
         categories: LLM,
         serves: &[Google],
@@ -477,6 +499,8 @@ pub const LOGIN_PROVIDERS: &[LoginProvider] = &[
         needs_oidc_nonce: false,
         exchange_echoes_challenge: false,
         paste_prompt: "After approving, the browser may fail to connect to 127.0.0.1:51121 — that is expected. Copy the FULL URL from the address bar and paste it here, then Enter:",
+        code_redirect_uri: None,
+        code_paste_prompt: None,
         device: None,
         categories: LLM,
         serves: &[Google, Anthropic, OpenAI],
@@ -495,6 +519,8 @@ pub const LOGIN_PROVIDERS: &[LoginProvider] = &[
         needs_oidc_nonce: false,
         exchange_echoes_challenge: false,
         paste_prompt: "Cursor login is completed by browser polling.",
+        code_redirect_uri: None,
+        code_paste_prompt: None,
         device: None,
         categories: LLM,
         serves: &[Anthropic, OpenAI, Google, XAI],
@@ -513,6 +539,8 @@ pub const LOGIN_PROVIDERS: &[LoginProvider] = &[
         needs_oidc_nonce: false,
         exchange_echoes_challenge: false,
         paste_prompt: "After approving Devin, paste the callback URL.",
+        code_redirect_uri: None,
+        code_paste_prompt: None,
         device: None,
         categories: NO_CATEGORIES,
         serves: &[],
@@ -531,6 +559,8 @@ pub const LOGIN_PROVIDERS: &[LoginProvider] = &[
         needs_oidc_nonce: false,
         exchange_echoes_challenge: false,
         paste_prompt: "After approving Snowflake, paste the callback URL.",
+        code_redirect_uri: None,
+        code_paste_prompt: None,
         device: None,
         categories: DATA_WAREHOUSE,
         serves: &[],
@@ -549,6 +579,8 @@ pub const LOGIN_PROVIDERS: &[LoginProvider] = &[
         needs_oidc_nonce: false,
         exchange_echoes_challenge: false,
         paste_prompt: "After approving DigitalOcean, paste the full callback URL including its fragment.",
+        code_redirect_uri: None,
+        code_paste_prompt: None,
         device: None,
         categories: CLOUD_INFRASTRUCTURE,
         serves: &[],
@@ -875,6 +907,52 @@ mod tests {
         ] {
             assert_eq!(credential_type(id), expected);
         }
+    }
+
+    /// A code-display redirect is unusable without instructions describing the code,
+    /// so the pair moves together — asserted over the WHOLE table rather than for the
+    /// one row that has it. A row setting only the URL would send the operator to a
+    /// page showing a code while the prompt asked for an address bar; a row setting
+    /// only the prompt would print instructions for a page nobody is looking at.
+    #[test]
+    fn a_code_display_redirect_and_its_paste_prompt_are_set_together() {
+        for entry in LOGIN_PROVIDERS {
+            assert_eq!(
+                entry.code_redirect_uri.is_some(),
+                entry.code_paste_prompt.is_some(),
+                "{}: code_redirect_uri and code_paste_prompt must both be set or both be absent",
+                entry.key
+            );
+        }
+        let carrying_a_code_redirect: Vec<_> = LOGIN_PROVIDERS
+            .iter()
+            .filter(|entry| entry.code_redirect_uri.is_some())
+            .map(|entry| entry.key)
+            .collect();
+        assert_eq!(
+            carrying_a_code_redirect,
+            ["anthropic"],
+            "a code-display redirect is a redirect the provider ACTUALLY registered, \
+             never a console URL that looks plausible: an unregistered one is refused \
+             at the authorize step, so adding a row here means someone verified it"
+        );
+
+        let anthropic = login_provider("anthropic").expect("the anthropic row");
+        assert_eq!(
+            anthropic.code_redirect_uri,
+            Some("https://platform.claude.com/oauth/code/callback")
+        );
+        // Both redirects are registered on the same app, and they must stay distinct:
+        // equal values would make the no-listener path send the loopback redirect
+        // again, which is the defect this field exists to fix.
+        assert_eq!(anthropic.redirect_uri, "http://localhost:54545/callback");
+        assert!(
+            anthropic
+                .code_paste_prompt
+                .expect("the anthropic code prompt")
+                .contains("code#state"),
+            "the prompt for a code-display redirect must name the shape the page renders"
+        );
     }
 }
 

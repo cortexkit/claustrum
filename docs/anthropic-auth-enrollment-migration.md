@@ -3,18 +3,22 @@
 Written for the seat implementing `anthropic-auth`. Everything here is measured
 against this repository, not recalled, and the dates say when.
 
-<!-- built-when: crates/credentials-module/src/read_surface.rs::enrollment_token -->
-**Status: the ceremony is BUILT, spending the token is NOT BUILT (2026-09-19).** A
-consumer can complete `propose -> approve -> poll` today and receive a token it cannot
-yet spend: `enrollment_token` appears zero times in `read_surface.rs`, so no scoped
-operation accepts one. That is a later slice of the same campaign. The marker above
-names the symbol whose appearance falsifies this line, and this document goes red in
-the gate on the day it ships.
+**Status: the ceremony is BUILT and the token is now SPENDABLE (2026-09-19).**
+`credential.get_scoped` and `credential.list_scoped` accept an `enrollment_token`
+parameter, resolve it to the live consumer name, and evaluate that name's grants. A
+revoked enrollment stops resolving immediately and answers identically to an unknown
+token, so revocation is real and does not leak which names ever existed.
 
-Also, and separately: none of this is on `master` or on any running vault. It lives on
-the integration branch `campaign/enrollment-selectors`, and the vault on this machine
-is still at store schema 8. Build against the contract, do not expect the daemon to
-answer yet.
+This line replaces a NOT-BUILT status that stood for several hours. It did not move
+because anyone remembered: `scripts/check-doc-status.py` carried a marker naming
+`read_surface.rs::enrollment_token`, and the gate refused the moment that symbol
+appeared — *"the feature shipped and the header did not move"*. The marker is gone now
+because its claim is spent; a marker whose symbol already exists can never fire again,
+and one that cannot fire reads as a check while being none.
+
+Still true and unchanged: none of this is on `master` or on any running vault. It lives
+on the integration branch `campaign/enrollment-selectors`, and the vault on this machine
+is still at store schema 8. Build against the contract; the daemon does not answer yet.
 
 ## What does not change, and will not
 
@@ -147,12 +151,11 @@ Two of those rows are load-bearing for how you write the loop:
 `superseded` and `already_consumed` both mean stop and tell the operator. `pending`
 means keep polling.
 
-## Discovery, once spending exists
+## Discovery
 
-<!-- built-when: crates/credentials-module/src/read_surface.rs::enrollment_token -->
-**Status: NOT BUILT (2026-09-19).** The section below describes the shape agreed with
-`openai-auth` and folded into the campaign spec. It is here so you can design against
-it, not so you can call it.
+**Status: BUILT on the integration branch (2026-09-19), not yet on a running vault.**
+The shape below was agreed with `openai-auth` before it was built, which is why it
+survived contact with the implementation unchanged.
 
 `credential.list_scoped` returns one row per credential your grants cover — id,
 categories, type, served vendors, lifecycle state, `record_version`, allowed
@@ -204,8 +207,9 @@ This one deliberately does NOT get its own `built-when` marker. The falsifier wo
 a struct FIELD rather than a symbol, the checker matches symbols, and
 `created_at_ms` already appears once in that file in an unrelated test fixture — so a
 marker naming it could never fire, and a check that cannot fail is worse than no check
-because it reads as one. It rides the `enrollment_token` marker above instead, since
-nothing here is callable until that lands anyway.
+because it reads as one. It rode the `enrollment_token` marker until that claim was
+spent, and now nothing mechanical defends this paragraph: it is a plain measurement
+with its date, and you should re-measure rather than trust it.
 
 When it does land, treat rows **at or above** your high-water mark as new, never
 strictly above: strictly-above makes a same-millisecond twin permanently invisible —
@@ -226,10 +230,28 @@ healthy credential stale.
    the nine outcomes, 0600 token file. This is testable today against the contract.
 3. Decide your names (`anthropic-auth-opencode`, `anthropic-auth-pi`) and write the
    0600 token file path into your own docs.
-4. Wait for the spending half. This document goes red in the repo's doc-status gate on
-   the day `enrollment_token` appears in `read_surface.rs`, which is the signal.
+4. **The spending half has landed** — `enrollment_token` is accepted on
+   `credential.get_scoped` and `credential.list_scoped`. What you are now waiting on is
+   placement: this is on the integration branch, and the running vault is still at
+   schema 8, so the daemon will not answer a token-bearing call yet.
 5. Then: `list_scoped` for discovery, `get_scoped` for the payload, `view` as the
    cursor, declined set keyed on identity.
+
+## How your call is identified, in one paragraph
+
+Put the token in the params, not in a header or a handshake: both scoped ops carry an
+optional `enrollment_token`. If you present one it decides who you are; if you omit it
+the vault falls back to your bus principal, which for a host-launched plugin means no
+grants at all. A token that does not resolve does **not** fall back — the call refuses.
+That is deliberate: falling back would make a revoked consumer keep working from
+whatever ambient identity its transport happens to carry, which turns revocation into a
+property of your process rather than of the vault.
+
+One compatibility note you can check rather than trust: the params struct is
+`deny_unknown_fields`, so a daemon predating this field REFUSES a token-bearing call
+instead of ignoring the token and answering from the wrong principal. You will see an
+explicit decode refusal, not a plausible-looking list computed for grants you do not
+hold.
 
 ## Questions that are mine, not yours
 

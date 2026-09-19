@@ -160,13 +160,32 @@ pub struct GetParams {
 #[cfg_attr(test, derive(Serialize))]
 #[derive(Debug, Deserialize)]
 pub struct GetScopedParams {
+    /// Present for a host-launched consumer; absent for a supervised module, which is
+    /// identified by its bus principal instead. See `scoped_principal` for why a
+    /// presented token wins over the ambient identity and why a bad one does not fall
+    /// back to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enrollment_token: Option<String>,
     pub credential_id: String,
 }
 
-/// `credential.list_scoped` accepts no parameters and lists every row covered by the caller's grants.
+/// `credential.list_scoped` lists every row covered by the caller's grants.
+///
+/// `enrollment_token` is how a host-launched consumer says who it is. A supervised module
+/// omits it and is identified by its bus principal; a consumer that holds a token presents
+/// it and is identified by that. There is no third way in.
+///
+/// `deny_unknown_fields` does real work on the compatibility edge: a daemon predating this
+/// field REFUSES a token-bearing call rather than ignoring the token and answering from
+/// whatever ambient principal the connection carries. A silently ignored token would
+/// return a list computed for the wrong grants, which reads as "my grants are wrong"
+/// rather than "this daemon is too old".
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ListScopedParams {}
+pub struct ListScopedParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enrollment_token: Option<String>,
+}
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ListScopedCredential {
@@ -1209,6 +1228,47 @@ impl ReadSurface {
         );
     }
 
+    /// Resolve who is asking: a supervised module, or a consumer holding an enrollment
+    /// token.
+    ///
+    /// TWO PRINCIPAL SOURCES, AND THEY ARE NOT EQUIVALENT. `Principal::Reserved` is the
+    /// supervisor's attestation, delivered as a launch nonce in the module's environment
+    /// — the vault trusts it because the daemon stamps it at route-bind. An enrollment
+    /// token is the vault's OWN attestation: it minted it, hashed it, and can revoke it.
+    /// Neither derives from the other, which is the point — a host-launched plugin has no
+    /// launch nonce and can never have one, so without this arm it could hold a category
+    /// grant and still be refused for not being a supervised module.
+    ///
+    /// THE TOKEN IS CHECKED BEFORE THE BUS PRINCIPAL, and deliberately. Presenting a
+    /// token is an explicit claim about identity; the bus principal is ambient. A
+    /// supervised module that also presents a token means it, and honouring the ambient
+    /// identity instead would silently route the operation to different grants than the
+    /// caller named.
+    ///
+    /// A BAD TOKEN IS NOT A FALLBACK TO THE BUS PRINCIPAL. If a token is presented and
+    /// does not resolve, the call refuses. Falling back would mean a consumer whose token
+    /// was revoked keeps working from whatever ambient identity it happens to have, which
+    /// makes revocation conditional on the caller's transport rather than on the vault.
+    fn scoped_principal(
+        &self,
+        principal: Option<&Principal>,
+        enrollment_token: Option<&str>,
+    ) -> Option<(&'static str, String)> {
+        if let Some(token) = enrollment_token {
+            return match self.engine.store().resolve_enrollment_token(token) {
+                Ok(Some((name, _generation))) => Some(("enrolled", name)),
+                // An unresolvable token and a store failure are the same answer to the
+                // caller. They differ in `auth_events`, which is where the operator can
+                // tell a revoked consumer from a broken store.
+                Ok(None) | Err(_) => None,
+            };
+        }
+        match principal {
+            Some(Principal::Reserved { module_id }) => Some(("reserved", module_id.clone())),
+            Some(Principal::Direct) | Some(Principal::Unverified) | None => None,
+        }
+    }
+
     /// Evaluate the one operation-scoped coverage predicate before loading sealed data.
     fn authorize_scoped(
         &self,
@@ -1216,12 +1276,25 @@ impl ReadSurface {
         credential_id: &str,
         operation: GrantOperation,
     ) -> Result<(), ReadError> {
-        let coverage = match principal {
-            Some(Principal::Reserved { module_id }) => self
-                .engine
-                .store()
-                .evaluate_scoped_coverage("reserved", module_id, credential_id, operation),
-            Some(Principal::Direct) | Some(Principal::Unverified) | None => {
+        self.authorize_scoped_as(principal, None, credential_id, operation)
+    }
+
+    /// `authorize_scoped` with an optional enrollment token, which is the only way a
+    /// host-launched consumer can be authorized at all.
+    fn authorize_scoped_as(
+        &self,
+        principal: Option<&Principal>,
+        enrollment_token: Option<&str>,
+        credential_id: &str,
+        operation: GrantOperation,
+    ) -> Result<(), ReadError> {
+        let coverage = match self.scoped_principal(principal, enrollment_token) {
+            Some((kind, id)) => {
+                self.engine
+                    .store()
+                    .evaluate_scoped_coverage(kind, &id, credential_id, operation)
+            }
+            None => {
                 self.record_scoped_refusal(principal, credential_id, ScopedReadRefusal::NoGrant);
                 return Err(ReadError::NotFound);
             }
@@ -1274,19 +1347,20 @@ impl ReadSurface {
     pub fn list_scoped(
         &self,
         principal: Option<&Principal>,
-        _params: &ListScopedParams,
+        params: &ListScopedParams,
     ) -> Result<ListScopedResult, ReadError> {
-        let module_id = match principal {
-            Some(Principal::Reserved { module_id }) => module_id,
-            Some(Principal::Direct) | Some(Principal::Unverified) | None => {
-                self.record_scoped_refusal(
-                    principal,
-                    "credential.list_scoped",
-                    ScopedReadRefusal::NoGrant,
-                );
-                return Err(ReadError::NotFound);
-            }
+        let Some((principal_kind, principal_id)) =
+            self.scoped_principal(principal, params.enrollment_token.as_deref())
+        else {
+            self.record_scoped_refusal(
+                principal,
+                "credential.list_scoped",
+                ScopedReadRefusal::NoGrant,
+            );
+            return Err(ReadError::NotFound);
         };
+        let module_id = &principal_id;
+        let _ = principal_kind;
         self.engine
             .store()
             .list_scoped_snapshot("reserved", module_id)
@@ -1302,9 +1376,12 @@ impl ReadSurface {
         principal: Option<&Principal>,
         params: &GetScopedParams,
     ) -> GetOutcome {
-        if let Err(code) =
-            self.authorize_scoped(principal, &params.credential_id, GrantOperation::Read)
-        {
+        if let Err(code) = self.authorize_scoped_as(
+            principal,
+            params.enrollment_token.as_deref(),
+            &params.credential_id,
+            GrantOperation::Read,
+        ) {
             return err(code);
         }
 

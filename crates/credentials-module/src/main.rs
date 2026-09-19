@@ -3877,17 +3877,139 @@ mod tests {
         assert_request_key_set(
             read_surface::GetScopedParams {
                 credential_id: "apikey:request-shape".to_owned(),
+                enrollment_token: None,
             },
             &["credential_id"],
             "credential.get_scoped",
         );
+        assert_request_key_set(
+            read_surface::GetScopedParams {
+                credential_id: "apikey:request-shape".to_owned(),
+                enrollment_token: Some("cke_request_shape".to_owned()),
+            },
+            &["credential_id", "enrollment_token"],
+            "credential.get_scoped",
+        );
     }
 
+    /// AN ENROLLMENT TOKEN AUTHORIZES A SCOPED READ, AND A REVOKED ONE DOES NOT.
+    ///
+    /// This is the property that makes the ceremony worth having: until the resolver
+    /// existed, a consumer could complete enrollment, persist a token, and find that no
+    /// operation accepted it — a credential that proved nothing, which is worse than no
+    /// credential because it looks like access.
+    ///
+    /// The revoked arm is the load-bearing half. A token that keeps working after
+    /// revocation is not a smaller defect than one that never worked; it is the one that
+    /// matters, because revocation is the only control the operator has over a consumer
+    /// they no longer trust.
+    #[tokio::test]
+    async fn an_enrollment_token_authorizes_a_scoped_read_until_it_is_revoked() {
+        let (surface, store, _db, _root) = tmp_surface_with_store(197);
+        store
+            .create(
+                "apikey:enrolled-read",
+                &VaultRecord::new_static(CredentialKind::ApiKey, "test", b"secret".to_vec(), None),
+            )
+            .expect("create record");
+        store
+            .create_read_grant_audited(
+                "enrolled",
+                "probe-consumer",
+                credentials_core::store::SelectorKind::Exact,
+                "apikey:enrolled-read",
+                GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .expect("grant");
+
+        // The request secret is minted by the CONSUMER and only its hash reaches the
+        // vault, which is what stops a squatter from collecting a token for a name it
+        // proposed but does not hold.
+        let request_secret = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
+        let secret_hash = credentials_core::enrollment::enrollment_secret_hash(request_secret)
+            .expect("hashable secret");
+        let request = store
+            .propose_enrollment("probe-consumer", &secret_hash)
+            .expect("propose");
+        store
+            .approve_enrollment(&request.request_id, "probe-consumer", "operator")
+            .expect("approve");
+        let token = match store
+            .poll_enrollment(&request.request_id, request_secret)
+            .expect("poll")
+        {
+            credentials_core::enrollment::EnrollmentPoll::Approved { token, .. } => token,
+            other => panic!("an approved request must poll Approved, got {other:?}"),
+        };
+
+        let served = surface
+            .get_scoped(
+                None,
+                &read_surface::GetScopedParams {
+                    credential_id: "apikey:enrolled-read".to_owned(),
+                    enrollment_token: Some(token.clone()),
+                },
+            )
+            .await;
+        let read_surface::GetOutcome::Ok(served) = served else {
+            panic!("a live enrollment token must authorize the read its grant covers: {served:?}");
+        };
+        assert_eq!(
+            served.credential_id.as_deref(),
+            Some("apikey:enrolled-read"),
+            "and the reply names the credential it resolved, for binding verification"
+        );
+
+        store
+            .revoke_enrollment("probe-consumer", "operator")
+            .expect("revoke");
+        let refused = surface
+            .get_scoped(
+                None,
+                &read_surface::GetScopedParams {
+                    credential_id: "apikey:enrolled-read".to_owned(),
+                    enrollment_token: Some(token.clone()),
+                },
+            )
+            .await;
+        let read_surface::GetOutcome::Err { error } = refused else {
+            panic!("a revoked token must stop working immediately: {refused:?}");
+        };
+        assert_eq!(
+            error.code,
+            read_surface::ReadError::NotFound,
+            "and must be indistinguishable from an unknown token, so a caller cannot \
+             enumerate which consumer names ever existed"
+        );
+    }
+
+    /// `credential.list_scoped` carries exactly one optional parameter.
+    ///
+    /// This test used to be named ..._is_exactly_an_empty_object and asserted `&[]`. The
+    /// rename is the point: `enrollment_token` is how a host-launched consumer identifies
+    /// itself, and `skip_serializing_if` means a supervised module still sends `{}` on
+    /// the wire. So the empty-object case survives as the ABSENT arm below rather than as
+    /// the whole contract.
+    ///
+    /// Both arms are pinned because they are different claims. The absent arm says a
+    /// module's call did not grow a field; the present arm says the token is spelled
+    /// `enrollment_token` and nothing else, which is what a consumer's client must match
+    /// byte for byte.
     #[test]
-    fn credential_list_scoped_request_is_exactly_an_empty_object() {
+    fn credential_list_scoped_request_key_set_is_pinned() {
         assert_request_key_set(
-            read_surface::ListScopedParams {},
+            read_surface::ListScopedParams {
+                enrollment_token: None,
+            },
             &[],
+            "credential.list_scoped",
+        );
+        assert_request_key_set(
+            read_surface::ListScopedParams {
+                enrollment_token: Some("cke_request_shape".to_owned()),
+            },
+            &["enrollment_token"],
             "credential.list_scoped",
         );
     }

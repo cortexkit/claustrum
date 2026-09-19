@@ -2052,6 +2052,53 @@ impl EncryptedStore {
         .map_err(StoreOpError::from)
     }
 
+    /// Resolve a presented enrollment token to the live consumer name it names.
+    ///
+    /// This is the one function that makes an enrollment token SPENDABLE. Until it
+    /// existed the ceremony could mint a token, the consumer could persist it, and no
+    /// scoped operation would accept it — a credential that proved nothing, which is
+    /// worse than no credential because it looks like access.
+    ///
+    /// CONSTANT-TIME IS NOT THE PROPERTY HERE AND CLAIMING IT WOULD BE WORSE THAN NOT
+    /// HAVING IT. The lookup hashes the presented token and asks SQLite for a row, so
+    /// timing varies with index structure and page cache. What defends the token is its
+    /// entropy: 256 CSPRNG bits, the same as a capability handle, so guessing is not a
+    /// timing question. The hash is domain-separated, so a token is not interchangeable
+    /// with any other secret this store holds.
+    ///
+    /// `revoked_at_ms IS NULL` is part of the predicate rather than a check afterwards:
+    /// a revoked enrollment must be indistinguishable from an unknown token, for the
+    /// same reason a revoked capability handle answers like an unknown one. A caller who
+    /// can tell them apart can enumerate which names ever existed.
+    ///
+    /// The generation is returned WITH the name because a rotated token must not be
+    /// silently equivalent to its predecessor: the caller records which incarnation
+    /// authorized an operation, so a forensic reader can tell a pre-rotation spend from
+    /// a post-rotation one rather than seeing one undifferentiated name.
+    pub fn resolve_enrollment_token(
+        &self,
+        token: &str,
+    ) -> Result<Option<(String, i64)>, StoreOpError> {
+        let Some(hash) = crate::enrollment::enrollment_secret_hash(token) else {
+            // A malformed token is not an error the caller can act on differently from a
+            // wrong one, and saying so would separate "badly shaped" from "unknown".
+            return Ok(None);
+        };
+        self.store
+            .with_conn(|conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT name, token_generation FROM enrolled_consumers \
+                     WHERE token_hash = ?1 AND revoked_at_ms IS NULL",
+                )?;
+                let mut rows = stmt.query(rusqlite::params![hash])?;
+                match rows.next()? {
+                    Some(row) => Ok(Some((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))),
+                    None => Ok(None),
+                }
+            })
+            .map_err(StoreOpError::from)
+    }
+
     /// Revoke the live incarnation for a name while retaining its grants.
     pub fn revoke_enrollment(&self, name: &str, actor: &str) -> Result<(), StoreOpError> {
         let now = now_ms();
@@ -2149,8 +2196,22 @@ impl EncryptedStore {
 
     // ---- principal-scoped operation grants ------------------------------
 
-    /// Create one reserved-principal operation grant and append its audit transition
-    /// in one transaction so neither change can commit without the other.
+    /// Create one operation grant and append its audit transition in one transaction so
+    /// neither change can commit without the other.
+    ///
+    /// TWO PRINCIPAL KINDS, AND THE LIST IS CLOSED. `reserved` names a supervised module,
+    /// attested by the supervisor's launch nonce. `enrolled` names a consumer this vault
+    /// itself admitted through the enrollment ceremony. A grant may only name one of
+    /// those two, and that closure is the reason `Principal::Direct` cannot be granted
+    /// to: a grant to an unattested caller is a grant to every same-UID process on the
+    /// machine, unrevocable in practice because there is nothing to revoke.
+    ///
+    /// `enrolled` is NOT validated against the live enrollment table here, deliberately.
+    /// A grant may be created before its consumer enrolls — that is how an operator
+    /// prepares reach for a module about to be installed — and coupling the two would
+    /// make grant creation depend on ceremony ordering. What defends it is the resolver:
+    /// a token only resolves to a name with a LIVE enrollment, so a grant naming a name
+    /// that never enrolled, or one since revoked, reaches nothing.
     pub fn create_read_grant_audited(
         &self,
         principal_kind: &str,
@@ -2160,7 +2221,10 @@ impl EncryptedStore {
         operation: GrantOperation,
         ctx: AuditCtx<'_>,
     ) -> Result<(), StoreOpError> {
-        if principal_kind != "reserved" || principal_id.is_empty() || principal_id.contains('|') {
+        if !matches!(principal_kind, "reserved" | "enrolled")
+            || principal_id.is_empty()
+            || principal_id.contains('|')
+        {
             return Err(StoreOpError::InvalidPrincipal);
         }
         if selector.is_empty() {
@@ -2223,7 +2287,13 @@ impl EncryptedStore {
         operation: GrantOperation,
         ctx: AuditCtx<'_>,
     ) -> Result<(), StoreOpError> {
-        if principal_kind != "reserved" || principal_id.is_empty() || principal_id.contains('|') {
+        // Same closed kind list as creation. If revocation accepted a NARROWER set than
+        // creation, a grant could be created and never revocable through this API -- the
+        // asymmetry that turns a reach mistake into a permanent one.
+        if !matches!(principal_kind, "reserved" | "enrolled")
+            || principal_id.is_empty()
+            || principal_id.contains('|')
+        {
             return Err(StoreOpError::InvalidPrincipal);
         }
         if selector.is_empty() {

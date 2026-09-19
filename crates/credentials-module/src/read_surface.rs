@@ -430,6 +430,13 @@ pub enum ReadError {
     Corrupt,
     /// `get_many` exceeded the cap.
     TooManyItems,
+    /// `report_auth_failure` carried a `provider_status` the contract does not treat as
+    /// evidence the credential is dead. Refused rather than accepted-and-discarded, so a
+    /// consumer whose classification is wrong is told on its first wrong report instead
+    /// of at a mark that silently does nothing. `permanent`: the same status will never
+    /// become a credential death, so a retry cannot succeed. The consumer's repair is to
+    /// stop reporting that status, not to send it again.
+    ReportStatusNotCredentialDeath,
     /// A fresh token minted for this request still misses its supplied `min_ttl_ms`.
     /// The credential remains usable for callers that ask for less time.
     TtlUnsatisfiable,
@@ -500,7 +507,8 @@ impl ReadError {
             | ReadError::Corrupt
             | ReadError::RefreshUnsupported
             | ReadError::KindNotGettable
-            | ReadError::KindNotSignable => ErrorClass::Permanent,
+            | ReadError::KindNotSignable
+            | ReadError::ReportStatusNotCredentialDeath => ErrorClass::Permanent,
             // The refresh token is dead; a human must run a fresh login.
             ReadError::NeedsReauth => ErrorClass::AuthRequired,
             // A refresh attempt failed (provider may recover) or the master key is
@@ -1454,7 +1462,38 @@ impl ReadSurface {
         // (and a consumer can only ever kill the exact version it saw, not whatever is
         // current). The invalidate audits the revocation feedback in the chain atomically
         // (actor = the route channel; see below for why that is not a caller identity).
-        if params.provider_status == 401 || params.provider_status == 403 {
+        // A STATUS THE CONTRACT SAYS IS NOT A CREDENTIAL DEATH IS REFUSED, NOT IGNORED.
+        //
+        // This handler has only ever acted on 401 and 403, so a consumer reporting a 429
+        // quota refusal or a 5xx provider hiccup was already having its report discarded
+        // -- correctly, and INVISIBLY. A consumer whose classification is wrong got back
+        // success and a mark that silently did nothing, so the defect survived in the
+        // only place it could not be seen.
+        //
+        // Refusing costs the consumer nothing it can observe: it already holds the
+        // credential, and the report is advisory. That asymmetry is why this is not the
+        // same decision as the limiter's alarm-and-serve on the fetch path -- refusing a
+        // FETCH is an outage, refusing a redundant REPORT denies nothing. I had both
+        // under one rule because they share a limiter call, not because the argument
+        // carried across.
+        //
+        // 403 STAYS HONOURED, and this is the part measured rather than reasoned. Across
+        // every report this vault has taken (72 on 2026-09-19), exactly one real
+        // consumer 403 exists: `oauth:xai` at 2026-08-21 08:05, v156, applied. It was a
+        // GENUINE DEATH -- an operator re-logged in at 14:54 and it has refreshed cleanly
+        // every six hours since, and nothing repairs a misclassification. So xAI does use
+        // 403 as a credential signal while GitHub uses it for permission refusals, and
+        // this surface sees only the number. Refusing 403 would fail toward a dead
+        // credential that looks healthy, which is the worse direction.
+        //
+        // The resolution when a SECOND provider turns up using 403: a per-adapter
+        // declared policy rather than one global list, with a PERMISSIVE default so an
+        // adapter that has not spoken behaves exactly as today. One 403 in seventy-two
+        // does not justify that table yet.
+        if !matches!(params.provider_status, 401 | 403) {
+            return Err(ReadError::ReportStatusNotCredentialDeath);
+        }
+        {
             // The actor names the ROUTE CHANNEL, not the consumer. The number is
             // assigned to a route binding and reused as bindings come and go, so two
             // entries sharing `conn-1` are not evidence of the same reporter, and one

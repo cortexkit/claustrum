@@ -6879,11 +6879,20 @@ mod tests {
         };
 
         // A NON-AUTH status must not invalidate: a provider 500 is a hiccup, not a dead
-        // credential.
-        surface
+        // credential. It is now REFUSED rather than accepted-and-discarded — the record
+        // outcome is the same, and the consumer is told. This assertion used to read
+        // `.expect("a non-auth status is accepted")`, which was true and was the defect:
+        // a consumer classifying 5xx as a credential death got back success and a mark
+        // that did nothing.
+        let refusal = surface
             .report_auth_failure(7, None, &params(500, 1, None))
             .await
-            .expect("a non-auth status is accepted");
+            .expect_err("a non-auth status is refused, not accepted");
+        assert_eq!(
+            refusal,
+            read_surface::ReadError::ReportStatusNotCredentialDeath,
+            "and it refuses with the code that names why"
+        );
         assert_eq!(
             state_of(&store),
             RecordState::Active,
@@ -7086,6 +7095,80 @@ mod tests {
              of them has stopped fencing or stopped marking and no single-path test can \
              see it"
         );
+    }
+
+    /// A status the contract does not treat as a credential death is REFUSED, and the
+    /// two that are stay honoured.
+    ///
+    /// The refusing half is the new behaviour; the honouring half is what stops a future
+    /// tidy-up from collapsing this into "401 only". 403 is genuinely ambiguous across
+    /// providers — GitHub uses it for permission refusals on a live token, and xAI has
+    /// used it for a real death. Measured on the live store 2026-09-19: of 72 consumer
+    /// reports ever taken, exactly one was a real 403, on `oauth:xai`, and it WAS a death
+    /// — an operator re-logged in three hours later and it has refreshed cleanly since.
+    /// Refusing 403 would fail toward a dead credential that looks healthy.
+    #[tokio::test]
+    async fn a_report_status_outside_the_contract_is_refused_and_401_403_are_not() {
+        let (surface, store, _db, _root) = tmp_surface_with_store(196);
+        store
+            .create(
+                "apikey:status-gate",
+                &VaultRecord::new_static(CredentialKind::ApiKey, "test", b"key".to_vec(), None),
+            )
+            .expect("create record");
+        let handle = credentials_core::store::mint_handle().expect("mint handle");
+        store
+            .put_handle_hash(
+                &handle.hash,
+                "apikey:status-gate",
+                AuditCtx::admin(AuditOp::MintHandle),
+            )
+            .expect("bind handle");
+
+        let report = |status: u16| {
+            let raw = handle.raw.clone();
+            let surface = &surface;
+            async move {
+                surface
+                    .report_auth_failure(
+                        6,
+                        None,
+                        &read_surface::ReportAuthFailureParams {
+                            handle: Some(raw),
+                            credential_id: None,
+                            provider_status: status,
+                            record_version: 1,
+                            reporter_source: None,
+                        },
+                    )
+                    .await
+            }
+        };
+
+        for status in [429, 402, 500, 200, 404] {
+            let refusal = report(status)
+                .await
+                .expect_err("a status the contract does not treat as a death must refuse");
+            assert_eq!(
+                refusal,
+                read_surface::ReadError::ReportStatusNotCredentialDeath,
+                "status {status} must refuse with the naming code, not be accepted and \
+                 discarded: a consumer whose classification is wrong learns nothing from \
+                 a success that did nothing"
+            );
+            assert_eq!(
+                refusal.class(),
+                read_surface::ErrorClass::Permanent,
+                "the same status will never become a credential death, so a retry cannot \
+                 succeed and the class must say so"
+            );
+        }
+
+        for status in [401, 403] {
+            report(status)
+                .await
+                .unwrap_or_else(|e| panic!("status {status} must still be honoured, got {e:?}"));
+        }
     }
 
     /// The audit row for a scoped report names the PRINCIPAL, not the route channel.

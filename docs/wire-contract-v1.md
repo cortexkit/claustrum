@@ -58,6 +58,7 @@ cannot be met; retrying unchanged buys another one against the provider's mint b
 | `invalid_category_name` | permanent | a category is outside `^[a-z][a-z0-9-]{1,31}$` |
 | `invalid_credential_id` | permanent | an id begins with reserved `category:` or contains `|` |
 | `invalid_principal` | permanent | a grant principal is not `reserved` or contains `|` |
+| `report_status_not_credential_death` | permanent | `report_auth_failure` carried a `provider_status` outside {401, 403} |
 | `too_many_items` | context_overflow | a batch exceeded the per-request cap |
 | `sign_payload_too_large` | context_overflow | a sign payload exceeded 1 MiB (`MAX_SIGN_PAYLOAD`) |
 | `ttl_unsatisfiable` | context_overflow | a freshly minted token still cannot satisfy your `min_ttl_ms` |
@@ -231,6 +232,32 @@ cases have been seen side by side.
 
 *(Contributed by a consumer seat, 2026-09-17, after a real 401 cluster where the vault
 could not name the reporting consumer and the fence was the only thing that held.)*
+
+### A status outside {401, 403} is REFUSED, not ignored
+
+The vault has only ever acted on `401` and `403`. A report carrying `429`, `402` or a
+`5xx` was accepted and its mark silently did nothing — so a consumer classifying quota
+refusals as credential deaths got back success and no signal, and the defect survived in
+the one place it could not be seen. Those now refuse with
+`report_status_not_credential_death` (`permanent`), so a wrong classification is
+diagnosed on its first report.
+
+Refusing costs you nothing you can observe: you already hold the credential, and the
+report is advisory. That is why this is a refusal where a refused *fetch* would be an
+outage.
+
+**`403` is still honoured, and deliberately.** It is genuinely ambiguous across
+providers — GitHub uses it for permission refusals on a perfectly live token, and xAI has
+used it for a real credential death (measured: one such report, followed by an operator
+re-login, then clean refreshes ever since). This surface sees only the number. Refusing
+`403` would fail toward a dead credential that looks healthy, which is the worse
+direction, so the judgement stays with you: report only when you believe the credential
+itself is invalid.
+
+*(The refusal was proposed by a consumer seat arguing that a rate bound would convert a
+loud classification defect into a quiet one. That argument is right and is why this is a
+refusal rather than a throttle. Their stronger version — refuse everything but `401` —
+was refuted by the one real `403`.)*
 
 ---
 

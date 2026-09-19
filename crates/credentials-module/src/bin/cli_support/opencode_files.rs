@@ -754,6 +754,30 @@ where
     let lock = lock_path(path);
     let owner_path = lock.join("owner");
     let nonce = random_nonce()?;
+    // THE ACQUISITION DEADLINE IS WALL CLOCK, AND `now_override_ms` DOES NOT REACH IT.
+    //
+    // A test that pins the clock controls what the lock believes about STALENESS and
+    // controls nothing about how long this loop is allowed to run. So a test written
+    // with `ttl: Duration::from_millis(20)` has twenty milliseconds of REAL time to
+    // reach whatever state it asserts, however loaded the machine is.
+    //
+    // That is the mechanism behind this suite's load-correlated failures, measured
+    // 2026-09-19 at load 17-31 on a machine shared with other seats' test runs: the loop
+    // exits at its deadline before the state under test is reached, and the caller sees
+    // a timeout where the test named a specific refusal. It is NOT nondeterminism --
+    // every such test is a real-time budget in the low tens of milliseconds, and the
+    // question is only whether the machine was busy.
+    //
+    // DELIBERATELY NOT "FIXED" BY ROUTING THIS THROUGH THE INJECTED CLOCK. A pinned
+    // clock does not advance, so a deadline read from it never arrives and the loop
+    // spins forever; making it advance would reintroduce exactly the wall-clock/injected
+    // mixing that produced two separate defects in this file earlier the same day (the
+    // reclaim seed and `ManifestLease::commit`). The clock model needs one decision
+    // rather than a third local patch.
+    //
+    // Until then: a failure in this suite that reports a TIMEOUT where a specific
+    // refusal was named is this, not the property under test. Re-run alone before
+    // reporting it as a defect.
     let deadline = Instant::now() + options.ttl;
     loop {
         match fs::create_dir(&lock) {

@@ -1787,22 +1787,20 @@ dependencies = [
 
 [[package]]
 name = "subc-core"
-version = "0.18.14"
+version = "0.18.15"
 dependencies = [
  "base64",
  "cortexkit-log",
  "cortexkit-paths 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "ed25519-dalek",
- "fs4",
- "getrandom 0.2.17",
  "hex-literal",
- "rlimit",
  "rusqlite",
  "rustix",
  "serde",
  "serde_json",
  "sha2",
  "subc-control",
+ "subc-daemon",
  "subc-jsonc",
  "subc-protocol",
  "subc-transport",
@@ -1813,8 +1811,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "subc-daemon"
+version = "0.18.15"
+dependencies = [
+ "cortexkit-log",
+ "cortexkit-paths 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "fs4",
+ "getrandom 0.2.17",
+ "rlimit",
+ "serde",
+ "serde_json",
+ "sha2",
+ "subc-control",
+ "subc-jsonc",
+ "subc-protocol",
+ "subc-transport",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "subc-jsonc"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "serde_json",
 ]

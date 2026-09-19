@@ -1106,8 +1106,11 @@ fn preflight_login(
     let key = resolve_store_key(global)?;
 
     let exists = if path.exists() {
-        match credentials_core::store::list_meta_read_only(&path) {
-            Ok(rows) => rows.iter().any(|(stored_id, _)| stored_id == id),
+        // The version-aware reader, so the CLI has ONE lease-free metadata reader rather
+        // than two that could drift. This caller only needs existence, so the version is
+        // discarded here; the verbs that render a reduced view are the ones that use it.
+        match credentials_core::store::list_meta_read_only_with_schema(&path) {
+            Ok((rows, _)) => rows.iter().any(|(stored_id, _)| stored_id == id),
             Err(StoreOpError::NotFound) => false,
             Err(error) => return Err(CliError::Store(error)),
         }
@@ -2877,6 +2880,25 @@ fn created_id_is_already_reachable(global: &GlobalArgs, id: &str) -> bool {
 }
 
 fn request_admin_status(global: &GlobalArgs) -> Result<serde_json::Value, CliError> {
+    request_admin_status_with_schema(global).map(|(result, _)| result)
+}
+
+/// The store's recorded schema version when the report came from the lease-free
+/// readers, or `None` when a live module answered.
+///
+/// A live module has already migrated on boot, so there is nothing behind to report;
+/// only the offline path can meet a store the binary is ahead of.
+type StoreSchemaVersion = Option<u32>;
+
+/// Build the status report, and say which schema the store was read at.
+///
+/// The version is threaded out rather than printed here because the note belongs AFTER
+/// the verb's own output: a caller that printed it first would put a diagnostic above
+/// the inventory an operator is reading, and a script capturing stdout would still be
+/// fine but a human tailing the transcript would not.
+fn request_admin_status_with_schema(
+    global: &GlobalArgs,
+) -> Result<(serde_json::Value, StoreSchemaVersion), CliError> {
     let op = AdminOpBody::Status {
         v: ADMIN_OP_SCHEMA_V1,
     };
@@ -2888,7 +2910,7 @@ fn request_admin_status(global: &GlobalArgs) -> Result<serde_json::Value, CliErr
             &op,
             None,
         ) {
-            admin_client::RouteCommit::Committed(v) => return Ok(v),
+            admin_client::RouteCommit::Committed(v) => return Ok((v, None)),
             admin_client::RouteCommit::Refused(m) => return Err(CliError::RouteRefused(m)),
             admin_client::RouteCommit::LocalFailure(m) => return Err(CliError::LocalFailure(m)),
             admin_client::RouteCommit::Indeterminate(m) => {
@@ -2914,27 +2936,52 @@ fn request_admin_status(global: &GlobalArgs) -> Result<serde_json::Value, CliErr
             global.data_dir.display()
         )));
     }
-    let metas = match credentials_core::store::list_meta_read_only(&db) {
-        Ok(metas) => metas,
-        Err(StoreOpError::NotFound) => Vec::new(),
+    let (metas, meta_schema) = match credentials_core::store::list_meta_read_only_with_schema(&db) {
+        Ok((metas, schema)) => (metas, Some(schema)),
+        Err(StoreOpError::NotFound) => (Vec::new(), None),
         Err(error) => return Err(CliError::Store(error)),
     };
-    let grants = match credentials_core::store::list_read_grants_read_only(&db) {
-        Ok(grants) => grants,
-        Err(StoreOpError::NotFound) => Vec::new(),
-        Err(error) => return Err(CliError::Store(error)),
-    };
+    let (grants, grant_schema) =
+        match credentials_core::store::list_read_grants_read_only_with_schema(&db) {
+            Ok((grants, schema)) => (grants, Some(schema)),
+            Err(StoreOpError::NotFound) => (Vec::new(), None),
+            Err(error) => return Err(CliError::Store(error)),
+        };
     let open_intents = match credentials_core::store::count_refresh_intents_read_only(&db) {
         Ok(count) => count,
         Err(StoreOpError::NotFound) => 0,
         Err(error) => return Err(CliError::Store(error)),
     };
-    Ok(credentials_core::admin_ops::status_result(
-        &metas,
-        &grants,
-        open_intents,
-        false,
+    Ok((
+        credentials_core::admin_ops::status_result(&metas, &grants, open_intents, false),
+        meta_schema.or(grant_schema),
     ))
+}
+
+/// Say, once, that the store this read met is behind the binary.
+///
+/// *** THE WINDOW THIS DESCRIBES IS THE PLACEMENT WINDOW. *** A CLI-only change is
+/// placed first and the daemon, which migrates on boot, is restarted later. Between the
+/// two the offline readers meet a store one migration behind, and they read it
+/// truthfully: no categories exist yet, and every grant is a prefix grant. Without this
+/// line the reduced view is indistinguishable from a vault that genuinely has no
+/// categories, which is the reading that would send an operator looking for a bug in
+/// their classification rather than at the restart they have not done yet.
+///
+/// STDERR, and stdout is untouched, so a script parsing the inventory keeps working.
+fn print_store_behind_note(store_schema: StoreSchemaVersion) {
+    let Some(store_schema) = store_schema else {
+        return;
+    };
+    let binary_schema = credentials_core::store::newest_migration_version();
+    if store_schema >= binary_schema {
+        return;
+    }
+    eprintln!(
+        "note: store schema {store_schema} is behind this binary's {binary_schema}; \
+         categories and category grants appear after the daemon restarts (migration {})",
+        credentials_core::store::CATEGORY_SCHEMA_VERSION
+    );
 }
 
 type InventoryRow = (String, u64, String, Vec<String>);
@@ -3248,7 +3295,7 @@ fn print_read_grants(result: &serde_json::Value) -> Result<(), CliError> {
 }
 
 fn cmd_status(global: &GlobalArgs) -> Result<(), CliError> {
-    let result = request_admin_status(global)?;
+    let (result, store_schema) = request_admin_status_with_schema(global)?;
     let inventory = parse_inventory(&result)?;
 
     let status = result["status"].as_str().unwrap_or("unknown");
@@ -3288,6 +3335,7 @@ fn cmd_status(global: &GlobalArgs) -> Result<(), CliError> {
             retired.join(", ")
         );
     }
+    print_store_behind_note(store_schema);
     Ok(())
 }
 
@@ -3842,9 +3890,10 @@ fn format_ts_ms(ts_ms: i64) -> String {
 fn cmd_list(global: &GlobalArgs) -> Result<(), CliError> {
     // A discovered daemon still supplies authenticated `admin.status`; when none is
     // reachable, the same report is built from lease-free plaintext metadata readers.
-    let result = request_admin_status(global)?;
+    let (result, store_schema) = request_admin_status_with_schema(global)?;
     let rows = parse_inventory(&result)?;
     print_inventory(&rows);
+    print_store_behind_note(store_schema);
     Ok(())
 }
 
@@ -3852,8 +3901,10 @@ fn cmd_grants(global: &GlobalArgs) -> Result<(), CliError> {
     // Grant inventory is part of the same authenticated admin.status response as the
     // credential inventory. A discovered daemon is queried online; otherwise the same
     // sorted rows come from the lease-free plaintext reader.
-    let result = request_admin_status(global)?;
-    print_grants(&result)
+    let (result, store_schema) = request_admin_status_with_schema(global)?;
+    print_grants(&result)?;
+    print_store_behind_note(store_schema);
+    Ok(())
 }
 
 /// Report whether each credential still holds material the engine can work with.

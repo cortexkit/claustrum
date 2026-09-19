@@ -4230,3 +4230,90 @@ fn category_cli_lists_mutates_reclassifies_and_renders_category_grants() {
     assert!(stdout.contains("llm-provider"));
     assert!(!stdout.contains("category:llm-provider"));
 }
+
+/// A store one migration behind the binary must still be readable offline.
+///
+/// *** THE PLACEMENT WINDOW. *** A CLI-only change is placed first and the daemon,
+/// which migrates on boot, is restarted later. Between the two every offline `list`
+/// meets a store at schema 8, and before this it failed outright with "no such table:
+/// credential_categories" -- so the one verb an operator reaches for during a deploy
+/// was broken for the whole window.
+///
+/// BOTH ARMS IN ONE TEST, because the note is only correct if it is CONDITIONAL: an
+/// unconditional note would pass the schema-8 arm alone and then tell every operator
+/// on a migrated vault that their categories are missing.
+#[test]
+fn list_reads_a_store_one_migration_behind_and_says_so_on_stderr_only() {
+    let vault = GrantCliVault::new("behind-schema");
+
+    // Build the schema-8 store by running the REAL chain up to version 8, so the
+    // fixture cannot drift from the migrations it stands in for.
+    let descriptor = StorageDescriptor {
+        module_id: credentials_core::contract::MODULE_ID.into(),
+        storage_namespace: credentials_core::contract::STORAGE_NAMESPACE.into(),
+        isolation: Isolation::Module,
+        backend: StorageBackend::Sqlite {
+            path: vault
+                .data_dir
+                .join("store.db")
+                .to_string_lossy()
+                .into_owned(),
+        },
+    };
+    {
+        let sqlite = open_sqlite(&descriptor).expect("open schema-8 store");
+        credentials_core::store::migrate_through_for_test(&sqlite, 8).expect("migrate to 8");
+        sqlite
+            .with_conn(|conn| {
+                for id in ["apikey:behind-one", "apikey:behind-two"] {
+                    conn.execute(
+                        "INSERT INTO credentials \
+                         (credential_id, record_version, key_id, state, envelope, updated_at_ms) \
+                         VALUES (?1, 1, '00', 'active', X'00', 0)",
+                        rusqlite::params![id],
+                    )?;
+                }
+                Ok(())
+            })
+            .expect("seed schema-8 rows");
+    }
+
+    let behind = vault.run(&["list"]);
+    let stdout = String::from_utf8_lossy(&behind.stdout);
+    let stderr = String::from_utf8_lossy(&behind.stderr);
+    assert!(
+        behind.status.success(),
+        "list must exit 0 on a store one migration behind: {stderr}"
+    );
+    assert!(stdout.contains("apikey:behind-one"), "stdout: {stdout}");
+    assert!(stdout.contains("apikey:behind-two"), "stdout: {stdout}");
+    assert_eq!(
+        stderr.trim(),
+        "note: store schema 8 is behind this binary's 9; categories and category grants \
+         appear after the daemon restarts (migration 9)",
+        "the note must be verbatim and on stderr"
+    );
+
+    // THE POSITIVE CONTROL: the same verb on a migrated store must carry NO note, or
+    // the assertion above would pass for a note printed unconditionally.
+    let migrated = GrantCliVault::new("behind-schema-migrated");
+    migrated.bootstrap();
+    let put = migrated.run(&["put", "--id", "apikey:ahead", "--payload", "secret"]);
+    assert!(
+        put.status.success(),
+        "put failed: {}",
+        String::from_utf8_lossy(&put.stderr)
+    );
+    let ahead = migrated.run(&["list"]);
+    let ahead_stdout = String::from_utf8_lossy(&ahead.stdout);
+    let ahead_stderr = String::from_utf8_lossy(&ahead.stderr);
+    assert!(ahead.status.success(), "list failed: {ahead_stderr}");
+    assert!(
+        ahead_stdout.contains("apikey:ahead"),
+        "stdout: {ahead_stdout}"
+    );
+    assert!(
+        !ahead_stderr.contains("is behind this binary's"),
+        "a migrated store must carry no behind-note: {ahead_stderr}"
+    );
+}

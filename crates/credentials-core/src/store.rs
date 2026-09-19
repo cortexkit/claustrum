@@ -3833,6 +3833,57 @@ pub fn count_refresh_intents_read_only(
     })
 }
 
+/// The OTHER live handles on a credential, newest first, as (hash, minted-at-ms).
+///
+/// For the advisory `mint-handle` prints after a successful mint. The vault cannot tell
+/// one holder from another -- there is no holder column and no last-use column -- so it
+/// cannot know whether a fresh handle REPLACES one the operator already holds or joins a
+/// set of live doors held by different consumers. Both are ordinary.
+///
+/// *** WHY THIS EXISTS AT ALL, because the alternative looks obviously better. ***
+/// The tempting fix is `mint-handle --replace`, revoking the credential's other handles
+/// in the same transaction. That is wrong here: on `oauth:anthropic` the other live
+/// handle is a different consumer's default-resolution door, so a replace issued by one
+/// holder would silently close another's. The vault has no way to tell them apart.
+///
+/// So the operator is asked instead, and the timing is the whole point: measured on this
+/// vault 2026-09-19, four credentials carried 16 live handles and 12 had no identifiable
+/// holder. Every orphan was created by a hand-edit that pasted a new handle over an old
+/// one -- the consumer's config is a map keyed on credential id, so the displaced value
+/// stops existing there the moment the editor saves while remaining live here. THE ONE
+/// MOMENT BOTH VALUES COEXIST IS IN THE MINTING OPERATOR'S HANDS, and after that no
+/// surface holds the predecessor. Asking later is a canvass; asking now is a question.
+///
+/// Read-only and lease-free, so it runs beside a serving daemon: every column is
+/// plaintext and a handle hash is not spendable.
+pub fn other_live_handles_read_only(
+    store_path: &std::path::Path,
+    credential_id: &str,
+    exclude_hash: &str,
+) -> Result<Vec<(String, i64)>, StoreOpError> {
+    let map = |e: rusqlite::Error| StoreOpError::from(StoreError::Backend(e.to_string()));
+    let conn = rusqlite::Connection::open_with_flags(
+        format!("file:{}?mode=ro", store_path.display()),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+    )
+    .map_err(map)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT handle_hash, created_at_ms FROM handles \
+             WHERE credential_id = ?1 AND revoked = 0 AND handle_hash <> ?2 \
+             ORDER BY created_at_ms DESC",
+        )
+        .map_err(map)?;
+    let rows = stmt
+        .query_map(rusqlite::params![credential_id, exclude_hash], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .map_err(map)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(map)?;
+    Ok(rows)
+}
+
 /// What a whole-file restore of this store would bring back.
 ///
 /// Every column read here is plaintext, so this answers on a restored copy sitting
@@ -6768,6 +6819,94 @@ mod tests {
                 .is_err());
         }
         assert_eq!(store.read_audit(None).unwrap().len(), before);
+    }
+
+    /// The predecessor query must exclude the handle just minted, exclude revoked
+    /// rows, stay inside its own credential, and order newest first.
+    ///
+    /// Every one of those four is a way the advisory could mislead rather than help:
+    /// including self makes a first mint look like a replacement, including revoked
+    /// rows tells an operator to revoke a dead door, crossing credentials names
+    /// somebody else's handle as theirs to kill, and wrong order buries the likely
+    /// predecessor under older ones.
+    #[test]
+    fn predecessor_query_excludes_self_revoked_and_other_credentials() {
+        let (root, store) = tmp_store(114);
+        let path = root.path().join("store.db");
+        store.create("apikey:a", &oauth_record()).unwrap();
+        store.create("apikey:b", &oauth_record()).unwrap();
+
+        let first = mint_handle().unwrap();
+        let second = mint_handle().unwrap();
+        let dead = mint_handle().unwrap();
+        let elsewhere = mint_handle().unwrap();
+        for (h, id) in [
+            (&first, "apikey:a"),
+            (&second, "apikey:a"),
+            (&dead, "apikey:a"),
+            (&elsewhere, "apikey:b"),
+        ] {
+            store
+                .put_handle_hash(&h.hash, id, AuditCtx::admin(AuditOp::MintHandle))
+                .unwrap();
+        }
+        store
+            .revoke_handle(&dead.raw, AuditCtx::admin(AuditOp::RevokeHandle))
+            .unwrap();
+
+        // A FIRST mint has no predecessor: asking about the only handle must be empty,
+        // which is the arm that keeps the advisory silent.
+        let (only_root, only_store) = tmp_store(115);
+        only_store.create("apikey:a", &oauth_record()).unwrap();
+        let lone = mint_handle().unwrap();
+        only_store
+            .put_handle_hash(&lone.hash, "apikey:a", AuditCtx::admin(AuditOp::MintHandle))
+            .unwrap();
+        assert!(
+            other_live_handles_read_only(
+                &only_root.path().join("store.db"),
+                "apikey:a",
+                &lone.hash
+            )
+            .unwrap()
+            .is_empty(),
+            "a credential's only handle must not be reported as its own predecessor"
+        );
+
+        let got = other_live_handles_read_only(&path, "apikey:a", &second.hash).unwrap();
+        let hashes: Vec<&str> = got.iter().map(|(h, _)| h.as_str()).collect();
+        assert_eq!(
+            hashes,
+            vec![first.hash.as_str()],
+            "expected only the live sibling on this credential: self excluded, revoked \
+             excluded, other credential excluded"
+        );
+        assert_ne!(
+            hashes.first().copied(),
+            Some(dead.hash.as_str()),
+            "a revoked handle must never be offered for revocation"
+        );
+        assert_ne!(
+            hashes.first().copied(),
+            Some(elsewhere.hash.as_str()),
+            "a handle on another credential must never be named here"
+        );
+
+        // Ordering: with two live siblings the newest comes first.
+        let third = mint_handle().unwrap();
+        store
+            .put_handle_hash(
+                &third.hash,
+                "apikey:a",
+                AuditCtx::admin(AuditOp::MintHandle),
+            )
+            .unwrap();
+        let ordered = other_live_handles_read_only(&path, "apikey:a", &second.hash).unwrap();
+        assert_eq!(ordered.len(), 2);
+        assert!(
+            ordered[0].1 >= ordered[1].1,
+            "newest first, so the likeliest predecessor is not buried"
+        );
     }
 
     /// A minted handle must be traceable to its mint by the SAME join that already

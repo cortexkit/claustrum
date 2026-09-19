@@ -3404,7 +3404,47 @@ fn cmd_mint_handle(global: &GlobalArgs, args: &[String]) -> Result<(), CliError>
     println!("{handle}");
     eprintln!("revoke with: ck auth revoke-handle --handle {handle}");
     eprintln!("(minted handle for {id}; store it now — it is not recoverable)");
+    warn_about_predecessors(global, &id, handle);
     Ok(())
+}
+
+/// Ask the operator about a predecessor, because this is the only moment anyone can.
+///
+/// A fresh handle either REPLACES one the operator already holds or joins a set held by
+/// different consumers, and the vault cannot tell which: there is no holder column. What
+/// it can do is say that other live doors exist and name them by hash, while the person
+/// who knows whether one of them is theirs is still standing here holding both values.
+///
+/// After this returns, nothing holds the predecessor. A consumer config keyed on
+/// credential id loses it on the next save; the audit chain records that a handle was
+/// minted and (only since 2026-09-19) which one. That asymmetry is how this vault reached
+/// 16 live handles on four credentials with 12 unattributable to any holder -- resolved
+/// by canvassing three seats, which is an hour of work this advisory would have saved.
+///
+/// FAILS OPEN AND SILENT. The mint already succeeded and its handle is on stdout; an
+/// advisory that turned a completed mint into a visible error would teach operators that
+/// minting is unreliable. A hash is not spendable, so naming them costs nothing.
+fn warn_about_predecessors(global: &GlobalArgs, id: &str, handle: &str) {
+    let hash = credentials_core::handle_hash(handle);
+    let Ok(others) =
+        credentials_core::store::other_live_handles_read_only(&store_path(global), id, &hash)
+    else {
+        return;
+    };
+    if others.is_empty() {
+        return;
+    }
+    eprintln!(
+        "note: {id} now has {} live handles. The vault cannot tell holders apart, so if\n\
+         \x20     this one REPLACES a handle you already hold, revoke that one now:",
+        others.len() + 1
+    );
+    for (other, minted_at) in &others {
+        eprintln!(
+            "  ck auth revoke-handle --hash {other}   (minted {})",
+            format_ts_ms(*minted_at)
+        );
+    }
 }
 
 fn cmd_revoke_handle(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {

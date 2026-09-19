@@ -115,6 +115,8 @@ Fill in the acknowledgements and checked locations before enrolment.
 
 Any monitor that reads a provider's quota from the local `auth.json` entry loses that lane when the tombstone lands. On this host Insula reads xAI quota that way. Mint it its own capability handle (a distinct handle, so revoking either side never cuts the other) and install it in its handle file BEFORE the tombstone; done in that order on 2026-09-19 (handle 09:31Z, tombstone 09:53Z) Insula's grok row flipped to `source=vault` within a second and never sampled degraded. In the reverse order the lane is dark for the gap.
 
+Do NOT label the vault record (`set-identity --account-id`) while the local entry is a tombstone. A dedup consumer keys on the account label: with both slots unlabelled the tombstoned local lane and the vault lane collapse to one row and the serving lane wins; labelling only the vault twin splits them, publishes the dead local lane as a second row, and moves the provider out of completeness. Learned live on 2026-09-19 (seq 1674, reverted 4 minutes later at seq 1675). The unlabelled state matches deepseek and synthetic, which publish one clean row each. Labelling becomes safe only once the consumer stops enumerating a tombstoned local entry.
+
 A custody flip logs nothing on either side: the wire is the only witness. Capture a before/after quota snapshot on purpose if the flip is to be verifiable afterwards.
 
 ## Verifying the serve

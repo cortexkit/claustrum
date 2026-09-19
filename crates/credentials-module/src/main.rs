@@ -3641,6 +3641,32 @@ mod tests {
         // one in it is a secret in the repository. The request shape is what a decoder has
         // to agree on; the reply shape is pinned by the wire-key contract tests next to
         // each op, which assert presence AND absence without materialising a payload.
+        // AND THE ROW SHAPE, WHICH THE REQUEST PINS CANNOT SEE.
+        //
+        // A list_scoped row carries no secret -- ids, categories, vendors, state -- so
+        // unlike a get_scoped body it is safe to pin, and it is the only fixture a
+        // consumer's REPLY decoder can be checked against. The gap was not theoretical:
+        // my own TypeScript decoder read `credential_type` where the wire says `type`
+        // (the Rust field is renamed) and refused every valid row, while the
+        // request-shape fixture stayed green throughout.
+        assert_eq!(
+            serde_json::to_string(&read_surface::ListScopedCredential {
+                id: "oauth:anthropic".into(),
+                categories: vec!["llm-provider".into()],
+                credential_type: "subscription".into(),
+                serves: vec!["anthropic".into()],
+                refresh_adapter: Some("anthropic".into()),
+                state: "active".into(),
+                record_version: 232,
+                operations: vec!["read".into()],
+                account_id: None,
+                email: None,
+                org_name: None,
+            })
+            .unwrap(),
+            operation("credential.list_scoped")["row"]
+        );
+
         assert_eq!(
             serde_json::to_string(&read_surface::ListScopedParams {
                 enrollment_token: Some("t".repeat(64)),

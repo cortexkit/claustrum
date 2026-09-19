@@ -453,6 +453,11 @@ export interface ScopedInventoryRow {
   readonly state: string
   readonly recordVersion: number
   readonly operations: readonly string[]
+  /**
+   * NOT SERVED TODAY. The field is absent from `ListScopedCredential`, so this is always
+   * null; it is declared because a consumer's discovery high-water mark needs it and the
+   * absence should be visible in the type rather than discovered at runtime.
+   */
   readonly createdAtMs: number | null
   readonly accountId?: string
   readonly email?: string
@@ -483,7 +488,16 @@ function decodeScopedInventory(
     // for binding verification; an inventory row IS the credential, so it does not name
     // the concept twice. Reading the wrong key yields undefined for every row and says
     // nothing about why -- which is exactly what it did to my own probe.
-    if (typeof row.id !== 'string' || typeof row.credential_type !== 'string' || typeof row.state !== 'string') {
+    // THE WIRE KEY IS `type`, NOT `credential_type`. The Rust field is named
+    // `credential_type` (because `type` is a keyword) and carries
+    // `#[serde(rename = "type")]`, so the FIELD name and the WIRE name differ and reading
+    // the field name gets undefined for every row.
+    //
+    // Second instance of this exact mistake in one evening: my probe read
+    // `credential_id` where the row says `id` and printed "?" for all seventeen. Both
+    // times I wrote the decoder from the Rust struct rather than from a served payload,
+    // which is the habit this test exists to break.
+    if (typeof row.id !== 'string' || typeof row.type !== 'string' || typeof row.state !== 'string') {
       throw asCredentialError(response, 'invalid_response', logUnknownClass)
     }
     const createdAtMs =
@@ -502,7 +516,7 @@ function decodeScopedInventory(
     return {
       id: row.id,
       categories: strings(row.categories),
-      credentialType: row.credential_type,
+      credentialType: row.type,
       serves: strings(row.serves),
       state: row.state,
       refreshAdapter: row.refresh_adapter,

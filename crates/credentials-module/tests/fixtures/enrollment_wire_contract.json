@@ -26,7 +26,8 @@
     {
       "op": "credential.list_scoped",
       "request": "{\"enrollment_token\":\"tttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt\"}",
-      "success": "pinned by the wire-key contract tests beside each op, which assert presence AND absence without materialising a decrypted payload"
+      "success": "pinned by the wire-key contract tests beside each op, which assert presence AND absence without materialising a decrypted payload",
+      "row": "{\"id\":\"oauth:anthropic\",\"categories\":[\"llm-provider\"],\"type\":\"subscription\",\"serves\":[\"anthropic\"],\"refresh_adapter\":\"anthropic\",\"state\":\"active\",\"record_version\":232,\"operations\":[\"read\"]}"
     },
     {
       "op": "credential.get_scoped",

@@ -60,6 +60,30 @@ describe('the client speaks the producer-pinned wire', () => {
     ])
   })
 
+  /**
+   * THE REPLY SHAPE, WHICH THE REQUEST PINS CANNOT SEE.
+   *
+   * My own decoder read `credential_type` where the wire says `type` -- the Rust field is
+   * renamed -- and refused EVERY valid row, while every request-shape assertion above
+   * stayed green. A request fixture cannot catch a reply-decoding defect, and I wrote the
+   * decoder from the Rust struct instead of from a served payload.
+   */
+  test('the client decodes the row the producer actually emits', () => {
+    const fixture = JSON.parse(readFileSync(FIXTURE, 'utf8')) as {
+      operations: (FixtureRow & { row?: string })[]
+    }
+    const row = fixture.operations.find((entry) => entry.op === 'credential.list_scoped')?.row
+    if (row === undefined) throw new Error('no pinned row for credential.list_scoped')
+    const decoded = JSON.parse(row) as Record<string, unknown>
+
+    // Exactly the keys the client reads, named as the WIRE names them.
+    expect(Object.hasOwn(decoded, 'type')).toBe(true)
+    expect(Object.hasOwn(decoded, 'credential_type')).toBe(false)
+    expect(Object.hasOwn(decoded, 'id')).toBe(true)
+    expect(Object.hasOwn(decoded, 'credential_id')).toBe(false)
+    expect(decoded.refresh_adapter).toBe('anthropic')
+  })
+
   test('the ceremony rows are pinned too, so a consumer can build against them offline', () => {
     expect(Object.keys(fixtureRequest('auth.enroll_propose')).sort()).toEqual([
       'proposed_name',

@@ -66,7 +66,19 @@ jobs:
           claustrum does not self-initialize. Run \`ck auth bootstrap\` before enabling
           the module, or the daemon will exit with 'no master key has been provisioned'.
           On Linux and Windows there is no keychain, so bootstrap with \`--key-path\` and
-          give the daemon the same path via CK_MASTER_KEY_PATH."
+          give the daemon the same path via CK_MASTER_KEY_PATH.
+
+          REQUIRES subc 0.17.20 OR NEWER. An older supervisor refuses this module's
+          HELLO with 'malformed HELLO body: missing field \`consumes\`' and parks it
+          after three restarts. The error names a protocol field rather than a version,
+          so it reads as a broken release; it is a supervisor that predates the field
+          becoming optional. v0.1.2 does not carry this floor.
+
+          CARRIES STORE MIGRATION 9, which rebuilds read_grants and adds credential
+          categories. Place the daemon and ck-auth TOGETHER: whichever runs first
+          migrates the store, and a v0.1.2 binary has no store-ahead refusal, so
+          rolling back past this release would write into a migrated store. This
+          release is the rollback floor for any vault that applies migration 9."
           fi
 
   assets:

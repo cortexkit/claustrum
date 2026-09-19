@@ -1026,13 +1026,29 @@ fn offline_grants_lists_a_newly_minted_grant_with_creation_time() {
         &["reserved", "agent", "exact", "operator:", "read"],
         "grant rows must expose each requested column: {stdout}"
     );
-    assert_eq!(fields.len(), 7, "timestamp should be two formatted columns");
+    // 8 = the five above + REACHES + the timestamp's two columns. The reach column was
+    // added after a grant naming a category no credential carried rendered identically
+    // to a working one; this count is what stops it being dropped by a tidy-up.
+    assert_eq!(
+        fields.len(),
+        8,
+        "expected five identity columns, REACHES, and a two-column timestamp: {stdout}"
+    );
+    // 0, and correctly: this fixture grants the selector `operator:`, and no credential
+    // in the scratch vault is literally named that. It is prefix-SHAPED, which under
+    // byte-equality `exact` reaches nothing — so the fixture is itself an instance of the
+    // defect the column exists to expose, and asserting 1 here would have been me
+    // expecting the old prefix semantics.
+    assert_eq!(
+        fields[5], "0",
+        "a prefix-shaped exact selector matching no credential id reaches nothing: {stdout}"
+    );
     assert!(
-        fields[5].len() == 10 && fields[5].as_bytes()[4] == b'-' && fields[5].as_bytes()[7] == b'-',
+        fields[6].len() == 10 && fields[6].as_bytes()[4] == b'-' && fields[6].as_bytes()[7] == b'-',
         "creation date must use the CLI time-column format: {stdout}"
     );
     assert!(
-        fields[6].len() == 8 && fields[6].as_bytes()[2] == b':' && fields[6].as_bytes()[5] == b':',
+        fields[7].len() == 8 && fields[7].as_bytes()[2] == b':' && fields[7].as_bytes()[5] == b':',
         "creation time must use the CLI time-column format: {stdout}"
     );
 }

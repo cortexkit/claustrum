@@ -3162,6 +3162,42 @@ struct GrantRow {
     created_at_ms: i64,
 }
 
+/// Credential id -> its assigned categories, read from the same `admin.status` reply
+/// the grant table is rendered from.
+///
+/// Tolerant by design: a reply without the inventory yields an empty map and every grant
+/// renders `reaches 0`. That is honest rather than silent -- an operator seeing every row
+/// at zero will question the reading, where a missing column would just be absent.
+fn parse_credential_categories(
+    result: &serde_json::Value,
+) -> std::collections::BTreeMap<String, Vec<String>> {
+    let mut map = std::collections::BTreeMap::new();
+    let Some(rows) = result
+        .get("credentials")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return map;
+    };
+    for row in rows {
+        let Some(id) = row.get("id").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let categories = row
+            .get("categories")
+            .and_then(serde_json::Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+        map.insert(id.to_owned(), categories);
+    }
+    map
+}
+
 fn parse_grants(result: &serde_json::Value) -> Result<Vec<GrantRow>, CliError> {
     let rows = result
         .get("read_grants")
@@ -3265,11 +3301,10 @@ fn parse_grants(result: &serde_json::Value) -> Result<Vec<GrantRow>, CliError> {
 /// The header is here for the same reason. Without it the operation column (`read` /
 /// `sign`) and the principal kind are both short lowercase words, and nothing on screen
 /// says which is which.
-fn print_grants(result: &serde_json::Value) -> Result<(), CliError> {
+fn render_grants(result: &serde_json::Value) -> Result<Vec<String>, CliError> {
     let grants = parse_grants(result)?;
     if grants.is_empty() {
-        println!("no grants");
-        return Ok(());
+        return Ok(vec!["no grants".to_owned()]);
     }
     // Include the header in the width so a long heading cannot overrun its own column.
     let w = |head: &str, f: &dyn Fn(&GrantRow) -> &str| {
@@ -3285,13 +3320,51 @@ fn print_grants(result: &serde_json::Value) -> Result<(), CliError> {
     let ws = w("SELECTOR KIND", &|g| g.selector_kind.as_str());
     let wc = w("SELECTOR", &|g| g.credential_prefix.as_str());
     let wo = w("OP", &|g| g.operation.as_str());
-    println!(
-        "{:<wk$}  {:<wp$}  {:<ws$}  {:<wc$}  {:<wo$}  GRANTED",
-        "KIND", "PRINCIPAL", "SELECTOR KIND", "SELECTOR", "OP"
-    );
+
+    // REACH IS THE COLUMN THAT MAKES A WRONG GRANT VISIBLE.
+    //
+    // Every other column renders what the operator TYPED, so a grant that authorizes
+    // nothing looks identical to one that works. That is not hypothetical: a
+    // `category:llm-provider` grant was created on this vault while no credential
+    // carried that category, because registry defaults apply at CREATION and every
+    // credential predated the migration that introduced categories. It was
+    // syntactically valid, accepted without complaint, reached zero credentials, and
+    // read as correct in this exact table. A consumer asking me to double-check a
+    // selector is the only reason it was caught.
+    //
+    // `reaches 0` stays LEGAL rather than a refusal: granting an empty category is how
+    // an operator prepares reach for a module about to be installed. The column is what
+    // keeps that honest -- a permanent visible statement rather than a one-time warning
+    // that scrolls past.
+    //
+    // Computed from the SAME `admin.status` reply, which already carries per-credential
+    // categories. No new admin op and no new wire field, which is why this is a
+    // rendering change rather than a protocol one.
+    let inventory = parse_credential_categories(result);
+    let reach = |g: &GrantRow| -> usize {
+        let selector = g
+            .credential_prefix
+            .strip_prefix("category:")
+            .filter(|_| g.selector_kind == "category")
+            .unwrap_or(&g.credential_prefix);
+        match g.selector_kind.as_str() {
+            "category" => inventory
+                .values()
+                .filter(|categories| categories.iter().any(|c| c == selector))
+                .count(),
+            // `exact` is byte equality, deliberately: a grant whose reach can grow when
+            // someone else names a credential is not a grant anyone can reason about.
+            _ => inventory.contains_key(selector) as usize,
+        }
+    };
+
+    let mut lines = vec![format!(
+        "{:<wk$}  {:<wp$}  {:<ws$}  {:<wc$}  {:<wo$}  {:>7}  GRANTED",
+        "KIND", "PRINCIPAL", "SELECTOR KIND", "SELECTOR", "OP", "REACHES"
+    )];
     for grant in grants {
-        println!(
-            "{:<wk$}  {:<wp$}  {:<ws$}  {:<wc$}  {:<wo$}  {}",
+        lines.push(format!(
+            "{:<wk$}  {:<wp$}  {:<ws$}  {:<wc$}  {:<wo$}  {:>7}  {}",
             grant.principal_kind,
             grant.principal_id,
             grant.selector_kind,
@@ -3301,8 +3374,21 @@ fn print_grants(result: &serde_json::Value) -> Result<(), CliError> {
                 .filter(|_| grant.selector_kind == "category")
                 .unwrap_or(&grant.credential_prefix),
             grant.operation,
+            reach(&grant),
             format_ts_ms(grant.created_at_ms)
-        );
+        ));
+    }
+    Ok(lines)
+}
+
+/// Print what `render_grants` produced.
+///
+/// The split exists so a test can drive the REAL formatter rather than a copy of it. A
+/// test that rebuilt these rows by hand would assert its own arithmetic and pass with the
+/// production renderer deleted.
+fn print_grants(result: &serde_json::Value) -> Result<(), CliError> {
+    for line in render_grants(result)? {
+        println!("{line}");
     }
     Ok(())
 }
@@ -5509,6 +5595,68 @@ mod taxonomy_cli_tests {
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    /// A GRANT THAT REACHES NOTHING SAYS SO.
+    ///
+    /// Written because it happened on the live vault: a `category:llm-provider` grant was
+    /// created while NO credential carried that category, because registry defaults apply
+    /// at creation and every credential predated the migration that introduced
+    /// categories. It was syntactically valid, accepted without complaint, authorized
+    /// nothing, and rendered identically to a working grant — every other column shows
+    /// what the operator TYPED. A consumer asking me to double-check a selector is the
+    /// only reason it was caught.
+    ///
+    /// Both arms matter and they fail differently. Without the zero arm, a renderer that
+    /// hardcoded a plausible count passes. Without the non-zero arm, a renderer that
+    /// printed 0 for everything passes — and that is the likelier defect, because a reach
+    /// computation that silently matches nothing is what a selector-format change would
+    /// produce.
+    #[test]
+    fn the_grant_table_reports_what_each_row_actually_reaches() {
+        let reply = serde_json::json!({
+            "credentials": [
+                { "id": "apikey:one", "state": "active", "categories": ["llm-provider"] },
+                { "id": "apikey:two", "state": "active", "categories": ["llm-provider"] },
+                { "id": "signing:x:1", "state": "active", "categories": [] },
+            ],
+            "read_grants": [
+                { "principal_kind": "reserved", "principal_id": "m", "selector_kind": "category",
+                  "credential_prefix": "llm-provider", "operation": "read", "created_at_ms": 0 },
+                { "principal_kind": "reserved", "principal_id": "m", "selector_kind": "category",
+                  "credential_prefix": "no-such-category", "operation": "read", "created_at_ms": 0 },
+                // Sorted, because an existing guard refuses an unsorted grant set: the
+                // order is the operator's reach audit and a shuffled one hides a diff.
+                { "principal_kind": "reserved", "principal_id": "m", "selector_kind": "exact",
+                  "credential_prefix": "signing:x", "operation": "sign", "created_at_ms": 0 },
+                { "principal_kind": "reserved", "principal_id": "m", "selector_kind": "exact",
+                  "credential_prefix": "signing:x:1", "operation": "sign", "created_at_ms": 0 },
+            ],
+        });
+        let lines = render_grants(&reply).expect("render");
+        let reaches = |selector: &str| -> String {
+            let line = lines
+                .iter()
+                .find(|l| l.split_whitespace().nth(3) == Some(selector) && !l.starts_with("KIND"))
+                .unwrap_or_else(|| panic!("no row for {selector:?} in:\n{}", lines.join("\n")));
+            line.split_whitespace()
+                .nth(5)
+                .unwrap_or_default()
+                .to_owned()
+        };
+        assert_eq!(reaches("llm-provider"), "2", "two credentials carry it");
+        assert_eq!(
+            reaches("no-such-category"),
+            "0",
+            "the defect this exists for: valid, accepted, authorizes nothing"
+        );
+        assert_eq!(reaches("signing:x:1"), "1");
+        assert_eq!(
+            reaches("signing:x"),
+            "0",
+            "exact is byte equality: a prefix of a real id reaches nothing, which is the \
+             narrowing the selector vocabulary exists to make visible"
+        );
     }
 
     #[test]

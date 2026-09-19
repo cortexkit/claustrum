@@ -45,6 +45,7 @@ async fn main() {
     // because the anti-enumeration property is about whether two bodies agree.
     let mut status_ids: Option<Vec<String>> = None;
     let mut scoped_id: Option<String> = None;
+    let mut list_scoped = false;
     let mut as_module: Option<String> = None;
     let mut enroll_propose: Option<String> = None;
     let mut enroll_poll: Option<String> = None;
@@ -158,6 +159,11 @@ async fn main() {
                 };
                 enrollment_token = Some(token);
             }
+            // THE OP A CONSUMER SPENDS MOST, and it had no probe arm until the
+            // anthropic-auth seat asked for a live acceptance that exercises it. That
+            // absence is how `list_scoped` shipped querying grants under a hardcoded
+            // `reserved` kind: nothing an operator could run would have shown it.
+            "--list-scoped" => list_scoped = true,
             "--scoped-id" => {
                 let Some(id) = args.next() else {
                     eprintln!("vault_read_probe: --scoped-id needs a credential id");
@@ -254,6 +260,7 @@ async fn main() {
         (None, None)
             if scoped_id.is_some()
                 || status_ids.is_some()
+                || list_scoped
                 || enroll_propose.is_some()
                 || enroll_poll.is_some() =>
         {
@@ -323,6 +330,46 @@ async fn main() {
 
     let (route_channel, route_epoch) = route_open(&mut stream, &root, as_module.as_deref()).await;
     eprintln!("[probe] route.open -> route_channel={route_channel} route_epoch={route_epoch}");
+
+    if list_scoped {
+        let body = credential_list_scoped(
+            &mut stream,
+            route_channel,
+            route_epoch,
+            enrollment_token.as_deref(),
+        )
+        .await;
+        let parsed: Value = serde_json::from_slice(&body.body).unwrap_or(Value::Null);
+        let rows = parsed["result"]["credentials"].as_array();
+        match rows {
+            Some(rows) => {
+                eprintln!("[probe] list_scoped -> {} row(s)", rows.len());
+                for row in rows {
+                    // `serves` is the CANONICAL routing axis, not the id spelling:
+                    // apikey:openrouter serves Anthropic models and contains no
+                    // "anthropic" anywhere in its id.
+                    eprintln!(
+                        "  {}  categories={}  serves={}  state={}  v{}",
+                        // The field is `id` here, NOT `credential_id`. `get` and `status`
+                        // echo `credential_id` for binding verification; an inventory row
+                        // IS the credential, so it does not need to name the concept
+                        // twice. Reading the wrong key printed "?" for every row and said
+                        // nothing about why.
+                        row["id"].as_str().unwrap_or("?"),
+                        row["categories"],
+                        row["serves"],
+                        row["state"].as_str().unwrap_or("?"),
+                        row["record_version"]
+                    );
+                }
+            }
+            None => eprintln!(
+                "[probe] list_scoped -> {}",
+                serde_json::to_string(&parsed).unwrap_or_default()
+            ),
+        }
+        return;
+    }
 
     if report_auth_failure {
         let version = record_version.unwrap_or_else(|| {
@@ -418,15 +465,27 @@ async fn main() {
             // function rather than a re-derivation here. A probe that re-implemented the
             // domain separator could disagree with the vault and the disagreement would
             // present as "the ceremony is broken" rather than "the probe is wrong".
-            let seed = format!(
-                "{}-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .expect("clock")
-                    .as_nanos(),
-                name
-            );
+            // A CALLER-SUPPLIED SECRET MAKES THE RESUME TESTABLE. Without
+            // `--enroll-secret` this arm mints a fresh secret from the clock and pid on
+            // every run, so a second propose is a DIFFERENT caller by construction and can
+            // only ever demonstrate `pending_exists`. Re-running it looks like the resume
+            // is broken; it is the probe asking a different question.
+            //
+            // Measured during the live acceptance: I passed `--enroll-secret`, got
+            // `pending_exists`, and nearly reported the just-landed resume as not working.
+            // The flag was parsed and then read only by the poll arm.
+            let seed = match enroll_secret.as_ref() {
+                Some(supplied) => supplied.clone(),
+                None => format!(
+                    "{}-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .expect("clock")
+                        .as_nanos(),
+                    name
+                ),
+            };
             let secret_hex = credentials_core::enrollment::enrollment_secret_hash(
                 &credentials_core::enrollment::enrollment_secret_hash(&{
                     use std::collections::hash_map::DefaultHasher;
@@ -936,6 +995,47 @@ struct ReportAddress<'a> {
     handle: &'a str,
     credential_id: Option<&'a str>,
     enrollment_token: Option<&'a str>,
+}
+
+/// Enumerate what the caller's own grants cover.
+///
+/// EMPTY PARAMS ARE NOT ALLOWED TO BE ABSENT: the op decodes `params: {}` and rejects an
+/// absent or null params object, so a caller cannot accidentally ask a different question
+/// by omitting it.
+async fn credential_list_scoped(
+    stream: &mut TcpStream,
+    route_channel: u16,
+    route_epoch: u32,
+    enrollment_token: Option<&str>,
+) -> Frame {
+    let mut params = json!({});
+    if let Some(token) = enrollment_token {
+        params["enrollment_token"] = json!(token);
+    }
+    let frame = Frame::build(
+        FrameType::Request,
+        Flags::new(false, Priority::Interactive, false),
+        route_channel,
+        route_epoch,
+        9_001,
+        serde_json::to_vec(&json!({
+            "method": "credential.list_scoped",
+            "params": params,
+        }))
+        .unwrap(),
+    )
+    .expect("build list_scoped frame");
+    write_frame(stream, &frame).await.unwrap();
+    // MATCH ON corr, like every other caller here: the daemon multiplexes, so the next
+    // frame on the wire is not necessarily the answer to this question.
+    loop {
+        let frame = read_frame_timeout(stream).await;
+        if frame.header.corr == 9_001
+            && matches!(frame.header.ty, FrameType::Response | FrameType::Error)
+        {
+            return frame;
+        }
+    }
 }
 
 async fn credential_report_auth_failure(

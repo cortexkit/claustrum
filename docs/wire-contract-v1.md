@@ -162,6 +162,17 @@ plausible list computed for grants you do not hold.
 Use `credential_id` only to verify a handle-to-manifest binding, never to route: it is an
 operator-chosen label, while account routing joins on `account_id` + `record_version`.
 
+`account_id` IS THE PROVIDER'S ACCOUNT IDENTIFIER AND ITS SHAPE IS THE PROVIDER'S CHOICE.
+Treat it as an opaque string. It is stable per account and comparable to itself, and
+nothing more: do not validate it against a pattern, do not compare values across
+providers, and do not infer from one provider's shape what another's will be. On a live
+vault today Anthropic and OpenAI serve UUIDs and Google serves an email address, so a
+consumer that assumes UUID shape breaks on a REAL value rather than a missing one — which
+presents as a parse error on good data, the least legible failure available.
+
+Reported by a consumer whose ledger holds one email in a column where every other row is a
+UUID.
+
 Two optional levers, and they are the same lever pointed differently:
 
 - `force_refresh: true` — exchange before serving, unconditionally.

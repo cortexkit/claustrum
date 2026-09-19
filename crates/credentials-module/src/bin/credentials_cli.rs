@@ -1729,6 +1729,19 @@ fn attach_import_identity(
             org_name: requested_identity.org_name,
         }),
         None => match imported_email {
+            // THE EMAIL BECOMES THE ACCOUNT ID BECAUSE AN EMAIL-ONLY IDENTITY IS DROPPED.
+            // `RecordIdentity::normalized` discards an identity with no account_id, so a
+            // harness that gives us an address and no subject would otherwise import with
+            // no identity at all -- which is how five antigravity accounts rendered as
+            // indistinguishable unlabelled rows until 2026-09-19.
+            //
+            // The consequence is real and belongs here rather than in a commit message: a
+            // consumer's account column then holds an email for this provider and a UUID
+            // for every other. That is admissible because `account_id` is contractually
+            // the PROVIDER's identifier with the provider's own shape, and for Google an
+            // address is a truer account identity than anything else we hold -- but a
+            // consumer validating UUID shape breaks on a real value, not a missing one.
+            // docs/wire-contract-v1.md states the opacity rule for exactly this reason.
             Some(email) => record.with_identity(RecordIdentity {
                 account_id: Some(email.clone()),
                 email: Some(email),

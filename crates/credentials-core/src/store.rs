@@ -886,7 +886,7 @@ impl EncryptedStore {
             audit_key,
             fenced_out: AtomicBool::new(false),
         };
-        encrypted.sweep_pending_enrollments(now_ms(), 0)?;
+        encrypted.sweep_pending_enrollments_on_open(now_ms())?;
         Ok(encrypted)
     }
 
@@ -1686,9 +1686,18 @@ impl EncryptedStore {
         .map_err(StoreOpError::from)
     }
 
-    fn sweep_pending_enrollments(&self, now: i64, reserve_rows: i64) -> Result<(), StoreOpError> {
-        self.fenced_write(|tx| sweep_pending_enrollments_tx(tx, now, reserve_rows))
-            .map_err(StoreOpError::from)
+    fn sweep_pending_enrollments_on_open(&self, now: i64) -> Result<(), StoreOpError> {
+        match self
+            .store
+            .with_conn_fenced(|tx| sweep_pending_enrollments_tx(tx, now, 0))
+        {
+            Ok(()) => Ok(()),
+            // An EncryptedStore is also used by lease-free diagnostics. A failed fence
+            // proves this instance has no write authority, so opening it must stay a
+            // pure read and leave expired rows for the next writer.
+            Err(StoreError::Fenced { .. }) => Ok(()),
+            Err(error) => Err(StoreOpError::from(error)),
+        }
     }
 
     // ---- principal-scoped operation grants ------------------------------

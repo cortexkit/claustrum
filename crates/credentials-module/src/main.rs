@@ -3948,13 +3948,15 @@ mod tests {
     fn credential_report_auth_failure_request_key_set_is_pinned() {
         assert_request_key_set(
             read_surface::ReportAuthFailureParams {
-                handle: "ckh_request_shape".to_owned(),
+                handle: Some("ckh_request_shape".to_owned()),
+                credential_id: Some("apikey:request-shape".to_owned()),
                 provider_status: 401,
                 record_version: 7,
                 reporter_source: Some("probe".to_owned()),
             },
             &[
                 "handle",
+                "credential_id",
                 "provider_status",
                 "record_version",
                 "reporter_source",
@@ -6271,7 +6273,8 @@ mod tests {
                 1,
                 None,
                 &read_surface::ReportAuthFailureParams {
-                    handle: handle.raw.clone(),
+                    handle: Some(handle.raw.clone()),
+                    credential_id: None,
                     provider_status: 401,
                     record_version: 1,
                     reporter_source: None,
@@ -6411,7 +6414,8 @@ mod tests {
                 11,
                 None,
                 &read_surface::ReportAuthFailureParams {
-                    handle: raw.raw.clone(),
+                    handle: Some(raw.raw.clone()),
+                    credential_id: None,
                     provider_status: 401,
                     record_version: 1,
                     reporter_source: None,
@@ -6866,7 +6870,8 @@ mod tests {
         };
         let params = |status: u16, version: u64, reporter_source: Option<&str>| {
             read_surface::ReportAuthFailureParams {
-                handle: handle.clone(),
+                handle: Some(handle.clone()),
+                credential_id: None,
                 provider_status: status,
                 record_version: version,
                 reporter_source: reporter_source.map(str::to_owned),
@@ -6969,7 +6974,8 @@ mod tests {
                 7,
                 None,
                 &read_surface::ReportAuthFailureParams {
-                    handle: "ckh_not_a_handle".to_string(),
+                    handle: Some("ckh_not_a_handle".to_string()),
+                    credential_id: None,
                     provider_status: 401,
                     record_version: 1,
                     reporter_source: None,
@@ -6980,6 +6986,325 @@ mod tests {
             matches!(unknown, Err(read_surface::ReadError::NotFound)),
             "an unknown handle must be a uniform not_found, got {unknown:?}"
         );
+    }
+
+    /// THE LOAD-BEARING TEST OF THE SCOPED ADDRESS: both addressing forms produce ONE
+    /// store outcome.
+    ///
+    /// Written this way because the failure it guards is not a wrong answer, it is
+    /// DRIFT. Two addresses reaching two code paths that each look correct is how one
+    /// of them silently stops fencing on version, or stops marking stale, or starts
+    /// latching where the other marks -- and nothing fails, because each path has its
+    /// own test asserting its own behaviour. Asserting the two outcomes are EQUAL is
+    /// the only shape that cannot be satisfied by two correct-looking implementations.
+    #[tokio::test]
+    async fn a_scoped_report_and_a_handle_report_reach_the_same_store_outcome() {
+        use credentials_core::oauth::OAuthCredential;
+
+        // Two identical credentials so each address can be exercised on its own record
+        // without the first report changing what the second one sees.
+        let (surface, store, _db, _root) = tmp_surface_with_store(191);
+        let record = || {
+            VaultRecord::new_oauth(
+                "stub",
+                "stub",
+                OAuthCredential {
+                    access_token: "live".to_string().into(),
+                    refresh_token: "refresh".to_string().into(),
+                    expires_at_ms: Some(i64::MAX),
+                    token_url: "https://example.invalid/token".into(),
+                    client_id: None,
+                    scopes: Vec::new(),
+                },
+                b"live".to_vec(),
+            )
+        };
+        store
+            .create("oauth:twin-handle", &record())
+            .expect("create handle-addressed twin");
+        store
+            .create("oauth:twin-scoped", &record())
+            .expect("create scope-addressed twin");
+
+        let handle = credentials_core::store::mint_handle().expect("mint handle");
+        store
+            .put_handle_hash(
+                &handle.hash,
+                "oauth:twin-handle",
+                AuditCtx::admin(AuditOp::MintHandle),
+            )
+            .expect("bind handle");
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "twin-reporter",
+                credentials_core::store::SelectorKind::Exact,
+                "oauth:twin-scoped",
+                credentials_core::store::GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .expect("grant read on the scoped twin");
+        let principal = subc_protocol::Principal::Reserved {
+            module_id: "twin-reporter".into(),
+        };
+
+        surface
+            .report_auth_failure(
+                1,
+                None,
+                &read_surface::ReportAuthFailureParams {
+                    handle: Some(handle.raw),
+                    credential_id: None,
+                    provider_status: 401,
+                    record_version: 1,
+                    reporter_source: None,
+                },
+            )
+            .await
+            .expect("handle-addressed report");
+        surface
+            .report_auth_failure(
+                2,
+                Some(&principal),
+                &read_surface::ReportAuthFailureParams {
+                    handle: None,
+                    credential_id: Some("oauth:twin-scoped".to_owned()),
+                    provider_status: 401,
+                    record_version: 1,
+                    reporter_source: None,
+                },
+            )
+            .await
+            .expect("scope-addressed report");
+
+        let by_handle = store.meta("oauth:twin-handle").expect("handle twin meta");
+        let by_scope = store.meta("oauth:twin-scoped").expect("scoped twin meta");
+        assert_eq!(
+            (by_handle.state, by_handle.record_version),
+            (by_scope.state, by_scope.record_version),
+            "the two addressing forms must reach one store outcome; if they diverge, one \
+             of them has stopped fencing or stopped marking and no single-path test can \
+             see it"
+        );
+    }
+
+    /// The audit row for a scoped report names the PRINCIPAL, not the route channel.
+    ///
+    /// This exists because mutation found nothing guarding it: replacing the principal
+    /// arm with `conn-N` left the entire suite green. The handle form legitimately
+    /// writes `conn-N` -- a handle holder is anonymous by design and the channel number
+    /// is all there is -- but a scoped caller's identity is what AUTHORIZED the write,
+    /// read one line above by the grant lookup that admitted the call. Writing `conn-N`
+    /// there would discard a value already in hand, which is a defect this repo has met
+    /// three times (mint rows naming a credential but not which handle, a peer's limiter
+    /// holding a principal and writing `conn-N`, a pin recording a slot rather than its
+    /// occupant). All three were found by accident, months later, from the outside.
+    #[tokio::test]
+    async fn a_scoped_report_audits_under_the_principal_not_the_channel() {
+        let (surface, store, _db, _root) = tmp_surface_with_store(195);
+        store
+            .create(
+                "apikey:audited-scope",
+                &VaultRecord::new_static(CredentialKind::ApiKey, "test", b"key".to_vec(), None),
+            )
+            .expect("create record");
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "named-reporter",
+                credentials_core::store::SelectorKind::Exact,
+                "apikey:audited-scope",
+                credentials_core::store::GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .expect("grant read");
+
+        surface
+            .report_auth_failure(
+                // A channel number that would be unmistakable in the row if it leaked in.
+                4242,
+                Some(&subc_protocol::Principal::Reserved {
+                    module_id: "named-reporter".into(),
+                }),
+                &read_surface::ReportAuthFailureParams {
+                    handle: None,
+                    credential_id: Some("apikey:audited-scope".to_owned()),
+                    provider_status: 401,
+                    record_version: 1,
+                    reporter_source: None,
+                },
+            )
+            .await
+            .expect("scoped report");
+
+        let entry = store
+            .read_audit(None)
+            .expect("read chain")
+            .into_iter()
+            .find(|e| {
+                e.credential_id.as_deref() == Some("apikey:audited-scope")
+                    && e.op == AuditOp::ReportAuthFailure.as_str()
+            })
+            .expect("the scoped report appended a chain row");
+        assert_eq!(
+            entry.actor, "named-reporter",
+            "a scoped report must be attributable to the principal that authorized it; \
+             `conn-4242` here would mean the identity was held and thrown away"
+        );
+    }
+
+    /// A scoped report at a version the caller was NOT served changes nothing and the
+    /// credential keeps serving. The fence is the whole defence against a buggy retry
+    /// loop killing a token that refreshed while it was failing, so it must hold on the
+    /// new address exactly as it does on the old one.
+    #[tokio::test]
+    async fn a_scoped_report_at_a_stale_version_is_a_no_op() {
+        use credentials_core::oauth::OAuthCredential;
+        use credentials_core::store::RecordState;
+
+        let (surface, store, _db, _root) = tmp_surface_with_store(192);
+        store
+            .create(
+                "oauth:fenced",
+                &VaultRecord::new_oauth(
+                    "stub",
+                    "stub",
+                    OAuthCredential {
+                        access_token: "live".to_string().into(),
+                        refresh_token: "refresh".to_string().into(),
+                        expires_at_ms: Some(i64::MAX),
+                        token_url: "https://example.invalid/token".into(),
+                        client_id: None,
+                        scopes: Vec::new(),
+                    },
+                    b"live".to_vec(),
+                ),
+            )
+            .expect("create record");
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "fence-reporter",
+                credentials_core::store::SelectorKind::Exact,
+                "oauth:fenced",
+                credentials_core::store::GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .expect("grant read");
+
+        surface
+            .report_auth_failure(
+                3,
+                Some(&subc_protocol::Principal::Reserved {
+                    module_id: "fence-reporter".into(),
+                }),
+                &read_surface::ReportAuthFailureParams {
+                    handle: None,
+                    credential_id: Some("oauth:fenced".to_owned()),
+                    provider_status: 401,
+                    // The record is at version 1; the caller claims it was served 99.
+                    record_version: 99,
+                    reporter_source: None,
+                },
+            )
+            .await
+            .expect("a stale report is accepted and ignored, never an error");
+
+        // ASSERTED ON stale_pending, NOT ON state, AND THAT IS THE WHOLE TEST.
+        //
+        // The first version of this asserted `state == Active` and PASSED under a mutant
+        // that bypassed the fence entirely -- because an applied report on a refreshable
+        // record does not change `state` at all: it sets `stale_pending` and lets the
+        // next get do the work. So `state` reads Active in both the fenced and the
+        // unfenced world, and the assertion could not fail. Caught by mutation, not by
+        // review, and it is the exact defect this repo keeps meeting: an assertion on a
+        // value the mechanism does not move.
+        let meta = store.meta("oauth:fenced").expect("meta");
+        assert!(
+            !meta.stale_pending,
+            "a report carrying a version the caller was never served must not mark the \
+             record stale: that is what stops a buggy retry loop from killing a token \
+             that refreshed while it was failing"
+        );
+        assert_eq!(
+            meta.state,
+            RecordState::Active,
+            "and it must not latch the record either"
+        );
+        assert_eq!(meta.record_version, 1, "and it must not bump the version");
+    }
+
+    /// An unknown credential id and one the caller holds no grant for must be
+    /// INDISTINGUISHABLE. Asserted on the error values themselves rather than on both
+    /// merely being errors: two different refusals are still two refusals, and the
+    /// difference is exactly what turns this surface into an inventory oracle.
+    #[tokio::test]
+    async fn a_scoped_report_cannot_tell_unknown_from_ungranted() {
+        let (surface, store, _db, _root) = tmp_surface_with_store(193);
+        store
+            .create(
+                "apikey:exists-but-ungranted",
+                &VaultRecord::new_static(CredentialKind::ApiKey, "test", b"key".to_vec(), None),
+            )
+            .expect("create an ungranted credential");
+        let principal = subc_protocol::Principal::Reserved {
+            module_id: "no-grants-at-all".into(),
+        };
+        let mut refusals = Vec::new();
+        for id in [
+            "apikey:exists-but-ungranted",
+            "apikey:no-such-credential-anywhere",
+        ] {
+            refusals.push(
+                surface
+                    .report_auth_failure(
+                        4,
+                        Some(&principal),
+                        &read_surface::ReportAuthFailureParams {
+                            handle: None,
+                            credential_id: Some(id.to_owned()),
+                            provider_status: 401,
+                            record_version: 1,
+                            reporter_source: None,
+                        },
+                    )
+                    .await
+                    .expect_err("both must refuse"),
+            );
+        }
+        let (ungranted, unknown) = (refusals[0], refusals[1]);
+        assert_eq!(
+            format!("{ungranted:?}"),
+            format!("{unknown:?}"),
+            "an existing-but-ungranted id and a nonexistent one must answer identically; \
+             a caller that can tell them apart can enumerate the vault one guess at a time"
+        );
+    }
+
+    /// Both addresses, and neither, are malformed requests rather than addressing
+    /// questions.
+    #[tokio::test]
+    async fn a_report_supplying_both_addresses_or_neither_is_refused() {
+        let (surface, _store, _db, _root) = tmp_surface_with_store(194);
+        for (handle, credential_id) in [
+            (Some("ckh_whatever".to_owned()), Some("apikey:x".to_owned())),
+            (None, None),
+        ] {
+            surface
+                .report_auth_failure(
+                    5,
+                    None,
+                    &read_surface::ReportAuthFailureParams {
+                        handle,
+                        credential_id,
+                        provider_status: 401,
+                        record_version: 1,
+                        reporter_source: None,
+                    },
+                )
+                .await
+                .expect_err("exactly one address, or the request is malformed");
+        }
     }
 
     /// A refreshable report keeps the credential active and schedules its existing
@@ -7022,7 +7347,8 @@ mod tests {
                 8,
                 None,
                 &read_surface::ReportAuthFailureParams {
-                    handle: handle.raw,
+                    handle: Some(handle.raw),
+                    credential_id: None,
                     provider_status: 401,
                     record_version: 1,
                     reporter_source: None,
@@ -7082,7 +7408,8 @@ mod tests {
                 9,
                 None,
                 &read_surface::ReportAuthFailureParams {
-                    handle: handle.raw.clone(),
+                    handle: Some(handle.raw.clone()),
+                    credential_id: None,
                     provider_status: 401,
                     record_version: 1,
                     reporter_source: None,

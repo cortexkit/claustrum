@@ -328,7 +328,28 @@ impl StatusParams {
 #[cfg_attr(test, derive(Serialize))]
 #[derive(Debug, Deserialize)]
 pub struct ReportAuthFailureParams {
-    pub handle: String,
+    /// The capability handle the consumer was served through. Anonymous addressing,
+    /// unchanged. Exactly one of this and [`Self::credential_id`] must be present.
+    #[serde(default)]
+    pub handle: Option<String>,
+    /// The credential id, for a caller holding a `Read` grant covering it and no
+    /// handle at all.
+    ///
+    /// WHY THIS EXISTS. Enrollment creates a consumer that holds a bearer token and a
+    /// category grant and ZERO capability handles. Without this address it could
+    /// discover credentials and fetch them and then had no way to say one was dead --
+    /// the recovery loop broken for exactly the consumer class enrollment creates, with
+    /// the credential looking healthy until a background refresh happened to fail. The
+    /// gap was found by the anthropic-auth seat tracing one consumer through its whole
+    /// lifecycle INCLUDING failure; enrollment, discovery and fetch each look complete
+    /// on their own.
+    ///
+    /// The gate is `GrantOperation::Read`, not a new operation: reporting that a
+    /// credential you may read was refused upstream is strictly LESS authority than
+    /// reading it, because the report is version-fenced and can only mark stale
+    /// something the caller was already entitled to fetch.
+    #[serde(default)]
+    pub credential_id: Option<String>,
     pub provider_status: u16,
     /// The `record_version` the consumer was SERVED for this handle (from the `get`
     /// result it acted on). Required: the vault invalidates only if this still matches
@@ -1370,14 +1391,35 @@ impl ReadSurface {
         principal: Option<&Principal>,
         params: &ReportAuthFailureParams,
     ) -> Result<(), ReadError> {
-        // Rate-limit on the presented handle (before resolution), like get — a flood
-        // of report_auth_failure (malicious invalidation DoS) is itself an anomaly.
-        self.check_limiter(connection_id, &params.handle).await;
-
-        let credential_id = match self.engine.store().resolve_handle(&params.handle) {
-            Ok(id) => id,
-            Err(StoreOpError::NotFound) => return Err(ReadError::NotFound),
-            Err(e) => return Err(map_store_error(&e)),
+        // TWO ADDRESSES, EXACTLY ONE OF THEM, mirroring `status` above rather than
+        // inventing a second dispatch shape. `scoped` is carried forward because it
+        // decides the audit actor: a handle holder is anonymous and the channel number is
+        // all there is, while a scoped caller has a principal that is KNOWN HERE and must
+        // not be discarded.
+        let (credential_id, scoped) = match (&params.handle, &params.credential_id) {
+            (Some(handle), None) => {
+                // Rate-limit on the presented handle (before resolution), like get — a
+                // flood of report_auth_failure (malicious invalidation DoS) is itself an
+                // anomaly.
+                self.check_limiter(connection_id, handle).await;
+                match self.engine.store().resolve_handle(handle) {
+                    Ok(id) => (id, false),
+                    Err(StoreOpError::NotFound) => return Err(ReadError::NotFound),
+                    Err(e) => return Err(map_store_error(&e)),
+                }
+            }
+            (None, Some(credential_id)) => {
+                // An unknown id and an ungranted id must be INDISTINGUISHABLE here, for
+                // the same reason they are on `get_scoped` and `status`: telling them
+                // apart turns this into an inventory oracle. `authorize_scoped` records
+                // the discriminated reason in `auth_events` locally and returns one code.
+                self.authorize_scoped(principal, credential_id, GrantOperation::Read)?;
+                (credential_id.clone(), true)
+            }
+            // Both or neither is a malformed request, not an addressing question. It
+            // answers as `NotFound` rather than a distinct code so that a caller cannot
+            // use the difference to probe which of two ids exists by pairing them.
+            (Some(_), Some(_)) | (None, None) => return Err(ReadError::NotFound),
         };
 
         // Only an authentication failure (401/403) invalidates; a 5xx/429 is a
@@ -1444,7 +1486,24 @@ impl ReadSurface {
             // construction. A per-bind incarnation tag (derived, non-secret)
             // distinguishes a restarted process from a long-lived one without putting
             // an authentication token in a readable column.
-            let actor = format!("conn-{connection_id}");
+            //
+            // AND FOR THE SCOPED ARM THAT QUESTION IS NOW SETTLED, which is why `scoped`
+            // is carried down here. A scoped report is authorized BY the principal: the
+            // grant lookup that admitted this call already read the name, so recording it
+            // discloses nothing the write did not already depend on, and it is not the
+            // "should we identify anonymous reporters" question above. Writing `conn-N`
+            // for a caller whose identity authorized the write would discard a value held
+            // one line up -- this repo has three separate instances of that defect on
+            // record (`mint_handle` naming a credential but not which handle, a peer's
+            // limiter holding a principal and writing `conn-N`, a slot pin recording the
+            // slot rather than its occupant) and is not adding a fourth.
+            let actor = match (scoped, principal) {
+                (true, Some(Principal::Reserved { module_id })) => module_id.clone(),
+                // Scoped with no reserved principal cannot happen -- `authorize_scoped`
+                // refused above -- but the actor must stay a total function rather than
+                // panicking on a route-plane input, so it degrades to the channel form.
+                _ => format!("conn-{connection_id}"),
+            };
             let parsed = parse_credential_id(&credential_id);
             let refreshable = default_refresh_adapter(parsed.method, &parsed.provider).is_some();
             let audit = AuditCtx {

@@ -5724,6 +5724,64 @@ mod taxonomy_cli_tests {
         values.iter().map(|value| (*value).to_string()).collect()
     }
 
+    /// A CATEGORY NAMED BY A GRANT BUT CARRIED BY NOBODY IS LISTED, AT ZERO.
+    ///
+    /// That row is the whole point of the verb. The reach column on `grants` says a grant
+    /// reaches nothing; this is where an operator comes to find out WHY, and omitting the
+    /// empty category would send them away with a correct-looking grant and no
+    /// explanation -- the exact silence that let a `category:llm-provider` grant be
+    /// created on the live vault while no credential carried it.
+    ///
+    /// The uncategorized arm matters for the mirror reason: some credentials carry no
+    /// category deliberately, so hiding the count would make a FORGOTTEN assignment
+    /// indistinguishable from an INTENDED one.
+    #[test]
+    fn the_category_table_lists_an_empty_category_a_grant_names() {
+        let reply = serde_json::json!({
+            "credentials": [
+                { "id": "apikey:one", "state": "active", "categories": ["llm-provider"] },
+                { "id": "apikey:two", "state": "active", "categories": ["llm-provider"] },
+                { "id": "apple:bare", "state": "active", "categories": [] },
+            ],
+            "read_grants": [
+                { "principal_kind": "reserved", "principal_id": "m", "selector_kind": "category",
+                  "credential_prefix": "llm-provider", "operation": "read", "created_at_ms": 0 },
+                { "principal_kind": "reserved", "principal_id": "m", "selector_kind": "category",
+                  "credential_prefix": "no-such-category", "operation": "read", "created_at_ms": 0 },
+            ],
+        });
+        let lines = render_categories(&reply).expect("render");
+        let row = |name: &str| -> String {
+            lines
+                .iter()
+                .find(|l| l.starts_with(name))
+                .unwrap_or_else(|| panic!("no row for {name:?} in:\n{}", lines.join("\n")))
+                .clone()
+        };
+        assert!(
+            row("llm-provider").split_whitespace().nth(1) == Some("2"),
+            "two credentials carry it: {}",
+            row("llm-provider")
+        );
+        assert!(
+            row("llm-provider").contains("reserved:m"),
+            "and the principal holding the grant is named: {}",
+            row("llm-provider")
+        );
+        // The load-bearing row: present, at zero, because a grant names it.
+        let empty = row("no-such-category");
+        assert!(
+            empty.split_whitespace().nth(1) == Some("0"),
+            "a category a grant names but nothing carries must be listed at zero, not \
+             omitted: {empty}"
+        );
+        assert!(
+            row("(uncategorized)").split_whitespace().nth(1) == Some("1"),
+            "one credential carries no category: {}",
+            row("(uncategorized)")
+        );
+    }
+
     /// A GRANT THAT REACHES NOTHING SAYS SO.
     ///
     /// Written because it happened on the live vault: a `category:llm-provider` grant was

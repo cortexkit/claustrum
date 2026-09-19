@@ -4238,13 +4238,13 @@ fn every_verb_help_uses_a_flags_table_and_notes_layout() {
         .take_while(|line| !line.trim().is_empty())
         .map(|line| line.split_whitespace().next().expect("verb"))
         .collect();
-    // 29 = 27 + `enroll` + `approve`. `approve` is not new: it has been dispatchable
+    // 30 = 27 + `enroll` + `approve` + `categories`. `approve` is not new: it has been dispatchable
     // since August and was never in the table, which is exactly what
     // `every_dispatchable_verb_appears_in_the_top_level_verb_table` found on its first
     // run. This number is an anti-narrowing floor for the SCAN, not a budget for verbs.
     assert_eq!(
         verbs.len(),
-        29,
+        30,
         "the rendered verb-table scan narrowed; set-category and reclassify are public verbs"
     );
     assert!(accepted_help_flags("login").contains(&"--no-browser".to_string()));

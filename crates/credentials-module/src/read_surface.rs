@@ -1728,6 +1728,11 @@ impl ReadSurface {
             // `kind` names the chosen state-machine arm because `applied` alone
             // cannot distinguish a stale marker from a terminal latch. The status
             // remains diagnostic detail: 401 and 403 carry different provider facts.
+            // Resolved with the SAME helper the authorization used, so the audit line
+            // cannot disagree with the decision that let the report through.
+            let enrolled_reporter = self
+                .scoped_principal(principal, params.enrollment_token.as_deref())
+                .and_then(|(kind, id)| (kind == "enrolled").then_some(id));
             let observation = credentials_core::store::AuthObservation {
                 kind: if refreshable {
                     AuthEventKind::ConsumerReportStale.as_str()
@@ -1740,7 +1745,15 @@ impl ReadSurface {
                     .reporter_source
                     .as_deref()
                     .map(ReporterSource::from_wire),
-                principal: Self::observed_principal(principal),
+                // NAME THE REPORTER, NOT THE TRANSPORT. An enrolled consumer binds as
+                // Direct and proves who it is with its token, so reading the bus
+                // principal here logged `direct` with no id for a report that was
+                // authorized as `enrolled:<name>` -- the operator saw the socket instead
+                // of the caller. Resolved the same way the authorization was.
+                principal: match enrolled_reporter.as_deref() {
+                    Some(name) => Some(AuthEventPrincipal::Enrolled(name)),
+                    None => Self::observed_principal(principal),
+                },
             };
             if refreshable {
                 self.engine

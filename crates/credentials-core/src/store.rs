@@ -5986,6 +5986,16 @@ pub struct AuthObservation<'a> {
 pub enum AuthEventPrincipal<'a> {
     Direct,
     Reserved(&'a str),
+    /// A consumer holding an enrollment token, named by the enrollment it resolved to.
+    ///
+    /// WITHOUT THIS VARIANT AN ENROLLED REPORT LOGS `direct` WITH NO ID, because that is
+    /// what the bus carries: a host-launched consumer binds as Direct and proves who it
+    /// is with the token, not with the socket. An operator reading `auth_events` after a
+    /// credential went stale would see the transport and not the reporter.
+    ///
+    /// Reported by the anthropic-auth seat while auditing the live acceptance, where a
+    /// report authorized by `enrolled:acc-probe-consumer` recorded `direct:-`.
+    Enrolled(&'a str),
     Unverified,
 }
 
@@ -5994,6 +6004,7 @@ impl<'a> AuthEventPrincipal<'a> {
         match self {
             Self::Direct => "direct",
             Self::Reserved(_) => "reserved",
+            Self::Enrolled(_) => "enrolled",
             Self::Unverified => "unverified",
         }
     }
@@ -6001,6 +6012,7 @@ impl<'a> AuthEventPrincipal<'a> {
     const fn id(self) -> Option<&'a str> {
         match self {
             Self::Reserved(module_id) => Some(module_id),
+            Self::Enrolled(name) => Some(name),
             Self::Direct | Self::Unverified => None,
         }
     }

@@ -7525,6 +7525,87 @@ mod tests {
     /// A scoped report at a version the caller was NOT served changes nothing and the
     /// credential keeps serving. The fence is the whole defence against a buggy retry
     /// loop killing a token that refreshed while it was failing, so it must hold on the
+    /// AN ENROLLED REPORT NAMES THE CONSUMER, NOT THE SOCKET IT ARRIVED ON.
+    ///
+    /// A host-launched consumer binds as `Direct` and proves who it is with its token, so
+    /// reading the bus principal here logged `direct` with NO id for a report that was
+    /// authorized as `enrolled:<name>`. An operator asking "who said this credential was
+    /// dead" got the transport instead of the caller -- and the first-use path one
+    /// function away already records the resolved principal, so the two disagreed.
+    ///
+    /// Found by the anthropic-auth seat auditing the live seven-leg acceptance, where a
+    /// report authorized by `enrolled:acc-probe-consumer` recorded `direct:-`.
+    #[tokio::test]
+    async fn an_enrolled_report_is_audited_under_the_consumer_not_the_transport() {
+        let (surface, store, _db, _root) = tmp_surface_with_store(151);
+        let credential_id = "apikey:enrolled-report-attribution";
+        let record =
+            VaultRecord::new_static(CredentialKind::ApiKey, "test", b"material".to_vec(), None);
+        store
+            .create_audited(credential_id, &record, AuditCtx::admin(AuditOp::Put))
+            .expect("seed");
+
+        let request_secret = "b1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
+        let secret_hash = credentials_core::enrollment::enrollment_secret_hash(request_secret)
+            .expect("hashable secret");
+        let request = store
+            .propose_enrollment("reporting-consumer", &secret_hash)
+            .expect("propose");
+        store
+            .approve_enrollment(&request.request_id, "reporting-consumer", "operator")
+            .expect("approve");
+        let token = match store
+            .poll_enrollment(&request.request_id, request_secret)
+            .expect("poll")
+        {
+            credentials_core::enrollment::EnrollmentPoll::Approved { token, .. } => token,
+            other => panic!("an approved request must poll Approved, got {other:?}"),
+        };
+        store
+            .create_read_grant_audited(
+                "enrolled",
+                "reporting-consumer",
+                credentials_core::store::SelectorKind::Exact,
+                credential_id,
+                GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .expect("grant");
+
+        let version = store.list_meta().expect("meta")[0].1.record_version;
+        surface
+            .report_auth_failure(
+                77,
+                Some(&subc_protocol::Principal::Direct),
+                &read_surface::ReportAuthFailureParams {
+                    handle: None,
+                    credential_id: Some(credential_id.to_owned()),
+                    enrollment_token: Some(token),
+                    provider_status: 401,
+                    record_version: version,
+                    reporter_source: Some("direct".to_owned()),
+                },
+            )
+            .await
+            .expect("an enrolled consumer may report a credential its grant covers");
+
+        let event = store
+            .recent_auth_events(10)
+            .expect("events")
+            .into_iter()
+            .find(|e| e.credential_id == credential_id && e.principal_kind.is_some())
+            .expect("the report must record a principal");
+        assert_eq!(
+            (
+                event.principal_kind.as_deref(),
+                event.principal_id.as_deref()
+            ),
+            (Some("enrolled"), Some("reporting-consumer")),
+            "the audit row must name the consumer that authorized the report, not the \
+             Direct transport it arrived on"
+        );
+    }
+
     /// new address exactly as it does on the old one.
     #[tokio::test]
     async fn a_scoped_report_at_a_stale_version_is_a_no_op() {

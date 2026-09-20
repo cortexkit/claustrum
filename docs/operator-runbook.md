@@ -386,6 +386,39 @@ Both are past Anthropic's entire band with no death, so the ceiling is a propert
 the provider's authorization rather than of subscription OAuth. A monthly re-login is
 an Anthropic fact, not a vault fact.
 
+**Nor is DUAL CUSTODY itself fatal — that is an Anthropic fact too, and antigravity
+is the counter-example.** `antigravity:google` is held by BOTH this vault and the
+opencode plugin store, for the same account, and has been for months:
+
+```
+antigravity:google   1720 refresh_commit rows, record_version 1722, state active
+                     invalid_grant events: ZERO
+
+invalid_grant across the whole store:  oauth:anthropic x1  :ufuk2 x2  :yiyi x1
+```
+
+Every family revocation this vault has ever recorded is Anthropic. Antigravity has
+survived 1,720 exchanges under two independent custodians without one.
+
+The mechanism is the provider's rotation behaviour, and the adapter already encodes
+both cases: `antigravity.rs` re-packs `parsed.refresh_token.unwrap_or_else(|| bare_refresh)`
+— an OMITTED refresh token in the response means the old one stays valid. Google's
+installed-app OAuth omits it; Anthropic rotates and revokes the family when a
+rotated-away token is presented. Two holders of a NON-rotating refresh token never
+invalidate each other, because neither one's exchange changes what the other holds.
+
+So the rule is per-provider, not per-arrangement:
+
+```
+ROTATES  -> one custodian only; a second holder is a live revocation hazard
+OMITS    -> a second holder is redundancy, not a race
+```
+
+Judge a new provider by reading its adapter's refresh-token handling, not by whether
+two things hold the credential. And note what the antigravity evidence is NOT: 1,720
+clean exchanges is strong evidence of non-rotation, not a guarantee the provider will
+never start. The invalid_grant column is where that change would first appear.
+
 *** AND WHEN READING THE CHAIN FOR THIS, SPLIT ON `actor`. *** Filtering `op =
 'invalidate'` alone conflates two opposite events that share a row shape: `actor =
 vault` is the provider refusing a refresh (the credential died underneath you), while

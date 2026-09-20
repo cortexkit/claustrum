@@ -88,13 +88,28 @@ jobs:
         run: |
           set -euo pipefail
           v="${{ inputs.version }}"
-          for i in 1 2 3 4 5 6; do
+          # PATIENCE, MEASURED RATHER THAN GUESSED. The 0.2.0 publish succeeded and this
+          # check failed it: six attempts over 60s, and the version was fetchable shortly
+          # after. npm's CDN propagation routinely exceeds a minute, so a 60s ceiling
+          # turns a SLOW REGISTRY into a FAILED RELEASE -- and a red run on a package
+          # that did publish is the worst of both, because the next reader cannot tell
+          # whether to retry (which would refuse: the version now exists) or to
+          # investigate.
+          #
+          # 5 minutes with the interval widening. The check still cannot pass without the
+          # registry serving the version, which is the property it exists for.
+          delay=5
+          for i in $(seq 1 12); do
             if npm view "@cortexkit/claustrum-client@$v" version >/dev/null 2>&1; then
-              echo "registry serves $v"
+              echo "registry serves $v (visible on attempt $i)"
               exit 0
             fi
-            echo "not visible yet, attempt $i"
-            sleep 10
+            echo "not visible yet, attempt $i; sleeping ${delay}s"
+            sleep "$delay"
+            [ "$delay" -lt 40 ] && delay=$(( delay * 2 ))
           done
-          echo "PUBLISH REPORTED SUCCESS BUT THE REGISTRY DOES NOT SERVE $v"
+          echo "PUBLISH REPORTED SUCCESS BUT THE REGISTRY DID NOT SERVE $v WITHIN ~5m."
+          echo "Check https://www.npmjs.com/package/@cortexkit/claustrum-client before"
+          echo "re-running: if the version IS there, this check was impatient and the"
+          echo "release is fine. A re-run would refuse it as already-published."
           exit 1

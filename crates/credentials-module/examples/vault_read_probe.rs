@@ -35,6 +35,7 @@ async fn main() {
     let mut handle_file: Option<PathBuf> = None;
     let mut root = std::env::temp_dir();
     let mut force_refresh = false;
+    let mut describe = false;
     let mut min_ttl_ms: Option<i64> = None;
     let mut show_account_id = false;
     let mut show_claims = false;
@@ -81,6 +82,7 @@ async fn main() {
             // `expires` is treated as not-stale and served as-is (no refresh), so an
             // empty google access token would come back empty and look like a failure.
             "--force-refresh" => force_refresh = true,
+            "--describe" => describe = true,
             // Refresh if the token has less than this many ms of life left.
             "--min-ttl-ms" => {
                 min_ttl_ms = args.next().and_then(|v| v.parse().ok());
@@ -622,7 +624,7 @@ async fn main() {
         min_ttl_ms,
     )
     .await;
-    report(&body, show_account_id, show_claims);
+    report(&body, show_account_id, show_claims, describe);
 }
 
 /// Send `credential.public_key`.
@@ -1186,6 +1188,60 @@ fn base64url_decode(s: &str) -> Option<Vec<u8>> {
 
 /// FNV-1a-64: a stable, dependency-free fingerprint used only to compare two byte
 /// strings for equality without revealing either. NOT a cryptographic hash.
+/// Describe a served payload's SHAPE without ever printing it.
+///
+/// WHY THIS EXISTS. A consumer asked what `oauth:cursor` carries, because their lane
+/// builds a cookie header from Cursor's `<sub>%3A%3A<accessToken>` session token and a
+/// bare OAuth access token cannot feed it. That is answerable without disclosing a byte —
+/// separators, segment counts and encodings are structure, not secret — but there was no
+/// arm for it, and the alternatives were both bad: print the payload, or let the consumer
+/// guess and route a credential to a lane that cannot read it.
+///
+/// EVERY LINE HERE MUST STAY NON-DISCLOSING. Lengths, counts, and the presence of fixed
+/// separators are safe. Anything that echoes a SUBSTRING of the payload is not, however
+/// short — a prefix is exactly what an attacker wants. The one deliberate exception is the
+/// JWT header, which is an unauthenticated public field by construction and is what tells
+/// a reader whether the rest is a token at all.
+fn describe_shape(raw: &[u8]) -> String {
+    let text = match std::str::from_utf8(raw) {
+        Ok(text) => text,
+        Err(_) => return format!("{} bytes, not valid utf-8 (opaque binary)", raw.len()),
+    };
+    let mut notes: Vec<String> = vec![format!("{} bytes utf-8", text.len())];
+
+    // Cursor's session-token separator, url-encoded and raw. Named rather than generic
+    // because the question that produced this arm was about exactly this shape.
+    for (needle, label) in [("%3A%3A", "%3A%3A"), ("::", "::")] {
+        let count = text.matches(needle).count();
+        if count > 0 {
+            notes.push(format!("contains '{label}' x{count}"));
+        }
+    }
+
+    let dots = text.matches('.').count();
+    if dots == 2 && !text.contains(' ') {
+        notes.push("3 dot-separated segments (jwt-shaped)".to_owned());
+    }
+    if text.starts_with('{') && serde_json::from_str::<Value>(text).is_ok() {
+        notes.push("parses as json".to_owned());
+    }
+    if text.starts_with("sk-") {
+        notes.push("starts with the 'sk-' api-key convention".to_owned());
+    }
+    notes.push(format!(
+        "charset: {}",
+        if text
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-_.~%:".contains(&b))
+        {
+            "url-safe"
+        } else {
+            "mixed"
+        }
+    ));
+    notes.join(", ")
+}
+
 fn fnv1a64(bytes: &[u8]) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for &b in bytes {
@@ -1197,7 +1253,7 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 
 /// Print whether the read succeeded WITHOUT exposing the secret: only the payload
 /// length and a one-way fingerprint are shown.
-fn report(frame: &Frame, show_account_id: bool, show_claims: bool) {
+fn report(frame: &Frame, show_account_id: bool, show_claims: bool, describe: bool) {
     match frame.header.ty {
         FrameType::Response => {
             let value: Value = serde_json::from_slice(&frame.body).unwrap_or(Value::Null);
@@ -1222,6 +1278,12 @@ fn report(frame: &Frame, show_account_id: bool, show_claims: bool) {
                         bytes.len(),
                         fnv1a64(&bytes)
                     );
+                    // Opt-in, because a consumer integrating a new lane needs the SHAPE
+                    // and nobody running a routine deploy check does. Off by default so
+                    // the common path stays a length and a fingerprint.
+                    if describe {
+                        println!("   shape: {}", describe_shape(&bytes));
+                    }
                     // Non-secret metadata, printed verbatim. `account_id` plus
                     // `record_version` is the routing binding; `credential_id` is printed
                     // only so a deploy can verify the operator's handle-to-manifest binding,

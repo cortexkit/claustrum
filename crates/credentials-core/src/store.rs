@@ -2722,6 +2722,32 @@ let decoded_record = if operations.contains(&GrantOperation::Read) {
                 .query_map([], |row| row.get::<_, String>(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             drop(ids_stmt);
+            // A CATEGORY AN ACTIVE GRANT SELECTS ON IS NOT THE REGISTRY'S TO REMOVE.
+            //
+            // `--force` deletes each credential's set and reinserts the registry's, so any
+            // category the registry does not know is dropped. That includes every category
+            // an operator assigned by hand AND every one a migration assigned: on this
+            // vault `forge-identity` reaches 22 GitHub App credentials for a consumer that
+            // mints tokens hourly, and it exists only as a migration-10 assignment list.
+            // Running `--force` would have taken that grant to ZERO REACH, and the symptom
+            // is `not_found` on credentials that plainly exist -- the anti-enumeration
+            // answer, which by design says nothing about why.
+            //
+            // So the mass path refuses rather than warns. Collected BEFORE any write and
+            // checked inside the same fenced transaction, so a grant created concurrently
+            // cannot slip past. `set-category` on one credential is deliberately NOT
+            // guarded this way: there the operator named the row and the category, and
+            // this is the path that silently touches everything.
+            let granted_categories: BTreeSet<String> = {
+                let mut stmt = tx.prepare(
+                    "SELECT DISTINCT selector FROM read_grants WHERE selector_kind = 'category'",
+                )?;
+                let rows = stmt
+                    .query_map([], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                drop(stmt);
+                rows.into_iter().collect()
+            };
             let mut changed = 0usize;
             for credential_id in ids {
                 let defaults: BTreeSet<String> =
@@ -2740,6 +2766,26 @@ let decoded_record = if operations.contains(&GrantOperation::Read) {
                 drop(categories_stmt);
                 if (!force && !current.is_empty()) || current == defaults {
                     continue;
+                }
+                // Refuse before the first write if this would strip a category some grant
+                // is selecting on. The whole call fails, so no credential is left half
+                // reclassified and the operator gets one legible reason.
+                let stripped: Vec<&String> = current
+                    .difference(&defaults)
+                    .filter(|category| granted_categories.contains(*category))
+                    .collect();
+                if let Some(category) = stripped.first() {
+                    return Err(rusqlite::Error::SqliteFailure(
+                        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT),
+                        Some(format!(
+                            "refusing: reclassify --force would remove category '{category}' \
+                             from {credential_id}, and an active grant selects on it. That \
+                             category is not in the registry, so --force cannot restore it \
+                             and the grant would reach fewer credentials or none. Assign it \
+                             with `ck auth set-category <id> --add {category}` or revoke the \
+                             grant first."
+                        )),
+                    ));
                 }
                 tx.execute(
                     "DELETE FROM credential_categories WHERE credential_id = ?1",
@@ -10183,6 +10229,76 @@ mod taxonomy_tests {
             ),
             Err(StoreOpError::InvalidCredentialId)
         ));
+    }
+
+    /// `--force` MUST NOT STRIP A CATEGORY AN ACTIVE GRANT SELECTS ON.
+    ///
+    /// The live instance this was written for: `forge-identity` reaches 22 GitHub App
+    /// credentials for a consumer that mints tokens hourly, and it exists ONLY as a
+    /// migration-10 assignment list -- not in the registry. `--force` deletes each set and
+    /// reinserts the registry's, so it would have taken that grant to zero reach, with the
+    /// symptom arriving as `not_found` on credentials that plainly exist.
+    ///
+    /// The refusal fires BEFORE the first write, so a refused call leaves every credential
+    /// exactly as it was rather than half reclassified.
+    #[test]
+    fn force_refuses_to_strip_a_category_an_active_grant_selects_on() {
+        let (_root, store) = rig("reclassify-grant-guard", 211);
+        let id = "oauth:anthropic";
+        let record = VaultRecord::new_static(CredentialKind::ApiKey, "test", b"m".to_vec(), None);
+        store
+            .create_audited(id, &record, AuditCtx::admin(AuditOp::Put))
+            .expect("seed");
+        // A category the registry does not know, exactly like forge-identity.
+        store
+            .set_categories_audited(
+                id,
+                SetCategoryMode::Add,
+                &["hand-assigned".to_owned()],
+                AuditCtx::admin(AuditOp::SetCategory),
+            )
+            .expect("assign");
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "some-consumer",
+                SelectorKind::Category,
+                "hand-assigned",
+                GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .expect("grant");
+
+        let before = store.categories(id).expect("before");
+        let refusal = store
+            .reclassify_audited(true, AuditCtx::admin(AuditOp::SetCategory))
+            .expect_err("force must refuse while a grant selects on a stripped category");
+        let text = refusal.to_string();
+        assert!(
+            text.contains("hand-assigned") && text.contains("set-category"),
+            "the refusal must name the category AND the repair, got: {text}"
+        );
+        assert_eq!(
+            store.categories(id).expect("after"),
+            before,
+            "a refused reclassify must leave every category exactly as it was"
+        );
+
+        // CONTROL: with the grant gone, the same call proceeds. Without this the test
+        // passes against a `--force` that refuses unconditionally.
+        store
+            .revoke_read_grant_audited(
+                "reserved",
+                "some-consumer",
+                SelectorKind::Category,
+                "hand-assigned",
+                GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantRevoke),
+            )
+            .expect("revoke");
+        store
+            .reclassify_audited(true, AuditCtx::admin(AuditOp::SetCategory))
+            .expect("with no grant selecting it, force proceeds");
     }
 
     #[test]

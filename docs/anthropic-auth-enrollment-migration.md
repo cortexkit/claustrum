@@ -16,9 +16,13 @@ appeared — *"the feature shipped and the header did not move"*. The marker is 
 because its claim is spent; a marker whose symbol already exists can never fire again,
 and one that cannot fire reads as a check while being none.
 
-Still true and unchanged: none of this is on `master` or on any running vault. It lives
-on the integration branch `campaign/enrollment-selectors`, and the vault on this machine
-is still at store schema 8. Build against the contract; the daemon does not answer yet.
+**This is live.** The whole of it is on `master`, the daemon on this machine runs it,
+and the store is at schema 10. The ceremony and the spending half were both proven
+end to end against the running vault on 2026-09-19: propose, crash-resume, approve,
+poll, grant, list, get with a TTL demand, a version-fenced 401 report, and revocation
+killing every path.
+
+The client is published: `@cortexkit/claustrum-client@0.3.0`. Do not vendor it.
 
 ## What does not change, and will not
 
@@ -45,10 +49,14 @@ After enrollment you hold **one** bearer token, and an operator grants that toke
 
 ```
 ck auth grant --principal enrolled:anthropic-auth-opencode \
-              --selector-kind category --selector llm-provider --operation read
+              --selector-kind category --selector anthropic-native --operation read
 ```
 
-A credential assigned `llm-provider` is then in reach the moment it exists. No mint,
+A credential assigned `anthropic-native` is then in reach the moment it exists.
+`llm-provider` would ALSO work and is the wrong grant: it covers every model
+provider in the vault (16 rows on this one) to give you the four that speak
+Anthropic's protocol, and no consumer-side filtering narrows a capability that
+has already been issued. No mint,
 no file edit, no restart.
 
 ## Names: one per host process, not one per plugin
@@ -83,9 +91,17 @@ poll      you present (request_id, request_secret) and receive the token ONCE
 
 ### Persist before you POST
 
-`request_secret` is the **only** value needed to resume a pending request. Poll takes
-`(request_id, request_secret)` and nothing else. So write both under lock *before*
-sending the propose, and a crash between propose and poll resumes instead of wedging
+`request_secret` is the **only** value needed to resume a pending request, and it is the
+only one you CAN write first: `request_id` is minted by the vault and does not exist until
+propose returns. An earlier version of this section said to persist both before posting,
+which is impossible.
+
+That is exactly why propose is IDEMPOTENT ON `(name, secret_hash)`: mint the secret, write
+it under lock, then post. A crash before the reply lands costs nothing — re-proposing with
+the same secret returns the SAME `request_id` rather than refusing as a duplicate. A
+DIFFERENT secret on the same name is a different caller and is still refused.
+
+So: write the secret under lock *before* and a crash between propose and poll resumes instead of wedging
 your name — an editor restart mid-enrollment is an ordinary event, not an edge case.
 
 Pending rows also expire, so `pending_exists` is temporary rather than permanent, but
@@ -225,15 +241,14 @@ healthy credential stale.
 
 ## Suggested order of work
 
-1. **Nothing, for now.** Your handle path is unaffected and this is on a branch.
+1. **Nothing is forced.** Your handle path is unaffected and keeps working.
 2. Build the ceremony against the fixture: propose, persist-before-POST, poll loop on
    the nine outcomes, 0600 token file. This is testable today against the contract.
 3. Decide your names (`anthropic-auth-opencode`, `anthropic-auth-pi`) and write the
    0600 token file path into your own docs.
-4. **The spending half has landed** — `enrollment_token` is accepted on
-   `credential.get_scoped` and `credential.list_scoped`. What you are now waiting on is
-   placement: this is on the integration branch, and the running vault is still at
-   schema 8, so the daemon will not answer a token-bearing call yet.
+4. **The spending half is live** — `enrollment_token` is accepted on
+   `credential.get_scoped`, `credential.list_scoped` and `credential.report_auth_failure`,
+   on the running daemon. Nothing is waiting on placement.
 5. Then: `list_scoped` for discovery, `get_scoped` for the payload, `view` as the
    cursor, declined set keyed on identity.
 

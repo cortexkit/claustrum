@@ -59,8 +59,8 @@ const ROW = {
 
 describe('list_scoped decoding', () => {
   test('a covered row survives the round trip with its adapter intact', async () => {
-    const { client, daemon } = await clientWith([{ result: { credentials: [ROW], grants: [] } }])
-    const rows = await client.listScoped('t'.repeat(64))
+    const { client, daemon } = await clientWith([{ result: { credentials: [ROW], grants: [], view: 'v1-digest' } }])
+    const { rows, view } = await client.listScoped('t'.repeat(64))
 
     expect(rows).toHaveLength(1)
     expect(rows[0]!.id).toBe('oauth:anthropic')
@@ -74,9 +74,9 @@ describe('list_scoped decoding', () => {
 
   test('a static credential decodes with no adapter rather than an invented one', async () => {
     const { client } = await clientWith([
-      { result: { credentials: [{ ...ROW, id: 'apikey:openrouter', refresh_adapter: undefined }], grants: [] } },
+      { result: { credentials: [{ ...ROW, id: 'apikey:openrouter', refresh_adapter: undefined }], grants: [], view: 'v1-digest' } },
     ])
-    const rows = await client.listScoped()
+    const { rows } = await client.listScoped()
 
     // apikey:openrouter SERVES Anthropic models and speaks no refresh protocol. Absent is
     // the honest answer, and a consumer selecting on the adapter must not match it.
@@ -89,13 +89,13 @@ describe('list_scoped decoding', () => {
    * distinguishable from a shape the decoder failed to understand, which is the next test.
    */
   test('an empty inventory is an answer, not a failure', async () => {
-    const { client } = await clientWith([{ result: { credentials: [], grants: [] } }])
-    expect(await client.listScoped('t'.repeat(64))).toEqual([])
+    const { client } = await clientWith([{ result: { credentials: [], grants: [], view: 'v1-empty' } }])
+    expect((await client.listScoped('t'.repeat(64))).rows).toEqual([])
   })
 
   test('a row missing its id is refused rather than decoded into a nameless entry', async () => {
     const { id: _dropped, ...withoutId } = ROW
-    const { client } = await clientWith([{ result: { credentials: [withoutId], grants: [] } }])
+    const { client } = await clientWith([{ result: { credentials: [withoutId], grants: [], view: 'v1' } }])
     // A nameless row would be routed against by SOMETHING -- whichever field the consumer
     // happened to trust -- so failing closed is the only safe outcome.
     expect(client.listScoped()).rejects.toThrow()
@@ -103,7 +103,7 @@ describe('list_scoped decoding', () => {
 
   test('a non-integer record_version is refused, because it is a comparison cursor', async () => {
     const { client } = await clientWith([
-      { result: { credentials: [{ ...ROW, record_version: 'twelve' }], grants: [] } },
+      { result: { credentials: [{ ...ROW, record_version: 'twelve' }], grants: [], view: 'v1' } },
     ])
     // A version that decodes to NaN compares false against everything, so a consumer's
     // "has this changed" check would answer no forever.
@@ -112,9 +112,51 @@ describe('list_scoped decoding', () => {
 
   test('a categories array holding a non-string is refused, not silently coerced', async () => {
     const { client } = await clientWith([
-      { result: { credentials: [{ ...ROW, categories: ['llm-provider', 7] }], grants: [] } },
+      { result: { credentials: [{ ...ROW, categories: ['llm-provider', 7] }], grants: [], view: 'v1' } },
     ])
     expect(client.listScoped()).rejects.toThrow()
+  })
+})
+
+describe('the cursor and the rotate fence, both missing from 0.2.0', () => {
+  /**
+   * THE CURSOR MUST SURVIVE THE DECODER. 0.2.0 returned a bare array and dropped `view`,
+   * which leaves a consumer unable to tell "nothing changed" from "I never asked" -- so it
+   * reconciles on every poll or not at all. Reported by the anthropic-auth seat before
+   * they built on it.
+   */
+  test('listScoped returns the view alongside the rows', async () => {
+    const { client } = await clientWith([
+      { result: { credentials: [ROW], grants: [], view: 'digest-abc' } },
+    ])
+    const inventory = await client.listScoped('t'.repeat(64))
+    expect(inventory.view).toBe('digest-abc')
+    expect(inventory.rows).toHaveLength(1)
+  })
+
+  test('a reply with no view is refused rather than decoded into an absent cursor', async () => {
+    const { client } = await clientWith([{ result: { credentials: [ROW], grants: [] } }])
+    // An undefined cursor compares unequal to everything, so a consumer would reconcile
+    // forever and read it as churn in the vault.
+    expect(client.listScoped()).rejects.toThrow()
+  })
+
+  /**
+   * THE ROTATE FENCE IS REQUIRED BY THE PRODUCER. `EnrollRotateParams` takes
+   * `expected_token_generation` as a NON-OPTIONAL u64, so 0.2.0's `{ token }` could not
+   * decode at all -- every rotation would have failed on a live vault, and nothing in the
+   * client suite drove that method.
+   */
+  test('enrollRotate sends the generation fence the vault requires', async () => {
+    const { client, daemon } = await clientWith([
+      { result: { token: 'b'.repeat(64), token_generation: 2 } },
+    ])
+    const rotated = await client.enrollRotate({ token: 'a'.repeat(64), expectedTokenGeneration: 1 })
+
+    expect(rotated.tokenGeneration).toBe(2)
+    const sent = daemon.calls[0]!.params as Record<string, unknown>
+    expect(sent.expected_token_generation).toBe(1)
+    expect(Object.keys(sent).sort()).toEqual(['expected_token_generation', 'token'])
   })
 })
 

@@ -35,6 +35,7 @@ export {
   type ClaustrumReporterSource,
   type CredentialStatus,
   type EnrollmentPollOutcome,
+  type ScopedInventory,
   type ScopedInventoryRow,
   type ServedCredential,
 } from './wire.js'

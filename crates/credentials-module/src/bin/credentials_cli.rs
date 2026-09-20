@@ -813,7 +813,11 @@ fn help_verb(verb: &str) -> String {
              \n\
              \x20 --from-registry  required acknowledgement of the catalog source\n\
              \x20 --force          replace non-empty differing sets; without it only empty\n\
-             \x20                  sets are refilled\n\
+             \x20                  sets are refilled. REFUSES if it would remove a\n\
+             \x20                  category an active grant selects on: --force puts\n\
+             \x20                  back the REGISTRY set, so a hand-assigned or\n\
+             \x20                  migration-assigned category is dropped and that\n\
+             \x20                  grant reaches fewer credentials, or none\n\
              \n\
              NOTES\n\
              Enumeration and all category transitions use one fenced transaction."

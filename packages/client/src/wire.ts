@@ -242,7 +242,7 @@ export class ClaustrumClient {
    * `params` is `{}` and must be PRESENT: the vault rejects an absent or null params
    * object, so a caller cannot ask a different question by omitting it.
    */
-  async listScoped(enrollmentToken?: string): Promise<readonly ScopedInventoryRow[]> {
+  async listScoped(enrollmentToken?: string): Promise<ScopedInventory> {
     const response = await this.#call(
       'credential.list_scoped',
       enrollmentToken === undefined ? {} : { enrollment_token: enrollmentToken },
@@ -338,9 +338,24 @@ export class ClaustrumClient {
     return decodeEnrollmentPoll(response, this.#logger)
   }
 
-  /** Exchange a live token for its successor. The old token dies when the new one is issued. */
-  async enrollRotate(input: { token: string }): Promise<{ token: string; tokenGeneration: number }> {
-    const response = await this.#call('auth.enroll_rotate', { token: input.token })
+  /**
+   * Exchange a live token for its successor. The old token dies when the new one is issued.
+   *
+   * `expectedTokenGeneration` IS REQUIRED AND IS A FENCE, not bookkeeping: it must be the
+   * generation this caller currently holds. Two rotations racing — a retry after an
+   * uncertain reply, or two instances of the same consumer — would otherwise each mint a
+   * successor and each invalidate the other's, leaving a consumer holding a token the
+   * vault has already replaced. The vault refuses a rotation whose expectation does not
+   * match, so the loser learns it lost instead of discovering it on a later spend.
+   */
+  async enrollRotate(input: {
+    token: string
+    expectedTokenGeneration: number
+  }): Promise<{ token: string; tokenGeneration: number }> {
+    const response = await this.#call('auth.enroll_rotate', {
+      token: input.token,
+      expected_token_generation: input.expectedTokenGeneration,
+    })
     const result = decodeEnrollmentResult(response, this.#logger)
     const token = result.token
     const generation = result.token_generation
@@ -429,11 +444,20 @@ export class ClaustrumClient {
 /**
  * A row from the caller's own grant-covered inventory.
  *
- * `serves` is the ROUTING AXIS, not the id spelling. `apikey:openrouter` and
- * `antigravity:google` both serve Anthropic models and contain no "anthropic"
- * anywhere in their ids, so a consumer that filters on the id segment silently
- * drops working accounts. Measured on a live vault: 8 Anthropic-capable rows, 3 of
- * them invisible to an id-substring filter.
+ * TWO SELECTION AXES, AND THEY ANSWER DIFFERENT QUESTIONS. Pick by what you are about
+ * to do with the token:
+ *
+ * - `refreshAdapter` — whose PROTOCOL the credential speaks. Use it when the token
+ *   goes to a provider's own endpoints. Anything else is invalid there.
+ * - `serves` — which model VENDORS are reachable through it. Use it when choosing
+ *   where a model can be served from, and the protocol is not yours to care about.
+ *
+ * Never the id spelling, in either case: on a live vault 8 rows serve Anthropic models
+ * and 3 of them contain no "anthropic" anywhere in their id.
+ *
+ * An earlier version of this comment called `serves` "the routing axis" full stop. That
+ * was written before `refreshAdapter` existed and is wrong for the protocol-native case:
+ * it would send a Claude OAuth request to `apikey:openrouter`.
  */
 export interface ScopedInventoryRow {
   readonly id: string
@@ -464,15 +488,35 @@ export interface ScopedInventoryRow {
   readonly orgName?: string
 }
 
+/**
+ * An inventory reply: the covered rows, plus the cursor that says whether they moved.
+ *
+ * `view` is a DIGEST OVER WHAT THIS CALLER CAN SEE — ids, categories, state, operations —
+ * and deliberately NOT over `record_version`, so a routine token refresh does not move it.
+ * Compare it against the previous call's to decide whether to reconcile at all; it is an
+ * opaque string and nothing but equality is defined on it.
+ */
+export interface ScopedInventory {
+  readonly rows: readonly ScopedInventoryRow[]
+  readonly view: string
+}
+
 function decodeScopedInventory(
   response: unknown,
   logUnknownClass: (errorClass: string) => void,
-): readonly ScopedInventoryRow[] {
+): ScopedInventory {
   if (hasCredentialError(response)) throw asCredentialError(response, 'invalid_response', logUnknownClass)
   const result = isRecord(response) && isRecord(response.result) ? response.result : undefined
   const rows = result?.credentials
   if (!Array.isArray(rows)) throw asCredentialError(response, 'invalid_response', logUnknownClass)
-  return rows.map((row) => {
+  // THE CURSOR IS NOT OPTIONAL. Dropping it silently, as this decoder did in 0.2.0, leaves
+  // a consumer unable to tell "nothing changed" from "I did not ask", so it reconciles
+  // every poll or not at all.
+  const view = result?.view
+  if (typeof view !== 'string' || view.length === 0) {
+    throw asCredentialError(response, 'invalid_response', logUnknownClass)
+  }
+  const decoded = rows.map((row) => {
     if (!isRecord(row)) throw asCredentialError(response, 'invalid_response', logUnknownClass)
     const recordVersion = asRecordVersion(row.record_version)
     if (recordVersion === undefined) {
@@ -528,6 +572,7 @@ function decodeScopedInventory(
       orgName: row.org_name,
     }
   })
+  return { rows: decoded, view }
 }
 
 /** What a poll found. `pending` is not an error: the operator has not decided yet. */

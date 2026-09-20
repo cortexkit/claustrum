@@ -34,12 +34,6 @@ fn park(marker: &PathBuf) -> ! {
     }
 }
 
-/// Record a key's fingerprint under a name the parent test can look up.
-///
-/// Each rig bootstraps its own random keys, so "the vault reopened" alone cannot
-/// tell the parent WHICH key it reopened under — and a rotation that silently did
-/// nothing reopens just as cleanly as one that worked. Publishing the fingerprints
-/// lets each cut assert the specific slot its on-disk state implies.
 fn record_key(keys_file: &PathBuf, name: &str, key: &MasterKey) {
     use std::io::Write;
     let mut f = std::fs::OpenOptions::new()
@@ -47,7 +41,21 @@ fn record_key(keys_file: &PathBuf, name: &str, key: &MasterKey) {
         .append(true)
         .open(keys_file)
         .expect("open keys manifest");
-    writeln!(f, "{name}={}", key.key_id().to_hex()).expect("write key fingerprint");
+    // ONE SYSCALL, NOT `writeln!`. `write_fmt` emits a write per format fragment, so two
+    // appenders to one O_APPEND file interleave MID-LINE; an O_APPEND write of a
+    // line-sized buffer lands whole and they can only interleave BETWEEN lines.
+    //
+    // Today this helper is spawned and awaited one at a time, so it is genuinely
+    // single-writer and nothing tears. The reason to write it this way anyway is what the
+    // READER does: `rig_keys` parses with `filter_map(split_once('='))`, which drops an
+    // unparseable line SILENTLY. A torn line would therefore not present as corruption --
+    // it would present as a fingerprint that was never published, sending the next reader
+    // to hunt a rotation that did not record rather than a line that did not land.
+    //
+    // That is a bad hour to buy for a saved character, and "single-writer" is a property
+    // of today's call sites rather than of this function.
+    f.write_all(format!("{name}={}\n", key.key_id().to_hex()).as_bytes())
+        .expect("write key fingerprint");
 }
 
 fn main() {

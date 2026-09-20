@@ -204,6 +204,18 @@ fn assert_wrong_key_fails_closed(root: &Path) {
 /// Every rig generates fresh random keys, so "it reopened cleanly" is true of a
 /// vault that was never rotated at all. Naming the expected key per cut is what
 /// makes each test about the ROTATION rather than about opening a vault.
+///
+/// THIS READER DROPS UNPARSEABLE LINES, WHICH IS CORRECT AND IS ALSO WHAT WOULD EAT
+/// THE EVIDENCE. Failing the whole read on a torn tail would make a crash-cut rig
+/// flaky by construction, since the helper can be SIGKILLed mid-write by design. But
+/// dropping is only SAFE because the writer is atomic: `record_key` issues one
+/// `write_all` of a whole line rather than `writeln!`, which emits a syscall per
+/// format fragment.
+///
+/// The dependency is invisible from here, which is why it is written down here: if
+/// that writer ever goes back to `writeln!` and a second appender appears, this
+/// function reports a fingerprint that was never published rather than a line that
+/// did not land, and the failure names the rotation instead of the file.
 fn rig_keys(root: &Path) -> std::collections::HashMap<String, String> {
     let text = std::fs::read_to_string(root.join("data").join("keys.txt"))
         .expect("helper published its key fingerprints");

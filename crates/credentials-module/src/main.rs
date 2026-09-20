@@ -7763,149 +7763,155 @@ mod tests {
             .expect("the seeded api key")
             .1
             .record_version;
-        let direct = &subc_protocol::Principal::Direct;
+        // BOTH WIRE-REACHABLE SHAPES. `admin.principal(channel)` returns `Option`, and the
+        // dispatcher passes it straight through -- a channel with no recorded bind arrives
+        // as `None`, not as `Direct`. The token path returns before either is read, so the
+        // two must behave identically; asserting it is what makes that a property rather
+        // than an implementation detail one refactor away from changing.
+        for direct in [Some(&subc_protocol::Principal::Direct), None] {
+            // Each arm renders its answer to a string so two identities can be compared
+            // without every surface needing a bespoke assertion.
+            let mut surfaces: Vec<(&str, String, String)> = Vec::new();
 
-        // Each arm renders its answer to a string so two identities can be compared
-        // without every surface needing a bespoke assertion.
-        let mut surfaces: Vec<(&str, String, String)> = Vec::new();
+            for (name, tok) in [("with", Some(token.clone())), ("without", None)] {
+                let _ = name;
+                let _ = tok;
+            }
 
-        for (name, tok) in [("with", Some(token.clone())), ("without", None)] {
-            let _ = name;
-            let _ = tok;
-        }
+            macro_rules! differential {
+                ($label:expr, $call:expr) => {{
+                    let with = {
+                        let enrollment_token = Some(token.clone());
+                        format!("{:?}", $call(enrollment_token).await)
+                    };
+                    let without = {
+                        let enrollment_token: Option<String> = None;
+                        format!("{:?}", $call(enrollment_token).await)
+                    };
+                    surfaces.push(($label, with, without));
+                }};
+            }
 
-        macro_rules! differential {
-            ($label:expr, $call:expr) => {{
-                let with = {
-                    let enrollment_token = Some(token.clone());
-                    format!("{:?}", $call(enrollment_token).await)
-                };
-                let without = {
-                    let enrollment_token: Option<String> = None;
-                    format!("{:?}", $call(enrollment_token).await)
-                };
-                surfaces.push(($label, with, without));
-            }};
-        }
+            differential!("credential.get_scoped", |t: Option<String>| {
+                let s = &surface;
+                async move {
+                    match s
+                        .get_scoped(
+                            direct,
+                            &read_surface::GetScopedParams {
+                                credential_id: api_id.to_owned(),
+                                enrollment_token: t,
+                                min_ttl_ms: None,
+                            },
+                        )
+                        .await
+                    {
+                        read_surface::GetOutcome::Ok(r) => format!("ok:{}", r.record_version),
+                        read_surface::GetOutcome::Err { error } => format!("err:{:?}", error.code),
+                    }
+                }
+            });
 
-        differential!("credential.get_scoped", |t: Option<String>| {
-            let s = &surface;
-            async move {
-                match s
-                    .get_scoped(
-                        Some(direct),
-                        &read_surface::GetScopedParams {
-                            credential_id: api_id.to_owned(),
+            differential!("credential.list_scoped", |t: Option<String>| {
+                let s = &surface;
+                async move {
+                    s.list_scoped(
+                        direct,
+                        &read_surface::ListScopedParams {
                             enrollment_token: t,
-                            min_ttl_ms: None,
+                        },
+                    )
+                    .map(|r| r.credentials.len())
+                }
+            });
+
+            differential!("credential.status", |t: Option<String>| {
+                let s = &surface;
+                async move {
+                    let r = s
+                        .status(
+                            3,
+                            direct,
+                            &read_surface::StatusParams {
+                                handle: None,
+                                credential_id: Some(api_id.to_owned()),
+                                enrollment_token: t,
+                            },
+                        )
+                        .await;
+                    (r.ready, r.credential_id)
+                }
+            });
+
+            differential!("credential.public_key", |t: Option<String>| {
+                let s = &surface;
+                async move {
+                    s.public_key(
+                        4,
+                        direct,
+                        &read_surface::PublicKeyParams {
+                            handle: None,
+                            credential_id: Some(sign_id.to_owned()),
+                            enrollment_token: t,
                         },
                     )
                     .await
-                {
-                    read_surface::GetOutcome::Ok(r) => format!("ok:{}", r.record_version),
-                    read_surface::GetOutcome::Err { error } => format!("err:{:?}", error.code),
+                    .map(|r| r.key_id)
                 }
-            }
-        });
+            });
 
-        differential!("credential.list_scoped", |t: Option<String>| {
-            let s = &surface;
-            async move {
-                s.list_scoped(
-                    Some(direct),
-                    &read_surface::ListScopedParams {
-                        enrollment_token: t,
-                    },
-                )
-                .map(|r| r.credentials.len())
-            }
-        });
-
-        differential!("credential.status", |t: Option<String>| {
-            let s = &surface;
-            async move {
-                let r = s
-                    .status(
-                        3,
-                        Some(direct),
-                        &read_surface::StatusParams {
+            differential!("credential.sign", |t: Option<String>| {
+                let s = &surface;
+                async move {
+                    s.sign(
+                        5,
+                        direct,
+                        &read_surface::SignParams {
                             handle: None,
-                            credential_id: Some(api_id.to_owned()),
+                            credential_id: Some(sign_id.to_owned()),
+                            payload_b64: base64::engine::general_purpose::STANDARD.encode(b"x"),
                             enrollment_token: t,
                         },
                     )
-                    .await;
-                (r.ready, r.credential_id)
-            }
-        });
+                    .await
+                    .map(|r| r.key_id)
+                }
+            });
 
-        differential!("credential.public_key", |t: Option<String>| {
-            let s = &surface;
-            async move {
-                s.public_key(
-                    4,
-                    Some(direct),
-                    &read_surface::PublicKeyParams {
-                        handle: None,
-                        credential_id: Some(sign_id.to_owned()),
-                        enrollment_token: t,
-                    },
-                )
-                .await
-                .map(|r| r.key_id)
-            }
-        });
+            differential!("credential.report_auth_failure", |t: Option<String>| {
+                let s = &surface;
+                async move {
+                    s.report_auth_failure(
+                        6,
+                        direct,
+                        &read_surface::ReportAuthFailureParams {
+                            handle: None,
+                            credential_id: Some(api_id.to_owned()),
+                            enrollment_token: t,
+                            provider_status: 401,
+                            record_version: version,
+                            reporter_source: None,
+                        },
+                    )
+                    .await
+                    .is_ok()
+                }
+            });
 
-        differential!("credential.sign", |t: Option<String>| {
-            let s = &surface;
-            async move {
-                s.sign(
-                    5,
-                    Some(direct),
-                    &read_surface::SignParams {
-                        handle: None,
-                        credential_id: Some(sign_id.to_owned()),
-                        payload_b64: base64::engine::general_purpose::STANDARD.encode(b"x"),
-                        enrollment_token: t,
-                    },
-                )
-                .await
-                .map(|r| r.key_id)
-            }
-        });
-
-        differential!("credential.report_auth_failure", |t: Option<String>| {
-            let s = &surface;
-            async move {
-                s.report_auth_failure(
-                    6,
-                    Some(direct),
-                    &read_surface::ReportAuthFailureParams {
-                        handle: None,
-                        credential_id: Some(api_id.to_owned()),
-                        enrollment_token: t,
-                        provider_status: 401,
-                        record_version: version,
-                        reporter_source: None,
-                    },
-                )
-                .await
-                .is_ok()
-            }
-        });
-
-        assert_eq!(
-            surfaces.len(),
-            6,
-            "every scoped surface must be covered; add the new one to this table"
-        );
-        for (label, with, without) in &surfaces {
-            assert_ne!(
-                with, without,
-                "{label} answered a valid enrollment token the same as no token at all. \
-                 Either it never reads `enrollment_token` (the defect this test exists \
-                 for -- see StatusParams), or the fixture does not grant it."
+            assert_eq!(
+                surfaces.len(),
+                6,
+                "every scoped surface must be covered; add the new one to this table"
             );
+            for (label, with, without) in &surfaces {
+                assert_ne!(
+                    with, without,
+                    "{label} answered a valid enrollment token the same as no token at all, \
+                 with bus principal {direct:?}. Either it never reads `enrollment_token` \
+                 (the defect this test exists for -- see StatusParams), or the fixture \
+                 does not grant it."
+                );
+            }
         }
     }
 

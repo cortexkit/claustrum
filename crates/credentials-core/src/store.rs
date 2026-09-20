@@ -2724,10 +2724,10 @@ let decoded_record = if operations.contains(&GrantOperation::Read) {
             drop(ids_stmt);
             let mut changed = 0usize;
             for credential_id in ids {
-                let defaults: BTreeSet<String> = crate::catalog::category_defaults(&credential_id)
-                    .into_iter()
-                    .map(str::to_string)
-                    .collect();
+                let defaults: BTreeSet<String> =
+                    crate::catalog::category_defaults(&credential_id)
+                        .into_iter()
+                        .collect();
                 if defaults.is_empty() || credential_id.contains('|') {
                     continue;
                 }
@@ -10212,7 +10212,7 @@ mod taxonomy_tests {
         );
         assert_eq!(
             store.categories("oauth:snowflake").unwrap(),
-            ["data-warehouse"]
+            ["data-warehouse", "snowflake-native"]
         );
         assert_eq!(store.read_audit(None).unwrap().len(), before + 1);
         assert_eq!(
@@ -10237,7 +10237,7 @@ mod taxonomy_tests {
         );
         assert_eq!(
             store.categories("oauth:snowflake").unwrap(),
-            ["data-warehouse"]
+            ["data-warehouse", "snowflake-native"]
         );
     }
 

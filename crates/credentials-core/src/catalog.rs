@@ -641,17 +641,68 @@ fn catalog_match(id: &str) -> Option<CatalogEntry> {
         })
 }
 
-pub fn category_defaults(credential_id: &str) -> Vec<&'static str> {
-    catalog_match(credential_id)
+/// The categories a credential is stamped with at creation.
+///
+/// Two kinds, and they answer different questions:
+///
+/// - A PURPOSE category (`llm-provider`, `data-warehouse`) says what a credential is FOR.
+///   A consumer that needs any model provider grants on this.
+/// - A NATIVE-FAMILY category (`<adapter>-native`) says whose PROTOCOL it speaks. A
+///   consumer that sends tokens to one provider's own endpoints grants on this.
+///
+/// WHY BOTH EXIST. `llm-provider` covers sixteen credentials here; a consumer talking to
+/// Anthropic's native endpoints can use four of them. Granting the purpose category to get
+/// the four hands read authority over the other twelve, and no consumer-side filtering
+/// reduces that — the capability is already issued. `serves` cannot substitute either: it
+/// names the model vendors a credential can REACH, so `apikey:openrouter`,
+/// `antigravity:google` and `oauth:cursor` all serve Anthropic models through protocols
+/// that are not Anthropic's.
+///
+/// DERIVED FROM THE ID, NOT FROM THE RECORD, because stamping happens at creation and a
+/// migration cannot decrypt. That is also why it covers FUTURE credentials with no
+/// operator action: a new `oauth:anthropic:<account>` is stamped `anthropic-native` when
+/// it is created. A static key gets no native category at all — it speaks no refresh
+/// protocol, and inventing one would put `apikey:openrouter` in a family whose endpoints
+/// would refuse it.
+///
+/// Underscores become hyphens because `valid_category_name` admits neither underscores nor
+/// colons, so `github_app` stamps as `github-app-native`.
+pub fn category_defaults(credential_id: &str) -> Vec<String> {
+    let mut categories: Vec<String> = catalog_match(credential_id)
         .map(|entry| {
             entry
                 .categories()
                 .iter()
                 .copied()
-                .map(CredentialCategory::as_str)
+                .map(|category| CredentialCategory::as_str(category).to_owned())
                 .collect()
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if let Some(native) = native_family_category(credential_id) {
+        categories.push(native);
+    }
+    categories
+}
+
+/// The `<adapter>-native` category for a credential that speaks a provider's own protocol,
+/// or `None` for a static credential that speaks none.
+///
+/// Refuses to emit a name `valid_category_name` would reject rather than stamping
+/// something the grant path cannot select on: a category nothing can name is worse than an
+/// absent one, because it reads as coverage in `ck auth categories` and reaches nothing.
+pub fn native_family_category(credential_id: &str) -> Option<String> {
+    let parsed = crate::credential_id::parse_credential_id(credential_id);
+    // THE METHOD MUST BE EXPLICIT. `default_refresh_adapter` treats a MISSING method as
+    // legacy oauth, which is right for resolving an adapter on an old record and wrong
+    // here: it would stamp `apple:notes` as `notes-native`, inventing a protocol family
+    // for a static credential whose method we simply do not recognise. Claiming a
+    // credential speaks someone's protocol is a claim that must come from a method we
+    // actually parsed.
+    let method = parsed.method?;
+    let adapter =
+        crate::credential_id::default_refresh_adapter(Some(method), parsed.provider.as_str())?;
+    let candidate = format!("{}-native", adapter.replace('_', "-"));
+    valid_category_name(&candidate).then_some(candidate)
 }
 
 pub fn serves_for(credential_id: &str) -> &'static [ModelVendor] {
@@ -703,14 +754,26 @@ mod tests {
         let entry_rows = [
             ("apikey:zai", vec!["llm-provider"]),
             ("apikey:openrouter", vec!["llm-provider"]),
-            ("oauth:anthropic", vec!["llm-provider"]),
-            ("oauth:anthropic:fourth", vec!["llm-provider"]),
-            ("chatgpt:openai", vec!["llm-provider"]),
-            ("oauth:snowflake", vec!["data-warehouse"]),
-            ("oauth:digitalocean", vec!["cloud-infrastructure"]),
-            ("copilot:github", vec!["llm-provider"]),
-            ("oauth:cursor", vec!["llm-provider"]),
-            ("oauth:devin", vec![]),
+            ("oauth:anthropic", vec!["llm-provider", "anthropic-native"]),
+            (
+                "oauth:anthropic:fourth",
+                vec!["llm-provider", "anthropic-native"],
+            ),
+            ("chatgpt:openai", vec!["llm-provider", "openai-native"]),
+            (
+                "oauth:snowflake",
+                vec!["data-warehouse", "snowflake-native"],
+            ),
+            (
+                "oauth:digitalocean",
+                vec!["cloud-infrastructure", "digitalocean-native"],
+            ),
+            (
+                "copilot:github",
+                vec!["llm-provider", "github-copilot-native"],
+            ),
+            ("oauth:cursor", vec!["llm-provider", "cursor-native"]),
+            ("oauth:devin", vec!["devin-native"]),
         ];
         for (id, expected) in &entry_rows {
             assert!(
@@ -719,7 +782,7 @@ mod tests {
             );
             assert_eq!(category_defaults(id), *expected, "entry row {id}");
         }
-        let non_empty: BTreeSet<Vec<&str>> = entry_rows
+        let non_empty: BTreeSet<Vec<String>> = entry_rows
             .iter()
             .map(|(id, _)| category_defaults(id))
             .filter(|categories| !categories.is_empty())
@@ -867,15 +930,76 @@ mod tests {
         }
     }
 
+    /// THE NATIVE FAMILY IS THE GRANT AXIS; `serves` AND THE PURPOSE CATEGORY ARE NOT.
+    ///
+    /// A consumer that sends tokens to one provider's own endpoints needs a selector that
+    /// reaches exactly the credentials speaking that protocol. Measured on the live vault:
+    /// `serves` contains "anthropic" for EIGHT rows and only five are Claude OAuth, and
+    /// granting the purpose category `llm-provider` to reach those five hands read
+    /// authority over sixteen. Neither narrows to the family.
+    ///
+    /// Reported by the anthropic-auth seat: "granting category:llm-provider gives the
+    /// enrollment token read authority over all 17 LLM credentials, despite needing only
+    /// native Anthropic OAuth accounts. Consumer-side filtering does not reduce that
+    /// capability's blast radius."
+    #[test]
+    fn the_native_family_separates_protocol_from_purpose_and_from_serves() {
+        // Same purpose, same served vendor, three different protocols.
+        assert!(category_defaults("oauth:anthropic").contains(&"anthropic-native".to_owned()));
+        assert!(category_defaults("oauth:cursor").contains(&"cursor-native".to_owned()));
+        assert!(category_defaults("antigravity:google").contains(&"antigravity-native".to_owned()));
+
+        // A STATIC KEY JOINS NO FAMILY. apikey:openrouter serves Anthropic models and
+        // speaks no refresh protocol, so a native-family grant must not reach it.
+        assert_eq!(native_family_category("apikey:openrouter"), None);
+        assert!(!category_defaults("apikey:openrouter")
+            .iter()
+            .any(|category| category.ends_with("-native")));
+
+        // AND AN UNRECOGNISED METHOD JOINS NONE EITHER. `default_refresh_adapter` reads a
+        // missing method as legacy oauth, which would invent `notes-native` here.
+        assert_eq!(native_family_category("apple:notes"), None);
+
+        // FUTURE ACCOUNTS ARE COVERED WITH NO OPERATOR ACTION: the family is derived from
+        // the id, so a new account stamps itself at creation.
+        assert_eq!(
+            native_family_category("oauth:anthropic:someone-new"),
+            Some("anthropic-native".to_owned())
+        );
+
+        // Every emitted name must be selectable by a grant, or it reads as coverage in
+        // `ck auth categories` while reaching nothing.
+        for id in [
+            "oauth:anthropic",
+            "chatgpt:openai",
+            "copilot:github",
+            "antigravity:google",
+            "github_app:some-app",
+        ] {
+            if let Some(category) = native_family_category(id) {
+                assert!(valid_category_name(&category), "{id} -> {category}");
+            }
+        }
+        // github_app carries an underscore the grammar rejects, so it must be normalised
+        // rather than dropped.
+        assert_eq!(
+            native_family_category("github_app:some-app"),
+            Some("github-app-native".to_owned())
+        );
+    }
+
     #[test]
     fn serves_and_categories_use_one_catalog_match() {
         assert_eq!(serves_for("oauth:anthropic:fourth"), &[Anthropic]);
         assert_eq!(
             category_defaults("oauth:anthropic:fourth"),
-            ["llm-provider"]
+            ["llm-provider", "anthropic-native"]
         );
         assert!(serves_for("oauth:snowflake").is_empty());
-        assert_eq!(category_defaults("oauth:snowflake"), ["data-warehouse"]);
+        assert_eq!(
+            category_defaults("oauth:snowflake"),
+            ["data-warehouse", "snowflake-native"]
+        );
         assert!(serves_for("amazon-bedrock:main").is_empty());
         assert!(category_defaults("amazon-bedrock:main").is_empty());
         assert!(serves_for("apikey:openrouter").contains(&Anthropic));

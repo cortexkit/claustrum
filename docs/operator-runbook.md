@@ -944,6 +944,27 @@ Three things that make these read wrong:
 
   **If you are copying a store, copy the directory, never the file.** The main file on
   its own is a partial artefact whose losses are silent.
+
+  **AND PUT THE COPY OUTSIDE `~/.local/share/cortexkit`.** `~/.local/state/claustrum-snapshots/`
+  (mode 0700) is the place. This is not tidiness — a copy of a module directory placed
+  BESIDE the real one is a live hazard, and on 2026-09-19 one of mine took down every
+  module's fleet backup until it was moved.
+
+  The mechanism, so you can recognise it in a tool nobody has written yet: engram's
+  discovery reads `<data_home>/<child>/engram-catalog.json` one level deep and fails
+  CLOSED on any descriptor it cannot match to an enrolled module. A directory copy carries
+  `engram-catalog.json` — the descriptor is a file in the store directory, so `cp -R`
+  brings it — and its name does not match the module the descriptor claims. That refusal
+  is fleet-wide, not module-local: the whole generation stops, for every seat, and nothing
+  is captured until the directory moves.
+
+  The descriptor is only what noticed. A store copy also carries the LEASE FILE and the
+  signed-payloads tree, so anything that discovers by directory shape can find a second
+  thing claiming to be this vault.
+
+  The instinct that produces this is a good one — keep the rollback copy next to what it
+  can roll back — which is why the fix has to be the default location rather than a rule
+  to remember at the moment you are busy migrating.
 - **`mode=ro` is also what makes the read INERT, and dropping it is not harmless just
   because the SQL is a `SELECT`.** SQLite checkpoints on close when the closing connection
   is the last one attached to the database, and that is a property of the CONNECTION, not

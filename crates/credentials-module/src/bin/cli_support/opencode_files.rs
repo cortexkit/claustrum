@@ -37,6 +37,22 @@ static LEASE_LOST_WARNINGS: AtomicU64 = AtomicU64::new(0);
 #[derive(Clone)]
 struct ManifestLockOptions {
     ttl: Duration,
+    /// How long a contender keeps TRYING, as distinct from how long a lock stays fresh.
+    ///
+    /// These were one value (`ttl`) and the conflation caused a CI failure on 2026-09-20:
+    /// staleness is judged on the INJECTED clock, the retry deadline runs on WALL time, so
+    /// a barrier-coordinated test whose handshakes outlast `ttl` in real seconds refuses
+    /// with `manifest lock busy` while its injected clock has not moved at all. The
+    /// property under test never ran.
+    ///
+    /// Splitting them is what the note above `deadline` asked for. Production is unchanged
+    /// -- the default equals the `ttl` default, so a caller that sets neither behaves
+    /// exactly as before, and a caller that sets only `ttl` still gets the old pairing
+    /// unless it also widens this.
+    /// `None` means "follow `ttl`", which is what every caller that sets only `ttl` means
+    /// and what the code did before the split. An explicit value is for callers bounded by
+    /// COORDINATION rather than by time.
+    claim_timeout: Option<Duration>,
     renew_every: Duration,
     retry_min: Duration,
     retry_max: Duration,
@@ -56,6 +72,7 @@ impl Default for ManifestLockOptions {
     fn default() -> Self {
         Self {
             ttl: Duration::from_millis(MANIFEST_LOCK_TTL_MS),
+            claim_timeout: None,
             renew_every: Duration::from_millis(MANIFEST_LOCK_RENEW_EVERY_MS),
             retry_min: Duration::from_millis(25),
             retry_max: Duration::from_millis(75),
@@ -772,13 +789,19 @@ where
     // clock does not advance, so a deadline read from it never arrives and the loop
     // spins forever; making it advance would reintroduce exactly the wall-clock/injected
     // mixing that produced two separate defects in this file earlier the same day (the
-    // reclaim seed and `ManifestLease::commit`). The clock model needs one decision
-    // rather than a third local patch.
+    // reclaim seed and `ManifestLease::commit`).
     //
-    // Until then: a failure in this suite that reports a TIMEOUT where a specific
-    // refusal was named is this, not the property under test. Re-run alone before
-    // reporting it as a defect.
-    let deadline = Instant::now() + options.ttl;
+    // RESOLVED BY SPLITTING THE TWO BOUNDS rather than by unifying the two clocks. `ttl`
+    // answers "is that lock stale" on the injected clock; `claim_timeout` answers "have I
+    // tried long enough" on wall time. They were one value, and a barrier-coordinated test
+    // whose handshakes outlasted 500ms of real time refused with `manifest lock busy`
+    // while its injected clock had not moved -- so the property under test never ran. That
+    // fired on CI once before this split.
+    //
+    // The earlier note here said to re-run alone before reporting it as a defect. That was
+    // advice a reader has to remember at the moment they are least inclined to; the split
+    // means there is nothing to remember.
+    let deadline = Instant::now() + options.claim_timeout.unwrap_or(options.ttl);
     loop {
         match fs::create_dir(&lock) {
             Ok(()) => {
@@ -862,7 +885,12 @@ where
         thread::sleep(jitter(&options).min(deadline.saturating_duration_since(Instant::now())));
     }
 
-    reclaim_stale_manifest_lock_quarantines(path, options.ttl, options.ttl, &options);
+    reclaim_stale_manifest_lock_quarantines(
+        path,
+        options.ttl,
+        options.claim_timeout.unwrap_or(options.ttl),
+        &options,
+    );
 
     let (stop_tx, stop_rx) = mpsc::channel::<()>();
     let renewal_lock = lock.clone();
@@ -1399,6 +1427,10 @@ mod manifest_lock_aba_regression {
                     "loser",
                     ManifestLockOptions {
                         ttl: Duration::from_millis(500),
+                        // Barrier handshakes are bounded by the SLOWEST thread, not by the clock this
+                        // test freezes. A loaded runner crossing 500ms of real time refused with
+                        // `manifest lock busy` before the property under test ran.
+                        claim_timeout: Some(Duration::from_secs(30)),
                         renew_every: Duration::from_secs(1),
                         retry_min: Duration::from_millis(2),
                         retry_max: Duration::from_millis(3),
@@ -1429,6 +1461,10 @@ mod manifest_lock_aba_regression {
                     "replacement",
                     ManifestLockOptions {
                         ttl: Duration::from_millis(500),
+                        // Barrier handshakes are bounded by the SLOWEST thread, not by the clock this
+                        // test freezes. A loaded runner crossing 500ms of real time refused with
+                        // `manifest lock busy` before the property under test ran.
+                        claim_timeout: Some(Duration::from_secs(30)),
                         renew_every: Duration::from_secs(1),
                         retry_min: Duration::from_millis(2),
                         retry_max: Duration::from_millis(3),
@@ -1490,6 +1526,10 @@ mod manifest_lock_aba_regression {
                     tenant,
                     ManifestLockOptions {
                         ttl: Duration::from_millis(500),
+                        // Barrier handshakes are bounded by the SLOWEST thread, not by the clock this
+                        // test freezes. A loaded runner crossing 500ms of real time refused with
+                        // `manifest lock busy` before the property under test ran.
+                        claim_timeout: Some(Duration::from_secs(30)),
                         renew_every: Duration::from_secs(1),
                         retry_min: Duration::from_millis(2),
                         retry_max: Duration::from_millis(3),
@@ -1989,6 +2029,10 @@ mod manifest_lock_aba_regression {
             "claimant",
             ManifestLockOptions {
                 ttl: Duration::from_millis(500),
+                // Barrier handshakes are bounded by the SLOWEST thread, not by the clock this
+                // test freezes. A loaded runner crossing 500ms of real time refused with
+                // `manifest lock busy` before the property under test ran.
+                claim_timeout: Some(Duration::from_secs(30)),
                 now_override_ms: Some(now),
                 ..ManifestLockOptions::default()
             },
@@ -2021,6 +2065,10 @@ mod manifest_lock_aba_regression {
             "claimant",
             ManifestLockOptions {
                 ttl: Duration::from_millis(500),
+                // Barrier handshakes are bounded by the SLOWEST thread, not by the clock this
+                // test freezes. A loaded runner crossing 500ms of real time refused with
+                // `manifest lock busy` before the property under test ran.
+                claim_timeout: Some(Duration::from_secs(30)),
                 now_override_ms: Some(now),
                 ..ManifestLockOptions::default()
             },

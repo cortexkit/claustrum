@@ -3023,6 +3023,7 @@ mod tests {
                     &StatusParams {
                         handle: Some(handle.raw),
                         credential_id: None,
+                        enrollment_token: None,
                     },
                 )
                 .await,
@@ -3236,6 +3237,7 @@ mod tests {
                     &StatusParams {
                         handle: None,
                         credential_id: None,
+                        enrollment_token: None,
                     },
                 )
                 .await,
@@ -4218,8 +4220,9 @@ mod tests {
                 handle: Some("ckh_request_shape".to_owned()),
                 credential_id: Some("signing_key:request-shape".to_owned()),
                 payload_b64: "AQI=".to_owned(),
+                enrollment_token: Some("tok_request_shape".to_owned()),
             },
-            &["handle", "credential_id", "payload_b64"],
+            &["handle", "credential_id", "payload_b64", "enrollment_token"],
             "credential.sign",
         );
     }
@@ -4230,8 +4233,9 @@ mod tests {
             read_surface::PublicKeyParams {
                 handle: Some("ckh_request_shape".to_owned()),
                 credential_id: Some("signing_key:request-shape".to_owned()),
+                enrollment_token: Some("tok_request_shape".to_owned()),
             },
-            &["handle", "credential_id"],
+            &["handle", "credential_id", "enrollment_token"],
             "credential.public_key",
         );
     }
@@ -4257,8 +4261,9 @@ mod tests {
             read_surface::StatusParams {
                 handle: Some("ckh_request_shape".to_owned()),
                 credential_id: Some("apikey:request-shape".to_owned()),
+                enrollment_token: Some("tok_request_shape".to_owned()),
             },
-            &["handle", "credential_id"],
+            &["handle", "credential_id", "enrollment_token"],
             "credential.status",
         );
     }
@@ -4355,6 +4360,7 @@ mod tests {
                 &read_surface::StatusParams {
                     handle: Some(handle.raw),
                     credential_id: None,
+                    enrollment_token: None,
                 },
             )
             .await;
@@ -4376,6 +4382,7 @@ mod tests {
                     &read_surface::StatusParams {
                         handle: None,
                         credential_id: None,
+                        enrollment_token: None,
                     },
                 )
                 .await,
@@ -5231,6 +5238,7 @@ mod tests {
         let params = StatusParams {
             handle: Some(handle.raw.clone()),
             credential_id: None,
+            enrollment_token: None,
         };
         let before = surface.status(1, None, &params).await;
         assert!(before.ready, "an active credential is ready before fencing");
@@ -5259,6 +5267,7 @@ mod tests {
                 &StatusParams {
                     handle: None,
                     credential_id: None,
+                    enrollment_token: None,
                 },
             )
             .await;
@@ -5312,6 +5321,7 @@ mod tests {
                 &StatusParams {
                     handle: Some(active),
                     credential_id: None,
+                    enrollment_token: None,
                 },
             )
             .await;
@@ -5328,6 +5338,7 @@ mod tests {
                 &StatusParams {
                     handle: Some(dead),
                     credential_id: None,
+                    enrollment_token: None,
                 },
             )
             .await;
@@ -5345,6 +5356,7 @@ mod tests {
                 &StatusParams {
                     handle: Some(broken),
                     credential_id: None,
+                    enrollment_token: None,
                 },
             )
             .await;
@@ -5365,6 +5377,7 @@ mod tests {
                 &StatusParams {
                     handle: Some("ckh_not_a_real_handle".to_string()),
                     credential_id: None,
+                    enrollment_token: None,
                 },
             )
             .await;
@@ -5493,6 +5506,7 @@ mod tests {
                 &read_surface::PublicKeyParams {
                     handle: Some(handle.raw.clone()),
                     credential_id: None,
+                    enrollment_token: None,
                 },
             )
             .await
@@ -5507,6 +5521,7 @@ mod tests {
                     credential_id: None,
                     payload_b64: base64::engine::general_purpose::STANDARD
                         .encode(b"handle-authorized bytes"),
+                    enrollment_token: None,
                 },
             )
             .await
@@ -6181,6 +6196,7 @@ mod tests {
                     handle: Some(h_sign.raw.clone()),
                     credential_id: None,
                     payload_b64: payload.clone(),
+                    enrollment_token: None,
                 },
             )
             .await
@@ -6197,6 +6213,7 @@ mod tests {
                     handle: Some(h_api.raw.clone()),
                     credential_id: None,
                     payload_b64: payload,
+                    enrollment_token: None,
                 },
             )
             .await
@@ -6302,6 +6319,7 @@ mod tests {
                 &read_surface::PublicKeyParams {
                     handle: Some(signer_handle.raw.clone()),
                     credential_id: None,
+                    enrollment_token: None,
                 },
             )
             .await
@@ -6332,6 +6350,7 @@ mod tests {
                     handle: Some(signer_handle.raw),
                     credential_id: None,
                     payload_b64: base64::engine::general_purpose::STANDARD.encode(payload),
+                    enrollment_token: None,
                 },
             )
             .await
@@ -6355,6 +6374,7 @@ mod tests {
                 &read_surface::PublicKeyParams {
                     handle: Some(non_signer_handle.raw),
                     credential_id: None,
+                    enrollment_token: None,
                 },
             )
             .await
@@ -6397,6 +6417,7 @@ mod tests {
         let params = crate::read_surface::StatusParams {
             handle: Some(handle.raw.clone()),
             credential_id: None,
+            enrollment_token: None,
         };
         let before = surface.status(1, None, &params).await;
         assert!(before.ready, "seeded credential must start ready");
@@ -6474,6 +6495,7 @@ mod tests {
                 &crate::read_surface::StatusParams {
                     handle: Some(handle.raw.clone()),
                     credential_id: None,
+                    enrollment_token: None,
                 },
             )
             .await;
@@ -6524,6 +6546,7 @@ mod tests {
                 &crate::read_surface::StatusParams {
                     handle: Some(handle.raw.clone()),
                     credential_id: None,
+                    enrollment_token: None,
                 },
             )
             .await;
@@ -6548,6 +6571,7 @@ mod tests {
                 &crate::read_surface::StatusParams {
                     handle: Some(handle.raw.clone()),
                     credential_id: None,
+                    enrollment_token: None,
                 },
             )
             .await;
@@ -6567,6 +6591,7 @@ mod tests {
                 &crate::read_surface::StatusParams {
                     handle: None,
                     credential_id: None,
+                    enrollment_token: None,
                 },
             )
             .await;
@@ -6581,6 +6606,7 @@ mod tests {
                 &crate::read_surface::StatusParams {
                     handle: Some("ckh_definitely-not-a-handle".to_string()),
                     credential_id: None,
+                    enrollment_token: None,
                 },
             )
             .await;
@@ -6643,6 +6669,7 @@ mod tests {
                 &crate::read_surface::StatusParams {
                     handle: Some(handle.raw.clone()),
                     credential_id: None,
+                    enrollment_token: None,
                 },
             )
             .await;
@@ -6681,6 +6708,7 @@ mod tests {
                 &crate::read_surface::StatusParams {
                     handle: Some(handle.raw.clone()),
                     credential_id: None,
+                    enrollment_token: None,
                 },
             )
             .await;
@@ -6710,6 +6738,7 @@ mod tests {
                 &crate::read_surface::StatusParams {
                     handle: None,
                     credential_id: None,
+                    enrollment_token: None,
                 },
             )
             .await;
@@ -6724,6 +6753,7 @@ mod tests {
                 &crate::read_surface::StatusParams {
                     handle: Some("ckh_definitely-not-a-handle".to_string()),
                     credential_id: None,
+                    enrollment_token: None,
                 },
             )
             .await;
@@ -6904,6 +6934,7 @@ mod tests {
                 &crate::read_surface::StatusParams {
                     handle: Some(raw.raw),
                     credential_id: None,
+                    enrollment_token: None,
                 },
             )
             .await;
@@ -6935,6 +6966,7 @@ mod tests {
             let params = StatusParams {
                 handle: Some(format!("ckh_unknown_{i}")),
                 credential_id: None,
+                enrollment_token: None,
             };
             let _ = surface.status(77, None, &params).await;
         }
@@ -7636,6 +7668,342 @@ mod tests {
 
     /// A scoped report at a version the caller was NOT served changes nothing and the
     /// credential keeps serving. The fence is the whole defence against a buggy retry
+    /// EVERY SCOPED SURFACE MUST READ THE PRESENTED IDENTITY, AND THIS IS THE TEST THAT
+    /// CATCHES THE NEXT ONE THAT DOES NOT.
+    ///
+    /// The `status` gap survived because the absolute test is blind to it: an
+    /// unauthorized scoped call and a surface that CANNOT READ IDENTITY AT ALL return the
+    /// same body, so "refuses without a token" passes in both worlds -- and that is the
+    /// test anyone writes. Three of six surfaces had the field, three did not, and every
+    /// per-surface test was green.
+    ///
+    /// The property that separates them is DIFFERENTIAL rather than absolute: the same
+    /// call, made twice with two identities, must produce two different answers. Where it
+    /// does not, either the surface ignores the token or the fixture is wrong, and both
+    /// are worth failing on.
+    ///
+    /// Table-driven on purpose. A judgement per surface is what let three drift; this
+    /// fails for a seventh surface the day it is added, without anyone remembering to
+    /// think about it.
+    ///
+    /// The differential is the half that proves the guard READS something. Keep the
+    /// absolute arms beside it (`an_enrolled_token_authorizes_scoped_status`), because
+    /// those prove the guard EXISTS -- neither direction is sufficient alone. Property
+    /// from the opencode seat, after they read the status fix.
+    #[tokio::test]
+    async fn every_scoped_surface_answers_an_enrolled_token_differently_than_no_token() {
+        use base64::Engine as _;
+
+        let (surface, store, _db, _root) = tmp_surface_with_store(164);
+        let api_id = "apikey:differential";
+        let sign_id = "signing:agent-assertion:differential";
+        store
+            .create_audited(
+                api_id,
+                &VaultRecord::new_static(
+                    CredentialKind::ApiKey,
+                    "test",
+                    b"material".to_vec(),
+                    None,
+                ),
+                AuditCtx::admin(AuditOp::Put),
+            )
+            .expect("seed api key");
+        store
+            .create_audited(
+                sign_id,
+                &VaultRecord::new_static(
+                    CredentialKind::SigningKey,
+                    "test",
+                    test_ed25519_pem().as_bytes().to_vec(),
+                    None,
+                ),
+                AuditCtx::admin(AuditOp::Put),
+            )
+            .expect("seed signing key");
+
+        let request_secret = "d1d2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
+        let secret_hash = credentials_core::enrollment::enrollment_secret_hash(request_secret)
+            .expect("hashable secret");
+        let request = store
+            .propose_enrollment("differential-consumer", &secret_hash)
+            .expect("propose");
+        store
+            .approve_enrollment(&request.request_id, "differential-consumer", "operator")
+            .expect("approve");
+        let token = match store
+            .poll_enrollment(&request.request_id, request_secret)
+            .expect("poll")
+        {
+            credentials_core::enrollment::EnrollmentPoll::Approved { token, .. } => token,
+            other => panic!("an approved request must poll Approved, got {other:?}"),
+        };
+        for (selector, operation) in [
+            (api_id, GrantOperation::Read),
+            (sign_id, GrantOperation::Read),
+            (sign_id, GrantOperation::Sign),
+        ] {
+            store
+                .create_read_grant_audited(
+                    "enrolled",
+                    "differential-consumer",
+                    credentials_core::store::SelectorKind::Exact,
+                    selector,
+                    operation,
+                    AuditCtx::admin(AuditOp::GrantCreate),
+                )
+                .expect("grant");
+        }
+
+        let version = store
+            .list_meta()
+            .expect("meta")
+            .into_iter()
+            .find(|(id, _)| id == api_id)
+            .expect("the seeded api key")
+            .1
+            .record_version;
+        let direct = &subc_protocol::Principal::Direct;
+
+        // Each arm renders its answer to a string so two identities can be compared
+        // without every surface needing a bespoke assertion.
+        let mut surfaces: Vec<(&str, String, String)> = Vec::new();
+
+        for (name, tok) in [("with", Some(token.clone())), ("without", None)] {
+            let _ = name;
+            let _ = tok;
+        }
+
+        macro_rules! differential {
+            ($label:expr, $call:expr) => {{
+                let with = {
+                    let enrollment_token = Some(token.clone());
+                    format!("{:?}", $call(enrollment_token).await)
+                };
+                let without = {
+                    let enrollment_token: Option<String> = None;
+                    format!("{:?}", $call(enrollment_token).await)
+                };
+                surfaces.push(($label, with, without));
+            }};
+        }
+
+        differential!("credential.get_scoped", |t: Option<String>| {
+            let s = &surface;
+            async move {
+                match s
+                    .get_scoped(
+                        Some(direct),
+                        &read_surface::GetScopedParams {
+                            credential_id: api_id.to_owned(),
+                            enrollment_token: t,
+                            min_ttl_ms: None,
+                        },
+                    )
+                    .await
+                {
+                    read_surface::GetOutcome::Ok(r) => format!("ok:{}", r.record_version),
+                    read_surface::GetOutcome::Err { error } => format!("err:{:?}", error.code),
+                }
+            }
+        });
+
+        differential!("credential.list_scoped", |t: Option<String>| {
+            let s = &surface;
+            async move {
+                s.list_scoped(
+                    Some(direct),
+                    &read_surface::ListScopedParams {
+                        enrollment_token: t,
+                    },
+                )
+                .map(|r| r.credentials.len())
+            }
+        });
+
+        differential!("credential.status", |t: Option<String>| {
+            let s = &surface;
+            async move {
+                let r = s
+                    .status(
+                        3,
+                        Some(direct),
+                        &read_surface::StatusParams {
+                            handle: None,
+                            credential_id: Some(api_id.to_owned()),
+                            enrollment_token: t,
+                        },
+                    )
+                    .await;
+                (r.ready, r.credential_id)
+            }
+        });
+
+        differential!("credential.public_key", |t: Option<String>| {
+            let s = &surface;
+            async move {
+                s.public_key(
+                    4,
+                    Some(direct),
+                    &read_surface::PublicKeyParams {
+                        handle: None,
+                        credential_id: Some(sign_id.to_owned()),
+                        enrollment_token: t,
+                    },
+                )
+                .await
+                .map(|r| r.key_id)
+            }
+        });
+
+        differential!("credential.sign", |t: Option<String>| {
+            let s = &surface;
+            async move {
+                s.sign(
+                    5,
+                    Some(direct),
+                    &read_surface::SignParams {
+                        handle: None,
+                        credential_id: Some(sign_id.to_owned()),
+                        payload_b64: base64::engine::general_purpose::STANDARD.encode(b"x"),
+                        enrollment_token: t,
+                    },
+                )
+                .await
+                .map(|r| r.key_id)
+            }
+        });
+
+        differential!("credential.report_auth_failure", |t: Option<String>| {
+            let s = &surface;
+            async move {
+                s.report_auth_failure(
+                    6,
+                    Some(direct),
+                    &read_surface::ReportAuthFailureParams {
+                        handle: None,
+                        credential_id: Some(api_id.to_owned()),
+                        enrollment_token: t,
+                        provider_status: 401,
+                        record_version: version,
+                        reporter_source: None,
+                    },
+                )
+                .await
+                .is_ok()
+            }
+        });
+
+        assert_eq!(
+            surfaces.len(),
+            6,
+            "every scoped surface must be covered; add the new one to this table"
+        );
+        for (label, with, without) in &surfaces {
+            assert_ne!(
+                with, without,
+                "{label} answered a valid enrollment token the same as no token at all. \
+                 Either it never reads `enrollment_token` (the defect this test exists \
+                 for -- see StatusParams), or the fixture does not grant it."
+            );
+        }
+    }
+
+    /// AN ENROLLED CONSUMER CAN ASK AFTER A CREDENTIAL IT IS ALREADY ENTITLED TO READ.
+    ///
+    /// `status` was the ONE scoped surface with no `enrollment_token` field. A
+    /// host-launched consumer could enumerate with `list_scoped`, fetch with
+    /// `get_scoped` and report a death with `report_auth_failure` -- and could not ask
+    /// whether one credential was healthy, because status resolved only the bus
+    /// principal, which for that consumer class is always `Direct`.
+    ///
+    /// The failure was invisible by construction: an unauthorized scoped status returns
+    /// the SAME body as a nonexistent credential (the enumeration guard), so a consumer
+    /// holding a valid grant and a valid token read `unavailable` and could not tell
+    /// that the surface simply had nowhere to put its identity.
+    ///
+    /// Not a design decision -- the field was added to three of four surfaces as each
+    /// one acquired a caller that needed it.
+    #[tokio::test]
+    async fn an_enrolled_token_authorizes_scoped_status() {
+        let (surface, store, _db, _root) = tmp_surface_with_store(163);
+        let credential_id = "apikey:enrolled-status";
+        let record =
+            VaultRecord::new_static(CredentialKind::ApiKey, "test", b"material".to_vec(), None);
+        store
+            .create_audited(credential_id, &record, AuditCtx::admin(AuditOp::Put))
+            .expect("seed");
+
+        let request_secret = "c1c2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
+        let secret_hash = credentials_core::enrollment::enrollment_secret_hash(request_secret)
+            .expect("hashable secret");
+        let request = store
+            .propose_enrollment("status-consumer", &secret_hash)
+            .expect("propose");
+        store
+            .approve_enrollment(&request.request_id, "status-consumer", "operator")
+            .expect("approve");
+        let token = match store
+            .poll_enrollment(&request.request_id, request_secret)
+            .expect("poll")
+        {
+            credentials_core::enrollment::EnrollmentPoll::Approved { token, .. } => token,
+            other => panic!("an approved request must poll Approved, got {other:?}"),
+        };
+        store
+            .create_read_grant_audited(
+                "enrolled",
+                "status-consumer",
+                credentials_core::store::SelectorKind::Exact,
+                credential_id,
+                GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .expect("grant");
+
+        // The caller arrives as Direct, which is what a host-launched consumer always is.
+        let with_token = surface
+            .status(
+                91,
+                Some(&subc_protocol::Principal::Direct),
+                &read_surface::StatusParams {
+                    handle: None,
+                    credential_id: Some(credential_id.to_owned()),
+                    enrollment_token: Some(token.clone()),
+                },
+            )
+            .await;
+        assert!(
+            with_token.ready,
+            "a consumer holding a covering grant and a valid token must be able to ask \
+             after a credential it may already read; got {with_token:?}"
+        );
+        assert_eq!(
+            with_token.credential_id.as_deref(),
+            Some(credential_id),
+            "a resolved scoped status echoes the id for binding verification"
+        );
+
+        // CONTROL, because 'ready' alone would also pass if the token were ignored and
+        // some other path had authorized it: the SAME call without the token must refuse.
+        let without_token = surface
+            .status(
+                92,
+                Some(&subc_protocol::Principal::Direct),
+                &read_surface::StatusParams {
+                    handle: None,
+                    credential_id: Some(credential_id.to_owned()),
+                    enrollment_token: None,
+                },
+            )
+            .await;
+        assert!(
+            !without_token.ready && without_token.credential_id.is_none(),
+            "without the token the caller is Direct, holds no grant, and must get the \
+             uniform unavailable body; got {without_token:?}"
+        );
+    }
+
     /// loop killing a token that refreshed while it was failing, so it must hold on the
     /// AN ENROLLED REPORT NAMES THE CONSUMER, NOT THE SOCKET IT ARRIVED ON.
     ///

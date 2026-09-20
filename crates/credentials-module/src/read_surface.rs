@@ -273,6 +273,11 @@ pub struct SignParams {
     pub credential_id: Option<String>,
     /// The exact bytes to sign, base64 (standard alphabet).
     pub payload_b64: String,
+    /// An enrollment token, for the consumer class that holds no handle. See the note on
+    /// [`StatusParams::enrollment_token`]: this field arrived on the scoped surfaces one
+    /// caller at a time, and the ones that lagged were the ones nobody had asked from yet.
+    #[serde(default)]
+    pub enrollment_token: Option<String>,
 }
 
 enum SignAuthorization<'a> {
@@ -316,6 +321,11 @@ pub struct PublicKeyParams {
     pub handle: Option<String>,
     #[serde(default)]
     pub credential_id: Option<String>,
+    /// An enrollment token, for the consumer class that holds no handle. See the note on
+    /// [`StatusParams::enrollment_token`]: this field arrived on the scoped surfaces one
+    /// caller at a time, and the ones that lagged were the ones nobody had asked from yet.
+    #[serde(default)]
+    pub enrollment_token: Option<String>,
 }
 
 enum PublicKeyAuthorization<'a> {
@@ -367,6 +377,20 @@ pub struct StatusParams {
     pub handle: Option<String>,
     #[serde(default)]
     pub credential_id: Option<String>,
+    /// An enrollment token, for the consumer class that holds no handle.
+    ///
+    /// WITHOUT THIS, STATUS WAS THE ONE SCOPED SURFACE AN ENROLLED CONSUMER COULD NOT
+    /// REACH. `get_scoped`, `list_scoped` and `report_auth_failure` all take a token, so
+    /// a host-launched consumer could discover credentials, fetch them, and say one was
+    /// dead -- and could not ask after the health of a single credential it already held
+    /// and was already entitled to read. The asymmetry was an oversight rather than a
+    /// decision: the field was added to three of four surfaces as each one needed it.
+    ///
+    /// Ignored when `handle` is used, for the same reason as on the failure report: a
+    /// handle holder is anonymous by design, and presenting both claims two identities
+    /// for one question.
+    #[serde(default)]
+    pub enrollment_token: Option<String>,
 }
 
 impl StatusParams {
@@ -1017,7 +1041,12 @@ impl ReadSurface {
                 }
             }
             SignAuthorization::Scoped(credential_id) => {
-                self.authorize_scoped(principal, credential_id, GrantOperation::Sign)?;
+                self.authorize_scoped_as(
+                    principal,
+                    params.enrollment_token.as_deref(),
+                    credential_id,
+                    GrantOperation::Sign,
+                )?;
                 credential_id.to_string()
             }
         };
@@ -1083,7 +1112,12 @@ impl ReadSurface {
                 }
             }
             PublicKeyAuthorization::Scoped(credential_id) => {
-                self.authorize_scoped(principal, credential_id, GrantOperation::Read)?;
+                self.authorize_scoped_as(
+                    principal,
+                    params.enrollment_token.as_deref(),
+                    credential_id,
+                    GrantOperation::Read,
+                )?;
                 credential_id.to_string()
             }
         };
@@ -1316,18 +1350,16 @@ impl ReadSurface {
         }
     }
 
-    /// Evaluate the one operation-scoped coverage predicate before loading sealed data.
-    fn authorize_scoped(
-        &self,
-        principal: Option<&Principal>,
-        credential_id: &str,
-        operation: GrantOperation,
-    ) -> Result<(), ReadError> {
-        self.authorize_scoped_as(principal, None, credential_id, operation)
-    }
-
-    /// `authorize_scoped` with an optional enrollment token, which is the only way a
-    /// host-launched consumer can be authorized at all.
+    /// Evaluate the one operation-scoped coverage predicate before loading sealed data,
+    /// with an optional enrollment token — the only way a host-launched consumer can be
+    /// authorized at all.
+    ///
+    /// THERE IS DELIBERATELY NO TOKEN-LESS WRAPPER. One existed, and its only effect was
+    /// to let a call site skip the caller's identity without saying so: three of six
+    /// scoped surfaces used it and were unreachable by enrolled consumers, each looking
+    /// correct in isolation because an unauthorized scoped call and a surface that cannot
+    /// read identity return the SAME body. Passing `None` explicitly is the same code and
+    /// says what it does.
     fn authorize_scoped_as(
         &self,
         principal: Option<&Principal>,
@@ -1886,8 +1918,18 @@ impl ReadSurface {
                 (credential_id, false)
             }
             (None, Some(credential_id)) => {
+                // `_as` rather than the token-less helper: an enrolled consumer presents a
+                // bearer token and no principal the bus can vouch for, so without this it
+                // resolves to `Direct`, fails coverage, and gets the same `unavailable`
+                // body as a credential that does not exist -- indistinguishable from the
+                // enumeration guard doing its job.
                 if self
-                    .authorize_scoped(principal, credential_id, GrantOperation::Read)
+                    .authorize_scoped_as(
+                        principal,
+                        params.enrollment_token.as_deref(),
+                        credential_id,
+                        GrantOperation::Read,
+                    )
                     .is_err()
                 {
                     return unavailable(None);

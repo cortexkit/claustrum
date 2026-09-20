@@ -169,13 +169,29 @@ means keep polling.
 
 ## Discovery
 
-**Status: BUILT on the integration branch (2026-09-19), not yet on a running vault.**
-The shape below was agreed with `openai-auth` before it was built, which is why it
-survived contact with the implementation unchanged.
+**Status: BUILT and live on the running vault (2026-09-19).** The shape below was agreed
+with `openai-auth` before it was built, which is why it survived contact with the
+implementation unchanged.
 
 `credential.list_scoped` returns one row per credential your grants cover — id,
-categories, type, served vendors, lifecycle state, `record_version`, allowed
-operations, and non-secret identity (`account_id`, `email`, `org_name`).
+categories, type, served vendors, `refresh_adapter`, lifecycle state, `record_version`,
+allowed operations, and non-secret identity (`account_id`, `email`, `org_name`) — plus
+`view`, a digest over what YOU can see.
+
+Two selection axes, and they answer different questions. `refresh_adapter` says whose
+PROTOCOL a credential speaks: select on it when the token goes to a provider's own
+endpoints. `serves` says which model VENDORS are reachable through it: select on it when
+choosing where a model can be served from. Never the id spelling — eight rows on this
+vault serve Anthropic models and three contain no "anthropic" anywhere in their id.
+
+`view` is the discovery cursor. It is a digest over ids, categories, state and operations
+and deliberately NOT over `record_version`, so a routine token refresh does not move it.
+Compare it against your previous call's to decide whether to reconcile at all; equality is
+the only thing defined on it.
+
+There is no `created_at_ms`. It is not on the struct, and the client type declares it
+always-null so the absence is visible where you would write the code rather than
+discovered at runtime.
 
 ### `view` is your change cursor, and it folds in identity
 

@@ -3237,13 +3237,32 @@ fn parse_grants(result: &serde_json::Value) -> Result<Vec<GrantRow>, CliError> {
         .ok_or_else(|| CliError::RouteRefused("admin.status omitted grant inventory".into()))?;
     let mut grants = Vec::with_capacity(rows.len());
     for (index, grant) in rows.iter().enumerate() {
+        // RENDER WHAT IS THERE; REFUSE ONLY WHAT IS ABSENT.
+        //
+        // This filter used to require `reserved` exactly, which was true when reserved
+        // modules were the only principals that could hold a grant. Enrollment added
+        // `enrolled`, and the CLI could CREATE one (`parse_grant_principal`) while being
+        // unable to display one -- so `ck auth grants` and `ck auth status` both died on
+        // a row this same binary had written.
+        //
+        // The worse half was the blast radius: ONE UNRENDERABLE ROW REFUSED THE ENTIRE
+        // INVENTORY, so a single grant took down the only surface an operator has for
+        // seeing grants at all. That is the shape of issue #45 in this repo -- one
+        // tenant's bad row denying every other tenant -- reached independently in my own
+        // CLI.
+        //
+        // So an unknown kind now RENDERS, carrying its literal text. A grant an operator
+        // cannot see is strictly more dangerous than one that displays with an unfamiliar
+        // label, because the label is a prompt to investigate and the absence is not.
+        // A missing or empty kind is still a refusal: that is a malformed reply rather
+        // than an unfamiliar one, and it would render as a blank column.
         let principal_kind = grant
             .get("principal_kind")
             .and_then(serde_json::Value::as_str)
-            .filter(|kind| *kind == "reserved")
+            .filter(|kind| !kind.is_empty())
             .ok_or_else(|| {
                 CliError::RouteRefused(format!(
-                    "admin.status returned an invalid grant principal kind at row {index}"
+                    "admin.status returned a grant with no principal kind at row {index}"
                 ))
             })?;
         let principal_id = grant
@@ -5967,5 +5986,83 @@ mod taxonomy_cli_tests {
             }]
         });
         assert_eq!(parse_grants(&v2).unwrap()[0].selector_kind, "category");
+    }
+
+    /// AN UNFAMILIAR PRINCIPAL KIND MUST NOT TAKE DOWN THE INVENTORY.
+    ///
+    /// Reported live by the insula seat on 2026-09-20: `ck auth grants` and `ck auth
+    /// status` both refused with "invalid grant principal kind at row 0" because the
+    /// parser required `reserved` exactly, and an `enrolled:` grant had been created --
+    /// by THIS BINARY, which accepts `enrolled:` at `parse_grant_principal`. The CLI
+    /// could write a row it could not read back.
+    ///
+    /// The blast radius is the part this test defends. One row refused the WHOLE table,
+    /// so a single grant removed the only surface an operator has for seeing grants at
+    /// all -- and `status` died AFTER printing the inventory, so it exited non-zero with
+    /// most of its output looking correct.
+    #[test]
+    fn one_unfamiliar_principal_kind_does_not_deny_the_whole_grant_inventory() {
+        let mixed = serde_json::json!({
+            "read_grants": [
+                {
+                    "principal_kind": "enrolled",
+                    "principal_id": "anthropic-auth-opencode",
+                    "selector_kind": "category",
+                    "credential_prefix": "anthropic-native",
+                    "operation": "read",
+                    "created_at_ms": 1,
+                    "covered_credential_ids": []
+                },
+                {
+                    // A kind no version of this binary has ever written. It must still
+                    // reach the operator's eyes: an unfamiliar label prompts a question,
+                    // an absent row does not. Placed here because the parser also
+                    // enforces a STABLE ORDER over the rows, which is its own defence --
+                    // a reordered inventory would hide a reach change in a diff.
+                    "principal_kind": "from-a-newer-daemon",
+                    "principal_id": "whoever",
+                    "selector_kind": "exact",
+                    "credential_prefix": "apikey:thing",
+                    "operation": "read",
+                    "created_at_ms": 3,
+                    "covered_credential_ids": []
+                },
+                {
+                    "principal_kind": "reserved",
+                    "principal_id": "insula",
+                    "selector_kind": "category",
+                    "credential_prefix": "llm-provider",
+                    "operation": "read",
+                    "created_at_ms": 2,
+                    "covered_credential_ids": []
+                }
+            ]
+        });
+        let rows = parse_grants(&mixed).expect("an unfamiliar kind must not refuse the table");
+        assert_eq!(
+            rows.len(),
+            3,
+            "every row must survive, not just the known ones"
+        );
+        assert_eq!(rows[0].principal_kind, "enrolled");
+        assert_eq!(rows[1].principal_kind, "from-a-newer-daemon");
+        assert_eq!(rows[2].principal_kind, "reserved");
+
+        // A MISSING kind is still a refusal: that is a malformed reply rather than an
+        // unfamiliar one, and it would render as a blank column that reads like a bug in
+        // the table instead of a fact about the grant.
+        let headless = serde_json::json!({
+            "read_grants": [{
+                "principal_id": "agent",
+                "credential_prefix": "apikey:",
+                "operation": "read",
+                "created_at_ms": 1,
+                "covered_credential_ids": []
+            }]
+        });
+        assert!(
+            parse_grants(&headless).is_err(),
+            "an absent kind is malformed"
+        );
     }
 }

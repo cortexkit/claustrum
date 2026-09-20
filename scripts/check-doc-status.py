@@ -199,6 +199,50 @@ def main() -> int:
             print(f"  - {f}\n", file=sys.stderr)
         return 1
 
+    # A DOC THAT CONTRADICTS ITS OWN HEADER IS THE CASE THIS GATE COULD NOT SEE.
+    #
+    # The header check above asks "is this NOT-BUILT claim honest". It cannot ask "does
+    # this document answer the same question twice, differently". On 2026-09-19
+    # github-app-credentials-design.md had read `Status: ADAPTER SHIPPED` at the top and
+    # `## Why this is designed and not built` thirty lines down, for a month, while the
+    # adapter carried 12,638 refresh commits. The gate passed the whole time, correctly,
+    # because it was answering a narrower question than the one a reader has.
+    #
+    # The reader who SCROLLS is the one who gets the wrong answer, which is why a header
+    # being right is not enough.
+    contradictions = []
+    for doc in docs:
+        text = doc.read_text(encoding="utf-8")
+        head = text[:400]
+        if not re.search(r"\*\*Status:[^*]*(SHIPPED|BUILT)(?![A-Z])", head, re.IGNORECASE):
+            continue
+        if re.search(r"^\*\*Status:.*(NOT BUILT|NOT-BUILT)", head, re.IGNORECASE | re.MULTILINE):
+            continue
+        # ONLY A BLANKET CLAIM IS A CONTRADICTION. "What is NOT built: SCOPED minting"
+        # NAMES the unbuilt part and is honest beside a shipped header; "Why this is
+        # designed and not built" has an anaphoric subject, so it claims the DOCUMENT'S
+        # subject is unbuilt and contradicts the header directly. The discriminator is
+        # whether the heading names a thing or points back at the doc.
+        for match in re.finditer(
+            r"^#{2,4}\s+((?:[^#\n]*\b(?:this|it)\b[^#\n]*)\b(?:not built|isn't built|is not built)\b[^#\n]*)$",
+            text, re.IGNORECASE | re.MULTILINE):
+            heading = match.group(1).strip()
+            # A heading that dates itself as history is the fix, not the defect.
+            body = text[match.end():match.end() + 300]
+            if re.search(r"\bhistorical\b|\bwas designed\b|\bbefore it was built\b",
+                         heading + body, re.IGNORECASE):
+                continue
+            contradictions.append(f"{doc}: header says shipped, but a section reads '{heading}'")
+    if contradictions:
+        print(
+            "REFUSING: a doc claims shipped at the top and unbuilt further down. A reader\n"
+            "    who scrolls gets the wrong answer, and the header check cannot see it:",
+            file=sys.stderr,
+        )
+        for c in contradictions:
+            print(f"  - {c}", file=sys.stderr)
+        return 1
+
     # Worded so a zero reads as a zero. "all honest" over an empty set is a verdict
     # about nothing, and it is the phrasing that made the vacuous pass unreadable.
     if checked:

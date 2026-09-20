@@ -35,24 +35,28 @@ the head repository's contents), but that is read from documentation and NOT fro
 recorded response, which is precisely the standard the rest of this file holds
 itself to.
 
-## Why this is designed and not built
+## Why it was designed before it was built
 
-Everything below is specified: wire verified against GitHub's docs, crypto
-chosen, handle shape settled, registry fields agreed with ALF. Nothing blocks an
-implementation except material.
+**Historical, and it says so because this section contradicted the header for a month.**
+The header has read ADAPTER SHIPPED since 2026-08-20; this section still said "designed
+and not built", which is the same defect a consumer found in my client interface on
+2026-09-19 — a document that answers a question one way at the top and the other way
+thirty lines down. The reader who scrolls is the one who gets the wrong answer.
 
-**It waits for a real key on purpose.** This repo's refresh adapters are built to
-the fidelity rule -- conformance tests assert against RECORDED provider
-responses, never invented ones. Without a real GitHub App there is no recorded
-`access_tokens` response to test against, only the shape the documentation
-describes. An adapter tested against a documented shape passes exactly as
-convincingly as one tested against a real one, and discovers nothing the docs
-already said.
+The adapter shipped and is load-bearing: 22 live `github_app` credentials and 12,638
+recorded `refresh_commit` rows on this vault.
 
-So the sequencing is deliberate rather than idle: when the PEM batch lands, mint
-one token against real GitHub, record the response, and build against that. The
-design work done ahead of it is the part that pays -- it has already killed a bad
-dependency and corrected a registry field before ~20 rows existed.
+The reasoning that held the work back is still worth keeping, because it is the general
+rule rather than a fact about this adapter. Refresh adapters here are built to the
+FIDELITY RULE: conformance tests assert against RECORDED provider responses, never
+invented ones. Without a real GitHub App there was no recorded `access_tokens` response to
+test against, only the shape the documentation describes — and AN ADAPTER TESTED AGAINST A
+DOCUMENTED SHAPE PASSES EXACTLY AS CONVINCINGLY AS ONE TESTED AGAINST A REAL ONE, while
+discovering nothing the docs already said.
+
+It paid: the design work killed a bad dependency and corrected a registry field before ~20
+rows existed. When the PEM batch landed, the first token was minted against real GitHub,
+the response recorded, and the adapter built against that.
 
 ## What it is
 

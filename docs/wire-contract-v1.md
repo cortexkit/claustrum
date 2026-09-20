@@ -68,6 +68,41 @@ nearest known class — each known class carries an actionable remedy, and apply
 wrong one (prompting a human for a transient network failure) is worse than saying
 "something is wrong and I do not know what".
 
+### 1a. Two refusal shapes, and only one of them carries a class
+
+A read-surface operation can be refused in two structurally different ways, and a
+consumer must handle both. This section exists because a consumer reading section 1
+would reasonably conclude that every refusal carries a class, and one of these does not.
+
+| | frame | body | carries `class` |
+|---|---|---|---|
+| the credential answered no | `Response` | `result.error.{code, class}` | yes |
+| the request never got that far | `Error` | `{code, message}` | **no** |
+
+The second shape is the transport refusal: a malformed frame, an unknown operation, or
+params that failed to decode (`invalid_params`). It is emitted by `send_route_error` in
+`main.rs` using `subc_protocol::ErrorBody`, whose fields are `code`, `message` and an
+optional `detail` — **there is no `class` field on that type**, so its absence is
+structural rather than an omission on some paths.
+
+**Why the class vocabulary is deliberately not extended to cover it.** The four classes
+each name a remedy the consumer can act on — retry, reduce, re-authenticate, give up.
+A transport refusal has no such remedy, because it means the request itself was wrong:
+the fix is a code change in the caller, not a different action at runtime. Labelling it
+`permanent` would be true in the useless sense and would invite a consumer to treat a
+bug in its own serialisation as a credential verdict.
+
+**What a consumer must do:** distinguish the two by FRAME TYPE before decoding. An
+`Error` frame is never a statement about a credential — do not map it into a credential
+state, do not mark anything `needs_reauth`, and do not delete client state on it. Treat
+an unrecognised `Error` code as retryable, because the alternative is letting a
+transport condition masquerade as a permanent verdict about a credential that is fine.
+
+**And do not decode an `Error` frame's body as a result.** A decoder reaching for
+`result.credentials` in an `Error` body gets a missing-field failure, which presents as
+corruption and sends the reader hunting a serialisation defect in the producer that does
+not exist.
+
 ---
 
 ## 2. Addressing

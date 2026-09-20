@@ -2255,6 +2255,48 @@ mod error_class_tests {
         assert_eq!(params.reporter_source, None);
     }
 
+    /// THE DOC'S CLASS-LESS REFUSAL SHAPE IS A STRUCTURAL FACT, SO PIN IT STRUCTURALLY.
+    ///
+    /// Section 1a tells consumers that a transport refusal carries no `class` and must be
+    /// distinguished by frame type. That claim is only true while `subc_protocol::ErrorBody`
+    /// has no class field — if a future protocol version adds one, the doc silently starts
+    /// telling consumers to handle an absence that no longer occurs, and a consumer that
+    /// built a frame-type branch on it carries dead code with no way to learn.
+    ///
+    /// The instrument is serialisation rather than reflection: serialise the real type and
+    /// look at the emitted keys. That answers what goes ON THE WIRE, which is the subject,
+    /// where a field list would answer what is in the struct.
+    ///
+    /// Written after a consumer spent an evening on a decode failure and I explained it
+    /// with the wrong mechanism — the doc had never named this shape at all, so nothing
+    /// was wrong in it and nothing pointed at it either.
+    #[test]
+    fn the_transport_refusal_shape_the_doc_describes_is_the_one_emitted() {
+        let body = subc_protocol::ErrorBody::new("invalid_params", "params not decodable");
+        let json = serde_json::to_value(&body).expect("serialisable");
+        let object = json.as_object().expect("an object");
+
+        assert!(
+            !object.contains_key("class"),
+            "section 1a of the wire contract tells consumers a transport refusal carries NO \
+             class and must be distinguished by frame type. This body emitted one: {json}. \
+             Either the protocol gained the field and the doc is now misleading, or this \
+             producer is emitting something the doc does not describe."
+        );
+        assert!(
+            object.contains_key("code"),
+            "the doc's table says a transport refusal carries `code`, which is the only \
+             thing a consumer has to act on there: {json}"
+        );
+
+        let doc = include_str!("../../../docs/wire-contract-v1.md");
+        assert!(
+            doc.contains("1a. Two refusal shapes"),
+            "the section this test defends is gone from the doc, so the assertions above \
+             now pin a shape nothing describes to consumers"
+        );
+    }
+
     /// The consumer-facing wire contract names EVERY error class, and no others.
     ///
     /// A document describing a wire surface is a claim that drifts silently: the class

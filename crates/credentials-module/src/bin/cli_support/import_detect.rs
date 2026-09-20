@@ -242,10 +242,6 @@ impl DetectedRow {
         self.payload.as_ref()
     }
 
-    pub fn into_payload(self) -> Option<EntryPayload> {
-        self.payload
-    }
-
     /// Render a refusal without forwarding a filesystem, serde, or source-reader error.
     pub fn non_selectable_text(&self) -> Option<String> {
         let failure = self.failure.as_ref()?;

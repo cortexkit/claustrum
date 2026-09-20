@@ -6982,6 +6982,76 @@ mod tests {
         );
     }
 
+    /// THE KEY-EXERCISE HANDLE PATH RUNS THE LIMITER, FOR BOTH OPERATIONS AND FROM ONE
+    /// PLACE.
+    ///
+    /// `sign` and `public_key` carried byte-identical address-resolution preambles until
+    /// they were extracted into `resolve_key_address`, and the extraction's own comment
+    /// claims the limiter position is load-bearing. Nothing defended that claim: removing
+    /// the `check_limiter` call from the shared helper left all 134 tests green, so the
+    /// property was asserted in prose and nowhere else.
+    ///
+    /// That is worse after the extraction than before. One helper serving two operations
+    /// means one deletion disarms the enumeration detector on BOTH, where previously a
+    /// careless edit could only reach one. A shared chokepoint needs a test precisely
+    /// because it concentrates the blast radius it was created to reduce.
+    ///
+    /// Both operations are driven here rather than one, because the helper is reached
+    /// through two different `From` conversions and a future edit could plausibly break
+    /// only one of them.
+    #[tokio::test]
+    async fn key_exercise_handle_sweeps_run_the_limiter() {
+        use base64::Engine as _;
+
+        for op in ["sign", "public_key"] {
+            let (surface, store, _db, _root) =
+                tmp_surface_with_store(if op == "sign" { 171 } else { 172 });
+            // More distinct unknown handles than the distinct ceiling (16), on ONE
+            // connection. None resolve -- the probe is the signal -- so the sweep must
+            // still raise the alarm.
+            for i in 0..20 {
+                let handle = Some(format!("ckh_unknown_{op}_{i}"));
+                if op == "sign" {
+                    let _ = surface
+                        .sign(
+                            78,
+                            None,
+                            &read_surface::SignParams {
+                                handle,
+                                credential_id: None,
+                                payload_b64: base64::engine::general_purpose::STANDARD.encode(b"x"),
+                                enrollment_token: None,
+                            },
+                        )
+                        .await;
+                } else {
+                    let _ = surface
+                        .public_key(
+                            78,
+                            None,
+                            &read_surface::PublicKeyParams {
+                                handle,
+                                credential_id: None,
+                                enrollment_token: None,
+                            },
+                        )
+                        .await;
+                }
+            }
+            let alarms = store
+                .read_audit(None)
+                .expect("read audit")
+                .into_iter()
+                .filter(|e| e.op == "fetch_anomaly")
+                .count();
+            assert!(
+                alarms >= 1,
+                "a {op} sweep of unknown handles must raise a durable fetch-anomaly alarm; \
+                 the limiter runs inside resolve_key_address, before resolution"
+            );
+        }
+    }
+
     /// Wire v2 layer-2 validation (spec §3.3): a route frame whose epoch does not
     /// match the locally-installed binding — or whose slot is unknown — is dropped
     /// silently BEFORE dispatch: no Response, no Error (an Error would inject into

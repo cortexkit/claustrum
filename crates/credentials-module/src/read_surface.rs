@@ -965,6 +965,33 @@ fn classify_scoped_coverage(coverage: ScopedCoverage) -> Option<ScopedReadRefusa
     }
 }
 
+/// One address for a key-exercise operation: a bearer handle, or a credential id under a
+/// grant. `sign` and `public_key` each have their own params type, so each has its own
+/// authorization enum; this is the shape they share, and the `From` impls keep the
+/// conversion at the call site rather than widening either params type.
+enum KeyAddress<'a> {
+    Handle(&'a str),
+    Scoped(&'a str),
+}
+
+impl<'a> From<SignAuthorization<'a>> for KeyAddress<'a> {
+    fn from(value: SignAuthorization<'a>) -> Self {
+        match value {
+            SignAuthorization::Handle(handle) => KeyAddress::Handle(handle),
+            SignAuthorization::Scoped(id) => KeyAddress::Scoped(id),
+        }
+    }
+}
+
+impl<'a> From<PublicKeyAuthorization<'a>> for KeyAddress<'a> {
+    fn from(value: PublicKeyAuthorization<'a>) -> Self {
+        match value {
+            PublicKeyAuthorization::Handle(handle) => KeyAddress::Handle(handle),
+            PublicKeyAuthorization::Scoped(id) => KeyAddress::Scoped(id),
+        }
+    }
+}
+
 impl ReadSurface {
     pub fn new(engine: Arc<RefreshEngine>, limiter: FetchLimiter) -> Self {
         // Compute the initial snapshot once at construction (boot time, off any
@@ -1028,28 +1055,15 @@ impl ReadSurface {
         params: &SignParams,
     ) -> Result<SignResult, ReadError> {
         let authorization = params.authorization().ok_or(ReadError::NotFound)?;
-        let credential_id = match authorization {
-            SignAuthorization::Handle(handle) => {
-                // Same limiter, same position as `get`: BEFORE resolution and keyed by the
-                // presented handle, so a sweep of unknown handles trips the detector here too
-                // rather than only on the get path.
-                self.check_limiter(connection_id, handle).await;
-                match self.engine.store().resolve_handle(handle) {
-                    Ok(id) => id,
-                    Err(StoreOpError::NotFound) => return Err(ReadError::NotFound),
-                    Err(e) => return Err(map_store_error(&e)),
-                }
-            }
-            SignAuthorization::Scoped(credential_id) => {
-                self.authorize_scoped_as(
-                    principal,
-                    params.enrollment_token.as_deref(),
-                    credential_id,
-                    GrantOperation::Sign,
-                )?;
-                credential_id.to_string()
-            }
-        };
+        let credential_id = self
+            .resolve_key_address(
+                connection_id,
+                principal,
+                params.enrollment_token.as_deref(),
+                authorization.into(),
+                GrantOperation::Sign,
+            )
+            .await?;
 
         let record = match self.engine.store().get(&credential_id) {
             Ok(r) => r,
@@ -1100,27 +1114,15 @@ impl ReadSurface {
         params: &PublicKeyParams,
     ) -> Result<PublicKeyResult, ReadError> {
         let authorization = params.authorization().ok_or(ReadError::NotFound)?;
-        let credential_id = match authorization {
-            PublicKeyAuthorization::Handle(handle) => {
-                // Match `get` and `sign`: rate-limit the presented handle before resolving
-                // it, so unknown-handle sweeps reach the same detector as valid traffic.
-                self.check_limiter(connection_id, handle).await;
-                match self.engine.store().resolve_handle(handle) {
-                    Ok(id) => id,
-                    Err(StoreOpError::NotFound) => return Err(ReadError::NotFound),
-                    Err(e) => return Err(map_store_error(&e)),
-                }
-            }
-            PublicKeyAuthorization::Scoped(credential_id) => {
-                self.authorize_scoped_as(
-                    principal,
-                    params.enrollment_token.as_deref(),
-                    credential_id,
-                    GrantOperation::Read,
-                )?;
-                credential_id.to_string()
-            }
-        };
+        let credential_id = self
+            .resolve_key_address(
+                connection_id,
+                principal,
+                params.enrollment_token.as_deref(),
+                authorization.into(),
+                GrantOperation::Read,
+            )
+            .await?;
 
         let record = match self.engine.store().get(&credential_id) {
             Ok(record) => record,
@@ -1307,6 +1309,44 @@ impl ReadSurface {
             principal_id,
             refusal,
         );
+    }
+
+    /// Resolve a handle-or-scoped address to a credential id, applying the same limiter
+    /// and the same grant check both key-exercise operations need.
+    ///
+    /// EXTRACTED BECAUSE THE DUPLICATION BILLED. `sign` and `public_key` carried
+    /// byte-identical copies of this differing only in the `GrantOperation`, and when the
+    /// enrollment-token gap was fixed the SAME edit had to be made twice -- one of the
+    /// three surfaces that had drifted apart was drifting because nobody notices a second
+    /// copy until they have already edited the first.
+    ///
+    /// The limiter position is load-bearing and is why this is one function rather than
+    /// two: it runs BEFORE resolution and is keyed on the presented handle, so a sweep of
+    /// unknown handles trips the detector here exactly as it does on `get`. A future
+    /// operation that resolves an address without this preamble gets the enumeration
+    /// surface back.
+    async fn resolve_key_address(
+        &self,
+        connection_id: u64,
+        principal: Option<&Principal>,
+        enrollment_token: Option<&str>,
+        address: KeyAddress<'_>,
+        operation: GrantOperation,
+    ) -> Result<String, ReadError> {
+        match address {
+            KeyAddress::Handle(handle) => {
+                self.check_limiter(connection_id, handle).await;
+                match self.engine.store().resolve_handle(handle) {
+                    Ok(id) => Ok(id),
+                    Err(StoreOpError::NotFound) => Err(ReadError::NotFound),
+                    Err(e) => Err(map_store_error(&e)),
+                }
+            }
+            KeyAddress::Scoped(credential_id) => {
+                self.authorize_scoped_as(principal, enrollment_token, credential_id, operation)?;
+                Ok(credential_id.to_string())
+            }
+        }
     }
 
     /// Resolve who is asking: a supervised module, or a consumer holding an enrollment

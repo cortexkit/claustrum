@@ -70,6 +70,14 @@ log in to a provider, mint and revoke handles, inspect state, verify the audit
 chain. Most write verbs commit through the running daemon with zero downtime;
 the offline path exists for bootstrap and master-key rotation.
 
+**Releases from v0.1.3 need subc 0.17.20 or newer.** An older supervisor refuses
+the module's HELLO with `malformed HELLO body: missing field "consumes"` and
+parks it after three restarts. That message names a protocol field rather than a
+version mismatch, so it reads as a broken release when it is a supervisor that
+predates the field being optional — upgrade the supervisor first. This concerns
+you only if you install from the release page by hand; `ck setup claustrum`
+installs core first by construction.
+
 - [`docs/cortexkit-credentials-contract.md`](docs/cortexkit-credentials-contract.md)
   — the normative security contract.
 - [`docs/operator-runbook.md`](docs/operator-runbook.md) — provisioning, wiring a

@@ -1434,11 +1434,37 @@ impl ReadSurface {
         // `list_scoped`, and the two resolve their principal through the same helper --
         // so reading either one in isolation shows correct code. Found by the consumer
         // that would have hit it, before they wrote a line against it.
-        self.engine
+        let result = self
+            .engine
             .store()
             .list_scoped_snapshot(principal_kind, &principal_id)
             .map(project_list_scoped)
-            .map_err(|_| ReadError::StoreError)
+            .map_err(|_| ReadError::StoreError)?;
+        // RECORD THE SUCCESS, because this op's SILENCE WAS INDISTINGUISHABLE FROM ITS
+        // ABSENCE, and that cost a consumer a debugging session on 2026-09-20.
+        //
+        // Every other scoped op records first use through `authorize_scoped`. This one
+        // does not go through it, so a successful enumeration wrote NOTHING while a
+        // refusal wrote a row. An operator reading `auth_events` therefore got the same
+        // empty result for "the consumer is working" and "the consumer never called" --
+        // and I offered exactly that reading to the insula seat as evidence, which is
+        // how a null instrument nearly sent them hunting an ordering bug that did not
+        // exist.
+        //
+        // It is the worst op to leave silent: it is the one a consumer calls FIRST, so
+        // its first success is the moment a cutover is proven.
+        //
+        // Subject is the OP rather than a credential id, matching the refusal rows and
+        // for the same reason -- the answer is "this principal enumerated", not "this
+        // principal touched row X". Best-effort and idempotent like the other site: a
+        // diagnostic that could fail an authorized read would be worse than blindness.
+        let _ = self.engine.store().record_scoped_first_use(
+            "credential.list_scoped",
+            principal_kind,
+            Some(&principal_id),
+            GrantOperation::Read,
+        );
+        Ok(result)
     }
 
     /// Serve a credential-id read after the route layer captures the bind's principal.

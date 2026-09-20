@@ -2687,8 +2687,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_scoped_is_snapshot_shaped_silent_on_success_and_records_only_rejected_principals()
-    {
+    async fn list_scoped_never_grows_the_audit_chain_and_records_first_use_once_per_principal() {
         let (surface, admin, store) = scoped_rig(94);
         store
             .create(
@@ -2742,8 +2741,44 @@ mod tests {
         assert!(listed["result"]["view"]
             .as_str()
             .is_some_and(|value| !value.is_empty()));
+        // THE AUDIT CHAIN MUST NOT GROW ON A READ. It is untrimmable and HMAC-linked, so
+        // a row per enumeration would make it grow with traffic forever. Unchanged.
         assert_eq!(store.read_audit(None).unwrap().len(), audit_count);
-        assert_eq!(store.recent_auth_events(100).unwrap().len(), event_count);
+
+        // `auth_events` IS THE OPPOSITE CASE AND USED TO BE SILENT TOO, which cost the
+        // insula seat a debugging session on 2026-09-20: a REFUSAL wrote a row and a
+        // SUCCESS wrote nothing, so an operator reading this table got the same empty
+        // answer for "the consumer is working" and "the consumer never called". I
+        // offered exactly that reading as evidence before noticing it could not answer.
+        //
+        // It is bounded and trimmable, and first use is IDEMPOTENT -- one row ever per
+        // (subject, principal, operation), not one per call. That distinction is what
+        // makes this safe: every list_scoped row shares one 64-entry ring keyed on the
+        // literal op, so a per-CALL row would evict the refusals that explain failures,
+        // the least interesting row pushing out the most interesting.
+        let after_first = store.recent_auth_events(100).unwrap().len();
+        assert_eq!(
+            after_first,
+            event_count + 1,
+            "a successful enumeration must be visible to an operator"
+        );
+        let again = scoped_route_request(&surface, &admin, 94, OP_LIST_SCOPED, json!({})).await;
+        assert_eq!(again["result"]["grants"], 2, "second call still serves");
+        assert_eq!(
+            store.recent_auth_events(100).unwrap().len(),
+            after_first,
+            "first use is once per principal, not once per call"
+        );
+        let first_use = store
+            .recent_auth_events(100)
+            .unwrap()
+            .into_iter()
+            .find(|event| {
+                event.credential_id == OP_LIST_SCOPED
+                    && event.principal_id.as_deref() == Some("consumer")
+            })
+            .expect("the successful caller is named");
+        assert_eq!(first_use.principal_kind.as_deref(), Some("reserved"));
 
         let invalid = scoped_route_request(
             &surface,
@@ -5044,6 +5079,57 @@ mod tests {
         assert_eq!(
             metrics.get("auditTipMac").and_then(|v| v.as_str()),
             Some("mac-7")
+        );
+    }
+
+    /// A SUCCESSFUL `list_scoped` MUST LEAVE A ROW, because its silence was
+    /// indistinguishable from never having been called.
+    ///
+    /// Measured 2026-09-20: the insula seat cut over to a reserved principal, their
+    /// enumeration behaved oddly, and I offered to read `auth_events` to tell them
+    /// whether the call had arrived. It could not answer: a REFUSAL wrote a row and a
+    /// SUCCESS wrote nothing, so the empty result meant both "working" and "never
+    /// called". This is the op a consumer calls FIRST, so its first success is the exact
+    /// moment a cutover is proven, and it was the one op that could not say so.
+    #[test]
+    fn a_successful_list_scoped_records_first_use_not_only_its_refusals() {
+        let (surface, store, _db, _root) = tmp_surface_with_store(196);
+        let id = "apikey:enumerated";
+        let record = VaultRecord::new_static(CredentialKind::ApiKey, "test", b"k".to_vec(), None);
+        store
+            .create_audited(id, &record, AuditCtx::admin(AuditOp::Put))
+            .expect("seed");
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "a-module",
+                credentials_core::store::SelectorKind::Exact,
+                id,
+                credentials_core::store::GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .expect("grant");
+
+        let principal = subc_protocol::Principal::Reserved {
+            module_id: "a-module".to_owned(),
+        };
+        let listed = surface
+            .list_scoped(
+                Some(&principal),
+                &read_surface::ListScopedParams {
+                    enrollment_token: None,
+                },
+            )
+            .expect("a granted reserved principal enumerates");
+        assert_eq!(listed.credentials.len(), 1, "the grant covers one row");
+
+        let events = store.recent_auth_events(32).expect("read events");
+        assert!(
+            events.iter().any(|event| {
+                event.credential_id == "credential.list_scoped"
+                    && event.principal_id.as_deref() == Some("a-module")
+            }),
+            "a successful enumeration must record first use under the caller, got {events:?}"
         );
     }
 

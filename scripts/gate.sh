@@ -178,7 +178,17 @@ run_expect() {
   if [ -n "$target" ] && [ "$has_nocapture" = "0" ]; then
     local src
     src="$(find crates -path "*/tests/${target}.rs" -print -quit 2>/dev/null || true)"
-    if [ -n "$src" ] && grep -q 'SKIPPING' "$src"; then
+    # MATCH THE EMISSION, NOT THE WORD. Every real notice opens a string literal with
+    # the token (`"SKIPPING {arm}: ..."`), so requiring the quote asks "does this file
+    # PRINT a skip notice" rather than "does this file contain the word". A bare
+    # `grep SKIPPING` fired on a DOC COMMENT of mine that used the word in prose --
+    # the same false positive the sibling path-rendering checker hit on its own
+    # documenting docstring, and the reason that one parses instead of matching text.
+    #
+    # A caps-emphasis house style makes this recur: a reserved token is easy to write
+    # by accident in a comment, and failing the gate on prose teaches people to route
+    # around the guard rather than to fix the file it is protecting.
+    if [ -n "$src" ] && grep -q '"SKIPPING' "$src"; then
       fail "$label targets ${target}, whose source can print a skip notice, but omits \
 --nocapture. cargo captures that notice, so the skip check below would read an empty \
 stream and pass the arm without ever seeing it skip."

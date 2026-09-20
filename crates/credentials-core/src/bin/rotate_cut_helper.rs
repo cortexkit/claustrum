@@ -46,14 +46,15 @@ fn record_key(keys_file: &PathBuf, name: &str, key: &MasterKey) {
     // line-sized buffer lands whole and they can only interleave BETWEEN lines.
     //
     // Today this helper is spawned and awaited one at a time, so it is genuinely
-    // single-writer and nothing tears. The reason to write it this way anyway is what the
-    // READER does: `rig_keys` parses with `filter_map(split_once('='))`, which drops an
-    // unparseable line SILENTLY. A torn line would therefore not present as corruption --
-    // it would present as a fingerprint that was never published, sending the next reader
-    // to hunt a rotation that did not record rather than a line that did not land.
+    // single-writer and nothing tears. It is written this way anyway because
+    // "single-writer" is a property of today's call sites rather than of this function,
+    // and one `tokio::spawn` away the property is gone with nothing to announce it.
     //
-    // That is a bad hour to buy for a saved character, and "single-writer" is a property
-    // of today's call sites rather than of this function.
+    // The reader (`rig_keys` in tests/rotate_crash_cut.rs) now REFUSES a malformed line
+    // rather than skipping it, which it can afford because every call here precedes the
+    // `park()` for its cut and the SIGKILL lands on a parked process. So a torn line is
+    // unreachable, and if it ever becomes reachable the rig says so instead of reporting
+    // a fingerprint that was never published.
     f.write_all(format!("{name}={}\n", key.key_id().to_hex()).as_bytes())
         .expect("write key fingerprint");
 }

@@ -205,23 +205,38 @@ fn assert_wrong_key_fails_closed(root: &Path) {
 /// vault that was never rotated at all. Naming the expected key per cut is what
 /// makes each test about the ROTATION rather than about opening a vault.
 ///
-/// THIS READER DROPS UNPARSEABLE LINES, WHICH IS CORRECT AND IS ALSO WHAT WOULD EAT
-/// THE EVIDENCE. Failing the whole read on a torn tail would make a crash-cut rig
-/// flaky by construction, since the helper can be SIGKILLed mid-write by design. But
-/// dropping is only SAFE because the writer is atomic: `record_key` issues one
-/// `write_all` of a whole line rather than `writeln!`, which emits a syscall per
-/// format fragment.
+/// THIS READER PRODUCES A VERDICT, SO IT REFUSES A MALFORMED LINE RATHER THAN
+/// SKIPPING ONE. The distinction is THALAMUS's and it is decided by what consumes the
+/// output, not by what the input looks like: an analysis tool may skip a bad line and
+/// keep describing, but a harness that CERTIFIES a result must refuse corrupt
+/// evidence, because a skipped line silently shrinks the population it certifies over.
 ///
-/// The dependency is invisible from here, which is why it is written down here: if
-/// that writer ever goes back to `writeln!` and a second appender appears, this
-/// function reports a fingerprint that was never published rather than a line that
-/// did not land, and the failure names the rotation instead of the file.
+/// Refusing costs nothing here, and that is a fact about the helper rather than a
+/// hope: every `record_key` call precedes the `park()` for its cut, and `park` writes
+/// the readiness marker the parent waits for BEFORE sleeping. So the SIGKILL always
+/// lands on a sleeping process with its writes complete, and a torn line is not a
+/// state this rig can reach.
+///
+/// I previously wrote the opposite here -- "the helper can be SIGKILLed mid-write by
+/// design" -- from the SHAPE of a crash-cut rig rather than from reading where the
+/// kills land. It was wrong, and it argued for the weaker reader.
 fn rig_keys(root: &Path) -> std::collections::HashMap<String, String> {
-    let text = std::fs::read_to_string(root.join("data").join("keys.txt"))
-        .expect("helper published its key fingerprints");
+    let path = root.join("data").join("keys.txt");
+    let text = std::fs::read_to_string(&path).expect("helper published its key fingerprints");
     text.lines()
-        .filter_map(|line| line.split_once('='))
-        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            let (name, fingerprint) = line.split_once('=').unwrap_or_else(|| {
+                panic!(
+                    "{}: malformed fingerprint line {line:?}. The helper writes each line with \
+                     one write_all and is killed only while parked, so this is a torn or \
+                     interleaved append rather than a rotation that failed to record -- do not \
+                     read it as the latter.",
+                    path.display()
+                )
+            });
+            (name.to_string(), fingerprint.to_string())
+        })
         .collect()
 }
 

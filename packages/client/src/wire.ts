@@ -501,7 +501,12 @@ export interface ScopedInventory {
   readonly view: string
 }
 
-function decodeScopedInventory(
+/**
+ * Exported for the golden-reply test only; `index.ts` re-exports by name, so this does not
+ * widen the published surface. The test drives THIS function rather than asserting keys,
+ * because a key check passes on a decoder that reads the wrong key.
+ */
+export function decodeScopedInventory(
   response: unknown,
   logUnknownClass: (errorClass: string) => void,
 ): ScopedInventory {

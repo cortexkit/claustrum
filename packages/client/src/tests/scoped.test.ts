@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { decodeScopedInventory } from '../wire.js'
 
 /**
  * THE PRODUCER OWNS THIS FIXTURE. It is written by Rust tests that serialise the real
@@ -82,6 +83,34 @@ describe('the client speaks the producer-pinned wire', () => {
     expect(Object.hasOwn(decoded, 'id')).toBe(true)
     expect(Object.hasOwn(decoded, 'credential_id')).toBe(false)
     expect(decoded.refresh_adapter).toBe('anthropic')
+  })
+
+  /**
+   * THE WHOLE REPLY, DECODED BY THE REAL DECODER.
+   *
+   * The key checks above pass on a decoder that reads the wrong key -- they assert what the
+   * fixture holds, not what this client does with it. A downstream consumer lost an
+   * evening to exactly that: its decoder, its stub and its fixture all spelled `kind` and
+   * agreed with each other while the vault had always sent `type`.
+   *
+   * The `reply` row is serialised by the producer's own test from the real
+   * `ListScopedResult`, wrapped as it goes on the wire, with a `view` computed by the
+   * production digest. So this is the only assertion here whose expected side this package
+   * did not write.
+   */
+  test('the client decodes the golden reply the producer serialises', () => {
+    const fixture = JSON.parse(readFileSync(FIXTURE, 'utf8')) as {
+      operations: (FixtureRow & { reply?: string })[]
+    }
+    const reply = fixture.operations.find((entry) => entry.op === 'credential.list_scoped')?.reply
+    if (reply === undefined) throw new Error('no golden reply for credential.list_scoped')
+
+    const inventory = decodeScopedInventory(JSON.parse(reply), () => {})
+    expect(inventory.rows).toHaveLength(1)
+    expect(inventory.rows[0]?.id).toBe('oauth:anthropic')
+    expect(inventory.rows[0]?.credentialType).toBe('subscription')
+    expect(inventory.rows[0]?.refreshAdapter).toBe('anthropic')
+    expect(inventory.view.length).toBeGreaterThan(0)
   })
 
   test('the ceremony rows are pinned too, so a consumer can build against them offline', () => {

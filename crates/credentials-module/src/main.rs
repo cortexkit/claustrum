@@ -3624,6 +3624,13 @@ mod tests {
     /// away, and never reach either loop. The pin would then report a green, complete key
     /// set for a struct that had grown a parameter -- blind in exactly the case it exists
     /// for. The exhaustive literals are the mechanism, not verbosity to be tidied.
+    /// The golden reply is what goes on the wire, which is `wrap_result` around the
+    /// result -- a consumer decodes `result.credentials`, so pinning the bare struct would
+    /// pin a shape nobody receives.
+    fn main_wrap_for_fixture<T: serde::Serialize>(value: T) -> serde_json::Value {
+        wrap_result(value)
+    }
+
     fn assert_request_key_set<T: serde::Serialize>(params: T, expected: &[&str], op: &str) {
         let value = serde_json::to_value(params).expect("serialize request parameters");
         let object = value
@@ -3702,6 +3709,52 @@ mod tests {
             })
             .unwrap(),
             operation("credential.list_scoped")["row"]
+        );
+
+        // AND THE WHOLE REPLY, NOT JUST ONE ROW.
+        //
+        // The row above was pinned first, and it did not stop a consumer's hand-copied
+        // fixture from spelling `type` as `kind` for days: their decoder, their stub and
+        // their fixture all agreed with each other and none agreed with this producer. A
+        // row alone also leaves the envelope unpinned, and the envelope is where the same
+        // consumer once modelled `grants` (a bare count) as the tuple array that actually
+        // lives one key over in `grant_tuples`.
+        //
+        // This is the golden reply a consumer should BYTE-COPY, with a provenance line
+        // naming the claustrum commit, rather than transcribe. The `view` is computed by
+        // the production digest, not typed, so the golden cannot carry a view the
+        // producer would never emit.
+        let golden_rows = vec![read_surface::ListScopedCredential {
+            id: "oauth:anthropic".into(),
+            categories: vec!["anthropic-native".into(), "llm-provider".into()],
+            credential_type: "subscription".into(),
+            serves: vec!["anthropic".into()],
+            refresh_adapter: Some("anthropic".into()),
+            state: "active".into(),
+            record_version: 232,
+            operations: vec!["read".into()],
+            account_id: Some("00000000-0000-4000-8000-000000000000".into()),
+            email: Some("consumer@example.invalid".into()),
+            org_name: None,
+        }];
+        let golden_tuples = vec![read_surface::GrantTuple {
+            selector_kind: "category".into(),
+            selector: "llm-provider".into(),
+            operation: "read".into(),
+        }];
+        let golden_view = read_surface::list_scoped_view(&golden_rows, &golden_tuples);
+        assert_eq!(
+            serde_json::to_string(&main_wrap_for_fixture(read_surface::ListScopedResult {
+                credentials: golden_rows,
+                grants: 1,
+                grant_tuples: golden_tuples,
+                view: golden_view,
+            }))
+            .unwrap(),
+            operation("credential.list_scoped")["reply"],
+            "the golden list_scoped reply drifted from what this producer serialises. \
+             Consumers byte-copy this file: regenerate it from the assertion's left side, \
+             announce the change, and expect every consumer fixture to need re-copying"
         );
 
         assert_eq!(

@@ -849,7 +849,10 @@ fn encoded_grant_tuple(tuple: &GrantTuple) -> Vec<u8> {
     encoded
 }
 
-fn list_scoped_view(credentials: &[ListScopedCredential], grants: &[GrantTuple]) -> String {
+pub(crate) fn list_scoped_view(
+    credentials: &[ListScopedCredential],
+    grants: &[GrantTuple],
+) -> String {
     let mut digest_input = b"claustrum.list_scoped.view.v1".to_vec();
     digest_input.push(1);
     push_u32(&mut digest_input, credentials.len());

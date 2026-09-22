@@ -3693,12 +3693,24 @@ mod tests {
         // my own TypeScript decoder read `credential_type` where the wire says `type`
         // (the Rust field is renamed) and refused every valid row, while the
         // request-shape fixture stayed green throughout.
+        // `type` and `serves` come from the SAME catalog functions the producer calls, not
+        // typed here. Both pinned rows used to carry `"type":"subscription"`, a value this
+        // producer has never emitted for any id -- `credential_type` answers `oauth` for
+        // `oauth:anthropic`. A golden that consumers byte-copy must not carry a value they
+        // can never receive, and hand-typing it is how it got there.
+        let real_type = |id: &str| credentials_core::catalog::credential_type(id).to_string();
+        let real_serves = |id: &str| -> Vec<String> {
+            credentials_core::catalog::serves_for(id)
+                .iter()
+                .map(|vendor| vendor.as_str().to_string())
+                .collect()
+        };
         assert_eq!(
             serde_json::to_string(&read_surface::ListScopedCredential {
                 id: "oauth:anthropic".into(),
                 categories: vec!["llm-provider".into()],
-                credential_type: "subscription".into(),
-                serves: vec!["anthropic".into()],
+                credential_type: real_type("oauth:anthropic"),
+                serves: real_serves("oauth:anthropic"),
                 refresh_adapter: Some("anthropic".into()),
                 state: "active".into(),
                 record_version: 232,
@@ -3724,19 +3736,47 @@ mod tests {
         // naming the claustrum commit, rather than transcribe. The `view` is computed by
         // the production digest, not typed, so the golden cannot carry a view the
         // producer would never emit.
-        let golden_rows = vec![read_surface::ListScopedCredential {
-            id: "oauth:anthropic".into(),
-            categories: vec!["anthropic-native".into(), "llm-provider".into()],
-            credential_type: "subscription".into(),
-            serves: vec!["anthropic".into()],
-            refresh_adapter: Some("anthropic".into()),
-            state: "active".into(),
-            record_version: 232,
-            operations: vec!["read".into()],
-            account_id: Some("00000000-0000-4000-8000-000000000000".into()),
-            email: Some("consumer@example.invalid".into()),
-            org_name: None,
-        }];
+        //
+        // TWO ROWS THAT SPAN THE KEY SPACE, not one realistic example. A consumer checking
+        // "every key I read is one the producer sends" against a single row cannot see an
+        // optional key that row happens to omit -- the first consumer to run that check
+        // had to name `org_name` by hand, which is the hand-maintained list this file
+        // exists to remove. So one row carries EVERY optional field and one carries NONE:
+        // together they show each optional key both present and absent.
+        //
+        // A new field reaches both rows without anyone remembering: these are exhaustive
+        // struct literals, so adding a field to `ListScopedCredential` is a compile error
+        // here until both rows state it. Do not convert them to `..Default::default()`.
+        //
+        // Ordered by id because the real reply is sorted by id.
+        let golden_rows = vec![
+            read_surface::ListScopedCredential {
+                id: "apikey:openrouter".into(),
+                categories: vec!["llm-provider".into()],
+                credential_type: real_type("apikey:openrouter"),
+                serves: real_serves("apikey:openrouter"),
+                refresh_adapter: None,
+                state: "active".into(),
+                record_version: 3,
+                operations: vec!["read".into()],
+                account_id: None,
+                email: None,
+                org_name: None,
+            },
+            read_surface::ListScopedCredential {
+                id: "oauth:anthropic".into(),
+                categories: vec!["anthropic-native".into(), "llm-provider".into()],
+                credential_type: real_type("oauth:anthropic"),
+                serves: real_serves("oauth:anthropic"),
+                refresh_adapter: Some("anthropic".into()),
+                state: "active".into(),
+                record_version: 232,
+                operations: vec!["read".into()],
+                account_id: Some("00000000-0000-4000-8000-000000000000".into()),
+                email: Some("consumer@example.invalid".into()),
+                org_name: Some("Example Org".into()),
+            },
+        ];
         let golden_tuples = vec![read_surface::GrantTuple {
             selector_kind: "category".into(),
             selector: "llm-provider".into(),

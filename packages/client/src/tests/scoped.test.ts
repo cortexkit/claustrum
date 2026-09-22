@@ -106,10 +106,19 @@ describe('the client speaks the producer-pinned wire', () => {
     if (reply === undefined) throw new Error('no golden reply for credential.list_scoped')
 
     const inventory = decodeScopedInventory(JSON.parse(reply), () => {})
-    expect(inventory.rows).toHaveLength(1)
-    expect(inventory.rows[0]?.id).toBe('oauth:anthropic')
-    expect(inventory.rows[0]?.credentialType).toBe('subscription')
-    expect(inventory.rows[0]?.refreshAdapter).toBe('anthropic')
+    // One row carries every optional field and one carries none, so the decoder is
+    // exercised on each optional key both present and absent.
+    expect(inventory.rows.map((row) => row.id)).toEqual(['apikey:openrouter', 'oauth:anthropic'])
+    const full = inventory.rows.find((row) => row.id === 'oauth:anthropic')
+    const bare = inventory.rows.find((row) => row.id === 'apikey:openrouter')
+    expect(full?.credentialType).toBe('oauth')
+    expect(full?.refreshAdapter).toBe('anthropic')
+    expect(bare?.credentialType).toBe('apikey')
+    expect(bare?.refreshAdapter).toBeUndefined()
+    expect(full?.orgName).toBe('Example Org')
+    expect(full?.email).toBe('consumer@example.invalid')
+    expect(bare?.orgName).toBeUndefined()
+    expect(bare?.accountId).toBeUndefined()
     expect(inventory.view.length).toBeGreaterThan(0)
   })
 

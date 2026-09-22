@@ -224,6 +224,41 @@ describe("custody freshness", () => {
     ]);
   });
 
+  test("caches a warm that lands after the budget instead of re-fetching", async () => {
+    // Production change that fails this: restoring `slot.generation += 1` to the timeout
+    // branch. The budget bounds how long a CALLER waits; it must not invalidate work the
+    // vault has already done. Bumping the generation makes the late result fail the
+    // `#isCurrent` check at the end of #warm, so a completed fetch is thrown away. Any
+    // oauth account is exposed to this on every 60s tick, because the tick warms with
+    // force=true (a real RPC raced against the budget, never the local cache) -- a
+    // refresh-forcing get reliably loses that race, and some refresh-free gets lose it
+    // too. Clearing `inFlight` is the separate concern and stays: it is what lets the next
+    // tick re-arm a slot whose RPC hung.
+    const pending = deferred<ServedCredential>();
+    let calls = 0;
+    const client = new FakeClient(async () => (++calls === 1 ? pending.promise : credential("second-fetch")));
+    let timeoutCallback: (() => void) | undefined;
+    const freshness = controller({
+      client,
+      setTimeout: (callback) => {
+        timeoutCallback = callback;
+        return {};
+      },
+    });
+
+    const resolved = freshness.resolve(apiAccounts[0]!);
+    await Promise.resolve();
+    timeoutCallback?.();
+    expect(await resolved).toBeUndefined();
+
+    // The get the caller stopped waiting for now lands, and is given room to settle.
+    pending.resolve(credential("eventual-material"));
+    for (let i = 0; i < 4; i += 1) await Promise.resolve();
+
+    expect(await freshness.resolve(apiAccounts[0]!)).toEqual(credential("eventual-material"));
+    expect(client.gets).toHaveLength(1);
+  });
+
   test("timeout warn reports the slot state the budget miss left behind", async () => {
     // Production change that fails this: the timeout branch logging `state: "transient"`
     // as a literal instead of reading the slot. The slot stays `available` so the next

@@ -253,9 +253,15 @@ export class FreshnessController {
     if (timeout !== undefined) this.#clearTimeout(timeout);
     if (result.kind === "timeout") {
       const slot = this.#slot(account);
+      // Clear `inFlight` so the next tick re-arms a slot whose RPC hung -- but do NOT bump
+      // `slot.generation`. The budget bounds how long a CALLER waits; it must not invalidate
+      // work the vault has already done. A generation bump makes the late result fail
+      // `#isCurrent` at the end of #warm, discarding a fetch that succeeded, so on any lane
+      // where the vault reliably exceeds the budget the cache never populates and every
+      // request re-fetches and misses again. A genuinely superseding warm still invalidates
+      // this one by bumping the generation itself when it starts.
       if (expire && slot.inFlight === promise) {
         slot.inFlight = undefined;
-        slot.generation += 1;
       }
       slot.warmTimedOut = true;
       this.#log?.warn({

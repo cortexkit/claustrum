@@ -45,56 +45,56 @@
     {
       "op": "auth.enroll_propose",
       "outcome": "name already has a live request",
-      "transport_status": "error",
-      "body": "{\"code\":\"pending_exists\",\"disposition\":\"permanent\"}"
+      "transport_status": "response",
+      "body": "{\"result\":{\"error\":{\"class\":\"permanent\",\"code\":\"pending_exists\"}}}"
     },
     {
       "op": "auth.enroll_propose",
       "outcome": "16 live rows",
-      "transport_status": "error",
-      "body": "{\"code\":\"pending_queue_full\",\"disposition\":\"transient\"}"
+      "transport_status": "response",
+      "body": "{\"result\":{\"error\":{\"class\":\"transient\",\"code\":\"pending_queue_full\"}}}"
     },
     {
       "op": "auth.enroll_propose",
       "outcome": "malformed name or hash",
-      "transport_status": "error",
-      "body": "{\"code\":\"invalid_params\",\"disposition\":\"permanent\"}"
+      "transport_status": "response",
+      "body": "{\"result\":{\"error\":{\"class\":\"permanent\",\"code\":\"invalid_params\"}}}"
     },
     {
       "op": "auth.enroll_poll",
       "outcome": "unknown request_id or wrong secret",
-      "transport_status": "error",
-      "body": "{\"code\":\"not_found\",\"disposition\":\"permanent\"}"
+      "transport_status": "response",
+      "body": "{\"result\":{\"error\":{\"class\":\"permanent\",\"code\":\"not_found\"}}}"
     },
     {
       "op": "auth.enroll_poll",
       "outcome": "malformed secret",
-      "transport_status": "error",
-      "body": "{\"code\":\"invalid_params\",\"disposition\":\"permanent\"}"
+      "transport_status": "response",
+      "body": "{\"result\":{\"error\":{\"class\":\"permanent\",\"code\":\"invalid_params\"}}}"
     },
     {
       "op": "auth.enroll_poll",
       "outcome": "already delivered",
-      "transport_status": "error",
-      "body": "{\"code\":\"already_consumed\",\"disposition\":\"permanent\"}"
+      "transport_status": "response",
+      "body": "{\"result\":{\"error\":{\"class\":\"permanent\",\"code\":\"already_consumed\"}}}"
     },
     {
       "op": "auth.enroll_poll",
       "outcome": "revoked, reissued past, or expired-approved",
-      "transport_status": "error",
-      "body": "{\"code\":\"superseded\",\"disposition\":\"permanent\"}"
+      "transport_status": "response",
+      "body": "{\"result\":{\"error\":{\"class\":\"permanent\",\"code\":\"superseded\"}}}"
     },
     {
       "op": "auth.enroll_rotate",
       "outcome": "wrong expected_token_generation",
-      "transport_status": "error",
-      "body": "{\"code\":\"stale_generation\",\"disposition\":\"permanent\"}"
+      "transport_status": "response",
+      "body": "{\"result\":{\"error\":{\"class\":\"permanent\",\"code\":\"stale_generation\"}}}"
     },
     {
       "op": "auth.enroll_rotate and scoped operations",
       "outcome": "unknown, revoked, or rotated-away token",
-      "transport_status": "error",
-      "body": "{\"code\":\"not_found\",\"disposition\":\"permanent\"}"
+      "transport_status": "response",
+      "body": "{\"result\":{\"error\":{\"class\":\"permanent\",\"code\":\"not_found\"}}}"
     }
   ]
 }

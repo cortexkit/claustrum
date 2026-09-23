@@ -197,6 +197,23 @@ The ceremony is `auth.enroll_propose` → operator approval → `auth.enroll_pol
    token. Only `pending` means keep polling; every other outcome is terminal.
 4. **Persist at `0600`** with a parent directory that is not group- or world-writable.
 
+**Refusals.** Every enrollment op refuses in the same shape as a read-surface
+refusal: a `Response` frame whose body is
+
+    {"result":{"error":{"class":"<permanent|transient>","code":"<refusal code>"}}}
+
+`class` is a member of the four-class set in § 1 and carries the retry policy;
+`code` names the outcome (`pending_exists`, `pending_queue_full`, `invalid_params`,
+`not_found`, `already_consumed`, `superseded`, `stale_generation`, and `store_error`
+when the vault's store fails). Only `pending_queue_full` and `store_error` are
+`transient`. The exact bytes are pinned in
+`crates/credentials-module/tests/fixtures/enrollment_wire_contract.json` by
+`enrollment_wire_fixture_pins_exact_requests_successes_and_nine_refusals`.
+
+The § 1a rule holds here too: an `Error` frame from an enrollment op means the request
+never reached the module (for example params that failed to decode) and is never an
+enrollment verdict. Do not treat it as `not_found`, `superseded` or any other refusal.
+
 Then present the token on the scoped ops. Three properties worth knowing:
 
 - **A presented token decides who you are**, overriding any ambient bus principal. If you

@@ -2,11 +2,13 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { createHash } from 'node:crypto'
 import { chmod, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
+import { readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { PROTOCOL_VERSION, SubcCallError } from '@cortexkit/subc-client'
 import {
   ClaustrumClient,
+  ClaustrumCredentialError,
   detectClaustrumConnection,
   getDefaultClaustrumConnectionPath,
 } from '../index'
@@ -565,6 +567,69 @@ describe('ClaustrumClient', () => {
       },
     ])
     client.close()
+  })
+
+  /**
+   * Enrollment refusals, fed byte-for-byte from the producer-owned fixture. The vault sends
+   * them as ordinary responses carrying `result.error.{code, class}`; the client must turn
+   * each into a credential error with that code and class, and must send the call exactly
+   * once. A refusal that looked like a broken connection would make the client reconnect
+   * and re-send, then report the refusal as retryable -- which is how a consumer polling an
+   * expired request ended up polling forever.
+   */
+  test('surfaces every fixture enrollment refusal as its code and class with one send', async () => {
+    const fixture = JSON.parse(
+      readFileSync(
+        join(
+          import.meta.dir,
+          '../../../../crates/credentials-module/tests/fixtures/enrollment_wire_contract.json',
+        ),
+        'utf8',
+      ),
+    ) as { refusals: { op: string; transport_status: string; body: string }[] }
+    expect(fixture.refusals).toHaveLength(9)
+
+    const token = 'ab'.repeat(32)
+    const calls: Record<string, (client: ClaustrumClient) => Promise<unknown>> = {
+      'auth.enroll_propose': (client) =>
+        client.enrollPropose({ name: 'consumer', requestSecretHash: '0'.repeat(64) }),
+      'auth.enroll_poll': (client) =>
+        client.enrollPoll({ requestId: 'request-id', requestSecret: token }),
+      'auth.enroll_rotate': (client) =>
+        client.enrollRotate({ token, expectedTokenGeneration: 1 }),
+    }
+
+    for (const row of fixture.refusals) {
+      expect(row.transport_status).toBe('response')
+      const body = JSON.parse(row.body) as { result: { error: { code: string; class: string } } }
+      // The final fixture row is named "auth.enroll_rotate and scoped operations"; its
+      // first word is the enrollment op to call, which is how every row is keyed here.
+      const method = row.op.split(' ')[0]
+      const invoke = calls[method]
+      if (invoke === undefined) throw new Error(`no enrollment call for fixture op ${row.op}`)
+
+      const daemon = new FakeDaemon([body])
+      let connects = 0
+      const client = await ClaustrumClient.connect({
+        connector: async () => {
+          connects += 1
+          return daemon as never
+        },
+      })
+
+      const outcome = await invoke(client).then(
+        () => undefined,
+        (error: unknown) => error,
+      )
+      expect(outcome).toBeInstanceOf(ClaustrumCredentialError)
+      expect(outcome).toMatchObject({
+        code: body.result.error.code,
+        class: body.result.error.class,
+      })
+      expect(daemon.calls.map((call) => call.method)).toEqual([method])
+      expect(connects).toBe(1)
+      client.close()
+    }
   })
 
   test('rejects a report response that does not explicitly acknowledge acceptance', async () => {

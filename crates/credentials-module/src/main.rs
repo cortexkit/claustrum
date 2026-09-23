@@ -1287,10 +1287,25 @@ async fn handle_read_request(
     send(writer, response).await
 }
 
+/// An enrollment refusal as it appears under `result.error`: the same `{code, class}`
+/// pair every read-surface refusal carries, so a consumer decodes enrollment and
+/// credential refusals with one decoder and one retry policy.
 #[derive(Serialize)]
 struct EnrollmentErrorBody<'a> {
     code: &'a str,
-    disposition: EnrollmentDisposition,
+    class: EnrollmentDisposition,
+}
+
+/// The complete reply body for an enrollment refusal.
+///
+/// A refusal is the module's answer to a request it received, so it travels in an
+/// ordinary `Response` frame. `Error` frames are reserved for requests that never reached
+/// the module (malformed frames, unknown operations, params that fail to decode), and
+/// clients treat them as a broken connection: an enrollment refusal sent that way made a
+/// client reconnect, re-send the call, and report every refusal as retryable, so a
+/// consumer polling an expired request polled forever.
+fn enrollment_refusal_reply(code: &str, class: EnrollmentDisposition) -> serde_json::Value {
+    wrap_result(json!({ "error": EnrollmentErrorBody { code, class } }))
 }
 
 async fn send_enrollment_error(
@@ -1340,13 +1355,13 @@ async fn send_enrollment_error_body(
     epoch: u32,
     corr: u64,
     code: &str,
-    disposition: EnrollmentDisposition,
+    class: EnrollmentDisposition,
 ) -> Result<(), ModuleError> {
-    let body = serde_json::to_vec(&EnrollmentErrorBody { code, disposition })
-        .map_err(ModuleError::Json)?;
+    let body =
+        serde_json::to_vec(&enrollment_refusal_reply(code, class)).map_err(ModuleError::Json)?;
     let frame = Frame::build_with_version(
         ver,
-        FrameType::Error,
+        FrameType::Response,
         Flags::new(false, Priority::Interactive, false),
         channel,
         epoch,
@@ -2449,6 +2464,27 @@ mod tests {
             .await
             .expect("serve enrollment request");
         responses.recv().await.expect("enrollment response")
+    }
+
+    /// An enrollment refusal is a `Response` whose body is exactly
+    /// `{"result":{"error":{"class":..,"code":..}}}`. The exact-key check is what keeps
+    /// the retired `disposition` field (or any other extra key) from creeping back in.
+    fn assert_enrollment_refusal(frame: &Frame, code: &str, class: &str) {
+        assert_eq!(
+            frame.header.ty,
+            FrameType::Response,
+            "an enrollment refusal must be a Response frame, not an Error frame"
+        );
+        let body: serde_json::Value =
+            serde_json::from_slice(&frame.body).expect("decode enrollment refusal");
+        assert_eq!(
+            body,
+            wrap_result(json!({ "error": { "code": code, "class": class } }))
+        );
+        assert!(
+            body["result"]["error"].get("disposition").is_none(),
+            "`disposition` is not part of the enrollment refusal wire shape"
+        );
     }
 
     async fn scoped_request(
@@ -3940,20 +3976,67 @@ mod tests {
             EnrollmentRefusal::NotFound,
         ];
         for (row, refusal) in refusal_rows.iter().zip(refusals) {
-            assert_eq!(row["transport_status"], "error");
             assert_eq!(
-                serde_json::to_string(&EnrollmentErrorBody {
-                    code: refusal.code(),
-                    disposition: refusal.disposition(),
-                })
+                row["transport_status"], "response",
+                "an enrollment refusal is a Response frame; Error frames mean the request never reached the module"
+            );
+            assert_eq!(
+                serde_json::to_string(&enrollment_refusal_reply(
+                    refusal.code(),
+                    refusal.disposition()
+                ))
                 .unwrap(),
                 row["body"]
+            );
+        }
+
+        // The fixture's final refusal row ("auth.enroll_rotate and scoped operations")
+        // says `credential.get_scoped` / `credential.list_scoped` answer an unknown,
+        // revoked or rotated-away enrollment token with the same bytes as
+        // `auth.enroll_rotate`. Build the scoped not-found reply exactly as the dispatcher
+        // builds it and compare, so that shared-row claim is checked rather than assumed.
+        let scoped_not_found = serde_json::to_string(&wrap_result(json!({
+            "error": read_surface::ErrorBody {
+                code: read_surface::ReadError::NotFound,
+                class: read_surface::ReadError::NotFound.class(),
+            }
+        })))
+        .unwrap();
+        assert_eq!(
+            refusal_rows[8]["op"],
+            "auth.enroll_rotate and scoped operations"
+        );
+        assert_eq!(scoped_not_found, refusal_rows[8]["body"]);
+    }
+
+    /// Enrollment refusals carry their retry policy in `class`, the field every
+    /// read-surface refusal uses, and consumers validate it against the read surface's
+    /// closed class set. A disposition that serialized to anything outside that set would
+    /// be decoded as an unknown class and silently downgraded to retryable.
+    #[test]
+    fn every_enrollment_disposition_is_a_member_of_the_error_class_wire_set() {
+        for disposition in [
+            EnrollmentDisposition::Permanent,
+            EnrollmentDisposition::Transient,
+        ] {
+            // Exhaustive match: adding a variant stops this from compiling, which brings
+            // the author here to add the new variant to the array above.
+            match disposition {
+                EnrollmentDisposition::Permanent | EnrollmentDisposition::Transient => {}
+            }
+            let wire = serde_json::to_value(disposition).expect("serialize disposition");
+            let wire = wire.as_str().expect("a disposition serializes as a string");
+            assert!(
+                read_surface::ERROR_CLASS_WIRE_SET.contains(&wire),
+                "enrollment disposition {disposition:?} serializes to `{wire}`, which is not \
+                 in the read-surface error class set {:?}",
+                read_surface::ERROR_CLASS_WIRE_SET
             );
         }
     }
 
     #[tokio::test]
-    async fn enrollment_route_uses_transport_errors_and_keeps_unknown_and_wrong_secret_identical() {
+    async fn enrollment_route_refusals_are_responses_and_unknown_matches_wrong_secret() {
         let (surface, admin, store) = scoped_rig(116);
         let secret = "11".repeat(32);
         let secret_hash = credentials_core::enrollment::enrollment_secret_hash(&secret).unwrap();
@@ -3965,11 +4048,7 @@ mod tests {
             json!({"proposed_name":"bad:name","request_secret_hash":secret_hash.clone()}),
         )
         .await;
-        assert_eq!(invalid.header.ty, FrameType::Error);
-        assert_eq!(
-            invalid.body,
-            br#"{"code":"invalid_params","disposition":"permanent"}"#
-        );
+        assert_enrollment_refusal(&invalid, "invalid_params", "permanent");
 
         let proposed = enrollment_route_frame(
             &surface,
@@ -3998,11 +4077,7 @@ mod tests {
             json!({"proposed_name":"consumer","request_secret_hash":"c".repeat(64)}),
         )
         .await;
-        assert_eq!(duplicate.header.ty, FrameType::Error);
-        assert_eq!(
-            duplicate.body,
-            br#"{"code":"pending_exists","disposition":"permanent"}"#
-        );
+        assert_enrollment_refusal(&duplicate, "pending_exists", "permanent");
 
         // THE RESUME, over the wire rather than only at the store: the same secret returns
         // the SAME id. A second id for one pending row would leave the first unreachable
@@ -4036,13 +4111,9 @@ mod tests {
             json!({"request_id":request_id.clone(),"request_secret":"22".repeat(32)}),
         )
         .await;
-        assert_eq!(unknown.header.ty, FrameType::Error);
-        assert_eq!(wrong_secret.header.ty, FrameType::Error);
+        assert_enrollment_refusal(&unknown, "not_found", "permanent");
+        assert_enrollment_refusal(&wrong_secret, "not_found", "permanent");
         assert_eq!(unknown.body, wrong_secret.body);
-        assert_eq!(
-            unknown.body,
-            br#"{"code":"not_found","disposition":"permanent"}"#
-        );
 
         let pending = enrollment_route_frame(
             &surface,
@@ -4080,11 +4151,7 @@ mod tests {
             json!({"request_id":request_id.clone(),"request_secret":secret.clone()}),
         )
         .await;
-        assert_eq!(consumed.header.ty, FrameType::Error);
-        assert_eq!(
-            consumed.body,
-            br#"{"code":"already_consumed","disposition":"permanent"}"#
-        );
+        assert_enrollment_refusal(&consumed, "already_consumed", "permanent");
 
         let stale = enrollment_route_frame(
             &surface,
@@ -4093,11 +4160,7 @@ mod tests {
             json!({"token":token.clone(),"expected_token_generation":2}),
         )
         .await;
-        assert_eq!(stale.header.ty, FrameType::Error);
-        assert_eq!(
-            stale.body,
-            br#"{"code":"stale_generation","disposition":"permanent"}"#
-        );
+        assert_enrollment_refusal(&stale, "stale_generation", "permanent");
         let rotated = enrollment_route_frame(
             &surface,
             &admin,
@@ -4113,7 +4176,7 @@ mod tests {
             json!({"token":token.clone(),"expected_token_generation":1}),
         )
         .await;
-        assert_eq!(old_token.header.ty, FrameType::Error);
+        assert_enrollment_refusal(&old_token, "not_found", "permanent");
         assert_eq!(old_token.body, unknown.body);
     }
 

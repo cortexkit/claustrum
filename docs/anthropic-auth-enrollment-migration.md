@@ -138,12 +138,13 @@ success  {"result":{"token":"<64 hex>","token_generation":2}}
 **Token grammar:** exactly 64 lowercase hex characters, no prefix, 32 CSPRNG bytes.
 The vault stores only `token_hash`, the lowercase-hex SHA-256 of the decoded 32 bytes.
 
-### Refusals are transport errors, never a further `status`
+### Refusals are `result.error`, never a further `status`
 
-Every non-success outcome carries the shipped `(code, disposition)` pair. Your poll
-loop branches on these and on nothing else:
+Every non-success outcome is a normal `Response` whose body is
+`{"result":{"error":{"class":...,"code":...}}}`, the same envelope the read surface
+uses. Your poll loop branches on these and on nothing else:
 
-| op | outcome | code | disposition |
+| op | outcome | code | class |
 |---|---|---|---|
 | propose | the name already has a live request | `pending_exists` | permanent |
 | propose | 16 live rows | `pending_queue_full` | transient |

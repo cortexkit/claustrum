@@ -21,7 +21,9 @@ pub const ENROLL_PROPOSE_SUBJECT: &str = "auth.enroll_propose";
 pub const ENROLL_POLL_SUBJECT: &str = "auth.enroll_poll";
 pub const ENROLL_EXPIRE_SUBJECT: &str = "auth.enroll_expire";
 
-/// Retry policy carried by enrollment transport errors.
+/// Retry policy of an enrollment refusal. On the wire it is the `class` field of the
+/// `result.error` envelope, so both variants must stay members of the read surface's
+/// closed error-class set (`permanent`, `transient`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EnrollmentDisposition {
@@ -67,8 +69,9 @@ impl EnrollmentRefusal {
     }
 }
 
-/// A ceremony failure. Store failures remain transport errors but are intentionally
-/// collapsed to one transient code so database detail never reaches an anonymous caller.
+/// A ceremony failure. Store failures are refused like any other enrollment outcome but
+/// are intentionally collapsed to one transient code so database detail never reaches an
+/// anonymous caller.
 #[derive(Debug)]
 pub enum EnrollmentError {
     Refused(EnrollmentRefusal),

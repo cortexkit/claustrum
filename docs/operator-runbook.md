@@ -1100,6 +1100,35 @@ its digest pinned above. It is inert without the master key, and the daemon cann
 it for a live store: both the daemon and the CLI open an exact `store.db` path rather than
 scanning the directory.
 
+### engram is not the only thing that can restore this store
+
+Everything above treats engram as the backup. On a Mac with Time Machine it is one of
+two, and the second one reads no descriptor. Measured 2026-09-20 on the host that runs
+this vault:
+
+```
+tmutil isexcluded ~/.local/share/cortexkit/claustrum         [Included]   the store
+tmutil isexcluded ~/.config/cortexkit                        [Included]   consumer handle files
+tmutil isexcluded ~/.local/state/cortexkit/anthropic-auth    [Included]   an enrollment token
+```
+
+Two consequences an operator should know before restoring anything:
+
+- **A Time Machine restore of the data directory is a whole-store restore.** It re-arms
+  every capability handle that was live at that snapshot, including ones revoked since,
+  because revocation lives in the same table. It also brings back the snapshot's fence
+  epoch and open refresh intents. Run the same checks as after an engram restore
+  (`restore_resurrection_read_only`, and revoke the handles rather than deleting the rows).
+  The master-key requirement is unchanged: the keychain item is not in the data directory.
+- **Mode 0600 does not keep a bearer file out of a backup.** Handle files and enrollment
+  tokens that consumers write under `~/.config` or `~/.local/state` are copied into every
+  Time Machine snapshot, and those copies outlive a revoke. The revoke still holds on the
+  live vault, so an old copy is refused, until a store restore brings the old handle
+  back with it. Where each consumer keeps its token is that consumer's decision. The
+  check is `tmutil isexcluded <dir>`, not the file mode.
+
+The general test, which came out of designing browser-session capture: the question is
+not whether a backup ENTRY covers a path, but whether any backup TOOL reaches it.
 ## Rotating the master key
 
 `ck auth rotate-master-key` performs a crash-safe two-slot handover: it stages a new

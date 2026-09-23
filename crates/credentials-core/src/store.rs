@@ -1827,10 +1827,23 @@ impl EncryptedStore {
                 }
 
                 match state.as_str() {
-                    "pending" => {
-                        append_enrollment_event_tx(tx, ENROLL_POLL_SUBJECT, "pending", now)?;
-                        Ok(Ok(EnrollmentPoll::Pending))
-                    }
+                    // A PENDING POLL RECORDS NOTHING, because nothing happened.
+                    //
+                    // Consumers poll on a timer while they wait for the operator, and one
+                    // was measured at ~2.2 polls a second. Every pending poll used to append
+                    // an `auth_events` row, and that table keeps only the newest
+                    // `AUTH_EVENTS_PER_CREDENTIAL` rows per subject, so the rows worth
+                    // having under `auth.enroll_poll` -- a `not_found` from a wrong secret,
+                    // a `superseded`, an `approved` -- were evicted within about half a
+                    // minute by rows saying "still waiting". The ring is for diagnosis; an
+                    // observation that nothing changed is not one.
+                    //
+                    // It also makes a pending poll write nothing at all: the fence row is
+                    // only written when this writer claims the database, so the
+                    // transaction commits empty instead of adding a commit per poll.
+                    //
+                    // Every other arm here is a transition or a refusal and still records.
+                    "pending" => Ok(Ok(EnrollmentPoll::Pending)),
                     "denied" => {
                         append_enrollment_event_tx(tx, ENROLL_POLL_SUBJECT, "denied", now)?;
                         Ok(Ok(EnrollmentPoll::Denied))
@@ -12778,6 +12791,58 @@ mod migration_10_tests {
         ] {
             assert!(!rendered.contains(forbidden), "event leaked {forbidden}");
         }
+    }
+
+    /// A CONSUMER WAITING FOR APPROVAL MUST NOT ERASE THE EVIDENCE OF AN ATTACK ON ITS REQUEST.
+    ///
+    /// A real consumer polled `auth.enroll_poll` about twice a second while it waited. When
+    /// every pending poll appended a row, the per-subject ring held only "pending" within
+    /// half a minute, and a wrong-secret `not_found` -- the one row that says someone else
+    /// is trying this request id -- was gone before anyone looked.
+    ///
+    /// Drives more pending polls than the ring holds, then asserts the refusal recorded
+    /// before them is still there and that no "pending" row was written at all.
+    #[test]
+    fn pending_polls_record_nothing_and_cannot_evict_a_wrong_secret_refusal() {
+        let (_root, store) = rig("enrollment-pending-silent", 116);
+        let secret = enrollment_secret(21);
+        let secret_hash = enrollment_secret_hash(&secret).expect("hash secret");
+        let base = now_ms();
+        let request = store
+            .propose_enrollment_at("patient-consumer", &secret_hash, base)
+            .expect("propose");
+
+        let wrong = enrollment_secret(22);
+        assert!(matches!(
+            store.poll_enrollment_at(&request.request_id, &wrong, base + 1),
+            Err(EnrollmentError::Refused(EnrollmentRefusal::NotFound))
+        ));
+
+        let polls = (AUTH_EVENTS_PER_CREDENTIAL as i64) * 2;
+        for index in 0..polls {
+            assert!(matches!(
+                store.poll_enrollment_at(&request.request_id, &secret, base + 2 + index),
+                Ok(EnrollmentPoll::Pending)
+            ));
+        }
+
+        let details: Vec<String> = store
+            .with_raw_conn(|conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT detail FROM auth_events WHERE credential_id = ?1 ORDER BY seq",
+                )?;
+                let rows = stmt
+                    .query_map([ENROLL_POLL_SUBJECT], |row| row.get(0))?
+                    .collect();
+                rows
+            })
+            .expect("read poll events");
+        assert_eq!(
+            details,
+            vec!["not_found".to_owned()],
+            "after {polls} pending polls the poll ring must hold exactly the wrong-secret \
+             refusal; a 'pending' row here means routine waiting is evicting diagnosis"
+        );
     }
 
     #[test]

@@ -4370,10 +4370,10 @@ fn render_enroll_list(rows: &[credentials_core::store::EnrollmentRow]) -> Vec<St
             "{key} asks for a name that is already enrolled; a plain approve is refused."
         ));
         lines.push(format!(
-            "  admit it under another name:  ck auth enroll approve {key} --name <new-name>"
+            "  admit it under another name:  ck auth enroll approve --request-id {key} --name <new-name>"
         ));
         lines.push(format!(
-            "  or refuse it:                 ck auth enroll deny {key}"
+            "  or refuse it:                 ck auth enroll deny --request-id {key}"
         ));
     }
     lines
@@ -5484,11 +5484,52 @@ mod tests {
         assert!(!free.contains("already enrolled"), "{text}");
 
         assert!(
-            text.contains("ck auth enroll approve req-taken --name <new-name>"),
+            text.contains("approve --request-id req-taken --name"),
             "{text}"
         );
-        assert!(text.contains("ck auth enroll deny req-taken"), "{text}");
-        assert!(!text.contains("approve req-free"), "{text}");
+        assert!(text.contains("deny --request-id req-taken"), "{text}");
+        assert!(!text.contains("req-free --name"), "{text}");
+    }
+
+    /// Every command the listing prints must be one the CLI accepts.
+    ///
+    /// Checking the printed strings against expected strings cannot catch a wrong
+    /// command: both come from the same author, so a wrong argument shape passes. That
+    /// happened: this listing first printed `enroll deny <id>` with a positional id,
+    /// and its test asserted exactly that, while the parser only takes `--request-id`.
+    /// Found only by running the printed command against the live vault. So each line
+    /// goes through the dispatcher's own argument check.
+    #[test]
+    fn every_command_enroll_list_prints_passes_the_argument_check() {
+        let rows = [
+            enrollment_row("req-taken", "anthropic-auth-opencode", "pending", 0),
+            enrollment_row(
+                "anthropic-auth-opencode",
+                "anthropic-auth-opencode",
+                "live",
+                1,
+            ),
+        ];
+        let commands: Vec<Vec<String>> = super::render_enroll_list(&rows)
+            .iter()
+            .filter_map(|line| line.split_once("ck auth ").map(|(_, command)| command))
+            .map(|command| {
+                command
+                    .split_whitespace()
+                    .map(|word| word.replace("<new-name>", "second-install"))
+                    .collect()
+            })
+            .collect();
+        assert_eq!(commands.len(), 2, "expected the approve and deny lines");
+        for words in commands {
+            let (verb, args) = words.split_first().unwrap();
+            super::reject_unknown_args(verb, args).unwrap_or_else(|error| {
+                panic!(
+                    "printed command `ck auth {}` is refused: {error:?}",
+                    words.join(" ")
+                )
+            });
+        }
     }
 
     #[test]

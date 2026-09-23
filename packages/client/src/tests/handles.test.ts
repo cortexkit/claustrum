@@ -11,6 +11,7 @@ import {
   readHandleFile,
   type OpenCodeHandleFileV1,
 } from '../handles.js'
+import { writeHandleFileLocked } from '../manifest-lock.js'
 
 // POSIX ONLY, DELIBERATELY. The contract these tests assert -- mode exactly 0600, a
 // non-world-writable parent, no symlink -- is a POSIX permission model. Windows has no
@@ -148,6 +149,29 @@ describe('client handle-file contract', () => {
     const provider = validFile().providers[0]
     const account = { ...provider.accounts[0], tenant_extra: { region: 'eu' } }
     expect(parseHandleFile({ version: 1, providers: [{ ...provider, accounts: [account] }] }).providers[0].accounts[0]).toEqual(account)
+  })
+
+  test('preserves account keys it does not name in foreign provider blocks', async () => {
+    await mkdir(root, { recursive: true, mode: 0o700 })
+    const path = join(root, 'handles.json')
+    const provider = validFile().providers[0]
+    const own = { ...provider, provider: 'anthropic', shape: 'oauth' as const, serve: 'anthropic-auth', accounts: [{ ...provider.accounts[0], credential_id: 'oauth:anthropic:main' }] }
+    const foreign = { ...provider, provider: 'xai', serve: 'opencode-claustrum', accounts: [{ ...provider.accounts[0], handle: `ckh_${'b'.repeat(43)}`, credential_id: 'apikey:xai:main', minTtlMs: 300000, tenant_routing: { region: 'eu', weights: { primary: 3, fallback: 1 } } }] }
+    await writeFile(path, `${JSON.stringify({ version: 1, providers: [own, foreign] })}\n`, { mode: 0o600 })
+    await writeHandleFileLocked(path, 'anthropic-auth', (file) => {
+      file.providers = file.providers.map((entry) => entry.serve === 'anthropic-auth'
+        ? { ...entry, accounts: [...entry.accounts, { label: 'fallback', handle: `ckh_${'c'.repeat(43)}`, credential_id: 'oauth:anthropic:fallback' }] }
+        : entry)
+    })
+    const after = await readHandleFile(path)
+    expect(after.providers[0].accounts).toHaveLength(2)
+    expect(after.providers[1]).toEqual(foreign)
+    const preserved = after.providers[1].accounts[0] as Record<string, unknown>
+    expect(preserved.label).toBe('main')
+    expect(preserved.handle).toBe(`ckh_${'b'.repeat(43)}`)
+    expect(preserved.credential_id).toBe('apikey:xai:main')
+    expect(preserved.minTtlMs).toBe(300000)
+    expect(preserved.tenant_routing).toEqual({ region: 'eu', weights: { primary: 3, fallback: 1 } })
   })
 
   test('matches credential IDs by provider segment without restricting kinds', () => {

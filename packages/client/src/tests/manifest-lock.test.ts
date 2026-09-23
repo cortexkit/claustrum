@@ -267,16 +267,26 @@ describe('manifest writer lock', () => {
     await owner(path, Date.now())
 
     const started = Date.now()
-    const renewal = setInterval(async () => {
-      const ownerPath = join(`${path}.lock`, 'owner')
-      const current = JSON.parse(await readFile(ownerPath, 'utf8')) as Record<string, unknown>
-      current.claimed_at_ms = Date.now()
-      await writeFile(ownerPath, `${JSON.stringify(current)}\n`, { mode: 0o600 })
+    // clearInterval stops future ticks but cannot cancel one already awaiting I/O. An
+    // unawaited tick that outlives the test writes into a root afterEach has removed, and
+    // bun reports the ENOENT against whichever test runs next. So each tick is chained and
+    // the chain is drained before the test returns. A failing tick is recorded, not left as
+    // a rejected promise, because a rejection nobody is awaiting yet is itself unhandled.
+    let tick = Promise.resolve(), tickError: unknown
+    const renewal = setInterval(() => {
+      tick = tick.then(async () => {
+        if (tickError !== undefined) return
+        const ownerPath = join(`${path}.lock`, 'owner')
+        const current = JSON.parse(await readFile(ownerPath, 'utf8')) as Record<string, unknown>
+        current.claimed_at_ms = Date.now()
+        await writeFile(ownerPath, `${JSON.stringify(current)}\n`, { mode: 0o600 })
+      }).catch((error: unknown) => { tickError = error })
     }, 5)
     try {
       await expect(withManifestLock(path, 'anthropic-auth', async () => {})).rejects.toThrow('manifest lock busy')
       expect(Date.now() - started).toBeGreaterThanOrEqual(35)
-    } finally { clearInterval(renewal) }
+    } finally { clearInterval(renewal); await tick }
+    if (tickError !== undefined) throw tickError
   })
 
   test('owner file exists while held and disappears with the lock after release', async () => {

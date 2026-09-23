@@ -4304,32 +4304,79 @@ fn cmd_enroll_list(global: &GlobalArgs) -> Result<(), CliError> {
     }
     let rows = credentials_core::store::list_enrollments_read_only(&db)
         .map_err(|error| CliError::Usage(format!("read enrollments: {error}")))?;
-    if rows.is_empty() {
-        println!("no pending requests and no live enrollments");
-        return Ok(());
+    for line in render_enroll_list(&rows) {
+        println!("{line}");
     }
+    Ok(())
+}
+
+/// Render the enrollment ledger, flagging pending requests whose name is already taken.
+///
+/// THE VAULT ACCEPTS THOSE REQUESTS ON PURPOSE. A proposal is anonymous and inert until
+/// the operator approves it, so refusing one adds no safety, and a refusal on that route
+/// would tell any caller which names are enrolled. It would also block a real case: a
+/// second install of a plugin that proposes the same fixed name, which `approve --name`
+/// admits under a different one.
+///
+/// What the operator needs instead is to see the collision BEFORE approving, because a
+/// plain `approve` on that request is refused (a name with a live enrollment cannot be
+/// admitted twice). So the row names the collision and both ways out.
+///
+/// A pure function over the rows so the flag can be tested without a vault.
+fn render_enroll_list(rows: &[credentials_core::store::EnrollmentRow]) -> Vec<String> {
+    if rows.is_empty() {
+        return vec!["no pending requests and no live enrollments".to_string()];
+    }
+    // Every non-pending row the ledger returns is an unrevoked enrollment, which is the
+    // set approval checks against.
+    let enrolled: std::collections::BTreeSet<&str> = rows
+        .iter()
+        .filter(|row| row.state != "pending")
+        .map(|row| row.name.as_str())
+        .collect();
     let width = rows
         .iter()
         .map(|row| row.key.chars().count())
         .max()
         .unwrap_or(3)
         .max(3);
-    println!("{:<width$}  {:<13}  NAME", "KEY", "STATE", width = width);
-    for row in &rows {
+    let mut lines = vec![format!(
+        "{:<width$}  {:<13}  NAME",
+        "KEY",
+        "STATE",
+        width = width
+    )];
+    let mut collisions = Vec::new();
+    for row in rows {
         let suffix = if row.token_generation > 0 {
             format!("  (generation {})", row.token_generation)
+        } else if row.state == "pending" && enrolled.contains(row.name.as_str()) {
+            collisions.push(row.key.as_str());
+            "  (name already enrolled)".to_string()
         } else {
             String::new()
         };
-        println!(
+        lines.push(format!(
             "{:<width$}  {:<13}  {}{suffix}",
             row.key,
             row.state,
             row.name,
             width = width
-        );
+        ));
     }
-    Ok(())
+    for key in collisions {
+        lines.push(String::new());
+        lines.push(format!(
+            "{key} asks for a name that is already enrolled; a plain approve is refused."
+        ));
+        lines.push(format!(
+            "  admit it under another name:  ck auth enroll approve {key} --name <new-name>"
+        ));
+        lines.push(format!(
+            "  or refuse it:                 ck auth enroll deny {key}"
+        ));
+    }
+    lines
 }
 
 /// Read the proposed name for a pending request so `approve` can default to it.
@@ -5392,6 +5439,58 @@ fn resolver_config(global: &GlobalArgs) -> ResolverConfig {
 
 #[cfg(test)]
 mod tests {
+    fn enrollment_row(
+        key: &str,
+        name: &str,
+        state: &str,
+        generation: i64,
+    ) -> credentials_core::store::EnrollmentRow {
+        credentials_core::store::EnrollmentRow {
+            key: key.to_string(),
+            name: name.to_string(),
+            state: state.to_string(),
+            created_at_ms: 0,
+            token_generation: generation,
+        }
+    }
+
+    /// A pending request for an enrolled name is shown with both remedies; one for a free
+    /// name is not. Both arms matter: a flag on every pending row would be noise an
+    /// operator learns to skip, and a missing flag sends them into a refused approve.
+    #[test]
+    fn enroll_list_flags_only_pending_requests_for_an_enrolled_name() {
+        let rows = [
+            enrollment_row("req-taken", "anthropic-auth-opencode", "pending", 0),
+            enrollment_row("req-free", "fresh-consumer", "pending", 0),
+            enrollment_row(
+                "anthropic-auth-opencode",
+                "anthropic-auth-opencode",
+                "live",
+                1,
+            ),
+        ];
+        let lines = super::render_enroll_list(&rows);
+        let text = lines.join("\n");
+
+        let taken = lines
+            .iter()
+            .find(|line| line.starts_with("req-taken "))
+            .unwrap();
+        assert!(taken.ends_with("(name already enrolled)"), "{text}");
+        let free = lines
+            .iter()
+            .find(|line| line.starts_with("req-free "))
+            .unwrap();
+        assert!(!free.contains("already enrolled"), "{text}");
+
+        assert!(
+            text.contains("ck auth enroll approve req-taken --name <new-name>"),
+            "{text}"
+        );
+        assert!(text.contains("ck auth enroll deny req-taken"), "{text}");
+        assert!(!text.contains("approve req-free"), "{text}");
+    }
+
     #[test]
     fn no_browser_flag_refuses_the_platform_browser_spawn() {
         assert!(super::browser_open_allowed(&[]));

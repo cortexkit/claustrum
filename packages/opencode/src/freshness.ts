@@ -27,6 +27,9 @@ type Slot = {
   // Reporting-only: a warm budget miss. Must not feed #canWarm — a cooldown here
   // would skip the next request for TRANSIENT_BACKOFF_MS after a one-request blip.
   warmTimedOut?: boolean;
+  // The generation of a warm whose caller gave up on it at the budget. Its late SUCCESS is
+  // still kept (see #bounded); its late FAILURE is not applied (see the `.catch` in #warm).
+  abandonedGeneration?: number;
 };
 
 type IntervalHandle = { unref?: () => unknown };
@@ -141,10 +144,12 @@ export class FreshnessController {
     await this.#refreshHandleVersion();
     await Promise.all(this.#accounts.map(async (account) => {
       const slot = this.#slot(account);
-      // Expire on timeout: a hung `credential.get` must not pin the in-flight generation
-      // for every later tick -- the only consequence of leaving it bound is that the
-      // idle account never warms or retries. The detached original completion is already
-      // fenced by `#isCurrent` against the bumped generation, so it cannot poison the slot.
+      // Expire on timeout: a hung `credential.get` must not pin the slot's `inFlight` for
+      // every later tick -- the only consequence of leaving it bound is that the idle
+      // account never warms or retries. The detached original completion is not discarded:
+      // a late success is kept unless a newer warm (which bumps the generation when it
+      // starts) or an `invalidate()` has superseded it, and a late failure is never applied
+      // (see #bounded and the `.catch` in #warm).
       if (this.#canWarm(slot)) await this.#bounded(account, this.#warm(account, true), true);
     }));
   }
@@ -227,7 +232,15 @@ export class FreshnessController {
         return served;
       })
       .catch((error: unknown) => {
-        if (this.#isCurrent(slot, version, generation)) this.#markFailure(account, slot, error);
+        // A failure from a warm its caller already abandoned is not applied. Unlike a late
+        // success, it carries no material, only a verdict that may be older than reality: an
+        // RPC that hung across an operator re-login comes back `auth_required` for a
+        // credential that is now fine, and applying it would block retries for
+        // REAUTH_BACKOFF_MS (or, for `not_found`, mark the slot `gone` for good). Skipping it
+        // costs one re-fetch, which returns the current verdict.
+        if (this.#isCurrent(slot, version, generation) && slot.abandonedGeneration !== generation) {
+          this.#markFailure(account, slot, error);
+        }
         return undefined;
       })
       .finally(() => {
@@ -260,8 +273,13 @@ export class FreshnessController {
       // where the vault reliably exceeds the budget the cache never populates and every
       // request re-fetches and misses again. A genuinely superseding warm still invalidates
       // this one by bumping the generation itself when it starts.
+      // Record the abandoned generation so that a late FAILURE from it is not applied: the
+      // two outcomes are deliberately asymmetric (a late success carries material the vault
+      // served; a late failure carries only a possibly-stale verdict). `inFlight === promise`
+      // means no newer warm has started, so `slot.generation` is still this warm's.
       if (expire && slot.inFlight === promise) {
         slot.inFlight = undefined;
+        slot.abandonedGeneration = slot.generation;
       }
       slot.warmTimedOut = true;
       this.#log?.warn({

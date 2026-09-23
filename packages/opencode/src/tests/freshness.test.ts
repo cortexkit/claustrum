@@ -259,6 +259,54 @@ describe("custody freshness", () => {
     expect(client.gets).toHaveLength(1);
   });
 
+  test("ignores a failure verdict from a warm the caller already abandoned", async () => {
+    // The asymmetry with the test above is deliberate. A late SUCCESS carries material the
+    // vault actually served, so keeping it is safe. A late FAILURE carries only a verdict,
+    // and that verdict can be older than reality: an RPC that hung across an operator
+    // re-login comes back `auth_required` for a credential that is now fine. Applying it
+    // would latch the slot to `reauth` and block every retry for REAUTH_BACKOFF_MS; a
+    // `permanent/not_found` would mark it `gone` for good. Skipping it costs one re-fetch,
+    // which returns the current verdict. Production change that fails this: dropping the
+    // `abandonedGeneration` check from the `.catch` in #warm.
+    const pending = deferred<ServedCredential>();
+    let calls = 0;
+    const client = new FakeClient(async () => (++calls === 1 ? pending.promise : credential("second-fetch")));
+    let timeoutCallback: (() => void) | undefined;
+    const freshness = controller({
+      client,
+      setTimeout: (callback) => {
+        timeoutCallback = callback;
+        return {};
+      },
+    });
+
+    const resolved = freshness.resolve(apiAccounts[0]!);
+    await Promise.resolve();
+    timeoutCallback?.();
+    expect(await resolved).toBeUndefined();
+
+    // The abandoned get now fails, and is given room to settle.
+    pending.reject(new ClaustrumCredentialError("needs_reauth", "auth_required", "reauth"));
+    for (let i = 0; i < 4; i += 1) await Promise.resolve();
+
+    expect(freshness.state(apiAccounts[0]!)).toBe("available");
+    expect(await freshness.resolve(apiAccounts[0]!)).toEqual(credential("second-fetch"));
+    expect(client.gets).toHaveLength(2);
+  });
+
+  test("still applies a failure verdict from a warm nobody abandoned", async () => {
+    // Counter-arm for the test above: the fence must be scoped to the ABANDONED warm, not
+    // to every failure. Without this, "never apply a failure" would pass the test above and
+    // leave a genuinely dead credential serving forever.
+    const client = new FakeClient(async () => {
+      throw new ClaustrumCredentialError("needs_reauth", "auth_required", "reauth");
+    });
+    const freshness = controller({ client });
+
+    expect(await freshness.resolve(apiAccounts[0]!)).toBeUndefined();
+    expect(freshness.state(apiAccounts[0]!)).toBe("reauth");
+  });
+
   test("timeout warn reports the slot state the budget miss left behind", async () => {
     // Production change that fails this: the timeout branch logging `state: "transient"`
     // as a literal instead of reading the slot. The slot stays `available` so the next

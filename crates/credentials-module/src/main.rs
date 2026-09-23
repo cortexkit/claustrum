@@ -1031,7 +1031,7 @@ async fn handle_read_request(
 
     let result = match request.method.as_str() {
         OP_ENROLL_PROPOSE => match serde_json::from_value::<EnrollProposeParams>(request.params) {
-            Ok(params) => match surface.enroll_propose(&params) {
+            Ok(params) => match surface.enroll_propose(principal.as_ref(), &params) {
                 Ok(result) => wrap_result(result),
                 Err(error) => {
                     return send_enrollment_error(writer, ver, channel, epoch, corr, &error).await
@@ -1050,7 +1050,7 @@ async fn handle_read_request(
             }
         },
         OP_ENROLL_POLL => match serde_json::from_value::<EnrollPollParams>(request.params) {
-            Ok(params) => match surface.enroll_poll(&params) {
+            Ok(params) => match surface.enroll_poll(principal.as_ref(), &params) {
                 Ok(result) => wrap_result(result),
                 Err(error) => {
                     return send_enrollment_error(writer, ver, channel, epoch, corr, &error).await
@@ -8966,6 +8966,80 @@ mod tests {
             source.contains(&control),
             "positive control failed: the scan could not find `fn wrap_result` in the \
              source it read; the absence assertion above is therefore meaningless"
+        );
+    }
+
+    /// AN ENROLLMENT EVENT NAMES THE BUS IDENTITY THAT SENT IT.
+    ///
+    /// Every other `auth_events` kind records its caller; enrollment was the exception,
+    /// writing NULL for both principal columns. Seven proposals for an already-enrolled
+    /// name arrived at this vault overnight and nothing could say whether a supervised
+    /// module or something running beside one had sent them.
+    ///
+    /// Drives the real read surface with two different principals so the recorded value
+    /// has to come from the caller rather than from a constant; a store call that ignored
+    /// its argument would write the same pair for both.
+    #[tokio::test]
+    async fn enrollment_events_record_the_bus_principal_that_sent_them() {
+        let (surface, _store, db_path, _root) = tmp_surface_with_store(164);
+        let secret = "d1d2d3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
+        let secret_hash =
+            credentials_core::enrollment::enrollment_secret_hash(secret).expect("hashable secret");
+
+        let reserved = subc_protocol::Principal::Reserved {
+            module_id: "a-supervised-module".into(),
+        };
+        let proposal = surface
+            .enroll_propose(
+                Some(&reserved),
+                &read_surface::EnrollProposeParams {
+                    proposed_name: "attributed-consumer".into(),
+                    request_secret_hash: secret_hash,
+                },
+            )
+            .expect("propose");
+        let wrong = "0000000000000000000000000000000000000000000000000000000000000001";
+        let refused = surface.enroll_poll(
+            Some(&subc_protocol::Principal::Direct),
+            &read_surface::EnrollPollParams {
+                request_id: proposal.request_id,
+                request_secret: wrong.into(),
+            },
+        );
+        assert!(refused.is_err(), "a wrong secret must be refused");
+
+        // A raw read, because the module crate cannot reach core's test-only accessor.
+        let conn = rusqlite::Connection::open(&db_path).expect("open raw db");
+        let mut stmt = conn
+            .prepare(
+                "SELECT credential_id, detail, principal_kind, principal_id FROM auth_events \
+                 WHERE kind = 'enrollment' ORDER BY seq",
+            )
+            .expect("prepare");
+        let rows: Vec<(String, String, Option<String>, Option<String>)> = stmt
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .expect("query")
+            .collect::<Result<_, _>>()
+            .expect("rows");
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "auth.enroll_propose".to_owned(),
+                    "accepted".to_owned(),
+                    Some("reserved".to_owned()),
+                    Some("a-supervised-module".to_owned()),
+                ),
+                (
+                    "auth.enroll_poll".to_owned(),
+                    "not_found".to_owned(),
+                    Some("direct".to_owned()),
+                    None,
+                ),
+            ],
+            "each enrollment event must carry the principal of the call that wrote it"
         );
     }
 

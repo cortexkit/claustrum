@@ -422,8 +422,16 @@ async fn main() {
         // the two ops name the same keypair. Either alone proves only that an op
         // answered, which is the weaker claim that let this gap exist.
         if status {
-            let body =
-                credential_status(&mut stream, route_channel, route_epoch, &handle, None, 12).await;
+            let body = credential_status(
+                &mut stream,
+                route_channel,
+                route_epoch,
+                &handle,
+                None,
+                None,
+                12,
+            )
+            .await;
             let parsed: Value = serde_json::from_slice(&body.body).unwrap_or(Value::Null);
             eprintln!(
                 "[probe] status -> {}",
@@ -446,6 +454,7 @@ async fn main() {
                     route_epoch,
                     &handle,
                     Some(id),
+                    enrollment_token.as_deref(),
                     corr,
                 )
                 .await;
@@ -749,12 +758,19 @@ async fn credential_status(
     route_epoch: u32,
     handle: &str,
     credential_id: Option<&str>,
+    enrollment_token: Option<&str>,
     corr: u64,
 ) -> Frame {
-    let params = match credential_id {
+    let mut params = match credential_id {
         Some(id) => json!({ "credential_id": id }),
         None => json!({ "handle": handle }),
     };
+    // Sent only when given, and only beside an id: an enrolled consumer has no bus identity,
+    // so the token is what the vault authorizes a scoped status against. Without this arm
+    // the deploy that shipped the field had no way to prove it was live.
+    if let (Some(token), Some(_)) = (enrollment_token, credential_id) {
+        params["enrollment_token"] = json!(token);
+    }
     let frame = Frame::build(
         FrameType::Request,
         Flags::new(false, Priority::Interactive, false),

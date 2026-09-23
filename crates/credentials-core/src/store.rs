@@ -1654,19 +1654,51 @@ impl EncryptedStore {
 
     /// Propose one consumer name. The request id is returned once; only the caller's
     /// separately persisted request secret can resume the ceremony.
+    ///
+    /// `principal` is whoever the bus says sent it, recorded on the `auth_events` row. A
+    /// proposal is anonymous by design, but anonymous is not the same as unattributed: a
+    /// host-launched consumer arrives as `direct`, a supervised one as `reserved:<id>`, and
+    /// that difference is what tells an operator whether a stray proposal came from a
+    /// module or from something running beside it. Before this was recorded, seven
+    /// proposals for an already-enrolled name arrived overnight and nothing could say from
+    /// where.
+    pub fn propose_enrollment_by(
+        &self,
+        principal: Option<AuthEventPrincipal<'_>>,
+        proposed_name: &str,
+        request_secret_hash: &str,
+    ) -> Result<EnrollmentProposal, EnrollmentError> {
+        self.propose_enrollment_inner(proposed_name, request_secret_hash, now_ms(), principal)
+    }
+
+    /// Test convenience: a proposal with no bus principal. Not compiled into the daemon,
+    /// so a production call site cannot drop the caller's identity by picking the shorter
+    /// name -- the shape that let three scoped surfaces ignore it for weeks.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn propose_enrollment(
         &self,
         proposed_name: &str,
         request_secret_hash: &str,
     ) -> Result<EnrollmentProposal, EnrollmentError> {
-        self.propose_enrollment_at(proposed_name, request_secret_hash, now_ms())
+        self.propose_enrollment_inner(proposed_name, request_secret_hash, now_ms(), None)
     }
 
+    #[cfg(test)]
     fn propose_enrollment_at(
         &self,
         proposed_name: &str,
         request_secret_hash: &str,
         now: i64,
+    ) -> Result<EnrollmentProposal, EnrollmentError> {
+        self.propose_enrollment_inner(proposed_name, request_secret_hash, now, None)
+    }
+
+    fn propose_enrollment_inner(
+        &self,
+        proposed_name: &str,
+        request_secret_hash: &str,
+        now: i64,
+        principal: Option<AuthEventPrincipal<'_>>,
     ) -> Result<EnrollmentProposal, EnrollmentError> {
         if !valid_enrollment_name(proposed_name) || !is_lower_hex_32(request_secret_hash) {
             return Err(EnrollmentError::Refused(EnrollmentRefusal::InvalidParams));
@@ -1706,7 +1738,13 @@ impl EncryptedStore {
                     )
                     .optional()?;
                 if let Some(existing_id) = resumable {
-                    append_enrollment_event_tx(tx, ENROLL_PROPOSE_SUBJECT, "resumed", now)?;
+                    append_enrollment_event_tx(
+                        tx,
+                        ENROLL_PROPOSE_SUBJECT,
+                        "resumed",
+                        now,
+                        principal,
+                    )?;
                     return Ok(Ok(EnrollmentProposal {
                         request_id: existing_id,
                     }));
@@ -1719,7 +1757,13 @@ impl EncryptedStore {
                     |row| row.get(0),
                 )?;
                 if name_in_use {
-                    append_enrollment_event_tx(tx, ENROLL_PROPOSE_SUBJECT, "pending_exists", now)?;
+                    append_enrollment_event_tx(
+                        tx,
+                        ENROLL_PROPOSE_SUBJECT,
+                        "pending_exists",
+                        now,
+                        principal,
+                    )?;
                     return Ok(Err(EnrollmentRefusal::PendingExists));
                 }
 
@@ -1735,6 +1779,7 @@ impl EncryptedStore {
                         ENROLL_PROPOSE_SUBJECT,
                         "pending_queue_full",
                         now,
+                        principal,
                     )?;
                     return Ok(Err(EnrollmentRefusal::PendingQueueFull));
                 }
@@ -1752,7 +1797,7 @@ impl EncryptedStore {
                         expires_at_ms
                     ],
                 )?;
-                append_enrollment_event_tx(tx, ENROLL_PROPOSE_SUBJECT, "accepted", now)?;
+                append_enrollment_event_tx(tx, ENROLL_PROPOSE_SUBJECT, "accepted", now, principal)?;
                 Ok(Ok(EnrollmentProposal {
                     request_id: request_id.clone(),
                 }))
@@ -1764,19 +1809,45 @@ impl EncryptedStore {
     /// Poll with exactly the request id and request secret. Unknown request ids and
     /// wrong well-formed secrets deliberately take the same constant-time comparison
     /// and return the same refusal.
+    ///
+    /// `principal` is recorded on every event the poll writes, for the same reason as on
+    /// [`Self::propose_enrollment_by`]: a wrong-secret refusal is worth far more when it
+    /// says which bus identity presented it.
+    pub fn poll_enrollment_by(
+        &self,
+        principal: Option<AuthEventPrincipal<'_>>,
+        request_id: &str,
+        request_secret: &str,
+    ) -> Result<EnrollmentPoll, EnrollmentError> {
+        self.poll_enrollment_inner(request_id, request_secret, now_ms(), principal)
+    }
+
+    /// Test convenience with no bus principal; see [`Self::propose_enrollment`].
+    #[cfg(any(test, feature = "test-support"))]
     pub fn poll_enrollment(
         &self,
         request_id: &str,
         request_secret: &str,
     ) -> Result<EnrollmentPoll, EnrollmentError> {
-        self.poll_enrollment_at(request_id, request_secret, now_ms())
+        self.poll_enrollment_inner(request_id, request_secret, now_ms(), None)
     }
 
+    #[cfg(test)]
     fn poll_enrollment_at(
         &self,
         request_id: &str,
         request_secret: &str,
         now: i64,
+    ) -> Result<EnrollmentPoll, EnrollmentError> {
+        self.poll_enrollment_inner(request_id, request_secret, now, None)
+    }
+
+    fn poll_enrollment_inner(
+        &self,
+        request_id: &str,
+        request_secret: &str,
+        now: i64,
+        principal: Option<AuthEventPrincipal<'_>>,
     ) -> Result<EnrollmentPoll, EnrollmentError> {
         if !is_lower_hex_32(request_secret) {
             return Err(EnrollmentError::Refused(EnrollmentRefusal::InvalidParams));
@@ -1810,7 +1881,13 @@ impl EncryptedStore {
                     .unwrap_or("0000000000000000000000000000000000000000000000000000000000000000");
                 let secret_matches = constant_time_hash_eq(&presented_hash, stored_hash);
                 if row.is_none() || !secret_matches {
-                    append_enrollment_event_tx(tx, ENROLL_POLL_SUBJECT, "not_found", now)?;
+                    append_enrollment_event_tx(
+                        tx,
+                        ENROLL_POLL_SUBJECT,
+                        "not_found",
+                        now,
+                        principal,
+                    )?;
                     return Ok(Err(EnrollmentRefusal::NotFound));
                 }
 
@@ -1821,8 +1898,20 @@ impl EncryptedStore {
                         "UPDATE pending_enrollments SET state = 'expired' WHERE request_id = ?1",
                         [request_id],
                     )?;
-                    append_enrollment_event_tx(tx, ENROLL_EXPIRE_SUBJECT, "expired", now)?;
-                    append_enrollment_event_tx(tx, ENROLL_POLL_SUBJECT, "superseded", now)?;
+                    append_enrollment_event_tx(
+                        tx,
+                        ENROLL_EXPIRE_SUBJECT,
+                        "expired",
+                        now,
+                        principal,
+                    )?;
+                    append_enrollment_event_tx(
+                        tx,
+                        ENROLL_POLL_SUBJECT,
+                        "superseded",
+                        now,
+                        principal,
+                    )?;
                     return Ok(Err(EnrollmentRefusal::Superseded));
                 }
 
@@ -1845,7 +1934,13 @@ impl EncryptedStore {
                     // Every other arm here is a transition or a refusal and still records.
                     "pending" => Ok(Ok(EnrollmentPoll::Pending)),
                     "denied" => {
-                        append_enrollment_event_tx(tx, ENROLL_POLL_SUBJECT, "denied", now)?;
+                        append_enrollment_event_tx(
+                            tx,
+                            ENROLL_POLL_SUBJECT,
+                            "denied",
+                            now,
+                            principal,
+                        )?;
                         Ok(Ok(EnrollmentPoll::Denied))
                     }
                     "consumed" => {
@@ -1854,16 +1949,29 @@ impl EncryptedStore {
                             ENROLL_POLL_SUBJECT,
                             "already_consumed",
                             now,
+                            principal,
                         )?;
                         Ok(Err(EnrollmentRefusal::AlreadyConsumed))
                     }
                     "expired" => {
-                        append_enrollment_event_tx(tx, ENROLL_POLL_SUBJECT, "superseded", now)?;
+                        append_enrollment_event_tx(
+                            tx,
+                            ENROLL_POLL_SUBJECT,
+                            "superseded",
+                            now,
+                            principal,
+                        )?;
                         Ok(Err(EnrollmentRefusal::Superseded))
                     }
                     "approved" => {
                         let Some(enrollment_id) = enrollment_id else {
-                            append_enrollment_event_tx(tx, ENROLL_POLL_SUBJECT, "superseded", now)?;
+                            append_enrollment_event_tx(
+                                tx,
+                                ENROLL_POLL_SUBJECT,
+                                "superseded",
+                                now,
+                                principal,
+                            )?;
                             return Ok(Err(EnrollmentRefusal::Superseded));
                         };
                         let incarnation = tx
@@ -1883,16 +1991,34 @@ impl EncryptedStore {
                             .optional()?;
                         let Some((name, token_hash, token_generation, revoked_at_ms)) = incarnation
                         else {
-                            append_enrollment_event_tx(tx, ENROLL_POLL_SUBJECT, "superseded", now)?;
+                            append_enrollment_event_tx(
+                                tx,
+                                ENROLL_POLL_SUBJECT,
+                                "superseded",
+                                now,
+                                principal,
+                            )?;
                             return Ok(Err(EnrollmentRefusal::Superseded));
                         };
                         if revoked_at_ms.is_some() || token_hash.is_some() || token_generation != 0
                         {
-                            append_enrollment_event_tx(tx, ENROLL_POLL_SUBJECT, "superseded", now)?;
+                            append_enrollment_event_tx(
+                                tx,
+                                ENROLL_POLL_SUBJECT,
+                                "superseded",
+                                now,
+                                principal,
+                            )?;
                             return Ok(Err(EnrollmentRefusal::Superseded));
                         }
                         if final_name.as_deref() != Some(name.as_str()) {
-                            append_enrollment_event_tx(tx, ENROLL_POLL_SUBJECT, "superseded", now)?;
+                            append_enrollment_event_tx(
+                                tx,
+                                ENROLL_POLL_SUBJECT,
+                                "superseded",
+                                now,
+                                principal,
+                            )?;
                             return Ok(Err(EnrollmentRefusal::Superseded));
                         }
 
@@ -1906,14 +2032,26 @@ impl EncryptedStore {
                             rusqlite::params![token_hash, enrollment_id],
                         )?;
                         if changed != 1 {
-                            append_enrollment_event_tx(tx, ENROLL_POLL_SUBJECT, "superseded", now)?;
+                            append_enrollment_event_tx(
+                                tx,
+                                ENROLL_POLL_SUBJECT,
+                                "superseded",
+                                now,
+                                principal,
+                            )?;
                             return Ok(Err(EnrollmentRefusal::Superseded));
                         }
                         tx.execute(
                         "UPDATE pending_enrollments SET state = 'consumed' WHERE request_id = ?1",
                         [request_id],
                     )?;
-                        append_enrollment_event_tx(tx, ENROLL_POLL_SUBJECT, "approved", now)?;
+                        append_enrollment_event_tx(
+                            tx,
+                            ENROLL_POLL_SUBJECT,
+                            "approved",
+                            now,
+                            principal,
+                        )?;
                         Ok(Ok(EnrollmentPoll::Approved {
                             name,
                             token,
@@ -2042,7 +2180,7 @@ impl EncryptedStore {
                         "UPDATE pending_enrollments SET state = 'expired' WHERE request_id = ?1",
                         [request_id],
                     )?;
-                    append_enrollment_event_tx(tx, ENROLL_EXPIRE_SUBJECT, "expired", now)?;
+                    append_enrollment_event_tx(tx, ENROLL_EXPIRE_SUBJECT, "expired", now, None)?;
                 }
                 return Err(rusqlite::Error::QueryReturnedNoRows);
             }
@@ -4850,6 +4988,7 @@ fn append_enrollment_event_tx(
     subject: &str,
     detail: &str,
     now: i64,
+    principal: Option<AuthEventPrincipal<'_>>,
 ) -> rusqlite::Result<()> {
     debug_assert!(matches!(
         subject,
@@ -4858,8 +4997,15 @@ fn append_enrollment_event_tx(
     tx.execute(
         "INSERT INTO auth_events \
          (ts_ms, credential_id, kind, provider_status, detail, record_version, applied, principal_kind, principal_id) \
-         VALUES (?1, ?2, ?3, NULL, ?4, NULL, 0, NULL, NULL)",
-        rusqlite::params![now, subject, AuthEventKind::Enrollment.as_str(), detail],
+         VALUES (?1, ?2, ?3, NULL, ?4, NULL, 0, ?5, ?6)",
+        rusqlite::params![
+            now,
+            subject,
+            AuthEventKind::Enrollment.as_str(),
+            detail,
+            principal.map(AuthEventPrincipal::kind),
+            principal.and_then(AuthEventPrincipal::id),
+        ],
     )?;
     trim_auth_events_tx(tx, subject)
 }
@@ -4875,7 +5021,7 @@ fn sweep_pending_enrollments_tx(
         [now],
     )?;
     if expired > 0 {
-        append_enrollment_event_tx(tx, ENROLL_EXPIRE_SUBJECT, "expired", now)?;
+        append_enrollment_event_tx(tx, ENROLL_EXPIRE_SUBJECT, "expired", now, None)?;
     }
 
     let retention_cutoff = now.saturating_sub(ENROLLMENT_TERMINAL_RETENTION_MS);

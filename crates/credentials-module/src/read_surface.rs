@@ -1011,22 +1011,30 @@ impl ReadSurface {
         }
     }
 
+    /// The bus principal is recorded on the event, never used to authorize: a proposal is
+    /// anonymous by design, and the operator's approval is what admits it.
     pub fn enroll_propose(
         &self,
+        principal: Option<&Principal>,
         params: &EnrollProposeParams,
     ) -> Result<EnrollmentProposal, EnrollmentError> {
-        self.engine
-            .store()
-            .propose_enrollment(&params.proposed_name, &params.request_secret_hash)
+        self.engine.store().propose_enrollment_by(
+            Self::observed_principal(principal),
+            &params.proposed_name,
+            &params.request_secret_hash,
+        )
     }
 
     pub fn enroll_poll(
         &self,
+        principal: Option<&Principal>,
         params: &EnrollPollParams,
     ) -> Result<EnrollmentPoll, EnrollmentError> {
-        self.engine
-            .store()
-            .poll_enrollment(&params.request_id, &params.request_secret)
+        self.engine.store().poll_enrollment_by(
+            Self::observed_principal(principal),
+            &params.request_id,
+            &params.request_secret,
+        )
     }
 
     pub fn enroll_rotate(

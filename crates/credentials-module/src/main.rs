@@ -314,7 +314,7 @@ where
 
     // Boot gate: build the vault from the resolved descriptor, then reconcile any
     // dangling refresh intents BEFORE accepting any request.
-    let (surface, admin) = build_surface(&ack).await?;
+    let (surface, admin) = build_surface(&ack, &config.module_id).await?;
     let surface = Arc::new(surface);
     let admin = Arc::new(admin);
     // Wire v2: the module-side channel → epoch map (spec §3.3 layer 2).
@@ -404,6 +404,40 @@ where
     }
 }
 
+/// Route this process's log lines into the fleet's dated segments (fleet-logging r2):
+/// `<data dir>/logs/claustrum.<YYYY-MM-DD>.log`, one line per event, redacted by the
+/// fleet credential redactor before the write.
+///
+/// THE DIRECTORY IS THE ONE THE SUPERVISOR HANDED US, not a second resolution. The spec's
+/// rule is that where two components must agree on a path one resolves it and the other
+/// is told; an isolated test instance that re-derived the path would append to the
+/// operator's segment and read as equivalent. So this runs after the storage descriptor
+/// is decoded, and before anything the serve loop could log.
+///
+/// A failure here must not take the vault down. The crate already falls back to stderr
+/// on its own when the directory is unwritable; the only errors left are a missing module
+/// id (impossible here, it is passed) and a subscriber installed twice, which is one
+/// stderr line in the daemon's capture -- exactly where a logger that failed to start
+/// should be visible.
+fn init_fleet_log(module_id: &str, data_dir: &std::path::Path) {
+    // The id this process registered under, so the segment and every logger name root
+    // match what the supervisor and `ck module logs` call it.
+    let mut config = cortexkit_log::Config::in_dir(module_id, data_dir.join("logs"));
+    // The supervisor injects the operator's retention choices at spawn. `Config::from_env`
+    // would read them too, but it also resolves the data directory itself, which is the
+    // second resolution this function exists to avoid.
+    let env_u32 = |name: &str| std::env::var(name).ok()?.trim().parse::<u32>().ok();
+    if let Some(days) = env_u32("CK_LOG_MAX_AGE_DAYS") {
+        config.retention.max_age_days = days;
+    }
+    if let Some(mb) = env_u32("CK_LOG_ALARM_SEGMENT_MB") {
+        config.retention.alarm_segment_mb = mb;
+    }
+    if let Err(error) = cortexkit_log::init(config) {
+        eprintln!("claustrum: fleet logger not installed: {error}");
+    }
+}
+
 /// Spawn the background task that keeps the cached health snapshot current. It
 /// ticks on [`HEALTH_REFRESH_INTERVAL`] and recomputes off the probe path, so the
 /// channel-0 `health.check` reply is always a cheap in-memory read of the last
@@ -435,6 +469,7 @@ impl Drop for AbortOnDrop {
 /// the registered adapters, then reconcile persisted refresh state before exposing reads.
 async fn build_surface(
     ack: &ModuleHelloAckBody,
+    module_id: &str,
 ) -> Result<(ReadSurface, admin_surface::AdminSurface), ModuleError> {
     let descriptor_value = ack
         .storage
@@ -444,6 +479,7 @@ async fn build_surface(
         .map_err(|e| ModuleError::Message(format!("decoding storage descriptor: {e}")))?;
 
     let data_dir = sqlite_data_dir(&descriptor)?;
+    init_fleet_log(module_id, &data_dir);
     // Derive the vault identity before the data_dir is moved into the resolver config;
     // it binds the admin-op transcript to THIS vault.
     let vault_id = credentials_core::vault_id_for(&data_dir)
@@ -734,13 +770,17 @@ async fn handle_frame(
                 .expected(frame.header.channel)
                 .map(|e| e.to_string())
                 .unwrap_or_else(|| "unknown-slot".to_string());
-            eprintln!(
-                "route-epoch drop: channel={} arrived_epoch={} expected={} \
-                 (frames for a binding this module does not hold; compare with the \
-                 supervisor's live route census -- equal to the live epoch means the \
-                 census moved under this check, lower means the sender predates its \
-                 own re-bind)",
-                frame.header.channel, frame.header.epoch, expected,
+            // Every field is a frame-header integer or a value this module chose. Nothing
+            // from a request body can reach this line -- see `LOG_SITES`.
+            tracing::warn!(
+                target: "routes",
+                channel = frame.header.channel,
+                arrived_epoch = frame.header.epoch,
+                expected = %expected,
+                "route-epoch drop: frames for a binding this module does not hold; compare \
+                 with the supervisor's live route census -- equal to the live epoch means \
+                 the census moved under this check, lower means the sender predates its \
+                 own re-bind",
             );
         }
         return Ok(true);
@@ -8926,6 +8966,67 @@ mod tests {
             source.contains(&control),
             "positive control failed: the scan could not find `fn wrap_result` in the \
              source it read; the absence assertion above is therefore meaningless"
+        );
+    }
+
+    /// EVERY LINE THIS DAEMON CAN WRITE, ENUMERATED -- so a new one needs a reviewer.
+    ///
+    /// The read surface is anonymous and its callers carry bearer material: capability
+    /// handles, enrollment tokens, and credential ids that are not secrets but are what an
+    /// attacker would enumerate. A log line is DURABLE since fleet-logging r2 (a dated
+    /// segment on disk, fourteen days by default), so a formatting mistake that used to be
+    /// ephemeral stderr is now a file. The fleet redactor catches credential SHAPES; it
+    /// cannot catch a handle that has been truncated, a token in an unfamiliar encoding,
+    /// or an id that is sensitive only because of where it appeared.
+    ///
+    /// So the policy is structural rather than filter-based: nothing a consumer sends
+    /// reaches a log line. Today that holds by inspection of three sites:
+    ///
+    ///   println!  `--version`, before any connection exists
+    ///   eprintln! the logger failed to install (no request has been read yet)
+    ///   warn!     route-epoch drop: frame-header integers and a value this module chose
+    ///
+    /// This test cannot see WHAT a new site logs. What it does is make a new site
+    /// impossible to add without editing the count here, which puts the question in front
+    /// of whoever does it. Covers the four files linked into the daemon binary.
+    ///
+    /// Patterns are built by concatenation so this test's own text is not counted, and
+    /// `println!` is counted net of `eprintln!` because one contains the other.
+    #[test]
+    fn every_daemon_output_site_is_enumerated() {
+        let sources = [
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs")),
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/read_surface.rs")),
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/admin_surface.rs")),
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/limiter.rs")),
+        ];
+        let count = |shape: &str| -> usize {
+            let pattern = format!("{shape}{}", "!(");
+            sources.iter().map(|s| s.matches(&pattern).count()).sum()
+        };
+        let eprintln = count("eprintln");
+        let println = count("println") - eprintln;
+        let tracing: usize = ["trace", "debug", "info", "warn", "error"]
+            .iter()
+            .map(|level| count(level))
+            .sum();
+        let other = count("print") + count("eprint") + count("dbg");
+
+        let observed = (println, eprintln, tracing, other);
+        assert_eq!(
+            observed,
+            (1, 1, 1, 0),
+            "the daemon's output sites changed (println, eprintln, tracing, other). Before \
+             updating this count, confirm the new site logs NOTHING a consumer sent -- no \
+             handle, token, credential id, or request field -- and add it to the list in \
+             this test's doc comment. Log lines are durable files since fleet-logging r2."
+        );
+
+        // Positive control: the one route-path line must be FOUND by the same scan, or a
+        // broken pattern would report every count as zero and read as "no new sites".
+        assert!(
+            sources[0].contains("route-epoch drop"),
+            "positive control failed: the scan could not see the route-epoch drop line"
         );
     }
 }

@@ -41,6 +41,11 @@ cortexkit-store-types = { path = "../commons/crates/cortexkit-store-types" }
 # so two independent binaries agree on a path byte-for-byte. Used to scope the
 # keychain master-key item per-vault by canonical data_dir.
 cortexkit-paths = { path = "../commons/crates/cortexkit-paths" }
+# Fleet logging (r2): one line format, one dated segment per module per day. Pulled in
+# WITHOUT `store-paths`: the daemon is told its data directory by the supervisor at
+# HELLO and must not resolve it a second time through another copy of the resolver.
+cortexkit-log = { path = "../commons/crates/cortexkit-log", default-features = false }
+tracing = "0.1"
 
 # The same rusqlite (bundled) cortexkit-store uses, so the Connection/Transaction
 # types the fenced-write closures expose unify with ours.

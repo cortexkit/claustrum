@@ -44,6 +44,10 @@ tokio = { workspace = true }
 # crate only needs a client to hand it.
 reqwest = { workspace = true }
 async-trait = { workspace = true }
+# The daemon's own log lines. The CLI does not initialise a logger: its output is
+# the operator's terminal, not a fleet segment.
+cortexkit-log = { workspace = true }
+tracing = { workspace = true }
 # The CLI's `login` command stamps the minted token's expiry from wall-clock time.
 chrono = { workspace = true }
 # Interactive login UX: the provider picker (arrow keys + fuzzy filter) and the

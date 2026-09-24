@@ -11,7 +11,7 @@
     },
     "packages/client": {
       "name": "@cortexkit/claustrum-client",
-      "version": "0.3.1",
+      "version": "0.4.0",
       "dependencies": {
         "@cortexkit/subc-client": "^0.16.0",
       },

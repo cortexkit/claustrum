@@ -158,6 +158,10 @@ enum CliError {
     Io(String),
     /// The running module refused an admin op (auth/gate/store error). Terminal.
     RouteRefused(String),
+    /// A status report (from the running module or from this CLI's own lease-free read)
+    /// failed this CLI's shape or ordering check. Nobody refused anything: the report
+    /// arrived and this side would not trust it, so the wording must not blame the module.
+    StatusReportInvalid(String),
     /// THIS CLIENT could not prepare the op: nothing was dispatched, and the module
     /// was never asked. Terminal for the same reason as `RouteRefused` (the offline
     /// path needs the same master key), but the operator's next move is local.
@@ -216,6 +220,9 @@ impl std::fmt::Display for CliError {
             CliError::StoreOpen(e) => write!(f, "{e}"),
             CliError::Io(m) => write!(f, "{m}"),
             CliError::RouteRefused(m) => write!(f, "the running module refused the op: {m}"),
+            CliError::StatusReportInvalid(m) => {
+                write!(f, "the status report failed this CLI's check: {m}")
+            }
             // NAMES THIS SIDE, because the operator's next move depends on which machine
             // is at fault and the old wording sent them to the wrong one. Nothing was
             // dispatched, so there is no module state to inspect and no wire error to
@@ -3150,7 +3157,7 @@ fn parse_inventory(result: &serde_json::Value) -> Result<Vec<InventoryRow>, CliE
         .get("credentials")
         .and_then(serde_json::Value::as_array)
         .ok_or_else(|| {
-            CliError::RouteRefused("admin.status omitted credential inventory".into())
+            CliError::StatusReportInvalid("admin.status omitted credential inventory".into())
         })?;
     rows.iter()
         .enumerate()
@@ -3160,7 +3167,7 @@ fn parse_inventory(result: &serde_json::Value) -> Result<Vec<InventoryRow>, CliE
                 .and_then(serde_json::Value::as_str)
                 .filter(|state| matches!(*state, "active" | "needs_reauth" | "retired" | "corrupt"))
                 .ok_or_else(|| {
-                    CliError::RouteRefused(format!(
+                    CliError::StatusReportInvalid(format!(
                         "admin.status returned an invalid state at credential row {index}"
                     ))
                 })?;
@@ -3169,7 +3176,7 @@ fn parse_inventory(result: &serde_json::Value) -> Result<Vec<InventoryRow>, CliE
                 .and_then(serde_json::Value::as_u64)
                 .filter(|version| *version > 0)
                 .ok_or_else(|| {
-                    CliError::RouteRefused(format!(
+                    CliError::StatusReportInvalid(format!(
                         "admin.status returned an invalid version at credential row {index}"
                     ))
                 })?;
@@ -3178,7 +3185,7 @@ fn parse_inventory(result: &serde_json::Value) -> Result<Vec<InventoryRow>, CliE
                 .and_then(serde_json::Value::as_str)
                 .filter(|id| !id.is_empty())
                 .ok_or_else(|| {
-                    CliError::RouteRefused(format!(
+                    CliError::StatusReportInvalid(format!(
                         "admin.status returned an invalid id at credential row {index}"
                     ))
                 })?;
@@ -3283,7 +3290,9 @@ fn parse_grants(result: &serde_json::Value) -> Result<Vec<GrantRow>, CliError> {
     let rows = result
         .get("read_grants")
         .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| CliError::RouteRefused("admin.status omitted grant inventory".into()))?;
+        .ok_or_else(|| {
+            CliError::StatusReportInvalid("admin.status omitted grant inventory".into())
+        })?;
     let mut grants = Vec::with_capacity(rows.len());
     for (index, grant) in rows.iter().enumerate() {
         // RENDER WHAT IS THERE; REFUSE ONLY WHAT IS ABSENT.
@@ -3310,7 +3319,7 @@ fn parse_grants(result: &serde_json::Value) -> Result<Vec<GrantRow>, CliError> {
             .and_then(serde_json::Value::as_str)
             .filter(|kind| !kind.is_empty())
             .ok_or_else(|| {
-                CliError::RouteRefused(format!(
+                CliError::StatusReportInvalid(format!(
                     "admin.status returned a grant with no principal kind at row {index}"
                 ))
             })?;
@@ -3319,7 +3328,7 @@ fn parse_grants(result: &serde_json::Value) -> Result<Vec<GrantRow>, CliError> {
             .and_then(serde_json::Value::as_str)
             .filter(|id| !id.is_empty())
             .ok_or_else(|| {
-                CliError::RouteRefused(format!(
+                CliError::StatusReportInvalid(format!(
                     "admin.status returned an invalid grant principal at row {index}"
                 ))
             })?;
@@ -3328,7 +3337,7 @@ fn parse_grants(result: &serde_json::Value) -> Result<Vec<GrantRow>, CliError> {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("exact");
         if !matches!(selector_kind, "exact" | "category") {
-            return Err(CliError::RouteRefused(format!(
+            return Err(CliError::StatusReportInvalid(format!(
                 "admin.status returned an invalid selector kind at row {index}"
             )));
         }
@@ -3337,7 +3346,7 @@ fn parse_grants(result: &serde_json::Value) -> Result<Vec<GrantRow>, CliError> {
             .and_then(serde_json::Value::as_str)
             .filter(|prefix| !prefix.is_empty())
             .ok_or_else(|| {
-                CliError::RouteRefused(format!(
+                CliError::StatusReportInvalid(format!(
                     "admin.status returned an invalid grant prefix at row {index}"
                 ))
             })?;
@@ -3346,7 +3355,7 @@ fn parse_grants(result: &serde_json::Value) -> Result<Vec<GrantRow>, CliError> {
             .and_then(serde_json::Value::as_str)
             .filter(|operation| matches!(*operation, "read" | "sign" | "open"))
             .ok_or_else(|| {
-                CliError::RouteRefused(format!(
+                CliError::StatusReportInvalid(format!(
                     "admin.status returned an invalid grant operation at row {index}"
                 ))
             })?;
@@ -3354,7 +3363,7 @@ fn parse_grants(result: &serde_json::Value) -> Result<Vec<GrantRow>, CliError> {
             .get("created_at_ms")
             .and_then(serde_json::Value::as_i64)
             .ok_or_else(|| {
-                CliError::RouteRefused(format!(
+                CliError::StatusReportInvalid(format!(
                     "admin.status returned an invalid grant creation time at row {index}"
                 ))
             })?;
@@ -3381,7 +3390,7 @@ fn parse_grants(result: &serde_json::Value) -> Result<Vec<GrantRow>, CliError> {
             .as_ref()
             .is_some_and(|previous| previous >= &order_key)
         {
-            return Err(CliError::RouteRefused(
+            return Err(CliError::StatusReportInvalid(
                 "admin.status returned grants out of stable order".into(),
             ));
         }
@@ -3517,7 +3526,7 @@ fn print_read_grants(result: &serde_json::Value) -> Result<(), CliError> {
         return Ok(());
     };
     let raw_grants = raw_grants.as_array().ok_or_else(|| {
-        CliError::RouteRefused("admin.status returned malformed read grants".into())
+        CliError::StatusReportInvalid("admin.status returned malformed read grants".into())
     })?;
     let grants = parse_grants(result)?;
     println!();
@@ -3532,7 +3541,7 @@ fn print_read_grants(result: &serde_json::Value) -> Result<(), CliError> {
             .get("covered_credential_ids")
             .and_then(serde_json::Value::as_array)
             .ok_or_else(|| {
-                CliError::RouteRefused(format!(
+                CliError::StatusReportInvalid(format!(
                     "admin.status omitted covered credentials at grant row {index}"
                 ))
             })?;
@@ -3551,17 +3560,17 @@ fn print_read_grants(result: &serde_json::Value) -> Result<(), CliError> {
         let mut prior_id: Option<&str> = None;
         for (covered_index, id) in covered.iter().enumerate() {
             let id = id.as_str().filter(|id| !id.is_empty()).ok_or_else(|| {
-                CliError::RouteRefused(format!(
+                CliError::StatusReportInvalid(format!(
                     "admin.status returned an invalid covered credential at grant row {index}, row {covered_index}"
                 ))
             })?;
             if grant.selector_kind == "exact" && !id.starts_with(&grant.credential_prefix) {
-                return Err(CliError::RouteRefused(format!(
+                return Err(CliError::StatusReportInvalid(format!(
                     "admin.status listed a credential outside its grant selector at grant row {index}"
                 )));
             }
             if prior_id.is_some_and(|prior| prior >= id) {
-                return Err(CliError::RouteRefused(format!(
+                return Err(CliError::StatusReportInvalid(format!(
                     "admin.status returned covered credentials out of stable order at grant row {index}"
                 )));
             }
@@ -5516,6 +5525,40 @@ mod tests {
             created_at_ms: 0,
             token_generation: generation,
         }
+    }
+
+    /// A status report this CLI will not trust must not be blamed on the running module.
+    ///
+    /// The same report arrives from the running module or from this CLI's own lease-free
+    /// read, and in neither case did anything refuse: this side checked the report and
+    /// rejected it. "The running module refused the op" sent an operator to inspect a
+    /// daemon that had answered correctly -- measured when an out-of-order grant listing
+    /// printed that text on the offline path, with no module involved at all.
+    #[test]
+    fn a_report_that_fails_this_clis_check_does_not_blame_the_module() {
+        let row = |kind: &str, operation: &str| {
+            serde_json::json!({
+                "principal_kind": "reserved",
+                "principal_id": "agent",
+                "selector_kind": kind,
+                "credential_prefix": "a:",
+                "operation": operation,
+                "created_at_ms": 1,
+            })
+        };
+        // Grants must arrive sorted by their field text, so "category" sorts before
+        // "exact"; this exact-then-category pair is out of order and must be refused.
+        let report = serde_json::json!({
+            "read_grants": [row("exact", "read"), row("category", "read")]
+        });
+        let error = super::parse_grants(&report).expect_err("out-of-order report is refused");
+        let text = error.to_string();
+        assert!(
+            !text.contains("running module"),
+            "a local check must not name the module: {text}"
+        );
+        assert!(text.contains("failed this CLI's check"), "{text}");
+        assert!(text.contains("out of stable order"), "{text}");
     }
 
     /// A pending request for an enrolled name is shown with both remedies; one for a free

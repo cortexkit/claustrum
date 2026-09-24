@@ -49,6 +49,9 @@ cannot be met; retrying unchanged buys another one against the provider's mint b
 | `not_found` | permanent | unknown handle, revoked handle, or an id no grant covers — indistinguishable by design |
 | `kind_not_gettable` | permanent | `credential.get` on a `SigningKey`; use `credential.sign` or `credential.public_key` |
 | `kind_not_signable` | permanent | `credential.sign` on a record that is not a `SigningKey` |
+| `kind_not_openable` | permanent | authorized `credential.open` on a record that is not a `KemKey` |
+| `open_failed` | permanent | KEM payload or HPKE opening failed; all crypto faults have the same reply |
+| `open_rate_limited` | transient | this connection has reached the scoped-open refusal threshold |
 | `corrupt` | permanent | the record failed to decrypt or parse and has been quarantined |
 | `refresh_unsupported` | permanent | a refresh was demanded of a record with no refresh adapter |
 | `needs_reauth` | auth_required | the credential is latched dead, or deliberately retired |
@@ -60,7 +63,7 @@ cannot be met; retrying unchanged buys another one against the provider's mint b
 | `invalid_principal` | permanent | a grant principal is not `reserved` or contains `|` |
 | `report_status_not_credential_death` | permanent | `report_auth_failure` carried a `provider_status` outside {401, 403} |
 | `too_many_items` | context_overflow | a batch exceeded the per-request cap |
-| `sign_payload_too_large` | context_overflow | a sign payload exceeded 1 MiB (`MAX_SIGN_PAYLOAD`) |
+| `sign_payload_too_large` | context_overflow | a sign payload or the combined `credential.open` fields exceeded 1 MiB (`MAX_SIGN_PAYLOAD`) |
 | `ttl_unsatisfiable` | context_overflow | a freshly minted token still cannot satisfy your `min_ttl_ms` |
 
 **On an unknown class:** render a generic degraded state. Do not fall back to the
@@ -440,3 +443,9 @@ If this document and the source disagree, the source wins and this document is a
 | request shapes | pinned by the request-shape tests in `read_surface.rs` |
 | `auth_events` vocabulary | `credentials-core/src/audit.rs` (`AuthEventKind`), documented in the operator runbook |
 | the class list in §1 | pinned against source by `the_wire_contract_doc_names_every_error_class` |
+
+### `credential.open`
+
+`credential.open` accepts `{credential_id, enc_b64, ciphertext_b64, info_b64, aad_b64, enrollment_token?}` with no extra fields (including `handle`). All byte fields use `base64::engine::general_purpose::STANDARD`, the same strict, padded standard-alphabet decoder as `credential.sign`. The reply is `{result:{plaintext_b64,key_id}}`; `key_id` equals the same record's `credential.public_key` reply, derived by `credentials_core::signing::key_id_for_public`. A KEM public-key reply has `algorithm: "x25519"` and `public_key_hex`.
+
+Checks run in order: (1) shape decode (`invalid_params`, permanent); (2) combined encoded length at most `ENC_BOUND = ceil(MAX_SIGN_PAYLOAD / 3) * 4 + 12`, then standard base64 decode (malformed input: `invalid_params`, permanent); (3) combined decoded length at most `MAX_SIGN_PAYLOAD` (1 MiB), otherwise `sign_payload_too_large`, context_overflow; (4) connection-scoped refusal counter gate (`open_rate_limited`, transient, without delay or disconnect); (5) scoped authorization for `open` (`not_found` on unknown or ungranted id); (6) KEM kind fence (`kind_not_openable`, permanent); (7) PKCS#8 parse and fresh RFC 9180 base-mode receiver opening sequence zero (`open_failed`, permanent, identically for invalid encapsulation, wrong recipient, modified ciphertext, wrong aad or wrong info and corrupt stored payload). Each step runs only after its predecessors pass. Refusals at step 5 alone increment the connection counter; it recovers after 60 seconds. Authorized opens do not increment it. `info_b64` and `aad_b64` are uninterpreted associated bytes: the vault does not inspect machine identity or verify a signature inside the plaintext.

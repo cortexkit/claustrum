@@ -36,8 +36,9 @@
 //! reads (`force_refresh` / a tight `min_ttl_ms`) and `report_auth_failure` are the
 //! rate-sensitive paths the limiter watches.
 
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use base64::Engine;
 use serde::{Deserialize, Serialize};
@@ -347,6 +348,25 @@ impl PublicKeyParams {
     }
 }
 
+/// Parameters for the X25519 base-mode receiver. Unknown fields are refused before decoding.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OpenParams {
+    pub credential_id: String,
+    pub enc_b64: String,
+    pub ciphertext_b64: String,
+    pub info_b64: String,
+    pub aad_b64: String,
+    #[serde(default)]
+    pub enrollment_token: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OpenResult {
+    pub plaintext_b64: credentials_core::secret::Secret<String>,
+    pub key_id: String,
+}
+
 /// The public material of an Ed25519 signing key.
 ///
 /// `credential.get` returns a record payload verbatim, and a signing-key payload is
@@ -543,6 +563,10 @@ pub enum ReadError {
     KindNotSignable,
     /// `credential.sign` was asked to sign more bytes than the cap allows.
     SignPayloadTooLarge,
+    KindNotOpenable,
+    OpenFailed,
+    OpenRateLimited,
+    InvalidParams,
 }
 
 /// The fleet-wide error-class vocabulary (error-class contract, ratified 2026-07-08;
@@ -597,14 +621,18 @@ impl ReadError {
             | ReadError::RefreshUnsupported
             | ReadError::KindNotGettable
             | ReadError::KindNotSignable
+            | ReadError::KindNotOpenable
+            | ReadError::OpenFailed
+            | ReadError::InvalidParams
             | ReadError::ReportStatusNotCredentialDeath => ErrorClass::Permanent,
             // The refresh token is dead; a human must run a fresh login.
             ReadError::NeedsReauth => ErrorClass::AuthRequired,
             // A refresh attempt failed (provider may recover) or the master key is
             // unresolvable right now (keychain/lease may recover).
-            ReadError::RefreshFailed | ReadError::StoreError | ReadError::VaultLocked => {
-                ErrorClass::Transient
-            }
+            ReadError::RefreshFailed
+            | ReadError::StoreError
+            | ReadError::VaultLocked
+            | ReadError::OpenRateLimited => ErrorClass::Transient,
             // Over the `get_many` cap, over the signing-payload cap, or a minimum-TTL
             // demand a fresh token cannot meet: reduce the request and retry. All are
             // bounds on ONE request rather than statements about the credential, which
@@ -764,12 +792,18 @@ pub struct StatusResult {
     pub stale_pending: Option<bool>,
 }
 
+/// A scoped-open connection can make requests again after the refusal window expires,
+/// even if it remains bound.
+const OPEN_REFUSAL_WINDOW: Duration = Duration::from_secs(60);
+const OPEN_REFUSAL_THRESHOLD: usize = 16;
+
 /// The read surface: the engine (for refresh-on-read), the per-connection limiter,
 /// and the actor used in audit entries this surface writes (refresh commits and
 /// report_auth_failure go in the same chain as admin writes).
 pub struct ReadSurface {
     engine: Arc<RefreshEngine>,
     limiter: Mutex<FetchLimiter>,
+    open_refusals: Mutex<HashMap<u64, (Instant, usize)>>,
     // A PRECOMPUTED health snapshot, refreshed off the probe path on a cadence (see
     // the daemon's health refresher). The subc health.check reply MUST be cheap and
     // in-memory (spec §2): a live store read on the probe path can queue behind a
@@ -1004,6 +1038,7 @@ impl ReadSurface {
         ReadSurface {
             engine,
             limiter: Mutex::new(limiter),
+            open_refusals: Mutex::new(HashMap::new()),
             health: std::sync::Mutex::new(initial),
             last_refresh_ms: std::sync::atomic::AtomicI64::new(now_ms()),
             #[cfg(test)]
@@ -1110,6 +1145,102 @@ impl ReadSurface {
         }
     }
 
+    /// Open one base-mode HPKE message. Count only refused scoped resolutions, so a
+    /// long-lived authorized consumer can open arbitrarily many messages.
+    pub async fn open(
+        &self,
+        connection_id: u64,
+        principal: Option<&Principal>,
+        params: &OpenParams,
+    ) -> Result<OpenResult, ReadError> {
+        // The transport frame cap is larger than this bound. Check the sum before
+        // allocating decoded buffers, then check the actual decoded byte count.
+        const ENC_BOUND: usize = credentials_core::signing::MAX_SIGN_PAYLOAD.div_ceil(3) * 4 + 12;
+        let fields = [
+            &params.enc_b64,
+            &params.ciphertext_b64,
+            &params.info_b64,
+            &params.aad_b64,
+        ];
+        if fields.iter().map(|field| field.len()).sum::<usize>() > ENC_BOUND {
+            return Err(ReadError::SignPayloadTooLarge);
+        }
+        let decoded = fields.map(|field| {
+            base64::engine::general_purpose::STANDARD
+                .decode(field.as_bytes())
+                .map_err(|_| ReadError::InvalidParams)
+        });
+        let [enc, ciphertext, info, aad] = decoded;
+        let (enc, ciphertext, info, aad) = (enc?, ciphertext?, info?, aad?);
+        if [enc.len(), ciphertext.len(), info.len(), aad.len()]
+            .iter()
+            .sum::<usize>()
+            > credentials_core::signing::MAX_SIGN_PAYLOAD
+        {
+            return Err(ReadError::SignPayloadTooLarge);
+        }
+        {
+            let mut counters = self.open_refusals.lock().await;
+            if let Some((start, count)) = counters.get(&connection_id).copied() {
+                if start.elapsed() >= OPEN_REFUSAL_WINDOW {
+                    counters.remove(&connection_id);
+                } else if count >= OPEN_REFUSAL_THRESHOLD {
+                    return Err(ReadError::OpenRateLimited);
+                }
+            }
+        }
+        let credential_id = match self
+            .resolve_key_address(
+                connection_id,
+                principal,
+                params.enrollment_token.as_deref(),
+                KeyAddress::Scoped(&params.credential_id),
+                GrantOperation::Open,
+            )
+            .await
+        {
+            Ok(id) => id,
+            Err(ReadError::NotFound) => {
+                let mut counters = self.open_refusals.lock().await;
+                let entry = counters.entry(connection_id).or_insert((Instant::now(), 0));
+                if entry.0.elapsed() >= OPEN_REFUSAL_WINDOW {
+                    *entry = (Instant::now(), 0);
+                }
+                entry.1 += 1;
+                return Err(ReadError::NotFound);
+            }
+            Err(error) => return Err(error),
+        };
+        let record = self
+            .engine
+            .store()
+            .get(&credential_id)
+            .map_err(|error| map_store_error(&error))?;
+        if record.kind != credentials_core::record::CredentialKind::KemKey {
+            return Err(ReadError::KindNotOpenable);
+        }
+        let diagnostic_id: String = credential_id.chars().take(128).collect();
+        let parsed = std::str::from_utf8(record.payload.expose())
+            .map_err(|_| "invalid UTF-8 container".to_string())
+            .and_then(credentials_core::kem::public_half);
+        let (_, key_id) = parsed.map_err(|error| {
+            eprintln!("kem credential {diagnostic_id:?} unusable: {error}");
+            ReadError::OpenFailed
+        })?;
+        let pem =
+            std::str::from_utf8(record.payload.expose()).map_err(|_| ReadError::OpenFailed)?;
+        let plaintext = credentials_core::secret::Secret::new(
+            credentials_core::kem::open_base(pem, &enc, &ciphertext, &info, &aad)
+                .map_err(|_| ReadError::OpenFailed)?,
+        );
+        Ok(OpenResult {
+            plaintext_b64: credentials_core::secret::Secret::new(
+                base64::engine::general_purpose::STANDARD.encode(plaintext.expose()),
+            ),
+            key_id,
+        })
+    }
+
     /// Return the public half of a signing-key record without ever serving its private
     /// payload.
     ///
@@ -1154,7 +1285,11 @@ impl ReadSurface {
 
         // Check the kind before parsing bytes so non-signing records receive the
         // same permanent refusal regardless of the secret they carry.
-        if record.kind != credentials_core::record::CredentialKind::SigningKey {
+        if !matches!(
+            record.kind,
+            credentials_core::record::CredentialKind::SigningKey
+                | credentials_core::record::CredentialKind::KemKey
+        ) {
             if params.credential_id.is_some() {
                 self.record_scoped_refusal(principal, &credential_id, ScopedReadRefusal::WrongKind);
             }
@@ -1162,6 +1297,15 @@ impl ReadSurface {
         }
 
         let pem = std::str::from_utf8(record.payload.expose()).map_err(|_| ReadError::Corrupt)?;
+        if record.kind == credentials_core::record::CredentialKind::KemKey {
+            let (public, key_id) =
+                credentials_core::kem::public_half(pem).map_err(|_| ReadError::Corrupt)?;
+            return Ok(PublicKeyResult {
+                public_key_hex: public.iter().map(|byte| format!("{byte:02x}")).collect(),
+                key_id,
+                algorithm: "x25519",
+            });
+        }
         let public = credentials_core::signing::public_key_ed25519(pem).map_err(|_| {
             // A record typed as a signing key but holding unusable bytes is vault
             // corruption, not a caller request error, just as it is for `sign`.
@@ -2185,8 +2329,16 @@ impl ReadSurface {
         }
     }
 
+    #[cfg(test)]
+    pub async fn expire_open_window_for_test(&self, connection_id: u64) {
+        if let Some((start, _)) = self.open_refusals.lock().await.get_mut(&connection_id) {
+            *start = Instant::now() - OPEN_REFUSAL_WINDOW;
+        }
+    }
+
     /// Forget a closed connection's limiter state.
     pub async fn drop_connection(&self, connection_id: u64) {
+        self.open_refusals.lock().await.remove(&connection_id);
         self.limiter.lock().await.drop_connection(connection_id);
     }
 }

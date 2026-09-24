@@ -4238,13 +4238,11 @@ fn every_verb_help_uses_a_flags_table_and_notes_layout() {
         .take_while(|line| !line.trim().is_empty())
         .map(|line| line.split_whitespace().next().expect("verb"))
         .collect();
-    // 30 = 27 + `enroll` + `approve` + `categories`. `approve` is not new: it has been dispatchable
-    // since August and was never in the table, which is exactly what
-    // `every_dispatchable_verb_appears_in_the_top_level_verb_table` found on its first
-    // run. This number is an anti-narrowing floor for the SCAN, not a budget for verbs.
+    // This is an anti-narrowing floor for the rendered verb-table scan, not a
+    // budget for verbs. It includes the KEM mint ceremony and the approve verb.
     assert_eq!(
         verbs.len(),
-        30,
+        31,
         "the rendered verb-table scan narrowed; set-category and reclassify are public verbs"
     );
     assert!(accepted_help_flags("login").contains(&"--no-browser".to_string()));
@@ -4521,7 +4519,7 @@ fn list_reads_a_store_one_migration_behind_and_says_so_on_stderr_only() {
     assert!(stdout.contains("apikey:behind-two"), "stdout: {stdout}");
     assert_eq!(
         stderr.trim(),
-        "note: store schema 8 is behind this binary's 10; categories and category grants \
+        "note: store schema 8 is behind this binary's 11; categories and category grants \
          appear after the daemon restarts (migration 9)",
         "the note must be verbatim and on stderr"
     );

@@ -189,36 +189,54 @@ impl GithubAppAdapter {
 
         let installations: Vec<Installation> = serde_json::from_slice(&response.body)
             .map_err(|error| RefreshError::Decode(error.to_string()))?;
-        installations
+        let mut matching = installations
             .into_iter()
-            .find(|installation| installation.client_id == client_id)
-            .map(|installation| installation.id)
-            .ok_or_else(|| {
-                // INVALID_GRANT, NOT DECODE, and the distinction is the difference
-                // between a retry loop and a repair.
-                //
-                // GitHub authenticated the App JWT and returned a well-formed
-                // installations list; none of them is this App. So the App is not
-                // installed anywhere, or the stored client_id belongs to a different
-                // App. Either way NO RETRY CAN SUCCEED — a human must install it in org
-                // settings — and every attempt costs a real App JWT mint against a
-                // vendor budget shared by every holder of that App.
-                //
-                // It was `Decode`, which maps to wire class `transient`, so a consumer
-                // doing the correct thing for a transient error retried forever and
-                // spent a mint each time. Found on 2026-08-27 while proving installation
-                // coverage before a fleet rollout: one of 23 Apps failed exactly here,
-                // and the class told its caller to keep trying.
-                //
-                // `InvalidGrant` is the disposition variant rather than an OAuth-specific
-                // one: it means UNSERVICEABLE UNTIL A HUMAN ACTS. Routing here latches
-                // `needs_reauth`, so an uninstalled App becomes visible in `ck auth list`
-                // and in health instead of being discovered at rollout time, and the
-                // repair after installing is `ck auth reactivate`.
-                RefreshError::InvalidGrant(
-                    "GitHub returned no installation for this App client_id".into(),
-                )
-            })
+            .filter(|installation| installation.client_id == client_id)
+            .map(|installation| installation.id);
+        let first = matching.next();
+        let others = matching.count();
+        // AN APP INSTALLED ON SEVERAL ACCOUNTS HAS NO ANSWER HERE, SO REFUSE RATHER THAN
+        // PICK. Every installation of one App shares its client_id, and this list is in
+        // whatever order GitHub returns. Taking the first would mint a token scoped to an
+        // account nobody chose and serve it as success: repositories on the intended
+        // account then fail with 404s that point at permissions, not at the vault. The
+        // record does not say which account it belongs to, so the vault cannot choose.
+        // Like the uninstalled case below, this is unserviceable until a human acts:
+        // remove the extra installations (or deposit a separate App per account), then
+        // `ck auth reactivate`.
+        if others > 0 {
+            return Err(RefreshError::InvalidGrant(format!(
+                "this App is installed on {} accounts, and the vault will not choose one; \
+                 remove the extra installations or use one App per account",
+                others + 1
+            )));
+        }
+        first.ok_or_else(|| {
+            // INVALID_GRANT, NOT DECODE, and the distinction is the difference
+            // between a retry loop and a repair.
+            //
+            // GitHub authenticated the App JWT and returned a well-formed
+            // installations list; none of them is this App. So the App is not
+            // installed anywhere, or the stored client_id belongs to a different
+            // App. Either way NO RETRY CAN SUCCEED — a human must install it in org
+            // settings — and every attempt costs a real App JWT mint against a
+            // vendor budget shared by every holder of that App.
+            //
+            // It was `Decode`, which maps to wire class `transient`, so a consumer
+            // doing the correct thing for a transient error retried forever and
+            // spent a mint each time. Found on 2026-08-27 while proving installation
+            // coverage before a fleet rollout: one of 23 Apps failed exactly here,
+            // and the class told its caller to keep trying.
+            //
+            // `InvalidGrant` is the disposition variant rather than an OAuth-specific
+            // one: it means UNSERVICEABLE UNTIL A HUMAN ACTS. Routing here latches
+            // `needs_reauth`, so an uninstalled App becomes visible in `ck auth list`
+            // and in health instead of being discovered at rollout time, and the
+            // repair after installing is `ck auth reactivate`.
+            RefreshError::InvalidGrant(
+                "GitHub returned no installation for this App client_id".into(),
+            )
+        })
     }
 
     fn auth_headers(authorization: &str) -> [(&str, &str); 4] {
@@ -519,6 +537,41 @@ mod tests {
              latches needs_reauth; got {error:?}. Decode/Transport here means wire class \
              `transient`, and a consumer retrying a permanently uninstallable App spends \
              one App JWT mint per attempt forever"
+        );
+    }
+
+    /// An App installed on two accounts must refuse, not mint for whichever GitHub lists
+    /// first. The second installation is the recorded one with a different id and
+    /// account, which is exactly what GitHub returns when the same App is installed
+    /// twice: both carry the App's client_id. No token request may be sent, because any
+    /// token minted here would be scoped to an account the record never named.
+    #[tokio::test]
+    async fn an_app_installed_on_two_accounts_refuses_rather_than_picking_one() {
+        let mut installations: Vec<serde_json::Value> =
+            serde_json::from_slice(RECORDED_INSTALLATIONS).expect("recorded fixture parses");
+        let mut second = installations[0].clone();
+        second["id"] = serde_json::json!(999_000_001u64);
+        second["account"]["login"] = serde_json::json!("someone-else");
+        installations.push(second);
+        let body = serde_json::to_vec(&installations).unwrap();
+        let transport = fixture_transport(vec![(200, body.as_slice())]);
+
+        let error = GithubAppAdapter::new()
+            .refresh(&credential(), &transport)
+            .await
+            .expect_err("an App on two accounts has no single installation to mint for");
+
+        match &error {
+            RefreshError::InvalidGrant(message) => assert!(
+                message.contains("installed on 2 accounts"),
+                "the refusal must name the count: {message}"
+            ),
+            other => panic!("ambiguity needs a human, not a retry; got {other:?}"),
+        }
+        assert_eq!(
+            transport.requests().len(),
+            1,
+            "only the installations list is fetched; no token may be minted"
         );
     }
 

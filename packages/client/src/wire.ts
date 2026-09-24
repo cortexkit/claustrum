@@ -34,6 +34,14 @@ export type ClaustrumClientOptions = {
 /**
  * Credential material plus optional non-secret identity metadata. Missing wire fields remain
  * `undefined`; a present non-string identity value rejects the response as invalid.
+ *
+ * An absent identity field means the vault had nothing to assert — NOT that identity failed.
+ * Consumers must not collapse absence into mismatch: assert on presence, refuse on a present
+ * difference, and serve (log, if it matters) when the field is missing. Absence proves neither
+ * the right identity nor the wrong one, so treating it as a failure converts a vault that could
+ * not answer into a consumer that cannot serve. The vault records no per-read success (at most
+ * the first scoped read per principal), and nothing at all when a consumer declines to serve, so
+ * an outage caused that way is visible only to the consumer that caused it.
  */
 export type ServedCredential = {
   material: string
@@ -49,6 +57,12 @@ export type ServedCredential = {
   /**
    * Provider account identity the served token executes under. Account-scoped routing joins this
    * value with `recordVersion`; it is neither the operator's credential label nor the bearer handle.
+   *
+   * BEST-EFFORT, NEVER GUARANTEED, including for JWT providers. The vault parses the claim live
+   * from the served access token and falls back to stored login-time identity; both legs can be
+   * empty, and the serve path yields nothing rather than fabricating an id. It is absent when the
+   * provider has no known claim, the token does not carry one, or no identity was captured at
+   * login. Do not gate serving on its presence.
    */
   accountId?: string
   /** Non-secret account display metadata captured at login. */

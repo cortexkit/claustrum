@@ -1091,6 +1091,58 @@ fn grants_keep_read_and_sign_rows_separate_and_sort_by_prefix_then_operation() {
     assert_eq!(&rows[2][..5], &["reserved", "agent", "exact", "z:", "sign"]);
 }
 
+/// One principal holding BOTH selector kinds and all three operations must still list.
+///
+/// The CLI refuses a grant inventory that does not arrive in stable order, and it checks
+/// that order on the TEXT of each field. A store that sorted by enum declaration order
+/// instead (exact before category, open after sign) passed every single-kind test and
+/// took `ck auth grants` and `ck auth status` down on the live vault, where one module
+/// holds exact and category grants side by side. The producer's order and the
+/// consumer's check only meet when both kinds and a non-alphabetical operation are
+/// present in one listing, so this test puts them there.
+#[test]
+fn grants_list_when_one_principal_holds_both_selector_kinds_and_every_operation() {
+    let vault = GrantCliVault::new("grants-mixed-kinds");
+    vault.bootstrap();
+
+    for (kind, selector, operation) in [
+        ("exact", "z:", "read"),
+        ("category", "llm-provider", "read"),
+        ("exact", "a:", "open"),
+        ("exact", "a:", "sign"),
+    ] {
+        let created = vault.run(&[
+            "grant",
+            "--principal",
+            "agent",
+            "--selector-kind",
+            kind,
+            "--selector",
+            selector,
+            "--operation",
+            operation,
+        ]);
+        assert!(
+            created.status.success(),
+            "grant {kind} {selector} {operation} failed: {}",
+            String::from_utf8_lossy(&created.stderr)
+        );
+    }
+
+    let listed = vault.run(&["grants"]);
+    let stdout = String::from_utf8_lossy(&listed.stdout);
+    assert!(
+        listed.status.success(),
+        "grants refused a mixed inventory: {}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    let rows = stdout
+        .lines()
+        .filter(|line| line.contains("reserved"))
+        .count();
+    assert_eq!(rows, 4, "every grant needs its own row: {stdout}");
+}
+
 #[test]
 fn revoked_grant_disappears_from_the_grants_listing() {
     let vault = GrantCliVault::new("grants-revoked");

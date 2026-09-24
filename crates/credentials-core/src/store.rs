@@ -5478,29 +5478,18 @@ fn read_grants_from_conn(
             created_at_ms: row.get(5)?,
         })
     };
-    let mut grants = if let (Some(kind), Some(id)) = (principal_kind, principal_id) {
+    // The SQL ORDER BY is the listing's order, and it sorts on the stored TEXT. Do not
+    // re-sort here by the enums: their declaration order (exact before category, open
+    // after sign) is not the text order, and `ck auth grants` refuses a listing whose
+    // text order is not strictly increasing, so a re-sort takes the operator's only
+    // grant inventory down as soon as one principal holds both selector kinds.
+    let grants = if let (Some(kind), Some(id)) = (principal_kind, principal_id) {
         stmt.query_map(rusqlite::params![kind, id], parse)?
             .collect::<rusqlite::Result<Vec<_>>>()?
     } else {
         stmt.query_map([], parse)?
             .collect::<rusqlite::Result<Vec<_>>>()?
     };
-    grants.sort_by(|a, b| {
-        (
-            &a.principal_kind,
-            &a.principal_id,
-            a.selector_kind,
-            &a.selector,
-            a.operation,
-        )
-            .cmp(&(
-                &b.principal_kind,
-                &b.principal_id,
-                b.selector_kind,
-                &b.selector,
-                b.operation,
-            ))
-    });
     Ok(grants)
 }
 
@@ -11959,11 +11948,12 @@ mod migration_10_tests {
                 .map(|grant| grant.operation)
                 .collect::<Vec<_>>(),
             [
+                GrantOperation::Open,
                 GrantOperation::Read,
-                GrantOperation::Sign,
-                GrantOperation::Open
+                GrantOperation::Sign
             ],
-            "the typed operation rank, not alphabetical SQL text, orders each selector"
+            "the stored TEXT orders each selector's operations: the SQL sorts by text and \
+             `ck auth grants` checks text order, so any other order refuses the whole listing"
         );
         store.with_conn(|conn| {
             conn.execute_batch("PRAGMA ignore_check_constraints = ON")?;

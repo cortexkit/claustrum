@@ -107,6 +107,7 @@ const OP_STATUS: &str = "credential.status";
 const OP_REPORT_AUTH_FAILURE: &str = "credential.report_auth_failure";
 const OP_SIGN: &str = "credential.sign";
 const OP_PUBLIC_KEY: &str = "credential.public_key";
+const OP_OPEN: &str = "credential.open";
 const OP_ENROLL_PROPOSE: &str = "auth.enroll_propose";
 const OP_ENROLL_POLL: &str = "auth.enroll_poll";
 const OP_ENROLL_ROTATE: &str = "auth.enroll_rotate";
@@ -1146,6 +1147,17 @@ async fn handle_read_request(
                 return invalid_params(writer, ver, channel, epoch, corr, &e.to_string()).await
             }
         },
+        OP_OPEN => match serde_json::from_value::<read_surface::OpenParams>(request.params) {
+            Ok(p) => match surface.open(connection_id, principal.as_ref(), &p).await {
+                Ok(result) => wrap_result(result),
+                Err(code) => wrap_result(json!({
+                    "error": read_surface::ErrorBody { code, class: code.class() }
+                })),
+            },
+            Err(error) => {
+                return invalid_params(writer, ver, channel, epoch, corr, &error.to_string()).await
+            }
+        },
         OP_PUBLIC_KEY => match serde_json::from_value::<PublicKeyParams>(request.params) {
             Ok(p) if p.has_exactly_one_authorization() => {
                 match surface
@@ -1753,6 +1765,11 @@ fn manifest(module_id: &str) -> ModuleManifest {
             ManagementOperation {
                 name: OP_PUBLIC_KEY.to_string(),
                 description: Some("Return a signing key's public half. Never returns private material.".to_string()),
+                kind: ManagementOperationKind::Query,
+            },
+            ManagementOperation {
+                name: OP_OPEN.to_string(),
+                description: Some("Open a base-mode HPKE message with a scoped KEM key.".to_string()),
                 kind: ManagementOperationKind::Query,
             },
             ManagementOperation {
@@ -5779,6 +5796,93 @@ mod tests {
         );
     }
 
+    /// The two read fences must both reject vault-held private keys; get_many uses
+    /// the handle get path and must not turn a refused item into a successful payload.
+    #[tokio::test]
+    async fn kem_key_payload_is_absent_from_get_get_many_and_get_scoped() {
+        let (surface, admin, store) = scoped_rig(87);
+        let id = "kem:recipient:private";
+        let pem = credentials_core::kem::generate_key().expect("generate recipient");
+        store
+            .create(
+                id,
+                &VaultRecord::new_static(
+                    CredentialKind::KemKey,
+                    "test",
+                    pem.as_bytes().to_vec(),
+                    None,
+                ),
+            )
+            .expect("deposit recipient");
+        let handle = credentials_core::store::mint_handle().expect("mint handle");
+        store
+            .put_handle_hash(&handle.hash, id, AuditCtx::admin(AuditOp::MintHandle))
+            .expect("store handle");
+        admin.record_bind(
+            87,
+            subc_protocol::Principal::Reserved {
+                module_id: "prefrontal-core".into(),
+            },
+        );
+        let expected = json!({ "code": "kind_not_gettable", "class": "permanent" });
+        let single = scoped_route_request(
+            &surface,
+            &admin,
+            87,
+            OP_GET,
+            json!({"handle": handle.raw.clone()}),
+        )
+        .await;
+        assert_eq!(
+            single["result"]["error"], expected,
+            "get must refuse private KEM payload"
+        );
+        let batch = scoped_route_request(
+            &surface,
+            &admin,
+            87,
+            OP_GET_MANY,
+            json!({"items": [{"handle": handle.raw.clone()}]}),
+        )
+        .await;
+        assert_eq!(
+            batch["results"][0]["error"], expected,
+            "get_many must refuse private KEM payload: {batch}"
+        );
+        let unknown = scoped_request(&surface, &admin, 87, "kem:recipient:unknown").await;
+        let ungranted = scoped_request(&surface, &admin, 87, id).await;
+        assert_eq!(
+            ungranted, unknown,
+            "a kind fence must not reveal an ungranted id"
+        );
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "prefrontal-core",
+                SelectorKind::Exact,
+                id,
+                GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .expect("read grant");
+        let scoped = scoped_request(&surface, &admin, 87, id).await;
+        assert_eq!(
+            scoped["result"]["error"], expected,
+            "get_scoped must refuse private KEM payload"
+        );
+        for reply in [&single, &batch, &scoped] {
+            let serialized = reply.to_string();
+            assert!(
+                !serialized.contains("\"payload\""),
+                "refusal must not carry any payload field: {serialized}"
+            );
+            assert!(
+                !serialized.contains(&pem),
+                "refusal must not carry private PEM text"
+            );
+        }
+    }
+
     /// `get_many` delegates every item to `get`; each response, including each refusal,
     /// stays at its input position.
     ///
@@ -5883,6 +5987,330 @@ mod tests {
             panic!("the item after two refusals must serve at index three");
         };
         assert_eq!(after.payload, b"after unknown refusal");
+    }
+
+    #[tokio::test]
+    async fn kem_open_sequence_zero_twice_and_failure_bodies_are_identical() {
+        use base64::Engine as _;
+        use credentials_core::kem::*;
+        let (surface, _admin, store) = scoped_rig(91);
+        let id = "kem:open:probe";
+        let pem = credentials_core::kem::generate_key().unwrap();
+        let (public, key_id) = credentials_core::kem::public_half(&pem).unwrap();
+        store
+            .create(
+                id,
+                &VaultRecord::new_static(CredentialKind::KemKey, "test", pem.into_bytes(), None),
+            )
+            .unwrap();
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "prefrontal-core",
+                SelectorKind::Exact,
+                id,
+                GrantOperation::Open,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .unwrap();
+        let principal = subc_protocol::Principal::Reserved {
+            module_id: "prefrontal-core".into(),
+        };
+        let (enc, ct) = seal_base(&public, b"plaintext", b"info", b"aad").unwrap();
+        let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        let mut params = read_surface::OpenParams {
+            credential_id: id.into(),
+            enc_b64: encode(&enc),
+            ciphertext_b64: encode(&ct),
+            info_b64: encode(b"info"),
+            aad_b64: encode(b"aad"),
+            enrollment_token: None,
+        };
+        for _ in 0..17 {
+            let opened = surface.open(901, Some(&principal), &params).await.unwrap();
+            assert_eq!(opened.plaintext_b64.expose(), &encode(b"plaintext"));
+            assert_eq!(opened.key_id, key_id);
+        }
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "prefrontal-core",
+                SelectorKind::Exact,
+                id,
+                GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .unwrap();
+        let public_reply = surface
+            .public_key(
+                901,
+                Some(&principal),
+                &read_surface::PublicKeyParams {
+                    handle: None,
+                    credential_id: Some(id.into()),
+                    enrollment_token: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(public_reply.algorithm, "x25519");
+        assert_eq!(public_reply.key_id, key_id);
+        assert_eq!(
+            public_reply.public_key_hex,
+            public
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        );
+        assert_eq!(
+            public_reply.key_id,
+            credentials_core::signing::key_id_for_public(&public)
+        );
+        let mut failures = Vec::new();
+        params.enc_b64 = encode(&[0u8; 32]);
+        failures.push(
+            surface
+                .open(901, Some(&principal), &params)
+                .await
+                .unwrap_err(),
+        );
+        params.enc_b64 = encode(&enc);
+        params.ciphertext_b64 = encode(b"wrong recipient ciphertext");
+        failures.push(
+            surface
+                .open(901, Some(&principal), &params)
+                .await
+                .unwrap_err(),
+        );
+        params.ciphertext_b64 = encode(&ct);
+        let mut tampered = ct.clone();
+        tampered[0] ^= 1;
+        params.ciphertext_b64 = encode(&tampered);
+        failures.push(
+            surface
+                .open(901, Some(&principal), &params)
+                .await
+                .unwrap_err(),
+        );
+        params.ciphertext_b64 = encode(&ct);
+        params.aad_b64 = encode(b"wrong aad");
+        failures.push(
+            surface
+                .open(901, Some(&principal), &params)
+                .await
+                .unwrap_err(),
+        );
+        params.aad_b64 = encode(b"aad");
+        params.info_b64 = encode(b"wrong info");
+        failures.push(
+            surface
+                .open(901, Some(&principal), &params)
+                .await
+                .unwrap_err(),
+        );
+        assert!(failures
+            .iter()
+            .all(|error| *error == read_surface::ReadError::OpenFailed));
+        let api_id = "apikey:open:other";
+        store
+            .create(
+                api_id,
+                &VaultRecord::new_static(CredentialKind::ApiKey, "test", b"api".to_vec(), None),
+            )
+            .unwrap();
+        params.credential_id = api_id.into();
+        let api_without_grant = surface
+            .open(901, Some(&principal), &params)
+            .await
+            .unwrap_err();
+        params.credential_id = "apikey:unknown".into();
+        assert_eq!(
+            api_without_grant,
+            surface
+                .open(901, Some(&principal), &params)
+                .await
+                .unwrap_err()
+        );
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "prefrontal-core",
+                SelectorKind::Exact,
+                api_id,
+                GrantOperation::Open,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .unwrap();
+        params.credential_id = api_id.into();
+        assert_eq!(
+            surface
+                .open(901, Some(&principal), &params)
+                .await
+                .unwrap_err(),
+            read_surface::ReadError::KindNotOpenable
+        );
+    }
+
+    #[tokio::test]
+    async fn open_refusal_sweep_and_repeated_unknown_id_trip_without_throttling_sign() {
+        use base64::Engine as _;
+        use credentials_core::kem::*;
+        let (surface, _admin, store) = scoped_rig(92);
+        let principal = subc_protocol::Principal::Reserved {
+            module_id: "prefrontal-core".into(),
+        };
+        let mut params = read_surface::OpenParams {
+            credential_id: String::new(),
+            enc_b64: base64::engine::general_purpose::STANDARD.encode([0u8; 32]),
+            ciphertext_b64: String::new(),
+            info_b64: String::new(),
+            aad_b64: String::new(),
+            enrollment_token: None,
+        };
+        for n in 0..16 {
+            params.credential_id = format!("kem:unknown:{n}");
+            assert_eq!(
+                surface
+                    .open(92, Some(&principal), &params)
+                    .await
+                    .unwrap_err(),
+                read_surface::ReadError::NotFound
+            );
+        }
+        assert_eq!(
+            surface
+                .open(92, Some(&principal), &params)
+                .await
+                .unwrap_err(),
+            read_surface::ReadError::OpenRateLimited
+        );
+        let sign = read_surface::SignParams {
+            handle: None,
+            credential_id: Some("signing:unknown".into()),
+            payload_b64: "".into(),
+            enrollment_token: None,
+        };
+        assert_eq!(
+            surface.sign(92, Some(&principal), &sign).await.unwrap_err(),
+            read_surface::ReadError::NotFound
+        );
+        for _ in 0..16 {
+            assert_eq!(
+                surface
+                    .open(93, Some(&principal), &params)
+                    .await
+                    .unwrap_err(),
+                read_surface::ReadError::NotFound
+            );
+        }
+        assert_eq!(
+            surface
+                .open(93, Some(&principal), &params)
+                .await
+                .unwrap_err(),
+            read_surface::ReadError::OpenRateLimited
+        );
+        let id = "kem:recovery";
+        let pem = credentials_core::kem::generate_key().unwrap();
+        let (public, _) = credentials_core::kem::public_half(&pem).unwrap();
+        store
+            .create(
+                id,
+                &VaultRecord::new_static(CredentialKind::KemKey, "test", pem.into_bytes(), None),
+            )
+            .unwrap();
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "prefrontal-core",
+                SelectorKind::Exact,
+                id,
+                GrantOperation::Open,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .unwrap();
+        let (enc, ct) = seal_base(&public, b"hello", b"", b"").unwrap();
+        params.credential_id = id.into();
+        params.enc_b64 = base64::engine::general_purpose::STANDARD.encode(enc);
+        params.ciphertext_b64 = base64::engine::general_purpose::STANDARD.encode(ct);
+        surface.expire_open_window_for_test(93).await;
+        assert_eq!(
+            surface
+                .open(93, Some(&principal), &params)
+                .await
+                .unwrap()
+                .plaintext_b64
+                .expose(),
+            &base64::engine::general_purpose::STANDARD.encode(b"hello")
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_encoding_open_reply_is_permanent_result_not_transport_invalid_params() {
+        let (surface, _admin, _) = scoped_rig(95);
+        let mut params = read_surface::OpenParams {
+            credential_id: "kem:unknown".into(),
+            enc_b64: String::new(),
+            ciphertext_b64: String::new(),
+            info_b64: String::new(),
+            aad_b64: String::new(),
+            enrollment_token: None,
+        };
+        for field in 0..4 {
+            let fields = [
+                &mut params.enc_b64,
+                &mut params.ciphertext_b64,
+                &mut params.info_b64,
+                &mut params.aad_b64,
+            ];
+            *fields.into_iter().nth(field).unwrap() = "!".into();
+            let code = surface.open(95, None, &params).await.unwrap_err();
+            assert_eq!(
+                crate::wrap_result(serde_json::json!({
+                    "error": read_surface::ErrorBody { code, class: code.class() }
+                })),
+                serde_json::json!({"result": {"error": {
+                    "code": "malformed_encoding", "class": "permanent"
+                }}}),
+                "malformed field index {field}"
+            );
+            let fields = [
+                &mut params.enc_b64,
+                &mut params.ciphertext_b64,
+                &mut params.info_b64,
+                &mut params.aad_b64,
+            ];
+            fields.into_iter().nth(field).unwrap().clear();
+        }
+    }
+
+    #[tokio::test]
+    async fn open_decoded_max_sign_payload_boundary_and_encoded_bound_precede_authorization() {
+        use base64::Engine as _;
+        let (surface, _admin, _) = scoped_rig(94);
+        let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        let mut params = read_surface::OpenParams {
+            credential_id: "kem:unknown".into(),
+            enc_b64: encode(&[0u8; 32]),
+            ciphertext_b64: String::new(),
+            info_b64: encode(&vec![0u8; credentials_core::signing::MAX_SIGN_PAYLOAD - 32]),
+            aad_b64: String::new(),
+            enrollment_token: None,
+        };
+        assert_eq!(
+            surface.open(94, None, &params).await.unwrap_err(),
+            read_surface::ReadError::NotFound
+        );
+        params.aad_b64 = encode(b"x");
+        assert_eq!(
+            surface.open(94, None, &params).await.unwrap_err(),
+            read_surface::ReadError::SignPayloadTooLarge
+        );
+        params.info_b64 = "!".repeat(1_398_117);
+        assert_eq!(
+            surface.open(94, None, &params).await.unwrap_err(),
+            read_surface::ReadError::SignPayloadTooLarge
+        );
     }
 
     #[tokio::test]
@@ -9120,11 +9548,14 @@ mod tests {
     /// cannot catch a handle that has been truncated, a token in an unfamiliar encoding,
     /// or an id that is sensitive only because of where it appeared.
     ///
-    /// So the policy is structural rather than filter-based: nothing a consumer sends
-    /// reaches a log line. Today that holds by inspection of three sites:
+    /// So the policy is structural rather than filter-based: ordinary consumer bytes
+    /// never reach a log line. One exception records a bounded, escaped credential id
+    /// and the container found for a corrupt stored KEM payload so operators can repair
+    /// the record without exposing plaintext or private key bytes. The sites are:
     ///
     ///   println!  `--version`, before any connection exists
     ///   eprintln! the logger failed to install (no request has been read yet)
+    ///   eprintln! a corrupt KEM record's capped escaped id and container only
     ///   warn!     route-epoch drop: frame-header integers and a value this module chose
     ///
     /// This test cannot see WHAT a new site logs. What it does is make a new site
@@ -9156,10 +9587,10 @@ mod tests {
         let observed = (println, eprintln, tracing, other);
         assert_eq!(
             observed,
-            (1, 1, 1, 0),
+            (1, 2, 1, 0),
             "the daemon's output sites changed (println, eprintln, tracing, other). Before \
-             updating this count, confirm the new site logs NOTHING a consumer sent -- no \
-             handle, token, credential id, or request field -- and add it to the list in \
+             updating this count, confirm the new site logs no secret and bounds any \
+             request field -- then add it to the list in \
              this test's doc comment. Log lines are durable files since fleet-logging r2."
         );
 

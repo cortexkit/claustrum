@@ -35,6 +35,7 @@ pub mod envelope;
 pub mod google_login;
 pub mod health;
 pub mod http;
+pub mod kem;
 pub mod key;
 pub mod oauth;
 pub mod oauth_login;

@@ -1652,3 +1652,7 @@ So the check cannot be a gate. Sixty findings on clean input is the alarm-that-a
 fires failure, and the first thing anyone does with such an alarm is stop reading it.
 The file-list anomaly is judgement-shaped and stays judgement-shaped.
 
+
+### KEM open probe
+
+After deploying the new vault, mint a disposable recipient with `ck auth mint-kem-key --id kem:probe` (save the printed `public_key_hex` and `key_id`). Grant `open` on the exact `kem:probe` selector to the test module with `ck auth grant --principal reserved:<module-id> --selector-kind exact --selector kem:probe --operation open`. Seal a message with `cargo run -p credentials-module --example kem_seal_probe -- <public_key_hex> <plaintext> > /tmp/kem-fields.json`, then run `cargo run -p credentials-module --example vault_read_probe -- --subc <connection-file> --as-module <module-id> --scoped-id kem:probe --open-fields /tmp/kem-fields.json`. The probe opens twice on the same bound connection: verify identical `plaintext_b64` values and a `key_id` matching the minted value. Check for exactly one `scoped_first_use` event for `(kem:probe, <module-id>, open)`, then revoke the grant with `ck auth revoke-grant` using the same selector and operation and remove the disposable key with `ck auth remove --id kem:probe`. The first production open for a real consumer still requires its own deployment verification; the disposable probe does not exercise that principal.

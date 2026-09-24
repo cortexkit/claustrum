@@ -499,6 +499,26 @@ const MIGRATIONS: &[Migration] = &[
                      ); \
                      INSERT INTO grants_generation (id, value) VALUES (1, 1);",
     },
+    // Only the operation CHECK changes. Copy stored rows without reconstructing
+    // grants or bumping the generation: no grant authority changes here.
+    Migration {
+        version: 11,
+        statements: "CREATE TABLE read_grants_v11 (\
+                         principal_kind    TEXT NOT NULL CHECK (principal_kind IN ('reserved','enrolled')), \
+                         principal_id      TEXT NOT NULL, \
+                         selector_kind     TEXT NOT NULL CHECK (selector_kind IN ('exact','category')), \
+                         selector          TEXT NOT NULL, \
+                         operation         TEXT NOT NULL CHECK(operation IN ('read', 'sign', 'open')), \
+                         created_at_ms     INTEGER NOT NULL, \
+                         PRIMARY KEY (principal_kind, principal_id, selector_kind, selector, operation)\
+                     ); \
+                     INSERT INTO read_grants_v11 \
+                         (principal_kind, principal_id, selector_kind, selector, operation, created_at_ms) \
+                     SELECT principal_kind, principal_id, selector_kind, selector, operation, created_at_ms \
+                     FROM read_grants; \
+                     DROP TABLE read_grants; \
+                     ALTER TABLE read_grants_v11 RENAME TO read_grants;",
+    },
 ];
 
 /// The newest store migration THIS BINARY knows how to apply.
@@ -543,7 +563,7 @@ pub const fn newest_migration_version() -> u32 {
 #[cfg(any(test, feature = "test-support"))]
 pub fn migrate_through_for_test(store: &SqliteStore, version: u32) -> Result<(), StoreError> {
     if version >= SELECTOR_SCHEMA_VERSION {
-        return EncryptedStore::migrate(store);
+        return EncryptedStore::migrate_inner(store, None, version);
     }
     let chain: Vec<Migration> = MIGRATIONS
         .iter()
@@ -587,6 +607,7 @@ pub struct RecordMeta {
 pub enum GrantOperation {
     Read,
     Sign,
+    Open,
 }
 
 impl GrantOperation {
@@ -594,6 +615,7 @@ impl GrantOperation {
         match self {
             Self::Read => "read",
             Self::Sign => "sign",
+            Self::Open => "open",
         }
     }
 }
@@ -605,8 +627,9 @@ impl std::str::FromStr for GrantOperation {
         match value {
             "read" => Ok(Self::Read),
             "sign" => Ok(Self::Sign),
+            "open" => Ok(Self::Open),
             _ => Err(format!(
-                "unknown grant operation '{value}' (expected read or sign)"
+                "unknown grant operation '{value}' (expected read, sign, or open)"
             )),
         }
     }
@@ -1486,16 +1509,20 @@ impl EncryptedStore {
     /// when the schema-9 store contains the category backfill: its audit entry cannot be
     /// written without first decrypting the existing chain key.
     pub fn migrate(store: &SqliteStore) -> Result<(), StoreError> {
-        Self::migrate_inner(store, None)
+        Self::migrate_inner(store, None, newest_migration_version())
     }
 
     /// Apply the schema chain with the master key available for migration 10's single
     /// `category.migrate` chain entry.
     pub fn migrate_with_key(store: &SqliteStore, key: &MasterKey) -> Result<(), StoreError> {
-        Self::migrate_inner(store, Some(key))
+        Self::migrate_inner(store, Some(key), newest_migration_version())
     }
 
-    fn migrate_inner(store: &SqliteStore, key: Option<&MasterKey>) -> Result<(), StoreError> {
+    fn migrate_inner(
+        store: &SqliteStore,
+        key: Option<&MasterKey>,
+        target: u32,
+    ) -> Result<(), StoreError> {
         let recorded = store.with_conn(read_schema_version)?;
         let newest = newest_migration_version();
         if recorded > newest {
@@ -1591,6 +1618,15 @@ impl EncryptedStore {
                 Some(load_migration_10_audit_key(store, key)?)
             };
             apply_migration_10(store, &plan, audit_key.as_deref())?;
+        }
+
+        if target >= 11 {
+            let migration_11 = MIGRATIONS
+                .iter()
+                .copied()
+                .filter(|m| m.version == 11)
+                .collect::<Vec<_>>();
+            store.migrate(SCHEMA_NAMESPACE, &migration_11)?;
         }
 
         store
@@ -5442,13 +5478,30 @@ fn read_grants_from_conn(
             created_at_ms: row.get(5)?,
         })
     };
-    if let (Some(kind), Some(id)) = (principal_kind, principal_id) {
+    let mut grants = if let (Some(kind), Some(id)) = (principal_kind, principal_id) {
         stmt.query_map(rusqlite::params![kind, id], parse)?
-            .collect::<rusqlite::Result<Vec<_>>>()
+            .collect::<rusqlite::Result<Vec<_>>>()?
     } else {
         stmt.query_map([], parse)?
-            .collect::<rusqlite::Result<Vec<_>>>()
-    }
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    grants.sort_by(|a, b| {
+        (
+            &a.principal_kind,
+            &a.principal_id,
+            a.selector_kind,
+            &a.selector,
+            a.operation,
+        )
+            .cmp(&(
+                &b.principal_kind,
+                &b.principal_id,
+                b.selector_kind,
+                &b.selector,
+                b.operation,
+            ))
+    });
+    Ok(grants)
 }
 
 /// List operation grants from a store file WITHOUT a lease or a master key, with the
@@ -6826,6 +6879,15 @@ mod tests {
             ],
             "every grant needs its own row, ordered by selector then operation; collapsing \
              read and sign hides half an authority set from the operator reading it"
+        );
+        let bytes = seen
+            .iter()
+            .map(|(selector, op)| format!("{selector} {op}\n"))
+            .collect::<String>();
+        assert_eq!(
+            bytes.as_bytes(),
+            b"a: sign\nz: read\nz: sign\n",
+            "read/sign output remains byte-identical"
         );
         let _ = std::fs::remove_dir_all(root);
     }
@@ -10042,7 +10104,7 @@ mod tests {
     fn the_newest_migration_version_is_pinned_because_the_manifest_declares_it() {
         assert_eq!(
             newest_migration_version(),
-            10,
+            11,
             "the newest migration changed. This value is DECLARED in the module manifest \
              as store_schema_version, so a supervisor comparing declared-against-actual \
              sees it. Update the literal, and note the manifest consequence."
@@ -11793,6 +11855,164 @@ mod migration_10_tests {
     }
 
     #[test]
+    fn migration_11_preserves_all_grants_generation_and_every_other_schema_object() {
+        let (root, store) = sqlite("migration-11", 117);
+        migrate_through_for_test(&store, 10).expect("schema 10");
+        store.with_conn(|conn| {
+            for (kind, id, selector_kind, selector, operation, timestamp) in [
+                ("reserved", "agent", "exact", "apikey:one", "read", 7),
+                ("enrolled", "consumer", "category", "llm-provider", "sign", 9),
+                ("reserved", "agent", "category", "github", "read", 11),
+                ("enrolled", "consumer", "exact", "apikey:two", "sign", 13),
+            ] {
+                conn.execute(
+                    "INSERT INTO read_grants (principal_kind, principal_id, selector_kind, selector, operation, created_at_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    rusqlite::params![kind, id, selector_kind, selector, operation, timestamp],
+                )?;
+            }
+            conn.execute("UPDATE grants_generation SET value = 42 WHERE id = 1", [])?;
+            Ok(())
+        }).expect("seed both selectors and operations");
+        let rows = |store: &SqliteStore| {
+            store.with_conn(|conn| {
+                let mut stmt = conn.prepare("SELECT principal_kind, principal_id, selector_kind, selector, operation, created_at_ms FROM read_grants ORDER BY principal_kind, principal_id, selector_kind, selector, operation")?;
+                let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, String>(4)?, r.get::<_, i64>(5)?)))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(rows)
+            }).expect("read all six grant columns")
+        };
+        let before_rows = rows(&store);
+        let before_objects = vault_schema_objects(&store);
+        let old_ddl = object_sql(&before_objects, "read_grants");
+        assert!(old_ddl.contains("CHECK(operation IN ('read', 'sign'))"));
+        assert_eq!(generation_of(&store), 42);
+        EncryptedStore::migrate(&store).expect("schema 11");
+        assert_eq!(schema_version_of(&store), 11);
+        assert_eq!(
+            rows(&store),
+            before_rows,
+            "every column of every grant survives"
+        );
+        assert_eq!(
+            generation_of(&store),
+            42,
+            "a DDL-only migration is not a grant mutation"
+        );
+        let after_objects = vault_schema_objects(&store);
+        let expected: Vec<_> = before_objects
+            .into_iter()
+            .map(|(kind, name, ddl)| {
+                if name == "read_grants" {
+                    (
+                        kind,
+                        name,
+                        ddl.replace(
+                            "CHECK(operation IN ('read', 'sign'))",
+                            "CHECK(operation IN ('read', 'sign', 'open'))",
+                        ),
+                    )
+                } else {
+                    (kind, name, ddl)
+                }
+            })
+            .collect();
+        assert_eq!(
+            after_objects, expected,
+            "only the operation CHECK may change"
+        );
+        let (grants, version) =
+            list_read_grants_read_only_with_schema(&root.join("store.db")).expect("schema 11 read");
+        assert_eq!(version, 11);
+        assert_eq!(grants.len(), 4);
+    }
+
+    #[test]
+    fn open_grants_round_trip_and_unknown_operations_are_refused_by_the_reader() {
+        let (root, store) = sqlite("open-grant", 118);
+        EncryptedStore::migrate(&store).expect("migrate");
+        assert!(GrantOperation::Read < GrantOperation::Sign);
+        assert!(GrantOperation::Sign < GrantOperation::Open);
+        for (text, operation) in [
+            ("read", GrantOperation::Read),
+            ("sign", GrantOperation::Sign),
+            ("open", GrantOperation::Open),
+        ] {
+            assert_eq!(text.parse::<GrantOperation>(), Ok(operation));
+            assert_eq!(operation.as_str(), text);
+        }
+        assert_eq!(
+            "other".parse::<GrantOperation>(),
+            Err("unknown grant operation 'other' (expected read, sign, or open)".to_string())
+        );
+        store.with_conn(|conn| {
+            for operation in ["open", "sign", "read"] {
+                conn.execute("INSERT INTO read_grants (principal_kind, principal_id, selector_kind, selector, operation, created_at_ms) VALUES ('reserved', 'agent', 'exact', 'apikey:one', ?1, 1)", [operation])?;
+            }
+            Ok(())
+        }).expect("seed all operations");
+        let path = root.join("store.db");
+        assert_eq!(
+            list_read_grants_read_only_with_schema(&path)
+                .expect("read open")
+                .0
+                .iter()
+                .map(|grant| grant.operation)
+                .collect::<Vec<_>>(),
+            [
+                GrantOperation::Read,
+                GrantOperation::Sign,
+                GrantOperation::Open
+            ],
+            "the typed operation rank, not alphabetical SQL text, orders each selector"
+        );
+        store.with_conn(|conn| {
+            conn.execute_batch("PRAGMA ignore_check_constraints = ON")?;
+            conn.execute("INSERT INTO read_grants (principal_kind, principal_id, selector_kind, selector, operation, created_at_ms) VALUES ('reserved', 'agent', 'exact', 'apikey:two', 'other', 2)", [])?;
+            Ok(())
+        }).expect("simulate corrupt operation");
+        let error = list_read_grants_read_only_with_schema(&path)
+            .expect_err("unknown operation refuses the entire inventory")
+            .to_string();
+        assert!(
+            error.contains("unknown grant operation 'other' (expected read, sign, or open)"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn schema_10_lease_free_readers_and_schema_12_shared_runner_remain_compatible() {
+        let (root, store) = sqlite("migration-compat", 119);
+        migrate_through_for_test(&store, 10).expect("schema 10");
+        store.with_conn(|conn| conn.execute("INSERT INTO read_grants (principal_kind, principal_id, selector_kind, selector, operation, created_at_ms) VALUES ('reserved', 'agent', 'exact', 'apikey:one', 'read', 1)", [])).expect("seed schema-10 grant");
+        let path = root.join("store.db");
+        assert_eq!(
+            list_meta_read_only_with_schema(&path)
+                .expect("behind metadata")
+                .1,
+            10
+        );
+        let (behind_grants, behind_version) =
+            list_read_grants_read_only_with_schema(&path).expect("behind grants");
+        assert_eq!(behind_version, 10);
+        assert_eq!(behind_grants[0].operation, GrantOperation::Read);
+        EncryptedStore::migrate(&store).expect("schema 11");
+        store.with_conn(|conn| conn.execute("INSERT INTO cortexkit_schema_version (namespace, version, applied_at_unix) VALUES (?1, 12, 0)", [SCHEMA_NAMESPACE])).expect("schema 12 fixture");
+        store
+            .migrate(SCHEMA_NAMESPACE, MIGRATIONS)
+            .expect("shared runner skips already-applied migrations");
+        assert_eq!(
+            list_meta_read_only_with_schema(&path)
+                .expect("ahead metadata")
+                .1,
+            12
+        );
+        let (ahead_grants, ahead_version) =
+            list_read_grants_read_only_with_schema(&path).expect("ahead grants");
+        assert_eq!(ahead_version, 12);
+        assert_eq!(ahead_grants[0].operation, GrantOperation::Read);
+    }
+
+    #[test]
     fn migration_10_applies_to_a_schema_9_store_and_lands_the_ddl_a_fresh_store_carries() {
         let (_migrated_root, migrated) = sqlite("ddl-migrated", 101);
         migrate_through_for_test(&migrated, 9).expect("migrate through version 9");
@@ -11809,11 +12029,11 @@ mod migration_10_tests {
             })
             .expect("seed a schema-9 store");
 
-        EncryptedStore::migrate(&migrated).expect("migration 10 applies to a schema-9 store");
+        migrate_through_for_test(&migrated, 10).expect("migration 10 applies to a schema-9 store");
         assert_eq!(schema_version_of(&migrated), 10);
 
         let (_fresh_root, fresh) = sqlite("ddl-fresh", 102);
-        EncryptedStore::migrate(&fresh).expect("a store created fresh at schema 10");
+        migrate_through_for_test(&fresh, 10).expect("a store created fresh at schema 10");
 
         let objects = vault_schema_objects(&migrated);
         assert_eq!(
@@ -11986,7 +12206,7 @@ mod migration_10_tests {
     #[test]
     fn the_grant_generation_reads_one_on_a_fresh_store_and_on_a_migrated_one() {
         let (_fresh_root, fresh) = sqlite("generation-fresh", 104);
-        EncryptedStore::migrate(&fresh).expect("fresh store at schema 10");
+        migrate_through_for_test(&fresh, 10).expect("fresh store at schema 10");
         assert_eq!(generation_of(&fresh), 1);
 
         // A store with rows for this migration to convert and date: its writes must not
@@ -12010,7 +12230,7 @@ mod migration_10_tests {
                 Ok(())
             })
             .expect("seed a schema-9 store");
-        EncryptedStore::migrate(&migrated).expect("migrate to 10");
+        migrate_through_for_test(&migrated, 10).expect("migrate to 10");
         assert_eq!(
             generation_of(&migrated),
             1,
@@ -12344,7 +12564,7 @@ mod migration_10_tests {
         // The lease-free readers, on the same file, with no write lease held.
         let (metas, schema) =
             list_meta_read_only_with_schema(&path).expect("lease-free metadata read");
-        assert_eq!(schema, 10);
+        assert_eq!(schema, 11);
         assert_eq!(metas.len(), 1);
         let (grants, _) = list_read_grants_read_only_with_schema(&path).expect("lease-free grants");
         assert_eq!(grants.len(), 1);

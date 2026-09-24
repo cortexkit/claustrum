@@ -31,8 +31,8 @@
 //!   mint-handle --id <id>                      print a fresh handle (once)
 //!   revoke-handle --handle <ckh_...> | --hash <hex>
 //!   revoke-all-handles --id <id>
-//!   grant --principal <module-id> --prefix <credential-prefix> --operation <read|sign>
-//!   revoke-grant --principal <module-id> --prefix <credential-prefix> --operation <read|sign>
+//!   grant --principal <module-id> --prefix <credential-prefix> --operation <read|sign|open>
+//!   revoke-grant --principal <module-id> --prefix <credential-prefix> --operation <read|sign|open>
 //!   grants
 //!   audit [--limit N] | verify-audit
 //!
@@ -322,6 +322,7 @@ fn run() -> Result<(), CliError> {
         "bootstrap" => cmd_bootstrap(&global),
         "put" => cmd_put(&global, &args),
         "mint-signing-key" => cmd_mint_signing_key(&global, &args),
+        "mint-kem-key" => cmd_mint_kem_key(&global, &args),
         "import" => cmd_import(&global, &args),
         "set-identity" => cmd_set_identity(&global, &args),
         "set-category" => cmd_set_category(&global, &args),
@@ -403,7 +404,7 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
             // that handler have to move together.
             "--client-id",
         ],
-        "mint-signing-key" => &["--id"],
+        "mint-signing-key" | "mint-kem-key" => &["--id"],
         "import" => &[
             "--source",
             "--provider",
@@ -456,7 +457,7 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
     // Boolean (valueless) flags accepted per command.
     let bool_flags: &[&str] = match command {
         "put" => &["--replace"],
-        "mint-signing-key" => &["--replace"],
+        "mint-signing-key" | "mint-kem-key" => &["--replace"],
         "import" => &["--replace", "--clear-identity"],
         "set-identity" => &["--clear"],
         "reclassify" => &["--from-registry", "--force"],
@@ -527,7 +528,8 @@ fn usage_short() -> String {
        categories          which categories exist and what they cover\n\
        approve             record a master-key approval before a signing window\n\
          put                 ingest an api key, session cookie, or opaque secret\n\
-         mint-signing-key    generate and custody a new Ed25519 signing key\n\
+          mint-signing-key    generate and custody a new Ed25519 signing key\n\
+          mint-kem-key        generate and custody a new X25519 recipient key\n\
          import              import from opencode/pi/gemini-cli/antigravity\n\
          set-identity        attach non-secret account metadata to one credential\n\
          set-category        replace/add/remove authorization categories\n\
@@ -705,6 +707,16 @@ fn help_verb(verb: &str) -> String {
              file; the previous token stops working the moment it is minted.\n\
              list is read-only and takes no lease. awaiting-poll means admitted but never\n\
              collected, which is a stalled handover rather than a live consumer."
+        }
+        "mint-kem-key" => {
+            "ck auth mint-kem-key --id kem:<name> [--replace]\n\
+             \n\
+             \x20 --id <id>   KEM credential id to create\n\
+             \x20 --replace   explicitly replace an existing id\n\
+             \n\
+             NOTES\n\
+             Generate a fresh X25519 recipient key and store its private half in the vault.\n\
+             Only the created id, public_key_hex and key_id are printed."
         }
         "mint-signing-key" => {
             "ck auth mint-signing-key --id signing:<provider>[:<generation>] [--replace]\n\
@@ -912,12 +924,12 @@ fn help_verb(verb: &str) -> String {
         "grant" => {
             "ck auth grant --principal <id|reserved:id>\n\
              \x20             --selector-kind <exact|category> --selector <value>\n\
-             \x20             --operation <read|sign>\n\
+             \x20             --operation <read|sign|open>\n\
              \n\
              \x20 --principal <id|reserved:id>  reserved module principal\n\
              \x20 --selector-kind <kind>        exact or category (required, no default)\n\
              \x20 --selector <value>            credential id text or bare category name\n\
-             \x20 --operation <read|sign>       authority to grant (`--op` is accepted)\n\
+             \x20 --operation <read|sign|open>       authority to grant (`--op` is accepted)\n\
              \n\
              NOTES\n\
              exact matches one credential id byte for byte. category matches every\n\
@@ -930,12 +942,12 @@ fn help_verb(verb: &str) -> String {
         "revoke-grant" => {
             "ck auth revoke-grant --principal <id|reserved:id>\n\
              \x20                    --selector-kind <exact|category> --selector <value>\n\
-             \x20                    --operation <read|sign>\n\
+             \x20                    --operation <read|sign|open>\n\
              \n\
              \x20 --principal <id|reserved:id>  reserved module principal\n\
              \x20 --selector-kind <kind>        exact or category (required, no default)\n\
              \x20 --selector <value>            credential id text or bare category name\n\
-             \x20 --operation <read|sign>       authority to revoke (`--op` is accepted)\n\
+             \x20 --operation <read|sign|open>       authority to revoke (`--op` is accepted)\n\
              \n\
              NOTES\n\
              Revocation is exact over principal, selector kind, selector, and operation."
@@ -1311,6 +1323,43 @@ fn cmd_mint_signing_key(global: &GlobalArgs, args: &[String]) -> Result<(), CliE
 }
 
 /// Wrap ring's in-memory PKCS#8 bytes in the only PEM armour the signing parser accepts.
+fn cmd_mint_kem_key(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
+    let id = required(args, "--id")?;
+    if !matches!(parse_credential_id(&id).method, Some(AuthMethod::Kem)) {
+        return Err(CliError::Usage("mint-kem-key requires a kem: id".into()));
+    }
+    let private_pem = credentials_core::kem::generate_key().map_err(CliError::Io)?;
+    let (public, key_id) =
+        credentials_core::kem::public_half(&private_pem).map_err(CliError::Io)?;
+    let record = VaultRecord::new_static(
+        AuthMethod::Kem.credential_kind(),
+        "operator",
+        private_pem.into_bytes(),
+        None,
+    );
+    let mode = if has_flag(args, "--replace") {
+        StoreMode::ReplaceUnconditional
+    } else {
+        StoreMode::Create
+    };
+    let audit_op = if has_flag(args, "--replace") {
+        AdminAuditOp::Overwrite
+    } else {
+        AdminAuditOp::Put
+    };
+    commit_admin(global, store_op(&id, record, audit_op, mode))?;
+    println!("created {id}");
+    println!(
+        "public_key_hex {}",
+        public
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    );
+    println!("key_id {key_id}");
+    Ok(())
+}
+
 fn pem_wrap_private_key(pkcs8: &[u8]) -> String {
     let encoded = base64::engine::general_purpose::STANDARD.encode(pkcs8);
     let mut pem = String::from("-----BEGIN PRIVATE KEY-----\n");
@@ -3295,7 +3344,7 @@ fn parse_grants(result: &serde_json::Value) -> Result<Vec<GrantRow>, CliError> {
         let operation = grant
             .get("operation")
             .and_then(serde_json::Value::as_str)
-            .filter(|operation| matches!(*operation, "read" | "sign"))
+            .filter(|operation| matches!(*operation, "read" | "sign" | "open"))
             .ok_or_else(|| {
                 CliError::RouteRefused(format!(
                     "admin.status returned an invalid grant operation at row {index}"
@@ -3338,6 +3387,21 @@ fn parse_grants(result: &serde_json::Value) -> Result<Vec<GrantRow>, CliError> {
         }
         prior = Some(order_key);
     }
+    grants.sort_by(|left, right| {
+        let key = |grant: &GrantRow| {
+            (
+                grant.principal_kind.clone(),
+                grant.principal_id.clone(),
+                grant.selector_kind.clone(),
+                grant.credential_prefix.clone(),
+                grant
+                    .operation
+                    .parse::<GrantOperation>()
+                    .expect("validated grant operation"),
+            )
+        };
+        key(left).cmp(&key(right))
+    });
     Ok(grants)
 }
 

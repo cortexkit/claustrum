@@ -41,6 +41,8 @@ pub enum AuthMethod {
     /// An Ed25519 private key that the vault exercises but never returns from the
     /// public-material operation.
     Signing,
+    /// A static X25519 recipient key held by the vault.
+    Kem,
 }
 
 impl AuthMethod {
@@ -56,6 +58,7 @@ impl AuthMethod {
             "copilot" => Some(AuthMethod::Copilot),
             "github_app" => Some(AuthMethod::GithubApp),
             "signing" => Some(AuthMethod::Signing),
+            "kem" => Some(AuthMethod::Kem),
             _ => None,
         }
     }
@@ -71,6 +74,7 @@ impl AuthMethod {
             AuthMethod::Copilot => "copilot",
             AuthMethod::GithubApp => "github_app",
             AuthMethod::Signing => "signing",
+            AuthMethod::Kem => "kem",
         }
     }
 
@@ -84,6 +88,7 @@ impl AuthMethod {
             AuthMethod::ApiKey => crate::record::CredentialKind::ApiKey,
             AuthMethod::Cookie => crate::record::CredentialKind::Cookie,
             AuthMethod::Signing => crate::record::CredentialKind::SigningKey,
+            AuthMethod::Kem => crate::record::CredentialKind::KemKey,
             AuthMethod::Oauth
             | AuthMethod::Antigravity
             | AuthMethod::Chatgpt
@@ -176,7 +181,10 @@ pub fn default_refresh_adapter(method: Option<AuthMethod>, provider: &str) -> Op
         Some(AuthMethod::Chatgpt) => Some("openai".to_string()),
         Some(AuthMethod::Copilot) => Some("github-copilot".to_string()),
         Some(AuthMethod::GithubApp) => Some("github_app".to_string()),
-        Some(AuthMethod::ApiKey) | Some(AuthMethod::Cookie) | Some(AuthMethod::Signing) => None,
+        Some(AuthMethod::ApiKey)
+        | Some(AuthMethod::Cookie)
+        | Some(AuthMethod::Signing)
+        | Some(AuthMethod::Kem) => None,
     }
 }
 
@@ -212,6 +220,23 @@ mod tests {
     /// A `signing:` id must consume its method segment instead of taking the
     /// provider-first compatibility path, whose implicit OAuth default would make a
     /// signing key look refreshable to every administrative view.
+    #[test]
+    fn kem_method_is_static_and_selects_kem_key() {
+        let parsed = parse_credential_id("kem:machine:2");
+        assert_eq!(parsed.method, Some(AuthMethod::Kem));
+        assert_eq!(parsed.provider, "machine");
+        assert_eq!(parsed.account.as_deref(), Some("2"));
+        assert_eq!(parsed.method.unwrap().as_str(), "kem");
+        assert_eq!(
+            parsed.method.unwrap().credential_kind(),
+            crate::record::CredentialKind::KemKey
+        );
+        assert_eq!(
+            default_refresh_adapter(parsed.method, &parsed.provider),
+            None
+        );
+    }
+
     #[test]
     fn signing_method_is_not_treated_as_legacy_oauth() {
         let parsed = parse_credential_id("signing:agent-assertion:7");

@@ -56,6 +56,7 @@ async fn main() {
     let mut sign_payload: Option<String> = None;
     let mut sign_payload_bytes: Option<Vec<u8>> = None;
     let mut public_key = false;
+    let mut open_fields: Option<PathBuf> = None;
     let mut provider_status: u16 = 401;
     let mut record_version: Option<u64> = None;
 
@@ -208,6 +209,7 @@ async fn main() {
                 sign_payload_bytes = Some(bytes);
             }
             "--public-key" => public_key = true,
+            "--open-fields" => open_fields = args.next().map(PathBuf::from),
             "--provider-status" => {
                 provider_status = args.next().and_then(|v| v.parse().ok()).unwrap_or(401);
             }
@@ -263,6 +265,7 @@ async fn main() {
             if scoped_id.is_some()
                 || status_ids.is_some()
                 || list_scoped
+                || open_fields.is_some()
                 || enroll_propose.is_some()
                 || enroll_poll.is_some() =>
         {
@@ -405,6 +408,46 @@ async fn main() {
             "[probe] report_auth_failure status={provider_status} record_version={version} -> {}",
             serde_json::to_string(&parsed).unwrap_or_default()
         );
+        return;
+    }
+
+    if let Some(path) = open_fields {
+        let id = scoped_id
+            .as_deref()
+            .expect("--open-fields requires --scoped-id");
+        let fields: Value = serde_json::from_slice(&std::fs::read(path).expect("read seal fields"))
+            .expect("seal fields JSON");
+        for corr in [90, 91] {
+            let frame = Frame::build(
+                FrameType::Request,
+                Flags::new(false, Priority::Interactive, false),
+                route_channel,
+                route_epoch,
+                corr,
+                serde_json::to_vec(&json!({ "method": "credential.open", "params": {
+                    "credential_id": id,
+                    "enc_b64": fields["enc_b64"],
+                    "ciphertext_b64": fields["ciphertext_b64"],
+                    "info_b64": fields["info_b64"],
+                    "aad_b64": fields["aad_b64"],
+                    "enrollment_token": enrollment_token,
+                }}))
+                .expect("encode open request"),
+            )
+            .expect("build open request");
+            write_frame(&mut stream, &frame)
+                .await
+                .expect("send open request");
+            loop {
+                let reply = read_frame_timeout(&mut stream).await;
+                if reply.header.corr == corr
+                    && matches!(reply.header.ty, FrameType::Response | FrameType::Error)
+                {
+                    println!("{}", String::from_utf8_lossy(&reply.body));
+                    break;
+                }
+            }
+        }
         return;
     }
 

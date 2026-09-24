@@ -103,3 +103,7 @@ base64 = "0.22"
 # RS256 GitHub App assertions. `ring` is already linked through rustls; declaring it
 # directly avoids adding RustCrypto's `rsa` crate and its open timing advisory.
 ring = "0.17.14"
+# RFC 9180 base-mode HPKE keeps the X25519 KEM, HKDF-SHA256 key schedule and
+# ChaCha20-Poly1305 AEAD together; ring cannot import a static X25519 recipient
+# through its ephemeral agreement API.
+hpke = "0.13"

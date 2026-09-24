@@ -39,8 +39,9 @@ export type ClaustrumClientOptions = {
  * Consumers must not collapse absence into mismatch: assert on presence, refuse on a present
  * difference, and serve (log, if it matters) when the field is missing. Absence proves neither
  * the right identity nor the wrong one, so treating it as a failure converts a vault that could
- * not answer into a consumer that cannot serve. The vault records nothing for a successful get,
- * so an outage caused that way is visible only to the consumer that caused it.
+ * not answer into a consumer that cannot serve. The vault records no per-read success (at most
+ * the first scoped read per principal), and nothing at all when a consumer declines to serve, so
+ * an outage caused that way is visible only to the consumer that caused it.
  */
 export type ServedCredential = {
   material: string

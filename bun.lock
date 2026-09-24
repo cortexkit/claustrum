@@ -11,9 +11,9 @@
     },
     "packages/client": {
       "name": "@cortexkit/claustrum-client",
-      "version": "0.1.0",
+      "version": "0.3.1",
       "dependencies": {
-        "@cortexkit/subc-client": "^0.8.1",
+        "@cortexkit/subc-client": "^0.16.0",
       },
     },
     "packages/opencode": {
@@ -33,7 +33,7 @@
 
     "@cortexkit/opencode-claustrum": ["@cortexkit/opencode-claustrum@workspace:packages/opencode"],
 
-    "@cortexkit/subc-client": ["@cortexkit/subc-client@0.8.1", "", {}, "sha512-8U9w3AnSff0QYlLVzcKOuTULakRtVpcGJrquGHxOQQlWZGzXZdCs8nroLMeoM2xhFGwxIh8xFk832w1KG6akAA=="],
+    "@cortexkit/subc-client": ["@cortexkit/subc-client@0.16.0", "", {}, "sha512-TYixR0E0CwBsZVi9G0gCfvr7bIrlDifVuP7Sy2CGlX29eCEZ3PXcda82S4VdM1paiAGsPBAm7TtQWvIJje4ArQ=="],
 
     "@msgpackr-extract/msgpackr-extract-darwin-arm64": ["@msgpackr-extract/msgpackr-extract-darwin-arm64@3.0.4", "", { "os": "darwin", "cpu": "arm64" }, "sha512-LCkGo6JDfaBhgST7UpPWgNgLINpcpabaHfyz5OBx75nUYxBsaEPxjnyNjWpeb/xBup/682QnBfRBy2/LvPutZQ=="],
 

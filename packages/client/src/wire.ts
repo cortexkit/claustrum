@@ -408,7 +408,14 @@ export class ClaustrumClient {
       error instanceof SubcCallError &&
       error.kind === 'terminal' &&
       error.code !== 'missing_identity' &&
-      error.code !== 'invalid_control_body'
+      error.code !== 'invalid_control_body' &&
+      // The daemon answers unknown_module only when no module with this id is
+      // registered or supervised at all; a vault that is restarting or warming up
+      // is reported as module_warming or target_unavailable, which the SDK already
+      // retries in place. A fresh connection to the same daemon gets the same
+      // answer, and the wasted reconnect would also start the reconnect backoff,
+      // leaving a genuinely wedged connection unable to recover for a minute.
+      error.code !== 'unknown_module'
     )
   }
 

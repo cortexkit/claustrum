@@ -393,6 +393,19 @@ describe('ClaustrumClient', () => {
     client.close()
   })
 
+  test('does not reconnect when the daemon reports the claustrum module as unknown', async () => {
+    let connects = 0
+    const client = await ClaustrumClient.connect({
+      connector: async () => {
+        connects += 1
+        return new FakeDaemon([], terminal('unknown_module')) as never
+      },
+    })
+    await expect(client.getCredential('a')).rejects.toMatchObject({ code: 'unknown_module' })
+    expect(connects).toBe(1)
+    client.close()
+  })
+
   test('decodes nested error classes and maps them to actions', async () => {
     const cases = [
       ['not_found', 'permanent', 'gone'],

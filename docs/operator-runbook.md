@@ -1129,6 +1129,29 @@ Two consequences an operator should know before restoring anything:
 
 The general test, which came out of designing browser-session capture: the question is
 not whether a backup ENTRY covers a path, but whether any backup TOOL reaches it.
+
+## Keys other machines see: rotate with `--replace`, never remove and re-mint
+
+Some signing keys have their public half announced to other machines, which remember
+it together with the key's `record_version`: the NATS bus's per-machine message key
+`signing:msgsig` (callosum announces it), and later the sealing key. For these, a
+rotation must keep the credential id and move the version forward:
+
+```
+ck auth mint-signing-key --id signing:msgsig --replace
+```
+
+`record_version` only increases within one row's life. `ck auth remove` deletes the row,
+and minting the same id again starts it back at version 1. A whole-store restore also
+brings back an older key at its older version. In both cases the version a peer
+remembers is now higher than what this machine serves. Peers keep the key they hold and
+callosum raises an alarm naming the version to beat ("rotate above N"). The fix is to
+run the `--replace` above until `record_version` (see `ck auth status`) is higher than
+N.
+
+The NATS account key (`signing:ck-bus-account:<generation>`) is not announced this way.
+It rotates to a new generation id, and ck-bus is re-granted on the new id.
+
 ## Rotating the master key
 
 `ck auth rotate-master-key` performs a crash-safe two-slot handover: it stages a new

@@ -739,8 +739,12 @@ where
                 body.code, body.message
             )))
         }
+        // Named in full because this line is the only record of the event: the process
+        // exits and the supervisor restarts it. The channel and epoch say whether a
+        // consumer's request reached us before the supervisor acknowledged the handshake.
         ty => Err(ModuleError::Message(format!(
-            "unexpected frame {ty:?} awaiting HELLO_ACK"
+            "unexpected frame {ty:?} awaiting HELLO_ACK (channel {}, epoch {}, corr {})",
+            frame.header.channel, frame.header.epoch, frame.header.corr
         ))),
     }
 }

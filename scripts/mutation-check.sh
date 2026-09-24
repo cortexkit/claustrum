@@ -173,11 +173,16 @@ run_arm() {
         # mutation is the whole condition replaced by `false`, never a conjunct: a
         # neighbouring clause in a disjunction absorbs a `false &&` prefix and leaves the
         # code completely unmutated while every applied-evidence check still passes.
+        #
+        # RE-ANCHORED AGAIN when the fence widened from `== SigningKey` to
+        # `is_vault_held_key()` (it now covers KEM keys too). Both the handle get path
+        # and get_scoped use that predicate, so the anchor includes the comment line
+        # unique to the scoped path; `replace_exact` refuses unless it matches once.
         replace_exact "$source" \
-          '                if record.kind == credentials_core::record::CredentialKind::SigningKey {
-                    // The caller'"'"'s read grant already authorized this record, so this is not' \
+          '                if record.kind.is_vault_held_key() {
+                    // The caller'"'"'s read grant already authorized this record, so this is' \
           '                if false {
-                    // The caller'"'"'s read grant already authorized this record, so this is not'
+                    // The caller'"'"'s read grant already authorized this record, so this is'
         ;;
       4)
         replace_exact "$source" \

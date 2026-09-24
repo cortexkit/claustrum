@@ -6246,6 +6246,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn malformed_encoding_open_reply_is_permanent_result_not_transport_invalid_params() {
+        let (surface, _admin, _) = scoped_rig(95);
+        let mut params = read_surface::OpenParams {
+            credential_id: "kem:unknown".into(),
+            enc_b64: String::new(),
+            ciphertext_b64: String::new(),
+            info_b64: String::new(),
+            aad_b64: String::new(),
+            enrollment_token: None,
+        };
+        for field in 0..4 {
+            let fields = [
+                &mut params.enc_b64,
+                &mut params.ciphertext_b64,
+                &mut params.info_b64,
+                &mut params.aad_b64,
+            ];
+            *fields.into_iter().nth(field).unwrap() = "!".into();
+            let code = surface.open(95, None, &params).await.unwrap_err();
+            assert_eq!(
+                crate::wrap_result(serde_json::json!({
+                    "error": read_surface::ErrorBody { code, class: code.class() }
+                })),
+                serde_json::json!({"result": {"error": {
+                    "code": "malformed_encoding", "class": "permanent"
+                }}}),
+                "malformed field index {field}"
+            );
+            let fields = [
+                &mut params.enc_b64,
+                &mut params.ciphertext_b64,
+                &mut params.info_b64,
+                &mut params.aad_b64,
+            ];
+            fields.into_iter().nth(field).unwrap().clear();
+        }
+    }
+
+    #[tokio::test]
     async fn open_decoded_max_sign_payload_boundary_and_encoded_bound_precede_authorization() {
         use base64::Engine as _;
         let (surface, _admin, _) = scoped_rig(94);

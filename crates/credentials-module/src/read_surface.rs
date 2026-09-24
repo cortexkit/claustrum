@@ -566,7 +566,8 @@ pub enum ReadError {
     KindNotOpenable,
     OpenFailed,
     OpenRateLimited,
-    InvalidParams,
+    /// A `credential.open` byte field is not strict standard base64.
+    MalformedEncoding,
 }
 
 /// The fleet-wide error-class vocabulary (error-class contract, ratified 2026-07-08;
@@ -623,7 +624,7 @@ impl ReadError {
             | ReadError::KindNotSignable
             | ReadError::KindNotOpenable
             | ReadError::OpenFailed
-            | ReadError::InvalidParams
+            | ReadError::MalformedEncoding
             | ReadError::ReportStatusNotCredentialDeath => ErrorClass::Permanent,
             // The refresh token is dead; a human must run a fresh login.
             ReadError::NeedsReauth => ErrorClass::AuthRequired,
@@ -1168,7 +1169,7 @@ impl ReadSurface {
         let decoded = fields.map(|field| {
             base64::engine::general_purpose::STANDARD
                 .decode(field.as_bytes())
-                .map_err(|_| ReadError::InvalidParams)
+                .map_err(|_| ReadError::MalformedEncoding)
         });
         let [enc, ciphertext, info, aad] = decoded;
         let (enc, ciphertext, info, aad) = (enc?, ciphertext?, info?, aad?);
@@ -2479,6 +2480,30 @@ mod error_class_tests {
                  vendoring it would branch on an incomplete set"
             );
         }
+        // The byte-decoder refusal is an in-result verdict, distinct from the
+        // transport invalid_params code; pin its literal code and class in both
+        // the producer and the consumer-facing table.
+        let encoding_body = ErrorBody {
+            code: ReadError::MalformedEncoding,
+            class: ReadError::MalformedEncoding.class(),
+        };
+        let emitted = serde_json::to_value(encoding_body).expect("encode error body");
+        assert_eq!(
+            emitted,
+            serde_json::json!({
+                "code": "malformed_encoding", "class": "permanent"
+            })
+        );
+        let row = "| `malformed_encoding` | permanent | a `credential.open` byte field failed strict standard base64 decoding |";
+        assert_eq!(
+            doc.matches(row).count(),
+            1,
+            "the table must pin exactly one malformed-encoding verdict"
+        );
+        assert!(
+            !doc.contains("| `invalid_params` |"),
+            "invalid_params is a transport Error, not an in-result code"
+        );
         // And the reverse: a class the doc names that the enum no longer emits would be
         // a consumer branching on something that can never arrive.
         for candidate in [

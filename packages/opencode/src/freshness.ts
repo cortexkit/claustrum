@@ -54,6 +54,14 @@ const OAUTH_FRESH_MS = 60_000;
 const OAUTH_TICK_MS = 60_000;
 const DEFAULT_MIN_TTL_MS = 270 * 60_000;
 const WARM_BUDGET_MS = 100;
+// Lateness at or above which a budget timer fire is treated as the result of a blocked
+// event loop (Bun drains an expired timer before buffered socket I/O after a synchronous
+// block past the budget) rather than a genuinely slow RPC.
+const WARM_LATE_MS = 20;
+// A single short re-arm when the first fire is late: long enough for the poll phase to
+// run and the buffered reply to land, short enough that a hung RPC still ends near
+// `WARM_BUDGET_MS + WARM_GRACE_MS`.
+const WARM_GRACE_MS = 10;
 const TRANSIENT_BACKOFF_MS = 60_000;
 const REAUTH_BACKOFF_MS = 5 * 60_000;
 export const DEFAULT_RETRY_AFTER_MS = 60_000;
@@ -255,9 +263,26 @@ export class FreshnessController {
   }
 
   async #bounded(account: FreshnessAccount, promise: Promise<ServedCredential | undefined>, expire = true): Promise<ServedCredential | undefined> {
+    const armedAt = this.#now();
     let timeout: unknown;
+    let resolveDeadline!: () => void;
+    let rearmed = false;
+    const fireTimer = () => {
+      // Expired-budget ordering fires the timer before buffered I/O drains after a
+      // synchronous loop block. A setImmediate defer was measured and did not help.
+      // Re-arming once gives the poll phase a chance to run before the verdict lands;
+      // a second late fire would just stall again, so the re-arm is bounded.
+      const late = this.#now() - armedAt - WARM_BUDGET_MS;
+      if (late >= WARM_LATE_MS && !rearmed) {
+        rearmed = true;
+        timeout = this.#setTimeout(fireTimer, WARM_GRACE_MS);
+      } else {
+        resolveDeadline();
+      }
+    };
     const deadline = new Promise<void>((resolve) => {
-      timeout = this.#setTimeout(() => resolve(), WARM_BUDGET_MS);
+      resolveDeadline = resolve;
+      timeout = this.#setTimeout(fireTimer, WARM_BUDGET_MS);
     });
     const result = await Promise.race([
       promise.then((served) => ({ kind: "completed" as const, served })),

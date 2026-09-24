@@ -5779,6 +5779,93 @@ mod tests {
         );
     }
 
+    /// The two read fences must both reject vault-held private keys; get_many uses
+    /// the handle get path and must not turn a refused item into a successful payload.
+    #[tokio::test]
+    async fn kem_key_payload_is_absent_from_get_get_many_and_get_scoped() {
+        let (surface, admin, store) = scoped_rig(87);
+        let id = "kem:recipient:private";
+        let pem = credentials_core::kem::generate_key().expect("generate recipient");
+        store
+            .create(
+                id,
+                &VaultRecord::new_static(
+                    CredentialKind::KemKey,
+                    "test",
+                    pem.as_bytes().to_vec(),
+                    None,
+                ),
+            )
+            .expect("deposit recipient");
+        let handle = credentials_core::store::mint_handle().expect("mint handle");
+        store
+            .put_handle_hash(&handle.hash, id, AuditCtx::admin(AuditOp::MintHandle))
+            .expect("store handle");
+        admin.record_bind(
+            87,
+            subc_protocol::Principal::Reserved {
+                module_id: "prefrontal-core".into(),
+            },
+        );
+        let expected = json!({ "code": "kind_not_gettable", "class": "permanent" });
+        let single = scoped_route_request(
+            &surface,
+            &admin,
+            87,
+            OP_GET,
+            json!({"handle": handle.raw.clone()}),
+        )
+        .await;
+        assert_eq!(
+            single["result"]["error"], expected,
+            "get must refuse private KEM payload"
+        );
+        let batch = scoped_route_request(
+            &surface,
+            &admin,
+            87,
+            OP_GET_MANY,
+            json!({"items": [{"handle": handle.raw.clone()}]}),
+        )
+        .await;
+        assert_eq!(
+            batch["results"][0]["error"], expected,
+            "get_many must refuse private KEM payload: {batch}"
+        );
+        let unknown = scoped_request(&surface, &admin, 87, "kem:recipient:unknown").await;
+        let ungranted = scoped_request(&surface, &admin, 87, id).await;
+        assert_eq!(
+            ungranted, unknown,
+            "a kind fence must not reveal an ungranted id"
+        );
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "prefrontal-core",
+                SelectorKind::Exact,
+                id,
+                GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .expect("read grant");
+        let scoped = scoped_request(&surface, &admin, 87, id).await;
+        assert_eq!(
+            scoped["result"]["error"], expected,
+            "get_scoped must refuse private KEM payload"
+        );
+        for reply in [&single, &batch, &scoped] {
+            let serialized = reply.to_string();
+            assert!(
+                !serialized.contains("\"payload\""),
+                "refusal must not carry any payload field: {serialized}"
+            );
+            assert!(
+                !serialized.contains(&pem),
+                "refusal must not carry private PEM text"
+            );
+        }
+    }
+
     /// `get_many` delegates every item to `get`; each response, including each refusal,
     /// stays at its input position.
     ///

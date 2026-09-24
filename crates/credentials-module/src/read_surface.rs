@@ -1209,10 +1209,9 @@ impl ReadSurface {
                     return err(ReadError::TtlUnsatisfiable);
                 }
                 let record = refreshed.record;
-                if record.kind == credentials_core::record::CredentialKind::SigningKey {
-                    // The handle resolved, so this is not an absence verdict: the signing key
-                    // remains serviceable through `sign` and `public_key`, but its private
-                    // PKCS#8 payload must never be served through `get`.
+                if record.kind.is_vault_held_key() {
+                    // The handle resolved, so this is not an absence verdict. The vault
+                    // exercises held keys itself; their private payloads cannot leave `get`.
                     return err(ReadError::KindNotGettable);
                 }
                 if record.payload.expose().is_empty() {
@@ -1589,10 +1588,9 @@ impl ReadSurface {
                     return err(ReadError::TtlUnsatisfiable);
                 }
                 let record = refreshed.record;
-                if record.kind == credentials_core::record::CredentialKind::SigningKey {
-                    // The caller's read grant already authorized this record, so this is not
-                    // an absence verdict: the signing key remains serviceable through `sign`
-                    // and `public_key`, but its private PKCS#8 payload never leaves `get`.
+                if record.kind.is_vault_held_key() {
+                    // The caller's read grant already authorized this record, so this is
+                    // not an absence verdict. Vault-held private keys cannot leave `get`.
                     return err(ReadError::KindNotGettable);
                 }
                 if record.payload.expose().is_empty() {

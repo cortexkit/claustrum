@@ -58,11 +58,19 @@ pub enum CredentialKind {
     /// for adapter selection, because the stored adapter can be overridden at write
     /// time, and the same argument applies to anything a writer controls).
     ///
-    /// A record of this kind is still served by `credential.get` if a handle
-    /// resolves to it -- the kind restricts what the vault will DO, not what it will
-    /// disclose. Callers that must never see key material should not hold a get-
-    /// capable handle for one.
+    /// The vault exercises this key and refuses ordinary payload reads even when
+    /// a get-capable handle resolves to it.
     SigningKey,
+    /// An X25519 recipient private key held for in-vault HPKE opening.
+    KemKey,
+}
+
+impl CredentialKind {
+    /// The vault exercises these keys itself; ordinary reads never serve their
+    /// private payloads, even to a caller holding a get-capable handle.
+    pub fn is_vault_held_key(self) -> bool {
+        matches!(self, Self::SigningKey | Self::KemKey)
+    }
 }
 
 /// The non-secret lifecycle state of a stored record.
@@ -591,6 +599,26 @@ mod tests {
             assert_eq!(record.kind, *expected_kind, "historic {id} kind survives");
             assert_eq!(record.payload.expose(), b"old");
         }
+    }
+
+    #[test]
+    fn held_key_kinds_are_never_ordinary_payloads() {
+        for kind in [CredentialKind::SigningKey, CredentialKind::KemKey] {
+            assert!(kind.is_vault_held_key());
+        }
+        for kind in [
+            CredentialKind::Oauth,
+            CredentialKind::ApiKey,
+            CredentialKind::Dsn,
+            CredentialKind::Cookie,
+            CredentialKind::Opaque,
+        ] {
+            assert!(!kind.is_vault_held_key());
+        }
+        assert_eq!(
+            serde_json::to_string(&CredentialKind::KemKey).unwrap(),
+            "\"kem_key\""
+        );
     }
 
     #[test]

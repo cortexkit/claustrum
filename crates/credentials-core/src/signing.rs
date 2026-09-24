@@ -178,7 +178,7 @@ pub fn sign_ed25519(key_pem: &str, payload: &[u8]) -> Result<Signature, SignErro
 }
 
 /// Derive the stable, public key identifier used by both signing and publication.
-fn key_id_for_public(public: &[u8]) -> String {
+pub fn key_id_for_public(public: &[u8]) -> String {
     let digest = ring::digest::digest(&ring::digest::SHA256, public);
     hex_lower(&digest.as_ref()[..8])
 }
@@ -197,6 +197,12 @@ mod tests {
     use super::*;
     use ring::rand::SystemRandom;
     use ring::signature::{UnparsedPublicKey, ED25519};
+
+    #[test]
+    fn existing_ed25519_key_id_is_byte_identical() {
+        let public = hex_bytes("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a");
+        assert_eq!(key_id_for_public(&public), "21fe31dfa154a261");
+    }
 
     fn a_key() -> (String, Vec<u8>) {
         let rng = SystemRandom::new();

@@ -86,6 +86,13 @@ pub const CATEGORY_SCHEMA_VERSION: u32 = 9;
 /// where the grant table still carries the old column name.
 pub const SELECTOR_SCHEMA_VERSION: u32 = 10;
 
+/// The migration that records who proposed each pending enrollment.
+///
+/// The lease-free enrollment reader branches on it for the same placement-window reason
+/// as the two constants above: below it `pending_enrollments` has no proposer columns,
+/// and every row there is read with an unknown proposer rather than failing the listing.
+pub const ENROLLMENT_PROPOSER_SCHEMA_VERSION: u32 = 12;
+
 /// The audit ops that DEPOSIT a credential, so the earliest entry carrying one of
 /// them is that credential's birth instant.
 ///
@@ -518,6 +525,18 @@ const MIGRATIONS: &[Migration] = &[
                      FROM read_grants; \
                      DROP TABLE read_grants; \
                      ALTER TABLE read_grants_v11 RENAME TO read_grants;",
+    },
+    // Who proposed a pending enrollment, stored on the request row itself so an
+    // operator approving it can see where it came from. The same principal is also
+    // written to `auth_events` at propose time, but that row carries no request id and
+    // the table is a bounded ring, so it cannot be joined back to a request reliably.
+    //
+    // Nullable, and existing rows are deliberately left NULL: nothing on disk holds
+    // their proposer reliably, and a guessed value would read as an observed one.
+    Migration {
+        version: 12,
+        statements: "ALTER TABLE pending_enrollments ADD COLUMN proposer_kind TEXT; \
+                     ALTER TABLE pending_enrollments ADD COLUMN proposer_id TEXT;",
     },
 ];
 
@@ -1620,13 +1639,15 @@ impl EncryptedStore {
             apply_migration_10(store, &plan, audit_key.as_deref())?;
         }
 
-        if target >= 11 {
-            let migration_11 = MIGRATIONS
-                .iter()
-                .copied()
-                .filter(|m| m.version == 11)
-                .collect::<Vec<_>>();
-            store.migrate(SCHEMA_NAMESPACE, &migration_11)?;
+        // Every migration after 10 is declarative again, so the shared runner applies
+        // them through `target`; it skips any the store has already recorded.
+        let after_selector = MIGRATIONS
+            .iter()
+            .copied()
+            .filter(|m| m.version > SELECTOR_SCHEMA_VERSION && m.version <= target)
+            .collect::<Vec<_>>();
+        if !after_selector.is_empty() {
+            store.migrate(SCHEMA_NAMESPACE, &after_selector)?;
         }
 
         store
@@ -1691,7 +1712,8 @@ impl EncryptedStore {
     /// Propose one consumer name. The request id is returned once; only the caller's
     /// separately persisted request secret can resume the ceremony.
     ///
-    /// `principal` is whoever the bus says sent it, recorded on the `auth_events` row. A
+    /// `principal` is whoever the bus says sent it, recorded on the `auth_events` row and,
+    /// for a new request, on the pending row itself so `ck auth enroll list` can show it. A
     /// proposal is anonymous by design, but anonymous is not the same as unattributed: a
     /// host-launched consumer arrives as `direct`, a supervised one as `reserved:<id>`, and
     /// that difference is what tells an operator whether a stray proposal came from a
@@ -1820,17 +1842,23 @@ impl EncryptedStore {
                     return Ok(Err(EnrollmentRefusal::PendingQueueFull));
                 }
 
+                // The proposer is written only here, on the INSERT. The resume path above
+                // returns the original row untouched, so a later caller presenting the same
+                // name and secret cannot rewrite who the operator sees as the proposer.
                 tx.execute(
                     "INSERT INTO pending_enrollments \
                  (request_id, proposed_name, final_name, enrollment_id, request_secret_hash, \
-                  state, approved_by, approved_at_ms, created_at_ms, expires_at_ms) \
-                 VALUES (?1, ?2, NULL, NULL, ?3, 'pending', NULL, NULL, ?4, ?5)",
+                  state, approved_by, approved_at_ms, created_at_ms, expires_at_ms, \
+                  proposer_kind, proposer_id) \
+                 VALUES (?1, ?2, NULL, NULL, ?3, 'pending', NULL, NULL, ?4, ?5, ?6, ?7)",
                     rusqlite::params![
                         request_id,
                         proposed_name,
                         request_secret_hash,
                         now,
-                        expires_at_ms
+                        expires_at_ms,
+                        principal.map(AuthEventPrincipal::kind),
+                        principal.and_then(AuthEventPrincipal::id),
                     ],
                 )?;
                 append_enrollment_event_tx(tx, ENROLL_PROPOSE_SUBJECT, "accepted", now, principal)?;
@@ -5540,9 +5568,31 @@ pub struct EnrollmentRow {
     pub state: String,
     pub created_at_ms: i64,
     pub token_generation: i64,
+    /// Who proposed a pending request: `direct`, `reserved`, `enrolled` or `unverified`.
+    /// `None` for live enrollments, for requests proposed before migration 12, and for
+    /// every row of a store that has not reached migration 12 yet.
+    pub proposer_kind: Option<String>,
+    /// The proposer's id: the module id for `reserved`, the enrollment name for
+    /// `enrolled`, and `None` for kinds that carry no id.
+    pub proposer_id: Option<String>,
 }
 
 /// List pending requests and live enrollments WITHOUT a lease or a master key.
+///
+/// A thin wrapper over [`list_enrollments_read_only_with_schema`] for callers that want
+/// only the rows.
+pub fn list_enrollments_read_only(
+    store_path: &std::path::Path,
+) -> Result<Vec<EnrollmentRow>, StoreOpError> {
+    list_enrollments_read_only_with_schema(store_path).map(|(rows, _)| rows)
+}
+
+/// List pending requests and live enrollments WITHOUT a lease or a master key, with the
+/// store's recorded schema version.
+///
+/// A store below [`ENROLLMENT_PROPOSER_SCHEMA_VERSION`] has no proposer columns, so its
+/// pending rows are read with no proposer; the version rides along so the caller can say
+/// the proposer is missing because the store is behind, not because nobody proposed.
 ///
 /// LEASE-FREE FOR THE SAME REASON EVERY OTHER READ VERB IS: the moment an operator asks
 /// who is waiting for approval is the moment the vault is running, and a diagnostic that
@@ -5553,22 +5603,30 @@ pub struct EnrollmentRow {
 /// TOKEN HASHES ARE NOT RETURNED and no caller should add them. They are not secrets, but
 /// publishing them invites a reader to treat one as an identifier for a consumer, and the
 /// only legitimate use of that column is the resolver's equality check.
-pub fn list_enrollments_read_only(
+pub fn list_enrollments_read_only_with_schema(
     store_path: &std::path::Path,
-) -> Result<Vec<EnrollmentRow>, StoreOpError> {
+) -> Result<(Vec<EnrollmentRow>, u32), StoreOpError> {
     let map = |e: rusqlite::Error| StoreOpError::from(StoreError::Backend(e.to_string()));
     let conn = rusqlite::Connection::open_with_flags(
         format!("file:{}?mode=ro", store_path.display()),
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
     )
     .map_err(map)?;
+    let schema_version = read_schema_version(&conn).map_err(map)?;
     let mut rows: Vec<EnrollmentRow> = Vec::new();
 
+    // Selecting NULL for the proposer below migration 12 keeps one row parser for both
+    // shapes; selecting the real columns there would fail the whole listing.
+    let proposer_columns = if schema_version >= ENROLLMENT_PROPOSER_SCHEMA_VERSION {
+        "proposer_kind, proposer_id"
+    } else {
+        "NULL, NULL"
+    };
     let mut pending = conn
-        .prepare(
-            "SELECT request_id, proposed_name, state, created_at_ms FROM pending_enrollments \
-             WHERE state = 'pending' ORDER BY created_at_ms",
-        )
+        .prepare(&format!(
+            "SELECT request_id, proposed_name, state, created_at_ms, {proposer_columns} \
+             FROM pending_enrollments WHERE state = 'pending' ORDER BY created_at_ms"
+        ))
         .map_err(map)?;
     let mapped = pending
         .query_map([], |row| {
@@ -5578,6 +5636,8 @@ pub fn list_enrollments_read_only(
                 state: row.get(2)?,
                 created_at_ms: row.get(3)?,
                 token_generation: 0,
+                proposer_kind: row.get(4)?,
+                proposer_id: row.get(5)?,
             })
         })
         .map_err(map)?;
@@ -5607,13 +5667,15 @@ pub fn list_enrollments_read_only(
                 },
                 created_at_ms: row.get(1)?,
                 token_generation: row.get(2)?,
+                proposer_kind: None,
+                proposer_id: None,
             })
         })
         .map_err(map)?;
     for row in mapped {
         rows.push(row.map_err(map)?);
     }
-    Ok(rows)
+    Ok((rows, schema_version))
 }
 
 /// Count open refresh intents from a store file WITHOUT a lease or a master key.
@@ -10093,7 +10155,7 @@ mod tests {
     fn the_newest_migration_version_is_pinned_because_the_manifest_declares_it() {
         assert_eq!(
             newest_migration_version(),
-            11,
+            12,
             "the newest migration changed. This value is DECLARED in the module manifest \
              as store_schema_version, so a supervisor comparing declared-against-actual \
              sees it. Update the literal, and note the manifest consequence."
@@ -11875,7 +11937,9 @@ mod migration_10_tests {
         let old_ddl = object_sql(&before_objects, "read_grants");
         assert!(old_ddl.contains("CHECK(operation IN ('read', 'sign'))"));
         assert_eq!(generation_of(&store), 42);
-        EncryptedStore::migrate(&store).expect("schema 11");
+        // Through 11 only: this pins what migration 11 alone changes, and a later
+        // migration's DDL would otherwise show up in the object comparison below.
+        migrate_through_for_test(&store, 11).expect("schema 11");
         assert_eq!(schema_version_of(&store), 11);
         assert_eq!(
             rows(&store),
@@ -11913,6 +11977,130 @@ mod migration_10_tests {
             list_read_grants_read_only_with_schema(&root.join("store.db")).expect("schema 11 read");
         assert_eq!(version, 11);
         assert_eq!(grants.len(), 4);
+    }
+
+    fn pending_proposer(
+        store: &EncryptedStore,
+        request_id: &str,
+    ) -> (Option<String>, Option<String>) {
+        store
+            .with_raw_conn(|conn| {
+                conn.query_row(
+                    "SELECT proposer_kind, proposer_id FROM pending_enrollments WHERE request_id = ?1",
+                    [request_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
+            .expect("read the stored proposer")
+    }
+
+    #[test]
+    fn a_proposal_stores_its_proposer_on_the_pending_row() {
+        let (root, store) = rig("proposer-stored", 121);
+        let reserved = store
+            .propose_enrollment_by(
+                Some(AuthEventPrincipal::Reserved("insula")),
+                "module-consumer",
+                &"a".repeat(64),
+            )
+            .expect("reserved propose");
+        let direct = store
+            .propose_enrollment_by(
+                Some(AuthEventPrincipal::Direct),
+                "host-consumer",
+                &"b".repeat(64),
+            )
+            .expect("direct propose");
+        assert_eq!(
+            pending_proposer(&store, &reserved.request_id),
+            (Some("reserved".to_string()), Some("insula".to_string()))
+        );
+        assert_eq!(
+            pending_proposer(&store, &direct.request_id),
+            (Some("direct".to_string()), None),
+            "a direct principal carries no id"
+        );
+
+        // The lease-free reader carries the same two fields out to the CLI.
+        let (rows, version) = list_enrollments_read_only_with_schema(&root.join("store.db"))
+            .expect("lease-free enrollment read");
+        assert_eq!(version, newest_migration_version());
+        let row = rows
+            .iter()
+            .find(|row| row.key == reserved.request_id)
+            .expect("reserved row listed");
+        assert_eq!(row.proposer_kind.as_deref(), Some("reserved"));
+        assert_eq!(row.proposer_id.as_deref(), Some("insula"));
+    }
+
+    #[test]
+    fn resuming_a_proposal_as_another_principal_keeps_the_original_proposer() {
+        let (_root, store) = rig("proposer-resume", 122);
+        let secret = "c".repeat(64);
+        let first = store
+            .propose_enrollment_by(
+                Some(AuthEventPrincipal::Reserved("insula")),
+                "resumed-consumer",
+                &secret,
+            )
+            .expect("first propose");
+        let resumed = store
+            .propose_enrollment_by(
+                Some(AuthEventPrincipal::Direct),
+                "resumed-consumer",
+                &secret,
+            )
+            .expect("same name and secret resumes");
+        assert_eq!(
+            resumed.request_id, first.request_id,
+            "a resume, not a new row"
+        );
+        assert_eq!(
+            pending_proposer(&store, &first.request_id),
+            (Some("reserved".to_string()), Some("insula".to_string())),
+            "a resume must not rewrite who the operator sees as the proposer"
+        );
+    }
+
+    #[test]
+    fn migration_12_leaves_existing_pending_rows_without_a_proposer_and_a_behind_read_works() {
+        let (root, store) = sqlite("migration-12", 123);
+        migrate_through_for_test(&store, 11).expect("schema 11");
+        store
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO pending_enrollments \
+                     (request_id, proposed_name, request_secret_hash, state, created_at_ms, expires_at_ms) \
+                     VALUES ('req-before-12', 'older-consumer', ?1, 'pending', 1, 9999999999999)",
+                    ["d".repeat(64)],
+                )
+            })
+            .expect("seed a schema-11 pending row");
+        let path = root.join("store.db");
+
+        // The placement window: a newer reader on a store the daemon has not migrated.
+        let (behind_rows, behind_version) =
+            list_enrollments_read_only_with_schema(&path).expect("schema-11 enrollment read");
+        assert_eq!(behind_version, 11);
+        assert_eq!(behind_rows.len(), 1);
+        assert_eq!(behind_rows[0].key, "req-before-12");
+        assert_eq!(behind_rows[0].proposer_kind, None);
+        assert_eq!(behind_rows[0].proposer_id, None);
+
+        EncryptedStore::migrate(&store).expect("schema 12");
+        assert_eq!(
+            schema_version_of(&store),
+            ENROLLMENT_PROPOSER_SCHEMA_VERSION
+        );
+        let (rows, version) =
+            list_enrollments_read_only_with_schema(&path).expect("schema-12 enrollment read");
+        assert_eq!(version, ENROLLMENT_PROPOSER_SCHEMA_VERSION);
+        assert_eq!(rows.len(), 1, "the existing request survives the migration");
+        assert_eq!(
+            (rows[0].proposer_kind.clone(), rows[0].proposer_id.clone()),
+            (None, None),
+            "no backfill: a pre-12 row has no reliable proposer to copy"
+        );
     }
 
     #[test]
@@ -11985,7 +12173,9 @@ mod migration_10_tests {
             list_read_grants_read_only_with_schema(&path).expect("behind grants");
         assert_eq!(behind_version, 10);
         assert_eq!(behind_grants[0].operation, GrantOperation::Read);
-        EncryptedStore::migrate(&store).expect("schema 11");
+        // Through 11, so the recorded-12 row below stands in for a migration 12 the
+        // shared runner must treat as already applied.
+        migrate_through_for_test(&store, 11).expect("schema 11");
         store.with_conn(|conn| conn.execute("INSERT INTO cortexkit_schema_version (namespace, version, applied_at_unix) VALUES (?1, 12, 0)", [SCHEMA_NAMESPACE])).expect("schema 12 fixture");
         store
             .migrate(SCHEMA_NAMESPACE, MIGRATIONS)
@@ -12114,6 +12304,9 @@ mod migration_10_tests {
                 column("approved_at_ms", "INTEGER", false, None, false),
                 column("created_at_ms", "INTEGER", true, None, false),
                 column("expires_at_ms", "INTEGER", true, None, false),
+                // Migration 12: nullable, because rows proposed before it carry none.
+                column("proposer_kind", "TEXT", false, None, false),
+                column("proposer_id", "TEXT", false, None, false),
             ],
             "everything an approval fills in is nullable at proposal time"
         );
@@ -12554,7 +12747,7 @@ mod migration_10_tests {
         // The lease-free readers, on the same file, with no write lease held.
         let (metas, schema) =
             list_meta_read_only_with_schema(&path).expect("lease-free metadata read");
-        assert_eq!(schema, 11);
+        assert_eq!(schema, newest_migration_version());
         assert_eq!(metas.len(), 1);
         let (grants, _) = list_read_grants_read_only_with_schema(&path).expect("lease-free grants");
         assert_eq!(grants.len(), 1);

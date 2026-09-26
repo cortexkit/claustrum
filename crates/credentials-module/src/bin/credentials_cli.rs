@@ -4375,12 +4375,44 @@ fn cmd_enroll_list(global: &GlobalArgs) -> Result<(), CliError> {
             db.display()
         )));
     }
-    let rows = credentials_core::store::list_enrollments_read_only(&db)
+    let (rows, schema) = credentials_core::store::list_enrollments_read_only_with_schema(&db)
         .map_err(|error| CliError::Usage(format!("read enrollments: {error}")))?;
     for line in render_enroll_list(&rows) {
         println!("{line}");
     }
+    print_enroll_store_behind_note(schema);
     Ok(())
+}
+
+/// Say, once and on stderr, that this listing cannot show proposers because the store
+/// has not reached the migration that records them.
+///
+/// The same placement window as [`print_store_behind_note`]: a newer CLI reads the store
+/// before the daemon that migrates it restarts. Without the note every pending row
+/// showing `-` reads as "nobody knows who proposed this", when the truth is that the
+/// column does not exist yet. Stdout is untouched so a script parsing the table keeps
+/// working.
+fn print_enroll_store_behind_note(store_schema: u32) {
+    let proposer_schema = credentials_core::store::ENROLLMENT_PROPOSER_SCHEMA_VERSION;
+    if store_schema >= proposer_schema {
+        return;
+    }
+    let binary_schema = credentials_core::store::newest_migration_version();
+    eprintln!(
+        "note: store schema {store_schema} is behind this binary's {binary_schema}; \
+         proposers of pending requests appear after the daemon restarts (migration {proposer_schema})"
+    );
+}
+
+/// How the enrollment listing names a request's proposer: `kind:id`, the bare kind when
+/// the kind carries no id (`direct`), and `-` when no proposer is recorded (live
+/// enrollments, and requests proposed before the store recorded proposers).
+fn enroll_proposer_label(row: &credentials_core::store::EnrollmentRow) -> String {
+    match (&row.proposer_kind, &row.proposer_id) {
+        (Some(kind), Some(id)) => format!("{kind}:{id}"),
+        (Some(kind), None) => kind.clone(),
+        (None, _) => "-".to_string(),
+    }
 }
 
 /// Render the enrollment ledger, flagging pending requests whose name is already taken.
@@ -4413,14 +4445,23 @@ fn render_enroll_list(rows: &[credentials_core::store::EnrollmentRow]) -> Vec<St
         .max()
         .unwrap_or(3)
         .max(3);
+    let proposers: Vec<String> = rows.iter().map(enroll_proposer_label).collect();
+    let proposer_width = proposers
+        .iter()
+        .map(|label| label.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max("PROPOSER".len());
     let mut lines = vec![format!(
-        "{:<width$}  {:<13}  NAME",
+        "{:<width$}  {:<13}  {:<proposer_width$}  NAME",
         "KEY",
         "STATE",
-        width = width
+        "PROPOSER",
+        width = width,
+        proposer_width = proposer_width
     )];
     let mut collisions = Vec::new();
-    for row in rows {
+    for (row, proposer) in rows.iter().zip(&proposers) {
         let suffix = if row.token_generation > 0 {
             format!("  (generation {})", row.token_generation)
         } else if row.state == "pending" && enrolled.contains(row.name.as_str()) {
@@ -4430,11 +4471,13 @@ fn render_enroll_list(rows: &[credentials_core::store::EnrollmentRow]) -> Vec<St
             String::new()
         };
         lines.push(format!(
-            "{:<width$}  {:<13}  {}{suffix}",
+            "{:<width$}  {:<13}  {:<proposer_width$}  {}{suffix}",
             row.key,
             row.state,
+            proposer,
             row.name,
-            width = width
+            width = width,
+            proposer_width = proposer_width
         ));
     }
     for key in collisions {
@@ -5524,7 +5567,39 @@ mod tests {
             state: state.to_string(),
             created_at_ms: 0,
             token_generation: generation,
+            proposer_kind: None,
+            proposer_id: None,
         }
+    }
+
+    /// The proposer column names who asked, and `-` where nothing is recorded, with the
+    /// column wide enough for the longest label so NAME still lines up.
+    #[test]
+    fn enroll_list_shows_the_proposer_and_a_dash_when_none_is_recorded() {
+        let mut reserved = enrollment_row("req-module", "module-consumer", "pending", 0);
+        reserved.proposer_kind = Some("reserved".to_string());
+        reserved.proposer_id = Some("insula".to_string());
+        let mut direct = enrollment_row("req-host", "host-consumer", "pending", 0);
+        direct.proposer_kind = Some("direct".to_string());
+        let unknown = enrollment_row("req-older", "older-consumer", "pending", 0);
+        let lines = super::render_enroll_list(&[reserved, direct, unknown]);
+        let text = lines.join("\n");
+        assert_eq!(
+            lines[0], "KEY         STATE          PROPOSER         NAME",
+            "{text}"
+        );
+        assert_eq!(
+            lines[1], "req-module  pending        reserved:insula  module-consumer",
+            "{text}"
+        );
+        assert_eq!(
+            lines[2], "req-host    pending        direct           host-consumer",
+            "{text}"
+        );
+        assert_eq!(
+            lines[3], "req-older   pending        -                older-consumer",
+            "{text}"
+        );
     }
 
     /// A status report this CLI will not trust must not be blamed on the running module.

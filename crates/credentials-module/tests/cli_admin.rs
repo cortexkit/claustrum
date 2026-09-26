@@ -4569,10 +4569,15 @@ fn list_reads_a_store_one_migration_behind_and_says_so_on_stderr_only() {
     );
     assert!(stdout.contains("apikey:behind-one"), "stdout: {stdout}");
     assert!(stdout.contains("apikey:behind-two"), "stdout: {stdout}");
+    // The binary's own schema is read from the chain rather than typed, so a later
+    // migration moves this expectation with it instead of breaking it.
     assert_eq!(
         stderr.trim(),
-        "note: store schema 8 is behind this binary's 11; categories and category grants \
-         appear after the daemon restarts (migration 9)",
+        format!(
+            "note: store schema 8 is behind this binary's {}; categories and category grants \
+             appear after the daemon restarts (migration 9)",
+            credentials_core::store::newest_migration_version()
+        ),
         "the note must be verbatim and on stderr"
     );
 
@@ -4597,5 +4602,64 @@ fn list_reads_a_store_one_migration_behind_and_says_so_on_stderr_only() {
     assert!(
         !ahead_stderr.contains("is behind this binary's"),
         "a migrated store must carry no behind-note: {ahead_stderr}"
+    );
+}
+
+/// `enroll list` on a store one migration short of proposers still lists its pending
+/// requests, shows `-` for the proposer, and says why on stderr only.
+#[test]
+fn enroll_list_reads_a_store_without_proposers_and_says_so_on_stderr_only() {
+    let vault = GrantCliVault::new("enroll-behind-schema");
+    let descriptor = StorageDescriptor {
+        module_id: credentials_core::contract::MODULE_ID.into(),
+        storage_namespace: credentials_core::contract::STORAGE_NAMESPACE.into(),
+        isolation: Isolation::Module,
+        backend: StorageBackend::Sqlite {
+            path: vault
+                .data_dir
+                .join("store.db")
+                .to_string_lossy()
+                .into_owned(),
+        },
+    };
+    let behind = credentials_core::store::ENROLLMENT_PROPOSER_SCHEMA_VERSION - 1;
+    {
+        let sqlite = open_sqlite(&descriptor).expect("open behind store");
+        credentials_core::store::migrate_through_for_test(&sqlite, behind)
+            .expect("migrate to the schema before proposers");
+        sqlite
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO pending_enrollments \
+                     (request_id, proposed_name, request_secret_hash, state, created_at_ms, expires_at_ms) \
+                     VALUES ('req-behind', 'behind-consumer', ?1, 'pending', 1, 9999999999999)",
+                    ["e".repeat(64)],
+                )
+            })
+            .expect("seed a pending row");
+    }
+
+    let out = vault.run(&["enroll", "list"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "enroll list failed: {stderr}");
+    let row = stdout
+        .lines()
+        .find(|line| line.starts_with("req-behind "))
+        .unwrap_or_else(|| panic!("pending row missing: {stdout}"));
+    assert_eq!(
+        row.split_whitespace().collect::<Vec<_>>(),
+        ["req-behind", "pending", "-", "behind-consumer"],
+        "{stdout}"
+    );
+    assert_eq!(
+        stderr.trim(),
+        format!(
+            "note: store schema {behind} is behind this binary's {}; proposers of pending \
+             requests appear after the daemon restarts (migration {})",
+            credentials_core::store::newest_migration_version(),
+            credentials_core::store::ENROLLMENT_PROPOSER_SCHEMA_VERSION
+        ),
+        "the note must be verbatim and on stderr"
     );
 }

@@ -3139,15 +3139,26 @@ fn print_store_behind_note(store_schema: StoreSchemaVersion) {
     let Some(store_schema) = store_schema else {
         return;
     };
-    let binary_schema = credentials_core::store::newest_migration_version();
-    if store_schema >= binary_schema {
-        return;
+    if let Some(note) = store_behind_note(store_schema) {
+        eprintln!("{note}");
     }
-    eprintln!(
-        "note: store schema {store_schema} is behind this binary's {binary_schema}; \
-         categories and category grants appear after the daemon restarts (migration {})",
-        credentials_core::store::CATEGORY_SCHEMA_VERSION
-    );
+}
+
+/// The note text, or `None` when the store already has what the note says is missing.
+///
+/// Gated on the CATEGORY migration, not on "any migration behind": a store that has
+/// categories but lacks a later migration would otherwise be told its categories are
+/// missing, which is false and points the operator at the wrong thing.
+fn store_behind_note(store_schema: u32) -> Option<String> {
+    let category_schema = credentials_core::store::CATEGORY_SCHEMA_VERSION;
+    if store_schema >= category_schema {
+        return None;
+    }
+    Some(format!(
+        "note: store schema {store_schema} is behind this binary's {}; \
+         categories and category grants appear after the daemon restarts (migration {category_schema})",
+        credentials_core::store::newest_migration_version()
+    ))
 }
 
 type InventoryRow = (String, u64, String, Vec<String>);
@@ -5570,6 +5581,20 @@ mod tests {
             proposer_kind: None,
             proposer_id: None,
         }
+    }
+
+    /// The categories note fires only on a store that lacks categories. A store past the
+    /// category migration but behind a later one must not be told categories are missing.
+    #[test]
+    fn the_categories_note_fires_only_below_the_category_migration() {
+        let category = credentials_core::store::CATEGORY_SCHEMA_VERSION;
+        assert!(super::store_behind_note(category - 1).is_some());
+        assert_eq!(super::store_behind_note(category), None);
+        assert_eq!(
+            super::store_behind_note(credentials_core::store::newest_migration_version() - 1),
+            None,
+            "one migration behind, but categories already exist"
+        );
     }
 
     /// The proposer column names who asked, and `-` where nothing is recorded, with the

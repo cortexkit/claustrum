@@ -88,9 +88,10 @@ pub const SELECTOR_SCHEMA_VERSION: u32 = 10;
 
 /// The migration that records who proposed each pending enrollment.
 ///
-/// The lease-free enrollment reader branches on it for the same placement-window reason
-/// as the two constants above: below it `pending_enrollments` has no proposer columns,
-/// and every row there is read with an unknown proposer rather than failing the listing.
+/// The lease-free enrollment reader branches on it because a newer CLI can read the store
+/// before the daemon has restarted and applied this migration. Below it
+/// `pending_enrollments` has no proposer columns, so every row there is read with an
+/// unknown proposer rather than failing the listing.
 pub const ENROLLMENT_PROPOSER_SCHEMA_VERSION: u32 = 12;
 
 /// The audit ops that DEPOSIT a credential, so the earliest entry carrying one of
@@ -12078,7 +12079,8 @@ mod migration_10_tests {
             .expect("seed a schema-11 pending row");
         let path = root.join("store.db");
 
-        // The placement window: a newer reader on a store the daemon has not migrated.
+        // A newer CLI reading a store the daemon has not migrated yet: the listing must
+        // still work while the proposer columns do not exist.
         let (behind_rows, behind_version) =
             list_enrollments_read_only_with_schema(&path).expect("schema-11 enrollment read");
         assert_eq!(behind_version, 11);
@@ -12173,8 +12175,8 @@ mod migration_10_tests {
             list_read_grants_read_only_with_schema(&path).expect("behind grants");
         assert_eq!(behind_version, 10);
         assert_eq!(behind_grants[0].operation, GrantOperation::Read);
-        // Through 11, so the recorded-12 row below stands in for a migration 12 the
-        // shared runner must treat as already applied.
+        // Migrate through 11 only. The version-12 row inserted below then simulates an
+        // already-applied migration 12, which the shared runner must skip.
         migrate_through_for_test(&store, 11).expect("schema 11");
         store.with_conn(|conn| conn.execute("INSERT INTO cortexkit_schema_version (namespace, version, applied_at_unix) VALUES (?1, 12, 0)", [SCHEMA_NAMESPACE])).expect("schema 12 fixture");
         store

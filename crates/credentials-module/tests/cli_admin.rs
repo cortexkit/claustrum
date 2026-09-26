@@ -4569,8 +4569,8 @@ fn list_reads_a_store_one_migration_behind_and_says_so_on_stderr_only() {
     );
     assert!(stdout.contains("apikey:behind-one"), "stdout: {stdout}");
     assert!(stdout.contains("apikey:behind-two"), "stdout: {stdout}");
-    // The binary's own schema is read from the chain rather than typed, so a later
-    // migration moves this expectation with it instead of breaking it.
+    // The binary's schema comes from `newest_migration_version()` rather than a typed
+    // number, so this expectation follows later migrations instead of breaking on them.
     assert_eq!(
         stderr.trim(),
         format!(

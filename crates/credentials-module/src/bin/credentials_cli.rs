@@ -3728,20 +3728,34 @@ fn warn_about_predecessors(global: &GlobalArgs, id: &str, handle: &str) {
     else {
         return;
     };
+    for line in render_predecessor_note(id, &others) {
+        eprintln!("{line}");
+    }
+}
+
+/// The predecessor note's text, or nothing when no other live handle exists.
+///
+/// THE OTHER HANDLES ARE LISTED AS BARE HASHES, NEVER AS COMMANDS. Most of them belong to
+/// other consumers, and printing each as a ready-to-run `ck auth revoke-handle --hash ...`
+/// line made them indistinguishable from the one revoke command the operator DOES want
+/// (the `revoke with:` line for the handle just minted). A cleanup script that took the
+/// first line matching the command came within a shell syntax error of revoking two
+/// other consumers' handles. So the verb appears once, as prose, and no line here
+/// contains `ck auth`.
+fn render_predecessor_note(id: &str, others: &[(String, i64)]) -> Vec<String> {
     if others.is_empty() {
-        return;
+        return Vec::new();
     }
-    eprintln!(
+    let mut lines = vec![format!(
         "note: {id} now has {} live handles. The vault cannot tell holders apart, so if\n\
-         \x20     this one REPLACES a handle you already hold, revoke that one now:",
+         \x20     this one REPLACES a handle you already hold, revoke that one by its hash\n\
+         \x20     (revoke-handle --hash <hash>). Other live handles, NOT this one:",
         others.len() + 1
-    );
-    for (other, minted_at) in &others {
-        eprintln!(
-            "  ck auth revoke-handle --hash {other}   (minted {})",
-            format_ts_ms(*minted_at)
-        );
+    )];
+    for (other, minted_at) in others {
+        lines.push(format!("    {other}  minted {}", format_ts_ms(*minted_at)));
     }
+    lines
 }
 
 fn cmd_revoke_handle(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
@@ -5581,6 +5595,26 @@ mod tests {
             proposer_kind: None,
             proposer_id: None,
         }
+    }
+
+    /// Only the handle just minted may appear as a runnable revoke command; the other
+    /// holders' handles are listed as bare hashes so a script grepping for the command
+    /// can never pick one of them.
+    #[test]
+    fn the_predecessor_note_names_other_handles_without_a_runnable_command() {
+        let others = vec![
+            ("a".repeat(64), 1_758_000_000_000_i64),
+            ("b".repeat(64), 1_758_000_100_000_i64),
+        ];
+        let lines = super::render_predecessor_note("oauth:anthropic", &others);
+        let text = lines.join("\n");
+        assert!(text.contains(&"a".repeat(64)), "{text}");
+        assert!(text.contains(&"b".repeat(64)), "{text}");
+        assert!(
+            !text.contains("ck auth"),
+            "no line may be a runnable command: {text}"
+        );
+        assert!(super::render_predecessor_note("oauth:anthropic", &[]).is_empty());
     }
 
     /// The categories note fires only on a store that lacks categories. A store past the

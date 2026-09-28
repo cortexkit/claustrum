@@ -79,12 +79,18 @@ Status: implementation and deployment record for schema migration 9.
 
 ## Owner-supplied catalog policy
 
-The closed category vocabulary is `llm-provider`, `data-warehouse`, and
-`cloud-infrastructure`. Every API-key entry is `llm-provider`. Login entries are
+The catalog seeds four categories: `llm-provider`, `data-warehouse`,
+`cloud-infrastructure` and `web-search`. Categories themselves are not a closed set: an
+operator can assign any valid name with `ck auth set-category`. The seeds are what a new
+credential is stamped with at creation. API-key entries are `llm-provider`, except the
+search APIs Tavily, Kagi, Exa and Parallel, which are `web-search` and never
+`llm-provider`, so no LLM consumer's grant reaches a search key. Login entries are
 `llm-provider` except Snowflake (`data-warehouse`), DigitalOcean
-(`cloud-infrastructure`), and Devin (uncategorized). `ModelVendor` is a separate closed
-advisory vocabulary. The assignments are literal per-entry catalog fields; no key-derived
-fallback or default builds either list. Exact-value tests pin all 26 rows.
+(`cloud-infrastructure`), and Devin (uncategorized). A credential that speaks a provider's
+OAuth protocol is also stamped `<adapter>-native` from its id. `ModelVendor` is a
+separate, advisory vocabulary that never authorizes. The assignments are literal
+per-entry catalog fields; no key-derived fallback builds either list, and exact-value
+tests pin every row.
 
 ## Deploy and rollback
 

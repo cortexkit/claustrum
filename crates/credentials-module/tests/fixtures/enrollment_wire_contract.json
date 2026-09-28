@@ -39,6 +39,28 @@
       "op": "credential.report_auth_failure",
       "request": "{\"credential_id\":\"oauth:anthropic\",\"enrollment_token\":\"tttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt\",\"provider_status\":401,\"record_version\":12,\"reporter_source\":\"direct\"}",
       "success": "pinned by the wire-key contract tests beside each op, which assert presence AND absence without materialising a decrypted payload"
+    },
+    {
+      "op": "credential.get",
+      "success_cases": [
+        "every optional field present",
+        "every optional field absent"
+      ],
+      "success": [
+        "{\"result\":{\"account_id\":\"00000000-0000-4000-8000-000000000000\",\"credential_id\":\"oauth:example\",\"email\":\"consumer@example.invalid\",\"expires_at_ms\":1900000000000,\"org_name\":\"Example Org\",\"payload\":[102,105,120,116,117,114,101,45,110,111,116,45,97,45,115,101,99,114,101,116],\"project_id\":\"example-project-000000\",\"record_version\":42}}",
+        "{\"result\":{\"expires_at_ms\":null,\"payload\":[102,105,120,116,117,114,101,45,110,111,116,45,97,45,115,101,99,114,101,116],\"record_version\":7}}"
+      ]
+    },
+    {
+      "op": "credential.status",
+      "success_cases": [
+        "handle resolved to an active credential",
+        "handle did not resolve (unknown or revoked)"
+      ],
+      "success": [
+        "{\"result\":{\"credential_id\":\"apikey:active\",\"last_error_code\":null,\"lease_held\":true,\"ready\":true,\"record_version\":1,\"stale_pending\":false}}",
+        "{\"result\":{\"last_error_code\":\"not_found\",\"lease_held\":true,\"ready\":false}}"
+      ]
     }
   ],
   "refusals": [

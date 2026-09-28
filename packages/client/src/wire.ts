@@ -71,11 +71,33 @@ export type ServedCredential = {
   orgName?: string
 }
 
+/**
+ * Non-secret health for one handle, read without minting anything.
+ *
+ * An unresolved handle (unknown or revoked) is an ordinary answer, not an error: it decodes
+ * as `ready: false, lastErrorCode: 'not_found'` with `credentialId`, `recordVersion` and
+ * `stalePending` all absent. The vault omits them on purpose so a probe learns nothing about
+ * what exists and no placeholder value is asserted about a record it never saw.
+ */
 export type CredentialStatus = {
   ready: boolean
   lastErrorCode: string | null
   leaseHeld: boolean
-  recordVersion: number
+  /**
+   * Operator-chosen record label the handle resolved to, for verifying a binding the caller
+   * already holds. Not a routing key. Absent when the handle did not resolve.
+   */
+  credentialId?: string
+  /**
+   * The record's change cursor, present only when the handle resolved to a record.
+   *
+   * Optional, and OMITTED from the object rather than defaulted, because there is no honest
+   * default: 0 or -1 would compare as older than every real version, so a poller would read a
+   * revoked handle as a change it had yet to see, forever. With the key absent, TypeScript
+   * refuses arithmetic or ordering on it until the caller has handled `undefined`, and
+   * `'recordVersion' in status` is false. Never replace absence with a number (`?? 0`).
+   */
+  recordVersion?: number
   stalePending?: boolean
 }
 
@@ -98,7 +120,14 @@ function isOptionalString(value: unknown): value is string | undefined {
   return value === undefined || typeof value === 'string'
 }
 
-function decodeCredential(response: unknown, logUnknownClass: (errorClass: string) => void): ServedCredential {
+/**
+ * Exported for the golden-reply test only; `index.ts` re-exports by name, so this does not
+ * widen the published surface.
+ */
+export function decodeCredential(
+  response: unknown,
+  logUnknownClass: (errorClass: string) => void,
+): ServedCredential {
   if (hasCredentialError(response)) throw asCredentialError(response, 'invalid_response', logUnknownClass)
   const result = isRecord(response) && isRecord(response.result) ? response.result : undefined
   const payload = result?.payload
@@ -149,15 +178,25 @@ function decodeCredential(response: unknown, logUnknownClass: (errorClass: strin
   }
 }
 
-function decodeStatus(response: unknown, logUnknownClass: (errorClass: string) => void): CredentialStatus {
+/** Exported for the golden-reply test only, like `decodeCredential`. */
+export function decodeStatus(
+  response: unknown,
+  logUnknownClass: (errorClass: string) => void,
+): CredentialStatus {
   if (hasCredentialError(response)) throw asCredentialError(response, 'invalid_response', logUnknownClass)
   const result = isRecord(response) && isRecord(response.result) ? response.result : undefined
-  const recordVersion = asRecordVersion(result?.record_version)
+  // Absent is a valid reply (the handle did not resolve); a PRESENT value that is not a
+  // non-negative integer is malformed. The producer omits the key rather than nulling it,
+  // so an explicit null is refused too.
+  const rawRecordVersion = result?.record_version
+  const recordVersion = rawRecordVersion === undefined ? undefined : asRecordVersion(rawRecordVersion)
+  const credentialId = result?.credential_id
   if (
     typeof result?.ready !== 'boolean' ||
     (result?.last_error_code !== undefined && result?.last_error_code !== null && typeof result?.last_error_code !== 'string') ||
     typeof result?.lease_held !== 'boolean' ||
-    recordVersion === undefined ||
+    (rawRecordVersion !== undefined && recordVersion === undefined) ||
+    !isOptionalString(credentialId) ||
     (result?.stale_pending !== undefined && typeof result.stale_pending !== 'boolean')
   ) {
     throw asCredentialError(response, 'invalid_status', logUnknownClass)
@@ -166,7 +205,8 @@ function decodeStatus(response: unknown, logUnknownClass: (errorClass: string) =
     ready: result.ready,
     lastErrorCode: result.last_error_code ?? null,
     leaseHeld: result.lease_held,
-    recordVersion,
+    ...(credentialId === undefined ? {} : { credentialId }),
+    ...(recordVersion === undefined ? {} : { recordVersion }),
     ...(result.stale_pending === undefined ? {} : { stalePending: result.stale_pending }),
   }
 }

@@ -4030,6 +4030,201 @@ mod tests {
         assert_eq!(scoped_not_found, refusal_rows[8]["body"]);
     }
 
+    /// The golden `credential.get` and `credential.status` replies, pinned from the producer.
+    ///
+    /// These are the two handle-addressed reads most consumers spend, and until they were
+    /// pinned nothing checked a client decoder against what this daemon actually sends. The
+    /// TypeScript client dropped five `GetResult` fields for weeks, and it refused the
+    /// unresolved-handle status shape outright because it required a `record_version` this
+    /// producer deliberately omits there. The client suite decodes these same bytes.
+    ///
+    /// WHERE THE BYTES COME FROM. The `get` replies are exhaustive `GetResult` literals
+    /// (a new field is a compile error here until both cases state it; do not convert them
+    /// to `..Default::default()`). The `status` replies are produced by the REAL
+    /// `ReadSurface::status` over a scratch store, so the unresolved shape is whatever the
+    /// production `unavailable` arm builds, not a literal restating it. Both are wrapped by
+    /// `wrap_result`, exactly as the dispatcher sends them.
+    ///
+    /// The payload is a fixed non-secret byte string: this is a fixture consumers byte-copy,
+    /// so it must never carry real material.
+    ///
+    /// ABSENCES ARE PINNED EXPLICITLY, not just implied by string equality, because they are
+    /// the part a well-meaning change would break. An unresolved handle omits
+    /// `credential_id` (so a probe learns nothing about what exists), `record_version` (a
+    /// sentinel such as 0 would compare as "older than everything" and a poller would read a
+    /// revoked handle as a pending change forever) and `stale_pending` (a default `false`
+    /// would assert "no repair pending" about a record this path never saw).
+    #[tokio::test]
+    async fn handle_read_wire_fixture_pins_get_and_status_replies() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/enrollment_wire_contract.json"
+        ))
+        .expect("decode wire fixture");
+        let operations = fixture["operations"].as_array().expect("operation rows");
+        let successes = |name: &str| -> Vec<serde_json::Value> {
+            let row = operations
+                .iter()
+                .find(|row| row["op"] == name)
+                .unwrap_or_else(|| panic!("missing {name} fixture row"));
+            let success = row["success"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{name} success must be an array of reply strings"));
+            assert_eq!(
+                success.len(),
+                row["success_cases"].as_array().map_or(0, Vec::len),
+                "every {name} success reply needs a success_cases entry naming it"
+            );
+            success.clone()
+        };
+        let result_keys = |reply: &serde_json::Value| -> Vec<String> {
+            reply["result"]
+                .as_object()
+                .expect("a reply carries a result object")
+                .keys()
+                .cloned()
+                .collect()
+        };
+        let regenerate =
+            "the golden handle-read reply drifted from what this producer serialises. \
+             Consumers byte-copy this file: regenerate the row from the assertion's left side, \
+             announce the change, and update the client decoder and its key-coverage test";
+
+        // credential.get, every optional field populated.
+        let get_full = wrap_result(read_surface::GetResult {
+            payload: b"fixture-not-a-secret".to_vec(),
+            expires_at_ms: Some(1_900_000_000_000),
+            record_version: 42,
+            credential_id: Some("oauth:example".into()),
+            project_id: Some("example-project-000000".into()),
+            account_id: Some("00000000-0000-4000-8000-000000000000".into()),
+            email: Some("consumer@example.invalid".into()),
+            org_name: Some("Example Org".into()),
+        });
+        assert_eq!(
+            result_keys(&get_full),
+            [
+                "account_id",
+                "credential_id",
+                "email",
+                "expires_at_ms",
+                "org_name",
+                "payload",
+                "project_id",
+                "record_version"
+            ],
+            "the full get case must populate every GetResult field"
+        );
+
+        // credential.get, every optional field absent. `expires_at_ms` is the one optional
+        // field that is NOT skipped when empty: a credential with no known expiry is sent as
+        // an explicit null, and this case pins that too.
+        let get_bare = wrap_result(read_surface::GetResult {
+            payload: b"fixture-not-a-secret".to_vec(),
+            expires_at_ms: None,
+            record_version: 7,
+            credential_id: None,
+            project_id: None,
+            account_id: None,
+            email: None,
+            org_name: None,
+        });
+        assert_eq!(
+            result_keys(&get_bare),
+            ["expires_at_ms", "payload", "record_version"],
+            "an absent optional get field must be OMITTED, not sent as null"
+        );
+        assert!(get_bare["result"]["expires_at_ms"].is_null());
+
+        // credential.status, from the real surface.
+        let (surface, store, _db, _root) = tmp_surface_with_store(21);
+        let handle = credentials_core::store::mint_handle().expect("mint handle");
+        store
+            .put_handle_hash(
+                &handle.hash,
+                "apikey:active",
+                AuditCtx::admin(AuditOp::MintHandle),
+            )
+            .expect("put handle");
+        let status_for = |handle: String| {
+            let surface = Arc::clone(&surface);
+            async move {
+                wrap_result(
+                    surface
+                        .status(
+                            1,
+                            None,
+                            &StatusParams {
+                                handle: Some(handle),
+                                credential_id: None,
+                                enrollment_token: None,
+                            },
+                        )
+                        .await,
+                )
+            }
+        };
+        let status_resolved = status_for(handle.raw).await;
+        // A handle that never existed takes the same arm as a revoked one: resolution fails
+        // and the surface answers with its uniform not-found shape.
+        let status_unresolved = status_for("ckh_not_a_real_handle".to_string()).await;
+
+        let resolved = status_resolved["result"]
+            .as_object()
+            .expect("status result object");
+        for key in ["credential_id", "record_version", "stale_pending"] {
+            assert!(
+                resolved.contains_key(key),
+                "a resolved handle's status must carry `{key}`"
+            );
+        }
+        assert_eq!(resolved["ready"], true);
+
+        let unresolved = status_unresolved["result"]
+            .as_object()
+            .expect("status result object");
+        for key in ["credential_id", "record_version", "stale_pending"] {
+            assert!(
+                !unresolved.contains_key(key),
+                "an unresolved handle's status must OMIT `{key}`, not default it: a present \
+                 id discloses what exists, a sentinel version reads as older than every real \
+                 one, and a defaulted stale mark asserts something this path never observed. \
+                 Got {unresolved:?}"
+            );
+        }
+        assert_eq!(
+            result_keys(&status_unresolved),
+            ["last_error_code", "lease_held", "ready"]
+        );
+        assert_eq!(unresolved["ready"], false);
+        assert_eq!(unresolved["last_error_code"], "not_found");
+
+        let get = successes(OP_GET);
+        assert_eq!(get.len(), 2, "credential.get pins exactly two cases");
+        assert_eq!(
+            serde_json::to_string(&get_full).unwrap(),
+            get[0],
+            "{regenerate}"
+        );
+        assert_eq!(
+            serde_json::to_string(&get_bare).unwrap(),
+            get[1],
+            "{regenerate}"
+        );
+
+        let status = successes(OP_STATUS);
+        assert_eq!(status.len(), 2, "credential.status pins exactly two cases");
+        assert_eq!(
+            serde_json::to_string(&status_resolved).unwrap(),
+            status[0],
+            "{regenerate}"
+        );
+        assert_eq!(
+            serde_json::to_string(&status_unresolved).unwrap(),
+            status[1],
+            "{regenerate}"
+        );
+    }
+
     /// Enrollment refusals carry their retry policy in `class`, the field every
     /// read-surface refusal uses, and consumers validate it against the read surface's
     /// closed class set. A disposition that serialized to anything outside that set would

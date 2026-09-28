@@ -307,6 +307,24 @@ remain valid audit-chain strings and are never rewritten.
 binding with it, but never route on it—account routing remains `account_id` +
 `record_version`.
 
+**An unresolved handle is an answer, not an error.** A handle that is unknown or revoked
+returns a normal result, `{"ready":false,"last_error_code":"not_found","lease_held":…}`,
+with `credential_id`, `record_version` and `stale_pending` all ABSENT (never null, never a
+sentinel): an id would tell a probe what exists, a placeholder version would compare as
+older than every real one so a poller would chase a change that never comes, and a
+defaulted `stale_pending` would assert something about a record the vault never looked
+at. Decode each of the three as optional. `@cortexkit/claustrum-client` does so from
+0.5.0: `recordVersion` and `credentialId` are optional on `CredentialStatus` and are
+omitted from the object when the reply omits them; 0.4.x threw `invalid_status` on this
+shape.
+
+The exact reply bytes for a resolved and an unresolved handle, and for `credential.get`
+with every optional field present and with every one absent, are pinned in
+`crates/credentials-module/tests/fixtures/enrollment_wire_contract.json` by
+`handle_read_wire_fixture_pins_get_and_status_replies`, which produces the status rows
+from the real status surface. On `get`, `expires_at_ms` is the one optional field sent as
+an explicit `null` rather than omitted.
+
 **`record_version` and `ready` move independently, and that is deliberate.**
 `record_version` tracks material: it bumps on refresh and on replace. `ready` tracks the
 state verdict. So `ck auth reactivate` — the repair for a credential wrongly marked dead

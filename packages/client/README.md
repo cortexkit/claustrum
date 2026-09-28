@@ -16,6 +16,11 @@ credential caching, refresh, account scheduling, and retry policy.
   by design (the vault cannot enumerate which). Treat it as gone either way: re-run
   `ck auth migrate-opencode` to mint a fresh handle; the prior record, if any, is kept.
 • `auth_required` means the record is latched and needs reauthentication.
+• `statusCredential` on an unknown or revoked handle RESOLVES, it does not throw: it
+  returns `ready: false, lastErrorCode: 'not_found'` with `recordVersion`, `credentialId`
+  and `stalePending` absent. Since 0.5.0 `CredentialStatus.recordVersion` is optional for
+  that reason; handle `undefined` rather than defaulting it to a number, which would read
+  as a version older than every real one.
 • Unknown server error classes are bounded to `transient`; callers must retry them
   rather than treating a forward-compatible class as permanent.
 

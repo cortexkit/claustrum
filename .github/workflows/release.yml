@@ -154,32 +154,21 @@ jobs:
           path: claustrum
           ref: ${{ inputs.tag || github.ref }}
 
-      # Same private-sibling preamble as ci.yml: cargo loads the whole workspace manifest
+      # Same sibling preamble as ci.yml: cargo loads the whole workspace manifest
       # (including the path-deps on cortexkit/subconscious and cortexkit/commons) before
       # resolving any package, so both must be present or the build dies at manifest-load.
-      # A tag push is never a fork event, so the secret is in scope here.
-      - name: Mint cross-repo read token
-        id: app-token
-        uses: actions/create-github-app-token@v3
-        with:
-          client-id: ${{ vars.CK_CI_APP_CLIENT_ID }}
-          private-key: ${{ secrets.CK_CI_APP_PRIVATE_KEY }}
-          owner: cortexkit
-          repositories: subconscious,commons
-
+      # Both are public, so the default token checks them out.
       - name: Checkout subconscious
         uses: actions/checkout@v5
         with:
           repository: cortexkit/subconscious
           path: subconscious
-          token: ${{ steps.app-token.outputs.token }}
 
       - name: Checkout commons
         uses: actions/checkout@v5
         with:
           repository: cortexkit/commons
           path: commons
-          token: ${{ steps.app-token.outputs.token }}
 
       # THE STAMP MUST NAME THE COMMIT THAT WAS CHECKED OUT, WHICH IS NOT `github.sha`.
       # On a workflow_dispatch for an existing tag, `github.sha` is the DISPATCHED ref

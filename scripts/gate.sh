@@ -422,8 +422,8 @@ assert_floor_not_lowered "$(dirname "$0")/gate.sh"
 # wrong twice over. It failed on the ubuntu runner (ring's build script wants
 # x86_64-w64-mingw32-gcc, which GitHub's image does not carry and this mac has via
 # homebrew), and the reason I gave for adding it did not survive checking: I claimed it
-# would give fork PRs a signal, but the fork-safe job runs cargo ZERO times, so it would
-# have given them nothing. CI's own windows runner already compiles this natively -- that
+# would give fork PRs a signal, but the fork-safe job (since removed) ran cargo ZERO
+# times, so it would have given them nothing. CI's own windows runner already compiles this natively -- that
 # is how the defect was caught. The gap was never CI's. It was that this gate could not
 # see a platform the host is not.
 if rustup target list --installed 2>/dev/null | grep -qx x86_64-pc-windows-gnu; then
@@ -531,13 +531,13 @@ run_expect 1 "release artifact (test seams absent)" \
 # contract check and a release-artifact assertion, this gate did not, and its
 # header still promised parity. A claim about another file has to be checked
 # against that file or it is a comment pretending to be a guarantee.
-# COUNT THE `test` JOB ONLY. The workflow gained a second job (`fork-safe`) whose
-# steps re-run checks this gate ALREADY has, because a fork PR cannot mint the token
-# for the private sibling checkouts and so cannot run the real suite at all. Counting
-# every `- name:` in the file would read those duplicates as new CI coverage and
-# demand arms that already exist -- and the fix for that pressure is to widen the
-# bound, which is how this check stops checking. Bound the count to the job the claim
-# is about instead.
+# COUNT THE `test` JOB ONLY. The workflow once carried a second job (`fork-safe`, for
+# fork PRs while the sibling repos were private) whose steps re-ran checks this gate
+# ALREADY has, and counting every `- name:` in the file read those duplicates as new CI
+# coverage and demanded arms that already existed -- and the fix for that pressure is
+# to widen the bound, which is how this check stops checking. That job is gone, but
+# the count stays bound to the job the claim is about, so the next job anyone adds
+# cannot reopen it.
 ci_steps=$(awk '/^  test:/{j=1} /^  [a-z-]+:$/ && !/^  test:/{j=0} j && /^      - name:/{n++} END{print n+0}' \
     .github/workflows/ci.yml)
 gate_arms=$(grep -cE '^run_(check|expect)' "$0")

@@ -357,6 +357,10 @@ assert_floor_not_lowered() {
 # released-v0.1.2 behavior, and rendered per-verb help checks; it is not the sum
 # of branch-specific test changes.
 #
+# Raised 789 -> 790 on 2026-09-28 with the golden credential.get / credential.status reply
+# pin. Read off this arm's own test-result lines on the final tree (the same awk sum the
+# arm runs), not added up.
+#
 # Raised 779 -> 789 on 2026-09-26 with migration 12 and the mint-handle note test (the proposer of a pending
 # enrollment). Read off the final tree with the command below, not added up.
 #
@@ -395,7 +399,7 @@ assert_floor_not_lowered() {
 #
 # THE FLOOR IS RATCHETED AGAINST THE MERGE TARGET BY `assert_floor_not_lowered` BELOW,
 # because a floor alone does not defend the property it exists for. See that function.
-run_expect 789 "workspace unit + integration" \
+run_expect 790 "workspace unit + integration" \
   cargo test --locked --workspace --features credentials-core/test-support
 
 assert_floor_not_lowered "$(dirname "$0")/gate.sh"

@@ -307,7 +307,14 @@ The picker covers OAuth (`anthropic`, `openai`, `xai`, `google`, `antigravity`),
 device-flow (`github-copilot`, `kimi`, and `--device` for openai/xai), custom
 browser flows (`cursor`, `devin`, `snowflake`, `digitalocean`), and API-key
 providers (`zai`, `openrouter`, `deepseek`, `groq`, …), which are validated against
-the provider before being stored.
+the provider before being stored. A few API-key providers have no probe that can
+tell a bad key from a good one (for example `opencode-go`, `vercel-ai-gateway`,
+`cline-pass`); for those, login prints a `NOTE:` line saying the key was stored
+without being checked, and why.
+
+API-key credentials are stamped with a category at creation: model providers get
+`llm-provider`, and the web-search keys (`tavily`, `kagi`, `exa`, `parallel`) get
+`web-search` instead, so a grant on `llm-provider` never reaches a search key.
 
 OAuth logins open a browser and complete automatically: a one-shot CLI-local
 listener on the loopback redirect captures the code, so **when the browser shows a

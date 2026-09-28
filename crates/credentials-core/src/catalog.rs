@@ -10,6 +10,10 @@ pub enum CredentialCategory {
     LlmProvider,
     DataWarehouse,
     CloudInfrastructure,
+    /// Keys for web search APIs (Tavily, Kagi, Exa, Parallel). Kept apart from
+    /// `llm-provider` on purpose: every model consumer is granted `llm-provider`, and a
+    /// search key filed there would reach all of them.
+    WebSearch,
 }
 
 impl CredentialCategory {
@@ -17,6 +21,7 @@ impl CredentialCategory {
         Self::LlmProvider,
         Self::DataWarehouse,
         Self::CloudInfrastructure,
+        Self::WebSearch,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -24,6 +29,7 @@ impl CredentialCategory {
             Self::LlmProvider => "llm-provider",
             Self::DataWarehouse => "data-warehouse",
             Self::CloudInfrastructure => "cloud-infrastructure",
+            Self::WebSearch => "web-search",
         }
     }
 }
@@ -42,6 +48,9 @@ pub enum ModelVendor {
     Qwen,
     Perplexity,
     Nvidia,
+    MiniMax,
+    Xiaomi,
+    StepFun,
 }
 
 impl ModelVendor {
@@ -58,6 +67,9 @@ impl ModelVendor {
         Self::Qwen,
         Self::Perplexity,
         Self::Nvidia,
+        Self::MiniMax,
+        Self::Xiaomi,
+        Self::StepFun,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -74,6 +86,9 @@ impl ModelVendor {
             Self::Qwen => "qwen",
             Self::Perplexity => "perplexity",
             Self::Nvidia => "nvidia",
+            Self::MiniMax => "minimax",
+            Self::Xiaomi => "xiaomi",
+            Self::StepFun => "stepfun",
         }
     }
 }
@@ -81,6 +96,7 @@ impl ModelVendor {
 const LLM: &[CredentialCategory] = &[CredentialCategory::LlmProvider];
 const DATA_WAREHOUSE: &[CredentialCategory] = &[CredentialCategory::DataWarehouse];
 const CLOUD_INFRASTRUCTURE: &[CredentialCategory] = &[CredentialCategory::CloudInfrastructure];
+const WEB_SEARCH: &[CredentialCategory] = &[CredentialCategory::WebSearch];
 const NO_CATEGORIES: &[CredentialCategory] = &[];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,6 +119,13 @@ pub enum KeyValidation {
         url: &'static str,
         auth_header: AuthHeaderScheme,
     },
+    /// The key is stored without any probe. Used where no check is possible without
+    /// something this table cannot express (a provider-specific header, a per-deployment
+    /// base URL, a model-denied response that must not count as a bad key), or where the
+    /// provider has no endpoint that rejects a bad key. A probe that refuses a valid key
+    /// blocks the login outright, which is worse than not checking. `reason` is printed
+    /// at login so the operator knows the key was not verified and why.
+    Unvalidated { reason: &'static str },
 }
 
 #[derive(Debug, Clone)]
@@ -118,8 +141,8 @@ pub struct ApiKeyProvider {
 }
 
 use ModelVendor::{
-    Anthropic, DeepSeek, Google, Meta, Mistral, Moonshot, Nvidia, OpenAI, Perplexity, Qwen, Zhipu,
-    XAI,
+    Anthropic, DeepSeek, Google, Meta, MiniMax, Mistral, Moonshot, Nvidia, OpenAI, Perplexity,
+    Qwen, StepFun, Xiaomi, Zhipu, XAI,
 };
 
 pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
@@ -181,8 +204,17 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         default_id: "apikey:fireworks-ai",
         dashboard_url: "https://app.fireworks.ai/settings/users/api-keys",
         placeholder: "fw-...",
+        // Not `/inference/v1/models`, which this row used to probe. oh-my-pi's
+        // fireworks.kdl records why: "The OpenAI-compatible inference listing
+        // (`/inference/v1/models`) enumerates the caller's *deployed* models and returns
+        // `500 Error listing deployed models` for accounts without active deployments,
+        // which rejected valid `fw_…` keys during `/login`. The control-plane `List
+        // Models` API hits the static `fireworks` serverless catalog (same endpoint
+        // discovery uses) and only requires the key to authenticate, not to own any
+        // deployments." Here a 500 only warns rather than refusing, but a warning on
+        // every valid key is noise that hides a real one.
         validation: KeyValidation::GetEndpoint {
-            url: "https://api.fireworks.ai/inference/v1/models",
+            url: "https://api.fireworks.ai/v1/accounts/fireworks/models?filter=supports_serverless%3Dtrue&pageSize=1",
             auth_header: AuthHeaderScheme::Bearer,
         },
         categories: LLM,
@@ -317,6 +349,604 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[Google],
+    },
+    // The rows below mirror oh-my-pi's API-key providers. Each `// oh-my-pi auth/<key>.kdl`
+    // line names the file (packages/catalog/src/compat/rules/auth/ in that repo) that the
+    // display name, dashboard URL, placeholder and probe were copied from. Its validate
+    // kinds map as: "models-endpoint" -> GetEndpoint with a Bearer key, "chat-completions"
+    // -> OpenAiChat, "anthropic-messages" -> AnthropicMessages, and no probe (or one this
+    // table cannot express) -> Unvalidated. "serves from its models.json rows" means the
+    // vendor list was read off the model families of that provider's rows in
+    // packages/catalog/src/models.json; families with no `ModelVendor` (Baidu, ByteDance,
+    // Cohere and others) are left out, since `serves` is advisory and additive.
+    // oh-my-pi auth/abliteration.kdl; serves from its models.json rows.
+    ApiKeyProvider {
+        key: "abliteration",
+        display_name: "Abliteration",
+        default_id: "apikey:abliteration",
+        dashboard_url: "https://abliteration.ai/console",
+        placeholder: "ak_...",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://api.abliteration.ai/v1/models",
+            auth_header: AuthHeaderScheme::Bearer,
+        },
+        categories: LLM,
+        serves: &[Zhipu],
+    },
+    // oh-my-pi auth/aiand.kdl; serves from its models.json rows.
+    ApiKeyProvider {
+        key: "aiand",
+        display_name: "ai&",
+        default_id: "apikey:aiand",
+        dashboard_url: "https://console.aiand.com/api-keys",
+        placeholder: "sk-...",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://api.aiand.com/v1/models",
+            auth_header: AuthHeaderScheme::Bearer,
+        },
+        categories: LLM,
+        serves: &[OpenAI, Google, DeepSeek, Moonshot, Zhipu, Qwen],
+    },
+    // oh-my-pi auth/baseten.kdl; serves from its models.json rows.
+    ApiKeyProvider {
+        key: "baseten",
+        display_name: "Baseten",
+        default_id: "apikey:baseten",
+        dashboard_url: "https://app.baseten.co/settings/api_keys",
+        placeholder: "bt_...",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://inference.baseten.co/v1/models",
+            auth_header: AuthHeaderScheme::Bearer,
+        },
+        categories: LLM,
+        serves: &[OpenAI, DeepSeek, Moonshot, Zhipu, Nvidia],
+    },
+    // oh-my-pi auth/charm-hyper.kdl.
+    // The probe is `/v1/credits`, not `/v1/models`: charm-hyper.kdl records that the models
+    // endpoint is public and answers 200 for a bogus key, so it could never reject one.
+    // The roster is live-only (no static model rows), so `serves` lists only the families
+    // oh-my-pi's providers/charm-hyper.kdl names: GLM (default model), Kimi and Gemma.
+    ApiKeyProvider {
+        key: "charm-hyper",
+        display_name: "Charm Hyper",
+        default_id: "apikey:charm-hyper",
+        dashboard_url: "https://hyper.charm.land/",
+        placeholder: "sk-hyper-...",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://hyper.charm.land/v1/credits",
+            auth_header: AuthHeaderScheme::Bearer,
+        },
+        categories: LLM,
+        serves: &[Google, Moonshot, Zhipu],
+    },
+    // oh-my-pi auth/cline-pass.kdl; serves from its models.json rows.
+    ApiKeyProvider {
+        key: "cline-pass",
+        display_name: "ClinePass",
+        default_id: "apikey:cline-pass",
+        dashboard_url: "https://app.cline.bot/dashboard/account",
+        placeholder: "sk_...",
+        validation: KeyValidation::Unvalidated {
+            reason: "ClinePass checks keys on an account route that also needs client headers this login does not send",
+        },
+        categories: LLM,
+        serves: &[Google, DeepSeek, Moonshot, Zhipu, Meta, Qwen, MiniMax, Xiaomi],
+    },
+    // oh-my-pi auth/commandcode.kdl; serves from its models.json rows.
+    ApiKeyProvider {
+        key: "commandcode",
+        display_name: "Command Code",
+        default_id: "apikey:commandcode",
+        dashboard_url: "https://commandcode.ai/studio",
+        placeholder: "user_...",
+        validation: KeyValidation::Unvalidated {
+            reason: "Command Code has no endpoint that rejects a bad key without billing it: its model list is public, and a chat probe bills the key and refuses Go-plan keys that are still valid",
+        },
+        categories: LLM,
+        serves: &[Anthropic, OpenAI, Google, XAI, DeepSeek, Moonshot, Zhipu, Meta, Qwen, Nvidia, MiniMax, Xiaomi, StepFun],
+    },
+    // oh-my-pi auth/deepinfra.kdl; serves from its models.json rows.
+    // A chat probe rather than `/models`: deepinfra.kdl records that DeepInfra's models
+    // endpoint is public and would accept any string as a key.
+    ApiKeyProvider {
+        key: "deepinfra",
+        display_name: "DeepInfra",
+        default_id: "apikey:deepinfra",
+        dashboard_url: "https://deepinfra.com/dash/api_keys",
+        placeholder: "...",
+        validation: KeyValidation::OpenAiChat {
+            base_url: "https://api.deepinfra.com/v1/openai",
+            model: "deepseek-ai/DeepSeek-V4-Flash-0731",
+        },
+        categories: LLM,
+        serves: &[Anthropic, OpenAI, Google, DeepSeek, Mistral, Moonshot, Zhipu, Meta, Qwen, Nvidia, MiniMax, Xiaomi],
+    },
+    // oh-my-pi auth/firepass.kdl; serves from its models.json rows.
+    // firepass.kdl: Fire Pass keys are scoped to router endpoints and do not authorize
+    // `/v1/models`, so the probe is a chat request to a router model.
+    ApiKeyProvider {
+        key: "firepass",
+        display_name: "Fire Pass (Fireworks subscription)",
+        default_id: "apikey:firepass",
+        dashboard_url: "https://app.fireworks.ai/settings/users/api-keys",
+        placeholder: "fpk_...",
+        validation: KeyValidation::OpenAiChat {
+            base_url: "https://api.fireworks.ai/inference/v1",
+            model: "accounts/fireworks/routers/glm-5p2-fast",
+        },
+        categories: LLM,
+        serves: &[Moonshot, Zhipu],
+    },
+    // oh-my-pi auth/gmi-cloud.kdl; serves from its models.json rows.
+    ApiKeyProvider {
+        key: "gmi-cloud",
+        display_name: "GMI Cloud",
+        default_id: "apikey:gmi-cloud",
+        dashboard_url: "https://console.gmicloud.ai",
+        placeholder: "eyJ...",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://api.gmi-serving.com/v1/models",
+            auth_header: AuthHeaderScheme::Bearer,
+        },
+        categories: LLM,
+        serves: &[DeepSeek],
+    },
+    // oh-my-pi auth/meta.kdl; serves from its models.json rows.
+    ApiKeyProvider {
+        key: "meta",
+        display_name: "Meta Model API",
+        default_id: "apikey:meta",
+        dashboard_url: "https://developer.meta.com/ai/",
+        placeholder: "Model API key",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://api.meta.ai/v1/models",
+            auth_header: AuthHeaderScheme::Bearer,
+        },
+        categories: LLM,
+        serves: &[Meta],
+    },
+    // oh-my-pi auth/minimax-code.kdl; serves from its models.json rows.
+    ApiKeyProvider {
+        key: "minimax-code",
+        display_name: "MiniMax Token Plan (International)",
+        default_id: "apikey:minimax-code",
+        dashboard_url: "https://platform.minimax.io/subscribe/token-plan",
+        placeholder: "sk-...",
+        validation: KeyValidation::OpenAiChat {
+            base_url: "https://api.minimax.io/v1",
+            model: "MiniMax-M3",
+        },
+        categories: LLM,
+        serves: &[MiniMax],
+    },
+    // oh-my-pi auth/minimax-code-cn.kdl; serves from its models.json rows.
+    ApiKeyProvider {
+        key: "minimax-code-cn",
+        display_name: "MiniMax Token Plan (China)",
+        default_id: "apikey:minimax-code-cn",
+        dashboard_url: "https://platform.minimaxi.com/subscribe/token-plan",
+        placeholder: "sk-...",
+        validation: KeyValidation::OpenAiChat {
+            base_url: "https://api.minimaxi.com/v1",
+            model: "MiniMax-M3",
+        },
+        categories: LLM,
+        serves: &[MiniMax],
+    },
+    // oh-my-pi auth/nanogpt.kdl.
+    // A broad aggregator: its catalog carries models from every vendor listed here.
+    ApiKeyProvider {
+        key: "nanogpt",
+        display_name: "NanoGPT",
+        default_id: "apikey:nanogpt",
+        dashboard_url: "https://nano-gpt.com/api",
+        placeholder: "sk-...",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://nano-gpt.com/api/v1/models",
+            auth_header: AuthHeaderScheme::Bearer,
+        },
+        categories: LLM,
+        serves: ModelVendor::ALL,
+    },
+    // oh-my-pi auth/novita.kdl; serves from its models.json rows.
+    // novita.kdl: the probe is inference, not billing, because the billing route needs a
+    // Balance permission some team roles lack, which rejected their valid keys.
+    ApiKeyProvider {
+        key: "novita",
+        display_name: "Novita",
+        default_id: "apikey:novita",
+        dashboard_url: "https://novita.ai/settings/key-management",
+        placeholder: "sk_...",
+        validation: KeyValidation::OpenAiChat {
+            base_url: "https://api.novita.ai/openai/v1",
+            model: "moonshotai/kimi-k2.7-code",
+        },
+        categories: LLM,
+        serves: &[OpenAI, Google, DeepSeek, Mistral, Moonshot, Zhipu, Meta, Qwen, Nvidia, MiniMax, Xiaomi, StepFun],
+    },
+    // oh-my-pi auth/ollama-cloud.kdl; serves from its models.json rows.
+    ApiKeyProvider {
+        key: "ollama-cloud",
+        display_name: "Ollama Cloud",
+        default_id: "apikey:ollama-cloud",
+        dashboard_url: "https://ollama.com/settings/keys",
+        placeholder: "ollama-cloud-api-key",
+        validation: KeyValidation::Unvalidated {
+            reason: "oh-my-pi declares no validation probe for Ollama Cloud",
+        },
+        categories: LLM,
+        serves: &[OpenAI, Google, DeepSeek, Mistral, Moonshot, Zhipu, Qwen, Nvidia, MiniMax],
+    },
+    // oh-my-pi auth/opencode-go.kdl; serves from its models.json rows.
+    ApiKeyProvider {
+        key: "opencode-go",
+        display_name: "OpenCode Go",
+        default_id: "apikey:opencode-go",
+        dashboard_url: "https://opencode.ai/auth",
+        placeholder: "sk-...",
+        validation: KeyValidation::Unvalidated {
+            reason: "oh-my-pi declares no validation probe for OpenCode Go",
+        },
+        categories: LLM,
+        serves: &[OpenAI, XAI, DeepSeek, Moonshot, Zhipu, Meta, Qwen, MiniMax, Xiaomi],
+    },
+    // oh-my-pi auth/opencode-zen.kdl; serves from its models.json rows.
+    ApiKeyProvider {
+        key: "opencode-zen",
+        display_name: "OpenCode Zen",
+        default_id: "apikey:opencode-zen",
+        dashboard_url: "https://opencode.ai/auth",
+        placeholder: "sk-...",
+        validation: KeyValidation::Unvalidated {
+            reason: "oh-my-pi declares no validation probe for OpenCode Zen",
+        },
+        categories: LLM,
+        serves: &[Anthropic, OpenAI, Google, XAI, DeepSeek, Moonshot, Zhipu, Meta, Qwen, Nvidia, MiniMax, Xiaomi],
+    },
+    // oh-my-pi auth/qianfan.kdl; serves from its models.json rows.
+    // Unvalidated rather than a chat probe: oh-my-pi's probe for Qianfan tolerates a 401
+    // whose error code is `invalid_model` (the account lacks the probe model), and the
+    // chat probe here treats every 401 as a bad key, so it would refuse valid keys.
+    ApiKeyProvider {
+        key: "qianfan",
+        display_name: "Qianfan",
+        default_id: "apikey:qianfan",
+        dashboard_url: "https://console.bce.baidu.com/qianfan/ais/console/apiKey",
+        placeholder: "bce-v3/ALTAK-...",
+        validation: KeyValidation::Unvalidated {
+            reason: "Qianfan answers 401 when the probe model is not enabled on the account, and this login cannot tell that apart from a bad key",
+        },
+        categories: LLM,
+        serves: &[DeepSeek],
+    },
+    // oh-my-pi auth/qwen-portal.kdl.
+    // Qwen's own portal (portal.qwen.ai); its model ids are opaque aliases, so `serves` is
+    // the operator's own vendor rather than read off model ids.
+    ApiKeyProvider {
+        key: "qwen-portal",
+        display_name: "Qwen Portal",
+        default_id: "apikey:qwen-portal",
+        dashboard_url: "https://chat.qwen.ai",
+        placeholder: "sk-...",
+        validation: KeyValidation::OpenAiChat {
+            base_url: "https://portal.qwen.ai/v1",
+            model: "coder-model",
+        },
+        categories: LLM,
+        serves: &[Qwen],
+    },
+    // oh-my-pi auth/sakana.kdl.
+    // Serves Sakana's own models only, and Sakana is not a vendor in `ModelVendor`.
+    ApiKeyProvider {
+        key: "sakana",
+        display_name: "Sakana AI",
+        default_id: "apikey:sakana",
+        dashboard_url: "https://console.sakana.ai/api-keys",
+        placeholder: "sk-...",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://api.sakana.ai/v1/models",
+            auth_header: AuthHeaderScheme::Bearer,
+        },
+        categories: LLM,
+        serves: &[],
+    },
+    // oh-my-pi auth/siliconflow.kdl.
+    // The roster is live-only; `serves` is only the default model's family (GLM) named in
+    // oh-my-pi's providers/siliconflow.kdl, not the full catalog.
+    ApiKeyProvider {
+        key: "siliconflow",
+        display_name: "SiliconFlow",
+        default_id: "apikey:siliconflow",
+        dashboard_url: "https://cloud.siliconflow.com/account/ak",
+        placeholder: "sk-...",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://api.siliconflow.com/v1/models",
+            auth_header: AuthHeaderScheme::Bearer,
+        },
+        categories: LLM,
+        serves: &[Zhipu],
+    },
+    // oh-my-pi auth/siliconflow-cn.kdl.
+    // The roster is live-only; `serves` is only the default model's family (DeepSeek) named
+    // in oh-my-pi's providers/siliconflow-cn.kdl, not the full catalog.
+    ApiKeyProvider {
+        key: "siliconflow-cn",
+        display_name: "SiliconFlow (China)",
+        default_id: "apikey:siliconflow-cn",
+        dashboard_url: "https://cloud.siliconflow.cn/account/ak",
+        placeholder: "sk-...",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://api.siliconflow.cn/v1/models",
+            auth_header: AuthHeaderScheme::Bearer,
+        },
+        categories: LLM,
+        serves: &[DeepSeek],
+    },
+    // oh-my-pi auth/singularityapi-dev.kdl.
+    // The roster is per key; `serves` is the families oh-my-pi's
+    // providers/singularityapi-dev.kdl names (DeepSeek, Kimi, GLM), not the full catalog.
+    ApiKeyProvider {
+        key: "singularityapi-dev",
+        display_name: "SingularityAPI",
+        default_id: "apikey:singularityapi-dev",
+        dashboard_url: "https://app.singularityapi.dev",
+        placeholder: "sk-sapi-...",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://api.singularityapi.dev/v1/models",
+            auth_header: AuthHeaderScheme::Bearer,
+        },
+        categories: LLM,
+        serves: &[DeepSeek, Moonshot, Zhipu],
+    },
+    // oh-my-pi auth/singularityapi-tech.kdl. The roster is per key (no models.json rows);
+    // `serves` comes from oh-my-pi's providers/singularityapi-tech.kdl, which says this
+    // deployment routes requests only to DeepSeek models.
+    ApiKeyProvider {
+        key: "singularityapi-tech",
+        display_name: "SingularityAPI Reserved Lanes",
+        default_id: "apikey:singularityapi-tech",
+        dashboard_url: "https://app.singularityapi.tech/compute/billing",
+        placeholder: "sk-...",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://api.singularityapi.tech/v1/models",
+            auth_header: AuthHeaderScheme::Bearer,
+        },
+        categories: LLM,
+        serves: &[DeepSeek],
+    },
+    // oh-my-pi auth/stepfun.kdl; serves from its models.json rows.
+    ApiKeyProvider {
+        key: "stepfun",
+        display_name: "StepFun",
+        default_id: "apikey:stepfun",
+        dashboard_url: "https://platform.stepfun.ai/interface-key",
+        placeholder: "...",
+        validation: KeyValidation::OpenAiChat {
+            base_url: "https://api.stepfun.ai/v1",
+            model: "step-5-preview",
+        },
+        categories: LLM,
+        serves: &[StepFun],
+    },
+    // oh-my-pi auth/synthetic.kdl; serves from its models.json rows.
+    ApiKeyProvider {
+        key: "synthetic",
+        display_name: "Synthetic",
+        default_id: "apikey:synthetic",
+        dashboard_url: "https://dev.synthetic.new/docs/api/overview",
+        placeholder: "sk-...",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://api.synthetic.new/openai/v1/models",
+            auth_header: AuthHeaderScheme::Bearer,
+        },
+        categories: LLM,
+        serves: &[OpenAI, DeepSeek, Moonshot, Zhipu, Qwen, Nvidia],
+    },
+    // oh-my-pi auth/typesafe.kdl.
+    // Serves TypeSafe's own judgment models only, which match no vendor in `ModelVendor`.
+    ApiKeyProvider {
+        key: "typesafe",
+        display_name: "TypeSafe",
+        default_id: "apikey:typesafe",
+        dashboard_url: "https://console.typesafe.ai/",
+        placeholder: "API key",
+        validation: KeyValidation::Unvalidated {
+            reason: "a TypeSafe key may belong to a deployment at a custom base URL, and probing the public host would refuse it",
+        },
+        categories: LLM,
+        serves: &[],
+    },
+    // oh-my-pi auth/umans.kdl; serves from its models.json rows.
+    ApiKeyProvider {
+        key: "umans",
+        display_name: "Umans AI Coding Plan",
+        default_id: "apikey:umans",
+        dashboard_url: "https://app.umans.ai/billing",
+        placeholder: "sk-...",
+        validation: KeyValidation::AnthropicMessages {
+            base_url: "https://api.code.umans.ai",
+            model: "umans-coder",
+        },
+        categories: LLM,
+        serves: &[DeepSeek, Moonshot, Zhipu, Qwen, Xiaomi],
+    },
+    // oh-my-pi auth/venice.kdl; serves from its models.json rows.
+    ApiKeyProvider {
+        key: "venice",
+        display_name: "Venice",
+        default_id: "apikey:venice",
+        dashboard_url: "https://venice.ai/settings/api",
+        placeholder: "vapi_...",
+        validation: KeyValidation::OpenAiChat {
+            base_url: "https://api.venice.ai/api/v1",
+            model: "qwen3-4b",
+        },
+        categories: LLM,
+        serves: &[Anthropic, OpenAI, Google, XAI, DeepSeek, Mistral, Moonshot, Zhipu, Meta, Qwen, Nvidia, MiniMax, Xiaomi],
+    },
+    // oh-my-pi auth/vercel-ai-gateway.kdl.
+    // A broad aggregator: its catalog carries models from every vendor listed here.
+    ApiKeyProvider {
+        key: "vercel-ai-gateway",
+        display_name: "Vercel AI Gateway",
+        default_id: "apikey:vercel-ai-gateway",
+        dashboard_url: "https://vercel.com/d?to=%2F%5Bteam%5D%2F%7E%2Fai-gateway%2Fapi-keys&title=AI+Gateway+API+Keys",
+        placeholder: "vck_...",
+        validation: KeyValidation::Unvalidated {
+            reason: "oh-my-pi declares no validation probe for Vercel AI Gateway",
+        },
+        categories: LLM,
+        serves: ModelVendor::ALL,
+    },
+    // oh-my-pi auth/wafer-serverless.kdl; serves from its models.json rows.
+    ApiKeyProvider {
+        key: "wafer-serverless",
+        display_name: "Wafer Serverless (pay-as-you-go)",
+        default_id: "apikey:wafer-serverless",
+        dashboard_url: "https://app.wafer.ai/usage",
+        placeholder: "wfr_...",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://pass.wafer.ai/v1/models",
+            auth_header: AuthHeaderScheme::Bearer,
+        },
+        categories: LLM,
+        serves: &[DeepSeek, Moonshot, Zhipu, Qwen, MiniMax],
+    },
+    // oh-my-pi auth/xiaomi-token-plan-ams.kdl; serves from its models.json rows.
+    ApiKeyProvider {
+        key: "xiaomi-token-plan-ams",
+        display_name: "Xiaomi Token Plan (Europe)",
+        default_id: "apikey:xiaomi-token-plan-ams",
+        dashboard_url: "https://platform.xiaomimimo.com/console/plan-manage",
+        placeholder: "tp-...",
+        validation: KeyValidation::OpenAiChat {
+            base_url: "https://token-plan-ams.xiaomimimo.com/v1",
+            model: "mimo-v2.5",
+        },
+        categories: LLM,
+        serves: &[Xiaomi],
+    },
+    // oh-my-pi auth/xiaomi-token-plan-cn.kdl; serves from its models.json rows.
+    ApiKeyProvider {
+        key: "xiaomi-token-plan-cn",
+        display_name: "Xiaomi Token Plan (China)",
+        default_id: "apikey:xiaomi-token-plan-cn",
+        dashboard_url: "https://platform.xiaomimimo.com/console/plan-manage",
+        placeholder: "tp-...",
+        validation: KeyValidation::OpenAiChat {
+            base_url: "https://token-plan-cn.xiaomimimo.com/v1",
+            model: "mimo-v2.5",
+        },
+        categories: LLM,
+        serves: &[Xiaomi],
+    },
+    // oh-my-pi auth/xiaomi-token-plan-sgp.kdl; serves from its models.json rows.
+    ApiKeyProvider {
+        key: "xiaomi-token-plan-sgp",
+        display_name: "Xiaomi Token Plan (Singapore)",
+        default_id: "apikey:xiaomi-token-plan-sgp",
+        dashboard_url: "https://platform.xiaomimimo.com/console/plan-manage",
+        placeholder: "tp-...",
+        validation: KeyValidation::OpenAiChat {
+            base_url: "https://token-plan-sgp.xiaomimimo.com/v1",
+            model: "mimo-v2.5",
+        },
+        categories: LLM,
+        serves: &[Xiaomi],
+    },
+    // oh-my-pi auth/yolo-auto.kdl; serves from its models.json rows.
+    ApiKeyProvider {
+        key: "yolo-auto",
+        display_name: "Yolo-Auto",
+        default_id: "apikey:yolo-auto",
+        dashboard_url: "https://yolo-auto.com/app",
+        placeholder: "yolo_...",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://yolo-auto.com/v1/models",
+            auth_header: AuthHeaderScheme::Bearer,
+        },
+        categories: LLM,
+        serves: &[DeepSeek, Qwen],
+    },
+    // oh-my-pi auth/zenmux.kdl; serves from its models.json rows.
+    ApiKeyProvider {
+        key: "zenmux",
+        display_name: "ZenMux",
+        default_id: "apikey:zenmux",
+        dashboard_url: "https://zenmux.ai/settings/keys",
+        placeholder: "sk-...",
+        validation: KeyValidation::GetEndpoint {
+            url: "https://zenmux.ai/api/v1/models",
+            auth_header: AuthHeaderScheme::Bearer,
+        },
+        categories: LLM,
+        serves: &[Anthropic, OpenAI, Google, XAI, DeepSeek, Mistral, Moonshot, Zhipu, Meta, Qwen, MiniMax, Xiaomi, StepFun],
+    },
+    // oh-my-pi auth/zhipu-coding-plan.kdl; serves from its models.json rows.
+    ApiKeyProvider {
+        key: "zhipu-coding-plan",
+        display_name: "Zhipu Coding Plan (智谱)",
+        default_id: "apikey:zhipu-coding-plan",
+        dashboard_url: "https://bigmodel.cn/coding-plan/personal/overview",
+        placeholder: "<id>.<secret>",
+        validation: KeyValidation::OpenAiChat {
+            base_url: "https://open.bigmodel.cn/api/coding/paas/v4",
+            model: "glm-5.1",
+        },
+        categories: LLM,
+        serves: &[Zhipu],
+    },
+    // oh-my-pi auth/tavily.kdl. A web search API, not a model provider.
+    ApiKeyProvider {
+        key: "tavily",
+        display_name: "Tavily",
+        default_id: "apikey:tavily",
+        dashboard_url: "https://app.tavily.com/home",
+        placeholder: "tvly-...",
+        validation: KeyValidation::Unvalidated {
+            reason: "oh-my-pi declares no validation probe for Tavily",
+        },
+        categories: WEB_SEARCH,
+        serves: &[],
+    },
+    // oh-my-pi auth/kagi.kdl. A web search API, not a model provider.
+    ApiKeyProvider {
+        key: "kagi",
+        display_name: "Kagi",
+        default_id: "apikey:kagi",
+        dashboard_url: "https://kagi.com/settings/api",
+        placeholder: "KG_...",
+        validation: KeyValidation::Unvalidated {
+            reason: "oh-my-pi declares no validation probe for Kagi",
+        },
+        categories: WEB_SEARCH,
+        serves: &[],
+    },
+    // oh-my-pi auth/exa.kdl. A web search API, not a model provider.
+    ApiKeyProvider {
+        key: "exa",
+        display_name: "Exa",
+        default_id: "apikey:exa",
+        dashboard_url: "https://dashboard.exa.ai/api-keys",
+        placeholder: "API key",
+        validation: KeyValidation::Unvalidated {
+            reason: "oh-my-pi declares no validation probe for Exa",
+        },
+        categories: WEB_SEARCH,
+        serves: &[],
+    },
+    // oh-my-pi auth/parallel.kdl. A web search API, not a model provider.
+    ApiKeyProvider {
+        key: "parallel",
+        display_name: "Parallel",
+        default_id: "apikey:parallel",
+        dashboard_url: "https://platform.parallel.ai/settings?tab=api-keys",
+        placeholder: "sk_...",
+        validation: KeyValidation::Unvalidated {
+            reason: "oh-my-pi declares no validation probe for Parallel",
+        },
+        categories: WEB_SEARCH,
+        serves: &[],
     },
 ];
 
@@ -810,11 +1440,11 @@ mod tests {
 
     #[test]
     fn both_catalogs_have_exact_owner_supplied_assignments() {
-        assert_eq!(API_KEY_PROVIDERS.len(), 15);
+        // 15 original rows, 37 model providers mirrored from oh-my-pi, 4 search APIs.
+        assert_eq!(API_KEY_PROVIDERS.len(), 56);
         assert_eq!(LOGIN_PROVIDERS.len(), 11);
-        assert!(API_KEY_PROVIDERS
-            .iter()
-            .all(|entry| entry.categories == LLM));
+        // Which api-key rows are `llm-provider` and which are `web-search` is pinned by
+        // the two category tests below, which also require every row to be listed.
         let login_categories: Vec<_> = LOGIN_PROVIDERS
             .iter()
             .map(|entry| {
@@ -849,7 +1479,12 @@ mod tests {
                 .iter()
                 .map(|v| v.as_str())
                 .collect::<Vec<_>>(),
-            ["llm-provider", "data-warehouse", "cloud-infrastructure"]
+            [
+                "llm-provider",
+                "data-warehouse",
+                "cloud-infrastructure",
+                "web-search"
+            ]
         );
         assert_eq!(
             ModelVendor::ALL
@@ -868,8 +1503,217 @@ mod tests {
                 "meta",
                 "qwen",
                 "perplexity",
-                "nvidia"
+                "nvidia",
+                "minimax",
+                "xiaomi",
+                "stepfun"
             ]
+        );
+    }
+
+    /// The api-key model providers this table held before oh-my-pi's were mirrored.
+    const ORIGINAL_LLM_KEYS: &[&str] = &[
+        "zai",
+        "openrouter",
+        "deepseek",
+        "cerebras",
+        "fireworks-ai",
+        "groq",
+        "mistral",
+        "together",
+        "perplexity",
+        "moonshot",
+        "huggingface",
+        "nvidia",
+        "xai",
+        "openai",
+        "google",
+    ];
+
+    /// Every oh-my-pi `login "api-key"` model provider this table did not already have,
+    /// under oh-my-pi's own provider id. Two live credentials already sit at
+    /// `apikey:opencode-go` and `apikey:ollama-cloud`, so those spellings are load-bearing.
+    const MIRRORED_LLM_KEYS: &[&str] = &[
+        "abliteration",
+        "aiand",
+        "baseten",
+        "charm-hyper",
+        "cline-pass",
+        "commandcode",
+        "deepinfra",
+        "firepass",
+        "gmi-cloud",
+        "meta",
+        "minimax-code",
+        "minimax-code-cn",
+        "nanogpt",
+        "novita",
+        "ollama-cloud",
+        "opencode-go",
+        "opencode-zen",
+        "qianfan",
+        "qwen-portal",
+        "sakana",
+        "siliconflow",
+        "siliconflow-cn",
+        "singularityapi-dev",
+        "singularityapi-tech",
+        "stepfun",
+        "synthetic",
+        "typesafe",
+        "umans",
+        "venice",
+        "vercel-ai-gateway",
+        "wafer-serverless",
+        "xiaomi-token-plan-ams",
+        "xiaomi-token-plan-cn",
+        "xiaomi-token-plan-sgp",
+        "yolo-auto",
+        "zenmux",
+        "zhipu-coding-plan",
+    ];
+
+    /// Web search APIs. Their keys are not model credentials.
+    const SEARCH_KEYS: &[&str] = &["tavily", "kagi", "exa", "parallel"];
+
+    /// oh-my-pi providers deliberately NOT in this table:
+    /// - local servers whose "key" is a localhost placeholder, so there is no secret;
+    /// - keys usable only with per-deployment settings a row cannot carry (litellm needs
+    ///   the proxy's base URL, coreweave an OpenAI-Project header);
+    /// - providers whose login is a custom, OAuth or device-code flow, not a pasted key.
+    const LEFT_OUT_KEYS: &[&str] = &[
+        "llama.cpp",
+        "lm-studio",
+        "ollama",
+        "vllm",
+        "litellm",
+        "coreweave",
+        "alibaba-coding-plan",
+        "alibaba-token-plan",
+        "cloudflare-ai-gateway",
+        "kilo",
+        "xiaomi",
+        "anthropic",
+        "cursor",
+        "devin",
+        "github-copilot",
+        "gitlab-duo",
+        "gitlab-duo-agent",
+        "google-antigravity",
+        "google-gemini-cli",
+        "kimi-code",
+        "muse-code",
+        "openai-codex",
+        "openai-codex-device",
+        "stencil",
+        "xai-oauth",
+        "zai-coding-plan",
+    ];
+
+    /// A key created under any model provider must be stamped `llm-provider`, or no LLM
+    /// consumer's category grant reaches it until an operator fixes it by hand. Checked
+    /// for the bare id and for a labeled account, since both are stamped at creation.
+    #[test]
+    fn every_model_provider_row_is_stamped_llm_provider() {
+        for key in ORIGINAL_LLM_KEYS.iter().chain(MIRRORED_LLM_KEYS) {
+            let row = api_key_provider(key).unwrap_or_else(|| panic!("no api-key row {key}"));
+            assert_eq!(row.default_id, format!("apikey:{key}"));
+            for id in [format!("apikey:{key}"), format!("apikey:{key}:work")] {
+                assert_eq!(category_defaults(&id), ["llm-provider"], "{id}");
+            }
+        }
+        // Every row must be listed somewhere, so a new row cannot land uncategorised
+        // without this test naming it.
+        for entry in API_KEY_PROVIDERS {
+            assert!(
+                ORIGINAL_LLM_KEYS.contains(&entry.key)
+                    || MIRRORED_LLM_KEYS.contains(&entry.key)
+                    || SEARCH_KEYS.contains(&entry.key),
+                "api-key row {} is in no category list",
+                entry.key
+            );
+        }
+    }
+
+    /// Every LLM consumer is granted `llm-provider`, so a search key filed there would be
+    /// readable by all of them. Search keys get `web-search` and nothing else, and the
+    /// search rows are the ONLY api-key rows outside `llm-provider`.
+    #[test]
+    fn search_keys_are_web_search_and_never_llm_provider() {
+        for key in SEARCH_KEYS {
+            let row = api_key_provider(key).unwrap_or_else(|| panic!("no api-key row {key}"));
+            assert!(row.serves.is_empty(), "{key} serves no model vendor");
+            for id in [format!("apikey:{key}"), format!("apikey:{key}:work")] {
+                assert_eq!(category_defaults(&id), ["web-search"], "{id}");
+            }
+        }
+        let outside_llm: Vec<_> = API_KEY_PROVIDERS
+            .iter()
+            .filter(|entry| entry.categories != LLM)
+            .map(|entry| entry.key)
+            .collect();
+        assert_eq!(outside_llm, SEARCH_KEYS);
+    }
+
+    #[test]
+    fn providers_this_table_cannot_hold_are_absent() {
+        for key in LEFT_OUT_KEYS {
+            assert!(
+                api_key_provider(key).is_none(),
+                "{key} was left out on purpose"
+            );
+            let id = format!("apikey:{key}");
+            assert!(catalog_match(&id).is_none(), "{id}");
+            assert!(category_defaults(&id).is_empty(), "{id}");
+        }
+    }
+
+    /// The rows stored without a probe, pinned so a row cannot quietly lose its check.
+    /// Each has a reason printed at login; an empty one would print a notice that
+    /// explains nothing.
+    #[test]
+    fn unvalidated_rows_are_exactly_the_ones_without_a_usable_probe() {
+        let unvalidated: Vec<_> = API_KEY_PROVIDERS
+            .iter()
+            .filter_map(|entry| match entry.validation {
+                KeyValidation::Unvalidated { reason } => {
+                    assert!(!reason.trim().is_empty(), "{} has no reason", entry.key);
+                    Some(entry.key)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            unvalidated,
+            [
+                "cline-pass",
+                "commandcode",
+                "ollama-cloud",
+                "opencode-go",
+                "opencode-zen",
+                "qianfan",
+                "typesafe",
+                "vercel-ai-gateway",
+                "tavily",
+                "kagi",
+                "exa",
+                "parallel",
+            ]
+        );
+    }
+
+    /// Fireworks' `/inference/v1/models` lists the caller's DEPLOYED models and answers
+    /// 500 for an account with none, so probing it flags valid keys. The serverless
+    /// catalog listing only needs the key to authenticate.
+    #[test]
+    fn fireworks_is_probed_on_the_serverless_catalog_not_the_deployment_listing() {
+        let row = api_key_provider("fireworks-ai").expect("the fireworks-ai row");
+        assert_eq!(
+            row.validation,
+            KeyValidation::GetEndpoint {
+                url: "https://api.fireworks.ai/v1/accounts/fireworks/models?filter=supports_serverless%3Dtrue&pageSize=1",
+                auth_header: AuthHeaderScheme::Bearer,
+            }
         );
     }
 
@@ -880,7 +1724,12 @@ mod tests {
                 .iter()
                 .map(|value| value.as_str())
                 .collect::<Vec<_>>(),
-            ["llm-provider", "data-warehouse", "cloud-infrastructure"]
+            [
+                "llm-provider",
+                "data-warehouse",
+                "cloud-infrastructure",
+                "web-search"
+            ]
         );
         assert_eq!(
             ModelVendor::ALL
@@ -900,6 +1749,9 @@ mod tests {
                 "qwen",
                 "perplexity",
                 "nvidia",
+                "minimax",
+                "xiaomi",
+                "stepfun",
             ]
         );
     }
@@ -1155,6 +2007,175 @@ mod source_ownership_tests {
                 ("xai", vec!["xai"]),
                 ("openai", vec!["openai"]),
                 ("google", vec!["google"]),
+                ("abliteration", vec!["zhipu"]),
+                (
+                    "aiand",
+                    vec!["openai", "google", "deepseek", "moonshot", "zhipu", "qwen"]
+                ),
+                (
+                    "baseten",
+                    vec!["openai", "deepseek", "moonshot", "zhipu", "nvidia"]
+                ),
+                ("charm-hyper", vec!["google", "moonshot", "zhipu"]),
+                (
+                    "cline-pass",
+                    vec![
+                        "google", "deepseek", "moonshot", "zhipu", "meta", "qwen", "minimax",
+                        "xiaomi"
+                    ]
+                ),
+                (
+                    "commandcode",
+                    vec![
+                        "anthropic",
+                        "openai",
+                        "google",
+                        "xai",
+                        "deepseek",
+                        "moonshot",
+                        "zhipu",
+                        "meta",
+                        "qwen",
+                        "nvidia",
+                        "minimax",
+                        "xiaomi",
+                        "stepfun"
+                    ]
+                ),
+                (
+                    "deepinfra",
+                    vec![
+                        "anthropic",
+                        "openai",
+                        "google",
+                        "deepseek",
+                        "mistral",
+                        "moonshot",
+                        "zhipu",
+                        "meta",
+                        "qwen",
+                        "nvidia",
+                        "minimax",
+                        "xiaomi"
+                    ]
+                ),
+                ("firepass", vec!["moonshot", "zhipu"]),
+                ("gmi-cloud", vec!["deepseek"]),
+                ("meta", vec!["meta"]),
+                ("minimax-code", vec!["minimax"]),
+                ("minimax-code-cn", vec!["minimax"]),
+                (
+                    "nanogpt",
+                    ModelVendor::ALL.iter().map(|v| v.as_str()).collect()
+                ),
+                (
+                    "novita",
+                    vec![
+                        "openai", "google", "deepseek", "mistral", "moonshot", "zhipu", "meta",
+                        "qwen", "nvidia", "minimax", "xiaomi", "stepfun"
+                    ]
+                ),
+                (
+                    "ollama-cloud",
+                    vec![
+                        "openai", "google", "deepseek", "mistral", "moonshot", "zhipu", "qwen",
+                        "nvidia", "minimax"
+                    ]
+                ),
+                (
+                    "opencode-go",
+                    vec![
+                        "openai", "xai", "deepseek", "moonshot", "zhipu", "meta", "qwen",
+                        "minimax", "xiaomi"
+                    ]
+                ),
+                (
+                    "opencode-zen",
+                    vec![
+                        "anthropic",
+                        "openai",
+                        "google",
+                        "xai",
+                        "deepseek",
+                        "moonshot",
+                        "zhipu",
+                        "meta",
+                        "qwen",
+                        "nvidia",
+                        "minimax",
+                        "xiaomi"
+                    ]
+                ),
+                ("qianfan", vec!["deepseek"]),
+                ("qwen-portal", vec!["qwen"]),
+                ("sakana", vec![]),
+                ("siliconflow", vec!["zhipu"]),
+                ("siliconflow-cn", vec!["deepseek"]),
+                ("singularityapi-dev", vec!["deepseek", "moonshot", "zhipu"]),
+                ("singularityapi-tech", vec!["deepseek"]),
+                ("stepfun", vec!["stepfun"]),
+                (
+                    "synthetic",
+                    vec!["openai", "deepseek", "moonshot", "zhipu", "qwen", "nvidia"]
+                ),
+                ("typesafe", vec![]),
+                (
+                    "umans",
+                    vec!["deepseek", "moonshot", "zhipu", "qwen", "xiaomi"]
+                ),
+                (
+                    "venice",
+                    vec![
+                        "anthropic",
+                        "openai",
+                        "google",
+                        "xai",
+                        "deepseek",
+                        "mistral",
+                        "moonshot",
+                        "zhipu",
+                        "meta",
+                        "qwen",
+                        "nvidia",
+                        "minimax",
+                        "xiaomi"
+                    ]
+                ),
+                (
+                    "vercel-ai-gateway",
+                    ModelVendor::ALL.iter().map(|v| v.as_str()).collect()
+                ),
+                (
+                    "wafer-serverless",
+                    vec!["deepseek", "moonshot", "zhipu", "qwen", "minimax"]
+                ),
+                ("xiaomi-token-plan-ams", vec!["xiaomi"]),
+                ("xiaomi-token-plan-cn", vec!["xiaomi"]),
+                ("xiaomi-token-plan-sgp", vec!["xiaomi"]),
+                ("yolo-auto", vec!["deepseek", "qwen"]),
+                (
+                    "zenmux",
+                    vec![
+                        "anthropic",
+                        "openai",
+                        "google",
+                        "xai",
+                        "deepseek",
+                        "mistral",
+                        "moonshot",
+                        "zhipu",
+                        "meta",
+                        "qwen",
+                        "minimax",
+                        "xiaomi",
+                        "stepfun"
+                    ]
+                ),
+                ("zhipu-coding-plan", vec!["zhipu"]),
+                ("tavily", vec![]),
+                ("kagi", vec![]),
+                ("exa", vec![]),
+                ("parallel", vec![]),
             ]
         );
         let login: Vec<_> = LOGIN_PROVIDERS

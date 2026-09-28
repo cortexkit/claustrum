@@ -6,6 +6,9 @@ pub enum ValidationOutcome {
     Valid,
     Invalid(String),
     Warning(String),
+    /// No probe was run, by design, for the reason given. Distinct from `Valid` so login
+    /// never claims a key was checked when it was not.
+    Unchecked(&'static str),
 }
 
 pub async fn validate_key(
@@ -13,6 +16,11 @@ pub async fn validate_key(
     validation: &KeyValidation,
     key: &str,
 ) -> ValidationOutcome {
+    // Before the test bypass below, so that a key with no probe is never reported as
+    // "valid" even in a test build: that would be a claim about a check that cannot run.
+    if let KeyValidation::Unvalidated { reason } = validation {
+        return ValidationOutcome::Unchecked(reason);
+    }
     // Test-only escape hatch, compiled OUT of release builds.
     //
     // The CLI integration test drives a real `login --provider zai` end to end and has
@@ -121,6 +129,7 @@ pub async fn validate_key(
                 Err(e) => ValidationOutcome::Warning(format!("transport error: {}", e)),
             }
         }
+        KeyValidation::Unvalidated { reason } => ValidationOutcome::Unchecked(reason),
     }
 }
 
@@ -382,6 +391,22 @@ mod tests {
         let transport = FixtureTransport::ok(500, "{}");
         let outcome = validate_key(&transport, &validation_bearer, "test-key").await;
         assert!(matches!(outcome, ValidationOutcome::Warning(_)));
+    }
+
+    /// A provider with no usable probe must make no network call at all (a request to an
+    /// endpoint that cannot judge the key could only refuse a valid one) and must come
+    /// back as Unchecked, never Valid, so login does not print "API key is valid."
+    #[tokio::test]
+    async fn an_unvalidated_provider_is_reported_unchecked_without_a_request() {
+        let validation = KeyValidation::Unvalidated {
+            reason: "no probe exists",
+        };
+        let transport = FixtureTransport::new(Vec::new());
+        assert_eq!(
+            validate_key(&transport, &validation, "test-key").await,
+            ValidationOutcome::Unchecked("no probe exists")
+        );
+        assert!(transport.requests().is_empty());
     }
 
     /// A non-auth 4xx means opposite things to a GET probe and a POST probe, and only

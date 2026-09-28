@@ -606,12 +606,13 @@ fn help_verb(verb: &str) -> String {
              OAuth providers open a browser URL. A one-shot CLI-local listener on the\n\
              loopback redirect completes the flow automatically; a busy port or a timeout\n\
              falls back to pasting the address-bar URL. github-copilot and kimi always use\n\
-             device authorization. api-key providers prompt for a key (validated before\n\
-             storing).\n\
+             device authorization. api-key providers prompt for a key, validated before\n\
+             storing where the provider offers a check; otherwise login says the key\n\
+             was stored unchecked, and why.\n\
              \n\
              Providers: anthropic, openai, xai, google, antigravity, github-copilot, kimi,\n\
              cursor, devin, snowflake, digitalocean, plus api-key providers (zai, openrouter,\n\
-             deepseek, groq, ...).\n\
+             deepseek, groq, ...) and web-search keys (tavily, kagi, exa, parallel).\n\
              \n\
              MULTIPLE ACCOUNTS per provider — give each its own labeled id: ck auth login\n\
              --provider anthropic --id oauth:anthropic:work (label freely chosen; each\n\
@@ -2412,7 +2413,12 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
                 .to_string()
         };
 
-        println!("Validating API key...");
+        if !matches!(
+            p.validation,
+            api_key_login::KeyValidation::Unvalidated { .. }
+        ) {
+            println!("Validating API key...");
+        }
         let http = credentials_core::http::ReqwestTransport::new()
             .map_err(|e| CliError::Io(e.to_string()))?;
         let outcome = tokio_block_on(api_key_login::validate_key(&http, &p.validation, &key));
@@ -2425,6 +2431,9 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             }
             api_key_login::ValidationOutcome::Warning(warn) => {
                 println!("WARNING: API key validation could not be completed: {warn}. Storing the key anyway.");
+            }
+            api_key_login::ValidationOutcome::Unchecked(reason) => {
+                println!("NOTE: storing this API key without checking it: {reason}.");
             }
         }
 

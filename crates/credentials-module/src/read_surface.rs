@@ -2067,9 +2067,11 @@ impl ReadSurface {
     /// refresh-adapter prefix non-authoritative applies, a record's stored kind is the
     /// only truth.
     ///
-    /// Blast radius today is zero and that is measured, not assumed: no consumer reads
-    /// `credential.status` at all (all three answered at source on 2026-08-25). It is
-    /// recorded here so the first consumer to poll status does not discover it.
+    /// Blast radius was measured as zero on 2026-08-25, because no consumer read
+    /// `credential.status` then (all three answered at source). That premise has since
+    /// expired: the published TypeScript client exposes `statusCredential`, and its decoder
+    /// is pinned against this surface's replies. So re-measure who polls status for a
+    /// vault-held key record before treating the divergence as harmless.
     pub async fn status(
         &self,
         connection_id: u64,

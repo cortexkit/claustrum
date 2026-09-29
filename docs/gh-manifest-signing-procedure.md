@@ -1,13 +1,14 @@
 # `gh` routing manifest — signing procedure
 
-**Status: PROCEDURE WRITTEN, NEVER EXERCISED.** No manifest has been signed. The
-signer described in §4 does not exist as code yet. Read this as what will happen,
-not as what has happened; the first real signature is also the first test of every
-step below.
+**Status: IN USE.** Manifests v8 through v13 and v15 were signed this way (v14 was drafted
+and never signed). `scripts/audit-signed-payloads.sh` lists every approval row and the
+retained bytes it binds.
 
-The root exists: `apikey:gh-manifest-root`, Ed25519, minted 2026-08-20 into vault
-custody, key id `c0342216a1b8edb0` (derived — first 8 bytes of SHA-256 over the
-public key, so any holder of the public half can recompute and check it).
+The root is `signing:gh-manifest-root:1`, an Ed25519 key generated inside the vault
+(`mint-signing-key`) so its private half never leaves it. Its key id is
+`c9ad111282d1da10`, the first 8 bytes of SHA-256 over the public key, so any holder of
+the public half can recompute and check it. The earlier root, `apikey:gh-manifest-root`
+(key id `c0342216a1b8edb0`), was removed on 2026-08-30 once no consumer trusted it.
 
 ## 1. What this key actually gates
 
@@ -209,6 +210,18 @@ the consumer held a commitment to bytes that neither could produce.
 admitted **only** when its SHA-256 equals the `payload_hash` of an `approval` row. That
 filter is the whole value: a store that accepted whatever was lying in `/tmp` would be
 worse than no store, because it would look like provenance.
+
+The hand-off envelope (`{key_id, manifest_bytes, signature}`, see §2b) is NOT an
+approved payload: its hash matches no approval row, so the audit rightly reports it as
+one. Keep envelopes beside the store, not in it:
+
+```
+<data_dir>/signed-envelopes/v<N>-envelope.json   0600
+```
+
+The v13 envelope sat inside `signed-payloads/` for three weeks, so every audit reported two
+findings that were not holes. An audit that always reports something teaches its reader to
+skim past findings, including a real missing payload.
 
 **Audit it in the direction that can find absence.** Scanning retained files against
 the chain is honest, complete, and structurally blind — it iterates what exists, so a

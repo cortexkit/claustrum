@@ -484,8 +484,10 @@ pub struct GetResult {
     /// in its own manifest can refuse the handle when this vault-side id disagrees with
     /// that row.
     ///
-    /// IT IS NOT A ROUTING KEY. Account-scoped routing joins on `account_id` plus
-    /// `record_version`. A credential id is an OPERATOR-CHOSEN LABEL: it is hand-written,
+    /// IT IS NOT A ROUTING KEY. Account-scoped routing pools capacity on the provider
+    /// account (`account_id`, with the refresh adapter from `list_scoped`), never on
+    /// `record_version`, which moves on every token refresh. A credential id is an
+    /// OPERATOR-CHOSEN LABEL: it is hand-written,
     /// can differ between two records holding the same provider account, and means
     /// nothing to the provider. A consumer routing on it will drift silently.
     ///
@@ -504,11 +506,14 @@ pub struct GetResult {
     pub project_id: Option<String>,
     /// The provider account identity the served token executes under (e.g. the OpenAI
     /// ChatGPT-Account-Id), a NON-secret value parsed live from the served access token
-    /// via the per-provider claim table. It answers "which account would a send through
-    /// this handle execute under" — the binding key an account-scoped router joins on,
-    /// paired with `record_version` (which bumps on every replace, so the router
-    /// re-resolves when a handle is re-pointed at a different account). Absent when the
-    /// provider has no known account claim or the token does not carry one. This field
+    /// via the per-provider claim table, falling back to the identity stored at login for
+    /// providers whose tokens are opaque (Anthropic). It answers "which account would a
+    /// send with this token execute under", which is the key an account-scoped router
+    /// pools on. Do NOT pair it with `record_version` in a pool key: that bumps on every
+    /// token refresh, so a pool keyed on it would split one account into a new pool per
+    /// refresh. A `--replace` re-login CAN re-point a credential id at a different
+    /// account, and this field changing is how a router detects that. Absent when the
+    /// provider has no known account claim and no identity was captured. This field
     /// never contains the operator's credential id or the bearer handle; it contains only
     /// the provider's account identity.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -688,8 +693,10 @@ pub struct StatusResult {
     /// `{label, handle, credential_id}` in its own manifest can refuse the handle when
     /// this vault-side id disagrees with that row.
     ///
-    /// IT IS NOT A ROUTING KEY. Account-scoped routing joins on `account_id` plus
-    /// `record_version`. A credential id is an OPERATOR-CHOSEN LABEL: it is hand-written,
+    /// IT IS NOT A ROUTING KEY. Account-scoped routing pools capacity on the provider
+    /// account (`account_id`, with the refresh adapter from `list_scoped`), never on
+    /// `record_version`, which moves on every token refresh. A credential id is an
+    /// OPERATOR-CHOSEN LABEL: it is hand-written,
     /// can differ between two records holding the same provider account, and means
     /// nothing to the provider. A consumer routing on it will drift silently.
     ///

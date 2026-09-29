@@ -240,7 +240,9 @@ plausible list computed for grants you do not hold.
 `expires_at_ms` and `record_version`, plus non-secret metadata where the vault has it
 (`credential_id`, `account_id`, `email`, `org_name`, and `project_id` for `antigravity`).
 Use `credential_id` only to verify a handle-to-manifest binding, never to route: it is an
-operator-chosen label, while account routing joins on `account_id` + `record_version`.
+operator-chosen label. Account routing pools on `account_id` (with the refresh adapter from
+`list_scoped`), never on `record_version`: that bumps on every token refresh, so a key that
+includes it splits one account into a new pool per refresh.
 
 `account_id` IS THE PROVIDER'S ACCOUNT IDENTIFIER AND ITS SHAPE IS THE PROVIDER'S CHOICE.
 Treat it as an opaque string. It is stable per account and comparable to itself, and

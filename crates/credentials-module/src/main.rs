@@ -48,8 +48,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use subc_protocol::manifest::Concurrency;
 use subc_protocol::manifest::{
-    build_provenance, SelfSignalDeclaration, SelfSignalEffect, SelfSignalKind, SignalAnchor,
-    SignalCadence,
+    build_provenance, LaunchNonceSource, ManifestProvenance, SelfSignalDeclaration,
+    SelfSignalEffect, SelfSignalKind, SignalAnchor, SignalCadence,
 };
 use subc_protocol::{
     manifest::{
@@ -60,7 +60,7 @@ use subc_protocol::{
         HealthStatus, ModuleControlRequest, ModuleControlResponse, MODULE_CONTROL_OP_HEALTH_CHECK,
     },
     ErrorBody, Flags, Frame, FrameType, ModuleHelloAckBody, ModuleHelloBody, Priority,
-    PROTOCOL_VERSION, SUBC_LAUNCH_NONCE_ENV, SUBC_MODULE_ID_ENV,
+    PROTOCOL_VERSION, SUBC_MODULE_ID_ENV,
 };
 use subc_transport::{authenticate_client, connection_file, read_frame, write_frame};
 use tokio::{
@@ -146,6 +146,9 @@ struct ModuleConfig {
     /// for a non-reserved launch (the daemon would then reject a reserved id, but a
     /// dev run without a supervisor simply omits it).
     launch_nonce: Option<String>,
+    /// Where that nonce came from, declared in the manifest's provenance so the
+    /// supervisor can tell which modules no longer need the environment copy.
+    launch_nonce_source: Option<LaunchNonceSource>,
 }
 
 impl ModuleConfig {
@@ -155,13 +158,32 @@ impl ModuleConfig {
             .ok()
             .filter(|v| !v.trim().is_empty())
             .unwrap_or_else(|| DEFAULT_MODULE_ID.to_string());
-        let launch_nonce = std::env::var(SUBC_LAUNCH_NONCE_ENV)
-            .ok()
+        // THE ONLY READ OF THE LAUNCH NONCE IN THIS DAEMON, and it must stay the only
+        // one. `subc_os::launch_nonce` takes the nonce from the inherited descriptor the
+        // supervisor passes (falling back to `SUBC_LAUNCH_NONCE` only when no descriptor
+        // is named), closes that descriptor, and caches the answer for the process. A
+        // second reader going to the environment directly would break once the
+        // supervisor stops setting the environment copy, and one reading the descriptor
+        // number again would consume whatever file the process opened there next.
+        //
+        // Called first thing in `main`, before anything is spawned, because until it
+        // runs the descriptor is inheritable and a child would receive the pipe.
+        let nonce = subc_os::launch_nonce().map_err(|e| {
+            ModuleError::Message(format!("cannot read the supervisor's launch nonce: {e}"))
+        })?;
+        let launch_nonce_source = nonce.as_ref().map(|n| match n.source() {
+            subc_os::LaunchNonceSource::Fd => LaunchNonceSource::Fd,
+            subc_os::LaunchNonceSource::Env => LaunchNonceSource::Env,
+            other => LaunchNonceSource::from_wire_name(other.as_str()),
+        });
+        let launch_nonce = nonce
+            .map(|n| n.value().to_string())
             .filter(|v| !v.trim().is_empty());
         Ok(Self {
             connection_file_path,
             module_id,
             launch_nonce,
+            launch_nonce_source,
         })
     }
 }
@@ -697,7 +719,7 @@ async fn send_hello(
     config: &ModuleConfig,
 ) -> Result<(), ModuleError> {
     let body = serde_json::to_vec(&ModuleHelloBody {
-        manifest: manifest(&config.module_id),
+        manifest: manifest(&config.module_id, config.launch_nonce_source.clone()),
         protocol_ver: PROTOCOL_VERSION,
         // Advertise health.check so the daemon actively probes us (capability-
         // gated: unadvertised = health "unknown", never probed). We answer L2
@@ -1491,7 +1513,7 @@ fn resolver_config_from_env(data_dir: PathBuf) -> ResolverConfig {
 /// operations. Storage is `owns_schema: true` (the vault owns its schema). The
 /// `reserved: true` binding lives in the daemon's subc.jsonc config, not here; the
 /// module proves its reserved identity by echoing the launch nonce in HELLO.
-fn manifest(module_id: &str) -> ModuleManifest {
+fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> ModuleManifest {
     // BUILT THROUGH THE BUILDER, NOT A STRUCT LITERAL, because subc-protocol 0.16.0
     // made `ModuleManifest` `#[non_exhaustive]`. That migration was compile-loud -- a
     // literal simply stops compiling -- and the point of it is that FUTURE field
@@ -1614,7 +1636,7 @@ fn manifest(module_id: &str) -> ModuleManifest {
     // documented as braces.
     .provenance({
         let rev = credentials_core::contract::BUILD_REV;
-        (rev != "unknown")
+        let built = (rev != "unknown")
             .then(|| {
                 build_provenance(
                     Some(rev),
@@ -1623,7 +1645,15 @@ fn manifest(module_id: &str) -> ModuleManifest {
                 )
                 .ok()
             })
-            .flatten()
+            .flatten();
+        // The nonce source is a fact about this LAUNCH, not about the build, so it is
+        // declared even on a dev build that has no revision to state. The supervisor
+        // reads it to decide when the environment copy of the nonce can be withdrawn.
+        match (built, launch_nonce_source) {
+            (built, None) => built,
+            (Some(p), source) => Some(p.with_launch_nonce_source(source)),
+            (None, source) => Some(ManifestProvenance::new().with_launch_nonce_source(source)),
+        }
     })
     // ONE periodic behaviour exists in this daemon, and the list is exhaustive by
     // inspection rather than recollection: every `interval`/`sleep` outside `#[cfg(test)]`
@@ -1858,7 +1888,7 @@ mod tests {
     /// nothing else in the repo would catch.
     #[test]
     fn the_self_signal_declaration_matches_what_the_refresher_actually_does() {
-        let m = manifest("claustrum");
+        let m = manifest("claustrum", None);
         let signals = m.self_signals.as_ref().expect(
             "self_signals must be Some: an exhaustive list also states that no \
                      PERIODIC provider traffic exists, which None leaves open",
@@ -1889,7 +1919,7 @@ mod tests {
 
     #[test]
     fn the_manifest_declares_no_consumer_role_because_nothing_may_be_pushed_outward() {
-        let manifest = super::manifest("claustrum");
+        let manifest = super::manifest("claustrum", None);
         assert!(
             manifest.consumes.is_empty(),
             "claustrum must consume no roles: an outbound call would break both the \
@@ -1919,7 +1949,7 @@ mod tests {
     /// currently bothers to read, because the reader changes and the module does not.
     #[test]
     fn the_manifest_still_declares_the_fields_protocol_0_19_made_optional() {
-        let manifest = super::manifest("claustrum");
+        let manifest = super::manifest("claustrum", None);
         assert_eq!(
             manifest.trust_tier,
             Some(TrustTier::FirstParty),
@@ -3664,7 +3694,7 @@ mod tests {
     /// producing a fact the fleet census will silently drop.
     #[test]
     fn provenance_never_publishes_a_placeholder_as_a_build_fact() {
-        let m = manifest("claustrum");
+        let m = manifest("claustrum", None);
         let rev = credentials_core::contract::BUILD_REV;
         // The canonical form the protocol enforces: 40 lowercase hex.
         let conforming = rev.len() == 40
@@ -3702,6 +3732,135 @@ mod tests {
         );
     }
 
+    /// The manifest declares where the launch nonce came from, on every build.
+    ///
+    /// The supervisor withdraws the environment copy of the nonce only once every
+    /// module reports `fd`, so a module that silently omits the field holds that step
+    /// up (or worse, is assumed ready without evidence). A dev build has no revision to
+    /// state, and the source must survive that too: it describes the launch, not the
+    /// build.
+    #[test]
+    fn manifest_declares_the_launch_nonce_source() {
+        let fd = manifest("claustrum", Some(LaunchNonceSource::Fd));
+        let p = fd
+            .provenance
+            .as_ref()
+            .expect("a known nonce source always produces a provenance block");
+        assert_eq!(p.launch_nonce_source, Some(LaunchNonceSource::Fd));
+        assert!(
+            p.validate().is_ok(),
+            "the declared block must satisfy the protocol validator"
+        );
+        let wire = serde_json::to_value(&fd).expect("manifest serializes");
+        assert_eq!(
+            wire.pointer("/provenance/launch_nonce_source"),
+            Some(&json!("fd")),
+            "the wire spelling the supervisor's census reads"
+        );
+
+        let env = manifest("claustrum", Some(LaunchNonceSource::Env));
+        assert_eq!(
+            env.provenance
+                .as_ref()
+                .and_then(|p| p.launch_nonce_source.clone()),
+            Some(LaunchNonceSource::Env)
+        );
+
+        // With no supervisor there is no nonce and no source, and nothing is invented.
+        let none = manifest("claustrum", None);
+        assert!(none
+            .provenance
+            .as_ref()
+            .is_none_or(|p| p.launch_nonce_source.is_none()));
+    }
+
+    /// No shipped source reads the launch nonce except through `subc_os::launch_nonce`.
+    ///
+    /// `launch_nonce_source: fd` in the manifest only proves the HELLO read came from the
+    /// descriptor. A second reader going to `SUBC_LAUNCH_NONCE` directly would keep
+    /// working while the supervisor still sets the environment copy, and fail the day it
+    /// stops. Two other modules shipped exactly that, and only a source scan finds it.
+    ///
+    /// Scans every `src/` tree in this workspace. Removing the variable (the CLI scrubs it
+    /// before spawning children) is not a read and is allowed. `examples/` is excluded:
+    /// the operator probe takes a nonce the operator exports by hand.
+    #[test]
+    fn no_shipped_source_reads_the_launch_nonce_directly() {
+        fn offending(text: &str) -> Vec<String> {
+            text.lines()
+                .filter(|line| {
+                    let code = line.split("//").next().unwrap_or("");
+                    (code.contains("\"SUBC_LAUNCH_NONCE\"") && !code.contains("remove_var"))
+                        || code.contains("SUBC_LAUNCH_NONCE_ENV")
+                })
+                .map(|line| line.trim().to_string())
+                .collect()
+        }
+        // Positive control: the scanner must be able to say yes, or a clean result means
+        // nothing.
+        assert_eq!(
+            offending("let n = std::env::var(\"SUBC_LAUNCH_NONCE\").ok();").len(),
+            1
+        );
+        assert_eq!(
+            offending("use subc_protocol::SUBC_LAUNCH_NONCE_ENV;").len(),
+            1
+        );
+        assert!(offending("std::env::remove_var(\"SUBC_LAUNCH_NONCE\");").is_empty());
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut scanned = 0usize;
+        let mut found = Vec::new();
+        let mut stack: Vec<std::path::PathBuf> = [
+            "crates/credentials-core/src",
+            "crates/credentials-module/src",
+        ]
+        .iter()
+        .map(|d| root.join(d))
+        .collect();
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("read src dir") {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    scanned += 1;
+                    let text = std::fs::read_to_string(&path).expect("read source");
+                    // This test's own control strings are the one expected hit.
+                    if path.ends_with("main.rs")
+                        && path
+                            .parent()
+                            .is_some_and(|p| p.ends_with("credentials-module/src"))
+                    {
+                        let before_tests = text
+                            .split("fn no_shipped_source_reads_the_launch_nonce_directly")
+                            .next()
+                            .unwrap_or("");
+                        found.extend(
+                            offending(before_tests)
+                                .into_iter()
+                                .map(|l| format!("{}: {l}", path.display())),
+                        );
+                    } else {
+                        found.extend(
+                            offending(&text)
+                                .into_iter()
+                                .map(|l| format!("{}: {l}", path.display())),
+                        );
+                    }
+                }
+            }
+        }
+        assert!(
+            scanned > 20,
+            "the scan must actually visit the source tree (visited {scanned})"
+        );
+        assert!(
+            found.is_empty(),
+            "read the launch nonce through subc_os::launch_nonce, never directly:\n{}",
+            found.join("\n")
+        );
+    }
     /// The request pins below cover the parameter structs that exist for known route operations.
     /// They catch a parameter added to a known op, but a wholly new op with a new struct still
     /// depends on the person adding it to create a pin. This deliberately does not enumerate

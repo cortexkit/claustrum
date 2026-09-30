@@ -354,7 +354,7 @@ async fn main() {
                     // apikey:openrouter serves Anthropic models and contains no
                     // "anthropic" anywhere in its id.
                     eprintln!(
-                        "  {}  adapter={}  categories={}  serves={}  state={}  v{}",
+                        "  {}  adapter={}  account={}  ops={}  categories={}  serves={}  state={}  v{}",
                         // The field is `id` here, NOT `credential_id`. `get` and `status`
                         // echo `credential_id` for binding verification; an inventory row
                         // IS the credential, so it does not need to name the concept
@@ -366,6 +366,13 @@ async fn main() {
                         // that and a name otherwise is what lets an operator see which
                         // rows a native-protocol consumer may actually use.
                         row["refresh_adapter"].as_str().unwrap_or("-"),
+                        // Identity is what separates a covered row from a bare id: a
+                        // `list` or `read` grant returns it, a sign/open-only grant does
+                        // not. Without this column the probe cannot show whether a
+                        // metadata-only `list` grant actually carries identity, which is
+                        // the whole point of that grant. `account_id` is not a secret.
+                        row["account_id"].as_str().unwrap_or("-"),
+                        row["operations"],
                         row["categories"],
                         row["serves"],
                         row["state"].as_str().unwrap_or("?"),

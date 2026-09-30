@@ -31,6 +31,7 @@ members = ["crates/credentials-core", "crates/credentials-module"]
 [workspace.dependencies]
 subc-protocol = { path = "../subconscious/crates/subc-protocol" }
 subc-transport = { path = "../subconscious/crates/subc-transport" }
+subc-os = { path = "../subconscious/crates/subc-os" }
 subc-core = { path = "../subconscious/crates/subc-core" }
 
 cortexkit-store = { path = "../commons/crates/cortexkit-store" }

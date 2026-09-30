@@ -35,6 +35,7 @@ base64 = { workspace = true }
 credentials-core = { path = "../credentials-core" }
 subc-protocol = { workspace = true }
 subc-transport = { workspace = true }
+subc-os = { workspace = true }
 cortexkit-store = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

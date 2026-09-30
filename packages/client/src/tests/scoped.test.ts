@@ -122,6 +122,28 @@ describe('the client speaks the producer-pinned wire', () => {
     expect(inventory.view.length).toBeGreaterThan(0)
   })
 
+  /**
+   * A caller holding only the metadata-only `list` grant gets the roster with identity and
+   * the refresh adapter, and its row's `operations` says `list`. The decoder reads
+   * operations as open strings, so an operation it has never seen must pass through
+   * rather than refuse the whole reply.
+   */
+  test('the client decodes the golden reply to a list-only caller', () => {
+    const fixture = JSON.parse(readFileSync(FIXTURE, 'utf8')) as {
+      operations: (FixtureRow & { list_only_reply?: string })[]
+    }
+    const reply = fixture.operations.find((entry) => entry.op === 'credential.list_scoped')?.list_only_reply
+    if (reply === undefined) throw new Error('no golden list-only reply for credential.list_scoped')
+
+    const inventory = decodeScopedInventory(JSON.parse(reply), () => {})
+    expect(inventory.rows).toHaveLength(1)
+    const row = inventory.rows[0]
+    expect(row?.operations).toEqual(['list'])
+    expect(row?.accountId).toBe('00000000-0000-4000-8000-000000000000')
+    expect(row?.refreshAdapter).toBe('anthropic')
+    expect(row?.email).toBe('consumer@example.invalid')
+  })
+
   test('the ceremony rows are pinned too, so a consumer can build against them offline', () => {
     expect(Object.keys(fixtureRequest('auth.enroll_propose')).sort()).toEqual([
       'proposed_name',

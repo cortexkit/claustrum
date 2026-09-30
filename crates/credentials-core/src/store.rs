@@ -539,6 +539,28 @@ const MIGRATIONS: &[Migration] = &[
         statements: "ALTER TABLE pending_enrollments ADD COLUMN proposer_kind TEXT; \
                      ALTER TABLE pending_enrollments ADD COLUMN proposer_id TEXT;",
     },
+    // Admit the metadata-only `list` operation. SQLite cannot alter a CHECK constraint in
+    // place, so the table is rebuilt with `list` added to the allowed operations, the
+    // same way migration 11 added `open`. Stored rows are copied unchanged and the grant
+    // generation is not bumped: no existing grant gains or loses authority.
+    Migration {
+        version: 13,
+        statements: "CREATE TABLE read_grants_v13 (\
+                         principal_kind    TEXT NOT NULL CHECK (principal_kind IN ('reserved','enrolled')), \
+                         principal_id      TEXT NOT NULL, \
+                         selector_kind     TEXT NOT NULL CHECK (selector_kind IN ('exact','category')), \
+                         selector          TEXT NOT NULL, \
+                         operation         TEXT NOT NULL CHECK(operation IN ('read', 'sign', 'open', 'list')), \
+                         created_at_ms     INTEGER NOT NULL, \
+                         PRIMARY KEY (principal_kind, principal_id, selector_kind, selector, operation)\
+                     ); \
+                     INSERT INTO read_grants_v13 \
+                         (principal_kind, principal_id, selector_kind, selector, operation, created_at_ms) \
+                     SELECT principal_kind, principal_id, selector_kind, selector, operation, created_at_ms \
+                     FROM read_grants; \
+                     DROP TABLE read_grants; \
+                     ALTER TABLE read_grants_v13 RENAME TO read_grants;",
+    },
 ];
 
 /// The newest store migration THIS BINARY knows how to apply.
@@ -620,6 +642,15 @@ pub struct RecordMeta {
 }
 
 /// The operation a principal-scoped credential-prefix grant permits.
+///
+/// Each operation authorizes only its own surfaces; none implies another. `List` is the
+/// metadata-only one: it makes a covered row visible in `credential.list_scoped` with
+/// its identity and refresh adapter, and authorizes nothing that can return a token or
+/// exercise a key. It exists so a module can be given the account roster without also
+/// being given every token, which `Read` would do.
+///
+/// `List` is declared last so the derived order of the three older variants, which
+/// decides the order of a list_scoped row's `operations`, is unchanged.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]
@@ -628,6 +659,7 @@ pub enum GrantOperation {
     Read,
     Sign,
     Open,
+    List,
 }
 
 impl GrantOperation {
@@ -636,6 +668,7 @@ impl GrantOperation {
             Self::Read => "read",
             Self::Sign => "sign",
             Self::Open => "open",
+            Self::List => "list",
         }
     }
 }
@@ -648,8 +681,9 @@ impl std::str::FromStr for GrantOperation {
             "read" => Ok(Self::Read),
             "sign" => Ok(Self::Sign),
             "open" => Ok(Self::Open),
+            "list" => Ok(Self::List),
             _ => Err(format!(
-                "unknown grant operation '{value}' (expected read, sign, or open)"
+                "unknown grant operation '{value}' (expected read, sign, open, or list)"
             )),
         }
     }
@@ -2782,7 +2816,12 @@ impl EncryptedStore {
                     if operations.is_empty() {
                         continue;
                     }
-let decoded_record = if operations.contains(&GrantOperation::Read) {
+                    // `read` and `list` both authorize the row's identity and adapter;
+                    // a row reached only by `sign` or `open` stays sealed. Unsealing here
+                    // serves metadata only, and no payload leaves this function.
+                    let decoded_record = if operations.contains(&GrantOperation::Read)
+                        || operations.contains(&GrantOperation::List)
+                    {
                         let plaintext = envelope::open(
                             &self.key,
                             &envelope_bytes,
@@ -10156,7 +10195,7 @@ mod tests {
     fn the_newest_migration_version_is_pinned_because_the_manifest_declares_it() {
         assert_eq!(
             newest_migration_version(),
-            12,
+            13,
             "the newest migration changed. This value is DECLARED in the module manifest \
              as store_schema_version, so a supervisor comparing declared-against-actual \
              sees it. Update the literal, and note the manifest consequence."
@@ -11980,6 +12019,100 @@ mod migration_10_tests {
         assert_eq!(grants.len(), 4);
     }
 
+    #[test]
+    fn migration_13_admits_list_and_copies_every_grant_without_touching_the_generation() {
+        let (root, store) = sqlite("migration-13", 124);
+        migrate_through_for_test(&store, 12).expect("schema 12");
+        store.with_conn(|conn| {
+            for (kind, id, selector_kind, selector, operation, timestamp) in [
+                ("reserved", "agent", "exact", "apikey:one", "read", 7),
+                ("enrolled", "consumer", "category", "llm-provider", "sign", 9),
+                ("reserved", "agent", "category", "github", "open", 11),
+                ("enrolled", "consumer", "exact", "kem:two", "open", 13),
+            ] {
+                conn.execute(
+                    "INSERT INTO read_grants (principal_kind, principal_id, selector_kind, selector, operation, created_at_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    rusqlite::params![kind, id, selector_kind, selector, operation, timestamp],
+                )?;
+            }
+            conn.execute("UPDATE grants_generation SET value = 57 WHERE id = 1", [])?;
+            Ok(())
+        }).expect("seed every schema-12 operation over both selectors");
+        // Schema 12 must refuse `list`, or the migration below proves nothing about it.
+        let refused = store.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO read_grants (principal_kind, principal_id, selector_kind, selector, operation, created_at_ms) VALUES ('reserved', 'router', 'category', 'llm-provider', 'list', 1)",
+                [],
+            )
+        });
+        assert!(refused.is_err(), "schema 12 has no `list` operation");
+        let rows = |store: &SqliteStore| {
+            store.with_conn(|conn| {
+                let mut stmt = conn.prepare("SELECT principal_kind, principal_id, selector_kind, selector, operation, created_at_ms FROM read_grants ORDER BY principal_kind, principal_id, selector_kind, selector, operation")?;
+                let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, String>(4)?, r.get::<_, i64>(5)?)))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(rows)
+            }).expect("read all six grant columns")
+        };
+        let before_rows = rows(&store);
+        assert_eq!(before_rows.len(), 4);
+        let before_objects = vault_schema_objects(&store);
+        let old_ddl = object_sql(&before_objects, "read_grants");
+        assert!(old_ddl.contains("CHECK(operation IN ('read', 'sign', 'open'))"));
+
+        migrate_through_for_test(&store, 13).expect("schema 13");
+        assert_eq!(schema_version_of(&store), 13);
+        assert_eq!(
+            rows(&store),
+            before_rows,
+            "every column of every grant survives byte for byte"
+        );
+        assert_eq!(
+            generation_of(&store),
+            57,
+            "a DDL-only migration is not a grant mutation"
+        );
+        let after_objects = vault_schema_objects(&store);
+        let expected: Vec<_> = before_objects
+            .into_iter()
+            .map(|(kind, name, ddl)| {
+                if name == "read_grants" {
+                    (
+                        kind,
+                        name,
+                        ddl.replace(
+                            "CHECK(operation IN ('read', 'sign', 'open'))",
+                            "CHECK(operation IN ('read', 'sign', 'open', 'list'))",
+                        ),
+                    )
+                } else {
+                    (kind, name, ddl)
+                }
+            })
+            .collect();
+        assert_eq!(
+            after_objects, expected,
+            "only the operation CHECK may change"
+        );
+
+        store.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO read_grants (principal_kind, principal_id, selector_kind, selector, operation, created_at_ms) VALUES ('reserved', 'router', 'category', 'llm-provider', 'list', 15)",
+                [],
+            )
+        }).expect("schema 13 stores a list grant");
+        let (grants, version) =
+            list_read_grants_read_only_with_schema(&root.join("store.db")).expect("schema 13 read");
+        assert_eq!(version, 13);
+        assert_eq!(grants.len(), 5);
+        assert!(
+            grants
+                .iter()
+                .any(|grant| grant.operation == GrantOperation::List
+                    && grant.principal_id == "router")
+        );
+    }
+
     fn pending_proposer(
         store: &EncryptedStore,
         request_id: &str,
@@ -12089,7 +12222,9 @@ mod migration_10_tests {
         assert_eq!(behind_rows[0].proposer_kind, None);
         assert_eq!(behind_rows[0].proposer_id, None);
 
-        EncryptedStore::migrate(&store).expect("schema 12");
+        // Run the chain through 12 only, so the schema version asserted below is the one
+        // migration 12 records; a later migration would advance it.
+        migrate_through_for_test(&store, 12).expect("schema 12");
         assert_eq!(
             schema_version_of(&store),
             ENROLLMENT_PROPOSER_SCHEMA_VERSION
@@ -12111,20 +12246,22 @@ mod migration_10_tests {
         EncryptedStore::migrate(&store).expect("migrate");
         assert!(GrantOperation::Read < GrantOperation::Sign);
         assert!(GrantOperation::Sign < GrantOperation::Open);
+        assert!(GrantOperation::Open < GrantOperation::List);
         for (text, operation) in [
             ("read", GrantOperation::Read),
             ("sign", GrantOperation::Sign),
             ("open", GrantOperation::Open),
+            ("list", GrantOperation::List),
         ] {
             assert_eq!(text.parse::<GrantOperation>(), Ok(operation));
             assert_eq!(operation.as_str(), text);
         }
         assert_eq!(
             "other".parse::<GrantOperation>(),
-            Err("unknown grant operation 'other' (expected read, sign, or open)".to_string())
+            Err("unknown grant operation 'other' (expected read, sign, open, or list)".to_string())
         );
         store.with_conn(|conn| {
-            for operation in ["open", "sign", "read"] {
+            for operation in ["open", "sign", "read", "list"] {
                 conn.execute("INSERT INTO read_grants (principal_kind, principal_id, selector_kind, selector, operation, created_at_ms) VALUES ('reserved', 'agent', 'exact', 'apikey:one', ?1, 1)", [operation])?;
             }
             Ok(())
@@ -12138,6 +12275,7 @@ mod migration_10_tests {
                 .map(|grant| grant.operation)
                 .collect::<Vec<_>>(),
             [
+                GrantOperation::List,
                 GrantOperation::Open,
                 GrantOperation::Read,
                 GrantOperation::Sign
@@ -12154,13 +12292,13 @@ mod migration_10_tests {
             .expect_err("unknown operation refuses the entire inventory")
             .to_string();
         assert!(
-            error.contains("unknown grant operation 'other' (expected read, sign, or open)"),
+            error.contains("unknown grant operation 'other' (expected read, sign, open, or list)"),
             "{error}"
         );
     }
 
     #[test]
-    fn schema_10_lease_free_readers_and_schema_12_shared_runner_remain_compatible() {
+    fn schema_10_lease_free_readers_and_schema_13_shared_runner_remain_compatible() {
         let (root, store) = sqlite("migration-compat", 119);
         migrate_through_for_test(&store, 10).expect("schema 10");
         store.with_conn(|conn| conn.execute("INSERT INTO read_grants (principal_kind, principal_id, selector_kind, selector, operation, created_at_ms) VALUES ('reserved', 'agent', 'exact', 'apikey:one', 'read', 1)", [])).expect("seed schema-10 grant");
@@ -12175,10 +12313,10 @@ mod migration_10_tests {
             list_read_grants_read_only_with_schema(&path).expect("behind grants");
         assert_eq!(behind_version, 10);
         assert_eq!(behind_grants[0].operation, GrantOperation::Read);
-        // Migrate through 11 only. The version-12 row inserted below then simulates an
-        // already-applied migration 12, which the shared runner must skip.
-        migrate_through_for_test(&store, 11).expect("schema 11");
-        store.with_conn(|conn| conn.execute("INSERT INTO cortexkit_schema_version (namespace, version, applied_at_unix) VALUES (?1, 12, 0)", [SCHEMA_NAMESPACE])).expect("schema 12 fixture");
+        // Migrate through 12 only. The version-13 row inserted below then simulates an
+        // already-applied migration 13, which the shared runner must skip.
+        migrate_through_for_test(&store, 12).expect("schema 12");
+        store.with_conn(|conn| conn.execute("INSERT INTO cortexkit_schema_version (namespace, version, applied_at_unix) VALUES (?1, 13, 0)", [SCHEMA_NAMESPACE])).expect("schema 13 fixture");
         store
             .migrate(SCHEMA_NAMESPACE, MIGRATIONS)
             .expect("shared runner skips already-applied migrations");
@@ -12186,11 +12324,11 @@ mod migration_10_tests {
             list_meta_read_only_with_schema(&path)
                 .expect("ahead metadata")
                 .1,
-            12
+            13
         );
         let (ahead_grants, ahead_version) =
             list_read_grants_read_only_with_schema(&path).expect("ahead grants");
-        assert_eq!(ahead_version, 12);
+        assert_eq!(ahead_version, 13);
         assert_eq!(ahead_grants[0].operation, GrantOperation::Read);
     }
 

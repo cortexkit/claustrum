@@ -533,10 +533,27 @@ ck auth login --provider <name> --replace
 ```
 
 `grants` is read-only and lists the complete authority set. Each row contains the
-principal kind and id, credential prefix, operation (`read` or `sign`), and creation
-time. The rows are sorted by principal, prefix, then operation, so repeated runs are
+principal kind and id, selector kind, selector, operation, and creation time. The
+operation is one of four, and none implies another:
+
+| operation | authorizes |
+|---|---|
+| `read` | `credential.get_scoped` (the token itself), and scoped `status`, `public_key` and `report_auth_failure` |
+| `sign` | `credential.sign` with a signing key |
+| `open` | `credential.open` with a KEM key |
+| `list` | the row in `credential.list_scoped`, with its identity (`account_id`, `email`, `org_name`) and `refresh_adapter`, and nothing else |
+
+`list` is the account roster without the tokens: grant it to a module that must choose
+between accounts but must never fetch one. A `list`-only principal is refused by every
+other scoped operation with the same `not_found` as a principal with no grant.
+
+The rows are sorted by principal, selector, then operation, so repeated runs are
 stable and a grant differing only by operation remains visible. An empty table prints
 `no grants` rather than silently producing no output.
+
+Migration 13 admits `list` in the store. A `ck auth` binary from before it cannot parse
+a `list` row and refuses the whole `grants` listing as invalid; use a current binary
+to read or revoke one.
 
 Two verbs express intent that `--replace` does not:
 

@@ -172,8 +172,22 @@ is the point: a grant whose reach can grow when someone else names a credential 
 grant you can reason about. Use `category` when you want a set that moves, and it moves
 only when an operator assigns the category under the master key.
 
-`read` and `sign` are distinct: a `read` grant does not authorize signing, and a `sign`
-grant does not authorize `credential.public_key`.
+A grant carries one of four operations. Each authorizes only its own surfaces, and none
+implies another:
+
+| grant operation | authorizes | does not authorize |
+|---|---|---|
+| `read` | `get_scoped` (the token), scoped `status`, `public_key`, `report_auth_failure`; identity in `list_scoped` | `sign`, `open` |
+| `sign` | `credential.sign` with a signing key; the row (without identity) in `list_scoped` | the token, `public_key`, `open` |
+| `open` | `credential.open` with a KEM key; the row (without identity) in `list_scoped` | the token, `sign` |
+| `list` | the row in `list_scoped` WITH its identity (`account_id`, `email`, `org_name`) and `refresh_adapter` | every other operation: no token, no status, no key use, no report |
+
+`list` is the account roster without the tokens, for a consumer that chooses which
+account serves a request and must never be able to fetch one. It unseals the record only
+to read those metadata fields; no payload leaves the vault. A `list`-only principal that
+calls `get_scoped`, scoped `status`, `sign`, `public_key`, `open` or `report_auth_failure`
+is refused with the same `not_found` as a principal holding no grant at all, so it also
+cannot use those surfaces to learn whether an id exists.
 
 | operation | handle | credential_id | enrollment token |
 |---|---|---|---|
@@ -182,6 +196,7 @@ grant does not authorize `credential.public_key`.
 | `credential.get_scoped` | — | yes (`read`) | yes |
 | `credential.list_scoped` | — | principal-addressed; all of the caller's grants | yes |
 | `credential.sign` | yes | yes (`sign`) | — |
+| `credential.open` | — | yes (`open`) | yes |
 | `credential.public_key` | yes | yes (`read`) | — |
 | `credential.status` | yes | yes (`read`) | — |
 | `credential.report_auth_failure` | yes | yes (`read`) | — |
@@ -270,8 +285,10 @@ unmeetable — never speculatively.
 `{ credentials, grants, grant_tuples, view }`. Unknown fields, including filters and
 `token`, are `invalid_params`. Rows are sorted by id. `categories`, lifecycle `state`,
 `record_version`, derived `type`/`serves`, and the caller's covering `operations` are
-non-secret; no credential payload is returned. Identity is projected only when the caller
-holds `read` for that row, never for a sign-only row.
+non-secret; no credential payload is returned. Identity and `refresh_adapter` are
+projected only when the caller holds `read` or `list` for that row, never for a row it
+reaches only through `sign` or `open`. `operations` names every covering operation,
+including `list`; decode it as an open set of strings.
 
 `operations` is an **authorization fact**: it says which of this caller's grant rows cover
 the id. It does not promise that the sealed record kind or lifecycle state can serve that

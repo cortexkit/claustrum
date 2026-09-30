@@ -1110,6 +1110,7 @@ fn grants_list_when_one_principal_holds_both_selector_kinds_and_every_operation(
         ("category", "llm-provider", "read"),
         ("exact", "a:", "open"),
         ("exact", "a:", "sign"),
+        ("exact", "a:", "list"),
     ] {
         let created = vault.run(&[
             "grant",
@@ -1140,7 +1141,73 @@ fn grants_list_when_one_principal_holds_both_selector_kinds_and_every_operation(
         .lines()
         .filter(|line| line.contains("reserved"))
         .count();
-    assert_eq!(rows, 4, "every grant needs its own row: {stdout}");
+    assert_eq!(rows, 5, "every grant needs its own row: {stdout}");
+}
+
+/// The metadata-only `list` operation goes through the operator's whole grant loop:
+/// created by `grant`, rendered by `grants` under its own name, removed by
+/// `revoke-grant`. A CLI or admin-op parser that still knew only the older operations
+/// would refuse at the first step, and a listing parser that did would refuse the whole
+/// inventory at the second.
+#[test]
+fn a_list_grant_round_trips_through_grant_grants_and_revoke_grant() {
+    let vault = GrantCliVault::new("grants-list-op");
+    vault.bootstrap();
+    let args = |verb: &'static str| {
+        [
+            verb,
+            "--principal",
+            "router",
+            "--selector-kind",
+            "category",
+            "--selector",
+            "llm-provider",
+            "--operation",
+            "list",
+        ]
+    };
+    let created = vault.run(&args("grant"));
+    assert!(
+        created.status.success(),
+        "grant --operation list failed: {}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&created.stdout).trim(),
+        "granted reserved:router list category:llm-provider"
+    );
+
+    let listed = vault.run(&["grants"]);
+    let stdout = String::from_utf8_lossy(&listed.stdout);
+    assert!(
+        listed.status.success(),
+        "grants refused a list row: {}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    let rows: Vec<Vec<&str>> = stdout
+        .lines()
+        .filter(|line| line.contains("reserved"))
+        .map(|line| line.split_whitespace().collect())
+        .collect();
+    assert_eq!(rows.len(), 1, "one grant, one row: {stdout}");
+    assert_eq!(
+        &rows[0][..5],
+        &["reserved", "router", "category", "llm-provider", "list"]
+    );
+
+    let revoked = vault.run(&args("revoke-grant"));
+    assert!(
+        revoked.status.success(),
+        "revoke-grant --operation list failed: {}",
+        String::from_utf8_lossy(&revoked.stderr)
+    );
+    let listed = vault.run(&["grants"]);
+    assert!(listed.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&listed.stdout).trim(),
+        "no grants",
+        "a revoked list grant must no longer be listed"
+    );
 }
 
 #[test]

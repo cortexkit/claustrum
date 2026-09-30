@@ -31,8 +31,8 @@
 //!   mint-handle --id <id>                      print a fresh handle (once)
 //!   revoke-handle --handle <ckh_...> | --hash <hex>
 //!   revoke-all-handles --id <id>
-//!   grant --principal <module-id> --prefix <credential-prefix> --operation <read|sign|open>
-//!   revoke-grant --principal <module-id> --prefix <credential-prefix> --operation <read|sign|open>
+//!   grant --principal <module-id> --prefix <credential-prefix> --operation <read|sign|open|list>
+//!   revoke-grant --principal <module-id> --prefix <credential-prefix> --operation <read|sign|open|list>
 //!   grants
 //!   audit [--limit N] | verify-audit
 //!
@@ -932,12 +932,12 @@ fn help_verb(verb: &str) -> String {
         "grant" => {
             "ck auth grant --principal <id|reserved:id>\n\
              \x20             --selector-kind <exact|category> --selector <value>\n\
-             \x20             --operation <read|sign|open>\n\
+             \x20             --operation <read|sign|open|list>\n\
              \n\
              \x20 --principal <id|reserved:id>  reserved module principal\n\
              \x20 --selector-kind <kind>        exact or category (required, no default)\n\
              \x20 --selector <value>            credential id text or bare category name\n\
-             \x20 --operation <read|sign|open>       authority to grant (`--op` is accepted)\n\
+             \x20 --operation <read|sign|open|list>  authority to grant (`--op` is accepted)\n\
              \n\
              NOTES\n\
              exact matches one credential id byte for byte. category matches every\n\
@@ -945,20 +945,25 @@ fn help_verb(verb: &str) -> String {
              assigned. Both are stored as bare text; neither carries a kind marker.\n\
              --prefix is gone: its reach changed whenever someone named a new\n\
              credential. A former prefix that named a family is a category now.\n\
-             Read and sign are separate authorities; neither implies the other."
+             Each operation is a separate authority; none implies another.\n\
+             read: fetch the token (get_scoped), status, public_key, report_auth_failure.\n\
+             sign: sign with a signing key. open: open with a KEM key.\n\
+             list: see the row in list_scoped with its identity and refresh adapter,\n\
+             and nothing else. It never returns a token or exercises a key."
         }
         "revoke-grant" => {
             "ck auth revoke-grant --principal <id|reserved:id>\n\
              \x20                    --selector-kind <exact|category> --selector <value>\n\
-             \x20                    --operation <read|sign|open>\n\
+             \x20                    --operation <read|sign|open|list>\n\
              \n\
              \x20 --principal <id|reserved:id>  reserved module principal\n\
              \x20 --selector-kind <kind>        exact or category (required, no default)\n\
              \x20 --selector <value>            credential id text or bare category name\n\
-             \x20 --operation <read|sign|open>       authority to revoke (`--op` is accepted)\n\
+             \x20 --operation <read|sign|open|list>  authority to revoke (`--op` is accepted)\n\
              \n\
              NOTES\n\
-             Revocation is exact over principal, selector kind, selector, and operation."
+             Revocation is exact over principal, selector kind, selector, and operation.\n\
+             Revoking list leaves any read grant on the same selector in place."
         }
         "reactivate" => {
             "ck auth reactivate --id <id>\n\
@@ -3373,7 +3378,7 @@ fn parse_grants(result: &serde_json::Value) -> Result<Vec<GrantRow>, CliError> {
         let operation = grant
             .get("operation")
             .and_then(serde_json::Value::as_str)
-            .filter(|operation| matches!(*operation, "read" | "sign" | "open"))
+            .filter(|operation| matches!(*operation, "read" | "sign" | "open" | "list"))
             .ok_or_else(|| {
                 CliError::StatusReportInvalid(format!(
                     "admin.status returned an invalid grant operation at row {index}"

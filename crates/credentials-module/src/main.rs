@@ -3894,6 +3894,44 @@ mod tests {
              announce the change, and expect every consumer fixture to need re-copying"
         );
 
+        // A REPLY TO A LIST-ONLY CALLER: the account roster without the tokens. The row
+        // carries identity and the refresh adapter, exactly as a `read` row does, and its
+        // `operations` and the caller's tuple say `list`. A consumer decoding operations
+        // as a closed set would refuse this reply, which is what this golden lets it test.
+        let list_rows = vec![read_surface::ListScopedCredential {
+            id: "oauth:anthropic".into(),
+            categories: vec!["llm-provider".into()],
+            credential_type: real_type("oauth:anthropic"),
+            serves: real_serves("oauth:anthropic"),
+            refresh_adapter: Some("anthropic".into()),
+            state: "active".into(),
+            record_version: 232,
+            operations: vec!["list".into()],
+            account_id: Some("00000000-0000-4000-8000-000000000000".into()),
+            email: Some("consumer@example.invalid".into()),
+            org_name: Some("Example Org".into()),
+        }];
+        let list_tuples = vec![read_surface::GrantTuple {
+            selector_kind: "category".into(),
+            selector: "llm-provider".into(),
+            operation: credentials_core::store::GrantOperation::List
+                .as_str()
+                .into(),
+        }];
+        let list_view = read_surface::list_scoped_view(&list_rows, &list_tuples);
+        assert_eq!(
+            serde_json::to_string(&main_wrap_for_fixture(read_surface::ListScopedResult {
+                credentials: list_rows,
+                grants: 1,
+                grant_tuples: list_tuples,
+                view: list_view,
+            }))
+            .unwrap(),
+            operation("credential.list_scoped")["list_only_reply"],
+            "the golden list-only list_scoped reply drifted from what this producer \
+             serialises: regenerate it from the assertion's left side"
+        );
+
         assert_eq!(
             serde_json::to_string(&read_surface::ListScopedParams {
                 enrollment_token: Some("t".repeat(64)),
@@ -5550,6 +5588,279 @@ mod tests {
             }),
             "a successful enumeration must record first use under the caller, got {events:?}"
         );
+    }
+
+    /// An OAuth record with a far-future expiry, a refresh adapter and a full identity,
+    /// so a scoped get serves it without an upstream exchange and a list row has every
+    /// identity field to show or withhold.
+    fn roster_oauth_record() -> VaultRecord {
+        let oauth = credentials_core::OAuthCredential {
+            access_token: "sk-ant-oat01-roster".to_string().into(),
+            refresh_token: "ref".to_string().into(),
+            expires_at_ms: Some(4_102_444_800_000),
+            token_url: "https://api.anthropic.com/v1/oauth/token".to_string(),
+            client_id: Some("client".to_string()),
+            scopes: Vec::new(),
+        };
+        VaultRecord::new_oauth("login", "anthropic", oauth, b"sk-ant-oat01-roster".to_vec())
+            .with_identity(credentials_core::record::RecordIdentity {
+                account_id: Some("roster-account".to_string()),
+                email: Some("roster@example.invalid".to_string()),
+                org_name: Some("Roster Org".to_string()),
+            })
+    }
+
+    fn grant_for(
+        store: &EncryptedStore,
+        module: &str,
+        credential_id: &str,
+        operation: credentials_core::store::GrantOperation,
+    ) {
+        store
+            .create_read_grant_audited(
+                "reserved",
+                module,
+                credentials_core::store::SelectorKind::Exact,
+                credential_id,
+                operation,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .expect("grant");
+    }
+
+    fn reserved(module: &str) -> subc_protocol::Principal {
+        subc_protocol::Principal::Reserved {
+            module_id: module.to_owned(),
+        }
+    }
+
+    /// A `list` grant is the account roster without the tokens: the covered row comes
+    /// back from `list_scoped` WITH its identity and refresh adapter, exactly as it does
+    /// for `read`, and the enumeration's first-use row says `list` rather than claiming
+    /// the `read` authority this principal does not hold.
+    ///
+    /// A `sign` principal over the same row is the control: it sees the row and no
+    /// identity, so the identity here cannot come from a projection that ignores the
+    /// operation.
+    #[test]
+    fn a_list_only_principal_sees_identity_and_adapter_in_list_scoped() {
+        use credentials_core::store::GrantOperation;
+        let (surface, store, _db, _root) = tmp_surface_with_store(197);
+        let id = "oauth:anthropic:roster";
+        store
+            .create_audited(id, &roster_oauth_record(), AuditCtx::admin(AuditOp::Put))
+            .expect("seed");
+        grant_for(&store, "router", id, GrantOperation::List);
+        grant_for(&store, "signer", id, GrantOperation::Sign);
+        let params = read_surface::ListScopedParams {
+            enrollment_token: None,
+        };
+
+        let listed = surface
+            .list_scoped(Some(&reserved("router")), &params)
+            .expect("a list-only principal enumerates");
+        assert_eq!(listed.credentials.len(), 1, "the list grant covers one row");
+        let row = &listed.credentials[0];
+        assert_eq!(row.id, id);
+        assert_eq!(row.operations, vec!["list".to_string()]);
+        assert_eq!(row.account_id.as_deref(), Some("roster-account"));
+        assert_eq!(row.email.as_deref(), Some("roster@example.invalid"));
+        assert_eq!(row.org_name.as_deref(), Some("Roster Org"));
+        assert_eq!(row.refresh_adapter.as_deref(), Some("anthropic"));
+        assert_eq!(
+            listed.grant_tuples[0].operation, "list",
+            "the caller's own grant tuple names the operation"
+        );
+
+        let signer = surface
+            .list_scoped(Some(&reserved("signer")), &params)
+            .expect("a sign-only principal enumerates");
+        assert_eq!(signer.credentials.len(), 1);
+        assert_eq!(signer.credentials[0].account_id, None);
+        assert_eq!(signer.credentials[0].refresh_adapter, None);
+
+        let events = store.recent_auth_events(64).expect("read events");
+        let first_use = events
+            .iter()
+            .find(|event| {
+                event.credential_id == "credential.list_scoped"
+                    && event.kind == credentials_core::audit::AuthEventKind::ScopedFirstUse.as_str()
+                    && event.principal_id.as_deref() == Some("router")
+            })
+            .unwrap_or_else(|| panic!("no list_scoped first use for router: {events:?}"));
+        assert_eq!(first_use.detail.as_deref(), Some("list"));
+    }
+
+    /// `list` authorizes list_scoped and nothing else. Every scoped surface that can
+    /// return a token, exercise a key, or mark a credential must refuse a list-only
+    /// principal with the same `not_found` it gives a principal with no grant at all.
+    ///
+    /// Differential on purpose: each refusal is paired with the same call from a
+    /// principal holding the operation that surface does gate on, which must succeed.
+    /// Without the pair, a surface that refused everyone would pass.
+    #[tokio::test]
+    async fn a_list_only_principal_is_refused_by_every_other_scoped_surface() {
+        use base64::Engine as _;
+        use credentials_core::store::GrantOperation;
+        let (surface, store, _db, _root) = tmp_surface_with_store(198);
+        let oauth_id = "oauth:anthropic:roster";
+        store
+            .create_audited(
+                oauth_id,
+                &roster_oauth_record(),
+                AuditCtx::admin(AuditOp::Put),
+            )
+            .expect("seed oauth");
+        let signing_id = "signing:roster:1";
+        store
+            .create(
+                signing_id,
+                &VaultRecord::new_static(
+                    CredentialKind::SigningKey,
+                    "test",
+                    test_ed25519_pem().into_bytes(),
+                    None,
+                ),
+            )
+            .expect("seed signing key");
+        let kem_id = "kem:roster";
+        let kem_pem = credentials_core::kem::generate_key().expect("generate recipient");
+        store
+            .create(
+                kem_id,
+                &VaultRecord::new_static(
+                    CredentialKind::KemKey,
+                    "test",
+                    kem_pem.into_bytes(),
+                    None,
+                ),
+            )
+            .expect("seed kem key");
+        for id in [oauth_id, signing_id, kem_id] {
+            grant_for(&store, "router", id, GrantOperation::List);
+            grant_for(&store, "reader", id, GrantOperation::Read);
+        }
+        grant_for(&store, "signer", signing_id, GrantOperation::Sign);
+        grant_for(&store, "opener", kem_id, GrantOperation::Open);
+        let router = reserved("router");
+        let reader = reserved("reader");
+
+        // get_scoped returns the token itself: refused for list, served for read.
+        let get = |credential_id: &str| read_surface::GetScopedParams {
+            credential_id: credential_id.into(),
+            enrollment_token: None,
+            min_ttl_ms: None,
+        };
+        let refused = surface.get_scoped(Some(&router), &get(oauth_id)).await;
+        assert!(
+            matches!(
+                refused,
+                read_surface::GetOutcome::Err { ref error } if error.code == read_surface::ReadError::NotFound
+            ),
+            "get_scoped must refuse a list-only principal as not_found, got {refused:?}"
+        );
+        let served = surface.get_scoped(Some(&reader), &get(oauth_id)).await;
+        assert!(
+            matches!(served, read_surface::GetOutcome::Ok(_)),
+            "the same get_scoped with a read grant serves the token, got {served:?}"
+        );
+
+        // Scoped status by credential id: refused for list, answered for read.
+        let status = |credential_id: &str| read_surface::StatusParams {
+            handle: None,
+            credential_id: Some(credential_id.into()),
+            enrollment_token: None,
+        };
+        let refused = surface.status(1, Some(&router), &status(oauth_id)).await;
+        assert_eq!(
+            refused.last_error_code,
+            Some(read_surface::ReadError::NotFound)
+        );
+        assert_eq!(refused.credential_id, None);
+        let answered = surface.status(1, Some(&reader), &status(oauth_id)).await;
+        assert_eq!(answered.last_error_code, None);
+        assert_eq!(answered.credential_id.as_deref(), Some(oauth_id));
+
+        // sign: refused for list, signs for a sign grant.
+        let sign = read_surface::SignParams {
+            handle: None,
+            credential_id: Some(signing_id.into()),
+            payload_b64: base64::engine::general_purpose::STANDARD.encode(b"roster bytes"),
+            enrollment_token: None,
+        };
+        assert_eq!(
+            surface.sign(1, Some(&router), &sign).await.err(),
+            Some(read_surface::ReadError::NotFound),
+            "sign must refuse a list-only principal"
+        );
+        surface
+            .sign(1, Some(&reserved("signer")), &sign)
+            .await
+            .expect("the same sign with a sign grant signs");
+
+        // public_key is gated on read: refused for list, published for read.
+        let public = read_surface::PublicKeyParams {
+            handle: None,
+            credential_id: Some(signing_id.into()),
+            enrollment_token: None,
+        };
+        assert_eq!(
+            surface.public_key(1, Some(&router), &public).await.err(),
+            Some(read_surface::ReadError::NotFound),
+            "public_key must refuse a list-only principal"
+        );
+        surface
+            .public_key(1, Some(&reader), &public)
+            .await
+            .expect("the same public_key with a read grant publishes");
+
+        // open: an `open` grant gets past authorization to the decrypt, which fails on
+        // these empty fields with its own code; a list-only principal never gets there.
+        let open = read_surface::OpenParams {
+            credential_id: kem_id.into(),
+            enc_b64: String::new(),
+            ciphertext_b64: String::new(),
+            info_b64: String::new(),
+            aad_b64: String::new(),
+            enrollment_token: None,
+        };
+        assert_eq!(
+            surface.open(1, Some(&router), &open).await.err(),
+            Some(read_surface::ReadError::NotFound),
+            "open must refuse a list-only principal"
+        );
+        assert_eq!(
+            surface
+                .open(2, Some(&reserved("opener")), &open)
+                .await
+                .err(),
+            Some(read_surface::ReadError::OpenFailed),
+            "an open grant reaches the decrypt"
+        );
+
+        // report_auth_failure by credential id. It runs last because the read principal's
+        // accepted 401 marks the record stale, which would change what the get_scoped
+        // and status checks above observe.
+        let report = read_surface::ReportAuthFailureParams {
+            handle: None,
+            credential_id: Some(oauth_id.into()),
+            enrollment_token: None,
+            provider_status: 401,
+            record_version: store.meta(oauth_id).expect("meta").record_version,
+            reporter_source: None,
+        };
+        assert_eq!(
+            surface
+                .report_auth_failure(1, Some(&router), &report)
+                .await
+                .err(),
+            Some(read_surface::ReadError::NotFound),
+            "report_auth_failure must refuse a list-only principal"
+        );
+        surface
+            .report_auth_failure(1, Some(&reader), &report)
+            .await
+            .expect("the same report with a read grant is accepted");
     }
 
     #[test]

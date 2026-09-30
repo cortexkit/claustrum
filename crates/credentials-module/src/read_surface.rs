@@ -55,8 +55,8 @@ use credentials_core::enrollment::{
 use credentials_core::health::VaultHealth;
 use credentials_core::refresh_adapters::RefreshError;
 use credentials_core::store::{
-    AuthEventPrincipal, GrantOperation, ScopedCoverage, ScopedListSnapshot, ScopedReadRefusal,
-    StoreOpError,
+    AuthEventPrincipal, GrantOperation, ReadGrant, ScopedCoverage, ScopedListSnapshot,
+    ScopedReadRefusal, StoreOpError,
 };
 use subc_protocol::Principal;
 
@@ -974,6 +974,25 @@ fn project_list_scoped(snapshot: ScopedListSnapshot) -> ListScopedResult {
     }
 }
 
+/// The operation a successful `list_scoped` records as its first use.
+///
+/// The row names the grant operation that was exercised, so an operator reading
+/// `auth_events` can tell a principal that enumerated with token authority from one that
+/// only holds the metadata-only `list` grant. A caller holding `read` records `read`, as
+/// every enumeration did before `list` existed, so existing consumers keep their one
+/// first-use row instead of gaining a second. A caller holding `list` and no `read` records
+/// `list`: writing `read` there would claim an authority that principal does not have.
+/// Any other caller (sign-only, open-only, or no grants at all) keeps the historical
+/// `read` value.
+fn list_scoped_first_use_operation(grants: &[ReadGrant]) -> GrantOperation {
+    let holds = |operation| grants.iter().any(|grant| grant.operation == operation);
+    if !holds(GrantOperation::Read) && holds(GrantOperation::List) {
+        GrantOperation::List
+    } else {
+        GrantOperation::Read
+    }
+}
+
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1668,12 +1687,13 @@ impl ReadSurface {
         // `list_scoped`, and the two resolve their principal through the same helper --
         // so reading either one in isolation shows correct code. Found by the consumer
         // that would have hit it, before they wrote a line against it.
-        let result = self
+        let snapshot = self
             .engine
             .store()
             .list_scoped_snapshot(principal_kind, &principal_id)
-            .map(project_list_scoped)
             .map_err(|_| ReadError::StoreError)?;
+        let first_use_operation = list_scoped_first_use_operation(&snapshot.grants);
+        let result = project_list_scoped(snapshot);
         // RECORD THE SUCCESS, because this op's SILENCE WAS INDISTINGUISHABLE FROM ITS
         // ABSENCE, and that cost a consumer a debugging session on 2026-09-20.
         //
@@ -1696,7 +1716,7 @@ impl ReadSurface {
             "credential.list_scoped",
             principal_kind,
             Some(&principal_id),
-            GrantOperation::Read,
+            first_use_operation,
         );
         Ok(result)
     }

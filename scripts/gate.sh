@@ -357,6 +357,10 @@ assert_floor_not_lowered() {
 # released-v0.1.2 behavior, and rendered per-verb help checks; it is not the sum
 # of branch-specific test changes.
 #
+# Raised 796 -> 801 on 2026-09-30 with the metadata-only `list` grant operation (migration
+# 13, the list-only list_scoped and refusal tests, the admin-op wire test, and the CLI
+# round trip). Read off this arm's own test-result lines on the final tree.
+#
 # Raised 790 -> 796 on 2026-09-28 with the api-key providers mirrored from oh-my-pi and
 # the web-search category (catalog category, absence and probe pins, plus the unchecked
 # login outcome). Read off this arm's own test-result lines on the final tree.
@@ -403,7 +407,7 @@ assert_floor_not_lowered() {
 #
 # THE FLOOR IS RATCHETED AGAINST THE MERGE TARGET BY `assert_floor_not_lowered` BELOW,
 # because a floor alone does not defend the property it exists for. See that function.
-run_expect 796 "workspace unit + integration" \
+run_expect 801 "workspace unit + integration" \
   cargo test --locked --workspace --features credentials-core/test-support
 
 assert_floor_not_lowered "$(dirname "$0")/gate.sh"

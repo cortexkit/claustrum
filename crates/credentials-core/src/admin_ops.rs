@@ -1034,6 +1034,36 @@ mod tests {
         );
     }
 
+    /// Both grant-mutating ops carry the metadata-only `list` operation over the wire in
+    /// its snake_case spelling, and re-encode it the same way.
+    #[test]
+    fn grant_create_and_revoke_accept_the_list_operation_on_the_wire() {
+        for tag in ["admin.grant_create_v2", "admin.grant_revoke_v2"] {
+            let wire = serde_json::json!({
+                "op": tag,
+                "v": ADMIN_OP_SCHEMA_V2,
+                "principal_kind": "reserved",
+                "principal_id": "router",
+                "selector_kind": "category",
+                "selector": "llm-provider",
+                "operation": "list",
+            });
+            let decoded: AdminOpBody =
+                serde_json::from_value(wire.clone()).unwrap_or_else(|e| panic!("{tag}: {e}"));
+            let operation = match &decoded {
+                AdminOpBody::GrantCreateV2 { operation, .. }
+                | AdminOpBody::GrantRevokeV2 { operation, .. } => *operation,
+                other => panic!("{tag} decoded as {other:?}"),
+            };
+            assert_eq!(operation, GrantOperation::List, "{tag}");
+            assert_eq!(
+                serde_json::to_value(&decoded).expect("encode"),
+                wire,
+                "{tag} re-encodes byte-compatibly"
+            );
+        }
+    }
+
     #[test]
     fn round_trips_through_bytes() {
         let record = VaultRecord::new_static(CredentialKind::ApiKey, "t", b"k".to_vec(), None);

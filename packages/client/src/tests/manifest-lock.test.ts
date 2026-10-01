@@ -264,7 +264,14 @@ describe('manifest writer lock', () => {
   test.skipIf(!onPosix)('renewing owner fails loudly after the bounded retry window', async () => {
     const path = await manifestPath()
     __setManifestLockTestOptions({ ttlMs: 40, renewEveryMs: 10, retryMinMs: 2, retryMaxMs: 3 })
-    await owner(path, Date.now())
+    // The owner's stamp sits a minute ahead, so it reads as fresh for the whole test no
+    // matter how late a renewal tick runs. Stamping Date.now() made the owner's liveness
+    // depend on the scheduler: on a loaded host a 5 ms tick can stall past the 40 ms TTL,
+    // the owner then looks stale, and the claimant correctly evicts it, so the test failed
+    // with a resolved promise while the lock was right. The renewal loop stays, so the
+    // claimant still races real owner rewrites.
+    const LIVE_AHEAD_MS = 60_000
+    await owner(path, Date.now() + LIVE_AHEAD_MS)
 
     const started = Date.now()
     // clearInterval stops future ticks but cannot cancel one already awaiting I/O. An
@@ -278,7 +285,7 @@ describe('manifest writer lock', () => {
         if (tickError !== undefined) return
         const ownerPath = join(`${path}.lock`, 'owner')
         const current = JSON.parse(await readFile(ownerPath, 'utf8')) as Record<string, unknown>
-        current.claimed_at_ms = Date.now()
+        current.claimed_at_ms = Date.now() + LIVE_AHEAD_MS
         await writeFile(ownerPath, `${JSON.stringify(current)}\n`, { mode: 0o600 })
       }).catch((error: unknown) => { tickError = error })
     }, 5)

@@ -1,0 +1,10 @@
+{
+  "created": "{\"result\":{\"id\":\"cookie:ollama.com:ufuk\",\"outcome\":\"created\",\"record_version\":1}}",
+  "replaced": "{\"result\":{\"id\":\"cookie:ollama.com:ufuk\",\"outcome\":\"replaced\",\"record_version\":2}}",
+  "invalid_id": "{\"result\":{\"error\":{\"class\":\"permanent\",\"code\":\"invalid_id\"}}}",
+  "invalid_payload": "{\"result\":{\"error\":{\"class\":\"permanent\",\"code\":\"invalid_payload\"}}}",
+  "not_found": "{\"result\":{\"error\":{\"class\":\"permanent\",\"code\":\"not_found\"}}}",
+  "not_permitted": "{\"result\":{\"error\":{\"class\":\"permanent\",\"code\":\"not_permitted\"}}}",
+  "store_error": "{\"result\":{\"error\":{\"class\":\"transient\",\"code\":\"store_error\"}}}",
+  "payload_hash": "d523e692e03fc04a7700e325960047a0283a062980239e5ea7ad03b4eac9bcb7"
+}

@@ -71,9 +71,9 @@ use tokio::{
 
 use limiter::{Caps, FetchLimiter};
 use read_surface::{
-    EnrollPollParams, EnrollProposeParams, EnrollRotateParams, GetManyParams, GetParams,
-    GetScopedParams, ListScopedParams, PublicKeyParams, ReadSurface, ReportAuthFailureParams,
-    StatusParams,
+    DepositCookieParams, EnrollPollParams, EnrollProposeParams, EnrollRotateParams, GetManyParams,
+    GetParams, GetScopedParams, ListScopedParams, PublicKeyParams, ReadSurface,
+    ReportAuthFailureParams, StatusParams,
 };
 
 // The vault's module id — re-exported from the single cross-binary definition site
@@ -99,6 +99,7 @@ const CONTROL_EGRESS_BUFFER: usize = 16;
 const HEALTH_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
 // Capability-handle read-surface operations plus the separate principal-scoped read.
+const OP_DEPOSIT_COOKIE: &str = "credential.deposit_cookie";
 const OP_GET: &str = "credential.get";
 const OP_GET_SCOPED: &str = "credential.get_scoped";
 const OP_LIST_SCOPED: &str = "credential.list_scoped";
@@ -1057,6 +1058,25 @@ async fn handle_read_request(
     };
 
     let result = match request.method.as_str() {
+        OP_DEPOSIT_COOKIE => match serde_json::from_value::<DepositCookieParams>(request.params) {
+            Ok(params) => match surface.deposit_cookie(principal.as_ref(), &params) {
+                Ok(result) => wrap_result(result),
+                Err(code) => {
+                    wrap_result(json!({ "error": { "code": code, "class": code.class() } }))
+                }
+            },
+            Err(_) => {
+                return invalid_params(
+                    writer,
+                    ver,
+                    channel,
+                    epoch,
+                    corr,
+                    "invalid cookie deposit parameters",
+                )
+                .await
+            }
+        },
         OP_ENROLL_PROPOSE => match serde_json::from_value::<EnrollProposeParams>(request.params) {
             Ok(params) => match surface.enroll_propose(principal.as_ref(), &params) {
                 Ok(result) => wrap_result(result),
@@ -1739,6 +1759,11 @@ fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> 
         // what it is.
         concurrency: Concurrency::ModuleManaged,
         operations: vec![
+            ManagementOperation {
+                name: OP_DEPOSIT_COOKIE.to_string(),
+                description: Some("Deposit a consent-attested browser cookie under a reserved principal's deposit grant.".to_string()),
+                kind: ManagementOperationKind::Mutate,
+            },
             ManagementOperation {
                 name: OP_ENROLL_PROPOSE.to_string(),
                 description: Some("Propose one bounded consumer enrollment using a pre-hashed resumption secret.".to_string()),
@@ -2491,6 +2516,1066 @@ mod tests {
             .expect("serve request");
         let response = responses.recv().await.expect("route response");
         serde_json::from_slice(&response.body).expect("decode response")
+    }
+
+    struct DepositCookieTestStore {
+        store: Arc<EncryptedStore>,
+        db_path: std::path::PathBuf,
+        _root: TestTempDir,
+    }
+
+    impl std::ops::Deref for DepositCookieTestStore {
+        type Target = EncryptedStore;
+        fn deref(&self) -> &Self::Target {
+            &self.store
+        }
+    }
+
+    impl DepositCookieTestStore {
+        fn with_raw_conn<T>(
+            &self,
+            f: impl FnOnce(&rusqlite::Connection) -> rusqlite::Result<T>,
+        ) -> rusqlite::Result<T> {
+            f(&rusqlite::Connection::open(&self.db_path)?)
+        }
+    }
+
+    fn deposit_cookie_rig(
+        seed: u8,
+    ) -> (
+        Arc<ReadSurface>,
+        Arc<admin_surface::AdminSurface>,
+        DepositCookieTestStore,
+    ) {
+        let (surface, store, db_path, _root) = tmp_surface_with_store(seed);
+        let engine = Arc::new(RefreshEngine::new(
+            Arc::clone(&store),
+            Vec::new(),
+            Arc::new(crate::test_support::NoHttp),
+        ));
+        let key = MasterKey::from_bytes([seed; MASTER_KEY_LEN]);
+        let admin = Arc::new(admin_surface::AdminSurface::new(
+            engine,
+            credentials_core::admin_auth::AdminMacKey::derive(&key),
+            credentials_core::vault_id_for(db_path.parent().unwrap()).unwrap(),
+            key.key_id(),
+        ));
+        (
+            surface,
+            admin,
+            DepositCookieTestStore {
+                store,
+                db_path,
+                _root,
+            },
+        )
+    }
+
+    const DEPOSIT_COOKIE_ID: &str = "cookie:ollama.com:ufuk";
+
+    fn deposit_cookie_params() -> serde_json::Value {
+        json!({"id": DEPOSIT_COOKIE_ID, "cookie": "session=abc", "consent_ref": "consent-123"})
+    }
+
+    fn deposit_cookie_grant(store: &EncryptedStore, name: &str, operation: GrantOperation) {
+        store
+            .create_read_grant_audited(
+                "reserved",
+                name,
+                SelectorKind::Category,
+                "browser-session",
+                operation,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .unwrap();
+    }
+
+    fn deposit_cookie_principal() -> Option<subc_protocol::Principal> {
+        Some(subc_protocol::Principal::Reserved {
+            module_id: "cerebellum".into(),
+        })
+    }
+
+    async fn deposit_cookie_frame(
+        surface: &Arc<ReadSurface>,
+        admin: &Arc<admin_surface::AdminSurface>,
+        principal: Option<subc_protocol::Principal>,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Frame {
+        let (writer, mut responses) = mpsc::channel(1);
+        let frame = Frame::build_with_version(
+            PROTOCOL_VERSION,
+            FrameType::Request,
+            Flags::new(false, Priority::Interactive, false),
+            51,
+            1,
+            1,
+            serde_json::to_vec(&json!({"method": method, "params": params})).unwrap(),
+        )
+        .unwrap();
+        handle_read_request(frame, &writer, surface, admin, principal)
+            .await
+            .unwrap();
+        responses.recv().await.unwrap()
+    }
+
+    fn deposit_cookie_body(frame: &Frame) -> serde_json::Value {
+        serde_json::from_slice(&frame.body).unwrap()
+    }
+
+    fn deposit_cookie_counts(store: &DepositCookieTestStore) -> (i64, i64, i64, i64) {
+        store.with_raw_conn(|conn| conn.query_row("SELECT (SELECT count(*) FROM credentials), (SELECT count(*) FROM credential_categories), (SELECT count(*) FROM audit_log), (SELECT count(*) FROM auth_events WHERE kind='scoped_first_use')", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))).unwrap()
+    }
+
+    fn deposit_cookie_raw_row(store: &DepositCookieTestStore) -> (i64, Vec<u8>) {
+        store
+            .with_raw_conn(|conn| {
+                conn.query_row(
+                    "SELECT record_version, envelope FROM credentials WHERE credential_id=?1",
+                    [DEPOSIT_COOKIE_ID],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn deposit_cookie_request_shape_and_secret_debug_are_pinned() {
+        for (email, keys) in [
+            (None, vec!["id", "cookie", "consent_ref"]),
+            (
+                Some("a".to_owned()),
+                vec!["id", "cookie", "consent_ref", "email"],
+            ),
+        ] {
+            let params = DepositCookieParams {
+                id: DEPOSIT_COOKIE_ID.into(),
+                cookie: credentials_core::secret::Secret::new("DO_NOT_PRINT_COOKIE".into()),
+                consent_ref: "consent-123".into(),
+                email,
+            };
+            assert!(!format!("{params:?}").contains("DO_NOT_PRINT_COOKIE"));
+            assert_request_key_set(params, &keys, OP_DEPOSIT_COOKIE);
+        }
+        let mut null = deposit_cookie_params();
+        null["email"] = serde_json::Value::Null;
+        let decoded: DepositCookieParams = serde_json::from_value(null).unwrap();
+        assert!(decoded.email.is_none());
+        assert_request_key_set(decoded, &["id", "cookie", "consent_ref"], OP_DEPOSIT_COOKIE);
+    }
+
+    #[tokio::test]
+    async fn deposit_cookie_create_replace_route_pins_categories_identity_and_audit() {
+        let (surface, admin, store) = deposit_cookie_rig(151);
+        deposit_cookie_grant(&store, "cerebellum", GrantOperation::Deposit);
+        let mut params = deposit_cookie_params();
+        params["email"] = json!("me@example.com");
+        let created = deposit_cookie_frame(
+            &surface,
+            &admin,
+            deposit_cookie_principal(),
+            OP_DEPOSIT_COOKIE,
+            params,
+        )
+        .await;
+        assert_eq!(
+            deposit_cookie_body(&created),
+            wrap_result(
+                json!({"id": DEPOSIT_COOKIE_ID, "outcome": "created", "record_version": 1})
+            )
+        );
+        let meta = store.meta(DEPOSIT_COOKIE_ID).unwrap();
+        assert_eq!(meta.categories, ["browser-session"]);
+        assert_eq!(meta.created_by.as_deref(), Some("reserved:cerebellum"));
+        let birth: (i64, i64) = store
+            .with_raw_conn(|c| {
+                c.query_row(
+                    "SELECT created_at_ms, updated_at_ms FROM credentials WHERE credential_id=?1",
+                    [DEPOSIT_COOKIE_ID],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+            })
+            .unwrap();
+        assert_eq!(birth.0, birth.1);
+        let record = store.get(DEPOSIT_COOKIE_ID).unwrap();
+        assert_eq!(record.source, "reserved:cerebellum");
+        assert_eq!(record.kind, CredentialKind::Cookie);
+        let operator = VaultRecord::new_cookie("operator", b"session=abc".to_vec());
+        assert_eq!(record.payload, operator.payload);
+        assert_eq!(
+            record.identity.account_id.as_deref(),
+            Some("me@example.com")
+        );
+        for (version, null_email) in [(2, false), (3, true)] {
+            let mut params = deposit_cookie_params();
+            if null_email {
+                params["email"] = serde_json::Value::Null;
+            }
+            let response = deposit_cookie_frame(
+                &surface,
+                &admin,
+                deposit_cookie_principal(),
+                OP_DEPOSIT_COOKIE,
+                params,
+            )
+            .await;
+            assert_eq!(
+                deposit_cookie_body(&response)["result"]["record_version"],
+                version
+            );
+            assert_eq!(
+                deposit_cookie_body(&response)["result"]["outcome"],
+                "replaced"
+            );
+            assert_eq!(
+                store.get(DEPOSIT_COOKIE_ID).unwrap().identity,
+                record.identity
+            );
+            assert_eq!(
+                store.meta(DEPOSIT_COOKIE_ID).unwrap().categories,
+                meta.categories
+            );
+        }
+        store
+            .with_raw_conn(|c| {
+                c.execute(
+                    "DELETE FROM credential_categories WHERE credential_id=?1",
+                    [DEPOSIT_COOKIE_ID],
+                )
+            })
+            .unwrap();
+        let response = deposit_cookie_frame(
+            &surface,
+            &admin,
+            deposit_cookie_principal(),
+            OP_DEPOSIT_COOKIE,
+            deposit_cookie_params(),
+        )
+        .await;
+        assert_eq!(
+            deposit_cookie_body(&response)["result"]["outcome"],
+            "replaced"
+        );
+        assert!(store.meta(DEPOSIT_COOKIE_ID).unwrap().categories.is_empty());
+        assert_eq!(
+            store.meta(DEPOSIT_COOKIE_ID).unwrap().created_by,
+            meta.created_by
+        );
+        let after_birth: i64 = store
+            .with_raw_conn(|c| {
+                c.query_row(
+                    "SELECT created_at_ms FROM credentials WHERE credential_id=?1",
+                    [DEPOSIT_COOKIE_ID],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(after_birth, birth.0);
+        let audit: Vec<_> = store
+            .read_audit(None)
+            .unwrap()
+            .into_iter()
+            .filter(|a| a.credential_id.as_deref() == Some(DEPOSIT_COOKIE_ID))
+            .collect();
+        assert_eq!(audit.len(), 4);
+        for entry in audit {
+            assert_eq!(entry.actor, "reserved:cerebellum");
+            assert!(!entry.alarm);
+            assert_eq!(
+                entry.payload_hash.as_deref(),
+                Some("d523e692e03fc04a7700e325960047a0283a062980239e5ea7ad03b4eac9bcb7")
+            );
+        }
+        let events: Vec<(String,String,String,String)> = store.with_raw_conn(|c| {
+            let mut q = c.prepare("SELECT credential_id, principal_kind, principal_id, detail FROM auth_events WHERE kind='scoped_first_use'")?;
+            let rows = q.query_map([], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?; rows.collect()
+        }).unwrap();
+        assert_eq!(
+            events,
+            [(
+                DEPOSIT_COOKIE_ID.into(),
+                "reserved".into(),
+                "cerebellum".into(),
+                "deposit".into()
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn deposit_cookie_email_is_disclosed_only_to_readers() {
+        let (surface, admin, store) = deposit_cookie_rig(161);
+        deposit_cookie_grant(&store, "cerebellum", GrantOperation::Deposit);
+        deposit_cookie_grant(&store, "insula", GrantOperation::Read);
+        let reader = Some(subc_protocol::Principal::Reserved {
+            module_id: "insula".into(),
+        });
+        for (id, email) in [
+            ("cookie:example.com:with-email", Some("a")),
+            ("cookie:example.com:without-email", None),
+        ] {
+            let mut params = deposit_cookie_params();
+            params["id"] = json!(id);
+            if let Some(email) = email {
+                params["email"] = json!(email);
+            }
+            let deposited = deposit_cookie_frame(
+                &surface,
+                &admin,
+                deposit_cookie_principal(),
+                OP_DEPOSIT_COOKIE,
+                params,
+            )
+            .await;
+            assert_eq!(
+                deposit_cookie_body(&deposited)["result"]["outcome"],
+                "created"
+            );
+            let fetched = deposit_cookie_frame(
+                &surface,
+                &admin,
+                reader.clone(),
+                OP_GET_SCOPED,
+                json!({"credential_id": id}),
+            )
+            .await;
+            assert_eq!(
+                deposit_cookie_body(&fetched)["result"]["email"],
+                json!(email)
+            );
+            let listed =
+                deposit_cookie_frame(&surface, &admin, reader.clone(), OP_LIST_SCOPED, json!({}))
+                    .await;
+            let body = deposit_cookie_body(&listed);
+            let row = body["result"]["credentials"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["id"] == id)
+                .unwrap();
+            assert_eq!(row["email"], json!(email));
+        }
+    }
+
+    #[tokio::test]
+    async fn deposit_cookie_creator_refusals_preserve_envelope_and_first_use() {
+        for other_module in [false, true] {
+            let (surface, admin, store) = deposit_cookie_rig(if other_module { 153 } else { 152 });
+            deposit_cookie_grant(&store, "cerebellum", GrantOperation::Deposit);
+            if other_module {
+                store
+                    .deposit_cookie(
+                        DEPOSIT_COOKIE_ID,
+                        &credentials_core::secret::Secret::new("other".into()),
+                        "consent",
+                        None,
+                        "reserved:other",
+                    )
+                    .unwrap();
+            } else {
+                store
+                    .create(
+                        DEPOSIT_COOKIE_ID,
+                        &VaultRecord::new_cookie("operator", b"original".to_vec()),
+                    )
+                    .unwrap();
+            }
+            let before = deposit_cookie_raw_row(&store);
+            let counts = deposit_cookie_counts(&store);
+            let reply = deposit_cookie_frame(
+                &surface,
+                &admin,
+                deposit_cookie_principal(),
+                OP_DEPOSIT_COOKIE,
+                deposit_cookie_params(),
+            )
+            .await;
+            assert_eq!(
+                deposit_cookie_body(&reply)["result"]["error"]["code"],
+                "not_permitted"
+            );
+            assert_eq!(deposit_cookie_raw_row(&store), before);
+            assert_eq!(deposit_cookie_counts(&store), counts);
+        }
+    }
+
+    #[tokio::test]
+    async fn deposit_cookie_audit_failure_rolls_back_create_and_replace() {
+        let (surface, admin, store) = deposit_cookie_rig(154);
+        deposit_cookie_grant(&store, "cerebellum", GrantOperation::Deposit);
+        let before = deposit_cookie_counts(&store);
+        store.force_deposit_cookie_audit_append_error_for_test(true);
+        let reply = deposit_cookie_frame(
+            &surface,
+            &admin,
+            deposit_cookie_principal(),
+            OP_DEPOSIT_COOKIE,
+            deposit_cookie_params(),
+        )
+        .await;
+        assert_eq!(
+            deposit_cookie_body(&reply)["result"]["error"]["code"],
+            "store_error"
+        );
+        assert_eq!(deposit_cookie_counts(&store), before);
+        store.force_deposit_cookie_audit_append_error_for_test(false);
+        surface.force_deposit_cookie_first_use_fault_for_test();
+        let reply = deposit_cookie_frame(
+            &surface,
+            &admin,
+            deposit_cookie_principal(),
+            OP_DEPOSIT_COOKIE,
+            deposit_cookie_params(),
+        )
+        .await;
+        assert_eq!(deposit_cookie_body(&reply)["result"]["outcome"], "created");
+        assert_eq!(deposit_cookie_counts(&store).3, 0);
+        let row = deposit_cookie_raw_row(&store);
+        let before = deposit_cookie_counts(&store);
+        store.force_deposit_cookie_audit_append_error_for_test(true);
+        let reply = deposit_cookie_frame(
+            &surface,
+            &admin,
+            deposit_cookie_principal(),
+            OP_DEPOSIT_COOKIE,
+            deposit_cookie_params(),
+        )
+        .await;
+        assert_eq!(
+            deposit_cookie_body(&reply)["result"]["error"]["code"],
+            "store_error"
+        );
+        assert_eq!(deposit_cookie_counts(&store), before);
+        assert_eq!(deposit_cookie_raw_row(&store), row);
+    }
+
+    #[tokio::test]
+    async fn deposit_cookie_decode_matrix_writes_nothing_and_never_echoes_values() {
+        let (surface, admin, store) = deposit_cookie_rig(155);
+        deposit_cookie_grant(&store, "cerebellum", GrantOperation::Deposit);
+        let mut rows = Vec::new();
+        for field in ["id", "cookie", "consent_ref"] {
+            for value in [
+                None,
+                Some(serde_json::Value::Null),
+                Some(json!(123)),
+                Some(json!(["secret"])),
+            ] {
+                let mut params = deposit_cookie_params();
+                if let Some(value) = value {
+                    params[field] = value;
+                } else {
+                    params.as_object_mut().unwrap().remove(field);
+                }
+                rows.push(params);
+            }
+        }
+        for (field, value) in [
+            ("email", json!(123)),
+            ("enrollment_token", json!("DO_NOT_ECHO")),
+            ("category", json!("DO_NOT_ECHO")),
+        ] {
+            let mut params = deposit_cookie_params();
+            params[field] = value;
+            rows.push(params);
+        }
+        for principal in [deposit_cookie_principal(), None] {
+            for params in &rows {
+                let before = deposit_cookie_counts(&store);
+                let events: i64 = store
+                    .with_raw_conn(|c| {
+                        c.query_row("SELECT count(*) FROM auth_events", [], |r| r.get(0))
+                    })
+                    .unwrap();
+                let reply = deposit_cookie_frame(
+                    &surface,
+                    &admin,
+                    principal.clone(),
+                    OP_DEPOSIT_COOKIE,
+                    params.clone(),
+                )
+                .await;
+                assert_eq!(reply.header.ty, FrameType::Error);
+                let text = String::from_utf8(reply.body.to_vec()).unwrap();
+                assert!(text.contains("invalid_params"));
+                assert!(!text.contains("session=abc"));
+                assert!(!text.contains("DO_NOT_ECHO"));
+                assert_eq!(deposit_cookie_counts(&store), before);
+                let after: i64 = store
+                    .with_raw_conn(|c| {
+                        c.query_row("SELECT count(*) FROM auth_events", [], |r| r.get(0))
+                    })
+                    .unwrap();
+                assert_eq!(after, events);
+            }
+        }
+        for null in [false, true] {
+            let mut params = deposit_cookie_params();
+            if null {
+                params["email"] = serde_json::Value::Null;
+            }
+            deposit_cookie_frame(
+                &surface,
+                &admin,
+                deposit_cookie_principal(),
+                OP_DEPOSIT_COOKIE,
+                params,
+            )
+            .await;
+            assert!(store
+                .get(DEPOSIT_COOKIE_ID)
+                .unwrap()
+                .identity
+                .email
+                .is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn deposit_cookie_id_and_payload_grammar_precede_authorization() {
+        let (surface, admin, store) = deposit_cookie_rig(156);
+        deposit_cookie_grant(&store, "cerebellum", GrantOperation::Deposit);
+        let base = format!(
+            "cookie:{}.{}.{}.com:a",
+            "a".repeat(63),
+            "a".repeat(63),
+            "a".repeat(63)
+        );
+        let id255 = format!("{base}{}", "a".repeat(255 - base.len()));
+        let ids = vec![
+            ("apikey:x".into(), false),
+            ("oauth:anthropic".into(), false),
+            ("cookie:example.com:a|b".into(), false),
+            ("category:browser-session".into(), false),
+            (id255.clone(), true),
+            (format!("{id255}a"), false),
+            (format!("cookie:{}.com:a", "a".repeat(63)), true),
+            (format!("cookie:{}.com:a", "a".repeat(64)), false),
+            (format!("cookie:a.com:{}", "a".repeat(64)), true),
+            (format!("cookie:a.com:{}", "a".repeat(65)), false),
+            ("cookie:-a.com:a".into(), false),
+            ("cookie:a-.com:a".into(), false),
+            ("cookie:A.com:a".into(), false),
+            ("cookie:localhost:a".into(), false),
+            ("cookie:a.com:".into(), false),
+            ("cookie:a.com:a:b".into(), false),
+        ];
+        for principal in [deposit_cookie_principal(), None] {
+            for (id, valid) in &ids {
+                let mut params = deposit_cookie_params();
+                params["id"] = json!(id);
+                let reply = deposit_cookie_frame(
+                    &surface,
+                    &admin,
+                    principal.clone(),
+                    OP_DEPOSIT_COOKIE,
+                    params,
+                )
+                .await;
+                let body = deposit_cookie_body(&reply);
+                if !valid {
+                    assert_eq!(body["result"]["error"]["code"], "invalid_id", "{id}");
+                } else if principal.is_none() {
+                    assert_eq!(body["result"]["error"]["code"], "not_found");
+                } else {
+                    assert!(body["result"]["outcome"].is_string(), "{body}");
+                }
+            }
+            for (field, value, valid) in [
+                ("cookie", "\t".into(), true),
+                ("cookie", "\u{7f}".into(), false),
+                ("cookie", "x".repeat(16384), true),
+                ("cookie", "x".repeat(16385), false),
+                ("cookie", "".into(), false),
+                ("cookie", "é".repeat(8192), true),
+                ("cookie", "é".repeat(8193), false),
+                ("consent_ref", " ".into(), false),
+                ("consent_ref", "a".repeat(128), true),
+                ("consent_ref", "a".repeat(129), false),
+                ("email", "a".repeat(254), true),
+                ("email", "a".repeat(255), false),
+                ("email", " ".into(), false),
+                ("email", "\u{2003}".into(), false),
+                ("email", "a".into(), true),
+                ("email", "\u{85}".into(), false),
+            ] {
+                let mut params = deposit_cookie_params();
+                params[field] = json!(value);
+                let reply = deposit_cookie_frame(
+                    &surface,
+                    &admin,
+                    principal.clone(),
+                    OP_DEPOSIT_COOKIE,
+                    params,
+                )
+                .await;
+                let body = deposit_cookie_body(&reply);
+                if !valid {
+                    assert_eq!(
+                        body["result"]["error"]["code"], "invalid_payload",
+                        "{field}"
+                    );
+                } else if principal.is_none() {
+                    assert_eq!(body["result"]["error"]["code"], "not_found");
+                } else {
+                    assert!(body["result"]["outcome"].is_string(), "{body}");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn deposit_cookie_wire_fixture_and_refusal_diagnostics_are_exact() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/deposit_cookie_wire_contract.json"
+        ))
+        .unwrap();
+        for code in [
+            "created",
+            "replaced",
+            "invalid_id",
+            "invalid_payload",
+            "not_found",
+            "not_permitted",
+            "store_error",
+        ] {
+            let (surface, admin, store) = deposit_cookie_rig(157);
+            deposit_cookie_grant(&store, "cerebellum", GrantOperation::Deposit);
+            let mut params = deposit_cookie_params();
+            let mut principal = deposit_cookie_principal();
+            match code {
+                "replaced" => {
+                    store
+                        .deposit_cookie(
+                            DEPOSIT_COOKIE_ID,
+                            &credentials_core::secret::Secret::new("old".into()),
+                            "consent",
+                            None,
+                            "reserved:cerebellum",
+                        )
+                        .unwrap();
+                }
+                "invalid_id" => params["id"] = json!("secret-invalid-id"),
+                "invalid_payload" => params["cookie"] = json!("\n"),
+                "not_found" => principal = None,
+                "not_permitted" => {
+                    store
+                        .create(
+                            DEPOSIT_COOKIE_ID,
+                            &VaultRecord::new_cookie("operator", b"old".to_vec()),
+                        )
+                        .unwrap();
+                }
+                "store_error" => store.force_deposit_cookie_audit_append_error_for_test(true),
+                _ => {}
+            }
+            let before = deposit_cookie_counts(&store);
+            let reply = deposit_cookie_frame(
+                &surface,
+                &admin,
+                principal.clone(),
+                OP_DEPOSIT_COOKIE,
+                params.clone(),
+            )
+            .await;
+            assert_eq!(reply.header.ty, FrameType::Response);
+            assert_eq!(
+                reply.body.as_slice(),
+                fixture[code].as_str().unwrap().as_bytes(),
+                "{code}"
+            );
+            if matches!(code, "created" | "replaced") {
+                continue;
+            }
+            assert_eq!(deposit_cookie_counts(&store), before, "{code}");
+            let subject = if matches!(code, "invalid_id" | "invalid_payload" | "not_found") {
+                OP_DEPOSIT_COOKIE
+            } else {
+                DEPOSIT_COOKIE_ID
+            };
+            let reason = if code == "not_found" {
+                "no_grant".to_owned()
+            } else {
+                format!("deposit_cookie_{code}")
+            };
+            let events: Vec<(String,String,String,Option<String>)>=store.with_raw_conn(|c| {
+                let mut q=c.prepare("SELECT credential_id, detail, principal_kind, principal_id FROM auth_events WHERE kind='scoped_read_refusal'")?;
+                let rows=q.query_map([],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?; rows.collect()
+            }).unwrap();
+            assert_eq!(
+                events,
+                [(
+                    subject.into(),
+                    reason,
+                    if principal.is_none() {
+                        "unverified".into()
+                    } else {
+                        "reserved".into()
+                    },
+                    principal.as_ref().map(|_| "cerebellum".into())
+                )],
+                "{code}"
+            );
+            surface.force_deposit_cookie_diagnostic_fault_for_test();
+            let faulted =
+                deposit_cookie_frame(&surface, &admin, principal, OP_DEPOSIT_COOKIE, params).await;
+            assert_eq!(faulted.body, reply.body, "{code}");
+            let count: i64 = store
+                .with_raw_conn(|c| {
+                    c.query_row(
+                        "SELECT count(*) FROM auth_events WHERE kind='scoped_read_refusal'",
+                        [],
+                        |r| r.get(0),
+                    )
+                })
+                .unwrap();
+            assert_eq!(count, 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn deposit_cookie_not_found_is_uniform_for_unbound_direct_and_ungranted() {
+        let (surface, admin, _store) = deposit_cookie_rig(158);
+        let mut bodies = Vec::new();
+        for principal in [
+            None,
+            Some(subc_protocol::Principal::Direct),
+            deposit_cookie_principal(),
+        ] {
+            let reply = deposit_cookie_frame(
+                &surface,
+                &admin,
+                principal,
+                OP_DEPOSIT_COOKIE,
+                deposit_cookie_params(),
+            )
+            .await;
+            assert_eq!(
+                deposit_cookie_body(&reply)["result"]["error"]["code"],
+                "not_found"
+            );
+            bodies.push(reply.body);
+        }
+        assert!(bodies.windows(2).all(|w| w[0] == w[1]));
+        surface.force_scoped_grant_lookup_error_for_test();
+        let reply = deposit_cookie_frame(
+            &surface,
+            &admin,
+            deposit_cookie_principal(),
+            OP_DEPOSIT_COOKIE,
+            deposit_cookie_params(),
+        )
+        .await;
+        assert_eq!(reply.body, bodies[0]);
+    }
+
+    #[tokio::test]
+    async fn deposit_only_denial_on_every_read_and_key_operation_has_positive_controls() {
+        use base64::Engine as _;
+        use credentials_core::kem::*;
+        let (surface, admin, store) = deposit_cookie_rig(159);
+        let signing_id = "cookie:example.com:sign";
+        let kem_id = "cookie:example.com:kem";
+        let kem = credentials_core::kem::generate_key().unwrap();
+        let (public, _) = credentials_core::kem::public_half(&kem).unwrap();
+        store
+            .create(
+                DEPOSIT_COOKIE_ID,
+                &VaultRecord::new_cookie("operator", b"session=abc".to_vec()),
+            )
+            .unwrap();
+        store
+            .create(
+                signing_id,
+                &VaultRecord::new_static(
+                    CredentialKind::SigningKey,
+                    "operator",
+                    test_ed25519_pem().into_bytes(),
+                    None,
+                ),
+            )
+            .unwrap();
+        store
+            .create(
+                kem_id,
+                &VaultRecord::new_static(
+                    CredentialKind::KemKey,
+                    "operator",
+                    kem.into_bytes(),
+                    None,
+                ),
+            )
+            .unwrap();
+        deposit_cookie_grant(&store, "cerebellum", GrantOperation::Deposit);
+        for operation in [
+            GrantOperation::Read,
+            GrantOperation::Sign,
+            GrantOperation::Open,
+        ] {
+            deposit_cookie_grant(&store, "reader", operation);
+        }
+        let reader = Some(subc_protocol::Principal::Reserved {
+            module_id: "reader".into(),
+        });
+        for id in [DEPOSIT_COOKIE_ID, signing_id, kem_id] {
+            assert!(
+                store
+                    .evaluate_scoped_coverage("reserved", "cerebellum", id, GrantOperation::Deposit)
+                    .unwrap()
+                    .covered
+            );
+        }
+        let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        let (enc, ct) = seal_base(&public, b"plaintext", b"info", b"aad").unwrap();
+        let rows = [
+            (OP_GET_SCOPED, json!({"credential_id":DEPOSIT_COOKIE_ID})),
+            (OP_STATUS, json!({"credential_id":DEPOSIT_COOKIE_ID})),
+            (
+                OP_REPORT_AUTH_FAILURE,
+                json!({"credential_id":DEPOSIT_COOKIE_ID,"provider_status":401,"record_version":2}),
+            ),
+            (
+                OP_SIGN,
+                json!({"credential_id":signing_id,"payload_b64":encode(b"hello")}),
+            ),
+            (OP_PUBLIC_KEY, json!({"credential_id":signing_id})),
+            (
+                OP_OPEN,
+                json!({"credential_id":kem_id,"enc_b64":encode(&enc),"ciphertext_b64":encode(&ct),"info_b64":encode(b"info"),"aad_b64":encode(b"aad")}),
+            ),
+        ];
+        for (method, params) in rows {
+            let before: i64 = store
+                .with_raw_conn(|c| {
+                    c.query_row(
+                        "SELECT count(*) FROM auth_events WHERE kind='scoped_read_refusal'",
+                        [],
+                        |r| r.get(0),
+                    )
+                })
+                .unwrap();
+            let denied = deposit_cookie_frame(
+                &surface,
+                &admin,
+                deposit_cookie_principal(),
+                method,
+                params.clone(),
+            )
+            .await;
+            if method == OP_STATUS {
+                assert_eq!(
+                    deposit_cookie_body(&denied)["result"]["last_error_code"],
+                    "not_found"
+                );
+                assert_eq!(deposit_cookie_body(&denied)["result"]["ready"], false);
+            } else {
+                assert_eq!(
+                    deposit_cookie_body(&denied)["result"]["error"]["code"],
+                    "not_found",
+                    "{method}"
+                );
+            }
+            let after: i64 = store
+                .with_raw_conn(|c| {
+                    c.query_row(
+                        "SELECT count(*) FROM auth_events WHERE kind='scoped_read_refusal'",
+                        [],
+                        |r| r.get(0),
+                    )
+                })
+                .unwrap();
+            assert_eq!(after, before + 1, "{method}");
+            let allowed =
+                deposit_cookie_frame(&surface, &admin, reader.clone(), method, params).await;
+            assert_eq!(allowed.header.ty, FrameType::Response, "{method}");
+            assert!(
+                deposit_cookie_body(&allowed)["result"]
+                    .get("error")
+                    .is_none(),
+                "{method}: {}",
+                deposit_cookie_body(&allowed)
+            );
+            if method == OP_STATUS {
+                assert_eq!(deposit_cookie_body(&allowed)["result"]["ready"], true);
+            }
+        }
+        let grantless = deposit_cookie_frame(
+            &surface,
+            &admin,
+            Some(subc_protocol::Principal::Reserved {
+                module_id: "grantless".into(),
+            }),
+            OP_LIST_SCOPED,
+            json!({}),
+        )
+        .await;
+        let deposit = deposit_cookie_frame(
+            &surface,
+            &admin,
+            deposit_cookie_principal(),
+            OP_LIST_SCOPED,
+            json!({}),
+        )
+        .await;
+        let body = deposit_cookie_body(&deposit);
+        assert_eq!(body["result"]["credentials"], json!([]));
+        assert_eq!(body["result"]["grants"], 0);
+        assert_eq!(body["result"]["grant_tuples"], json!([]));
+        assert_eq!(
+            body["result"]["view"],
+            deposit_cookie_body(&grantless)["result"]["view"]
+        );
+        let listed =
+            deposit_cookie_frame(&surface, &admin, reader, OP_LIST_SCOPED, json!({})).await;
+        assert!(deposit_cookie_body(&listed)["result"]["credentials"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["id"] == DEPOSIT_COOKIE_ID));
+        deposit_cookie_grant(&store, "reader", GrantOperation::Deposit);
+        let listed = deposit_cookie_frame(
+            &surface,
+            &admin,
+            Some(subc_protocol::Principal::Reserved {
+                module_id: "reader".into(),
+            }),
+            OP_LIST_SCOPED,
+            json!({}),
+        )
+        .await;
+        assert!(!String::from_utf8(listed.body.to_vec())
+            .unwrap()
+            .contains("deposit"));
+        // The deposit grant confers no handle read authority. An independently minted
+        // bearer handle remains a valid read capability, regardless of module grants.
+        let refused = deposit_cookie_frame(
+            &surface,
+            &admin,
+            deposit_cookie_principal(),
+            OP_GET,
+            json!({"handle":"not-a-capability"}),
+        )
+        .await;
+        assert_eq!(
+            deposit_cookie_body(&refused)["result"]["error"]["code"],
+            "not_found"
+        );
+        let handle = credentials_core::store::mint_handle().unwrap();
+        store
+            .put_handle_hash(
+                &handle.hash,
+                DEPOSIT_COOKIE_ID,
+                AuditCtx::admin(AuditOp::MintHandle),
+            )
+            .unwrap();
+        let allowed = deposit_cookie_frame(
+            &surface,
+            &admin,
+            deposit_cookie_principal(),
+            OP_GET,
+            json!({"handle":handle.raw}),
+        )
+        .await;
+        assert!(deposit_cookie_body(&allowed)["result"]
+            .get("error")
+            .is_none());
+        // Admin authority requires a direct operator connection, not a module grant.
+        admin.record_bind(51, deposit_cookie_principal().unwrap());
+        for (method, params) in [
+            (OP_ADMIN_CHALLENGE, json!({})),
+            (OP_ADMIN_OP, json!({"op_body":"{}","tag_hex":"00"})),
+        ] {
+            let refused =
+                deposit_cookie_frame(&surface, &admin, deposit_cookie_principal(), method, params)
+                    .await;
+            assert_eq!(refused.header.ty, FrameType::Error);
+            assert!(String::from_utf8(refused.body.to_vec())
+                .unwrap()
+                .contains("admin_refused"));
+        }
+        admin.record_bind(51, subc_protocol::Principal::Direct);
+        let allowed = deposit_cookie_frame(
+            &surface,
+            &admin,
+            Some(subc_protocol::Principal::Direct),
+            OP_ADMIN_CHALLENGE,
+            json!({}),
+        )
+        .await;
+        assert_eq!(allowed.header.ty, FrameType::Response);
+    }
+
+    #[tokio::test]
+    async fn deposit_cookie_competing_creators_and_operator_replace_preserve_ownership() {
+        let (surface, admin, store) = deposit_cookie_rig(160);
+        for name in ["cerebellum", "other"] {
+            deposit_cookie_grant(&store, name, GrantOperation::Deposit);
+        }
+        let (one, two) = tokio::join!(
+            deposit_cookie_frame(
+                &surface,
+                &admin,
+                deposit_cookie_principal(),
+                OP_DEPOSIT_COOKIE,
+                deposit_cookie_params()
+            ),
+            deposit_cookie_frame(
+                &surface,
+                &admin,
+                Some(subc_protocol::Principal::Reserved {
+                    module_id: "other".into()
+                }),
+                OP_DEPOSIT_COOKIE,
+                deposit_cookie_params()
+            )
+        );
+        let bodies = [deposit_cookie_body(&one), deposit_cookie_body(&two)];
+        assert_eq!(
+            bodies
+                .iter()
+                .filter(|b| b["result"]["outcome"] == "created")
+                .count(),
+            1
+        );
+        assert_eq!(
+            bodies
+                .iter()
+                .filter(|b| b["result"]["error"]["code"] == "not_permitted")
+                .count(),
+            1
+        );
+        let audits = store.read_audit(None).unwrap();
+        assert_eq!(
+            audits
+                .iter()
+                .filter(|a| a.credential_id.as_deref() == Some(DEPOSIT_COOKIE_ID))
+                .count(),
+            1
+        );
+        let creator = store.meta(DEPOSIT_COOKIE_ID).unwrap().created_by.unwrap();
+        store
+            .overwrite_unconditional_audited(
+                DEPOSIT_COOKIE_ID,
+                &VaultRecord::new_cookie("operator", b"operator replace".to_vec()),
+                AuditCtx::admin(AuditOp::Overwrite),
+            )
+            .unwrap();
+        let principal = Some(subc_protocol::Principal::Reserved {
+            module_id: creator.strip_prefix("reserved:").unwrap().into(),
+        });
+        let reply = deposit_cookie_frame(
+            &surface,
+            &admin,
+            principal,
+            OP_DEPOSIT_COOKIE,
+            deposit_cookie_params(),
+        )
+        .await;
+        assert_eq!(deposit_cookie_body(&reply)["result"]["outcome"], "replaced");
+        assert_eq!(
+            store.meta(DEPOSIT_COOKIE_ID).unwrap().created_by.as_deref(),
+            Some(creator.as_str())
+        );
     }
 
     async fn enrollment_route_frame(
@@ -6036,6 +7121,7 @@ mod tests {
                     state,
                     stale_pending: false,
                     categories: Vec::new(),
+                    created_by: None,
                 },
             )
         }

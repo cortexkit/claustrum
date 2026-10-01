@@ -3,6 +3,7 @@
 //! Credential reads remain read-only. The enrollment proposal, poll, and rotation
 //! operations are the narrow exceptions: they write only bounded enrollment state and
 //! are kept out of the untrimmable audit chain except for successful token rotation.
+//! Cookie deposit is a separately granted write that commits its data and audit together.
 //! Handle operations take a capability HANDLE, never a
 //! public alias, and resolve it to a credential id before anything else; an unknown or
 //! revoked handle is a uniform `not_found` so a probe cannot enumerate.
@@ -61,6 +62,61 @@ use credentials_core::store::{
 use subc_protocol::Principal;
 
 use crate::limiter::{Admission, FetchLimiter, GET_MANY_MAX};
+
+/// Cookie-only write parameters. The route-bound module's deposit grant authorizes
+/// creation and replacement of its own cookies, but never reading them.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DepositCookieParams {
+    pub id: String,
+    pub cookie: credentials_core::secret::Secret<String>,
+    pub consent_ref: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DepositCookieResult {
+    pub id: String,
+    pub outcome: &'static str,
+    pub record_version: u64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DepositCookieError {
+    InvalidId,
+    InvalidPayload,
+    NotFound,
+    NotPermitted,
+    StoreError,
+}
+
+impl DepositCookieError {
+    pub fn class(self) -> &'static str {
+        if matches!(self, Self::StoreError) {
+            "transient"
+        } else {
+            "permanent"
+        }
+    }
+}
+
+fn valid_deposit_cookie_payload(params: &DepositCookieParams) -> bool {
+    (1..=16384).contains(&params.cookie.expose().len())
+        && params
+            .cookie
+            .expose()
+            .bytes()
+            .all(|b| b == 9 || (b >= 32 && b != 127))
+        && (1..=128).contains(&params.consent_ref.len())
+        && params.consent_ref.bytes().all(|b| (33..=126).contains(&b))
+        && params.email.as_ref().is_none_or(|email| {
+            (1..=254).contains(&email.len())
+                && !email.trim().is_empty()
+                && !email.chars().any(char::is_control)
+        })
+}
 
 /// Exact parameters for `auth.enroll_propose`.
 #[cfg_attr(test, derive(Serialize))]
@@ -833,6 +889,10 @@ pub struct ReadSurface {
     // diagnostic keeps a lookup failure distinct without shipping a test capability.
     #[cfg(test)]
     scoped_grant_lookup_error_for_test: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    deposit_cookie_diagnostic_fault: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    deposit_cookie_first_use_fault: std::sync::atomic::AtomicBool,
 }
 
 /// If the cached health snapshot has not been refreshed within this window, the probe
@@ -926,6 +986,7 @@ fn project_list_scoped(snapshot: ScopedListSnapshot) -> ListScopedResult {
     let mut grant_tuples: Vec<GrantTuple> = snapshot
         .grants
         .into_iter()
+        .filter(|grant| grant.operation != GrantOperation::Deposit)
         .map(|grant| GrantTuple {
             selector_kind: grant.selector_kind.as_str().to_string(),
             selector: grant.selector,
@@ -1070,6 +1131,10 @@ impl ReadSurface {
             last_refresh_ms: std::sync::atomic::AtomicI64::new(now_ms()),
             #[cfg(test)]
             scoped_grant_lookup_error_for_test: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            deposit_cookie_diagnostic_fault: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            deposit_cookie_first_use_fault: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -1451,6 +1516,131 @@ impl ReadSurface {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn force_deposit_cookie_diagnostic_fault_for_test(&self) {
+        self.deposit_cookie_diagnostic_fault
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn force_deposit_cookie_first_use_fault_for_test(&self) {
+        self.deposit_cookie_first_use_fault
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn deposit_cookie_refusal(
+        &self,
+        principal: Option<&Principal>,
+        subject: &str,
+        error: DepositCookieError,
+    ) -> DepositCookieError {
+        let reason = match error {
+            DepositCookieError::InvalidId => "deposit_cookie_invalid_id",
+            DepositCookieError::InvalidPayload => "deposit_cookie_invalid_payload",
+            DepositCookieError::NotPermitted => "deposit_cookie_not_permitted",
+            DepositCookieError::StoreError => "deposit_cookie_store_error",
+            DepositCookieError::NotFound => {
+                unreachable!("authorization records its own diagnostic")
+            }
+        };
+        let write = || {
+            #[cfg(test)]
+            if self
+                .deposit_cookie_diagnostic_fault
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(StoreOpError::Store("test cookie diagnostic failure".into()));
+            }
+            self.engine.store().record_auth_event(
+                subject,
+                credentials_core::store::AuthObservation {
+                    kind: AuthEventKind::ScopedReadRefusal.as_str(),
+                    provider_status: None,
+                    detail: Some(reason),
+                    reporter_source: None,
+                    principal: Self::observed_principal(principal)
+                        .or(Some(AuthEventPrincipal::Unverified)),
+                },
+                None,
+            )
+        };
+        let _ = write();
+        error
+    }
+
+    pub fn deposit_cookie(
+        &self,
+        principal: Option<&Principal>,
+        params: &DepositCookieParams,
+    ) -> Result<DepositCookieResult, DepositCookieError> {
+        use credentials_core::deposit_cookie::{valid_deposit_cookie_id, DepositCookieOutcome};
+        if !valid_deposit_cookie_id(&params.id) {
+            return Err(self.deposit_cookie_refusal(
+                principal,
+                "credential.deposit_cookie",
+                DepositCookieError::InvalidId,
+            ));
+        }
+        if !valid_deposit_cookie_payload(params) {
+            return Err(self.deposit_cookie_refusal(
+                principal,
+                "credential.deposit_cookie",
+                DepositCookieError::InvalidPayload,
+            ));
+        }
+        self.authorize_scoped_as(principal, None, &params.id, GrantOperation::Deposit)
+            .map_err(|_| DepositCookieError::NotFound)?;
+        let (kind, id) = self
+            .scoped_principal(principal, None)
+            .expect("authorized principal");
+        let result = self
+            .engine
+            .store()
+            .deposit_cookie(
+                &params.id,
+                &params.cookie,
+                &params.consent_ref,
+                params.email.as_deref(),
+                &format!("{kind}:{id}"),
+            )
+            .map_err(|error| {
+                self.deposit_cookie_refusal(
+                    principal,
+                    &params.id,
+                    match error {
+                        StoreOpError::DepositCookieNotPermitted => DepositCookieError::NotPermitted,
+                        _ => DepositCookieError::StoreError,
+                    },
+                )
+            })?;
+        // First-use diagnostics cannot turn a committed write into a refusal.
+        let write_first_use = || {
+            #[cfg(test)]
+            if self
+                .deposit_cookie_first_use_fault
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(StoreOpError::Store("test cookie first-use failure".into()));
+            }
+            self.engine.store().record_scoped_first_use(
+                &params.id,
+                kind,
+                Some(&id),
+                GrantOperation::Deposit,
+            )
+        };
+        let _ = write_first_use();
+        let (outcome, record_version) = match result {
+            DepositCookieOutcome::Created { record_version } => ("created", record_version),
+            DepositCookieOutcome::Replaced { record_version } => ("replaced", record_version),
+        };
+        Ok(DepositCookieResult {
+            id: params.id.clone(),
+            outcome,
+            record_version,
+        })
+    }
+
     /// Test-only: make the next scoped grant lookup take its store-error refusal arm.
     #[cfg(test)]
     pub(crate) fn force_scoped_grant_lookup_error_for_test(&self) {
@@ -1484,12 +1674,23 @@ impl ReadSurface {
         refusal: ScopedReadRefusal,
     ) {
         let (principal_kind, principal_id) = Self::scoped_principal_identity(principal);
-        let _ = self.engine.store().record_scoped_read_refusal(
-            credential_id,
-            principal_kind,
-            principal_id,
-            refusal,
-        );
+        let write = || {
+            #[cfg(test)]
+            if credential_id == "credential.deposit_cookie"
+                && self
+                    .deposit_cookie_diagnostic_fault
+                    .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(StoreOpError::Store("test cookie diagnostic failure".into()));
+            }
+            self.engine.store().record_scoped_read_refusal(
+                credential_id,
+                principal_kind,
+                principal_id,
+                refusal,
+            )
+        };
+        let _ = write();
     }
 
     /// Resolve a handle-or-scoped address to a credential id, applying the same limiter
@@ -1589,7 +1790,15 @@ impl ReadSurface {
         operation: GrantOperation,
     ) -> Result<(), ReadError> {
         let Some((kind, id)) = self.scoped_principal(principal, enrollment_token) else {
-            self.record_scoped_refusal(principal, credential_id, ScopedReadRefusal::NoGrant);
+            self.record_scoped_refusal(
+                principal,
+                if operation == GrantOperation::Deposit {
+                    "credential.deposit_cookie"
+                } else {
+                    credential_id
+                },
+                ScopedReadRefusal::NoGrant,
+            );
             return Err(ReadError::NotFound);
         };
         let coverage =
@@ -1613,7 +1822,15 @@ impl ReadSurface {
             Ok(coverage) => classify_scoped_coverage(coverage),
         };
         if let Some(refusal) = refusal {
-            self.record_scoped_refusal(principal, credential_id, refusal);
+            self.record_scoped_refusal(
+                principal,
+                if operation == GrantOperation::Deposit {
+                    "credential.deposit_cookie"
+                } else {
+                    credential_id
+                },
+                refusal,
+            );
             return Err(ReadError::NotFound);
         }
         // THE ONE CHOKEPOINT EVERY SCOPED OP PASSES THROUGH, which is why the record sits
@@ -1628,10 +1845,17 @@ impl ReadSurface {
         // Best-effort, deliberately: a diagnostic that could fail an authorized read
         // would be worse than the blindness it cures. The store call is idempotent, so
         // this is one INSERT ever and a cheap NOT EXISTS thereafter.
-        let _ =
-            self.engine
-                .store()
-                .record_scoped_first_use(credential_id, kind, Some(&id), operation);
+        // Deposit authorization alone is not a successful use: the write can still
+        // refuse ownership or roll back its audit. The deposit route records first use
+        // only after the data and audit have committed.
+        if operation != GrantOperation::Deposit {
+            let _ = self.engine.store().record_scoped_first_use(
+                credential_id,
+                kind,
+                Some(&id),
+                operation,
+            );
+        }
         Ok(())
     }
 

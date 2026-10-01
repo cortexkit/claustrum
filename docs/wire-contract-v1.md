@@ -487,3 +487,84 @@ If this document and the source disagree, the source wins and this document is a
 `credential.open` accepts `{credential_id, enc_b64, ciphertext_b64, info_b64, aad_b64, enrollment_token?}` with no extra fields (including `handle`). All byte fields use `base64::engine::general_purpose::STANDARD`, the same strict, padded standard-alphabet decoder as `credential.sign`. The reply is `{result:{plaintext_b64,key_id}}`; `key_id` equals the same record's `credential.public_key` reply, derived by `credentials_core::signing::key_id_for_public`. A KEM public-key reply has `algorithm: "x25519"` and `public_key_hex`.
 
 Checks run in order: (1) shape decode (a transport `Error` frame with code `invalid_params` and **no class**, per §1a); (2) combined encoded length at most `ENC_BOUND = ceil(MAX_SIGN_PAYLOAD / 3) * 4 + 12`, then standard base64 decode (malformed byte field: the in-result code `malformed_encoding`, class permanent); (3) combined decoded length at most `MAX_SIGN_PAYLOAD` (1 MiB), otherwise `sign_payload_too_large`, context_overflow; (4) connection-scoped refusal counter gate (`open_rate_limited`, transient, without delay or disconnect); (5) scoped authorization for `open` (`not_found` on unknown or ungranted id); (6) KEM kind fence (`kind_not_openable`, permanent); (7) PKCS#8 parse and fresh RFC 9180 base-mode receiver opening sequence zero (`open_failed`, permanent, identically for invalid encapsulation, wrong recipient, modified ciphertext, wrong aad or wrong info and corrupt stored payload). Each step runs only after its predecessors pass. Refusals at step 5 alone increment the connection counter; it recovers after 60 seconds. Authorized opens do not increment it. `info_b64` and `aad_b64` are uninterpreted associated bytes: the vault does not inspect machine identity or verify a signature inside the plaintext.
+
+## Cookie deposit (`credential.deposit_cookie`)
+
+A supervised module identified by its route-bound `reserved:<module>` principal
+and granted `category browser-session deposit` may write its own cookies, but not
+read them with that grant. It may send:
+
+```json
+{"method":"credential.deposit_cookie","params":{"id":"cookie:ollama.com:ufuk","cookie":"session=abc","consent_ref":"consent-123","email":"me@example.com"}}
+```
+
+Only `id`, `cookie`, `consent_ref` and optional `email` are accepted. Missing or null
+`email` means no identity on create and preserves identity on replace; present email
+is stored as both account_id and email and disclosed to browser-session readers.
+Unknown fields (including enrollment_token), missing required fields and wrong types
+return a transport Error frame with `invalid_params`, a fixed non-secret detail,
+and no writes. Admission order is decode, id grammar, payload grammar, then Deposit
+authorization; no grant widens either grammar.
+
+The id matches
+`^cookie:(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?:[A-Za-z0-9._@+-]{1,64}$`
+and is at most 255 UTF-8 bytes. Cookie length is 1..=16384 bytes, allowing HTAB,
+0x20..0x7E and UTF-8 bytes >=0x80 but excluding all other controls and DEL.
+Consent reference is 1..=128 bytes in 0x21..0x7E. Email is 1..=254 bytes,
+nonempty after Unicode trim and without control characters; no address syntax is
+required. Because the cookie is a JSON string, it is stored as UTF-8. The cap counts
+bytes, not characters. Non-UTF-8 obs-text requires operator `ck auth put --payload-file`;
+byte identity with operator put holds for UTF-8 input.
+
+Success bodies are exactly:
+
+```json
+{"result":{"id":"cookie:ollama.com:ufuk","outcome":"created","record_version":1}}
+{"result":{"id":"cookie:ollama.com:ufuk","outcome":"replaced","record_version":2}}
+```
+
+The cookie is never echoed. A creator can replace only its own record; creator is
+write-once, including across operator replaces. Existing operator or NULL-creator
+rows are not taken over. Creates assign exactly browser-session; replaces preserve
+categories, grants and birth time. Deposit grants authorize no reads, key operations,
+or admin operations and are omitted from list_scoped operations, grants, grant_tuples
+and view. A best-effort `scoped_first_use` auth_events row records the first committed
+deposit for each (credential id, principal, deposit) tuple. It is written only after
+commit so an ownership refusal or failed audit cannot appear as successful use.
+
+Every post-decode refusal is a Response frame with
+`{"result":{"error":{"class":"permanent","code":"not_found"}}}` shape.
+`invalid_id`, `invalid_payload`, `not_found` and `not_permitted` are permanent;
+`store_error` is transient (store, lease, I/O, shutdown, audit-append or version-guard
+failure). Refusals mutate no credentials, categories, audit or first-use rows.
+For each refusal, the vault attempts one bounded diagnostic in the trimmable
+`auth_events` table, without secret bytes: invalid_id,
+invalid_payload and not_found use subject `credential.deposit_cookie`;
+not_permitted and store_error use the validated id. Diagnostic failure never changes
+the reply. Authorization uses the scoped diagnostic reason `no_grant`, `not_found`,
+`uncategorized`, `wrong_kind` or `store_error`, while always replying `not_found`;
+other reasons are
+`deposit_cookie_invalid_id`, `deposit_cookie_invalid_payload`,
+`deposit_cookie_not_permitted` and `deposit_cookie_store_error`.
+
+A successful write and audit append commit in one transaction. Audit operations are
+`deposit_cookie_create` and `deposit_cookie_replace`, actor/source/created_by are the
+same `reserved:<module>` string, and alarm is false. The payload_hash is lowercase
+hex SHA-256 of:
+
+```text
+UTF8("ck-deposit-cookie/v1") || u32be(len(UTF8(id))) || UTF8(id)
+|| u32be(len(UTF8(consent_ref))) || UTF8(consent_ref) || SHA256(UTF8(cookie))
+```
+
+The inner SHA-256 is 32 raw bytes, not hex. Independent vector: id
+`cookie:ollama.com:ufuk`, consent_ref `consent-123`, cookie `session=abc` yields
+`d523e692e03fc04a7700e325960047a0283a062980239e5ea7ad03b4eac9bcb7`.
+The payload_hash commitment can be verified by recomputing the outer SHA-256 over
+the documented id, consent_ref and raw cookie digest layout and comparing the hex
+result. Verifying a replaced cookie requires retaining its digest outside the vault.
+
+**Trust line:** the vault trusts the depositing module's consent attestation and
+cannot see the consent card. The grant is not evidence that a card was shown.
+The hand-authored fixture `deposit_cookie_wire_contract.json` pins these bytes;
+fixture regeneration requires `UPDATE_FIXTURES=1` and a reviewed diff.

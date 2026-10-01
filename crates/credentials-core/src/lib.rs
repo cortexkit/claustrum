@@ -26,6 +26,7 @@ pub mod audit;
 pub mod catalog;
 pub mod contract;
 pub mod credential_id;
+pub mod deposit_cookie;
 pub mod device_flow;
 pub mod engine;
 #[cfg(test)]
@@ -101,7 +102,8 @@ pub use resolver::{
     ResolverConfig,
 };
 pub use store::{
-    handle_hash, mint_handle, payload_hash, refresh_token_hash, EncryptedStore, GrantOperation,
-    MintedHandle, ReadGrant, RecordMeta, RecordState, RefreshIntent, ScopedCoverage, ScopedListRow,
-    ScopedListSnapshot, ScopedReadRefusal, SelectorKind, SetCategoryMode, StoreOpError,
+    handle_hash, mint_handle, payload_hash, refresh_token_hash, DepositCookieOutcome,
+    EncryptedStore, GrantOperation, MintedHandle, ReadGrant, RecordMeta, RecordState,
+    RefreshIntent, ScopedCoverage, ScopedListRow, ScopedListSnapshot, ScopedReadRefusal,
+    SelectorKind, SetCategoryMode, StoreOpError,
 };

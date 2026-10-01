@@ -1298,6 +1298,9 @@ fn catalog_match(id: &str) -> Option<CatalogEntry> {
 /// Underscores become hyphens because `valid_category_name` admits neither underscores nor
 /// colons, so `github_app` stamps as `github-app-native`.
 pub fn category_defaults(credential_id: &str) -> Vec<String> {
+    if credential_id.starts_with("cookie:") {
+        return vec!["browser-session".to_owned()];
+    }
     let mut categories: Vec<String> = catalog_match(credential_id)
         .map(|entry| {
             entry
@@ -1429,6 +1432,18 @@ mod tests {
             "an entry row, not a no-match row, must carry a non-llm category"
         );
 
+        // Cookie defaults are a family rule, independent of either provider catalog.
+        for id in [
+            "cookie:example.com:me",
+            "cookie:x",
+            "cookie:oauth:anthropic",
+        ] {
+            assert_eq!(
+                category_defaults(id),
+                ["browser-session"],
+                "cookie row {id}"
+            );
+        }
         for id in ["apikey:zai-work", "apikey:apns-alfonso", "apple:notes"] {
             assert!(
                 catalog_match(id).is_none(),

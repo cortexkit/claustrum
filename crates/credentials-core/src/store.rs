@@ -46,6 +46,7 @@ use zeroize::Zeroizing;
 use crate::audit::{
     self, AlarmReason, AuditCtx, AuditEntry, AuditOp, AuditRecord, AuthEventKind, ReporterSource,
 };
+pub use crate::deposit_cookie::DepositCookieOutcome;
 use crate::enrollment::{
     constant_time_hash_eq, enrollment_secret_hash, is_lower_hex_32, mint_hex_32,
     valid_enrollment_name, EnrollmentError, EnrollmentPoll, EnrollmentProposal, EnrollmentRefusal,
@@ -561,6 +562,24 @@ const MIGRATIONS: &[Migration] = &[
                      DROP TABLE read_grants; \
                      ALTER TABLE read_grants_v13 RENAME TO read_grants;",
     },
+    // Existing creators remain unknown. Copy grants unchanged while adding deposit
+    // to the operation constraint, so no existing grant gains authority.
+    Migration {
+        version: 14,
+        statements: "ALTER TABLE credentials ADD COLUMN created_by TEXT; \
+                     CREATE TABLE read_grants_v14 (\
+                         principal_kind    TEXT NOT NULL CHECK (principal_kind IN ('reserved','enrolled')), \
+                         principal_id      TEXT NOT NULL, \
+                         selector_kind     TEXT NOT NULL CHECK (selector_kind IN ('exact','category')), \
+                         selector          TEXT NOT NULL, \
+                         operation         TEXT NOT NULL CHECK(operation IN ('read', 'sign', 'open', 'list', 'deposit')), \
+                         created_at_ms     INTEGER NOT NULL, \
+                         PRIMARY KEY (principal_kind, principal_id, selector_kind, selector, operation)\
+                     ); \
+                     INSERT INTO read_grants_v14 SELECT * FROM read_grants; \
+                     DROP TABLE read_grants; \
+                     ALTER TABLE read_grants_v14 RENAME TO read_grants;",
+    },
 ];
 
 /// The newest store migration THIS BINARY knows how to apply.
@@ -639,6 +658,8 @@ pub struct RecordMeta {
     pub stale_pending: bool,
     /// Sorted non-secret authorization categories.
     pub categories: Vec<String>,
+    /// Write-once creator; rows predating migration 14 have no known creator.
+    pub created_by: Option<String>,
 }
 
 /// The operation a principal-scoped credential-prefix grant permits.
@@ -649,8 +670,9 @@ pub struct RecordMeta {
 /// exercise a key. It exists so a module can be given the account roster without also
 /// being given every token, which `Read` would do.
 ///
-/// `List` is declared last so the derived order of the three older variants, which
-/// decides the order of a list_scoped row's `operations`, is unchanged.
+/// `Deposit` is declared last so derived ordering preserves the older operations'
+/// order in list_scoped responses. It permits cookie creation and replacement only
+/// when the stored creator is the same depositing principal.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]
@@ -660,6 +682,7 @@ pub enum GrantOperation {
     Sign,
     Open,
     List,
+    Deposit,
 }
 
 impl GrantOperation {
@@ -669,6 +692,7 @@ impl GrantOperation {
             Self::Sign => "sign",
             Self::Open => "open",
             Self::List => "list",
+            Self::Deposit => "deposit",
         }
     }
 }
@@ -682,8 +706,9 @@ impl std::str::FromStr for GrantOperation {
             "sign" => Ok(Self::Sign),
             "open" => Ok(Self::Open),
             "list" => Ok(Self::List),
+            "deposit" => Ok(Self::Deposit),
             _ => Err(format!(
-                "unknown grant operation '{value}' (expected read, sign, open, or list)"
+                "unknown grant operation '{value}' (expected read, sign, open, list, or deposit)"
             )),
         }
     }
@@ -884,6 +909,10 @@ pub enum StoreOpError {
     InvalidCategoryName,
     /// A grant principal is not a non-empty `reserved` principal id without `|`.
     InvalidPrincipal,
+    /// Deposit grants are restricted to reserved principals and browser-session categories.
+    InvalidDepositGrant,
+    /// The existing cookie belongs to another creator, or has no known creator.
+    DepositCookieNotPermitted,
     /// Identity preservation would attach an existing account label to incoming material
     /// whose provider claim names a different account.
     AccountIdentityMismatch {
@@ -943,6 +972,8 @@ impl std::fmt::Display for StoreOpError {
             StoreOpError::InvalidCredentialId => f.write_str("invalid_credential_id"),
             StoreOpError::InvalidCategoryName => f.write_str("invalid_category_name"),
             StoreOpError::InvalidPrincipal => f.write_str("invalid_principal"),
+            StoreOpError::InvalidDepositGrant => f.write_str("deposit requires a reserved principal and category browser-session selector"),
+            StoreOpError::DepositCookieNotPermitted => f.write_str("not_permitted"),
             StoreOpError::AccountIdentityMismatch {
                 credential_id,
                 retained_account_id,
@@ -1429,6 +1460,8 @@ pub struct EncryptedStore {
     // would show up as a value that failed to rise — caught by a human comparing two
     // numbers, if they compare them.
     fenced_out: AtomicBool,
+    #[cfg(any(test, feature = "test-support"))]
+    deposit_cookie_audit_fault: AtomicBool,
 }
 
 impl EncryptedStore {
@@ -1452,6 +1485,8 @@ impl EncryptedStore {
             key_id,
             audit_key,
             fenced_out: AtomicBool::new(false),
+            #[cfg(any(test, feature = "test-support"))]
+            deposit_cookie_audit_fault: AtomicBool::new(false),
         };
         encrypted.sweep_pending_enrollments_on_open(now_ms())?;
         Ok(encrypted)
@@ -1715,7 +1750,7 @@ impl EncryptedStore {
                     "SELECT record_version, key_id, state, stale_pending, \
                      COALESCE((SELECT group_concat(category, ',') FROM (\
                          SELECT category FROM credential_categories WHERE credential_id = ?1 ORDER BY category\
-                     )), '') \
+                     )), ''), created_by \
                      FROM credentials WHERE credential_id = ?1",
                     rusqlite::params![credential_id],
                     |row| {
@@ -1726,6 +1761,7 @@ impl EncryptedStore {
                             state: RecordState::from_str(&row.get::<_, String>(2)?),
                             stale_pending: row.get::<_, i64>(3)? != 0,
                             categories: split_categories(categories),
+                            created_by: row.get(5)?,
                         })
                     },
                 )
@@ -2526,6 +2562,13 @@ impl EncryptedStore {
         {
             return Err(StoreOpError::InvalidPrincipal);
         }
+        if operation == GrantOperation::Deposit
+            && (principal_kind != "reserved"
+                || selector_kind != SelectorKind::Category
+                || selector != "browser-session")
+        {
+            return Err(StoreOpError::InvalidDepositGrant);
+        }
         if selector.is_empty() {
             return Err(StoreOpError::InvalidCategoryName);
         }
@@ -2674,6 +2717,20 @@ impl EncryptedStore {
                 )?;
                 let grants = rows.collect::<rusqlite::Result<Vec<_>>>()?;
                 let caller_active_grants = grants.len() as u32;
+                if operation == GrantOperation::Deposit {
+                    let categories = crate::catalog::category_defaults(credential_id);
+                    return Ok(ScopedCoverage {
+                        covered: grants.iter().any(|(kind, selector)| {
+                            kind == SelectorKind::Category.as_str() && categories.contains(selector)
+                        }),
+                        caller_active_grants,
+                        holds_category_selector: grants.iter().any(|(kind, _)| kind == SelectorKind::Category.as_str()),
+                        // A fresh id has no stored categories: authorize the vault-assigned
+                        // defaults instead, without looking up any existing credential.
+                        id_exists: false,
+                        id_category_count: Some(categories.len() as u32),
+                    });
+                }
                 // The stored kind text is compared through the enum rather than against a
                 // literal spelled again here: this predicate reads raw columns, so a
                 // vocabulary change that misses it would silently cover nothing.
@@ -2805,6 +2862,7 @@ impl EncryptedStore {
                 for (id, record_version, state, envelope_bytes, categories) in candidates {
                     let operations: BTreeSet<GrantOperation> = grants
                         .iter()
+                        .filter(|grant| grant.operation != GrantOperation::Deposit)
                         .filter(|grant| match grant.selector_kind {
                             SelectorKind::Exact => id == grant.selector,
                             SelectorKind::Category => categories
@@ -3078,6 +3136,104 @@ impl EncryptedStore {
         .map_err(StoreOpError::from)
     }
 
+    /// Inject an audit-append failure after the deposit data write, without affecting
+    /// other store instances or operator writes.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn force_deposit_cookie_audit_append_error_for_test(&self, enabled: bool) {
+        self.deposit_cookie_audit_fault
+            .store(enabled, Ordering::Relaxed);
+    }
+
+    /// Store a cookie for an already-authorized reserved principal. Authorization and
+    /// wire grammar checks belong to the route; creator ownership is enforced here.
+    /// Mutation, intent clearing and audit append share one fenced transaction.
+    pub fn deposit_cookie(
+        &self,
+        credential_id: &str,
+        cookie: &crate::secret::Secret<String>,
+        consent_ref: &str,
+        email: Option<&str>,
+        principal_str: &str,
+    ) -> Result<DepositCookieOutcome, StoreOpError> {
+        validate_deposit_credential_id(credential_id)?;
+        if !crate::deposit_cookie::valid_deposit_cookie_id(credential_id) {
+            return Err(StoreOpError::InvalidCredentialId);
+        }
+        if !principal_str
+            .strip_prefix("reserved:")
+            .is_some_and(|id| !id.is_empty() && !id.contains('|'))
+        {
+            return Err(StoreOpError::InvalidPrincipal);
+        }
+        let mut incoming =
+            VaultRecord::new_cookie(principal_str, cookie.expose().as_bytes().to_vec());
+        if let Some(email) = email {
+            // Identity normalization discards email without an account id. Use the
+            // email as both the account label and disclosed email, as imports do.
+            incoming.identity.account_id = Some(email.to_owned());
+            incoming.identity.email = Some(email.to_owned());
+        }
+        validate_record_identity(&incoming)?;
+        let blob = self.seal_record(credential_id, &incoming)?;
+        let key_id_hex = self.key_id.to_hex();
+        let now = now_ms();
+        let hash = crate::deposit_cookie::deposit_cookie_payload_hash(
+            credential_id,
+            consent_ref,
+            cookie.expose().as_bytes(),
+        );
+        let outcome = self.fenced_write(|tx| {
+            let inserted = tx.execute(
+                "INSERT INTO credentials (credential_id, record_version, key_id, state, envelope, updated_at_ms, created_at_ms, created_by) \
+                 VALUES (?1, 1, ?2, 'active', ?3, ?4, ?4, ?5) ON CONFLICT(credential_id) DO NOTHING",
+                rusqlite::params![credential_id, key_id_hex, blob, now, principal_str],
+            )?;
+            let (outcome, op) = if inserted > 0 {
+                for category in crate::catalog::category_defaults(credential_id) {
+                    tx.execute("INSERT INTO credential_categories (credential_id, category) VALUES (?1, ?2)", rusqlite::params![credential_id, category])?;
+                }
+                (DepositCookieOutcome::Created { record_version: 1 }, AuditOp::DepositCookieCreate)
+            } else {
+                let (version, creator, existing): (i64, Option<String>, Vec<u8>) = tx.query_row(
+                    "SELECT record_version, created_by, envelope FROM credentials WHERE credential_id = ?1",
+                    [credential_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )?;
+                if creator.as_deref() != Some(principal_str) {
+                    return Ok(None);
+                }
+                if email.is_none() {
+                    incoming.identity = envelope::open(&self.key, &existing, &RecordBinding {
+                        credential_id, record_version: version as u64,
+                    }).ok().and_then(|plain| VaultRecord::decode(&plain).ok())
+                      .map(|record| record.identity).filter(|identity| identity.validate().is_ok())
+                      .unwrap_or_default().normalized();
+                }
+                let next = version.checked_add(1).ok_or(rusqlite::Error::InvalidQuery)?;
+                incoming.record_version = next as u64;
+                let blob = self.seal_record(credential_id, &incoming)
+                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                let changed = tx.execute(
+                    "UPDATE credentials SET record_version = ?2, key_id = ?3, state = 'active', stale_pending = 0, envelope = ?4, updated_at_ms = ?5 \
+                     WHERE credential_id = ?1 AND created_by = ?6 AND record_version = ?7",
+                    rusqlite::params![credential_id, next, key_id_hex, blob, now, principal_str, version],
+                )?;
+                if changed != 1 { return Err(rusqlite::Error::InvalidQuery); }
+                (DepositCookieOutcome::Replaced { record_version: next as u64 }, AuditOp::DepositCookieReplace)
+            };
+            clear_intent_tx(tx, credential_id)?;
+            #[cfg(any(test, feature = "test-support"))]
+            if self.deposit_cookie_audit_fault.load(Ordering::Relaxed) {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            append_audit_tx(tx, &self.audit_key, &AuditRecord {
+                op, credential_id: Some(credential_id.to_owned()), payload_hash: Some(hash),
+                actor: principal_str.to_owned(), alarm: None,
+            })?;
+            Ok(Some(outcome))
+        })?;
+        outcome.ok_or(StoreOpError::DepositCookieNotPermitted)
+    }
+
     /// Create a record (CREATE-ONLY) with an explicit audit context: fails
     /// [`StoreOpError::AlreadyExists`] if the id is already present. The record is
     /// sealed at `record_version = 1`, the row is written through the epoch-fenced
@@ -3124,8 +3280,8 @@ impl EncryptedStore {
                 // instant intact. Existing rows got theirs from their chain birth
                 // entry when the column was added.
                 "INSERT INTO credentials \
-                 (credential_id, record_version, key_id, state, envelope, updated_at_ms, created_at_ms) \
-                 VALUES (?1, ?2, ?3, 'active', ?4, ?5, ?5) \
+                 (credential_id, record_version, key_id, state, envelope, updated_at_ms, created_at_ms, created_by) \
+                 VALUES (?1, ?2, ?3, 'active', ?4, ?5, ?5, 'operator') \
                  ON CONFLICT(credential_id) DO NOTHING",
                 rusqlite::params![
                     credential_id,
@@ -5411,7 +5567,18 @@ fn list_meta_from_conn(
         "SELECT credential_id, record_version, key_id, state, stale_pending, '' \
          FROM credentials ORDER BY credential_id"
     };
-    let mut stmt = conn.prepare(sql)?;
+    // CLI inventory reads can run before migration, without a writer lease.
+    // Report no known creator when the store has no created_by column yet.
+    let creator = if schema_version >= 14 {
+        "created_by"
+    } else {
+        "NULL"
+    };
+    let sql = sql.replace(
+        "FROM credentials ORDER BY",
+        &format!(", {creator} FROM credentials ORDER BY"),
+    );
+    let mut stmt = conn.prepare(&sql)?;
     let rows = stmt
         .query_map([], |row| {
             let categories: String = row.get(5)?;
@@ -5423,6 +5590,7 @@ fn list_meta_from_conn(
                     state: RecordState::from_str(&row.get::<_, String>(3)?),
                     stale_pending: row.get::<_, i64>(4)? != 0,
                     categories: split_categories(categories),
+                    created_by: row.get(6)?,
                 },
             ))
         })?
@@ -10195,7 +10363,7 @@ mod tests {
     fn the_newest_migration_version_is_pinned_because_the_manifest_declares_it() {
         assert_eq!(
             newest_migration_version(),
-            13,
+            14,
             "the newest migration changed. This value is DECLARED in the module manifest \
              as store_schema_version, so a supervisor comparing declared-against-actual \
              sees it. Update the literal, and note the manifest consequence."
@@ -12258,7 +12426,10 @@ mod migration_10_tests {
         }
         assert_eq!(
             "other".parse::<GrantOperation>(),
-            Err("unknown grant operation 'other' (expected read, sign, open, or list)".to_string())
+            Err(
+                "unknown grant operation 'other' (expected read, sign, open, list, or deposit)"
+                    .to_string()
+            )
         );
         store.with_conn(|conn| {
             for operation in ["open", "sign", "read", "list"] {
@@ -12292,7 +12463,9 @@ mod migration_10_tests {
             .expect_err("unknown operation refuses the entire inventory")
             .to_string();
         assert!(
-            error.contains("unknown grant operation 'other' (expected read, sign, open, or list)"),
+            error.contains(
+                "unknown grant operation 'other' (expected read, sign, open, list, or deposit)"
+            ),
             "{error}"
         );
     }
@@ -12317,8 +12490,13 @@ mod migration_10_tests {
         // already-applied migration 13, which the shared runner must skip.
         migrate_through_for_test(&store, 12).expect("schema 12");
         store.with_conn(|conn| conn.execute("INSERT INTO cortexkit_schema_version (namespace, version, applied_at_unix) VALUES (?1, 13, 0)", [SCHEMA_NAMESPACE])).expect("schema 13 fixture");
+        let through_13: Vec<_> = MIGRATIONS
+            .iter()
+            .copied()
+            .filter(|m| m.version <= 13)
+            .collect();
         store
-            .migrate(SCHEMA_NAMESPACE, MIGRATIONS)
+            .migrate(SCHEMA_NAMESPACE, &through_13)
             .expect("shared runner skips already-applied migrations");
         assert_eq!(
             list_meta_read_only_with_schema(&path)
@@ -13611,3 +13789,7 @@ mod migration_10_tests {
             .expect("count every table")
     }
 }
+
+#[cfg(test)]
+#[path = "deposit_cookie_tests.rs"]
+mod deposit_cookie_tests;

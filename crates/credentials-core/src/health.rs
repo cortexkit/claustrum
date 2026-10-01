@@ -240,6 +240,7 @@ mod tests {
                 state,
                 stale_pending: false,
                 categories: Vec::new(),
+                created_by: None,
             },
         )
     }

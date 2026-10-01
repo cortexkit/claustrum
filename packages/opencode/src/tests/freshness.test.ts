@@ -66,6 +66,41 @@ function fakeInterval() {
   };
 }
 
+function fakeTimers() {
+  let now = 0;
+  let nextHandle = 0;
+  const handles: Array<{ handle: number; ms: number }> = [];
+  const pending = new Map<number, () => void>();
+  const cleared: number[] = [];
+  return {
+    advance(delta: number) { now += delta; },
+    now: () => now,
+    setTimeout(callback: () => void, ms: number) {
+      const handle = ++nextHandle;
+      pending.set(handle, callback);
+      handles.push({ handle, ms });
+      return handle;
+    },
+    clearTimeout(handle: unknown) {
+      const h = handle as number;
+      pending.delete(h);
+      cleared.push(h);
+    },
+    fire(handle: number) {
+      const cb = pending.get(handle);
+      if (cb !== undefined) {
+        pending.delete(handle);
+        cb();
+      }
+    },
+    findByMs(ms: number) {
+      return handles.find((entry) => entry.ms === ms && pending.has(entry.handle));
+    },
+    handles,
+    cleared,
+  };
+}
+
 function controller(input: {
   shape?: "api" | "oauth";
   accounts?: Account[];
@@ -222,6 +257,89 @@ describe("custody freshness", () => {
       { handle: MAIN_HANDLE, minTtlMs: undefined },
       { handle: MAIN_HANDLE, minTtlMs: undefined },
     ]);
+  });
+
+  test("caches a warm that lands after the budget instead of re-fetching", async () => {
+    // Production change that fails this: restoring `slot.generation += 1` to the timeout
+    // branch. The budget bounds how long a CALLER waits; it must not invalidate work the
+    // vault has already done. Bumping the generation makes the late result fail the
+    // `#isCurrent` check at the end of #warm, so a completed fetch is thrown away. Any
+    // oauth account is exposed to this on every 60s tick, because the tick warms with
+    // force=true (a real RPC raced against the budget, never the local cache) -- a
+    // refresh-forcing get reliably loses that race, and some refresh-free gets lose it
+    // too. Clearing `inFlight` is the separate concern and stays: it is what lets the next
+    // tick re-arm a slot whose RPC hung.
+    const pending = deferred<ServedCredential>();
+    let calls = 0;
+    const client = new FakeClient(async () => (++calls === 1 ? pending.promise : credential("second-fetch")));
+    let timeoutCallback: (() => void) | undefined;
+    const freshness = controller({
+      client,
+      setTimeout: (callback) => {
+        timeoutCallback = callback;
+        return {};
+      },
+    });
+
+    const resolved = freshness.resolve(apiAccounts[0]!);
+    await Promise.resolve();
+    timeoutCallback?.();
+    expect(await resolved).toBeUndefined();
+
+    // The get the caller stopped waiting for now lands, and is given room to settle.
+    pending.resolve(credential("eventual-material"));
+    for (let i = 0; i < 4; i += 1) await Promise.resolve();
+
+    expect(await freshness.resolve(apiAccounts[0]!)).toEqual(credential("eventual-material"));
+    expect(client.gets).toHaveLength(1);
+  });
+
+  test("ignores a failure verdict from a warm the caller already abandoned", async () => {
+    // The asymmetry with the test above is deliberate. A late SUCCESS carries material the
+    // vault actually served, so keeping it is safe. A late FAILURE carries only a verdict,
+    // and that verdict can be older than reality: an RPC that hung across an operator
+    // re-login comes back `auth_required` for a credential that is now fine. Applying it
+    // would latch the slot to `reauth` and block every retry for REAUTH_BACKOFF_MS; a
+    // `permanent/not_found` would mark it `gone` for good. Skipping it costs one re-fetch,
+    // which returns the current verdict. Production change that fails this: dropping the
+    // `abandonedGeneration` check from the `.catch` in #warm.
+    const pending = deferred<ServedCredential>();
+    let calls = 0;
+    const client = new FakeClient(async () => (++calls === 1 ? pending.promise : credential("second-fetch")));
+    let timeoutCallback: (() => void) | undefined;
+    const freshness = controller({
+      client,
+      setTimeout: (callback) => {
+        timeoutCallback = callback;
+        return {};
+      },
+    });
+
+    const resolved = freshness.resolve(apiAccounts[0]!);
+    await Promise.resolve();
+    timeoutCallback?.();
+    expect(await resolved).toBeUndefined();
+
+    // The abandoned get now fails, and is given room to settle.
+    pending.reject(new ClaustrumCredentialError("needs_reauth", "auth_required", "reauth"));
+    for (let i = 0; i < 4; i += 1) await Promise.resolve();
+
+    expect(freshness.state(apiAccounts[0]!)).toBe("available");
+    expect(await freshness.resolve(apiAccounts[0]!)).toEqual(credential("second-fetch"));
+    expect(client.gets).toHaveLength(2);
+  });
+
+  test("still applies a failure verdict from a warm nobody abandoned", async () => {
+    // Counter-arm for the test above: the fence must be scoped to the ABANDONED warm, not
+    // to every failure. Without this, "never apply a failure" would pass the test above and
+    // leave a genuinely dead credential serving forever.
+    const client = new FakeClient(async () => {
+      throw new ClaustrumCredentialError("needs_reauth", "auth_required", "reauth");
+    });
+    const freshness = controller({ client });
+
+    expect(await freshness.resolve(apiAccounts[0]!)).toBeUndefined();
+    expect(freshness.state(apiAccounts[0]!)).toBe("reauth");
   });
 
   test("timeout warn reports the slot state the budget miss left behind", async () => {
@@ -615,5 +733,141 @@ describe("custody freshness", () => {
     intervals.callbacks[0]!();
     await Promise.resolve();
     expect(client.gets).toEqual([{ handle: MAIN_HANDLE, minTtlMs: 270 * 60_000 }]);
+  });
+
+  test("serves a warm whose budget timer fires late when the get resolves in the grace", async () => {
+    // Production change that fails this: deleting the grace re-arm in #bounded. When the
+    // event loop is blocked synchronously past the budget, the expired timer fires before
+    // buffered socket I/O is drained and the warm loses a race it should have won. With
+    // the re-arm, the poll phase runs in the grace window and the late reply resolves
+    // the race as "completed" before the deadline settles.
+    const pending = deferred<ServedCredential>();
+    const client = new FakeClient(async () => pending.promise);
+    const timers = fakeTimers();
+    const entries: Array<{ errorCode?: string }> = [];
+    const freshness = new FreshnessController({
+      provider: PROVIDER,
+      shape: "api",
+      accounts: [apiAccounts[0]!],
+      client,
+      log: createLogger((entry) => entries.push(entry as { errorCode?: string })),
+      now: timers.now,
+      setTimeout: timers.setTimeout,
+      clearTimeout: timers.clearTimeout,
+    });
+
+    const resolved = freshness.resolve(apiAccounts[0]!);
+    await Promise.resolve();
+
+    // Budget armed at t=0; fire it at t=150 so the late check sees 150 - 0 - 100 = 50.
+    const budget = timers.findByMs(100)!;
+    timers.advance(150);
+    timers.fire(budget.handle);
+
+    // The grace was scheduled at +10ms; the get has not resolved yet, so it is still live.
+    const grace = timers.findByMs(10);
+    expect(grace).toBeDefined();
+    // Exactly two setTimeouts so far: budget + grace. No third.
+    expect(timers.handles).toHaveLength(2);
+
+    // The get resolves inside the grace window. The promise wins the race before the
+    // grace timer fires, so the warm resolves with the credential.
+    pending.resolve(credential("late-but-graceable"));
+    for (let i = 0; i < 8; i += 1) await Promise.resolve();
+
+    expect(await resolved).toEqual(credential("late-but-graceable"));
+    expect(freshness.warmTimedOut(apiAccounts[0]!)).toBe(false);
+    expect(entries.find((entry) => entry.errorCode === "timeout")).toBeUndefined();
+    // The late reply is cached: a subsequent resolve returns it without a new RPC.
+    expect(await freshness.resolve(apiAccounts[0]!)).toEqual(credential("late-but-graceable"));
+    expect(client.gets).toHaveLength(1);
+    // The grace timer was cleared on completion, not left live.
+    expect(timers.cleared).toContain(grace!.handle);
+  });
+
+  test("times out a warm whose budget timer fires on time without re-arming", async () => {
+    // Production change that fails this: dropping the lateness check so every fire
+    // re-arms once. An on-time fire (late=0) must resolve the deadline immediately.
+    const pending = deferred<ServedCredential>();
+    const client = new FakeClient(async () => pending.promise);
+    const timers = fakeTimers();
+    const entries: Array<{ errorCode?: string; errorClass?: string }> = [];
+    const freshness = new FreshnessController({
+      provider: PROVIDER,
+      shape: "api",
+      accounts: [apiAccounts[0]!],
+      client,
+      log: createLogger((entry) => entries.push(entry as { errorCode?: string; errorClass?: string })),
+      now: timers.now,
+      setTimeout: timers.setTimeout,
+      clearTimeout: timers.clearTimeout,
+    });
+
+    const resolved = freshness.resolve(apiAccounts[0]!);
+    await Promise.resolve();
+
+    // Budget armed at t=0; fire it at t=100 so late = 100 - 0 - 100 = 0.
+    const budget = timers.findByMs(100)!;
+    timers.advance(100);
+    timers.fire(budget.handle);
+
+    // Exactly one setTimeout for this warm; no grace was armed.
+    expect(timers.handles).toHaveLength(1);
+    expect(timers.findByMs(10)).toBeUndefined();
+
+    for (let i = 0; i < 4; i += 1) await Promise.resolve();
+
+    expect(await resolved).toBeUndefined();
+    expect(freshness.warmTimedOut(apiAccounts[0]!)).toBe(true);
+    const timeoutWarn = entries.find((entry) => entry.errorCode === "timeout");
+    expect(timeoutWarn?.errorClass).toBe("credential_warm");
+  });
+
+  test("times out a late warm whose get never resolves after exactly one grace", async () => {
+    // Production change that fails this: dropping the once-only flag so the grace keeps
+    // re-arming on every late fire. A genuinely hung RPC must end after one grace, not
+    // every WARM_GRACE_MS forever.
+    const pending = deferred<ServedCredential>();
+    const client = new FakeClient(async () => pending.promise);
+    const timers = fakeTimers();
+    const entries: Array<{ errorCode?: string }> = [];
+    const freshness = new FreshnessController({
+      provider: PROVIDER,
+      shape: "api",
+      accounts: [apiAccounts[0]!],
+      client,
+      log: createLogger((entry) => entries.push(entry as { errorCode?: string })),
+      now: timers.now,
+      setTimeout: timers.setTimeout,
+      clearTimeout: timers.clearTimeout,
+    });
+
+    const resolved = freshness.resolve(apiAccounts[0]!);
+    await Promise.resolve();
+
+    // Budget armed at t=0; fire it at t=150 so the late check sees 50 >= 20 and re-arms.
+    const budget = timers.findByMs(100)!;
+    timers.advance(150);
+    timers.fire(budget.handle);
+
+    const grace = timers.findByMs(10);
+    expect(grace).toBeDefined();
+    expect(timers.handles).toHaveLength(2);
+
+    // The get never resolves. Fire the grace at t=160: late = 60 >= 20, but the
+    // once-only flag forces the deadline to resolve as a timeout on the second fire.
+    timers.advance(10);
+    timers.fire(grace!.handle);
+
+    // No third timer was armed.
+    expect(timers.handles).toHaveLength(2);
+    expect(timers.findByMs(10)).toBeUndefined();
+
+    for (let i = 0; i < 4; i += 1) await Promise.resolve();
+
+    expect(await resolved).toBeUndefined();
+    expect(freshness.warmTimedOut(apiAccounts[0]!)).toBe(true);
+    const timeoutWarns = entries.filter((entry) => entry.errorCode === "timeout");
+    expect(timeoutWarns).toHaveLength(1);
   });
 });

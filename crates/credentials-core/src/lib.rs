@@ -23,6 +23,7 @@ pub mod admin_ops;
 pub mod apns;
 pub mod apns_submit;
 pub mod audit;
+pub mod bedrock;
 pub mod catalog;
 pub mod contract;
 pub mod credential_id;

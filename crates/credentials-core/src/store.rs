@@ -927,6 +927,10 @@ pub enum StoreOpError {
         supplied_account_id: String,
         derived_account_id: String,
     },
+    /// The payload is a short-term Amazon Bedrock API key, which expires within 12 hours
+    /// and cannot be renewed by the vault. `expires_at_ms` is decoded from the key when
+    /// its presigned URL carries one.
+    ShortTermBedrockKey { expires_at_ms: Option<i64> },
     /// The record is quarantined (`corrupt`) and cannot be served.
     Quarantined,
     /// The record is `needs_reauth` and must not be served until re-authenticated.
@@ -948,6 +952,21 @@ pub enum StoreOpError {
     CorruptVault(String),
     /// An underlying storage/backend error.
     Store(String),
+}
+
+/// Refuse a static record whose payload is a short-term Amazon Bedrock API key. Applied at
+/// every operator deposit sink (create, import, login and `put --replace` all reach one of
+/// the two), so no door can store a key that dies within 12 hours.
+fn refuse_short_term_bedrock_key(record: &VaultRecord) -> Result<(), StoreOpError> {
+    if record.kind == CredentialKind::Oauth {
+        return Ok(());
+    }
+    match crate::bedrock::short_term_bedrock_key(record.payload.expose()) {
+        Some(key) => Err(StoreOpError::ShortTermBedrockKey {
+            expires_at_ms: key.expires_at_ms,
+        }),
+        None => Ok(()),
+    }
 }
 
 enum IdentityPolicyOverwriteOutcome {
@@ -990,6 +1009,16 @@ impl std::fmt::Display for StoreOpError {
                 f,
                 "supplied identity names account '{supplied_account_id}', but incoming material names account '{derived_account_id}'; drop `--account-id`, or fix the export; the token's own claim is authoritative"
             ),
+            StoreOpError::ShortTermBedrockKey { expires_at_ms } => {
+                let when = expires_at_ms
+                    .and_then(chrono::DateTime::from_timestamp_millis)
+                    .map(|at| format!(" (it expires {})", at.format("%Y-%m-%d %H:%M:%SZ")))
+                    .unwrap_or_default();
+                write!(
+                    f,
+                    "this is a short-term Amazon Bedrock API key (bedrock-api-key-...){when}; it lives at most 12 hours and the vault cannot renew it. Create a long-term Bedrock API key (it starts ABSK) in the Bedrock console and store that instead"
+                )
+            }
             StoreOpError::Quarantined => f.write_str("credential is quarantined (corrupt)"),
             StoreOpError::NeedsReauth => f.write_str("credential needs re-authentication"),
             StoreOpError::Decrypt(e) => write!(f, "envelope decrypt failed: {e}"),
@@ -3247,6 +3276,7 @@ impl EncryptedStore {
         ctx: AuditCtx<'_>,
     ) -> Result<(), StoreOpError> {
         validate_deposit_credential_id(credential_id)?;
+        refuse_short_term_bedrock_key(record)?;
         let mut record = normalize_record_identity(record.clone());
         if let Some(derived_account_id) = derived_account_id(&record) {
             match record.identity.account_id.as_deref() {
@@ -3462,6 +3492,7 @@ impl EncryptedStore {
         preserve_existing_identity: bool,
         ctx: AuditCtx<'_>,
     ) -> Result<(), StoreOpError> {
+        refuse_short_term_bedrock_key(record)?;
         let incoming = normalize_record_identity(record.clone());
         validate_record_identity(&incoming)?;
         let incoming_account_id = preserve_existing_identity
@@ -5146,6 +5177,11 @@ impl EncryptedStore {
     }
 
     /// Seal a record into a cipher envelope bound to its id + version.
+    ///
+    /// Short-term Bedrock keys are refused at the operator deposit sinks (create and
+    /// unconditional overwrite), not here. This also re-seals existing records during
+    /// master-key rotation, where refusing one stored record would abort the whole
+    /// rotation; a dead key already in the store is the operator's to remove.
     fn seal_record(
         &self,
         credential_id: &str,
@@ -7518,6 +7554,59 @@ mod tests {
     /// caller that makes it concrete -- it reads a consumer's store and re-seals what it
     /// finds, so the moment that store carries the tombstone the sealer is holding the
     /// sentinel as if it were a token.
+    #[test]
+    fn operator_deposits_refuse_short_term_bedrock_keys_and_accept_long_term_ones() {
+        // apikey:amazon-bedrock held a short-term key for 95 days after it had already
+        // expired, reported active the whole time. Both operator sinks must refuse that
+        // form, and a long-term key must still store.
+        let (_dir, store) = tmp_store(171);
+        let short_term = VaultRecord::new_static(
+            CredentialKind::ApiKey,
+            "test",
+            b"bedrock-api-key-YmVkcm9jay5hbWF6b25hd3MuY29tLz9BY3Rpb249Q2FsbFdpdGhCZWFyZXJUb2tlbg=="
+                .to_vec(),
+            None,
+        );
+        let refused = store
+            .create_audited(
+                "apikey:amazon-bedrock",
+                &short_term,
+                AuditCtx::admin(AuditOp::Put),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(refused, StoreOpError::ShortTermBedrockKey { .. }),
+            "{refused}"
+        );
+        assert!(refused.to_string().contains("long-term Bedrock API key"));
+        let long_term = VaultRecord::new_static(
+            CredentialKind::ApiKey,
+            "test",
+            b"ABSKQmVkcm9ja0FQSUtleS1leGFtcGxl".to_vec(),
+            None,
+        );
+        store
+            .create_audited(
+                "apikey:amazon-bedrock",
+                &long_term,
+                AuditCtx::admin(AuditOp::Put),
+            )
+            .expect("a long-term key stores");
+        let replaced = store
+            .overwrite_unconditional_audited(
+                "apikey:amazon-bedrock",
+                &short_term,
+                AuditCtx::admin(AuditOp::Overwrite),
+            )
+            .unwrap_err();
+        assert!(matches!(replaced, StoreOpError::ShortTermBedrockKey { .. }));
+        assert_eq!(
+            store.get("apikey:amazon-bedrock").unwrap().payload.expose(),
+            b"ABSKQmVkcm9ja0FQSUtleS1leGFtcGxl",
+            "the refused overwrite left the long-term key in place"
+        );
+    }
+
     #[test]
     fn every_write_path_refuses_custody_tombstone_material() {
         let (_root, store) = tmp_store(0x5B);

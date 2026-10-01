@@ -56,7 +56,7 @@ use credentials_core::enrollment::{
 use credentials_core::health::VaultHealth;
 use credentials_core::refresh_adapters::RefreshError;
 use credentials_core::store::{
-    AuthEventPrincipal, GrantOperation, ReadGrant, ScopedCoverage, ScopedListSnapshot,
+    AuthEventPrincipal, GrantOperation, ScopedCoverage, ScopedListRow, ScopedListSnapshot,
     ScopedReadRefusal, StoreOpError,
 };
 use subc_protocol::Principal;
@@ -1035,23 +1035,36 @@ fn project_list_scoped(snapshot: ScopedListSnapshot) -> ListScopedResult {
     }
 }
 
-/// The operation a successful `list_scoped` records as its first use.
+/// The operations a successful `list_scoped` records as first use: each identity-bearing
+/// authority that actually covered a returned row.
 ///
-/// The row names the grant operation that was exercised, so an operator reading
-/// `auth_events` can tell a principal that enumerated with token authority from one that
-/// only holds the metadata-only `list` grant. A caller holding `read` records `read`, as
-/// every enumeration did before `list` existed, so existing consumers keep their one
-/// first-use row instead of gaining a second. A caller holding `list` and no `read` records
-/// `list`: writing `read` there would claim an authority that principal does not have.
-/// Any other caller (sign-only, open-only, or no grants at all) keeps the historical
-/// `read` value.
-fn list_scoped_first_use_operation(grants: &[ReadGrant]) -> GrantOperation {
-    let holds = |operation| grants.iter().any(|grant| grant.operation == operation);
-    if !holds(GrantOperation::Read) && holds(GrantOperation::List) {
-        GrantOperation::List
-    } else {
-        GrantOperation::Read
+/// Derived from the ROWS, not from the caller's grant set. Deriving it from the grant set
+/// recorded one operation per caller, `read` whenever the caller held any read grant, so a
+/// principal holding `read` on one credential and `list` on others logged `read` (a row it
+/// already had) when it started using `list`, and the vault's own record could not show
+/// that the metadata-only grant was in use. A routing module that adopted `list` while
+/// keeping one `read` grant hit exactly this, and only the consumer's own logs showed the
+/// switch.
+///
+/// `read` and `list` are the authorities that disclose a row's identity, so those are the
+/// ones recorded. A row covered by both counts as `read`, the stronger one, since `list`
+/// added nothing there. A sign-only or open-only listing, or an empty one, keeps the
+/// historical single `read` value so existing principals do not gain new rows. First use
+/// is idempotent per (subject, principal, operation), so this writes at most two rows per
+/// principal, ever.
+fn list_scoped_first_use_operations(rows: &[ScopedListRow]) -> Vec<GrantOperation> {
+    let mut exercised = std::collections::BTreeSet::new();
+    for row in rows {
+        if row.operations.contains(&GrantOperation::Read) {
+            exercised.insert(GrantOperation::Read);
+        } else if row.operations.contains(&GrantOperation::List) {
+            exercised.insert(GrantOperation::List);
+        }
     }
+    if exercised.is_empty() {
+        exercised.insert(GrantOperation::Read);
+    }
+    exercised.into_iter().collect()
 }
 
 fn now_ms() -> i64 {
@@ -1916,7 +1929,7 @@ impl ReadSurface {
             .store()
             .list_scoped_snapshot(principal_kind, &principal_id)
             .map_err(|_| ReadError::StoreError)?;
-        let first_use_operation = list_scoped_first_use_operation(&snapshot.grants);
+        let first_use_operations = list_scoped_first_use_operations(&snapshot.rows);
         let result = project_list_scoped(snapshot);
         // RECORD THE SUCCESS, because this op's SILENCE WAS INDISTINGUISHABLE FROM ITS
         // ABSENCE, and that cost a consumer a debugging session on 2026-09-20.
@@ -1936,12 +1949,14 @@ impl ReadSurface {
         // for the same reason -- the answer is "this principal enumerated", not "this
         // principal touched row X". Best-effort and idempotent like the other site: a
         // diagnostic that could fail an authorized read would be worse than blindness.
-        let _ = self.engine.store().record_scoped_first_use(
-            "credential.list_scoped",
-            principal_kind,
-            Some(&principal_id),
-            first_use_operation,
-        );
+        for operation in first_use_operations {
+            let _ = self.engine.store().record_scoped_first_use(
+                "credential.list_scoped",
+                principal_kind,
+                Some(&principal_id),
+                operation,
+            );
+        }
         Ok(result)
     }
 

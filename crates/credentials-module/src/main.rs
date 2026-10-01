@@ -3899,6 +3899,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_scoped_records_list_first_use_even_when_the_caller_also_holds_read() {
+        // A principal holding `read` on one credential and `list` on another. When the
+        // first-use operation was chosen from the caller's GRANTS, its first use of the
+        // `list` grant recorded `read`, a row it already had, so the vault's own record
+        // could not show the new grant in use. Choosing from the returned ROWS
+        // records each authority that actually disclosed a row.
+        let (surface, admin, store) = scoped_rig(97);
+        for id in ["apikey:zai", "apikey:deepseek"] {
+            store
+                .create(
+                    id,
+                    &VaultRecord::new_static(CredentialKind::ApiKey, "test", b"key".to_vec(), None),
+                )
+                .expect("create credential");
+        }
+        for (selector, operation) in [
+            ("apikey:zai", GrantOperation::Read),
+            ("apikey:deepseek", GrantOperation::List),
+        ] {
+            store
+                .create_read_grant_audited(
+                    "reserved",
+                    "router",
+                    SelectorKind::Exact,
+                    selector,
+                    operation,
+                    AuditCtx::admin(AuditOp::GrantCreate),
+                )
+                .unwrap();
+        }
+        admin.record_bind(
+            97,
+            subc_protocol::Principal::Reserved {
+                module_id: "router".into(),
+            },
+        );
+        let first_uses = || {
+            let mut details: Vec<String> = store
+                .recent_auth_events(100)
+                .unwrap()
+                .into_iter()
+                .filter(|event| {
+                    event.credential_id == OP_LIST_SCOPED
+                        && event.principal_id.as_deref() == Some("router")
+                })
+                .filter_map(|event| event.detail)
+                .collect();
+            details.sort();
+            details
+        };
+        let listed = scoped_route_request(&surface, &admin, 97, OP_LIST_SCOPED, json!({})).await;
+        assert_eq!(listed["result"]["credentials"].as_array().unwrap().len(), 2);
+        assert_eq!(first_uses(), ["list", "read"]);
+        // Still idempotent: a second enumeration adds nothing.
+        scoped_route_request(&surface, &admin, 97, OP_LIST_SCOPED, json!({})).await;
+        assert_eq!(first_uses(), ["list", "read"]);
+    }
+
+    #[tokio::test]
     async fn list_scoped_never_grows_the_audit_chain_and_records_first_use_once_per_principal() {
         let (surface, admin, store) = scoped_rig(94);
         store

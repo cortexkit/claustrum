@@ -1810,7 +1810,7 @@ dependencies = [
 
 [[package]]
 name = "subc-protocol"
-version = "0.27.0"
+version = "0.28.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1818,7 +1818,7 @@ dependencies = [
 
 [[package]]
 name = "subc-transport"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "getrandom 0.2.17",
  "hmac",

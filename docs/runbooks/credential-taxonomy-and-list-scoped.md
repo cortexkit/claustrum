@@ -79,8 +79,8 @@ Status: implementation and deployment record for schema migration 9.
 
 ## Owner-supplied catalog policy
 
-The catalog seeds four categories: `llm-provider`, `data-warehouse`,
-`cloud-infrastructure` and `web-search`. Categories themselves are not a closed set: an
+The catalog seeds five categories: `llm-provider`, `data-warehouse`,
+`cloud-infrastructure`, `web-search` and `browser-session`. Categories themselves are not a closed set: an
 operator can assign any valid name with `ck auth set-category`. The seeds are what a new
 credential is stamped with at creation. API-key entries are `llm-provider`, except the
 search APIs Tavily, Kagi, Exa and Parallel, which are `web-search` and never
@@ -90,7 +90,14 @@ search APIs Tavily, Kagi, Exa and Parallel, which are `web-search` and never
 OAuth protocol is also stamped `<adapter>-native` from its id. `ModelVendor` is a
 separate, advisory vocabulary that never authorizes. The assignments are literal
 per-entry catalog fields; no key-derived fallback builds either list, and exact-value
-tests pin every row.
+tests pin every row. Every new `cookie:` record is stamped only `browser-session`,
+never `llm-provider`, including records created by operator put. Migration 14 adds the
+`deposit` grant for reserved module principals on `browser-session`; it permits cookie
+writes only and grants no read access. Operator put records `created_by = operator`.
+Module deposits record their principal as the write-once creator. `ck auth list` shows
+`by=<principal>` for module-owned rows, but not for operator-created or legacy rows
+(or schema-13 stores). Replacing a module-owned row with operator `--replace` preserves
+its creator; only delete-then-put transfers ownership to the operator.
 
 ## Deploy and rollback
 

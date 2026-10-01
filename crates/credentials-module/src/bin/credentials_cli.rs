@@ -2,7 +2,7 @@
 
 //! The claustrum admin CLI (`ck auth`).
 //!
-//! This is the ONLY write surface. It is master-key-gated by STRUCTURE, not a
+//! This operator write surface is master-key-gated by STRUCTURE, not a
 //! separate handshake, via two stacked gates. FIRST, it must RESOLVE the master key
 //! (keychain / operator path) to open the encrypted store — and producing a valid
 //! sealed record IS the proof of master-key possession (a caller without the key
@@ -31,8 +31,8 @@
 //!   mint-handle --id <id>                      print a fresh handle (once)
 //!   revoke-handle --handle <ckh_...> | --hash <hex>
 //!   revoke-all-handles --id <id>
-//!   grant --principal <module-id> --prefix <credential-prefix> --operation <read|sign|open|list>
-//!   revoke-grant --principal <module-id> --prefix <credential-prefix> --operation <read|sign|open|list>
+//!   grant --principal <id> --selector-kind <exact|category> --selector <value> --operation <read|sign|open|list|deposit>
+//!   revoke-grant --principal <id> --selector-kind <exact|category> --selector <value> --operation <read|sign|open|list|deposit>
 //!   grants
 //!   audit [--limit N] | verify-audit
 //!
@@ -89,7 +89,11 @@ use ring::rand::SystemRandom;
 use ring::signature::Ed25519KeyPair;
 
 fn main() -> ExitCode {
-    match run() {
+    finish(run())
+}
+
+fn finish(result: Result<(), CliError>) -> ExitCode {
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("error: {e}");
@@ -249,7 +253,10 @@ struct GlobalArgs {
 }
 
 fn run() -> Result<(), CliError> {
-    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    run_args(std::env::args().skip(1).collect())
+}
+
+fn run_args(mut args: Vec<String>) -> Result<(), CliError> {
     // Bare `ck auth` prints the short verb table to stdout and exits 0 — showing
     // usage is not an error (no `error:` prefix, no stderr).
     if args.is_empty() {
@@ -932,12 +939,12 @@ fn help_verb(verb: &str) -> String {
         "grant" => {
             "ck auth grant --principal <id|reserved:id>\n\
              \x20             --selector-kind <exact|category> --selector <value>\n\
-             \x20             --operation <read|sign|open|list>\n\
+             \x20             --operation <read|sign|open|list|deposit>\n\
              \n\
              \x20 --principal <id|reserved:id>  reserved module principal\n\
              \x20 --selector-kind <kind>        exact or category (required, no default)\n\
              \x20 --selector <value>            credential id text or bare category name\n\
-             \x20 --operation <read|sign|open|list>  authority to grant (`--op` is accepted)\n\
+             \x20 --operation <read|sign|open|list|deposit>  grant authority (`--op` accepted)\n\
              \n\
              NOTES\n\
              exact matches one credential id byte for byte. category matches every\n\
@@ -949,17 +956,20 @@ fn help_verb(verb: &str) -> String {
              read: fetch the token (get_scoped), status, public_key, report_auth_failure.\n\
              sign: sign with a signing key. open: open with a KEM key.\n\
              list: see the row in list_scoped with its identity and refresh adapter,\n\
-             and nothing else. It never returns a token or exercises a key."
+             and nothing else. It never returns a token or exercises a key.\n\
+             deposit: cerebellum-style module write access for cookie: records only.\n\
+             Requires a reserved principal and category browser-session selector; it\n\
+             grants no read access. A module can replace only rows it created."
         }
         "revoke-grant" => {
             "ck auth revoke-grant --principal <id|reserved:id>\n\
              \x20                    --selector-kind <exact|category> --selector <value>\n\
-             \x20                    --operation <read|sign|open|list>\n\
+             \x20                    --operation <read|sign|open|list|deposit>\n\
              \n\
              \x20 --principal <id|reserved:id>  reserved module principal\n\
              \x20 --selector-kind <kind>        exact or category (required, no default)\n\
              \x20 --selector <value>            credential id text or bare category name\n\
-             \x20 --operation <read|sign|open|list>  authority to revoke (`--op` is accepted)\n\
+             \x20 --operation <read|sign|open|list|deposit>  revoke authority (`--op` accepted)\n\
              \n\
              NOTES\n\
              Revocation is exact over principal, selector kind, selector, and operation.\n\
@@ -3090,7 +3100,15 @@ fn request_admin_status_with_schema(
             &op,
             None,
         ) {
-            admin_client::RouteCommit::Committed(v) => return Ok((v, None)),
+            admin_client::RouteCommit::Committed(mut v) => {
+                // Creator display is advisory: a metadata read failure must not hide inventory.
+                if let Ok((metas, _)) =
+                    credentials_core::store::list_meta_read_only_with_schema(&store_path(global))
+                {
+                    attach_inventory_creators(&mut v, &metas);
+                }
+                return Ok((v, None));
+            }
             admin_client::RouteCommit::Refused(m) => return Err(CliError::RouteRefused(m)),
             admin_client::RouteCommit::LocalFailure(m) => return Err(CliError::LocalFailure(m)),
             admin_client::RouteCommit::Indeterminate(m) => {
@@ -3132,10 +3150,10 @@ fn request_admin_status_with_schema(
         Err(StoreOpError::NotFound) => 0,
         Err(error) => return Err(CliError::Store(error)),
     };
-    Ok((
-        credentials_core::admin_ops::status_result(&metas, &grants, open_intents, false),
-        meta_schema.or(grant_schema),
-    ))
+    let mut result =
+        credentials_core::admin_ops::status_result(&metas, &grants, open_intents, false);
+    attach_inventory_creators(&mut result, &metas);
+    Ok((result, meta_schema.or(grant_schema)))
 }
 
 /// Say, once, that the store this read met is behind the binary.
@@ -3173,6 +3191,24 @@ fn store_behind_note(store_schema: u32) -> Option<String> {
          categories and category grants appear after the daemon restarts (migration {category_schema})",
         credentials_core::store::newest_migration_version()
     ))
+}
+
+fn attach_inventory_creators(
+    result: &mut serde_json::Value,
+    metas: &[(String, credentials_core::store::RecordMeta)],
+) {
+    if let Some(rows) = result
+        .get_mut("credentials")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for row in rows {
+            let creator = metas
+                .iter()
+                .find(|(id, _)| row["id"].as_str() == Some(id.as_str()))
+                .and_then(|(_, meta)| meta.created_by.as_deref());
+            row["created_by"] = serde_json::json!(creator);
+        }
+    }
 }
 
 type InventoryRow = (String, u64, String, Vec<String>);
@@ -3229,15 +3265,31 @@ fn parse_inventory(result: &serde_json::Value) -> Result<Vec<InventoryRow>, CliE
         .collect()
 }
 
-fn print_inventory(rows: &[InventoryRow]) {
+fn render_inventory_row(
+    (state, version, id, categories): &InventoryRow,
+    result: &serde_json::Value,
+) -> String {
+    let creator = result["credentials"]
+        .as_array()
+        .and_then(|rows| {
+            rows.iter()
+                .find(|row| row["id"].as_str() == Some(id.as_str()))
+        })
+        .and_then(|row| row["created_by"].as_str())
+        .filter(|by| by.starts_with("reserved:") || by.starts_with("enrolled:"));
+    let categories = if categories.is_empty() {
+        "-".to_string()
+    } else {
+        categories.join(",")
+    };
+    let creator = creator.map(|by| format!("  by={by}")).unwrap_or_default();
+    format!("{state:<14} v{version:<4} {id}  {categories}{creator}")
+}
+
+fn print_inventory(rows: &[InventoryRow], result: &serde_json::Value) {
     println!("STATE          VER   CREDENTIAL  CATEGORIES");
-    for (state, version, id, categories) in rows {
-        let categories = if categories.is_empty() {
-            "-".to_string()
-        } else {
-            categories.join(",")
-        };
-        println!("{state:<14} v{version:<4} {id}  {categories}");
+    for row in rows {
+        println!("{}", render_inventory_row(row, result));
     }
 
     // SAY WHAT `active` DOES NOT MEAN, because the word claims more than the column
@@ -3378,7 +3430,7 @@ fn parse_grants(result: &serde_json::Value) -> Result<Vec<GrantRow>, CliError> {
         let operation = grant
             .get("operation")
             .and_then(serde_json::Value::as_str)
-            .filter(|operation| matches!(*operation, "read" | "sign" | "open" | "list"))
+            .filter(|operation| matches!(*operation, "read" | "sign" | "open" | "list" | "deposit"))
             .ok_or_else(|| {
                 CliError::StatusReportInvalid(format!(
                     "admin.status returned an invalid grant operation at row {index}"
@@ -3622,7 +3674,7 @@ fn cmd_status(global: &GlobalArgs) -> Result<(), CliError> {
         println!("open refresh intents: {open_intents}");
     }
     println!();
-    print_inventory(&inventory);
+    print_inventory(&inventory, &result);
     print_read_grants(&result)?;
     // Actionable tail: name what needs the operator, like the health probe does.
     let needs: Vec<&str> = result["needs_reauth_ids"]
@@ -4294,7 +4346,7 @@ fn cmd_list(global: &GlobalArgs) -> Result<(), CliError> {
     // reachable, the same report is built from lease-free plaintext metadata readers.
     let (result, store_schema) = request_admin_status_with_schema(global)?;
     let rows = parse_inventory(&result)?;
-    print_inventory(&rows);
+    print_inventory(&rows, &result);
     print_store_behind_note(store_schema);
     Ok(())
 }
@@ -6459,5 +6511,239 @@ mod taxonomy_cli_tests {
             parse_grants(&headless).is_err(),
             "an absent kind is malformed"
         );
+    }
+}
+
+#[cfg(test)]
+mod deposit_cli_tests {
+    use super::*;
+    use std::process::{Command, Output};
+
+    // A child test process runs the production argv parser and exit/stderr handler,
+    // so CLI tests can live beside the binary without requiring a prebuilt artifact.
+    #[test]
+    fn cli_child() {
+        let Ok(raw) = std::env::var("CK_AUTH_TEST_ARGV") else {
+            return;
+        };
+        let args: Vec<String> = serde_json::from_str(&raw).unwrap();
+        let code = finish(run_args(args));
+        let value = (0..=255u8)
+            .find(|value| ExitCode::from(*value) == code)
+            .unwrap();
+        std::process::exit(i32::from(value));
+    }
+
+    fn invoke(root: &std::path::Path, args: &[&str]) -> Output {
+        let mut argv: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        argv.extend([
+            "--data-dir".into(),
+            root.join("vault").display().to_string(),
+            "--key-path".into(),
+            root.join("master.key").display().to_string(),
+        ]);
+        Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "deposit_cli_tests::cli_child", "--nocapture"])
+            .env("CK_AUTH_TEST_ARGV", serde_json::to_string(&argv).unwrap())
+            .output()
+            .unwrap()
+    }
+
+    fn success(root: &std::path::Path, args: &[&str]) -> String {
+        let output = invoke(root, args);
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    }
+
+    fn root(label: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("ck-auth-{label}-{}-{nonce}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        success(&root, &["bootstrap"]);
+        root
+    }
+
+    fn global(root: &std::path::Path) -> GlobalArgs {
+        GlobalArgs {
+            data_dir: root.join("vault"),
+            key_source: KeySource::OperatorPath {
+                path: root.join("master.key"),
+            },
+            subc_conn: None,
+        }
+    }
+
+    #[test]
+    fn deposit_grant_round_trip_and_invalid_deposit_grant_stderr_are_pinned() {
+        let root = root("deposit-grants");
+        let grant = [
+            "grant",
+            "--principal",
+            "reserved:cerebellum",
+            "--selector-kind",
+            "category",
+            "--selector",
+            "browser-session",
+            "--operation",
+            "deposit",
+        ];
+        success(&root, &grant);
+        let table = success(&root, &["grants"]);
+        assert!(table.contains("deposit"), "{table}");
+        let mut revoke = grant;
+        revoke[0] = "revoke-grant";
+        success(&root, &revoke);
+        assert!(!success(&root, &["grants"]).contains("deposit"));
+        for (principal, kind, selector) in [
+            ("reserved:cerebellum", "exact", "cookie:example.com:me"),
+            ("reserved:cerebellum", "category", "llm-provider"),
+            ("enrolled:consumer", "category", "browser-session"),
+        ] {
+            let output = invoke(
+                &root,
+                &[
+                    "grant",
+                    "--principal",
+                    principal,
+                    "--selector-kind",
+                    kind,
+                    "--selector",
+                    selector,
+                    "--operation",
+                    "deposit",
+                ],
+            );
+            assert!(!output.status.success());
+            assert_eq!(String::from_utf8(output.stderr).unwrap(), "error: deposit requires a reserved principal and category browser-session selector\n");
+        }
+        for verb in ["grant", "revoke-grant"] {
+            assert!(help_verb(verb).contains("<read|sign|open|list|deposit>"));
+        }
+        assert!(help_verb("grant")
+            .contains("cerebellum-style module write access for cookie: records only"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cookie_put_categories_and_list_creator_display_cover_operator_null_and_schema_13() {
+        let root = root("cookie-list");
+        success(
+            &root,
+            &[
+                "put",
+                "--id",
+                "cookie:example.com:me",
+                "--payload",
+                "session=operator",
+            ],
+        );
+        let cfg = global(&root);
+        {
+            let store = open_for_admin(&cfg, false).unwrap();
+            let meta = store.meta("cookie:example.com:me").unwrap();
+            assert_eq!(meta.categories, ["browser-session"]);
+            assert_eq!(meta.created_by.as_deref(), Some("operator"));
+            store
+                .deposit_cookie(
+                    "cookie:example.com:module",
+                    &credentials_core::secret::Secret::new("session=module".to_string()),
+                    "consent-1",
+                    None,
+                    "reserved:cerebellum",
+                )
+                .unwrap();
+            store
+                .create(
+                    "cookie:example.com:legacy",
+                    &VaultRecord::new_cookie("operator", b"legacy".to_vec()),
+                )
+                .unwrap();
+            let conn = rusqlite::Connection::open(root.join("vault/store.db")).unwrap();
+            conn.execute("UPDATE credentials SET created_by = NULL WHERE credential_id = 'cookie:example.com:legacy'", []).unwrap();
+            let text = success(&root, &["list"]);
+            let module = text
+                .lines()
+                .find(|line| line.contains("cookie:example.com:module"))
+                .unwrap();
+            assert!(module.contains("by=reserved:cerebellum"), "{text}");
+            for id in ["cookie:example.com:me", "cookie:example.com:legacy"] {
+                assert!(
+                    !text
+                        .lines()
+                        .find(|line| line.contains(id))
+                        .unwrap()
+                        .contains("by="),
+                    "{text}"
+                );
+            }
+            assert!(success(&root, &["categories"]).contains("browser-session"));
+        }
+        std::fs::remove_dir_all(root).unwrap();
+
+        let root = root_schema_13();
+        let cfg = global(&root);
+        // Hold the writer lease throughout both child reads to prove they are lease-free.
+        let _lease = open_sqlite(&descriptor(&cfg)).unwrap();
+        let text = success(&root, &["list"]);
+        assert!(text.contains("cookie:example.com:old"), "{text}");
+        assert!(!text.contains("by="), "{text}");
+        assert_eq!(
+            credentials_core::store::list_meta_read_only_with_schema(&root.join("vault/store.db"))
+                .unwrap()
+                .1,
+            13
+        );
+        let usable = success(&root, &["usable"]);
+        assert!(usable.contains("serviceable: 1"), "{usable}");
+        drop(_lease);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn missing_or_malformed_creator_metadata_never_hides_inventory() {
+        let mut report = serde_json::json!({"credentials": [
+            {"id": "cookie:example.com:one", "state": "active", "record_version": 1, "created_by": 17},
+            {"id": "cookie:example.com:two", "state": "active", "record_version": 1}
+        ]});
+        let rows = parse_inventory(&report).unwrap();
+        assert_eq!(rows.len(), 2);
+        for row in &rows {
+            assert!(!render_inventory_row(row, &report).contains("by="));
+        }
+        attach_inventory_creators(&mut report, &[]);
+        assert_eq!(parse_inventory(&report).unwrap(), rows);
+    }
+
+    fn root_schema_13() -> PathBuf {
+        let root = root("schema-13");
+        let cfg = global(&root);
+        let sqlite = open_sqlite(&descriptor(&cfg)).unwrap();
+        credentials_core::store::migrate_through_for_test(&sqlite, 13).unwrap();
+        let key = resolve_store_key(&cfg).unwrap();
+        let key_id = key.key_id().to_hex();
+        let record = VaultRecord::new_cookie("operator", b"session=old".to_vec());
+        let envelope = credentials_core::envelope::seal(
+            &key,
+            &serde_json::to_vec(&record).unwrap(),
+            &credentials_core::envelope::RecordBinding {
+                credential_id: "cookie:example.com:old",
+                record_version: 1,
+            },
+        )
+        .unwrap();
+        sqlite.with_conn(|conn| {
+            conn.execute("INSERT INTO credentials (credential_id, record_version, key_id, state, envelope, updated_at_ms, created_at_ms) VALUES ('cookie:example.com:old', 1, ?1, 'active', ?2, 7, 7)", rusqlite::params![key_id, envelope])?;
+            Ok(())
+        }).unwrap();
+        drop(sqlite);
+        root
     }
 }

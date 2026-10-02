@@ -181,7 +181,7 @@ async fn malformed_control_requests_do_not_stop_dispatch_or_goodbye() {
     let (control, mut replies) = mpsc::channel(8);
     let (route, _route_rx) = mpsc::channel(8);
     let egress = Egress { control, route };
-    for body in [b"{".to_vec(), br#"{"type":"future.control"}"#.to_vec()] {
+    for body in [b"{".to_vec(), br#"{"op":"future.control"}"#.to_vec()] {
         let frame = Frame::build_with_version(
             subc_protocol::PROTOCOL_VERSION,
             FrameType::Request,

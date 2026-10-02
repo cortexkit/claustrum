@@ -2392,7 +2392,9 @@ impl EncryptedStore {
             Ok(Some(enrollment_id.clone()))
         })
         .map_err(StoreOpError::from)?
-        .ok_or_else(|| StoreOpError::Store(rusqlite::Error::QueryReturnedNoRows.to_string()))
+        // An expired request is gone for approval purposes. NotFound, not a store error,
+        // so the operator is not told the vault failed when the request simply lapsed.
+        .ok_or(StoreOpError::NotFound)
     }
 
     /// Deny a live pending request and append exactly one audit row.
@@ -2436,9 +2438,8 @@ impl EncryptedStore {
             if denied {
                 Ok(())
             } else {
-                Err(StoreOpError::Store(
-                    rusqlite::Error::QueryReturnedNoRows.to_string(),
-                ))
+                // Same reasoning as approval: a lapsed request is NotFound, not a fault.
+                Err(StoreOpError::NotFound)
             }
         })
     }
@@ -13417,7 +13418,10 @@ mod migration_10_tests {
             } else {
                 store.deny_enrollment(&proposal.request_id, "operator")
             };
-            assert!(result.is_err());
+            assert!(
+                matches!(result, Err(StoreOpError::NotFound)),
+                "an expired request must answer NotFound, not a storage error: {result:?}"
+            );
             let state: String = store
                 .with_raw_conn(|conn| {
                     conn.query_row(

@@ -1355,6 +1355,17 @@ fn load_migration_10_audit_key(
     Ok(Zeroizing::new(bytes))
 }
 
+fn migration_category_targets(assignments: &[(String, String)]) -> Vec<String> {
+    let mut grouped = std::collections::BTreeMap::<&str, Vec<&str>>::new();
+    for (id, category) in assignments {
+        grouped.entry(category).or_default().push(id);
+    }
+    grouped
+        .into_iter()
+        .map(|(category, ids)| format!("category:{category}|{}", ids.join(",")))
+        .collect()
+}
+
 fn apply_migration_10(
     store: &SqliteStore,
     plan: &Migration10Plan,
@@ -1408,24 +1419,19 @@ fn apply_migration_10(
 
         if !plan.assignments.is_empty() {
             let audit_key = audit_key.expect("an assignment plan requires a loaded audit key");
-            let category = &plan.assignments[0].1;
-            let ids = plan
-                .assignments
-                .iter()
-                .map(|(credential_id, _)| credential_id.as_str())
-                .collect::<Vec<_>>()
-                .join(",");
-            append_audit_tx(
-                &tx,
-                audit_key,
-                &AuditRecord {
-                    op: AuditOp::CategoryMigrate,
-                    credential_id: Some(format!("category:{category}|{ids}")),
-                    payload_hash: None,
-                    actor: "migration:10".to_string(),
-                    alarm: None,
-                },
-            )?;
+            for target in migration_category_targets(&plan.assignments) {
+                append_audit_tx(
+                    &tx,
+                    audit_key,
+                    &AuditRecord {
+                        op: AuditOp::CategoryMigrate,
+                        credential_id: Some(target),
+                        payload_hash: None,
+                        actor: "migration:10".to_string(),
+                        alarm: None,
+                    },
+                )?;
+            }
         }
 
         tx.execute_batch(generation)?;
@@ -2346,7 +2352,7 @@ impl EncryptedStore {
                     )?;
                     append_enrollment_event_tx(tx, ENROLL_EXPIRE_SUBJECT, "expired", now, None)?;
                 }
-                return Err(rusqlite::Error::QueryReturnedNoRows);
+                return Ok(None);
             }
             let live_name: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM enrolled_consumers \
@@ -2383,15 +2389,27 @@ impl EncryptedStore {
                     alarm: None,
                 },
             )?;
-            Ok(enrollment_id.clone())
+            Ok(Some(enrollment_id.clone()))
         })
-        .map_err(StoreOpError::from)
+        .map_err(StoreOpError::from)?
+        .ok_or_else(|| StoreOpError::Store(rusqlite::Error::QueryReturnedNoRows.to_string()))
     }
 
-    /// Deny a pending request and append exactly one Gate-2 audit row.
+    /// Deny a live pending request and append exactly one audit row.
+    /// An expired pending request is persisted as expired instead of denied.
     pub fn deny_enrollment(&self, request_id: &str, actor: &str) -> Result<(), StoreOpError> {
         let audit_key = self.audit_key.clone();
+        let now = now_ms();
         self.fenced_write(|tx| {
+            let expired = tx.execute(
+                "UPDATE pending_enrollments SET state = 'expired' \
+                 WHERE request_id = ?1 AND state = 'pending' AND expires_at_ms <= ?2",
+                rusqlite::params![request_id, now],
+            )?;
+            if expired > 0 {
+                append_enrollment_event_tx(tx, ENROLL_EXPIRE_SUBJECT, "expired", now, None)?;
+                return Ok(false);
+            }
             let changed = tx.execute(
                 "UPDATE pending_enrollments SET state = 'denied' \
                  WHERE request_id = ?1 AND state = 'pending'",
@@ -2411,9 +2429,18 @@ impl EncryptedStore {
                     alarm: None,
                 },
             )?;
-            Ok(())
+            Ok(true)
         })
         .map_err(StoreOpError::from)
+        .and_then(|denied| {
+            if denied {
+                Ok(())
+            } else {
+                Err(StoreOpError::Store(
+                    rusqlite::Error::QueryReturnedNoRows.to_string(),
+                ))
+            }
+        })
     }
 
     /// Resolve a presented enrollment token to the live consumer name it names.
@@ -3220,6 +3247,7 @@ impl EncryptedStore {
             let (outcome, op) = if inserted > 0 {
                 for category in crate::catalog::category_defaults(credential_id) {
                     tx.execute("INSERT INTO credential_categories (credential_id, category) VALUES (?1, ?2)", rusqlite::params![credential_id, category])?;
+                    bump_grants_generation_tx(tx)?;
                 }
                 (DepositCookieOutcome::Created { record_version: 1 }, AuditOp::DepositCookieCreate)
             } else {
@@ -3346,6 +3374,7 @@ impl EncryptedStore {
                         "INSERT INTO credential_categories (credential_id, category) VALUES (?1, ?2)",
                         rusqlite::params![credential_id, category],
                     )?;
+                    bump_grants_generation_tx(tx)?;
                 }
                 clear_intent_tx(tx, credential_id)?;
                 append_audit_tx(
@@ -3494,6 +3523,18 @@ impl EncryptedStore {
     ) -> Result<(), StoreOpError> {
         refuse_short_term_bedrock_key(record)?;
         let incoming = normalize_record_identity(record.clone());
+        if let (Some(supplied), Some(derived)) = (
+            incoming.identity.account_id.as_ref(),
+            derived_account_id(&incoming),
+        ) {
+            if supplied != &derived {
+                return Err(StoreOpError::SuppliedIdentityContradictsClaim {
+                    credential_id: credential_id.to_string(),
+                    supplied_account_id: supplied.clone(),
+                    derived_account_id: derived,
+                });
+            }
+        }
         validate_record_identity(&incoming)?;
         let incoming_account_id = preserve_existing_identity
             .then_some(())
@@ -3766,7 +3807,18 @@ impl EncryptedStore {
             .map_err(StoreOpError::from)?;
 
         let (version, state, stale_pending, blob) = row.ok_or(StoreOpError::NotFound)?;
-        match RecordState::from_str(&state) {
+        self.decode_record_row(credential_id, version, &state, stale_pending, &blob)
+    }
+
+    fn decode_record_row(
+        &self,
+        credential_id: &str,
+        version: i64,
+        state: &str,
+        stale_pending: i64,
+        blob: &[u8],
+    ) -> Result<(VaultRecord, bool), StoreOpError> {
+        match RecordState::from_str(state) {
             RecordState::Corrupt => return Err(StoreOpError::Quarantined),
             RecordState::NeedsReauth | RecordState::Retired => {
                 return Err(StoreOpError::NeedsReauth)
@@ -3778,20 +3830,20 @@ impl EncryptedStore {
             credential_id,
             record_version: version as u64,
         };
-        let plaintext = match envelope::open(&self.key, &blob, &binding) {
+        let plaintext = match envelope::open(&self.key, blob, &binding) {
             Ok(pt) => pt,
             Err(e) => {
                 // Per-record quarantine: a single undecryptable row is isolated so
                 // the rest of the vault keeps serving. Best-effort state flip — a
                 // failure to mark must not itself panic the read path.
-                let _ = self.quarantine(credential_id);
+                let _ = self.quarantine_if_version(credential_id, version as u64);
                 return Err(StoreOpError::Decrypt(e));
             }
         };
         match VaultRecord::decode(&plaintext) {
             Ok(record) => Ok((record, stale_pending != 0)),
             Err(e) => {
-                let _ = self.quarantine(credential_id);
+                let _ = self.quarantine_if_version(credential_id, version as u64);
                 Err(StoreOpError::Corrupt(e.to_string()))
             }
         }
@@ -3858,7 +3910,7 @@ impl EncryptedStore {
         let audit_key = self.audit_key.clone();
         let changed = self
             .fenced_write(|tx| {
-                // `state <> needs_reauth` makes this a STATE TRANSITION rather than a
+                // `state = active` makes this a STATE TRANSITION rather than a
                 // repeatable write, and that is what bounds the audit chain here.
                 //
                 // The version guard alone does not: invalidating does not bump
@@ -3876,7 +3928,7 @@ impl EncryptedStore {
                 // bounded per credential where the chain cannot be.
                 let n = tx.execute(
                     "UPDATE credentials SET state = ?2, updated_at_ms = ?3 \
-                 WHERE credential_id = ?1 AND record_version = ?4 AND state <> ?2",
+                 WHERE credential_id = ?1 AND record_version = ?4 AND state = 'active'",
                     rusqlite::params![
                         credential_id,
                         RecordState::NeedsReauth.as_str(),
@@ -4192,12 +4244,12 @@ impl EncryptedStore {
         let now = now_ms();
         let audit_key = self.audit_key.clone();
         self.fenced_write(|tx| {
-            // `AND state <> ?2` makes this a TRANSITION rather than a write: the
+            // Excluding needs_reauth and corrupt makes this a transition rather than a write: the
             // rows-changed count is then the answer to "did this do anything",
             // which is what both the audit decision and the operator message need.
             let state_changed = tx.execute(
                 "UPDATE credentials SET state = ?2, updated_at_ms = ?3 \
-                 WHERE credential_id = ?1 AND state <> ?2",
+                 WHERE credential_id = ?1 AND state NOT IN (?2, 'corrupt')",
                 rusqlite::params![credential_id, RecordState::NeedsReauth.as_str(), now],
             )? > 0;
             let intent_cleared = clear_intent_tx(tx, credential_id)? > 0;
@@ -4252,7 +4304,7 @@ impl EncryptedStore {
     /// an account or cleaning up a mistaken id; a temporary stop is `logout`
     /// (retire + revoke, reversible). Returns [`StoreOpError::NotFound`] when the
     /// id has no row, so a typo'd remove is loud instead of a silent no-op.
-    /// Returns how many handle rows were deleted, because a consumer holding one
+    /// Returns how many live handles were removed, because a consumer holding one
     /// cannot be told by the vault. Handles are bearer capabilities: nothing records
     /// WHO holds one, so removal cannot notify anybody, and a consumer's next fetch
     /// gets `not_found` with no explanation of why. Reporting the count gives the
@@ -4281,6 +4333,12 @@ impl EncryptedStore {
     ) -> Result<usize, StoreOpError> {
         let audit_key = self.audit_key.clone();
         let (removed, handles) = self.fenced_write(|tx| {
+            // Count before deleting the parent: foreign-key cascades may remove the rows.
+            let categories: usize = tx.query_row(
+                "SELECT COUNT(*) FROM credential_categories WHERE credential_id = ?1",
+                [credential_id],
+                |row| row.get(0),
+            )?;
             let n = tx.execute(
                 "DELETE FROM credentials WHERE credential_id = ?1",
                 rusqlite::params![credential_id],
@@ -4291,7 +4349,12 @@ impl EncryptedStore {
                 // Handle rows are deleted outright (not just revoked): the credential
                 // is gone, so retaining hash rows would only grow an unusable table.
                 // The mint/revoke history stays in the audit chain.
-                handles = tx.execute(
+                handles = tx.query_row(
+                    "SELECT COUNT(*) FROM handles WHERE credential_id = ?1 AND revoked = 0",
+                    [credential_id],
+                    |row| row.get(0),
+                )?;
+                tx.execute(
                     "DELETE FROM handles WHERE credential_id = ?1",
                     rusqlite::params![credential_id],
                 )?;
@@ -4301,6 +4364,9 @@ impl EncryptedStore {
                     "DELETE FROM credential_categories WHERE credential_id = ?1",
                     rusqlite::params![credential_id],
                 )?;
+                for _ in 0..categories {
+                    bump_grants_generation_tx(tx)?;
+                }
                 // Diagnostic events go WITH the credential, and this is the one
                 // place they can go.
                 //
@@ -4483,7 +4549,7 @@ impl EncryptedStore {
         self.fenced_write(|tx| {
             let n = tx.execute(
                 "UPDATE credentials SET state = ?2, updated_at_ms = ?3 \
-                 WHERE credential_id = ?1",
+                 WHERE credential_id = ?1 AND state <> ?2 AND state <> 'corrupt'",
                 rusqlite::params![credential_id, state.as_str(), now],
             )?;
             if clear_intent {
@@ -4585,7 +4651,7 @@ impl EncryptedStore {
                 "UPDATE credentials \
                   SET record_version = ?2, key_id = ?3, state = 'active', stale_pending = 0, \
                       envelope = ?4, updated_at_ms = ?5 \
-                 WHERE credential_id = ?1 AND record_version = ?6",
+                 WHERE credential_id = ?1 AND record_version = ?6 AND state = 'active'",
                 rusqlite::params![
                     credential_id,
                     next_version as i64,
@@ -4832,86 +4898,19 @@ impl EncryptedStore {
         .map_err(StoreOpError::from)
     }
 
-    /// Revoke a single handle by its raw value (idempotent — revoking an unknown or
-    /// already-revoked handle is a no-op success). The update AND a `RevokeHandle`
-    /// audit entry commit in ONE fenced transaction, so a revocation — the most
-    /// security-relevant handle action — is always tamper-evidently recorded. The
-    /// audit entry is keyed by the handle hash (the raw handle is never stored) AND, when
-    /// the handle resolves, by the credential that lost a door.
+    /// Revoke a single handle by its raw value. Only revoking a live handle appends
+    /// a `RevokeHandle` audit entry, in the same fenced transaction as the update.
+    /// The entry names the owning credential and the handle hash, never the raw value.
+    /// Repeats and unknown handles change nothing and append nothing.
     ///
-    /// THAT SECOND HALF WAS MISSING AND THE COMMENT HERE DEFENDED THE GAP. It said
-    /// revoke-by-handle "does not name the credential" -- true of the CALLER'S INPUT and
-    /// false about the transaction, which looks the row up by hash and therefore knows
-    /// the owner. A limitation of an argument was written down as a limitation of the
-    /// operation, and it read as a decision for two months.
-    ///
-    /// The cost was measured by an external contributor on 2026-08-25: a five-credential
-    /// rotation produced revocations that the chain could not attribute, two of them
-    /// sharing a timestamp to the second and therefore indistinguishable. The chain
-    /// answered "a handle was revoked" and could not answer the question an incident
-    /// actually asks -- WHICH CREDENTIALS LOST ACCESS, AND WHEN. Recovery by correlating
-    /// against the `handles` table works only while the row survives and only if exactly
-    /// one revocation landed in that second.
-    ///
-    /// No secrecy cost: `mint_handle` already records `credential_id`, and both values
-    /// are non-secret by construction (the handle is hashed server-side, so neither is a
-    /// bearer token). A census across the whole op vocabulary on a live chain found this
-    /// was the ONLY genuine gap -- `fetch_anomaly` is also credential-less and that is
-    /// correct, since an enumeration sweep is about the connection and its probed handles
-    /// may match no credential at all.
-    ///
-    /// A NULL HERE NOW MEANS SOMETHING, which partly answers the note below: for entries
-    /// written after this change, an absent credential id means the handle did not
-    /// resolve, so the revocation moved no rows. A populated one means a real door
-    /// closed. That does not fully separate attempt from effect -- an already-revoked
-    /// handle still resolves -- but it distinguishes the case that changed nothing at all
-    /// from the case that did.
-    ///
-    /// THERE IS DELIBERATELY NO UN-REVOKE, AND THE ABSENCE IS THE POINT. Written down
-    /// because an absent mechanism cannot be found by reading code: there is no symbol,
-    /// no failing test, and nothing to grep, so the gap is invisible until someone adds
-    /// the "missing" verb.
-    ///
-    /// `reactivate_audited` makes that MORE tempting rather than less, which is why this
-    /// note exists. Shipping a counterpart to `invalidate` establishes a pattern, and
-    /// un-revoke looks like the same shape one level down. It is not:
-    ///
-    /// - `reactivate` restores THE VAULT'S OWN trust in material the vault still holds.
-    ///   The secret never left; only a verdict about it was wrong.
-    /// - un-revoke would restore A THIRD PARTY'S access to a bearer token that has
-    ///   already left the building. A handle is revoked because it may have leaked, and
-    ///   the vault has no record of who holds a copy — un-revoking hands access back to
-    ///   whoever kept the string, including the reason it was revoked.
-    ///
-    /// The repair for a wrongly-revoked handle is to MINT A NEW ONE and distribute it,
-    /// which is cheap and leaves the leaked value dead. If a consumer needs continuity,
-    /// mint before revoking.
-    ///
-    /// UNRELATED AND UNFIXED, noted so it is not lost: this appends an audit entry
-    /// unconditionally, so a script revoking defensively in a loop grows the untrimmable
-    /// chain with entries that changed nothing — the defect
-    /// `invalidate_and_revoke_all_audited` was fixed for. Not changed here tonight
-    /// because it is a genuine design question rather than an oversight: a revocation
-    /// ATTEMPT may be worth recording even when it moved no rows, and the chain has no
-    /// field to say which happened. Admin-gated, so no unauthenticated caller can drive
-    /// it.
     /// Returns the owning credential ID when a live handle was revoked, otherwise `None`.
+    /// This operator-only result can distinguish a successful revocation from a no-op;
+    /// consumer reads still answer identically for unknown and revoked handles.
     ///
-    /// The owner is read inside the transaction anyway, to make the audit entry
-    /// attributable. Returning it costs nothing and closes a false assurance: the CLI
-    /// previously printed the same success line whether the handle was live, already
-    /// revoked, or had never existed, so an operator who pasted a truncated handle was
-    /// told a bearer credential was dead while it kept working.
-    ///
-    /// THE UNIFORM ANSWER IS A READ-SURFACE RULE AND DOES NOT APPLY HERE. `credential.get`
-    /// must not distinguish a revoked handle from an unknown one, because its callers are
-    /// strangers holding bearer tokens and the difference is an enumeration oracle. This
-    /// path is master-key gated: a caller who can reach it can already read the whole
-    /// store, so withholding the distinction protects nothing and costs the operator the
-    /// one fact they asked for.
-    ///
-    /// Repeated and unknown revocations are no-ops: neither appends to the durable
-    /// audit chain, which records state transitions rather than attempts.
+    /// There is deliberately no un-revoke: the vault cannot know who retained a copy
+    /// of a potentially leaked bearer token. Mint and distribute a new handle instead.
+    /// Reactivating a credential restores trust in material the vault still holds;
+    /// restoring a revoked handle would restore third-party access to an old capability.
     pub fn revoke_handle(
         &self,
         raw_handle: &str,
@@ -4987,6 +4986,9 @@ impl EncryptedStore {
                  WHERE credential_id = ?1 AND revoked = 0",
                 rusqlite::params![credential_id],
             )?;
+            if n == 0 {
+                return Ok(0);
+            }
             append_audit_tx(
                 tx,
                 &audit_key,
@@ -5679,28 +5681,18 @@ fn read_grants_from_conn(
     principal_id: Option<&str>,
     schema_version: u32,
 ) -> rusqlite::Result<Vec<ReadGrant>> {
-    // Below migration 9 there is no `selector_kind` column, so selecting it fails the
-    // whole read. Every grant in a pre-9 store selects by credential-id text -- migration
-    // 9 is what introduced the category kind -- so reporting `Exact` for each row is the
-    // TRUE reading of that store rather than a default standing in for an unknown.
-    let selector_kind_column = if schema_version >= CATEGORY_SCHEMA_VERSION {
-        "selector_kind"
-    } else {
-        "'exact'"
-    };
-    // The selector column was named `credential_prefix` until migration 10 renamed it,
-    // and an offline read can meet a store that has not been migrated yet. Selecting it
-    // under its old name AS the new one keeps one row parser for both shapes.
-    let selector_column = if schema_version >= SELECTOR_SCHEMA_VERSION {
-        "selector"
-    } else {
-        "credential_prefix AS selector"
-    };
-    let selector_order = if schema_version >= SELECTOR_SCHEMA_VERSION {
-        "selector"
-    } else {
-        "credential_prefix"
-    };
+    // Legacy prefix grants cannot be represented by the current exact/category model.
+    // Refuse explicitly rather than understating the reach of a stored grant.
+    if schema_version < SELECTOR_SCHEMA_VERSION {
+        return Err(rusqlite::Error::InvalidParameterName(format!(
+            "store schema {schema_version}: current selector kinds arrive with migration 10; \
+             restart the daemon on this build to migrate the store, or read it with the \
+             ck-auth that matches the store"
+        )));
+    }
+    let selector_kind_column = "selector_kind";
+    let selector_column = "selector";
+    let selector_order = "selector";
     let sql = if principal_kind.is_some() && principal_id.is_some() {
         format!(
             "SELECT principal_kind, principal_id, {selector_kind_column}, {selector_column}, operation, created_at_ms \
@@ -8879,6 +8871,227 @@ mod tests {
     }
 
     #[test]
+    fn stale_failed_reads_do_not_quarantine_replacement_material() {
+        let (_root, store) = tmp_store(151);
+        store.create("id", &oauth_record()).unwrap();
+        let invalid_plaintext = envelope::seal(
+            &store.key,
+            b"not a record",
+            &RecordBinding {
+                credential_id: "id",
+                record_version: 1,
+            },
+        );
+        store
+            .overwrite_unconditional_audited("id", &oauth_record(), AuditCtx::admin(AuditOp::Put))
+            .unwrap();
+        assert!(matches!(
+            store.decode_record_row("id", 1, "active", 0, &[0, 1]),
+            Err(StoreOpError::Decrypt(_))
+        ));
+        assert_eq!(store.meta("id").unwrap().state, RecordState::Active);
+        let blob = invalid_plaintext.unwrap();
+        assert!(matches!(
+            store.decode_record_row("id", 1, "active", 0, &blob),
+            Err(StoreOpError::Corrupt(_))
+        ));
+        assert_eq!(store.meta("id").unwrap().state, RecordState::Active);
+    }
+
+    #[test]
+    fn consumer_reports_only_invalidate_active_records() {
+        let (_root, store) = tmp_store(152);
+        for state in [
+            RecordState::Active,
+            RecordState::NeedsReauth,
+            RecordState::Retired,
+            RecordState::Corrupt,
+        ] {
+            let id = state.as_str();
+            store.create(id, &oauth_record()).unwrap();
+            store
+                .store
+                .with_conn(|conn| {
+                    conn.execute(
+                        "UPDATE credentials SET state = ?1 WHERE credential_id = ?2",
+                        rusqlite::params![state.as_str(), id],
+                    )
+                })
+                .unwrap();
+            let before = store.read_audit(None).unwrap().len();
+            let applied = store
+                .invalidate_if_version_reported(id, 1, AuditCtx::admin(AuditOp::Invalidate), None)
+                .unwrap();
+            assert_eq!(applied, state == RecordState::Active, "{state:?}");
+            assert_eq!(
+                store.meta(id).unwrap().state,
+                if applied {
+                    RecordState::NeedsReauth
+                } else {
+                    state
+                }
+            );
+            assert_eq!(
+                store.read_audit(None).unwrap().len(),
+                before + usize::from(applied)
+            );
+            assert!(!store
+                .invalidate_if_version_reported(id, 1, AuditCtx::admin(AuditOp::Invalidate), None)
+                .unwrap());
+            assert_eq!(
+                store.read_audit(None).unwrap().len(),
+                before + usize::from(applied)
+            );
+        }
+    }
+
+    #[test]
+    fn operator_invalidations_preserve_corrupt_and_audit_only_transitions() {
+        let (_root, store) = tmp_store(153);
+        store.create("id", &oauth_record()).unwrap();
+        store.quarantine("id").unwrap();
+        let before = store.read_audit(None).unwrap().len();
+        store
+            .invalidate_audited("id", AuditCtx::admin(AuditOp::Invalidate))
+            .unwrap();
+        assert_eq!(store.meta("id").unwrap().state, RecordState::Corrupt);
+        let outcome = store
+            .invalidate_and_revoke_all_audited("id", AuditCtx::admin(AuditOp::Invalidate))
+            .unwrap();
+        assert!(!outcome.state_changed);
+        assert_eq!(store.meta("id").unwrap().state, RecordState::Corrupt);
+        assert_eq!(store.read_audit(None).unwrap().len(), before);
+        store.create("live", &oauth_record()).unwrap();
+        store
+            .invalidate_audited("live", AuditCtx::admin(AuditOp::Invalidate))
+            .unwrap();
+        let after = store.read_audit(None).unwrap().len();
+        store
+            .invalidate_audited("live", AuditCtx::admin(AuditOp::Invalidate))
+            .unwrap();
+        assert_eq!(store.read_audit(None).unwrap().len(), after);
+    }
+
+    #[test]
+    fn replacement_refuses_explicit_identity_that_contradicts_claim() {
+        let (_root, store) = tmp_store(154);
+        store
+            .create("oauth:openai", &openai_record("original", b"old"))
+            .unwrap();
+        let incoming =
+            openai_record("claimed", b"new").with_identity(crate::record::RecordIdentity {
+                account_id: Some("supplied".into()),
+                ..Default::default()
+            });
+        let before = store.read_audit(None).unwrap().len();
+        for preserve in [true, false] {
+            assert!(matches!(
+                store.overwrite_unconditional_with_identity_policy_audited(
+                    "oauth:openai",
+                    &incoming,
+                    preserve,
+                    AuditCtx::admin(AuditOp::Put)
+                ),
+                Err(StoreOpError::SuppliedIdentityContradictsClaim { .. })
+            ));
+        }
+        assert_eq!(store.get("oauth:openai").unwrap().record_version, 1);
+        assert_eq!(store.read_audit(None).unwrap().len(), before);
+    }
+
+    #[test]
+    fn refresh_commit_cannot_restore_non_active_records() {
+        let (_root, store) = tmp_store(155);
+        for state in [
+            RecordState::NeedsReauth,
+            RecordState::Retired,
+            RecordState::Corrupt,
+        ] {
+            let id = state.as_str();
+            store.create(id, &oauth_record()).unwrap();
+            store.open_intent(id, 1, "old-hash").unwrap();
+            store
+                .store
+                .with_conn(|conn| {
+                    conn.execute(
+                        "UPDATE credentials SET state = ?1 WHERE credential_id = ?2",
+                        rusqlite::params![state.as_str(), id],
+                    )
+                })
+                .unwrap();
+            let before = store.read_audit(None).unwrap().len();
+            assert!(matches!(
+                store.commit_refresh(id, 1, &oauth_record()),
+                Err(StoreOpError::CasMismatch)
+            ));
+            assert_eq!(store.meta(id).unwrap().state, state);
+            assert_eq!(store.meta(id).unwrap().record_version, 1);
+            assert!(store.read_intent(id).unwrap().is_some());
+            assert_eq!(store.read_audit(None).unwrap().len(), before);
+        }
+        store.create("active", &oauth_record()).unwrap();
+        store.open_intent("active", 1, "old-hash").unwrap();
+        assert_eq!(
+            store.commit_refresh("active", 1, &oauth_record()).unwrap(),
+            2
+        );
+        assert!(store.read_intent("active").unwrap().is_none());
+    }
+
+    #[test]
+    fn removal_reports_only_live_handles_and_revoke_all_is_idempotent() {
+        let (_root, store) = tmp_store(156);
+        store.create("id", &oauth_record()).unwrap();
+        let revoked = mint_handle().unwrap();
+        let live = mint_handle().unwrap();
+        for handle in [&revoked, &live] {
+            store
+                .put_handle_hash(&handle.hash, "id", AuditCtx::admin(AuditOp::MintHandle))
+                .unwrap();
+        }
+        store
+            .revoke_handle(&revoked.raw, AuditCtx::admin(AuditOp::RevokeHandle))
+            .unwrap();
+        assert_eq!(
+            store
+                .remove_audited("id", AuditCtx::admin(AuditOp::Remove))
+                .unwrap(),
+            1
+        );
+        assert!(matches!(
+            store.resolve_handle(&live.raw),
+            Err(StoreOpError::NotFound)
+        ));
+        let before = store.read_audit(None).unwrap().len();
+        assert_eq!(
+            store
+                .revoke_all_handles("absent", AuditCtx::admin(AuditOp::RevokeHandle))
+                .unwrap(),
+            0
+        );
+        assert_eq!(store.read_audit(None).unwrap().len(), before);
+        store.create("live", &oauth_record()).unwrap();
+        let handle = mint_handle().unwrap();
+        store
+            .put_handle_hash(&handle.hash, "live", AuditCtx::admin(AuditOp::MintHandle))
+            .unwrap();
+        assert_eq!(
+            store
+                .revoke_all_handles("live", AuditCtx::admin(AuditOp::RevokeHandle))
+                .unwrap(),
+            1
+        );
+        let after = store.read_audit(None).unwrap().len();
+        assert_eq!(
+            store
+                .revoke_all_handles("live", AuditCtx::admin(AuditOp::RevokeHandle))
+                .unwrap(),
+            0
+        );
+        assert_eq!(store.read_audit(None).unwrap().len(), after);
+    }
+
+    #[test]
     fn get_missing_is_not_found() {
         let (root, store) = tmp_store(3);
         match store.get("absent") {
@@ -10625,17 +10838,13 @@ mod taxonomy_tests {
             "a schema-8 store has no categories, so an empty list is the true reading"
         );
 
-        let (grants, grant_schema) =
-            list_read_grants_read_only_with_schema(&path).expect("grant read on a schema-8 store");
-        assert_eq!(grant_schema, 8);
-        assert_eq!(grants.len(), 1, "every grant must be listed");
-        assert_eq!(grants[0].selector, "apikey:");
-        assert_eq!(
-            grants[0].selector_kind,
-            SelectorKind::Exact,
-            "migration 9 is what introduced the category kind, so every pre-9 grant is a \
-             prefix grant -- this is a reading, not a default"
-        );
+        let error = list_read_grants_read_only_with_schema(&path)
+            .expect_err("legacy prefix grants cannot be represented truthfully");
+        let message = error.to_string();
+        assert!(message.contains("store schema 8"));
+        assert!(message.contains("selector kinds arrive with migration 10"));
+        assert!(message.contains("restart the daemon on this build"));
+        assert!(message.contains("ck-auth that matches the store"));
 
         // POSITIVE CONTROL FOR EVERY ABSENT ASSERTION ABOVE. The same reads against a
         // migrated store must find the thing present, or the assertions above would pass
@@ -13184,6 +13393,112 @@ mod migration_10_tests {
 
     fn enrollment_secret(byte: u8) -> String {
         format!("{byte:02x}").repeat(32)
+    }
+
+    #[test]
+    fn approval_and_denial_persist_expiry_without_denial_audits() {
+        let (_root, store) = rig("expired-decisions", 157);
+        let hash = enrollment_secret_hash(&enrollment_secret(7)).unwrap();
+        for approve in [true, false] {
+            let proposal = store.propose_enrollment("consumer", &hash).unwrap();
+            store
+                .with_raw_conn(|conn| {
+                    conn.execute(
+                        "UPDATE pending_enrollments SET expires_at_ms = 0 WHERE request_id = ?1",
+                        [&proposal.request_id],
+                    )
+                })
+                .unwrap();
+            let before = store.read_audit(None).unwrap().len();
+            let result = if approve {
+                store
+                    .approve_enrollment(&proposal.request_id, "consumer", "operator")
+                    .map(|_| ())
+            } else {
+                store.deny_enrollment(&proposal.request_id, "operator")
+            };
+            assert!(result.is_err());
+            let state: String = store
+                .with_raw_conn(|conn| {
+                    conn.query_row(
+                        "SELECT state FROM pending_enrollments WHERE request_id = ?1",
+                        [&proposal.request_id],
+                        |row| row.get(0),
+                    )
+                })
+                .unwrap();
+            assert_eq!(state, "expired");
+            assert_eq!(store.read_audit(None).unwrap().len(), before);
+            let expires: i64 = store.with_raw_conn(|conn| conn.query_row("SELECT COUNT(*) FROM auth_events WHERE credential_id = ?1 AND detail = 'expired'", [ENROLL_EXPIRE_SUBJECT], |row| row.get(0))).unwrap();
+            assert_eq!(expires, if approve { 1 } else { 2 });
+        }
+    }
+
+    #[test]
+    fn default_category_assignments_and_removal_advance_generation() {
+        let (_root, store) = rig("default-generation", 158);
+        let before = store.grants_generation().unwrap();
+        store.create("apikey:zai", &api_record()).unwrap();
+        let created = store.grants_generation().unwrap();
+        assert!(created > before);
+        store
+            .remove_audited("apikey:zai", AuditCtx::admin(AuditOp::Remove))
+            .unwrap();
+        let removed = store.grants_generation().unwrap();
+        assert!(removed > created);
+        store
+            .deposit_cookie(
+                "cookie:example.com:agent",
+                &crate::secret::SecretString::from("session=x".to_string()),
+                "consent",
+                None,
+                "reserved:agent",
+            )
+            .unwrap();
+        let deposited = store.grants_generation().unwrap();
+        assert!(deposited > removed);
+        store
+            .deposit_cookie(
+                "cookie:example.com:agent",
+                &crate::secret::SecretString::from("session=y".to_string()),
+                "consent",
+                None,
+                "reserved:agent",
+            )
+            .unwrap();
+        assert_eq!(store.grants_generation().unwrap(), deposited);
+    }
+
+    #[test]
+    fn migration_targets_attribute_each_id_to_its_category() {
+        let assignments = vec![
+            ("one".into(), "alpha".into()),
+            ("two".into(), "beta".into()),
+            ("three".into(), "alpha".into()),
+        ];
+        assert_eq!(
+            migration_category_targets(&assignments),
+            ["category:alpha|one,three", "category:beta|two"]
+        );
+    }
+
+    #[test]
+    fn schema_nine_grant_listing_explains_required_migration() {
+        let (root, sqlite) = sqlite("schema-nine-listing", 159);
+        migrate_through_for_test(&sqlite, 9).unwrap();
+        sqlite.with_conn(|conn| conn.execute("INSERT INTO read_grants (principal_kind, principal_id, selector_kind, credential_prefix, operation, created_at_ms) VALUES ('reserved', 'agent', 'prefix', 'apikey:', 'read', 0)", [])).unwrap();
+        let error = list_read_grants_read_only_with_schema(&root.join("store.db"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("store schema 9"), "{error}");
+        assert!(
+            error.contains("selector kinds arrive with migration 10"),
+            "{error}"
+        );
+        assert!(
+            error.contains("restart the daemon on this build"),
+            "{error}"
+        );
     }
 
     #[test]

@@ -20,9 +20,17 @@ on:
       tag:
         description: "Existing tag to build and upload assets for"
         required: true
+      replace_published:
+        description: "Explicitly replace assets on an already-published release"
+        type: boolean
+        default: false
+      notes:
+        description: "Release-specific migration and compatibility notes"
+        type: string
+        default: ""
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -42,6 +50,8 @@ jobs:
   # only after every platform has uploaded. A watcher polling for the release either does
   # not see it or sees it complete.
   prepare:
+    permissions:
+      contents: write
     name: Ensure the release exists
     runs-on: ubuntu-latest
     steps:
@@ -91,39 +101,48 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag || github.ref_name }}
+          REPLACE_PUBLISHED: ${{ inputs.replace_published || false }}
+          RELEASE_NOTES: ${{ inputs.notes }}
         run: |
           set -euo pipefail
+          cat > release-notes.txt <<'NOTES'
+          Assets are built on the platform they run on. Each zip has a SHA-256
+          sidecar holding the digest of the zip bytes.
+
+          The macOS binaries are ad-hoc signed, not notarized: a browser-downloaded
+          zip carries a quarantine attribute and Gatekeeper will refuse it.
+          Installing via curl does not apply that attribute.
+
+          claustrum does not self-initialize. Run `ck auth bootstrap` before enabling
+          the module, or the daemon will exit with 'no master key has been provisioned'.
+          On Linux and Windows there is no keychain, so bootstrap with `--key-path`
+          and give the daemon the same path via CK_MASTER_KEY_PATH.
+
+          REQUIRES subc 0.17.20 OR NEWER. An older supervisor refuses this module's
+          HELLO with 'malformed HELLO body: missing field `consumes`' and parks it
+          after three restarts. The error names a protocol field rather than a version,
+          so it reads as a broken release; the supervisor predates that field becoming optional.
+          NOTES
+          if [ -n "$RELEASE_NOTES" ]; then
+            printf '\n%s\n' "$RELEASE_NOTES" >> release-notes.txt
+          fi
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "release $TAG already exists; assets will be added to it"
+            draft=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq '.isDraft')
+            if [ "$draft" != "true" ] && [ "$REPLACE_PUBLISHED" != "true" ]; then
+              echo "REFUSING: $TAG is published; set replace_published explicitly to replace its assets." >&2
+              exit 1
+            fi
+            # Hide the release while its replacement asset set is incomplete.
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=true --notes-file release-notes.txt
           else
             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
               --title "$TAG" --draft --verify-tag \
-              --notes "Assets are built on the platform they run on. Each zip has a
-          .sha256 sidecar holding the hex digest of the zip bytes.
-
-          The macOS binaries are ad-hoc signed, not notarized: a browser-downloaded zip
-          carries a quarantine attribute and Gatekeeper will refuse it. Installing via
-          curl does not apply that attribute.
-
-          claustrum does not self-initialize. Run \`ck auth bootstrap\` before enabling
-          the module, or the daemon will exit with 'no master key has been provisioned'.
-          On Linux and Windows there is no keychain, so bootstrap with \`--key-path\` and
-          give the daemon the same path via CK_MASTER_KEY_PATH.
-
-          REQUIRES subc 0.17.20 OR NEWER. An older supervisor refuses this module's
-          HELLO with 'malformed HELLO body: missing field \`consumes\`' and parks it
-          after three restarts. The error names a protocol field rather than a version,
-          so it reads as a broken release; it is a supervisor that predates the field
-          becoming optional. v0.1.2 does not carry this floor.
-
-          CARRIES STORE MIGRATION 9, which rebuilds read_grants and adds credential
-          categories. Place the daemon and ck-auth TOGETHER: whichever runs first
-          migrates the store, and a v0.1.2 binary has no store-ahead refusal, so
-          rolling back past this release would write into a migrated store. This
-          release is the rollback floor for any vault that applies migration 9."
+              --notes-file release-notes.txt
           fi
 
   assets:
+    permissions:
+      contents: write
     name: ${{ matrix.asset_os }}-${{ matrix.asset_arch }}
     needs: prepare
     runs-on: ${{ matrix.runner }}
@@ -157,18 +176,43 @@ jobs:
       # Same sibling preamble as ci.yml: cargo loads the whole workspace manifest
       # (including the path-deps on cortexkit/subconscious and cortexkit/commons) before
       # resolving any package, so both must be present or the build dies at manifest-load.
-      # Both are public, so the default token checks them out.
+      # Float on sibling default branches as CI does, but record what each platform built.
+      # Do not persist tokens: sibling build scripts run with release-write authority.
       - name: Checkout subconscious
         uses: actions/checkout@v5
         with:
           repository: cortexkit/subconscious
           path: subconscious
+          persist-credentials: false
 
       - name: Checkout commons
         uses: actions/checkout@v5
         with:
           repository: cortexkit/commons
           path: commons
+          persist-credentials: false
+
+      - name: Record sibling revisions
+        shell: bash
+        env:
+          ASSET_PLATFORM: ${{ matrix.asset_os }}-${{ matrix.asset_arch }}
+        run: |
+          set -euo pipefail
+          mkdir -p provenance
+          subconscious_rev=$(git -C ../subconscious rev-parse HEAD)
+          commons_rev=$(git -C ../commons rev-parse HEAD)
+          printf '%s: subconscious %s; commons %s\n' "$ASSET_PLATFORM" "$subconscious_rev" "$commons_rev" \
+            | tee "provenance/sibling-revisions-$ASSET_PLATFORM.txt"
+
+      # Matrix checkouts can resolve different sibling tips. Preserve each platform's
+      # pair independently rather than relying on whichever matrix job finishes last.
+      - name: Retain sibling provenance
+        uses: actions/upload-artifact@v4
+        with:
+          name: sibling-revisions-${{ matrix.asset_os }}-${{ matrix.asset_arch }}
+          overwrite: true
+          path: claustrum/provenance/*.txt
+          if-no-files-found: error
 
       # THE STAMP MUST NAME THE COMMIT THAT WAS CHECKED OUT, WHICH IS NOT `github.sha`.
       # On a workflow_dispatch for an existing tag, `github.sha` is the DISPATCHED ref
@@ -201,9 +245,11 @@ jobs:
       # unshippable rather than remembered.
       - name: Refuse a tag that disagrees with the crate version
         shell: bash
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
-          tag="${{ inputs.tag || github.ref_name }}"
+          tag="$TAG"
           want="${tag#v}"
           have=$(cargo metadata --no-deps --format-version 1 \
                  | python3 -c 'import json,sys; m=json.load(sys.stdin); \
@@ -231,8 +277,8 @@ jobs:
       #   path deps       11   version string ONLY, no source, no hash
       #
       # A path dependency's recorded version is not a reproducibility guarantee: the
-      # sibling is cloned at its own main either way, and an unbumped source edit compiles
-      # in silently regardless. So failing the release on a path VERSION STRING costs the
+      # sibling source floats on its default branch and its resolved revision is recorded
+      # above. A path version alone cannot establish provenance. Failing on that VERSION STRING costs the
       # release and buys nothing, while the 254 pins that do matter are unaffected.
       #
       # `cargo update -w` touches workspace and path members only -- verified: it moved
@@ -250,24 +296,21 @@ jobs:
           cp Cargo.lock ./lock.before
           cargo update -w
           python3 - <<'PY'
-          import re, sys
-          def pkgs(p):
-              s = open(p).read()
-              out = {}
-              for m in re.finditer(
-                  r'\[\[package\]\]\nname = "([^"]+)"\nversion = "([^"]+)"\n(source = "[^"]*"\n)?', s):
-                  out[m.group(1)] = (m.group(2), bool(m.group(3)))
-              return out
-          a, b = pkgs('lock.before'), pkgs('Cargo.lock')
-          moved = [(k, a[k][0], b[k][0], a[k][1]) for k in b if k in a and a[k][0] != b[k][0]]
-          for k, x, y, isreg in moved:
-              print(f"  {k}: {x} -> {y}  {'REGISTRY' if isreg else 'path'}")
-          bad = [m for m in moved if m[3]]
-          if bad:
-              print("REFUSING: `cargo update -w` moved a REGISTRY pin, which it must never do.")
-              print("The release would not be reproducible from the committed lockfile.")
-              sys.exit(1)
-          print(f"absorbed {len(moved)} path bump(s); 0 registry pins disturbed")
+          import collections, re, sys
+          def pins(path):
+              with open(path, encoding='utf-8') as handle:
+                  blocks = handle.read().split('[[package]]')[1:]
+              packages = [dict(re.findall(r'^([a-z]+) = "([^"]*)"$', block, re.M)) for block in blocks]
+              # Preserve every version, source and checksum, including duplicate entries.
+              return collections.Counter(
+                  (p['name'], p['version'], p['source'], p.get('checksum', ''))
+                  for p in packages if 'source' in p)
+          before, after = pins('lock.before'), pins('Cargo.lock')
+          if before != after:
+              for pin in sorted((before - after) | (after - before)):
+                  print(f'  changed non-path pin: {pin[0]} {pin[1]}')
+              sys.exit('REFUSING: cargo update -w disturbed non-path pins; the release is not reproducible.')
+          print('0 non-path pins disturbed')
           PY
           # RELATIVE, NOT /tmp: the windows runner has no /tmp, and this step failed
           # there with FileNotFoundError while darwin and linux passed -- a hardcoded
@@ -402,6 +445,8 @@ jobs:
       # not match the matrix is worse than no skip: it reads as considered.
       - name: Verify the packaged binary reports its revision
         shell: bash
+        env:
+          BUILT_REV: ${{ steps.rev.outputs.sha }}
         run: |
           set -euo pipefail
           # Same detection shape as packaging: the archiver, not the platform, is the fact.
@@ -434,10 +479,10 @@ jobs:
             # `github.sha`. A verification that cannot disagree with what it verifies is
             # not a verification.
             case "$v" in
-              *"$(echo "${{ steps.rev.outputs.sha }}" | cut -c1-7)"*) ;;
+              *"${BUILT_REV:0:7}"*) ;;
               *) echo "REFUSING: $b reports a revision that is not the checked-out source"
                  echo "  reported: $v"
-                 echo "  built at: ${{ steps.rev.outputs.sha }}"
+                 echo "  built at: $BUILT_REV"
                  exit 1 ;;
             esac
           done
@@ -445,9 +490,10 @@ jobs:
       - name: Upload to the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag || github.ref_name }}
         shell: bash
         run: |
-          gh release upload "${{ inputs.tag || github.ref_name }}" dist/* \
+          gh release upload "$TAG" dist/* \
             --repo "$GITHUB_REPOSITORY" --clobber
         working-directory: claustrum
 
@@ -460,25 +506,45 @@ jobs:
   # A draft that never publishes is a visible, fixable state. A published release missing
   # a platform looks finished and installs as "not supported on your OS".
   publish:
+    permissions:
+      contents: write
     name: Publish once every platform is in
     needs: assets
     runs-on: ubuntu-latest
     steps:
+      - name: Collect sibling provenance
+        uses: actions/download-artifact@v4
+        with:
+          pattern: sibling-revisions-*
+          path: provenance
+          merge-multiple: true
+
       - name: Undraft the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
-          # Six files: a zip and a digest sidecar for each of two binaries, three
-          # platforms. Counted rather than assumed -- publishing is the irreversible
-          # step, and the count is the last chance to notice a leg that uploaded nothing.
-          n=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
-                --json assets --jq '.assets | length')
-          echo "assets present: $n"
-          if [ "$n" -lt 12 ]; then
-            echo "REFUSING to publish: expected 12 assets (2 binaries x 3 platforms x"
-            echo "zip+digest), found $n. Leaving the release in draft."
-            exit 1
-          fi
-          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
+          names=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
+          for platform in darwin-arm64 linux-x64 windows-x64; do
+            for binary in ck-auth ck-claustrum; do
+              for suffix in zip zip.sha256; do
+                expected="$binary-$platform.$suffix"
+                if ! grep -Fx "$expected" <<< "$names" >/dev/null; then
+                  echo "REFUSING to publish: missing $expected. Leaving release in draft." >&2
+                  exit 1
+                fi
+              done
+            done
+          done
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body --jq '.body' > release-notes.txt
+          printf '\n## Sibling source revisions by platform\n' >> release-notes.txt
+          for platform in darwin-arm64 linux-x64 windows-x64; do
+            record="provenance/sibling-revisions-$platform.txt"
+            if [ ! -s "$record" ]; then
+              echo "REFUSING to publish: missing sibling provenance for $platform." >&2
+              exit 1
+            fi
+            cat "$record" >> release-notes.txt
+          done
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file release-notes.txt --draft=false

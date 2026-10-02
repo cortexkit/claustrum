@@ -90,7 +90,7 @@ default_branch=""
 # the one override for both scripts (a lift with `ci.yml` sets it once); the
 # step-0 scan below reads the same variable, so the file it checks and the run
 # it waits for cannot name two different workflows.
-tests_workflow_name="${WATCH_CI_WORKFLOW:-tests.yml}"
+tests_workflow_name="${WATCH_CI_WORKFLOW:-ci.yml}"
 # The repository the runs live in: from origin unless REPO is given, the same
 # derivation watch-ci.sh uses, so the probe and the watch query one repository.
 # A fixed default here was kept by the first lift and watched this repository's
@@ -219,7 +219,7 @@ if [ "$scanner_rc" -ne 0 ]; then
 fi
 
 if ! printf '%s\n' "$gate_report" | grep -qx 'trigger|ok'; then
-  refuse "tests.yml does not run on $train_ref — add \`train/**\` to on.push.branches in .github/workflows/tests.yml"
+  refuse "$tests_workflow_name does not run on $train_ref — add \`train/**\` to on.push.branches in $tests_workflow"
 fi
 
 # Conditions that decide on something the landing path never satisfies. A gate
@@ -411,6 +411,9 @@ run_trigger_probe() {
   git push -q --force "$remote" "$probe_sha:refs/heads/$probe_ref" ||
     refuse "could not push the trigger probe to $remote/$probe_ref"
 
+  trap 'git push -q "$remote" --delete train/trigger-probe >/dev/null 2>&1 || true' EXIT
+  trap 'exit 2' INT TERM
+
   # ~2 minutes. A run that is going to exist is queued within seconds; waiting
   # longer would only delay the first train in every clone.
   #
@@ -428,13 +431,15 @@ run_trigger_probe() {
   for _attempt in $(seq 1 "$probe_attempts"); do
     rid="$("$OPERATOR_GH" run list --repo "$repo_slug" \
       --branch "$probe_ref" --limit 20 --json databaseId,headSha,workflowName \
-      --jq ".[] | select(.headSha==\"$probe_sha\" and .workflowName==\"$want_name\") | .databaseId" 2>/dev/null | head -1)"
+      --jq ".[] | select(.headSha==\"$probe_sha\" and .workflowName==\"$want_name\") | .databaseId" 2>/dev/null)" || rid=""
+    rid="${rid%%$'\n'*}"
     [ -n "$rid" ] && break
     sleep "$probe_sleep"
   done
 
   git push -q "$remote" --delete "$probe_ref" ||
     printf 'train-push: warning — could not delete %s/%s\n' "$remote" "$probe_ref" >&2
+  trap - EXIT INT TERM
 
   if [ -z "$rid" ]; then
     refuse "no $tests_workflow_name run started for the probe on $probe_ref — the platform does not run it on train branches, whatever the workflow file says"

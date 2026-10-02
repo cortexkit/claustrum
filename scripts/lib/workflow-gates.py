@@ -36,6 +36,7 @@ Usage:
 from __future__ import annotations
 
 import fnmatch
+import re
 import sys
 from typing import Any
 
@@ -251,13 +252,40 @@ def push_matches(workflow: dict[str, Any], train_ref: str) -> bool:
     if not isinstance(body, dict):
         # `push:` with nothing under it triggers on every branch.
         return True
+    # A path-filtered push cannot promise a run for every train commit.
+    if "paths" in body or "paths-ignore" in body:
+        return False
     branches = as_list(body.get("branches"))
-    if not branches:
-        # A push trigger with no branches list runs on every branch. A
-        # branches-ignore list is a filter we do not interpret; treat it as a
-        # match and let the trigger probe be the judge.
-        return True
-    return any(fnmatch.fnmatchcase(train_ref, pattern) for pattern in branches)
+    if not branches and ("tags" in body or "tags-ignore" in body):
+        return False
+
+    def matches(pattern: str) -> bool:
+        # GitHub's single star stops at a slash; a double star crosses it.
+        regex = ""
+        i = 0
+        while i < len(pattern):
+            if pattern[i:i+2] == "**":
+                regex += ".*"
+                i += 2
+            elif pattern[i] == "*":
+                regex += "[^/]*"
+                i += 1
+            elif pattern[i] == "?":
+                regex += "[^/]"
+                i += 1
+            else:
+                regex += re.escape(pattern[i])
+                i += 1
+        return re.fullmatch(regex, train_ref) is not None
+
+    included = not branches
+    for pattern in branches:
+        if pattern.startswith("!"):
+            if matches(pattern[1:]):
+                included = False
+        elif matches(pattern):
+            included = True
+    return included and not any(matches(p) for p in as_list(body.get("branches-ignore")))
 
 
 def step_label(step: Any) -> str:

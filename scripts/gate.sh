@@ -34,7 +34,8 @@
 # red one there.
 set -euo pipefail
 
-cd "$(dirname "$0")/.."
+SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+cd "$(dirname "$SCRIPT_PATH")/.."
 BUN="${BUN:-$(command -v bun || true)}"
 [[ -n "$BUN" ]] || { printf 'GATE FAILED: bun not found; set BUN or add bun to PATH\n' >&2; exit 1; }
 
@@ -64,6 +65,7 @@ run_check() {
   printf '\n=== %s ===\n' "$label"
   local out
   out="$("$@" 2>&1)" || { printf '%s\n' "$out"; fail "$label"; }
+  printf '%s\n' "$out" | grep '^WARNING:' || true
   printf '  ok\n'
 }
 
@@ -88,6 +90,7 @@ run_check "threshold controls" python3 scripts/threshold-controls.py
 run_check "path rendering" python3 scripts/check-path-rendering.py
 run_check "fixture line endings" python3 scripts/check-fixture-line-endings.py
 run_check "doc status" python3 scripts/check-doc-status.py
+run_check "script contracts" python3 -m unittest discover -s scripts/tests -v
 # FORMAT IS SCOPED TO THIS REPO'S OWN CRATES, and that is a correctness fix rather
 # than a narrowing.
 #
@@ -198,7 +201,7 @@ stream and pass the arm without ever seeing it skip."
   local out
   out="$("$@" 2>&1)" || { printf '%s\n' "$out"; fail "$label"; }
   printf '%s\n' "$out" | grep -E '^test result:' || true
-  if printf '%s\n' "$out" | grep -q 'SKIPPING'; then
+  if [[ "$out" == *SKIPPING* ]]; then
     printf '%s\n' "$out" | grep 'SKIPPING' >&2
     fail "$label skipped an arm — it reported ok without running"
   fi
@@ -311,7 +314,7 @@ assert_floor_not_lowered() {
   local target_sha
   target_sha=$(git rev-parse --short "$target" 2>/dev/null || echo 'unresolved')
 
-  ours=$(grep -m1 -oE 'run_expect [0-9]+ "workspace' "$file" | grep -oE '[0-9]+')
+  ours=$(sed -n 's/^run_expect \([0-9][0-9]*\) "workspace.*/\1/p' "$file") || ours=""
   if [ -z "$ours" ]; then
     fail "floor ratchet: cannot read this tree's workspace floor from $file"
     return
@@ -324,7 +327,7 @@ assert_floor_not_lowered() {
     return
   fi
 
-  theirs=$(printf '%s\n' "$target_file" | grep -m1 -oE 'run_expect [0-9]+ "workspace' | grep -oE '[0-9]+')
+  theirs=$(sed -n 's/^run_expect \([0-9][0-9]*\) "workspace.*/\1/p' <<< "$target_file")
   if [ -z "$theirs" ]; then
     GATE_UNCHECKED="${GATE_UNCHECKED:-}floor ratchet (no floor in $target) "
     printf '\n=== floor ratchet: UNCHECKED ===\n'
@@ -410,7 +413,7 @@ assert_floor_not_lowered() {
 run_expect 801 "workspace unit + integration" \
   cargo test --locked --workspace --features credentials-core/test-support
 
-assert_floor_not_lowered "$(dirname "$0")/gate.sh"
+assert_floor_not_lowered "$SCRIPT_PATH"
 
 # THE ONE THING THIS macOS GATE CANNOT OTHERWISE SEE: code that does not COMPILE on Windows.
 #
@@ -442,6 +445,7 @@ if rustup target list --installed 2>/dev/null | grep -qx x86_64-pc-windows-gnu; 
   run_check "windows cross type-check" \
     cargo check --locked --target x86_64-pc-windows-gnu --workspace --all-targets
 else
+  GATE_UNCHECKED="${GATE_UNCHECKED:-}windows cross type-check (target not installed) "
   echo "SKIPPING windows cross type-check: target x86_64-pc-windows-gnu not installed" >&2
   echo "  install it with: rustup target add x86_64-pc-windows-gnu" >&2
 fi
@@ -552,7 +556,7 @@ run_expect 1 "release artifact (test seams absent)" \
 # cannot reopen it.
 ci_steps=$(awk '/^  test:/{j=1} /^  [a-z-]+:$/ && !/^  test:/{j=0} j && /^      - name:/{n++} END{print n+0}' \
     .github/workflows/ci.yml)
-gate_arms=$(grep -cE '^run_(check|expect)' "$0")
+gate_arms=$(grep -cE '^run_(check|expect)' "$SCRIPT_PATH")
 # A zero here means the awk stopped matching the job or step shape, not that CI has no
 # steps -- and it would sail under any gap bound. Refuse it: this is the same defect
 # as the test-count check that reported "ran 0 tests" when it could not count them.
@@ -595,17 +599,16 @@ fi
 # claim below is only true while that stays so: CI grew two steps past this gate
 # (inbound contracts, release artifact) before anyone noticed, which is exactly
 # the subset-of-CI failure this file's header says it exists to prevent.
-  # AN UNCHECKED ARM IS NOT A PASSED ARM, and the exit code cannot tell them apart --
-  # a check that could not run exits 0 exactly like one that ran and was satisfied. So
-  # the count rides the VERDICT LINE, which is the one thing every reader of this output
-  # sees, rather than a mid-log print they scrolled past on the way to the last line.
-  if [ -n "${GATE_UNCHECKED:-}" ]; then
-    printf '\nGATE PASSED WITH UNCHECKED ARMS -- %s\n' "$GATE_UNCHECKED"
-    printf '  Those arms did not run. A green here does not cover them.\n'
-  fi
-  printf '\nGATE PASSED -- every check CI runs, on this working tree\n'
 printf '  NOT covered: cross-platform (CI also runs Windows), and whether a\n'
 printf '  deployed BINARY carries what you just built (scripts/accept-deploy.sh).\n'
 printf '  Two windows-only defects passed this gate on 2026-09-04: a fixture\n'
 printf '  setting TMPDIR (windows reads TEMP/TMP), and std::os::unix in a test\n'
 printf '  (macOS IS unix). Touching platform APIs? See the probe in this file.\n'
+
+# An unchecked arm is not a passed arm. Keep the verdict last so `tail -1`
+# cannot hide an omission behind the coverage notes above.
+if [ -n "${GATE_UNCHECKED:-}" ]; then
+  printf '\nGATE PASSED WITH UNCHECKED ARMS -- %s\n' "$GATE_UNCHECKED"
+else
+  printf '\nGATE PASSED -- every check CI runs, on this working tree\n'
+fi

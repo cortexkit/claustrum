@@ -1,5 +1,8 @@
 name: CI
 
+permissions:
+  contents: read
+
 on:
   push:
     # `train/**` IS A PRECONDITION FOR THE CI-GATED TRAIN SHAPE, NOT A CONVENIENCE.
@@ -194,6 +197,11 @@ jobs:
       - name: Design doc status claims
         run: python3 scripts/check-doc-status.py
 
+      # Operator shell scripts use POSIX subprocess paths and macOS deploy tooling.
+      - name: Script contracts
+        if: runner.os != 'Windows'
+        run: python3 -m unittest discover -s scripts/tests -v
+
       - name: Fixture line endings
         # Guards a defect only the Windows job can see: git rewrites LF to CRLF on
         # checkout, so a byte-exact assertion against a fixture fails there and only
@@ -235,7 +243,7 @@ jobs:
       # Without this the gated binaries would rot unnoticed until the next rename, which
       # is the worst moment to discover they no longer compile.
       - name: Clippy (conformance seams)
-        run: cargo clippy --locked --workspace --all-targets --features kill9-test-seam,rotate-test-seam,login-test-seam,migration-tools -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets --features kill9-test-seam,rotate-test-seam,login-test-seam,migration-tools,import-prompt-seam -- -D warnings
 
       - name: Test
         run: cargo test --locked --workspace --all-targets

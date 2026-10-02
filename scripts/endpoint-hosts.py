@@ -45,6 +45,9 @@ MANIFEST = ROOT / "docs" / "endpoint-hosts.txt"
 CONST_RE = re.compile(
     r'\bconst\s+([A-Z][A-Z0-9_]*)\s*:\s*&str\s*=\s*"(https://[^"]+)"'
 )
+URL_RE = re.compile(r'"(https://[^"\s]+)"')
+# Standalone test modules and Cargo's feature-gated crash-cut binaries do not ship.
+TEST_ONLY_FILES = {"engine_tests.rs", "kill9_refresh_helper.rs", "rotate_cut_helper.rs", "login_cut_helper.rs"}
 
 # Byte-string domain separators: `b"cortexkit-credentials/…"`, wherever they appear
 # — as a const, or inline in a `hasher.update(…)` call, which is how three of them
@@ -72,7 +75,10 @@ TEST_MOD_RE = re.compile(r"#\[cfg\(test\)\]\s*(?:pub\s+)?mod\s+\w+\s*\{")
 
 
 def discover() -> list[tuple[str, str, str]]:
-    """Every PRODUCTION https endpoint constant in source, as (file, const, host).
+    """Production https URL literals, including inline and catalog endpoints.
+
+    Inline keys use source order within a file; reorderings need a reviewed diff.
+    Dynamically assembled URLs and unnamed format strings are outside this scan.
 
     Test fixtures are excluded, and that exclusion is load-bearing rather than
     tidiness: the first run of this script pinned five constants from a
@@ -98,22 +104,36 @@ def discover() -> list[tuple[str, str, str]]:
     found: list[tuple[str, str, str]] = []
     for src in SOURCE_DIRS:
         for path in sorted(src.rglob("*.rs")):
+            if path.name in TEST_ONLY_FILES:
+                continue
             text = path.read_text(encoding="utf-8")
             test_mods = [m.start() for m in TEST_MOD_RE.finditer(text)]
             cutoff = min(test_mods) if test_mods else len(text)
-            for m in CONST_RE.finditer(text):
-                if m.start() > cutoff:
+            constants = {m.start(2): m.group(1) for m in CONST_RE.finditer(text[:cutoff])}
+            inline_index = 0
+            for m in URL_RE.finditer(text[:cutoff]):
+                # Only URL literals, not prose links in line comments.
+                line_start = text.rfind("\n", 0, m.start()) + 1
+                if text[line_start:m.start()].lstrip().startswith("//"):
                     continue
+                name = constants.get(m.start(1))
+                if name is None:
+                    # Format strings with no literal host cannot be pinned by a URL-literal
+                    # scan. Named template constants, such as Snowflake's suffix, remain pinned.
+                    if "{" in m.group(1):
+                        continue
+                    inline_index += 1
+                    name = f"INLINE_{inline_index:03d}"
                 # A templated host ({account}.snowflakecomputing.com) still has a
                 # pinnable suffix: the tenant varies, the provider domain must not.
-                host = urlsplit(m.group(2)).netloc
+                host = urlsplit(m.group(1)).netloc
                 # POSIX separators always. `str(Path)` yields backslashes on Windows,
                 # so the manifest would read as 29 REMOVED plus 29 NEW there --
                 # every row "changed" while nothing in source did. The manifest is a
                 # committed artifact shared across platforms, so its keys cannot
                 # carry the local path flavour.
                 rel = path.relative_to(ROOT).as_posix()
-                found.append((rel, m.group(1), host))
+                found.append((rel, name, host))
     return sorted(found)
 
 
@@ -123,7 +143,7 @@ def render(rows: list[tuple[str, str, str]]) -> str:
         "# review the DIFF. Do not hand-edit: a transcribed host inherits the errors\n"
         "# of recollection while looking more authoritative than the source.\n"
         "#\n"
-        "# One line per endpoint constant: <file> <CONST> <host>. Only the host is\n"
+        "# One line per URL literal: <file> <CONST-or-INLINE-index> <host>. Only the host is\n"
         "# pinned; paths change with upstream APIs and say nothing about where a\n"
         "# credential travels.\n"
         "#\n"

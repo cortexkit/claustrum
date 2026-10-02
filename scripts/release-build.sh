@@ -24,6 +24,10 @@
 # hours later at deploy time, by which point the binary looks like any other.
 
 set -euo pipefail
+if [ -z "${PROBE:-}" ]; then
+  echo "REFUSING: no reachability probe given; set PROBE to the live check or 'none: <reason>'." >&2
+  exit 1
+fi
 cd "$(dirname "$0")/.."
 
 if [ -n "$(git status --porcelain)" ]; then
@@ -144,10 +148,19 @@ mkdir -p "$STAGE"
 # actually want to diff against is the one that ages out. The script does not have to
 # guess which that is: it asks the deployed binary, which is the same
 # ask-the-artifact instrument the acceptance legs use.
-DEPLOYED_REV="$(
-  "${HOME}/.local/share/cortexkit/bin/ck-auth" --version 2>/dev/null \
-    | grep -oE '\([0-9a-f]{7,}\)' | tr -d '()'
-)"
+DEPLOYED_BIN="${HOME}/.local/share/cortexkit/bin/ck-auth"
+DEPLOYED_REV=""
+if [ ! -e "$DEPLOYED_BIN" ]; then
+  echo "No deployed ck-auth: first deployment; no deployed stage needs retaining."
+else
+  deployed_rc=0
+  deployed_version="$("$DEPLOYED_BIN" --version 2>&1)" || deployed_rc=$?
+  DEPLOYED_REV="$(sed -nE 's/.*\(([0-9a-f]{7,})\).*/\1/p' <<< "$deployed_version")"
+  if [ "$deployed_rc" -ne 0 ] || [ -z "$DEPLOYED_REV" ]; then
+    echo "REFUSING: deployed ck-auth cannot name its revision (rc=$deployed_rc); pruning could remove its stage." >&2
+    exit 1
+  fi
+fi
 find target/staged -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null \
   | xargs -0 -r ls -dt 2>/dev/null \
   | tail -n +4 \

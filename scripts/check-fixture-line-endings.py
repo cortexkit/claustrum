@@ -49,6 +49,7 @@ MATCHER_CONTROL: tuple[tuple[str, tuple[str, ...], bool], ...] = (
     ("crates/a/tests/fixtures", ("crates/b/tests/fixtures/**",), False),
     ("crates/a/tests/fixtures", ("*.pem",), False),
     ("keys/root.pem", ("*.pem",), True),
+    ("crates/a/tests/fixtures_v2", ("crates/a/tests/fixtures/**",), False),
 )
 
 
@@ -77,7 +78,7 @@ def is_covered(rel: str, patterns: list[str]) -> bool:
     """
     for pat in patterns:
         base = pat.rstrip("*").rstrip("/")
-        if base and rel.startswith(base):
+        if base and (rel == base or rel.startswith(base + "/")):
             return True
         # A bare glob like `*.pem` covers files, not directories.
         if pat.startswith("*.") and rel.endswith(pat[1:]):

@@ -470,6 +470,23 @@ mod tests {
             1,
             "the finished login queued after the limit is never fetched"
         );
+
+        // The limit bounds the loop itself, not only the not-yet-finished answer: when
+        // the last allowed poll gets a retryable error instead, there is still no
+        // further poll.
+        let error_last = pending_then_finished(MAX_ATTEMPTS - 1);
+        error_last.responses.lock().unwrap().insert(
+            MAX_ATTEMPTS - 1,
+            CursorPollResponse {
+                status: 500,
+                body: Vec::new(),
+            },
+        );
+        let err = poll_for_tokens_with_sleep(&error_last, "u", "v", no_wait)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, CursorPollError::AttemptLimit), "{err:?}");
+        assert_eq!(error_last.urls.lock().unwrap().len(), MAX_ATTEMPTS);
     }
 
     /// The backoff grows until it reaches `MAX_BACKOFF_MS` exactly and then holds

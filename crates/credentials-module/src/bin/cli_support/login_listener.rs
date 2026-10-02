@@ -63,6 +63,13 @@ pub fn loopback_bind_addr(redirect_uri: &str) -> Option<String> {
     if !is_loopback {
         return None;
     }
+    // A literal loopback address (`[::1]`, `127.0.0.2`) is bound exactly as written, since
+    // that is the address the browser will connect to. The name `localhost` still binds
+    // numeric 127.0.0.1: resolving it here could pick `::1` on its own, and a browser
+    // that then tries 127.0.0.1 would never reach the listener.
+    if host == "localhost" {
+        return Some(format!("127.0.0.1:{port}"));
+    }
     Some(format!("{host}:{port}"))
 }
 
@@ -327,7 +334,8 @@ mod tests {
     fn loopback_redirects_bind_the_redirect_host() {
         assert_eq!(
             loopback_bind_addr("http://localhost:1455/auth/callback").as_deref(),
-            Some("localhost:1455")
+            Some("127.0.0.1:1455"),
+            "localhost must bind the numeric address, not whatever the resolver picks"
         );
         assert_eq!(
             loopback_bind_addr("http://127.0.0.1:56121/callback").as_deref(),

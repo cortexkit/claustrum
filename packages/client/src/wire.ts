@@ -166,8 +166,12 @@ export function decodeCredential(
   ) {
     throw asCredentialError(response, 'invalid_response', logUnknownClass)
   }
+  let material: string
+  try { material = new TextDecoder('utf-8', { fatal: true }).decode(Uint8Array.from(payload)) } catch {
+    throw asCredentialError(response, 'invalid_response', logUnknownClass)
+  }
   return {
-    material: new TextDecoder().decode(Uint8Array.from(payload)),
+    material,
     recordVersion,
     expiresAtMs,
     credentialId,
@@ -413,7 +417,7 @@ export class ClaustrumClient {
     const result = decodeEnrollmentResult(response, this.#logger)
     const token = result.token
     const generation = result.token_generation
-    if (typeof token !== 'string' || token.length === 0 || typeof generation !== 'number') {
+    if (typeof token !== 'string' || token.length === 0 || typeof generation !== 'number' || !Number.isInteger(generation) || generation < 0) {
       throw asCredentialError(response, 'invalid_response', this.#logger)
     }
     return { token, tokenGeneration: generation }
@@ -425,15 +429,16 @@ export class ClaustrumClient {
   }
 
   async #call(method: string, params: unknown): Promise<unknown> {
+    const sentClient = this.#client
     try {
-      return await this.#client.call(CLAUSTRUM_MODULE_ID, method, params, {
+      return await sentClient.call(CLAUSTRUM_MODULE_ID, method, params, {
         identity: this.#identity,
         consumerIdentity: null,
       })
     } catch (error) {
       if (this.#shouldReconnect(error)) {
         try {
-          await this.#reconnect()
+          if (this.#client === sentClient) await this.#reconnect()
         } catch (reconnectError) {
           throw this.#asTransportError(reconnectError)
         }

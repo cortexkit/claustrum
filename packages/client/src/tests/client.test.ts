@@ -13,6 +13,17 @@ import {
   getDefaultClaustrumConnectionPath,
 } from '../index'
 
+import { userConnectionToken } from '../detect'
+
+test('non-Unix user token sanitizes Unicode by code point and follows environment order', () => {
+  expect(userConnectionToken(null, { USER: 'aé😀-b_', USERNAME: 'ignored' })).toBe('a__-b_')
+  expect(userConnectionToken(null, { USER: '', USERNAME: 'name', HOME: 'ignored' })).toBe('name')
+  expect(userConnectionToken(null, { HOME: 'home', USERPROFILE: 'ignored' })).toBe('home')
+  expect(userConnectionToken(null, { USERPROFILE: 'profile' })).toBe('profile')
+  expect(userConnectionToken(null, {})).toBe('unknown')
+  expect(userConnectionToken(() => 42, { USER: 'ignored' })).toBe('42')
+})
+
 type Call = {
   moduleId: string
   method: string
@@ -46,6 +57,7 @@ class FakeDaemon {
 }
 
 const tempDirs: string[] = []
+const originalSubcConnection = process.env.SUBC_CONNECTION_FILE
 const originalConnection = process.env.CLAUSTRUM_SUBC_CONNECTION
 const originalModuleId = process.env.SUBC_MODULE_ID
 const originalLaunchNonce = process.env.SUBC_LAUNCH_NONCE
@@ -79,6 +91,8 @@ function terminal(code: string): SubcCallError {
 }
 
 afterEach(async () => {
+  if (originalSubcConnection === undefined) delete process.env.SUBC_CONNECTION_FILE
+  else process.env.SUBC_CONNECTION_FILE = originalSubcConnection
   if (originalConnection === undefined) delete process.env.CLAUSTRUM_SUBC_CONNECTION
   else process.env.CLAUSTRUM_SUBC_CONNECTION = originalConnection
   if (originalModuleId === undefined) delete process.env.SUBC_MODULE_ID
@@ -99,6 +113,62 @@ afterEach(async () => {
 })
 
 describe('ClaustrumClient', () => {
+  test('SUBC_CONNECTION_FILE is exclusive even when missing', async () => {
+    const runtimeFile = await tempPath('subc-connection.json')
+    await writeFile(runtimeFile, '{}')
+    process.env.XDG_RUNTIME_DIR = dirname(runtimeFile)
+    process.env.CLAUSTRUM_SUBC_CONNECTION = runtimeFile
+    const named = join(dirname(runtimeFile), 'missing.json')
+    process.env.SUBC_CONNECTION_FILE = named
+    expect(getDefaultClaustrumConnectionPath()).toBe(named)
+    expect(await detectClaustrumConnection()).toEqual({ status: 'absent', path: named })
+    expect(await detectClaustrumConnection(runtimeFile)).toMatchObject({ path: runtimeFile })
+  })
+
+  test.skipIf(typeof process.getuid !== 'function')('exact per-user temp file takes precedence over ambiguous glob', async () => {
+    const other = await tempPath('subc-other.connection.json')
+    const exact = join(dirname(other), `subc-${process.getuid!()}.connection.json`)
+    await writeFile(other, '{}')
+    await writeFile(exact, '{}')
+    delete process.env.SUBC_CONNECTION_FILE
+    delete process.env.XDG_RUNTIME_DIR
+    process.env.HOME = join(dirname(other), 'missing-home')
+    setTempDir(dirname(other))
+    expect(getDefaultClaustrumConnectionPath()).toBe(exact)
+  })
+
+  test('late failure from replaced client retries without reconnect backoff', async () => {
+    const late = Promise.withResolvers<unknown>()
+    let calls = 0
+    const first = { call: () => ++calls === 1 ? Promise.reject(terminal('route_wedged')) : late.promise, close: () => {} }
+    const second = new FakeDaemon([
+      { result: { payload: [111, 107], record_version: 1 } },
+      { result: { payload: [111, 107], record_version: 1 } },
+    ])
+    let connects = 0
+    const client = await ClaustrumClient.connect({ connector: async () => (++connects === 1 ? first : second) as never })
+    try {
+      const a = client.getCredential('a')
+      const b = client.getCredential('b')
+      await a
+      late.reject(terminal('route_wedged'))
+      await expect(b).resolves.toMatchObject({ material: 'ok' })
+      expect(connects).toBe(2)
+      expect(second.calls).toHaveLength(2)
+    } finally { client.close() }
+  })
+
+  test('enrollRotate rejects non-integer and negative generations', async () => {
+    for (const generation of [1.5, -3, NaN, Infinity]) {
+      const client = await ClaustrumClient.connect({ connector: async () => new FakeDaemon([{ result: { token: 'token', token_generation: generation } }]) as never })
+      try { await expect(client.enrollRotate({ token: 'old', expectedTokenGeneration: 1 })).rejects.toMatchObject({ code: 'invalid_response' }) } finally { client.close() }
+    }
+    for (const generation of [0, 1]) {
+      const client = await ClaustrumClient.connect({ connector: async () => new FakeDaemon([{ result: { token: 'token', token_generation: generation } }]) as never })
+      try { await expect(client.enrollRotate({ token: 'old', expectedTokenGeneration: 1 })).resolves.toEqual({ token: 'token', tokenGeneration: generation }) } finally { client.close() }
+    }
+  })
+
   test('default connection path honours CLAUSTRUM_SUBC_CONNECTION then the subc default', async () => {
     const configured = '/tmp/configured-subc-connection.json'
     const configuredCalls: string[] = []

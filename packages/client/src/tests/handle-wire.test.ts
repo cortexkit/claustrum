@@ -34,6 +34,19 @@ function fixtureReplies(op: string): Reply[] {
   return row.success.map((reply) => JSON.parse(reply as string) as Reply)
 }
 
+test('served material refuses invalid UTF-8 as invalid_response', () => {
+  for (const payload of [[255], [0xc3], [0xc0, 0xaf], [0xed, 0xa0, 0x80]]) {
+    try {
+      decodeCredential({ result: { payload, record_version: 1 } }, () => {})
+      throw new Error('accepted invalid UTF-8')
+    } catch (error) {
+      expect(error).toBeInstanceOf(ClaustrumCredentialError)
+      expect(error).toMatchObject({ code: 'invalid_response' })
+    }
+  }
+  expect(decodeCredential({ result: { payload: [0xc3, 0xa9], record_version: 1 } }, () => {}).material).toBe('é')
+})
+
 const noLog = (): void => {}
 
 /**

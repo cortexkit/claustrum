@@ -1,5 +1,5 @@
 import { constants as fsConstants } from 'node:fs'
-import { chmod, lstat, mkdir, open, readFile, readdir, rename, rm, stat, unlink } from 'node:fs/promises'
+import { chmod, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat, unlink } from 'node:fs/promises'
 import { randomBytes, randomInt } from 'node:crypto'
 import { basename as pathBasename, dirname, join } from 'node:path'
 import { HANDLE_FILE_CONTRACT, parseHandleFile, type OpenCodeHandleFileV1 } from './handles.js'
@@ -96,6 +96,21 @@ async function withLockCommit<T>(path: string, tenant: string, fn: (commit: () =
     }
     let observed: Owner | undefined, ownerReadError: unknown
     try { observed = await readOwner(ownerPath) } catch (error) { ownerReadError = error; if (code(error) !== 'ENOENT' && Date.now() >= deadline) throw code(error) === 'owner_invalid' ? error : lockError('lock_busy', 'manifest lock busy') }
+    if (!observed && code(ownerReadError) === 'ENOENT') {
+      const metadata = await lstat(lock).catch(() => undefined)
+      if (metadata?.isDirectory() && Date.now() - metadata.mtimeMs >= ttl) {
+        await testOptions?.beforeEvict?.()
+        const stale = `${lock}.stale-${Math.floor(metadata.mtimeMs)}-${token()}`
+        try {
+          await rename(lock, stale)
+          // A claimant may have published its owner while the eviction was pending.
+          const moved = await lstat(stale)
+          const ownerExists = await lstat(join(stale, 'owner')).then(() => true, (error: unknown) => code(error) !== 'ENOENT')
+          if (!ownerExists && moved.mtimeMs === metadata.mtimeMs) { testOptions?.afterEvict?.(); continue }
+          await rename(stale, lock).catch(() => {})
+        } catch (error) { if (!['ENOENT', 'EEXIST', 'ENOTEMPTY'].includes(code(error) ?? '')) throw error }
+      }
+    }
     if (observed && Date.now() - observed.claimed_at_ms >= ttl) {
       await testOptions?.beforeEvict?.()
       // The owner record remains because the quarantine is the ABA guard, not an audit log;
@@ -138,7 +153,34 @@ async function readManifest(path: string): Promise<ManifestHandleFile> {
   return parseHandleFile(JSON.parse(source.toString('utf8')))
 }
 const foreign = (file: ManifestHandleFile, tenant: string) => file.providers.filter((provider) => provider.serve !== tenant).map((provider) => JSON.stringify(provider))
-async function prepareParent(path: string): Promise<void> { const parent = dirname(path); await mkdir(parent, { recursive: true, mode: 0o700 }); const metadata = await stat(parent); if (!metadata.isDirectory()) throw new Error('handle file parent must be a directory'); if ((metadata.mode & 0o002) !== 0 && (metadata.mode & 0o1000) === 0) throw new Error('handle file parent is world-writable without sticky bit'); if ((metadata.mode & 0o022) !== 0) throw new Error('handle file parent must not be group- or other-writable') }
+async function refuseWritableAncestors(parent: string): Promise<void> {
+  let component: string
+  try { component = await realpath(parent) } catch (error) {
+    if (code(error) !== 'ENOENT') throw error
+    const next = dirname(parent)
+    if (next !== parent) await refuseWritableAncestors(next)
+    return
+  }
+  for (;;) {
+    const metadata = await stat(component)
+    if ((metadata.mode & 0o022) !== 0 && (metadata.mode & 0o1000) === 0) throw new Error('handle file ancestor is group- or world-writable without sticky bit')
+    const next = dirname(component)
+    if (next === component) return
+    component = next
+  }
+}
+async function prepareParent(path: string): Promise<void> {
+  const parent = dirname(path)
+  // Check existing ancestors before creating directories under a replaceable tree.
+  if (process.platform !== 'win32') await refuseWritableAncestors(parent)
+  const existing = await stat(parent).catch((error: unknown) => { if (code(error) !== 'ENOENT') throw error; return undefined })
+  if (existing && typeof process.getuid === 'function' && existing.uid !== process.getuid()) throw new Error('handle file parent is not owned by the current uid')
+  await mkdir(parent, { recursive: true, mode: 0o700 })
+  const metadata = await stat(parent)
+  if (!metadata.isDirectory()) throw new Error('handle file parent must be a directory')
+  if (typeof process.getuid === 'function' && metadata.uid !== process.getuid()) throw new Error('handle file parent is not owned by the current uid')
+  if (process.platform !== 'win32') await refuseWritableAncestors(parent)
+}
 async function writeAtomic(path: string, file: ManifestHandleFile, commit: () => Promise<void>): Promise<void> {
   const bytes = Buffer.from(JSON.stringify(file)); if (bytes.byteLength > HANDLE_FILE_CONTRACT.maxBytes) throw new Error('handle file exceeds 256 KiB')
     // pathBasename for the same reason the quarantine sweep uses it, but this one fails LOUD

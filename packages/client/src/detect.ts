@@ -24,37 +24,16 @@ const PRODUCTION_FILE_NAME = 'subc-connection.json'
 const TEMP_PREFIX = 'subc-'
 const TEMP_SUFFIX = '.connection.json'
 
-// The default discovery order MUST mirror `ck` / the daemon, because a client that picks a
-// different file ends up talking to the wrong daemon. The Rust source of truth (sibling
-// pin, NOT regenerated here) is:
-//
-//   crates/credentials-module/src/bin/credentials_cli.rs :: discover_subc_connection_file
-//     -> XDG_RUNTIME_DIR/subc-connection.json, else
-//        ~/.local/share/cortexkit/run/subc-connection.json, else
-//        <tempdir>/subc-<token>.connection.json  (glob; ambiguity REFUSES)
-//
-//   crates/subc-core/src/bootstrap.rs :: connection_file_path_with_source
-//     -> XDG_RUNTIME_DIR/subc-connection.json, else
-//        <tempdir>/subc-<user_connection_token()>.connection.json
-//     where user_connection_token() is the UID on unix (via a probe-file UID read),
-//     else a sanitized USER/USERNAME/HOME/USERPROFILE value, else "unknown".
-//
-// The OLD client derived `${uid}` itself via `process.getuid()`, but the daemon may
-// produce a different token (sanitized user on macOS, the literal "unknown" if all of
-// the lookups miss). The glob is the only way to mirror the daemon without re-deriving
-// the token (which is filesystem-side-effecting per the Rust side comment).
-// The home tier resolves from `$HOME` byte-for-byte, mirroring `non_empty_env("HOME")`
-// in `discover_subc_connection_file`: only the empty string is absent, and whitespace
-// is not trimmed. The Rust code does NOT fall back to a `getpwuid`-style lookup; the
-// client must not either, or an operator who points HOME at a per-test fixture loses
-// the daemon they started there.
+// Keep discovery in the CLI's order: exclusive SUBC_CONNECTION_FILE, runtime,
+// HOME, exact per-user temp name, then an unambiguous temp glob. The glob supports
+// daemons whose token derivation differs without guessing between other users.
 function homeTierPath(): string | undefined {
   const homeEnv = process.env.HOME
   return homeEnv ? join(homeEnv, '.local', 'share', 'cortexkit', 'run', PRODUCTION_FILE_NAME) : undefined
 }
 
 function highestPriorityAbsentMarker(): string {
-  const runtime = process.env.XDG_RUNTIME_DIR?.trim()
+  const runtime = process.env.XDG_RUNTIME_DIR
   if (runtime) return join(runtime, PRODUCTION_FILE_NAME)
   const home = homeTierPath()
   if (home) return home
@@ -65,18 +44,30 @@ function highestPriorityAbsentMarker(): string {
 }
 
 function findExistingConnectionPath(): string | undefined {
-  const runtime = process.env.XDG_RUNTIME_DIR?.trim()
+  if (process.env.SUBC_CONNECTION_FILE) return process.env.SUBC_CONNECTION_FILE
+  const runtime = process.env.XDG_RUNTIME_DIR
   if (runtime) {
     const p = join(runtime, PRODUCTION_FILE_NAME)
     if (safeIsFile(p)) return p
   }
   const home = homeTierPath()
   if (home && safeIsFile(home)) return home
+  const exact = join(tmpdir(), `${TEMP_PREFIX}${userConnectionToken()}${TEMP_SUFFIX}`)
+  if (safeIsFile(exact)) return exact
   const matches = listSubcConnectionFiles(tmpdir())
   // A single matching file IS the daemon; multiple matches mean different OS users
   // happened to share the temp dir. Picking one would route credential-bearing
   // requests at another user's daemon, so REFUSE both picks and the absent path.
   return matches.length === 1 ? matches[0] : undefined
+}
+
+export function userConnectionToken(getuid: (() => number) | null = process.getuid ?? null, env: NodeJS.ProcessEnv = process.env): string {
+  if (getuid) return String(getuid())
+  for (const key of ['USER', 'USERNAME', 'HOME', 'USERPROFILE']) {
+    const value = env[key]
+    if (value) return Array.from(value, (character) => /^[a-zA-Z0-9_-]$/.test(character) ? character : '_').join('')
+  }
+  return 'unknown'
 }
 
 export function getDefaultClaustrumConnectionPath(): string {
@@ -86,6 +77,7 @@ export function getDefaultClaustrumConnectionPath(): string {
 export function resolveClaustrumConnectionPath(explicit?: string): string {
   return (
     explicit?.trim() ||
+    process.env.SUBC_CONNECTION_FILE ||
     process.env.CLAUSTRUM_SUBC_CONNECTION?.trim() ||
     getDefaultClaustrumConnectionPath()
   )

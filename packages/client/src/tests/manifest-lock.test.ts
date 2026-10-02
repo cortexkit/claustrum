@@ -81,6 +81,63 @@ afterEach(async () => {
 const onPosix = process.platform !== 'win32'
 
 describe('manifest writer lock', () => {
+  test.skipIf(!onPosix)('writer refuses writable ancestors before creating anything', async () => {
+    const path = await manifestPath()
+    const root = join(path, '..')
+    await chmod(root, 0o775)
+    const target = join(root, 'private', 'manifest.json')
+    await expect(writeHandleFileLocked(target, 'tenant', () => {})).rejects.toThrow('without sticky bit')
+    expect(await readdir(root)).toEqual([])
+  })
+
+  test.skipIf(!onPosix)('writer accepts an owned sticky parent', async () => {
+    const path = await manifestPath()
+    await chmod(join(path, '..'), 0o1777)
+    await writeHandleFileLocked(path, 'tenant', () => {})
+    expect(JSON.parse(await readFile(path, 'utf8'))).toEqual({ version: 1, providers: [] })
+  })
+
+  test.skipIf(!onPosix)('writer refuses a parent owned by another uid before writing', async () => {
+    const path = await manifestPath()
+    const getuid = process.getuid!
+    process.getuid = () => getuid() + 1
+    try {
+      await expect(writeHandleFileLocked(path, 'tenant', () => {})).rejects.toThrow('not owned by the current uid')
+      expect(await readdir(join(path, '..'))).toEqual([])
+    } finally { process.getuid = getuid }
+  })
+
+  test('ownerless lock older than ttl is evicted using directory mtime', async () => {
+    const path = await manifestPath()
+    __setManifestLockTestOptions(reclaimOptions())
+    await mkdir(`${path}.lock`)
+    const old = (Date.now() - 1_000) / 1_000
+    await utimes(`${path}.lock`, old, old)
+    await expect(withManifestLock(path, 'tenant', () => 'claimed')).resolves.toBe('claimed')
+  })
+
+  test('ownerless lock with recent mtime is retained until ttl', async () => {
+    const path = await manifestPath()
+    __setManifestLockTestOptions(reclaimOptions())
+    await mkdir(`${path}.lock`)
+    const future = (Date.now() + 10_000) / 1_000
+    await utimes(`${path}.lock`, future, future)
+    await expect(withManifestLock(path, 'tenant', () => {})).rejects.toMatchObject({ code: 'lock_busy' })
+    expect((await readdir(`${path}.lock`))).toEqual([])
+  })
+
+  test('owner published during ownerless eviction is not stolen', async () => {
+    const path = await manifestPath()
+    __setManifestLockTestOptions({ ...reclaimOptions(), beforeEvict: async () => {
+      await writeFile(join(`${path}.lock`, 'owner'), JSON.stringify({ tenant: 'other', pid: 1, claimed_at_ms: Date.now() + 10_000, nonce: 'other' }))
+    } })
+    await mkdir(`${path}.lock`)
+    const old = (Date.now() - 1_000) / 1_000
+    await utimes(`${path}.lock`, old, old)
+    await expect(withManifestLock(path, 'tenant', () => {})).rejects.toMatchObject({ code: 'lock_busy' })
+    expect(JSON.parse(await readFile(join(`${path}.lock`, 'owner'), 'utf8')).nonce).toBe('other')
+  })
+
   test.skipIf(!onPosix)('two concurrent tenant writers preserve both provider blocks', async () => {
     const path = await manifestPath()
     const firstEntered = Promise.withResolvers<void>()
@@ -459,7 +516,7 @@ describe('manifest writer lock', () => {
     const parent = join(path, '..')
     await chmod(parent, 0o770)
 
-    await expect(writeHandleFileLocked(path, 'anthropic-auth', () => {})).rejects.toThrow('handle file parent must not be group- or other-writable')
+    await expect(writeHandleFileLocked(path, 'anthropic-auth', () => {})).rejects.toThrow('group- or world-writable without sticky bit')
     expect((await stat(parent)).mode & 0o777).toBe(0o770)
   })
 
@@ -533,18 +590,18 @@ describe('manifest writer lock', () => {
     expect(await readFile(path, 'utf8')).toBe(before)
   })
 
-  test('pins missing and unparseable owner records without eviction', async () => {
+  test('pins unparseable owner records without eviction', async () => {
     const path = await manifestPath()
     const lockPath = `${path}.lock`
     __setManifestLockTestOptions({ ttlMs: 25, renewEveryMs: 8, retryMinMs: 2, retryMaxMs: 3 })
-    for (const ownerSource of [undefined, '{']) {
+    for (const ownerSource of ['{']) {
       await mkdir(lockPath, { mode: 0o700 })
       if (ownerSource !== undefined) {
         await writeFile(join(lockPath, 'owner'), ownerSource, { mode: 0o600 })
       }
 
       const error = (await withManifestLock(path, 'anthropic-auth', async () => {}).catch((caught) => caught)) as Error & { code?: string }
-      expect(error.code).toBe(ownerSource === undefined ? 'lock_busy' : 'owner_invalid')
+      expect(error.code).toBe('owner_invalid')
       expect((await lstat(lockPath)).isDirectory()).toBe(true)
       expect((await readdir(join(path, '..'))).some((name) => name.includes('.lock.stale-'))).toBe(false)
       await rm(lockPath, { recursive: true })

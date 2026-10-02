@@ -261,6 +261,18 @@ impl CommitSeam for InjectedCommit<'_> {
     }
 }
 
+fn disambiguate_labels(rows: &mut [PickerRow]) {
+    let mut counts = BTreeMap::new();
+    for row in rows.iter() {
+        *counts.entry(row.label.clone()).or_insert(0) += 1;
+    }
+    for (index, row) in rows.iter_mut().enumerate() {
+        if counts[&row.label] > 1 {
+            row.label = format!("{} [entry {}]", row.label, index + 1);
+        }
+    }
+}
+
 fn resolve_selection(
     rows: &[PickerRow],
     picked: &[String],
@@ -288,11 +300,18 @@ fn resolve_selection(
         if matches!(value.as_str(), "[all]" | "[none]") {
             continue;
         }
-        let Some((index, _)) = rows
+        let matches = rows
             .iter()
             .enumerate()
-            .find(|(_, row)| row.proposed_id() == Some(value.as_str()) || row.label == *value)
-        else {
+            .filter(|(_, row)| row.proposed_id() == Some(value.as_str()) || row.label == *value)
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        if matches.len() > 1 {
+            return Err(CliError::Usage(
+                "ambiguous import selection; select the rendered entry labels".into(),
+            ));
+        }
+        let Some(index) = matches.first().copied() else {
             return Err(CliError::Usage(format!(
                 "import picker selection '{value}' is neither a proposed id nor a rendered label"
             )));
@@ -585,6 +604,7 @@ pub fn run(global: &GlobalArgs) -> Result<(), CliError> {
             prompt_opens: 0,
         });
     }
+    disambiguate_labels(&mut rows);
     if rows.is_empty() {
         return Err(CliError::Usage(format!(
             "no installed harness accounts were detected; use the flag form: {FLAG_FORM}"
@@ -615,4 +635,49 @@ pub fn run(global: &GlobalArgs) -> Result<(), CliError> {
     let mut prompts = TerminalPrompts { labels, defaults };
     let mut commits = RealCommit { global };
     drive(global, &inventory, rows, &mut prompts, &mut commits)
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+
+    #[test]
+    fn duplicate_account_labels_remain_individually_selectable() {
+        let root = std::env::temp_dir().join(format!("ck-import-labels-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("accounts.json");
+        std::fs::write(&file, r#"{"version":4,"activeIndex":0,"accounts":[{"email":"a@x.com","refreshToken":"fixture-a"},{"email":"a@y.com","refreshToken":"fixture-b"}]}"#).unwrap();
+        let paths = import_detect::ImportPaths {
+            opencode: root.join("missing-opencode"),
+            pi: root.join("missing-pi"),
+            gemini_cli: root.join("missing-gemini"),
+            antigravity: file,
+        };
+        let mut rows = import_detect::enumerate(&paths)
+            .into_iter()
+            .filter(|row| row.is_selectable())
+            .map(|detected| {
+                let (label, initial_action) = render_row(&detected, &[]);
+                PickerRow {
+                    detected,
+                    label,
+                    initial_action,
+                    final_id: None,
+                    prompt_opens: 0,
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(rows.len(), 2);
+        disambiguate_labels(&mut rows);
+        assert_ne!(rows[0].label, rows[1].label);
+        let picked = rows.iter().map(|row| row.label.clone()).collect::<Vec<_>>();
+        assert_eq!(resolve_selection(&rows, &picked).unwrap().0, vec![0, 1]);
+        assert_eq!(
+            resolve_selection(&rows, &[rows[1].label.clone()])
+                .unwrap()
+                .0,
+            vec![1]
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

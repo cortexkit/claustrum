@@ -778,14 +778,14 @@ fn help_verb(verb: &str) -> String {
         "import" => {
             "ck auth import --source <opencode|pi|gemini-cli|antigravity> --id <id>\n\
              ck auth import  pick detected accounts to import (no flags)\n\
-             \x20              [--json <file>] [--provider <entry>] [--adapter <adapter>]\n\
+             \x20              --json <file> [--provider <entry>] [--adapter <adapter>]\n\
              \x20              [--replace]\n\
              \x20              [--account-id <id>] [--email <email>] [--org-name <name>]\n\
              \x20              [--clear-identity]\n\
              \n\
              \x20 --source <source>    which harness to read\n\
              \x20 --id <id>            vault credential id to create\n\
-             \x20 --json <file>        read that file instead of the source's default path\n\
+             \x20 --json <file>        required in the flag form: source file to read\n\
              \x20 --provider <entry>   opencode/pi: pick one auth.json entry; antigravity: pick\n\
              \x20                      an account by email or index; not used for gemini-cli\n\
              \x20 --adapter <adapter>  override the refresh adapter the method implies\n\
@@ -871,7 +871,7 @@ fn help_verb(verb: &str) -> String {
              \x20                         <config_home>/cortexkit/opencode-handles.json\n\
              \x20 --provider <id>         select a provider; repeatable, preserving requested\n\
              \x20                         order\n\
-             \x20 --serve-by <plugin-id>  serving plugin; defaults to opencode-claustrum\n\
+             \x20 --serve-by <plugin-id>  serving plugin; only opencode-claustrum is supported\n\
              \n\
              NOTES\n\
              Move OpenCode api entries into the vault as apikey:<provider>:main, write a\n\
@@ -944,7 +944,7 @@ fn help_verb(verb: &str) -> String {
              \x20 --principal <id|reserved:id>  reserved module principal\n\
              \x20 --selector-kind <kind>        exact or category (required, no default)\n\
              \x20 --selector <value>            credential id text or bare category name\n\
-             \x20 --operation <read|sign|open|list|deposit>  grant authority (`--op` accepted)\n\
+             \x20 --operation <read|sign|open|list|deposit>  grant authority (no `--op` alias)\n\
              \n\
              NOTES\n\
              exact matches one credential id byte for byte. category matches every\n\
@@ -969,7 +969,7 @@ fn help_verb(verb: &str) -> String {
              \x20 --principal <id|reserved:id>  reserved module principal\n\
              \x20 --selector-kind <kind>        exact or category (required, no default)\n\
              \x20 --selector <value>            credential id text or bare category name\n\
-             \x20 --operation <read|sign|open|list|deposit>  revoke authority (`--op` accepted)\n\
+             \x20 --operation <read|sign|open|list|deposit>  revoke authority (no `--op` alias)\n\
              \n\
              NOTES\n\
              Revocation is exact over principal, selector kind, selector, and operation.\n\
@@ -995,7 +995,7 @@ fn help_verb(verb: &str) -> String {
              \x20 --id <id>  credential to mark needs-reauth\n\
              \n\
              NOTES\n\
-             Mark a credential needs-reauth (stops serving until re-login) without revoking\n\
+             Mark a credential needs-reauth (stops serving until re-login) and revoke all\n\
              handles. `logout` is the usual operator verb; this is the lower-level primitive."
         }
         "audit" => {
@@ -1088,7 +1088,7 @@ fn help_verb(verb: &str) -> String {
              \n\
              NOTES\n\
              Initialize a new vault: provision the master key and seal the audit key (ALWAYS\n\
-             offline). Refuses if the vault already exists."
+             offline). An existing vault is left unchanged (idempotent)."
         }
         "overrides" => return usage_short(),
         _ => return format!("no help for '{verb}'\n\n{}", usage_short()),
@@ -1143,6 +1143,13 @@ fn commit_admin_with_key(
                 return Err(CliError::RouteIndeterminate(m))
             }
             admin_client::RouteCommit::NoLiveModule(m) => {
+                if non_empty_env("SUBC_CONNECTION_FILE")
+                    .map(PathBuf::from)
+                    .as_ref()
+                    == Some(conn_path)
+                {
+                    return Err(CliError::LocalFailure(m));
+                }
                 // Nothing was dispatched; the offline path below is safe.
                 eprintln!("(no live module: {m}; using the offline lease path)");
             }
@@ -1345,7 +1352,7 @@ fn cmd_mint_signing_key(global: &GlobalArgs, args: &[String]) -> Result<(), CliE
     Ok(())
 }
 
-/// Wrap ring's in-memory PKCS#8 bytes in the only PEM armour the signing parser accepts.
+/// Generate a KEM key and publish its public half for enrollment.
 fn cmd_mint_kem_key(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     let id = required(args, "--id")?;
     if !matches!(parse_credential_id(&id).method, Some(AuthMethod::Kem)) {
@@ -1371,7 +1378,14 @@ fn cmd_mint_kem_key(global: &GlobalArgs, args: &[String]) -> Result<(), CliError
         AdminAuditOp::Put
     };
     commit_admin(global, store_op(&id, record, audit_op, mode))?;
-    println!("created {id}");
+    println!(
+        "{} {id}",
+        if has_flag(args, "--replace") {
+            "replaced"
+        } else {
+            "created"
+        }
+    );
     println!(
         "public_key_hex {}",
         public
@@ -2069,6 +2083,21 @@ fn provider_ids<'a>(inventory: &'a [(String, String)], default_id: &str) -> Vec<
         .collect()
 }
 
+fn login_replace(args: &[String], interactive_replace: bool) -> bool {
+    has_flag(args, "--replace") || interactive_replace
+}
+
+fn new_login_id(provider: &str, default_id: &str, label: Option<&str>) -> Option<String> {
+    // Snowflake ids are derived from the account entered by the operator, not labels.
+    if provider == "snowflake" {
+        return None;
+    }
+    Some(label.map_or_else(
+        || default_id.to_string(),
+        |label| format!("{default_id}:{label}"),
+    ))
+}
+
 fn pick_login_interactively(global: &GlobalArgs) -> Result<InteractiveChoice, CliError> {
     use dialoguer::{theme::ColorfulTheme, FuzzySelect, Input, Select};
 
@@ -2126,7 +2155,7 @@ fn pick_login_interactively(global: &GlobalArgs) -> Result<InteractiveChoice, Cl
         // picked — the resolved id can.
         return Ok(InteractiveChoice {
             provider: provider.clone(),
-            id_override: Some(default_id.to_string()),
+            id_override: new_login_id(provider, default_id, None),
             replace: false,
         });
     }
@@ -2147,6 +2176,13 @@ fn pick_login_interactively(global: &GlobalArgs) -> Result<InteractiveChoice, Cl
         .map_err(|e| CliError::Usage(format!("interactive login cancelled: {e}")))?;
 
     if action == 0 {
+        if provider == "snowflake" {
+            return Ok(InteractiveChoice {
+                provider: provider.clone(),
+                id_override: None,
+                replace: false,
+            });
+        }
         let label: String = Input::with_theme(&theme)
             .with_prompt("Label for the new account (e.g. work, personal, gmail)")
             .validate_with(|s: &String| {
@@ -2159,7 +2195,7 @@ fn pick_login_interactively(global: &GlobalArgs) -> Result<InteractiveChoice, Cl
             .interact_text()
             .map_err(|e| CliError::Usage(format!("interactive login cancelled: {e}")))?;
         Ok(InteractiveChoice {
-            id_override: Some(format!("{default_id}:{label}")),
+            id_override: new_login_id(provider, default_id, Some(&label)),
             provider: provider.clone(),
             replace: false,
         })
@@ -2174,17 +2210,17 @@ fn pick_login_interactively(global: &GlobalArgs) -> Result<InteractiveChoice, Cl
 
 fn cmd_device_login(
     global: &GlobalArgs,
-    args: &[String],
+    _args: &[String],
     provider: &str,
     id: &str,
     wire: &LoginProvider,
+    replace: bool,
 ) -> Result<(), CliError> {
     use credentials_core::device_flow::{
         run_device_flow, run_openai_device_flow, DeviceBodyEncoding, DeviceFlowConfig,
     };
     use credentials_core::refresh_adapters::{github_copilot, kimi, xai, RefreshAdapter};
 
-    let replace = has_flag(args, "--replace");
     let preflighted_key = preflight_login(
         global,
         id,
@@ -2395,7 +2431,7 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             )));
         }
 
-        let replace = has_flag(args, "--replace") || interactive.replace;
+        let replace = login_replace(args, interactive.replace);
         let preflighted_key = preflight_login(
             global,
             &id,
@@ -2503,22 +2539,40 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
 
     // The proprietary browser-poll / callback flows (Cursor, Devin, Snowflake,
     // DigitalOcean) run their own driver, which returns None for any other provider.
+    let mut special_key = None;
+    let mut preflight_error = None;
     if let Some(special) = provider_login::run(
         &provider,
         args,
         interactive.id_override.as_deref(),
         interactive.replace,
+        &mut |id, replace| match preflight_login(
+            global,
+            id,
+            replace,
+            format!("'{id}' already holds a credential; use --replace"),
+        ) {
+            Ok(key) => {
+                special_key = Some(key);
+                Ok(())
+            }
+            Err(error) => {
+                preflight_error = Some(error);
+                Err("login preflight refused".into())
+            }
+        },
     )
-    .map_err(CliError::Io)?
+    .map_err(|error| preflight_error.unwrap_or(CliError::Io(error)))?
     {
         let mode = if special.replace {
             StoreMode::ReplaceUnconditional
         } else {
             StoreMode::Create
         };
-        commit_admin(
+        commit_login_admin(
             global,
             store_op(&special.id, special.record, AdminAuditOp::Login, mode),
+            special_key.expect("special login ran preflight"),
         )?;
         println!("logged in and stored {}", special.id);
         return Ok(());
@@ -2558,10 +2612,17 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             Some(DeviceKind::GithubCopilot | DeviceKind::Kimi)
         )
     {
-        return cmd_device_login(global, args, &provider, &id, wire);
+        return cmd_device_login(
+            global,
+            args,
+            &provider,
+            &id,
+            wire,
+            login_replace(args, interactive.replace),
+        );
     }
 
-    let replace = has_flag(args, "--replace") || interactive.replace;
+    let replace = login_replace(args, interactive.replace);
     let preflighted_key = preflight_login(
         global,
         &id,
@@ -2909,7 +2970,8 @@ fn cmd_reactivate(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> 
 /// (the compound atomic op), keeping the row and its audit chain. Re-login
 /// restores it (`login --provider <p> --replace`). Deliberately NOT a delete — a
 /// logout must never destroy an audit trail. `--provider <p>` resolves to the same
-/// default id `login --provider <p>` writes; `--id` names any credential directly.
+/// default id `login --provider <p>` writes, except Snowflake, where all account ids
+/// are retired. `--id` names any credential directly.
 fn cmd_logout(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     let id = match (optional(args, "--id"), optional(args, "--provider")) {
         (Some(_), Some(_)) => {
@@ -2937,11 +2999,27 @@ fn cmd_logout(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             ))
         }
     };
+    let ids = if optional(args, "--provider").as_deref() == Some("snowflake") {
+        let status = request_admin_status(global)?;
+        parse_inventory(&status)?
+            .into_iter()
+            .filter_map(|(_, _, id, _)| id.starts_with("oauth:snowflake:").then_some(id))
+            .collect::<Vec<_>>()
+    } else {
+        vec![id]
+    };
+    for id in ids {
+        logout_id(global, &id)?;
+    }
+    Ok(())
+}
+
+fn logout_id(global: &GlobalArgs, id: &str) -> Result<(), CliError> {
     let result = commit_admin(
         global,
         AdminOpBody::Logout {
             v: ADMIN_OP_SCHEMA_V1,
-            id: id.clone(),
+            id: id.to_string(),
         },
     )?;
     let revoked = result["handles_revoked"].as_u64().unwrap_or(0);
@@ -4317,10 +4395,9 @@ fn cmd_events(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     Ok(())
 }
 
-/// Render a millisecond timestamp as local `YYYY-MM-DD HH:MM:SS`.
+/// Render a millisecond timestamp as UTC `YYYY-MM-DD HH:MM:SS`.
 ///
-/// Hand-rolled because the crate takes no date dependency and this is the only place
-/// that needs one; the arithmetic is the civil-from-days algorithm.
+/// The arithmetic is the civil-from-days algorithm, independent of the local timezone.
 fn format_ts_ms(ts_ms: i64) -> String {
     let secs = ts_ms.div_euclid(1000);
     let days = secs.div_euclid(86_400);
@@ -5399,7 +5476,7 @@ mod discovery_tests {
     /// A panicking test poisons the mutex; without this, every later test in the module
     /// fails on the poison rather than on its own subject, turning one real failure into
     /// a wall of misattributed ones.
-    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+    pub(super) fn env_guard() -> std::sync::MutexGuard<'static, ()> {
         ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner())
     }
 
@@ -5623,17 +5700,23 @@ fn open_in_browser(args: &[String], url: &str) -> std::io::Result<()> {
         c
     };
     #[cfg(target_os = "windows")]
-    let mut cmd = {
-        // `cmd /c start "" <url>` — the empty title arg avoids start treating the URL
-        // as a window title. The URL is a single arg, not shell-interpolated.
-        let mut c = std::process::Command::new("cmd");
-        c.args(["/C", "start", "", url]);
-        c
-    };
-    cmd.stdout(std::process::Stdio::null())
+    let mut cmd = windows_browser_command(url);
+    spawn_browser(&mut cmd).map(|_| ())
+}
+
+#[cfg(any(windows, test))]
+fn windows_browser_command(url: &str) -> std::process::Command {
+    let mut command = std::process::Command::new("rundll32");
+    command.args(["url.dll,FileProtocolHandler", url]);
+    command
+}
+
+fn spawn_browser(command: &mut std::process::Command) -> std::io::Result<std::process::Child> {
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .status()
-        .map(|_| ())
+        .spawn()
 }
 
 fn decode_hash(hex: &str) -> Result<[u8; 32], CliError> {
@@ -6789,5 +6872,92 @@ mod deposit_cli_tests {
         }).unwrap();
         drop(sqlite);
         root
+    }
+}
+
+#[cfg(test)]
+mod login_regressions {
+    use super::*;
+
+    #[test]
+    fn snowflake_new_accounts_defer_id_until_account_is_known() {
+        assert_eq!(new_login_id("snowflake", "oauth:snowflake", None), None);
+        assert_eq!(
+            new_login_id("snowflake", "oauth:snowflake", Some("work")),
+            None
+        );
+        assert_eq!(
+            new_login_id("openai", "apikey:openai", None).as_deref(),
+            Some("apikey:openai")
+        );
+    }
+
+    #[test]
+    fn interactive_replace_is_forwarded_to_login_drivers() {
+        assert!(login_replace(&[], true));
+        assert!(!login_replace(&[], false));
+        assert!(login_replace(&["--replace".into()], false));
+    }
+
+    #[test]
+    fn windows_browser_argv_preserves_the_entire_url() {
+        let url = "https://example.com/authorize?client_id=public&state=test&redirect_uri=http%3A%2F%2Flocalhost";
+        let command = windows_browser_command(url);
+        assert_eq!(command.get_program(), "rundll32");
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            ["url.dll,FileProtocolHandler", url]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn browser_launcher_returns_without_waiting_for_exit() {
+        let start = std::time::Instant::now();
+        let mut command = std::process::Command::new("sleep");
+        command.arg("2");
+        let mut child = spawn_browser(&mut command).unwrap();
+        let elapsed = start.elapsed();
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "waited {elapsed:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod explicit_route_regressions {
+    use super::*;
+
+    #[test]
+    fn a_wrong_named_connection_refuses_instead_of_opening_offline_store() {
+        let _env = discovery_tests::env_guard();
+        let root = std::env::temp_dir().join(format!("ck-named-refusal-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let named = root.join("missing-connection.json");
+        let previous = std::env::var_os("SUBC_CONNECTION_FILE");
+        std::env::set_var("SUBC_CONNECTION_FILE", &named);
+        let global = GlobalArgs {
+            data_dir: root.clone(),
+            key_source: KeySource::OperatorPath {
+                path: root.join("missing.key"),
+            },
+            subc_conn: Some(named),
+        };
+        let result = commit_admin(
+            &global,
+            AdminOpBody::Status {
+                v: ADMIN_OP_SCHEMA_V1,
+            },
+        );
+        match previous {
+            Some(value) => std::env::set_var("SUBC_CONNECTION_FILE", value),
+            None => std::env::remove_var("SUBC_CONNECTION_FILE"),
+        }
+        assert!(matches!(result, Err(CliError::LocalFailure(_))));
+        assert!(!root.join("store.db").exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

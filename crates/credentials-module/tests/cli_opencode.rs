@@ -2407,3 +2407,179 @@ fn the_opencode_account_rejects_duplicate_or_invalid_labels_without_any_write() 
     assert_eq!(rig.run(&["audit"]).stdout, audit_before);
     assert!(String::from_utf8_lossy(&rig.run(&["list"]).stdout).contains("apikey:deepseek:main"));
 }
+
+#[test]
+fn unsupported_migration_tenants_refuse_before_any_write() {
+    let rig = MigrationRig::new(
+        "unsupported-tenant",
+        json!({"deepseek":{"type":"api","key":"fixture-key"}}),
+    );
+    let auth = std::fs::read(&rig.auth).unwrap();
+    let out = rig.migrate(&["--serve-by", "my-plugin"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("supports only opencode-claustrum"));
+    assert_eq!(std::fs::read(&rig.auth).unwrap(), auth);
+    assert!(!rig.handles.exists());
+    assert!(open_vault(&rig).list_meta().unwrap().is_empty());
+}
+
+#[test]
+fn multi_account_restore_refuses_before_reading_or_revoking_material() {
+    let rig = MigrationRig::new(
+        "restore-multi",
+        json!({"deepseek":{"type":"api","key":"fixture-main"}}),
+    );
+    assert!(rig.migrate(&[]).status.success());
+    let key = rig.root.join("alt.key");
+    std::fs::write(&key, b"fixture-alt").unwrap();
+    assert!(rig
+        .run(&[
+            "opencode-account",
+            "add",
+            "--provider",
+            "deepseek",
+            "--label",
+            "alt",
+            "--key-file",
+            key.to_str().unwrap(),
+            "--handle-file",
+            rig.handles.to_str().unwrap()
+        ])
+        .status
+        .success());
+    let handles = std::fs::read(&rig.handles).unwrap();
+    let auth = std::fs::read(&rig.auth).unwrap();
+    let audit = rig.run(&["audit"]).stdout;
+    let out = rig.migrate(&["--restore", "deepseek"]);
+    assert!(!out.status.success());
+    let error = String::from_utf8_lossy(&out.stderr);
+    assert!(error.contains("accounts: main, alt"), "{error}");
+    assert_eq!(std::fs::read(&rig.handles).unwrap(), handles);
+    assert_eq!(std::fs::read(&rig.auth).unwrap(), auth);
+    assert_eq!(rig.run(&["audit"]).stdout, audit);
+}
+
+#[test]
+fn non_identifier_auth_entries_are_skipped_and_preserved() {
+    let rig = MigrationRig::new(
+        "nonidentifier-auth",
+        json!({
+            "https://wellknown.example/auth": {"type":"wellknown","token":"fixture"},
+            "CustomProvider": {"type":"api","key":"custom-fixture"},
+            "deepseek": {"type":"api","key":"fixture-key"}
+        }),
+    );
+    let entries = opencode_files::read_auth_entries(&rig.auth).unwrap();
+    assert_eq!(entries.keys().collect::<Vec<_>>(), ["deepseek"]);
+    assert!(rig.migrate(&[]).status.success());
+    let raw: Value = serde_json::from_slice(&std::fs::read(&rig.auth).unwrap()).unwrap();
+    assert_eq!(raw["CustomProvider"]["key"], "custom-fixture");
+    assert_eq!(raw["https://wellknown.example/auth"]["type"], "wellknown");
+    assert!(opencode_files::write_auth_entry(
+        &rig.auth,
+        "CustomProvider",
+        json!({"type":"api","key":"other"})
+    )
+    .is_err());
+}
+
+#[test]
+fn account_key_files_trim_one_terminal_line_ending() {
+    let rig = MigrationRig::new(
+        "account-newline",
+        json!({"deepseek":{"type":"api","key":"fixture-main"}}),
+    );
+    assert!(rig.migrate(&[]).status.success());
+    for (label, bytes) in [
+        ("lf", b"fixture-lf\n".as_slice()),
+        ("crlf", b"fixture-crlf\r\n".as_slice()),
+    ] {
+        let key = rig.root.join(format!("{label}.key"));
+        std::fs::write(&key, bytes).unwrap();
+        let out = rig.run(&[
+            "opencode-account",
+            "add",
+            "--provider",
+            "deepseek",
+            "--label",
+            label,
+            "--key-file",
+            key.to_str().unwrap(),
+            "--handle-file",
+            rig.handles.to_str().unwrap(),
+        ]);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let store = open_vault(&rig);
+        assert_eq!(
+            store
+                .get(&format!("apikey:deepseek:{label}"))
+                .unwrap()
+                .payload
+                .expose(),
+            format!("fixture-{label}").as_bytes()
+        );
+    }
+}
+
+#[test]
+fn snowflake_provider_logout_retires_every_account() {
+    let rig = MigrationRig::new("snowflake-logout", json!({}));
+    let payload = rig.root.join("payload");
+    std::fs::write(&payload, b"fixture-key").unwrap();
+    for id in [
+        "oauth:snowflake:org-a",
+        "oauth:snowflake:org-b",
+        "apikey:deepseek",
+    ] {
+        let out = rig.run(&[
+            "put",
+            "--id",
+            id,
+            "--kind",
+            "api_key",
+            "--payload-file",
+            payload.to_str().unwrap(),
+        ]);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let out = rig.run(&["logout", "--provider", "snowflake"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let status = rig.run(&["status"]);
+    let text = String::from_utf8_lossy(&status.stdout);
+    for id in ["oauth:snowflake:org-a", "oauth:snowflake:org-b"] {
+        assert!(
+            text.lines()
+                .any(|line| line.contains(id) && line.contains("retired")),
+            "{text}"
+        );
+    }
+    assert!(
+        text.lines()
+            .any(|line| line.contains("apikey:deepseek") && line.contains("active")),
+        "{text}"
+    );
+}
+
+#[test]
+fn kem_replace_reports_replacement_not_creation() {
+    let rig = MigrationRig::new("kem-replace-message", json!({}));
+    assert!(rig
+        .run(&["mint-kem-key", "--id", "kem:operator"])
+        .status
+        .success());
+    let out = rig.run(&["mint-kem-key", "--id", "kem:operator", "--replace"]);
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("replaced kem:operator"));
+}

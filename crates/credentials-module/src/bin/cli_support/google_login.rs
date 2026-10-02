@@ -84,7 +84,7 @@ pub fn cmd_login(
 
     let captured = match listener {
         Some(listener) => {
-            println!("Approve in the browser — the login completes here automatically.");
+            println!("Approve in a browser on this machine — if it can reach this listener, the login completes here automatically.");
             let callback = listener.wait();
             if callback.is_some() {
                 println!("Browser redirect received — completing the login, nothing to paste.");

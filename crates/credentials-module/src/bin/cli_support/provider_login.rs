@@ -25,12 +25,23 @@ pub(crate) fn run(
     args: &[String],
     selected_id: Option<&str>,
     selected_replace: bool,
+    preflight: &mut dyn FnMut(&str, bool) -> Result<(), String>,
 ) -> Result<Option<SpecialLogin>, String> {
     let result = match provider {
-        "cursor" => Some(run_cursor(args, selected_id, selected_replace)?),
-        "devin" => Some(run_devin(args, selected_id, selected_replace)?),
-        "snowflake" => Some(run_snowflake(args, selected_id, selected_replace)?),
-        "digitalocean" => Some(run_digitalocean(args, selected_id, selected_replace)?),
+        "cursor" => Some(run_cursor(args, selected_id, selected_replace, preflight)?),
+        "devin" => Some(run_devin(args, selected_id, selected_replace, preflight)?),
+        "snowflake" => Some(run_snowflake(
+            args,
+            selected_id,
+            selected_replace,
+            preflight,
+        )?),
+        "digitalocean" => Some(run_digitalocean(
+            args,
+            selected_id,
+            selected_replace,
+            preflight,
+        )?),
         _ => None,
     };
     Ok(result)
@@ -40,6 +51,7 @@ fn run_cursor(
     args: &[String],
     selected_id: Option<&str>,
     selected_replace: bool,
+    preflight: &mut dyn FnMut(&str, bool) -> Result<(), String>,
 ) -> Result<SpecialLogin, String> {
     let id = optional(args, "--id")
         .or_else(|| selected_id.map(str::to_string))
@@ -50,6 +62,7 @@ fn run_cursor(
             cursor::DEFAULT_ID
         ));
     }
+    preflight(&id, has_flag(args, "--replace") || selected_replace)?;
     let pkce = generate_pkce().map_err(|e| format!("csprng: {e}"))?;
     let start =
         cursor::start_login(&pkce).map_err(|e| format!("building Cursor login URL: {e}"))?;
@@ -91,6 +104,7 @@ fn run_devin(
     args: &[String],
     selected_id: Option<&str>,
     selected_replace: bool,
+    preflight: &mut dyn FnMut(&str, bool) -> Result<(), String>,
 ) -> Result<SpecialLogin, String> {
     let id = optional(args, "--id")
         .or_else(|| selected_id.map(str::to_string))
@@ -101,6 +115,7 @@ fn run_devin(
             devin::DEFAULT_ID
         ));
     }
+    preflight(&id, has_flag(args, "--replace") || selected_replace)?;
     let pkce = generate_pkce().map_err(|e| format!("csprng: {e}"))?;
     let state = generate_state().map_err(|e| format!("csprng: {e}"))?;
     let authorize_url = devin::authorize_url(devin::LOGIN_REDIRECT_URI, &state, &pkce.challenge)
@@ -152,8 +167,12 @@ fn run_snowflake(
     args: &[String],
     selected_id: Option<&str>,
     selected_replace: bool,
+    preflight: &mut dyn FnMut(&str, bool) -> Result<(), String>,
 ) -> Result<SpecialLogin, String> {
-    let account = match optional(args, "--account") {
+    let selected_account = optional(args, "--id")
+        .or_else(|| selected_id.map(str::to_string))
+        .and_then(|id| id.strip_prefix("oauth:snowflake:").map(str::to_string));
+    let account = match optional(args, "--account").or(selected_account) {
         Some(account) => account,
         None => {
             println!("Snowflake account identifier:");
@@ -170,6 +189,8 @@ fn run_snowflake(
         .or_else(|| selected_id.map(str::to_string))
         .unwrap_or_else(|| default_id.clone());
     snowflake::validate_credential_id(&account, &id)?;
+
+    preflight(&id, has_flag(args, "--replace") || selected_replace)?;
 
     // Snowflake requires the actual callback port in the authorize URL. Reserve it
     // before opening the browser, then keep the listener alive through the redirect.
@@ -235,6 +256,7 @@ fn run_digitalocean(
     args: &[String],
     selected_id: Option<&str>,
     selected_replace: bool,
+    preflight: &mut dyn FnMut(&str, bool) -> Result<(), String>,
 ) -> Result<SpecialLogin, String> {
     let id = optional(args, "--id")
         .or_else(|| selected_id.map(str::to_string))
@@ -245,6 +267,7 @@ fn run_digitalocean(
             digitalocean::DEFAULT_ID
         ));
     }
+    preflight(&id, has_flag(args, "--replace") || selected_replace)?;
     let state = generate_state().map_err(|e| format!("csprng: {e}"))?;
     let authorize_url = digitalocean::authorize_url(&state);
     let listener = if has_flag(args, "--no-listener") {
@@ -297,7 +320,7 @@ fn open_and_capture(
     let _ = super::open_in_browser(args, authorize_url);
     let captured = match listener {
         Some(listener) => {
-            println!("Approve in the browser — the login completes here automatically.");
+            println!("Approve in a browser on this machine — if it can reach this listener, the login completes here automatically.");
             listener.wait()
         }
         None => None,
@@ -338,4 +361,44 @@ fn block_on<F: std::future::Future>(future: F) -> F::Output {
         .build()
         .expect("single-thread login runtime")
         .block_on(future)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn special_logins_preflight_before_starting_authorization() {
+        for provider in ["cursor", "devin", "snowflake", "digitalocean"] {
+            let args = vec!["--account".into(), "org-account".into()];
+            let mut seen = Vec::new();
+            let result = run(provider, &args, None, true, &mut |id, replace| {
+                seen.push((id.to_string(), replace));
+                Err("preflight stop".into())
+            });
+            assert!(
+                matches!(result, Err(ref error) if error == "preflight stop"),
+                "{provider}"
+            );
+            assert_eq!(seen.len(), 1, "{provider}");
+            assert!(seen[0].1);
+        }
+    }
+
+    #[test]
+    fn snowflake_replace_derives_account_from_selected_id() {
+        let mut seen = None;
+        let result = run(
+            "snowflake",
+            &[],
+            Some("oauth:snowflake:org-account"),
+            true,
+            &mut |id, _| {
+                seen = Some(id.to_string());
+                Err("preflight stop".into())
+            },
+        );
+        assert!(matches!(result, Err(ref error) if error == "preflight stop"));
+        assert_eq!(seen.as_deref(), Some("oauth:snowflake:org-account"));
+    }
 }

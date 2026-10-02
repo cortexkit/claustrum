@@ -285,7 +285,10 @@ fn read_key_material(path: &str) -> Result<Vec<u8>, CliError> {
         trim_terminal_newline(&mut material);
         return Ok(material);
     }
-    std::fs::read(path).map_err(|error| CliError::Io(format!("read key file {path}: {error}")))
+    let mut material = std::fs::read(path)
+        .map_err(|error| CliError::Io(format!("read key file {path}: {error}")))?;
+    trim_terminal_newline(&mut material);
+    Ok(material)
 }
 
 fn trim_terminal_newline(material: &mut Vec<u8>) {

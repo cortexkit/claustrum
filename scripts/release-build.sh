@@ -183,8 +183,15 @@ for bin in ck-claustrum ck-auth; do
   # uses JIT, so no entitlements file is needed: keychain resolution runs `security` as a
   # child process, which the runtime does not restrict.
   codesign --force --sign - --options runtime --identifier "$bin" "$STAGE/$bin"
-  codesign -dv "$STAGE/$bin" 2>&1 | grep -q 'flags=.*runtime' \
-    || { echo "REFUSING: $bin was signed without the hardened runtime" >&2; exit 1; }
+  # Capture first, then match. Under `set -o pipefail`, `codesign ... | grep -q` fails
+  # whenever grep exits on its first match before codesign finishes writing: codesign
+  # takes SIGPIPE and the pipeline reports failure, so a correctly hardened binary was
+  # refused intermittently.
+  signature="$(codesign -dv "$STAGE/$bin" 2>&1)"
+  case "$signature" in
+    *flags=*runtime*) ;;
+    *) echo "REFUSING: $bin was signed without the hardened runtime" >&2; exit 1 ;;
+  esac
   # WRITE the digest beside the artifact, do not merely print it. A hash that exists
   # only in this script's output is a hash that reaches the placer as a CLAIM IN A
   # MESSAGE -- retyped, quotable, and unverifiable against anything at rest. The placer

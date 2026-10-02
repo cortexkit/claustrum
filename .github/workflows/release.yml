@@ -306,10 +306,17 @@ jobs:
         run: |
           for b in ck-claustrum ck-auth; do
             codesign --force --sign - --options runtime --identifier "$b" "target/release/$b"
-            codesign -dv "target/release/$b" 2>&1 | grep -q "Identifier=$b" \
-              || { echo "REFUSING: $b did not take the pinned identifier"; exit 1; }
-            codesign -dv "target/release/$b" 2>&1 | grep -q 'flags=.*runtime' \
-              || { echo "REFUSING: $b was signed without the hardened runtime"; exit 1; }
+            # Capture, then match: the runner's bash uses pipefail, so `codesign | grep -q`
+            # can fail on a good binary when grep exits before codesign finishes writing.
+            signature="$(codesign -dv "target/release/$b" 2>&1)"
+            case "$signature" in
+              *"Identifier=$b"*) ;;
+              *) echo "REFUSING: $b did not take the pinned identifier"; exit 1 ;;
+            esac
+            case "$signature" in
+              *flags=*runtime*) ;;
+              *) echo "REFUSING: $b was signed without the hardened runtime"; exit 1 ;;
+            esac
           done
 
       # ANSWERED BY THE FIRST RUN: Git Bash on the windows runner has NO `zip`.

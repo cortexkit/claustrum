@@ -33,6 +33,7 @@ The mutation arm disables only the custom-fetch installation:
 unshare -rn sh -c 'ip link set lo up; SPIKE_DISABLE_CUSTOM_FETCH=1 bash scripts/spikes/opencode-config-fetch.sh'
 ```
 
-It must fail with a final line containing `SPIKE FAIL deepseek custom_fetch=0`.
+It must exit nonzero and include `SPIKE FAIL deepseek custom_fetch=0` in its output;
+the remaining provider arms continue after that failure, so it is not the final line.
 That failure is load-bearing: without it, a fixture could pass while never
 proving fetch ownership.

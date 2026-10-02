@@ -163,10 +163,11 @@ def main() -> int:
                 )
             else:
                 externals.append(f"{doc.as_posix()} -> {where}")
-            continue
+            if not MARKER.search(text):
+                continue
 
-        marker = MARKER.search(text)
-        if not marker:
+        markers = list(MARKER.finditer(text))
+        if not markers:
             failures.append(
                 f"{doc.as_posix()} claims NOT BUILT but names no falsifier.\n"
                 f"    Add a marker naming the symbol whose existence would disprove it:\n"
@@ -175,23 +176,18 @@ def main() -> int:
             )
             continue
 
-        checked += 1
-        target = Path(marker.group("path"))
-        symbol = marker.group("symbol")
-        if not target.is_file():
-            failures.append(
-                f"{doc.as_posix()} names {target.as_posix()} which does not exist.\n"
-                f"    A marker pointing at a missing file can never fire, so the claim\n"
-                f"    is unguarded. Fix the path."
-            )
-            continue
-
-        if symbol in target.read_text(encoding="utf-8", errors="replace"):
-            failures.append(
-                f"{doc.as_posix()} says NOT BUILT, but `{symbol}` EXISTS in\n"
-                f"    {target.as_posix()}. The feature shipped and the header did not\n"
-                f"    move. Update the status line — that is what this check is for."
-            )
+        for marker in markers:
+            checked += 1
+            target = Path(marker.group("path"))
+            symbol = marker.group("symbol")
+            if not target.is_file():
+                failures.append(f"{doc.as_posix()} names missing file {target.as_posix()}; fix its falsifier path.")
+                continue
+            if re.search(rf"(?<!\w){re.escape(symbol)}(?!\w)", target.read_text(encoding="utf-8", errors="replace")):
+                failures.append(
+                    f"{doc.as_posix()} says NOT BUILT, but `{symbol}` EXISTS in\n"
+                    f"    {target.as_posix()}. Update the status line."
+                )
 
     if failures:
         print("REFUSING: design doc status claims contradicted by the code:\n", file=sys.stderr)
@@ -212,7 +208,7 @@ def main() -> int:
     # being right is not enough.
     contradictions = []
     for doc in docs:
-        text = doc.read_text(encoding="utf-8")
+        text = doc.read_text(encoding="utf-8", errors="replace")
         head = text[:400]
         if not re.search(r"\*\*Status:[^*]*(SHIPPED|BUILT)(?![A-Z])", head, re.IGNORECASE):
             continue

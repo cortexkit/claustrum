@@ -76,7 +76,7 @@ compare "sealed blob payload key" "$ours_key" "$theirs_key"
 
 # The `aps` member that causes iOS to run the service extension.
 ours_mutable=$(sed -n 's/^pub const MUTABLE_CONTENT_KEY: &str = "\(.*\)";$/\1/p' "$source_file")
-theirs_mutable=$(grep -o '"mutable-content":1' "$spec" | head -1 | sed 's/^"\(.*\)":1$/\1/')
+theirs_mutable=$(sed -n '/"mutable-content":1/{s/.*"mutable-content":1.*/mutable-content/p; q;}' "$spec")
 compare "mutable-content key" "$ours_mutable" "$theirs_mutable"
 
 # The envelope's minimum length, derived on both sides from the same three parts

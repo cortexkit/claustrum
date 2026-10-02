@@ -38,7 +38,7 @@ MANIFEST = ROOT / "docs" / "threshold-controls.txt"
 # regenerated without being read, which is worse than not having it.
 _TOKEN = r"(?:CAP|CEILING|LIMIT|MIN|MAX|CEILING)"
 THRESHOLD_NAME = re.compile(
-    rf"^pub const ((?:[A-Z0-9]+_)*{_TOKEN}(?:_[A-Z0-9]+)*)\s*:", re.M
+    rf"^\s*(?:pub(?:\([^)]*\))?\s+)?const ((?:[A-Z0-9]+_)*{_TOKEN}(?:_[A-Z0-9]+)*)\s*:", re.M
 )
 
 # Fixed sizes wearing threshold-shaped names: nothing sits below them, so there
@@ -81,17 +81,29 @@ def scan_source() -> dict[str, str]:
                 # NOT help, because the separator comes from Python's path
                 # rendering rather than from the shell.
                 found[name] = path.relative_to(ROOT).as_posix()
-    found.update(NAME_RULE_BLIND)
+    for name, rel in NAME_RULE_BLIND.items():
+        text = (ROOT / rel).read_text(encoding="utf-8")
+        if not re.search(rf"\bconst\s+{re.escape(name)}\s*:", text):
+            raise SystemExit(f"REFUSING: listed threshold {name} no longer exists in {rel}")
+        found[name] = rel
     return found
 
 
-def read_manifest() -> dict[str, tuple[str, str]]:
+def read_manifest() -> tuple[dict[str, tuple[str, str]], dict[str, str]]:
     rows: dict[str, tuple[str, str]] = {}
+    unchecked: dict[str, str] = {}
     for lineno, raw in enumerate(MANIFEST.read_text(encoding="utf-8").splitlines(), 1):
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
         parts = line.split()
+        if parts[0] == "UNCHECKED":
+            if len(parts) != 8 or parts[3:] != ["no", "exact", "boundary", "test", "yet"]:
+                sys.exit(f"{MANIFEST}:{lineno}: invalid unchecked row")
+            if parts[1] in unchecked or parts[1] in rows:
+                sys.exit(f"{MANIFEST}:{lineno}: duplicate threshold {parts[1]}")
+            unchecked[parts[1]] = parts[2]
+            continue
         # REFUSE AN UNREADABLE ROW rather than skipping it. A parser that
         # silently drops rows it cannot read reports success while checking
         # nothing, which is the failure this whole file exists to prevent.
@@ -99,8 +111,10 @@ def read_manifest() -> dict[str, tuple[str, str]]:
             sys.exit(
                 f"{MANIFEST}:{lineno}: expected '<constant> <file> <test>', got: {raw}"
             )
+        if parts[0] in rows or parts[0] in unchecked:
+            sys.exit(f"{MANIFEST}:{lineno}: duplicate threshold {parts[0]}")
         rows[parts[0]] = (parts[1], parts[2])
-    return rows
+    return rows, unchecked
 
 
 def main() -> int:
@@ -111,8 +125,13 @@ def main() -> int:
             print(f"{name} {path}")
         return 0
 
-    manifest = read_manifest()
+    manifest, unchecked = read_manifest()
     problems: list[str] = []
+    if unchecked:
+        print(f"WARNING: {len(unchecked)} UNCHECKED thresholds (no exact boundary test yet): " + ", ".join(sorted(unchecked)))
+    for name, path in sorted(unchecked.items()):
+        if source.get(name) != path:
+            problems.append(f"  unchecked threshold {name} missing or moved from {path}")
 
     # An empty scan is indistinguishable from a broken pattern, so require the
     # population to be non-trivial before believing any of its answers.
@@ -123,6 +142,8 @@ def main() -> int:
         )
 
     for name, path in sorted(source.items()):
+        if name in unchecked:
+            continue
         if name not in manifest:
             problems.append(
                 f"  {name} ({path})\n"
@@ -162,7 +183,7 @@ def main() -> int:
     if problems:
         return fail("thresholds without a recorded boundary test:\n" + "\n".join(problems))
 
-    print(f"threshold controls: {len(source)} threshold(s), each with a boundary test")
+    print(f"threshold controls: {len(manifest)} checked, {len(unchecked)} explicitly unchecked")
     return 0
 
 

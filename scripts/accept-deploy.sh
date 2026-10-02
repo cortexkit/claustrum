@@ -167,12 +167,15 @@ echo
 # "reports '<none>', expected '<rev>'" -- which reads as a stamping problem and
 # sends the reader to the build, not to the placement. Measured 2026-09-13.
 for name in ck-claustrum ck-auth; do
-    raw="$("$BIN_DIR/$name" --version 2>&1)"; rc=$?
+    rc=0
+    raw="$("$BIN_DIR/$name" --version 2>&1)" || rc=$?
     got="$(printf '%s' "$raw" | sed -n 's/.*(\(.*\))/\1/p')"
     if [ "$rc" -ge 128 ] && [ -z "$raw" ]; then
         fail "$name was KILLED on exec (rc=$rc, no output): the placed file is dead. \
 The usual cause is a plain \`cp\` over the running image -- replace by rename \
 (cp to <dest>.incoming, then mv -f). The old process keeps serving until it restarts."
+    elif [ "$rc" -ne 0 ]; then
+        fail "$name could not execute (rc=$rc)"
     elif [ "$got" = "$EXPECTED_REV" ]; then
         pass "$name reports $got"
     else
@@ -192,8 +195,12 @@ if [ -n "$STAGED_DIR" ]; then
             fail "$name absent from $STAGED_DIR"
             continue
         fi
-        a="$(shasum -a 256 "$STAGED_DIR/$name" | cut -d' ' -f1)"
-        b="$(shasum -a 256 "$BIN_DIR/$name" | cut -d' ' -f1)"
+        if ! a="$(shasum -a 256 "$STAGED_DIR/$name")" || ! b="$(shasum -a 256 "$BIN_DIR/$name")"; then
+            fail "$name digest could not be read"
+            continue
+        fi
+        a="${a%% *}"
+        b="${b%% *}"
         if [ "$a" = "$b" ]; then
             pass "$name digest matches its staged artifact"
         else
@@ -211,7 +218,8 @@ fi
 # --sign -` at the destination silently reverts it to the derived form, which
 # embeds the link-time UUID and revokes every macOS privacy grant bound to it.
 for name in ck-claustrum ck-auth; do
-    ident="$(codesign -dv "$BIN_DIR/$name" 2>&1 | sed -n 's/^Identifier=//p')"
+    signature="$(codesign -dv "$BIN_DIR/$name" 2>&1)" || signature=""
+    ident="$(sed -n 's/^Identifier=//p' <<< "$signature")"
     if [ "$ident" = "$name" ]; then
         pass "$name identifier pinned"
     else
@@ -248,14 +256,17 @@ done
   # Verified on this host that `-a` does not change the output shape: both forms
   # return exactly `2340`.
   pid="$(pgrep -a -x ck-claustrum || true)"
-if [ -z "$pid" ]; then
+if [[ "$pid" == *$'\n'* ]]; then
+    fail "multiple ck-claustrum processes; cannot identify the deployed image"
+elif [ -z "$pid" ]; then
     fail "no ck-claustrum process"
 else
     # lsof's txt rows: the inode is the SECOND-TO-LAST field and the path is the
     # LAST. Taking $2 yields the pid -- a plausible integer next to a real inode,
     # which is why this guard is spelled out rather than left to memory.
-    run_inode="$(lsof -p "$pid" | awk '$4=="txt" && /ck-claustrum/{print $(NF-1); exit}')"
-    dep_inode="$(stat -f %i "$BIN_DIR/ck-claustrum")"
+    open_files="$(lsof -p "$pid")" || open_files=""
+    run_inode="$(awk '$4=="txt" && /ck-claustrum/{if (!seen++) print $(NF-1)}' <<< "$open_files")"
+    dep_inode="$(stat -f %i "$BIN_DIR/ck-claustrum" 2>/dev/null)" || dep_inode=""
     if [ -n "$run_inode" ] && [ "$run_inode" = "$dep_inode" ]; then
         pass "running image is the deployed file (inode $run_inode)"
     else
@@ -268,7 +279,7 @@ else
     # opened, so a stale config cannot make it agree with the wrong answer. Every
     # other leg answers "is it healthy" or "is it the right binary"; only this one
     # answers "is it the right vault".
-    store="$(lsof -p "$pid" | awk '$NF ~ /store\.db$/ {print $NF; exit}')"
+    store="$(awk '$NF ~ /store\.db$/ {if (!seen++) print $NF}' <<< "$open_files")"
     expected_store="$HOME/.local/share/cortexkit/claustrum/store.db"
     if [ "$store" = "$expected_store" ]; then
         pass "open store is $store"
@@ -280,11 +291,13 @@ fi
 # ---- leg (f): serving, not merely alive -------------------------------------
 # A daemon whose master key was unavailable at boot is up, answering, and serving
 # nothing. The assertion is N/N serving, never "the process is up".
-status="$("$BIN_DIR/ck-auth" status 2>&1 | head -1)"
-if printf '%s' "$status" | grep -q "^vault: ok"; then
+status_rc=0
+status="$("$BIN_DIR/ck-auth" status 2>&1)" || status_rc=$?
+status="${status%%$'\n'*}"
+if [ "$status_rc" -eq 0 ] && [[ "$status" == "vault: ok"* ]]; then
     pass "$status"
 else
-    fail "$status"
+    fail "vault status (rc=$status_rc): ${status:-<no output>}"
     note "degraded is not automatically a deploy failure -- check WHICH credential"
 fi
 
@@ -293,7 +306,7 @@ fi
 # write. Only a round trip through the write path proves write authority, and the
 # mint/revoke pair also exercises the atomic audit append.
 probe="apikey:exa"
-if handle="$("$BIN_DIR/ck-auth" mint-handle --id "$probe" 2>&1 | head -1)" \
+if handle="$("$BIN_DIR/ck-auth" mint-handle --id "$probe" 2>/dev/null)" \
     && [ -n "$handle" ] \
     && "$BIN_DIR/ck-auth" revoke-handle --handle "$handle" >/dev/null 2>&1; then
     pass "fenced write path commits (mint + revoke on $probe)"

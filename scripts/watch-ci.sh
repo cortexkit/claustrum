@@ -43,7 +43,7 @@ fi
 # Which workflow gates a landing. A sha can carry runs from several workflows
 # (cost-gate, testbox), so resolving a run BY SHA has to name the gating one or
 # it can latch a run that says nothing about the tests.
-WORKFLOW="${WATCH_CI_WORKFLOW:-tests.yml}"
+WORKFLOW="${WATCH_CI_WORKFLOW:-ci.yml}"
 # How long to wait for a run to appear for a sha: 40 tries, 15s apart, is ten
 # minutes of patience for a queue that normally produces a run in seconds. Both
 # knobs exist so tests can drive the resolver without waiting out that budget.
@@ -94,7 +94,8 @@ if [ -z "$RID" ]; then
   for _ in $(seq 1 "$RESOLVE_ATTEMPTS"); do
     RID=$("$OPERATOR_GH" run list --repo "$REPO" --workflow "$WORKFLOW" --limit 40 \
       --json databaseId,headSha \
-      --jq ".[] | select(.headSha==\"$WATCH_SHA\") | .databaseId" | head -1)
+      --jq ".[] | select(.headSha==\"$WATCH_SHA\") | .databaseId") || RID=""
+    RID="${RID%%$'\n'*}"
     [ -n "$RID" ] && break
     sleep "$RESOLVE_SLEEP"
   done
@@ -112,34 +113,42 @@ if [ -n "$RUN_URL" ] && [ "$RUN_URL" != "null" ]; then
   echo "CI_RUN_URL $RUN_URL"
 fi
 
+# Five consecutive failed API reads are an unavailable watch, not a red build.
+poll_failures=0
 while true; do
-  STATUS=$("$OPERATOR_GH" run view "$RID" --repo "$REPO" --json status --jq '.status' 2>/dev/null || echo poll-error)
-  # 'Bash permission e2e (Windows)' is continue-on-error in PR mode
-  # (_unit-suite.yml strict=false): its job-level conclusion still reads
-  # 'failure' in the API, but it does not gate the run. Fail-fast must not
-  # fire on it; the run-level conclusion check below remains authoritative.
-  FAILED_JOB=$("$OPERATOR_GH" run view "$RID" --repo "$REPO" --json jobs \
-    --jq '[.jobs[] | select(.conclusion=="failure") | select(.name | contains("Bash permission") | not)][0] | if . == null then "" else .name + "|" + (.databaseId|tostring) end' 2>/dev/null || echo "")
-
-  if [ -n "$FAILED_JOB" ] && [ "$FAILED_JOB" != "null" ]; then
+  if snapshot=$("$OPERATOR_GH" run view "$RID" --repo "$REPO" --json status,conclusion,jobs \
+      --jq '.status + "|" + (.conclusion // "") + "|" + ([.jobs[] | select(.conclusion=="failure") | select(.name | contains("Bash permission") | not)][0] | if . == null then "" else .name + "|" + (.databaseId|tostring) end)' 2>/dev/null); then
+    poll_failures=0
+  else
+    poll_failures=$((poll_failures + 1))
+    if [ "$poll_failures" -ge 5 ]; then
+      echo "watch-ci: giving up after 5 consecutive failed gh run view calls for $RID" >&2
+      exit 2
+    fi
+    sleep 45
+    continue
+  fi
+  STATUS="${snapshot%%|*}"
+  rest="${snapshot#*|}"
+  CONC="${rest%%|*}"
+  FAILED_JOB="${rest#*|}"
+  if [ "$STATUS" = "completed" ]; then
+    echo "CI_DONE run=$RID conclusion=$CONC"
+    case "$CONC" in
+      success) exit 0 ;;
+      cancelled) echo "CI_SUPERSEDED run=$RID (cancelled; not a red build)"; exit 2 ;;
+      *) exit 1 ;;
+    esac
+  fi
+  if [ -n "$FAILED_JOB" ]; then
     NAME="${FAILED_JOB%%|*}"; JID="${FAILED_JOB##*|}"
     echo "CI_EARLY_FAIL job='$NAME' run=$RID"
     "$OPERATOR_GH" run view --repo "$REPO" --job "$JID" --log-failed 2>/dev/null \
       | grep -aE "FAIL \[|panicked at|error\[|bash startup failure" | head -8
-    if [ "${WATCH_CI_SETTLE:-0}" = "1" ]; then
-      echo "settling: waiting for run completion so a rerun is accepted"
-      while [ "$("$OPERATOR_GH" run view "$RID" --repo "$REPO" --json status --jq '.status' 2>/dev/null || echo poll-error)" != "completed" ]; do
-        sleep 45
-      done
+    if [ "${WATCH_CI_SETTLE:-0}" != "1" ]; then
+      exit 1
     fi
-    exit 1
+    echo "settling: waiting for run completion so a rerun is accepted"
   fi
-
-  if [ "$STATUS" = "completed" ]; then
-    CONC=$("$OPERATOR_GH" run view "$RID" --repo "$REPO" --json conclusion --jq '.conclusion')
-    echo "CI_DONE run=$RID conclusion=$CONC"
-    [ "$CONC" = "success" ] && exit 0 || exit 1
-  fi
-
   sleep 45
 done

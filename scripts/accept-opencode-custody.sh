@@ -5,6 +5,9 @@ WT="${WT:-$(cd "$(dirname "$0")/.." && pwd -P)}"
 CK_AUTH="$WT/target/release/ck-auth"
 umask 077
 ROOT="$(mktemp -d)"
+# The scratch auth files contain a real credential, so even early refusals remove them.
+trap 'rm -rf "$ROOT"' EXIT
+trap 'exit 1' INT TERM
 PROVIDER=synthetic
 # Derive the subc connection path the way `ck` itself does, so the acceptance rig
 # works on hosts whose runtime dir is not `/run/user/1000`. Order matches
@@ -83,14 +86,15 @@ cleanup() {
     if ! ck_auth migrate-opencode --restore "$PROVIDER" \
       --auth-file "$AUTH_FILE" --handle-file "$HANDLE_FILE" > "$ROOT/restore-on-failure.log" 2>&1; then
       printf 'ACCEPT FAIL rollback_restore_failed root=%s\n' "$ROOT" >&2
-      exit 1
+      status=1
     fi
   fi
-  [[ "$status" -eq 0 ]] && rm -rf "$ROOT"
+  rm -rf "$ROOT"
   exit "$status"
 }
-trap cleanup EXIT INT TERM
-trap 'printf "ACCEPT FAIL command=%s\n" "$BASH_COMMAND" >&2' ERR
+trap cleanup EXIT
+trap 'exit 1' INT TERM
+trap 'printf "ACCEPT FAIL command failed\n" >&2' ERR
 
 status_line() {
   ck_auth status | awk -v credential_id="$1" '$NF == credential_id { print }'
@@ -137,7 +141,8 @@ cat > "$XDG_CONFIG_HOME/opencode/opencode.json" <<EOF
 EOF
 chmod 600 "$XDG_CONFIG_HOME/opencode/opencode.json"
 
-MODEL_ID="$(opencode models | awk '$1 == "synthetic/hf:moonshotai/Kimi-K3" { print; exit }')"
+models="$(opencode models)"
+MODEL_ID="$(awk '$1 == "synthetic/hf:moonshotai/Kimi-K3" { if (!seen++) print }' <<< "$models")"
 if [[ -z "$MODEL_ID" ]]; then
   printf 'ACCEPT FAIL synthetic_model=missing\n' >&2
   exit 1

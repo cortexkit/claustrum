@@ -54,7 +54,16 @@ findings=0
 # report a gap that does not exist.
 sql() { sqlite3 "file:$STORE?mode=ro" "$1"; }
 
-approvals=$(sql "SELECT COUNT(*) FROM audit_log WHERE op='approval' AND credential_id='$KEY_ID';")
+approvals=$(sql "SELECT COUNT(*) FROM audit_log WHERE op='approval' AND credential_id='$KEY_ID';") || {
+  echo "REFUSING: cannot read approval rows from $STORE" >&2; exit 2;
+}
+case "$approvals" in
+  ''|*[!0-9]*) echo "REFUSING: invalid approval count" >&2; exit 2 ;;
+esac
+rows=$(sql "SELECT seq, datetime(ts_ms/1000,'unixepoch'), payload_hash FROM audit_log
+            WHERE op='approval' AND credential_id='$KEY_ID' ORDER BY seq;") || {
+  echo "REFUSING: cannot read approval chain from $STORE" >&2; exit 2;
+}
 files=$(find "$PAYLOADS" -name '*.json' -type f | wc -l | tr -d ' ')
 echo "approval rows: $approvals   retained files: $files"
 
@@ -71,7 +80,9 @@ echo "=== files -> chain (content): is every artifact one I approved? ==="
 for f in "$PAYLOADS"/*.json; do
   [ -f "$f" ] || continue
   h=$(shasum -a 256 "$f" | cut -d' ' -f1)
-  n=$(sql "SELECT COUNT(*) FROM audit_log WHERE op='approval' AND payload_hash='$h';")
+  n=$(sql "SELECT COUNT(*) FROM audit_log WHERE op='approval' AND credential_id='$KEY_ID' AND payload_hash='$h';") || {
+    echo "REFUSING: cannot read payload approval from $STORE" >&2; exit 2;
+  }
   if [ "$n" -ge 1 ]; then
     printf '  %-34s %s  approved\n' "$(basename "$f")" "${h:0:16}"
   else
@@ -86,7 +97,7 @@ for f in "$PAYLOADS"/*.json; do
   [ -f "$f" ] || continue
   fn=$(basename "$f")
   want=$(printf '%s' "$fn" | grep -oE 'v[0-9]+' | head -1 | tr -d 'v')
-  got=$(python3 -c "import json;print(json.load(open('$f')).get('manifest_version',''))" 2>/dev/null)
+  got=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("manifest_version", ""))' "$f" 2>/dev/null)
   if [ -z "$want" ] || [ -z "$got" ]; then
     printf '  %-34s could not read a version from both sides  *** UNCHECKABLE ***\n' "$fn"
     findings=$((findings + 1))
@@ -113,8 +124,7 @@ while IFS='|' read -r seq ts hash; do
     printf '  seq %-6s %s  *** BYTES NOT RETAINED (%s) ***\n' "$seq" "${hash:0:16}" "$ts"
     findings=$((findings + 1))
   fi
-done < <(sql "SELECT seq, datetime(ts_ms/1000,'unixepoch'), payload_hash FROM audit_log
-              WHERE op='approval' AND credential_id='$KEY_ID' ORDER BY seq;")
+done <<< "$rows"
 
 echo
 if [ "$findings" -eq 0 ]; then

@@ -245,7 +245,7 @@ def typescript_path_component_calls(source: str) -> list[int]:
 
 
 def is_test_typescript(path: Path) -> bool:
-    return "tests" in path.parts or path.name.endswith((".test.ts", ".spec.ts", ".test.tsx", ".spec.tsx"))
+    return "tests" in path.relative_to(ROOT).parts or path.name.endswith((".test.ts", ".spec.ts", ".test.tsx", ".spec.tsx"))
 
 
 def has_not_a_path_pragma(raw_lines: list[str], lineno: int) -> bool:
@@ -253,7 +253,7 @@ def has_not_a_path_pragma(raw_lines: list[str], lineno: int) -> bool:
 
 
 def main() -> int:
-    script_files = sorted(SCRIPTS.glob("*.py"))
+    script_files = sorted(SCRIPTS.rglob("*.py"))
     if not script_files:
         print("REFUSING: no scripts found to check -- the sweep is broken", file=sys.stderr)
         return 1

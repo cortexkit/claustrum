@@ -201,7 +201,8 @@ EOF
 
 bun "$ROOT/stub.ts" "$ROOT" &
 STUB_PID=$!
-for _ in {1..100}; do
+# Allow a cold bun process to initialize before declaring the local stub unavailable.
+for _ in {1..1500}; do
   [[ -s "$ROOT/port" ]] && break
   sleep 0.01
 done

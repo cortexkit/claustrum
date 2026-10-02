@@ -22,19 +22,18 @@ permissions:
 
 jobs:
   publish:
+    if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
 
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: 1.3.14
 
-      # npm >= 11.5.1 is required for OIDC trusted publishing. Pinning the floor rather
-      # than trusting the runner's bundled npm: a runner image bump that moves npm
-      # BACKWARDS would otherwise fail at the publish step with an auth error that reads
-      # like a credentials problem.
-      - name: Pin an npm that supports OIDC
+      # Install the current npm release for OIDC support (requires npm >= 11.5.1),
+      # rather than relying on the runner's bundled version. This is not a version pin.
+      - name: Install the latest npm for OIDC
         run: |
           npm install -g npm@latest
           npm --version
@@ -43,10 +42,12 @@ jobs:
       # checked against each other BEFORE anything is built, because a publish is
       # effectively irreversible and npm will not let the number be corrected in place.
       - name: Refuse a version disagreement
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
           declared="$(node -p "require('./packages/client/package.json').version")"
-          requested="${{ inputs.version }}"
+          requested="$REQUESTED_VERSION"
           if [ "$declared" != "$requested" ]; then
             echo "REFUSED: requested $requested but packages/client/package.json says $declared"
             echo "The manifest is the authority. Bump it in a commit rather than here."
@@ -57,9 +58,11 @@ jobs:
       # Refuse a version that already exists rather than discovering it at publish time,
       # where the error arrives after the build and reads as a permissions failure.
       - name: Refuse an already-published version
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          v="${{ inputs.version }}"
+          v="$REQUESTED_VERSION"
           if npm view "@cortexkit/claustrum-client@$v" version >/dev/null 2>&1; then
             echo "REFUSED: @cortexkit/claustrum-client@$v is already on the registry."
             echo "npm versions are immutable; bump the manifest."
@@ -85,9 +88,11 @@ jobs:
         run: npm publish --provenance --access public
 
       - name: Prove it is fetchable rather than assuming the exit code
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          v="${{ inputs.version }}"
+          v="$REQUESTED_VERSION"
           # PATIENCE, MEASURED RATHER THAN GUESSED. The 0.2.0 publish succeeded and this
           # check failed it: six attempts over 60s, and the version was fetchable shortly
           # after. npm's CDN propagation routinely exceeds a minute, so a 60s ceiling

@@ -68,11 +68,8 @@ pub enum RefusalKind {
     /// 400 `BadDeviceToken` / 410 `Unregistered`. The device token does not belong
     /// to this environment+topic, or the app was uninstalled.
     ///
-    /// This is the arm that diagnoses an environment mismatch. A device token minted
-    /// by a production build is refused here by the SANDBOX host, while the
-    /// production host accepts it — so submitting the same token to both hosts
-    /// distinguishes a production key from a sandbox one, which nothing in the `.p8`
-    /// itself can do.
+    /// This identifies device registration problems, not an environment-restricted
+    /// provider key; that key refusal is classified as `EnvironmentMismatch`.
     DeviceToken,
     /// 400 `TopicDisallowed` / `DeviceTokenNotForTopic`. The topic does not match
     /// the app the token was issued for.
@@ -234,10 +231,10 @@ pub const MIN_SEALED_LEN: usize = 1 + 32 + 16;
 
 fn compose_envelope_unchecked(sealed_blob: &[u8], title: &str, body: &str) -> Vec<u8> {
     let encoded = base64_standard(sealed_blob);
-    format!(
-        r#"{{"aps":{{"alert":{{"title":"{title}","body":"{body}"}},"{MUTABLE_CONTENT_KEY}":1,"sound":"default"}},"{SEALED_BLOB_KEY}":"{encoded}"}}"#
-    )
-    .into_bytes()
+    serde_json::to_vec(&serde_json::json!({
+        "aps": {"alert": {"title": title, "body": body}, MUTABLE_CONTENT_KEY: 1, "sound": "default"},
+        SEALED_BLOB_KEY: encoded,
+    })).expect("serializing a fixed-shape JSON body never fails")
 }
 
 /// The URL for a submission. Split out so the host/path composition is testable
@@ -641,5 +638,22 @@ mod tests {
         assert_ne!(bad_device, topic);
         assert_ne!(bad_device, unknown);
         assert_ne!(topic, unknown);
+    }
+}
+
+#[cfg(test)]
+mod envelope_rules {
+    use super::*;
+    #[test]
+    fn envelope_escapes_alert_text_and_preserves_sealed_blob() {
+        let title = "quote\" slash\\ newline\n";
+        let body = "x\"},\"cks\":\"AAAA";
+        let blob = vec![1; MIN_SEALED_LEN];
+        let envelope = compose_envelope(&blob, title, body).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&envelope).unwrap();
+        assert_eq!(value["aps"]["alert"]["title"], title);
+        assert_eq!(value["aps"]["alert"]["body"], body);
+        assert_eq!(value[SEALED_BLOB_KEY], base64_standard(&blob));
+        assert_eq!(value.as_object().unwrap().len(), 2);
     }
 }

@@ -29,6 +29,7 @@ pub struct ShortTermBedrockKey {
 
 /// Returns `Some` when `payload` is a short-term Bedrock API key.
 pub fn short_term_bedrock_key(payload: &[u8]) -> Option<ShortTermBedrockKey> {
+    let payload = payload.trim_ascii();
     let body = payload.strip_prefix(SHORT_TERM_PREFIX.as_bytes())?;
     Some(ShortTermBedrockKey {
         expires_at_ms: presigned_expiry_ms(body),
@@ -36,7 +37,7 @@ pub fn short_term_bedrock_key(payload: &[u8]) -> Option<ShortTermBedrockKey> {
 }
 
 fn presigned_expiry_ms(body: &[u8]) -> Option<i64> {
-    let body = std::str::from_utf8(body).ok()?.trim_end_matches('=');
+    let body = std::str::from_utf8(body).ok()?.trim().trim_end_matches('=');
     let decoded = base64::engine::general_purpose::STANDARD_NO_PAD
         .decode(body)
         .ok()?;
@@ -117,5 +118,25 @@ mod tests {
         ] {
             assert_eq!(short_term_bedrock_key(key), None, "{key:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod whitespace_rules {
+    use super::*;
+    #[test]
+    fn short_term_prefix_ignores_surrounding_whitespace() {
+        assert!(short_term_bedrock_key(b" \tbedrock-api-key-invalid\n").is_some());
+        assert!(short_term_bedrock_key(b" \tbedrock-api-key-\xff\n").is_some());
+    }
+    #[test]
+    fn presigned_expiry_ignores_surrounding_whitespace() {
+        let body = base64::engine::general_purpose::STANDARD
+            .encode("bedrock.amazonaws.com/?X-Amz-Date=20260623T080000Z&X-Amz-Expires=43200");
+        let padded = format!(" \t{body}\n");
+        assert_eq!(
+            presigned_expiry_ms(padded.as_bytes()),
+            Some(1_782_244_800_000)
+        );
     }
 }

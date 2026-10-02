@@ -178,7 +178,8 @@ impl RefreshAdapter for AnthropicAdapter {
 
         // Anthropic returns a relative expires_in (seconds); convert to an absolute
         // Unix-ms expiry so the stored credential carries a wall-clock deadline.
-        let expires_at_ms = Some(now_ms() + parsed.expires_in.saturating_mul(1000));
+        let expires_at_ms =
+            crate::oauth_login::relative_expiry_ms(now_ms(), Some(parsed.expires_in));
         // Reuse the existing refresh token if the provider did not rotate it (the
         // field is optional on the wire).
         let refresh_token = parsed

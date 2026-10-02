@@ -5,8 +5,7 @@
 //! and exchanges that assertion for the installation token a consumer may use. The PEM
 //! is never copied into an HTTP request or returned as the credential payload.
 
-use std::collections::{BTreeMap, HashMap};
-use std::sync::Mutex;
+use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -78,17 +77,14 @@ fn canonical_permissions(value: Option<&serde_json::Value>) -> Option<BTreeMap<S
 
 /// Mints GitHub App installation tokens from vaulted PKCS#8 RSA private keys.
 ///
-/// Installation ids are intentionally process-local. GitHub can issue a new id after
-/// an uninstall and reinstall, so persisting one in the credential record would turn a
-/// healthy key into a permanently stale 404 until an operator repaired the record.
+/// Discover installations on every refresh so account ambiguity cannot be hidden
+/// by an earlier successful mint.
 #[derive(Debug, Default)]
-pub struct GithubAppAdapter {
-    installation_ids: Mutex<HashMap<String, u64>>,
-}
+pub struct GithubAppAdapter;
 
 impl GithubAppAdapter {
     pub fn new() -> Self {
-        Self::default()
+        Self
     }
 
     fn mint_app_jwt(cred: &OAuthCredential, now_secs: i64) -> Result<String, RefreshError> {
@@ -132,22 +128,6 @@ impl GithubAppAdapter {
             .map_err(|error| RefreshError::Decode(format!("sign GitHub App JWT: {error}")))?;
         let signature = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature_bytes);
         Ok(format!("{signing_input}.{signature}"))
-    }
-
-    fn cached_installation_id(&self, client_id: &str) -> Option<u64> {
-        self.installation_ids.lock().ok()?.get(client_id).copied()
-    }
-
-    fn cache_installation_id(&self, client_id: &str, installation_id: u64) {
-        if let Ok(mut ids) = self.installation_ids.lock() {
-            ids.insert(client_id.to_string(), installation_id);
-        }
-    }
-
-    fn forget_installation_id(&self, client_id: &str) {
-        if let Ok(mut ids) = self.installation_ids.lock() {
-            ids.remove(client_id);
-        }
     }
 
     async fn discover_installation_id(
@@ -269,16 +249,9 @@ impl RefreshAdapter for GithubAppAdapter {
         let authorization = format!("Bearer {jwt}");
         let headers = Self::auth_headers(&authorization);
 
-        let installation_id = match self.cached_installation_id(client_id) {
-            Some(id) => id,
-            None => {
-                let id = self
-                    .discover_installation_id(client_id, &headers, http)
-                    .await?;
-                self.cache_installation_id(client_id, id);
-                id
-            }
-        };
+        let installation_id = self
+            .discover_installation_id(client_id, &headers, http)
+            .await?;
         let url = format!("{ACCESS_TOKENS_URL_PREFIX}{installation_id}/access_tokens");
         let response = http
             .post(&url, &headers, "application/json", b"{}".to_vec())
@@ -294,13 +267,16 @@ impl RefreshAdapter for GithubAppAdapter {
             ));
         }
         if response.status == 404 {
-            // The App may have been uninstalled and reinstalled while this process was
-            // alive. Forget only the process-local value so the next refresh discovers
-            // GitHub's new id instead of preserving a stale id on the credential record.
-            self.forget_installation_id(client_id);
+            // An uninstall/reinstall can remove an installation between discovery and
+            // exchange. Keep 404 retryable: the next refresh discovers the new id.
             return Err(RefreshError::Status(
                 response.status,
                 String::from_utf8_lossy(&response.body).into_owned(),
+            ));
+        }
+        if response.status == 403 {
+            return Err(RefreshError::InvalidGrant(
+                "GitHub installation token exchange requires operator repair".into(),
             ));
         }
         if response.status != 201 {
@@ -410,6 +386,36 @@ mod tests {
         include_bytes!("../../tests/fixtures/github_app/installations.json");
     const RECORDED_ACCESS_TOKENS: &[u8] =
         include_bytes!("../../tests/fixtures/github_app/access_tokens.json");
+
+    #[tokio::test]
+    async fn forbidden_installation_token_exchange_requires_operator_repair() {
+        let http = fixture_transport(vec![(200, RECORDED_INSTALLATIONS), (403, b"{}")]);
+        assert!(matches!(
+            GithubAppAdapter::new().refresh(&credential(), &http).await,
+            Err(RefreshError::InvalidGrant(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn later_installation_ambiguity_is_not_hidden_by_previous_mint() {
+        let mut installations: Vec<Value> = serde_json::from_slice(RECORDED_INSTALLATIONS).unwrap();
+        let mut second = installations[0].clone();
+        second["id"] = serde_json::json!(999);
+        installations.push(second);
+        let body = serde_json::to_vec(&installations).unwrap();
+        let http = fixture_transport(vec![
+            (200, RECORDED_INSTALLATIONS),
+            (201, RECORDED_ACCESS_TOKENS),
+            (200, &body),
+        ]);
+        let adapter = GithubAppAdapter::new();
+        adapter.refresh(&credential(), &http).await.unwrap();
+        assert!(matches!(
+            adapter.refresh(&credential(), &http).await,
+            Err(RefreshError::InvalidGrant(_))
+        ));
+        assert_eq!(http.requests().len(), 3);
+    }
 
     fn recorded_client_id() -> String {
         serde_json::from_slice::<Value>(RECORDED_APP).unwrap()["client_id"]
@@ -576,11 +582,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn installation_discovery_is_cached_in_memory_without_replacing_the_private_key() {
+    async fn installation_discovery_is_repeated_without_replacing_the_private_key() {
         let cred = credential();
         let http = fixture_transport(vec![
             (200, RECORDED_INSTALLATIONS),
             (201, RECORDED_ACCESS_TOKENS),
+            (200, RECORDED_INSTALLATIONS),
             (201, RECORDED_ACCESS_TOKENS),
         ]);
         let adapter = GithubAppAdapter::new();
@@ -593,8 +600,8 @@ mod tests {
         let requests = http.requests();
         assert_eq!(
             requests.len(),
-            3,
-            "the second mint reuses only in-memory discovery"
+            4,
+            "the second mint rechecks installation discovery"
         );
         assert_eq!(requests[0].method, "GET");
         assert_eq!(requests[0].url, INSTALLATIONS_URL);
@@ -602,7 +609,8 @@ mod tests {
             requests[1].url,
             format!("{ACCESS_TOKENS_URL_PREFIX}{RECORDED_INSTALLATION_ID}/access_tokens")
         );
-        assert_eq!(requests[2].method, "POST");
+        assert_eq!(requests[2].method, "GET");
+        assert_eq!(requests[3].method, "POST");
         for request in requests {
             let authorization = request
                 .headers
@@ -717,7 +725,7 @@ mod tests {
             (200, RECORDED_INSTALLATIONS),
             (201, RECORDED_ACCESS_TOKENS),
         ]);
-        let adapter = GithubAppAdapter::default();
+        let adapter = GithubAppAdapter::new();
         let _ = adapter.refresh(&credential(), &http).await;
 
         let requests = http.requests();
@@ -758,7 +766,7 @@ mod tests {
             401,
             br#"{"message":"A JSON web token could not be decoded"}"#,
         )]);
-        let adapter = GithubAppAdapter::default();
+        let adapter = GithubAppAdapter::new();
         let err = adapter
             .refresh(&credential(), &http)
             .await

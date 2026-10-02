@@ -240,11 +240,13 @@ pub fn import_antigravity_account(
         ));
     }
     let acct = match account {
-        None => store
-            .accounts
-            .get(store.active_index)
-            .or_else(|| store.accounts.first())
-            .ok_or(ImportError::Malformed("activeIndex out of range".into()))?,
+        None => store.accounts.get(store.active_index).ok_or_else(|| {
+            ImportError::Malformed(format!(
+                "activeIndex {} out of range for {} accounts",
+                store.active_index,
+                store.accounts.len()
+            ))
+        })?,
         Some(sel) => store
             .accounts
             .iter()
@@ -615,5 +617,20 @@ mod tests {
         assert!(!c.is_access_expired(799, 200), "outside skew is fresh");
         c.expires_at_ms = None;
         assert!(!c.is_access_expired(i64::MAX, 0), "no expiry => not forced");
+    }
+}
+
+#[cfg(test)]
+mod active_index_rules {
+    use super::*;
+    #[test]
+    fn invalid_active_index_names_index_and_account_count() {
+        let raw = br#"{"activeIndex":3,"accounts":[{"email":"a@example.com","refreshToken":"r"},{"email":"b@example.com","refreshToken":"s"}]}"#;
+        let error = import_antigravity_account(raw, None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("activeIndex 3"), "{error}");
+        assert!(error.contains("2 accounts"), "{error}");
+        assert!(import_antigravity_account(raw, Some("a@example.com")).is_ok());
     }
 }

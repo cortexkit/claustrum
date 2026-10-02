@@ -174,7 +174,7 @@ where
 
     let initial_interval = auth.interval.unwrap_or(5);
     let mut interval = max_duration(Duration::from_secs(initial_interval), cfg.poll_floor);
-    let deadline = Instant::now() + Duration::from_secs(auth.expires_in.unwrap_or(900).max(1));
+    let deadline = polling_deadline(auth.expires_in.unwrap_or(900))?;
     let poll_headers = header_refs(&cfg.extra_headers);
     let device_code = auth.device_code;
     let mut request = || async {
@@ -262,8 +262,8 @@ where
     };
     sink(&auth_for_sink);
 
-    let mut interval = Duration::from_secs(auth.interval.unwrap_or(5));
-    let deadline = Instant::now() + Duration::from_secs(auth.expires_in.unwrap_or(900).max(1));
+    let mut interval = Duration::from_secs(auth.interval.unwrap_or(5).max(5));
+    let deadline = polling_deadline(auth.expires_in.unwrap_or(900))?;
     let device_auth_id = auth.device_auth_id;
     let user_code = auth.user_code;
     let mut request = || async {
@@ -415,11 +415,11 @@ where
                 returned_interval,
             } => {
                 consecutive_failures = 0;
-                if let Some(seconds) = returned_interval {
-                    *interval = max_duration(*interval, Duration::from_secs(seconds));
-                }
                 if slow_down {
+                    // RFC 8628 increases the current interval once, independent of response hints.
                     *interval = interval.saturating_add(Duration::from_secs(5));
+                } else if let Some(seconds) = returned_interval {
+                    *interval = max_duration(*interval, Duration::from_secs(seconds));
                 }
             }
             PollDecision::Terminal(error) => return Err(error),
@@ -440,6 +440,12 @@ where
             }
         }
     }
+}
+
+fn polling_deadline(seconds: u64) -> Result<Instant, LoginError> {
+    Instant::now()
+        .checked_add(Duration::from_secs(seconds.max(1)))
+        .ok_or_else(|| LoginError::Device("device authorization lifetime is out of range".into()))
 }
 
 fn parse_token_response(response: HttpResponse) -> PollDecision {
@@ -472,9 +478,14 @@ fn parse_token_response(response: HttpResponse) -> PollDecision {
     let Some(access_token) = parsed.access_token else {
         return PollDecision::Failure(Some(status));
     };
-    let expires_at_ms = parsed.expires_in.and_then(|seconds| {
-        (seconds >= 0).then(|| now_ms().saturating_add(seconds.saturating_mul(1000)))
-    });
+    let expires_at_ms = crate::oauth_login::relative_expiry_ms(now_ms(), parsed.expires_in)
+        .or_else(|| {
+            parsed
+                .expires_in
+                .is_none()
+                .then(|| crate::oauth_login::access_token_expiry_ms(&access_token))
+                .flatten()
+        });
     PollDecision::Success(DeviceTokens {
         access_token,
         refresh_token: parsed.refresh_token,
@@ -649,7 +660,7 @@ mod tests {
             &[
                 Duration::from_secs(1),
                 Duration::from_secs(1),
-                Duration::from_secs(7)
+                Duration::from_secs(6)
             ]
         );
     }
@@ -758,7 +769,14 @@ mod tests {
             &http,
             "app_EMoamEEZ73f0CkXaXp7hrann",
             &|_| {},
-            |_| async {},
+            |duration| {
+                assert_eq!(
+                    duration,
+                    Duration::from_secs(5),
+                    "OpenAI polling must have a floor"
+                );
+                async {}
+            },
         )
         .await
         .unwrap();
@@ -809,5 +827,29 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, LoginError::Status(500, _)));
+    }
+}
+
+#[cfg(test)]
+mod expiry_rules {
+    use super::*;
+    #[test]
+    fn device_tokens_without_lifetime_use_access_jwt_expiry() {
+        let jwt = format!(
+            "e30.{}.sig",
+            crate::store::base64url(br#"{"exp":2000000000}"#)
+        );
+        let body = serde_json::to_vec(&serde_json::json!({"access_token":jwt})).unwrap();
+        match parse_token_response(HttpResponse { status: 200, body }) {
+            PollDecision::Success(tokens) => {
+                assert_eq!(tokens.expires_at_ms, Some(2_000_000_000_000))
+            }
+            _ => panic!("expected tokens"),
+        }
+    }
+    #[test]
+    fn unrepresentable_device_deadline_is_an_error_not_a_panic() {
+        assert!(polling_deadline(u64::MAX).is_err());
+        assert!(polling_deadline(900).is_ok());
     }
 }

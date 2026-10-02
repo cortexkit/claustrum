@@ -319,7 +319,7 @@ pub async fn exchange_authorization_code(
     verifier: &str,
     now_ms: i64,
 ) -> Result<LoginTokens, LoginError> {
-    if callback.state != expected_state {
+    if !states_equal(&callback.state, expected_state) {
         return Err(LoginError::StateMismatch);
     }
 
@@ -348,7 +348,7 @@ pub async fn exchange_authorization_code(
     Ok(LoginTokens {
         access_token: parsed.access_token,
         refresh_token: parsed.refresh_token,
-        expires_at_ms: Some(now_ms + parsed.expires_in.saturating_mul(1000)),
+        expires_at_ms: relative_expiry_ms(now_ms, Some(parsed.expires_in)),
         // Anthropic's exchange issues no id_token; its identity rides the response's
         // account/organization blocks instead.
         id_token: None,
@@ -380,7 +380,7 @@ pub async fn exchange_authorization_code_form(
     extra_body: &[(&str, &str)],
     now_ms: i64,
 ) -> Result<LoginTokens, LoginError> {
-    if callback.state != expected_state {
+    if !states_equal(&callback.state, expected_state) {
         return Err(LoginError::StateMismatch);
     }
 
@@ -416,7 +416,7 @@ pub async fn exchange_authorization_code_form(
     Ok(LoginTokens {
         access_token: parsed.access_token,
         refresh_token: parsed.refresh_token,
-        expires_at_ms: parsed.expires_in.map(|s| now_ms + s.saturating_mul(1000)),
+        expires_at_ms: relative_expiry_ms(now_ms, parsed.expires_in),
         id_token: parsed.id_token,
         account: None,
         organization: None,
@@ -438,7 +438,7 @@ pub async fn exchange_authorization_code_google(
     expected_state: &str,
     now_ms: i64,
 ) -> Result<LoginTokens, LoginError> {
-    if callback.state != expected_state {
+    if !states_equal(&callback.state, expected_state) {
         return Err(LoginError::StateMismatch);
     }
 
@@ -473,11 +473,33 @@ pub async fn exchange_authorization_code_google(
     Ok(LoginTokens {
         access_token: parsed.access_token,
         refresh_token: parsed.refresh_token,
-        expires_at_ms: Some(now_ms + expires_in.saturating_mul(1000)),
+        expires_at_ms: relative_expiry_ms(now_ms, Some(expires_in)),
         id_token: parsed.id_token,
         account: None,
         organization: None,
     })
+}
+
+/// Compare callback state without data-dependent early exits for equal-length values.
+pub(crate) fn states_equal(actual: &str, expected: &str) -> bool {
+    use subtle::ConstantTimeEq;
+    bool::from(actual.as_bytes().ct_eq(expected.as_bytes()))
+}
+
+/// Invalid negative lifetimes are treated as absent, not as already-expired tokens.
+pub(crate) fn relative_expiry_ms(now_ms: i64, seconds: Option<i64>) -> Option<i64> {
+    seconds
+        .filter(|s| *s >= 0)
+        .map(|s| now_ms.saturating_add(s.saturating_mul(1000)))
+}
+
+/// A non-JWT access token has no decodable expiry, so its expiry remains unknown.
+pub(crate) fn access_token_expiry_ms(token: &str) -> Option<i64> {
+    decode_jwt_claims(token)?
+        .get("exp")?
+        .as_i64()
+        .filter(|s| *s >= 0)
+        .map(|s| s.saturating_mul(1000))
 }
 
 /// Decode the payload claims of a JWT WITHOUT signature verification. Used only to
@@ -1242,5 +1264,108 @@ mod tests {
         // Garbage is None, never a panic.
         assert!(decode_jwt_claims("not-a-jwt").is_none());
         assert!(decode_jwt_claims("a.!!!.c").is_none());
+    }
+}
+
+#[cfg(test)]
+mod lifetime_rules {
+    use super::*;
+    use crate::refresh_adapters::fixture::FixtureTransport;
+    #[tokio::test]
+    async fn login_lifetimes_saturate_and_negative_lifetimes_are_absent() {
+        let callback = Callback {
+            code: "code".into(),
+            state: "state".into(),
+        };
+        for (seconds, expected) in [(i64::MAX, Some(i64::MAX)), (-1, None)] {
+            let body = serde_json::to_vec(
+                &serde_json::json!({"access_token":"a", "refresh_token":"r", "expires_in":seconds}),
+            )
+            .unwrap();
+            let http = FixtureTransport::ok(200, body.clone());
+            assert_eq!(
+                exchange_authorization_code(
+                    &http,
+                    "https://example.com",
+                    "c",
+                    "r",
+                    &callback,
+                    "state",
+                    "v",
+                    1000
+                )
+                .await
+                .unwrap()
+                .expires_at_ms,
+                expected
+            );
+            let http = FixtureTransport::ok(200, body.clone());
+            assert_eq!(
+                exchange_authorization_code_form(
+                    &http,
+                    "https://example.com",
+                    "c",
+                    "r",
+                    &callback,
+                    "state",
+                    "v",
+                    &[],
+                    1000
+                )
+                .await
+                .unwrap()
+                .expires_at_ms,
+                expected
+            );
+            let http = FixtureTransport::ok(200, body);
+            assert_eq!(
+                exchange_authorization_code_google(
+                    &http,
+                    "https://example.com",
+                    "c",
+                    "s",
+                    "r",
+                    &callback,
+                    "state",
+                    1000
+                )
+                .await
+                .unwrap()
+                .expires_at_ms,
+                expected
+            );
+        }
+    }
+    #[test]
+    fn state_comparison_uses_constant_time_primitive() {
+        let source = include_str!("oauth_login.rs");
+        let needle = ["actual.as_bytes().", "ct_eq(expected.as_bytes())"].concat();
+        assert!(source.contains(&needle));
+        // Guard the call sites too: an unused constant-time helper protects no callback.
+        for (source, prefix, count) in [
+            (source, "if !", 3),
+            (
+                include_str!("refresh_adapters/devin.rs"),
+                "if !crate::oauth_login::",
+                1,
+            ),
+            (
+                include_str!("refresh_adapters/snowflake.rs"),
+                "if !crate::oauth_login::",
+                1,
+            ),
+            (
+                include_str!("refresh_adapters/digitalocean.rs"),
+                "if !crate::oauth_login::",
+                1,
+            ),
+        ] {
+            let production = source.split("#[cfg(test)]").next().unwrap();
+            let guard = [prefix, "states_equal("].concat();
+            assert_eq!(production.matches(&guard).count(), count);
+        }
+        assert!(states_equal("same", "same"));
+        assert!(!states_equal("same", "samp"));
+        assert!(!states_equal("same", "same-longer"));
     }
 }

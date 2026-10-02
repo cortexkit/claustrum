@@ -488,13 +488,15 @@ impl RefreshEngine {
     async fn reconcile_one(&self, intent: &RefreshIntent) -> Result<Reconciliation, EngineError> {
         let id = intent.credential_id.as_str();
 
-        // Read the stored record. Absent / already-needs_reauth / quarantined =>
+        // Read the stored record. Absent / already-needs_reauth / damaged =>
         // there is nothing live to protect; clear the orphan intent.
         let record = match self.store.get(id) {
             Ok(r) => r,
             Err(StoreOpError::NotFound)
             | Err(StoreOpError::NeedsReauth)
-            | Err(StoreOpError::Quarantined) => {
+            | Err(StoreOpError::Quarantined)
+            | Err(StoreOpError::Decrypt(_))
+            | Err(StoreOpError::Corrupt(_)) => {
                 self.store.clear_intent(id)?;
                 return Ok(Reconciliation::OrphanCleared {
                     credential_id: id.to_string(),

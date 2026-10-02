@@ -1078,3 +1078,57 @@ async fn cookie_record_is_never_selected_for_refresh() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[tokio::test]
+async fn reconciliation_isolates_decrypt_and_decode_failures_and_continues() {
+    let (_root, descriptor) = tmp_descriptor();
+    let store = open_store(&descriptor, 161);
+    let record = stale_oauth_record();
+    let hash =
+        crate::store::refresh_token_hash(record.oauth.as_ref().unwrap().refresh_token.expose());
+    for id in ["a-decrypt", "b-decode", "c-good"] {
+        store.create(id, &record).unwrap();
+        store.open_intent(id, 1, &hash).unwrap();
+    }
+    let malformed = crate::envelope::seal(
+        &MasterKey::from_bytes([161; MASTER_KEY_LEN]),
+        b"not a record",
+        &crate::envelope::RecordBinding {
+            credential_id: "b-decode",
+            record_version: 1,
+        },
+    )
+    .unwrap();
+    store
+        .with_raw_conn(|conn| {
+            conn.execute(
+                "UPDATE credentials SET envelope = X'00' WHERE credential_id = 'a-decrypt'",
+                [],
+            )?;
+            conn.execute(
+                "UPDATE credentials SET envelope = ?1 WHERE credential_id = 'b-decode'",
+                [malformed],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let mut adapter = StubAdapter::new("stub");
+    adapter.check = Some(Ok(ValidityOutcome::Valid));
+    let (engine, calls) = engine(store, adapter);
+    let outcomes = engine
+        .reconcile()
+        .await
+        .expect("damaged records must not abort boot");
+    assert_eq!(outcomes.len(), 3);
+    for id in ["a-decrypt", "b-decode"] {
+        assert!(outcomes.iter().any(|outcome| matches!(outcome, Reconciliation::OrphanCleared { credential_id } if credential_id == id)));
+        assert_eq!(
+            engine.store().meta(id).unwrap().state,
+            crate::record::RecordState::Corrupt
+        );
+        assert!(engine.store().read_intent(id).unwrap().is_none());
+    }
+    assert!(outcomes.iter().any(|outcome| matches!(outcome, Reconciliation::ClearedValid { credential_id } if credential_id == "c-good")));
+    assert!(engine.store().read_intent("c-good").unwrap().is_none());
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}

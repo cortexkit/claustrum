@@ -13,7 +13,7 @@
 //! alarm that persists across connections, so a reconnect-churning sweep is still
 //! recorded for cross-connection analysis.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 /// The maximum number of handles a single `get_many` call may carry. A call over
@@ -64,7 +64,7 @@ impl Default for Caps {
 /// Per-connection fetch state.
 struct ConnState {
     /// Distinct credential ids fetched in the current window.
-    distinct: HashSet<String>,
+    distinct: HashMap<String, Instant>,
     /// Fetch timestamps in the current window (for the rate check).
     fetches: Vec<Instant>,
     /// Whether this connection has already been flagged (so we alarm once).
@@ -74,7 +74,7 @@ struct ConnState {
 impl ConnState {
     fn new() -> Self {
         ConnState {
-            distinct: HashSet::new(),
+            distinct: HashMap::new(),
             fetches: Vec::new(),
             flagged: false,
         }
@@ -85,6 +85,7 @@ impl ConnState {
         let cutoff = now.checked_sub(window);
         if let Some(cutoff) = cutoff {
             self.fetches.retain(|t| *t >= cutoff);
+            self.distinct.retain(|_, last_fetch| *last_fetch >= cutoff);
         }
         // The distinct set is window-scoped too: when no fetches remain in the
         // window, the spread resets (a connection that went quiet is no longer
@@ -127,8 +128,10 @@ impl FetchLimiter {
         // can retain (raw probe strings), so an enumeration flood cannot grow this set
         // without bound within a window. The cap is above the ceiling so the anomaly
         // decision below is unaffected.
-        if state.distinct.len() <= caps.distinct_ceiling {
-            state.distinct.insert(credential_id.to_string());
+        if let Some(last_fetch) = state.distinct.get_mut(credential_id) {
+            *last_fetch = now;
+        } else if state.distinct.len() <= caps.distinct_ceiling {
+            state.distinct.insert(credential_id.to_string(), now);
         }
 
         let over =
@@ -140,6 +143,12 @@ impl FetchLimiter {
         } else {
             Admission::Ok
         }
+    }
+
+    /// Remove every epoch of a channel when it is rebound. Late requests retain their
+    /// old epoch key and cannot lend counters to the channel's new tenant.
+    pub fn drop_channel(&mut self, channel: u16) {
+        self.conns.retain(|id, _| *id as u16 != channel);
     }
 
     /// Forget a connection's state (called when the connection closes).
@@ -248,6 +257,38 @@ mod tests {
         // Well past the window: the spread resets, so a new fetch is Ok again.
         let later = t0 + Duration::from_secs(120);
         assert_eq!(l.admit(1, "d", later), Admission::Ok);
+    }
+
+    #[test]
+    fn distinct_entries_expire_during_continuous_traffic() {
+        let mut l = FetchLimiter::new(caps());
+        let start = Instant::now();
+        l.admit(1, "old", start);
+        l.admit(1, "live", start + Duration::from_secs(40));
+        l.admit(1, "live", start + Duration::from_secs(61));
+        l.admit(1, "third", start + Duration::from_secs(62));
+        assert_eq!(
+            l.admit(1, "fourth", start + Duration::from_secs(63)),
+            Admission::Ok
+        );
+        assert_eq!(
+            l.admit(1, "fifth", start + Duration::from_secs(64)),
+            Admission::Anomaly { first: true }
+        );
+    }
+
+    #[test]
+    fn channel_rebind_forgets_every_old_epoch() {
+        let mut limiter = FetchLimiter::new(caps());
+        let now = Instant::now();
+        for id in [(1_u64 << 16) | 7, (2_u64 << 16) | 7] {
+            for key in ["a", "b", "c", "d"] {
+                limiter.admit(id, key, now);
+            }
+        }
+        limiter.drop_channel(7);
+        assert!(limiter.conns.is_empty());
+        assert_eq!(limiter.admit((1 << 16) | 7, "a", now), Admission::Ok);
     }
 
     #[test]

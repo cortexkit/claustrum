@@ -221,6 +221,10 @@ impl RouteEpochs {
     fn install(&self, channel: u16, epoch: u32) {
         let mut map = self.0.lock().unwrap_or_else(|p| p.into_inner());
         map.insert(channel, epoch);
+        self.1
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .retain(|(ch, _)| *ch != channel);
     }
 
     /// Whether `channel` is a live binding at exactly `epoch`.
@@ -276,6 +280,10 @@ impl RouteEpochs {
     fn remove(&self, channel: u16) {
         let mut map = self.0.lock().unwrap_or_else(|p| p.into_inner());
         map.remove(&channel);
+        self.1
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .retain(|(ch, _)| *ch != channel);
     }
 }
 
@@ -292,18 +300,30 @@ async fn run(config: ModuleConfig) -> Result<(), ModuleError> {
 
     // The HELLO_ACK carries the resolved storage descriptor; the surface is built
     // AFTER the handshake (it needs the descriptor) and the boot gate runs before
-    // any request is served. module_loop owns `egress` and drops it on return, closing
-    // both lanes so the writer task finishes.
+    // any request is served. In-flight requests can retain route senders after the
+    // loop exits, so shutdown gives the writer a bounded grace period, then aborts it.
     let loop_result = module_loop(&mut read_half, egress, &config).await;
 
-    let writer_result = writer
-        .await
-        .map_err(|e| ModuleError::Message(e.to_string()));
+    let writer_result = finish_writer(writer).await;
     match (loop_result, writer_result) {
         (Err(loop_err), _) => Err(loop_err),
         (Ok(()), Ok(Ok(()))) => Ok(()),
         (Ok(()), Ok(Err(writer_err))) => Err(ModuleError::Message(writer_err.to_string())),
         (Ok(()), Err(join_err)) => Err(join_err),
+    }
+}
+
+/// Bound egress draining even if an in-flight request or a stalled socket keeps it alive.
+async fn finish_writer(
+    mut writer: tokio::task::JoinHandle<Result<(), ModuleError>>,
+) -> Result<Result<(), ModuleError>, ModuleError> {
+    match tokio::time::timeout(std::time::Duration::from_secs(2), &mut writer).await {
+        Ok(result) => result.map_err(|e| ModuleError::Message(e.to_string())),
+        Err(_) => {
+            writer.abort();
+            let _ = writer.await;
+            Ok(Ok(()))
+        }
     }
 }
 
@@ -648,7 +668,7 @@ fn record_reconciliation_reasons(
 /// queued control frames are flushed before any route frame, and `select!` biases toward
 /// the control lane — so a health.check reply can never sit behind a backlog of route
 /// responses (the liveness guarantee: control egress is not starvable by data traffic).
-/// Returns when BOTH lanes are closed (the serve loop dropped its `Egress`).
+/// Returns when BOTH lanes are closed and drained; shutdown separately bounds this wait.
 async fn drain_writer<W>(
     write_half: W,
     mut control_rx: mpsc::Receiver<Frame>,
@@ -833,7 +853,12 @@ async fn handle_frame(
             // An epoch-valid route goodbye: forget the binding, that connection's
             // limiter state, AND its admin bind state (principal + nonce).
             routes.remove(frame.header.channel);
-            surface.drop_connection(frame.header.channel as u64).await;
+            surface
+                .drop_connection(route_connection_id(
+                    frame.header.channel,
+                    frame.header.epoch,
+                ))
+                .await;
             admin.drop_bind(frame.header.channel);
             Ok(true)
         }
@@ -868,8 +893,15 @@ async fn handle_control_request(
     admin: &Arc<admin_surface::AdminSurface>,
     routes: &Arc<RouteEpochs>,
 ) -> Result<(), ModuleError> {
-    let request =
-        serde_json::from_slice::<ModuleControlRequest>(&frame.body).map_err(ModuleError::Json)?;
+    let request = match serde_json::from_slice::<ModuleControlRequest>(&frame.body) {
+        Ok(request) => request,
+        Err(_) => {
+            // Control variants may grow independently of this module. Ignore malformed
+            // or unknown requests without logging their potentially sensitive bodies.
+            tracing::warn!(target: "routes", "ignored undecodable channel-0 control request");
+            return Ok(());
+        }
+    };
     let response_body = match request {
         ModuleControlRequest::RouteBind {
             route_channel,
@@ -881,13 +913,14 @@ async fn handle_control_request(
             // Installed here — when the accepted ack is being queued — so no route
             // traffic can pass layer-2 validation before the bind is acknowledged
             // (§3.2: module traffic legally begins only after the RouteBind ack).
+            surface.drop_channel(route_channel).await;
             routes.install(route_channel, epoch);
             // Record the bind's daemon-stamped principal (Gate 1 provenance) against
-            // the route channel, with a fresh generation. An absent principal stamp
+            // the route channel, under the newly installed wire epoch. An absent principal stamp
             // records as `Unverified` — never `direct` — so admin ops fail closed on
             // an older daemon. Reads remain anonymous/handle-scoped regardless.
             let principal = principal.unwrap_or(subc_protocol::Principal::Unverified);
-            admin.record_bind(route_channel, principal);
+            admin.record_bind_at(route_channel, epoch, principal);
             ModuleControlResponse::RouteBindAck {}
         }
         ModuleControlRequest::HealthCheck {} => {
@@ -1026,6 +1059,11 @@ struct AdminOpParams {
     tag_hex: String,
 }
 
+/// Each binding has separate counters even when a late task outlives Goodbye.
+fn route_connection_id(channel: u16, epoch: u32) -> u64 {
+    (u64::from(epoch) << 16) | u64::from(channel)
+}
+
 async fn handle_read_request(
     frame: Frame,
     writer: &mpsc::Sender<Frame>,
@@ -1039,7 +1077,7 @@ async fn handle_read_request(
     let epoch = frame.header.epoch;
     let corr = frame.header.corr;
     let ver = frame.header.ver;
-    let connection_id = channel as u64;
+    let connection_id = route_connection_id(channel, epoch);
 
     let request: ReadRequest = match serde_json::from_slice(&frame.body) {
         Ok(r) => r,
@@ -1266,7 +1304,7 @@ async fn handle_read_request(
                 }
             }
         }
-        OP_ADMIN_CHALLENGE => match admin.challenge(channel) {
+        OP_ADMIN_CHALLENGE => match admin.challenge_as(channel, epoch, principal.as_ref()) {
             admin_surface::AdminOutcome::Challenge {
                 nonce_hex,
                 vault_id_hex,
@@ -1293,7 +1331,13 @@ async fn handle_read_request(
         },
         OP_ADMIN_OP => match serde_json::from_value::<AdminOpParams>(request.params) {
             Ok(p) => match admin
-                .execute(channel, p.op_body.as_bytes(), &p.tag_hex)
+                .execute_as(
+                    channel,
+                    epoch,
+                    principal.as_ref(),
+                    p.op_body.as_bytes(),
+                    &p.tag_hex,
+                )
                 .await
             {
                 admin_surface::AdminOutcome::Ok(v) => wrap_result(v),
@@ -1504,6 +1548,7 @@ fn sqlite_data_dir(descriptor: &StorageDescriptor) -> Result<PathBuf, ModuleErro
     match &descriptor.backend {
         StorageBackend::Sqlite { path } => Ok(PathBuf::from(path)
             .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("."))),
         other => Err(ModuleError::Message(format!(
@@ -1530,7 +1575,7 @@ fn resolver_config_from_env(data_dir: PathBuf) -> ResolverConfig {
 }
 
 /// The module's capability manifest: a ManagementSurface exposing its read
-/// operations. Storage is `owns_schema: true` (the vault owns its schema). The
+/// and authenticated operator operations. Storage is `owns_schema: true` (the vault owns its schema). The
 /// `reserved: true` binding lives in the daemon's subc.jsonc config, not here; the
 /// module proves its reserved identity by echoing the launch nonce in HELLO.
 fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> ModuleManifest {
@@ -1759,6 +1804,16 @@ fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> 
         // what it is.
         concurrency: Concurrency::ModuleManaged,
         operations: vec![
+            ManagementOperation {
+                name: OP_ADMIN_CHALLENGE.to_string(),
+                description: Some("Issue a single-use challenge to a direct-bound operator.".to_string()),
+                kind: ManagementOperationKind::Mutate,
+            },
+            ManagementOperation {
+                name: OP_ADMIN_OP.to_string(),
+                description: Some("Execute a master-key-authorized operator mutation.".to_string()),
+                kind: ManagementOperationKind::Mutate,
+            },
             ManagementOperation {
                 name: OP_DEPOSIT_COOKIE.to_string(),
                 description: Some("Deposit a consent-attested browser cookie under a reserved principal's deposit grant.".to_string()),
@@ -3480,7 +3535,7 @@ mod tests {
             .get("error")
             .is_none());
         // Admin authority requires a direct operator connection, not a module grant.
-        admin.record_bind(51, deposit_cookie_principal().unwrap());
+        admin.record_bind_at(51, 1, deposit_cookie_principal().unwrap());
         for (method, params) in [
             (OP_ADMIN_CHALLENGE, json!({})),
             (OP_ADMIN_OP, json!({"op_body":"{}","tag_hex":"00"})),
@@ -3493,7 +3548,7 @@ mod tests {
                 .unwrap()
                 .contains("admin_refused"));
         }
-        admin.record_bind(51, subc_protocol::Principal::Direct);
+        admin.record_bind_at(51, 1, subc_protocol::Principal::Direct);
         let allowed = deposit_cookie_frame(
             &surface,
             &admin,
@@ -10531,73 +10586,87 @@ mod tests {
     /// report authorized by `enrolled:acc-probe-consumer` recorded `direct:-`.
     #[tokio::test]
     async fn an_enrolled_report_is_audited_under_the_consumer_not_the_transport() {
-        let (surface, store, _db, _root) = tmp_surface_with_store(151);
-        let credential_id = "apikey:enrolled-report-attribution";
-        let record =
-            VaultRecord::new_static(CredentialKind::ApiKey, "test", b"material".to_vec(), None);
-        store
-            .create_audited(credential_id, &record, AuditCtx::admin(AuditOp::Put))
-            .expect("seed");
+        for principal in [
+            subc_protocol::Principal::Direct,
+            subc_protocol::Principal::Reserved {
+                module_id: "ambient-module".into(),
+            },
+        ] {
+            let (surface, store, _db, _root) = tmp_surface_with_store(151);
+            let credential_id = "apikey:enrolled-report-attribution";
+            let record =
+                VaultRecord::new_static(CredentialKind::ApiKey, "test", b"material".to_vec(), None);
+            store
+                .create_audited(credential_id, &record, AuditCtx::admin(AuditOp::Put))
+                .expect("seed");
 
-        let request_secret = "b1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
-        let secret_hash = credentials_core::enrollment::enrollment_secret_hash(request_secret)
-            .expect("hashable secret");
-        let request = store
-            .propose_enrollment("reporting-consumer", &secret_hash)
-            .expect("propose");
-        store
-            .approve_enrollment(&request.request_id, "reporting-consumer", "operator")
-            .expect("approve");
-        let token = match store
-            .poll_enrollment(&request.request_id, request_secret)
-            .expect("poll")
-        {
-            credentials_core::enrollment::EnrollmentPoll::Approved { token, .. } => token,
-            other => panic!("an approved request must poll Approved, got {other:?}"),
-        };
-        store
-            .create_read_grant_audited(
-                "enrolled",
-                "reporting-consumer",
-                credentials_core::store::SelectorKind::Exact,
-                credential_id,
-                GrantOperation::Read,
-                AuditCtx::admin(AuditOp::GrantCreate),
-            )
-            .expect("grant");
+            let request_secret = "b1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
+            let secret_hash = credentials_core::enrollment::enrollment_secret_hash(request_secret)
+                .expect("hashable secret");
+            let request = store
+                .propose_enrollment("reporting-consumer", &secret_hash)
+                .expect("propose");
+            store
+                .approve_enrollment(&request.request_id, "reporting-consumer", "operator")
+                .expect("approve");
+            let token = match store
+                .poll_enrollment(&request.request_id, request_secret)
+                .expect("poll")
+            {
+                credentials_core::enrollment::EnrollmentPoll::Approved { token, .. } => token,
+                other => panic!("an approved request must poll Approved, got {other:?}"),
+            };
+            store
+                .create_read_grant_audited(
+                    "enrolled",
+                    "reporting-consumer",
+                    credentials_core::store::SelectorKind::Exact,
+                    credential_id,
+                    GrantOperation::Read,
+                    AuditCtx::admin(AuditOp::GrantCreate),
+                )
+                .expect("grant");
 
-        let version = store.list_meta().expect("meta")[0].1.record_version;
-        surface
-            .report_auth_failure(
-                77,
-                Some(&subc_protocol::Principal::Direct),
-                &read_surface::ReportAuthFailureParams {
-                    handle: None,
-                    credential_id: Some(credential_id.to_owned()),
-                    enrollment_token: Some(token),
-                    provider_status: 401,
-                    record_version: version,
-                    reporter_source: Some("direct".to_owned()),
-                },
-            )
-            .await
-            .expect("an enrolled consumer may report a credential its grant covers");
+            let version = store.list_meta().expect("meta")[0].1.record_version;
+            surface
+                .report_auth_failure(
+                    77,
+                    Some(&principal),
+                    &read_surface::ReportAuthFailureParams {
+                        handle: None,
+                        credential_id: Some(credential_id.to_owned()),
+                        enrollment_token: Some(token),
+                        provider_status: 401,
+                        record_version: version,
+                        reporter_source: Some("direct".to_owned()),
+                    },
+                )
+                .await
+                .expect("an enrolled consumer may report a credential its grant covers");
 
-        let event = store
-            .recent_auth_events(10)
-            .expect("events")
-            .into_iter()
-            .find(|e| e.credential_id == credential_id && e.principal_kind.is_some())
-            .expect("the report must record a principal");
-        assert_eq!(
-            (
-                event.principal_kind.as_deref(),
-                event.principal_id.as_deref()
-            ),
-            (Some("enrolled"), Some("reporting-consumer")),
-            "the audit row must name the consumer that authorized the report, not the \
+            let report = store
+                .read_audit(None)
+                .expect("audit log")
+                .into_iter()
+                .find(|entry| entry.op == "report_auth_failure")
+                .expect("report audit");
+            assert_eq!(report.actor, "enrolled:reporting-consumer");
+            let event = store
+                .recent_auth_events(10)
+                .expect("events")
+                .into_iter()
+                .find(|e| e.credential_id == credential_id && e.principal_kind.is_some())
+                .expect("the report must record a principal");
+            assert_eq!(
+                (
+                    event.principal_kind.as_deref(),
+                    event.principal_id.as_deref()
+                ),
+                (Some("enrolled"), Some("reporting-consumer")),
+                "the audit row must name the consumer that authorized the report, not the \
              Direct transport it arrived on"
-        );
+            );
+        }
     }
 
     /// new address exactly as it does on the old one.
@@ -11348,11 +11417,13 @@ mod tests {
         );
     }
 
+    include!("../tests/support/daemon_regressions.rs");
+
     /// EVERY LINE THIS DAEMON CAN WRITE, ENUMERATED -- so a new one needs a reviewer.
     ///
     /// The read surface is anonymous and its callers carry bearer material: capability
     /// handles, enrollment tokens, and credential ids that are not secrets but are what an
-    /// attacker would enumerate. A log line is DURABLE since fleet-logging r2 (a dated
+    /// attacker would enumerate. A log line is DURABLE once written to disk (a dated
     /// segment on disk, fourteen days by default), so a formatting mistake that used to be
     /// ephemeral stderr is now a file. The fleet redactor catches credential SHAPES; it
     /// cannot catch a handle that has been truncated, a token in an unfamiliar encoding,
@@ -11367,6 +11438,7 @@ mod tests {
     ///   eprintln! the logger failed to install (no request has been read yet)
     ///   eprintln! a corrupt KEM record's capped escaped id and container only
     ///   warn!     route-epoch drop: frame-header integers and a value this module chose
+    ///   warn!     undecodable channel-0 request: fixed text only, no body or decode error
     ///
     /// This test cannot see WHAT a new site logs. What it does is make a new site
     /// impossible to add without editing the count here, which puts the question in front
@@ -11397,7 +11469,7 @@ mod tests {
         let observed = (println, eprintln, tracing, other);
         assert_eq!(
             observed,
-            (1, 2, 1, 0),
+            (1, 2, 2, 0),
             "the daemon's output sites changed (println, eprintln, tracing, other). Before \
              updating this count, confirm the new site logs no secret and bounds any \
              request field -- then add it to the list in \

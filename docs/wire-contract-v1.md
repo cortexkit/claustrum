@@ -52,7 +52,7 @@ cannot be met; retrying unchanged buys another one against the provider's mint b
 | `kind_not_openable` | permanent | authorized `credential.open` on a record that is not a `KemKey` |
 | `open_failed` | permanent | KEM payload or HPKE opening failed; all crypto faults have the same reply |
 | `open_rate_limited` | transient | this connection has reached the scoped-open refusal threshold |
-| `malformed_encoding` | permanent | a `credential.open` byte field failed strict standard base64 decoding |
+| `malformed_encoding` | permanent | a `credential.sign` payload or `credential.open` byte field failed strict standard base64 decoding |
 | `corrupt` | permanent | the record failed to decrypt or parse and has been quarantined |
 | `refresh_unsupported` | permanent | a refresh was demanded of a record with no refresh adapter |
 | `needs_reauth` | auth_required | the credential is latched dead, or deliberately retired |
@@ -313,6 +313,11 @@ remain valid audit-chain strings and are never rewritten.
 ## 4. `credential.status` — the cursor surface
 
 `status` answers without minting anything. It is the surface to poll.
+
+A store failure while resolving a handle or reading its metadata reports the same
+transient `last_error_code` as the other handle reads (`refresh_failed` for an
+underlying store outage), never `not_found`. No keys are added to the status reply;
+the error code's class determines retry policy. Scoped refusals remain uniform.
 
 | field | meaning |
 |---|---|

@@ -5683,8 +5683,18 @@ fn read_grants_from_conn(
     schema_version: u32,
 ) -> rusqlite::Result<Vec<ReadGrant>> {
     // Legacy prefix grants cannot be represented by the current exact/category model.
-    // Refuse explicitly rather than understating the reach of a stored grant.
+    // Refuse explicitly rather than understating the reach of a stored grant. A store
+    // with no grants table at all (bootstrapped, never migrated) holds no grants, so it
+    // reads as empty instead of being refused for a schema it never reached.
     if schema_version < SELECTOR_SCHEMA_VERSION {
+        let has_grants_table: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'read_grants')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_grants_table {
+            return Ok(Vec::new());
+        }
         return Err(rusqlite::Error::InvalidParameterName(format!(
             "store schema {schema_version}: current selector kinds arrive with migration 10; \
              restart the daemon on this build to migrate the store, or read it with the \

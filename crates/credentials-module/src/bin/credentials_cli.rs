@@ -3217,12 +3217,21 @@ fn request_admin_status_with_schema(
         Err(StoreOpError::NotFound) => (Vec::new(), None),
         Err(error) => return Err(CliError::Store(error)),
     };
-    let (grants, grant_schema) =
+    // A store below the selector migration still holds legacy prefix grants, which the
+    // grant reader refuses rather than misreport. `list` and `status` must keep working
+    // during the placement window anyway, so they show no grants and let the store-behind
+    // note say why; `ck auth grants` itself still surfaces the refusal.
+    let behind_selectors =
+        meta_schema.is_some_and(|schema| schema < credentials_core::store::SELECTOR_SCHEMA_VERSION);
+    let (grants, grant_schema) = if behind_selectors {
+        (Vec::new(), meta_schema)
+    } else {
         match credentials_core::store::list_read_grants_read_only_with_schema(&db) {
             Ok((grants, schema)) => (grants, Some(schema)),
             Err(StoreOpError::NotFound) => (Vec::new(), None),
             Err(error) => return Err(CliError::Store(error)),
-        };
+        }
+    };
     let open_intents = match credentials_core::store::count_refresh_intents_read_only(&db) {
         Ok(count) => count,
         Err(StoreOpError::NotFound) => 0,
@@ -3238,8 +3247,8 @@ fn request_admin_status_with_schema(
 ///
 /// *** THE WINDOW THIS DESCRIBES IS THE PLACEMENT WINDOW. *** A CLI-only change is
 /// placed first and the daemon, which migrates on boot, is restarted later. Between the
-/// two the offline readers meet a store one migration behind, and they read it
-/// truthfully: no categories exist yet, and every grant is a prefix grant. Without this
+/// two the offline readers meet a store one migration behind: no categories exist yet,
+/// and its legacy prefix grants are left out rather than misreported. Without this
 /// line the reduced view is indistinguishable from a vault that genuinely has no
 /// categories, which is the reading that would send an operator looking for a bug in
 /// their classification rather than at the restart they have not done yet.

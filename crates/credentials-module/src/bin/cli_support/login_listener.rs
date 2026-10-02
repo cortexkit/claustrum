@@ -63,9 +63,7 @@ pub fn loopback_bind_addr(redirect_uri: &str) -> Option<String> {
     if !is_loopback {
         return None;
     }
-    // Bind the numeric loopback even when the redirect host is "localhost", so we do
-    // not depend on the resolver mapping localhost → 127.0.0.1.
-    Some(format!("127.0.0.1:{port}"))
+    Some(format!("{host}:{port}"))
 }
 
 /// Try to capture the OAuth callback by listening on the redirect's loopback
@@ -266,16 +264,13 @@ fn accept_with_timeout(listener: &TcpListener, timeout: Duration) -> Option<TcpS
     }
 }
 
-/// Read the HTTP request line and extract the `code=..&state=..` query. We only need
-/// the request line (`GET /path?query HTTP/1.1`), so we read a bounded prefix.
+/// Read through the headers before extracting the callback query, since a TCP read
+/// may end in the middle of the request line.
 fn read_callback_query(stream: &mut TcpStream) -> Option<String> {
-    stream.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
-    let mut buf = [0u8; 4096];
-    let n = stream.read(&mut buf).ok()?;
-    let request = std::str::from_utf8(&buf[..n]).ok()?;
-    // First line: METHOD SP request-target SP HTTP/x.y
-    let request_line = request.lines().next()?;
-    let target = request_line.split_whitespace().nth(1)?;
+    let (method, target, _) = read_http_request(stream)?;
+    if method != "GET" {
+        return None;
+    }
     // Extract the query after the first '?'. The target is a path like
     // `/auth/callback?code=..&state=..`.
     let (_, query) = target.split_once('?')?;
@@ -329,10 +324,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn loopback_redirects_bind_numeric_localhost() {
+    fn loopback_redirects_bind_the_redirect_host() {
         assert_eq!(
             loopback_bind_addr("http://localhost:1455/auth/callback").as_deref(),
-            Some("127.0.0.1:1455")
+            Some("localhost:1455")
         );
         assert_eq!(
             loopback_bind_addr("http://127.0.0.1:56121/callback").as_deref(),
@@ -429,5 +424,40 @@ mod tests {
         let posted = listener.wait().expect("fragment POST captured");
         assert_eq!(posted, "access_token=secret&expires_in=3600&state=state");
         client.join().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod streaming_tests {
+    use super::*;
+
+    #[test]
+    fn loopback_binding_keeps_ipv6_and_alternate_ipv4_hosts() {
+        assert_eq!(
+            loopback_bind_addr("http://[::1]:1234/cb").as_deref(),
+            Some("[::1]:1234")
+        );
+        assert_eq!(
+            loopback_bind_addr("http://127.0.0.2:1234/cb").as_deref(),
+            Some("127.0.0.2:1234")
+        );
+    }
+
+    #[test]
+    fn callback_capture_reads_fragmented_headers_to_completion() {
+        let listener = capture_callback("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = std::thread::spawn(move || {
+            let mut stream = TcpStream::connect(addr).unwrap();
+            stream.write_all(b"GET /cb?code=").unwrap();
+            std::thread::sleep(Duration::from_millis(100));
+            // Split the request across TCP writes to require a complete-header read.
+            let _ = stream.write_all(b"abc&state=xyz HTTP/1.1\r\nHost: localhost\r\n\r\n");
+            let mut response = String::new();
+            let _ = stream.read_to_string(&mut response);
+        });
+        let captured = listener.wait();
+        client.join().unwrap();
+        assert_eq!(captured.as_deref(), Some("code=abc&state=xyz"));
     }
 }

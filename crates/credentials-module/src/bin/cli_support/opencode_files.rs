@@ -270,6 +270,31 @@ impl fmt::Debug for HandleAccount {
     }
 }
 
+fn windows_directory(variable: &str, suffix: &str) -> Option<PathBuf> {
+    windows_directory_from(variable, suffix, cfg!(windows), &|name| {
+        std::env::var_os(name)
+    })
+}
+
+fn windows_directory_from(
+    variable: &str,
+    suffix: &str,
+    windows: bool,
+    env: &dyn Fn(&str) -> Option<std::ffi::OsString>,
+) -> Option<PathBuf> {
+    if !windows {
+        return None;
+    }
+    env(variable)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            env("USERPROFILE")
+                .filter(|value| !value.is_empty())
+                .map(|home| PathBuf::from(home).join(suffix))
+        })
+}
+
 pub fn default_auth_path() -> PathBuf {
     let data_home = std::env::var_os("XDG_DATA_HOME")
         .filter(|value| !value.is_empty())
@@ -279,6 +304,7 @@ pub fn default_auth_path() -> PathBuf {
                 .filter(|value| !value.is_empty())
                 .map(|home| PathBuf::from(home).join(".local/share"))
         })
+        .or_else(|| windows_directory("LOCALAPPDATA", "AppData/Local"))
         .unwrap_or_else(|| PathBuf::from(".local/share"));
     data_home.join("opencode").join("auth.json")
 }
@@ -292,6 +318,7 @@ pub fn default_handle_path() -> PathBuf {
                 .filter(|value| !value.is_empty())
                 .map(|home| PathBuf::from(home).join(".config"))
         })
+        .or_else(|| windows_directory("APPDATA", "AppData/Roaming"))
         .unwrap_or_else(|| PathBuf::from(".config"));
     config_home.join("cortexkit").join("opencode-handles.json")
 }
@@ -323,13 +350,16 @@ pub fn golden_tombstone_fixtures() -> Result<TombstoneFixtures, OpenCodeFilesErr
 pub fn read_auth_entries(path: &Path) -> Result<BTreeMap<String, Value>, OpenCodeFilesError> {
     validate_secure_file(path)?;
     let bytes = read_limited(path, AUTH_FILE_MAX_BYTES, "auth file")?;
-    let entries: BTreeMap<String, Value> =
-        serde_json::from_slice(&bytes).map_err(OpenCodeFilesError::Json)?;
-    for (provider, entry) in &entries {
-        validate_identifier(provider, "provider")?;
+    let mut entries = read_raw_auth_entries(&bytes)?;
+    entries.retain(|provider, _| identifier_is_valid(provider));
+    for entry in entries.values() {
         validate_auth_entry(entry)?;
     }
     Ok(entries)
+}
+
+fn read_raw_auth_entries(bytes: &[u8]) -> Result<BTreeMap<String, Value>, OpenCodeFilesError> {
+    serde_json::from_slice(bytes).map_err(OpenCodeFilesError::Json)
 }
 
 pub fn write_auth_entry(
@@ -340,7 +370,10 @@ pub fn write_auth_entry(
     validate_identifier(provider, "provider")?;
     validate_auth_entry(&entry)?;
     let mut entries = if path.exists() {
-        read_auth_entries(path)?
+        validate_secure_file(path)?;
+        let bytes = read_limited(path, AUTH_FILE_MAX_BYTES, "auth file")?;
+        // Preserve entries we cannot migrate, including wellknown URL keys.
+        read_raw_auth_entries(&bytes)?
     } else {
         BTreeMap::new()
     };
@@ -1146,12 +1179,7 @@ where
             action: "rename temporary file",
             source,
         })?;
-        File::open(parent)
-            .and_then(|directory| directory.sync_all())
-            .map_err(|source| OpenCodeFilesError::Io {
-                action: "sync parent directory",
-                source,
-            })?;
+        sync_parent_directory(parent)?;
         Ok(())
     })();
     if result.is_err() {
@@ -1339,25 +1367,40 @@ fn set_mode(path: &Path, mode: u32) -> Result<(), OpenCodeFilesError> {
 
 #[cfg(unix)]
 fn current_uid() -> Result<u32, OpenCodeFilesError> {
-    std::process::Command::new("/usr/bin/id")
-        .arg("-u")
-        .output()
-        .map_err(|source| OpenCodeFilesError::Io {
-            action: "determine current uid",
-            source,
-        })
-        .and_then(|output| {
-            if !output.status.success() {
-                return Err(OpenCodeFilesError::Invalid(
-                    "determine current uid failed".into(),
-                ));
-            }
-            String::from_utf8(output.stdout)
-                .map_err(|_| OpenCodeFilesError::Invalid("current uid was not UTF-8".into()))?
-                .trim()
-                .parse()
-                .map_err(|_| OpenCodeFilesError::Invalid("current uid was invalid".into()))
-        })
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    // A freshly created file is owned by the effective uid; create_new refuses
+    // pre-existing files and symlinks instead of trusting temp-directory contents.
+    let path = std::env::temp_dir().join(format!("ck-auth-uid-{}", random_nonce()?));
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .map_err(|source| io_error("determine current uid", source))?;
+    let result = file
+        .metadata()
+        .map(|metadata| metadata.uid())
+        .map_err(|source| io_error("determine current uid", source));
+    let _ = fs::remove_file(path);
+    result
+}
+
+fn sync_parent_directory(parent: &Path) -> Result<(), OpenCodeFilesError> {
+    sync_parent_directory_for_platform(parent, cfg!(unix))
+}
+
+fn sync_parent_directory_for_platform(
+    parent: &Path,
+    supports_directory_open: bool,
+) -> Result<(), OpenCodeFilesError> {
+    if supports_directory_open {
+        File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|source| io_error("sync parent directory", source))?;
+    }
+    // Windows cannot open directories through File::open. The file itself was
+    // synced before publication; do not report a successful rename as a failure.
+    Ok(())
 }
 
 // UNIX ONLY, like every other custody test in this file. The module imports
@@ -2300,5 +2343,53 @@ mod manifest_lock_aba_regression {
              lease as expired, and commit refused"
         );
         let _ = fs::remove_dir_all(root);
+    }
+}
+
+#[cfg(test)]
+mod portability_tests {
+    use super::*;
+
+    #[test]
+    fn platforms_without_directory_open_skip_parent_sync() {
+        assert!(
+            sync_parent_directory_for_platform(Path::new("/does-not-exist/ck-auth"), false).is_ok()
+        );
+    }
+
+    #[test]
+    fn windows_directories_use_native_environment() {
+        let env = |name: &str| match name {
+            "LOCALAPPDATA" => Some("C:/Users/operator/AppData/Local".into()),
+            "APPDATA" => Some("C:/Users/operator/AppData/Roaming".into()),
+            _ => None,
+        };
+        assert_eq!(
+            windows_directory_from("LOCALAPPDATA", "AppData/Local", true, &env),
+            Some(PathBuf::from("C:/Users/operator/AppData/Local"))
+        );
+        assert_eq!(
+            windows_directory_from("APPDATA", "AppData/Roaming", true, &env),
+            Some(PathBuf::from("C:/Users/operator/AppData/Roaming"))
+        );
+        assert_eq!(
+            windows_directory_from("APPDATA", "AppData/Roaming", false, &env),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn current_uid_matches_a_fresh_owned_file() {
+        use std::os::unix::fs::MetadataExt;
+        let path = std::env::temp_dir().join(format!("ck-uid-test-{}", random_nonce().unwrap()));
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        let uid = file.metadata().unwrap().uid();
+        assert_eq!(current_uid().unwrap(), uid);
+        fs::remove_file(path).unwrap();
     }
 }

@@ -4487,14 +4487,14 @@ fn import_help_page_is_byte_exact_with_the_bare_picker_line() {
     assert!(output.status.success());
     let expected = r#"ck auth import --source <opencode|pi|gemini-cli|antigravity> --id <id>
 ck auth import  pick detected accounts to import (no flags)
-               [--json <file>] [--provider <entry>] [--adapter <adapter>]
+               --json <file> [--provider <entry>] [--adapter <adapter>]
                [--replace]
                [--account-id <id>] [--email <email>] [--org-name <name>]
                [--clear-identity]
 
   --source <source>    which harness to read
   --id <id>            vault credential id to create
-  --json <file>        read that file instead of the source's default path
+  --json <file>        required in the flag form: source file to read
   --provider <entry>   opencode/pi: pick one auth.json entry; antigravity: pick
                        an account by email or index; not used for gemini-cli
   --adapter <adapter>  override the refresh adapter the method implies

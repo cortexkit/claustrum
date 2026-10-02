@@ -221,6 +221,14 @@ impl MigrationArgs {
                 "--restore is mutually exclusive with --dry-run, --replace, --force-shape, and --provider".into(),
             ));
         }
+        if serve_by
+            .as_deref()
+            .is_some_and(|tenant| tenant != "opencode-claustrum")
+        {
+            return Err(CliError::Usage(
+                "--serve-by supports only opencode-claustrum".into(),
+            ));
+        }
         Ok(Self {
             dry_run,
             replace,
@@ -449,6 +457,16 @@ fn restore_provider(
         )));
     }
     let accounts = handles.providers[provider_index].accounts.clone();
+    if accounts.len() > 1 {
+        return Err(CliError::Usage(format!(
+            "cannot restore {provider}: auth.json holds only one key; accounts: {}",
+            accounts
+                .iter()
+                .map(|account| account.label.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+    }
     for account in accounts {
         let mut handle = account.handle.clone();
         let material = match get_material(global, &handle) {

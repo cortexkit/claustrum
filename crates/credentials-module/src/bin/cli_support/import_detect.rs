@@ -46,17 +46,50 @@ fn non_empty_env(env: &(impl EnvLookup + ?Sized), name: &str) -> Option<PathBuf>
         .map(PathBuf::from)
 }
 
+fn home_dir(env: &(impl EnvLookup + ?Sized), windows: bool) -> Option<PathBuf> {
+    non_empty_env(env, "HOME")
+        .or_else(|| windows.then(|| non_empty_env(env, "USERPROFILE")).flatten())
+}
+
+pub fn data_home(env: &(impl EnvLookup + ?Sized), windows: bool) -> PathBuf {
+    non_empty_env(env, "XDG_DATA_HOME")
+        .or_else(|| non_empty_env(env, "HOME").map(|home| home.join(".local/share")))
+        .or_else(|| {
+            windows
+                .then(|| non_empty_env(env, "LOCALAPPDATA"))
+                .flatten()
+        })
+        .or_else(|| {
+            windows
+                .then(|| home_dir(env, true).map(|home| home.join("AppData/Local")))
+                .flatten()
+        })
+        .unwrap_or_else(|| PathBuf::from(".local/share"))
+}
+
+pub fn config_home(env: &(impl EnvLookup + ?Sized), windows: bool) -> PathBuf {
+    non_empty_env(env, "XDG_CONFIG_HOME")
+        .or_else(|| non_empty_env(env, "HOME").map(|home| home.join(".config")))
+        .or_else(|| windows.then(|| non_empty_env(env, "APPDATA")).flatten())
+        .or_else(|| {
+            windows
+                .then(|| home_dir(env, true).map(|home| home.join("AppData/Roaming")))
+                .flatten()
+        })
+        .unwrap_or_else(|| PathBuf::from(".config"))
+}
+
 fn home_relative(env: &(impl EnvLookup + ?Sized), suffix: &str) -> PathBuf {
-    non_empty_env(env, "HOME").unwrap_or_default().join(suffix)
+    home_dir(env, cfg!(windows))
+        .unwrap_or_default()
+        .join(suffix)
 }
 
 /// Resolve opencode's auth file with the same XDG/HOME fallback as the existing
 /// `opencode_files::default_auth_path()` function, whose zero-argument API remains
 /// unchanged for its existing callers.
 pub fn opencode_default_auth_path(env: &(impl EnvLookup + ?Sized)) -> PathBuf {
-    non_empty_env(env, "XDG_DATA_HOME")
-        .or_else(|| non_empty_env(env, "HOME").map(|home| home.join(".local/share")))
-        .unwrap_or_else(|| PathBuf::from(".local/share"))
+    data_home(env, cfg!(windows))
         .join("opencode")
         .join("auth.json")
 }
@@ -73,9 +106,7 @@ pub fn gemini_cli_default_auth_path(env: &(impl EnvLookup + ?Sized)) -> PathBuf 
 
 /// Resolve the antigravity plugin's XDG config file.
 pub fn antigravity_default_auth_path(env: &(impl EnvLookup + ?Sized)) -> PathBuf {
-    non_empty_env(env, "XDG_CONFIG_HOME")
-        .or_else(|| non_empty_env(env, "HOME").map(|home| home.join(".config")))
-        .unwrap_or_else(|| PathBuf::from(".config"))
+    config_home(env, cfg!(windows))
         .join("opencode")
         .join("antigravity-accounts.json")
 }
@@ -827,3 +858,37 @@ G7 — created_id_is_already_reachable reads request_admin_status: with --subc i
 Anchor drift — opencode_files::default_auth_path remains 233-244; oauth.rs import_provider, antigravity, and api-key readers remain 96-120, 210-288, and 309-342. credentials_cli::cmd_import and its construction/identity subranges moved +4 to 1422-1531, 1435-1487, and 1489-1505; parse_inventory moved +4 to 2949-2989; the create advisory call moved +4 to 1310 and its guard is 2825-2886. preflight_login is now 934-971 (its cited key-resolution body moved +4 to 943-955); login_id_is_valid is 1838-1847; the Input validation example is at 1989-1993; and import help is 608-632. dialoguer remains Cargo.toml:45-47, credential_id default_refresh_adapter remains 172-180, and store identity policy is 1205-1349. No cited behavior was silently adapted.
 Dialoguer capability — compile checks under the crate's existing features prove MultiSelect and its cancellable interact_opt method are reachable. Input has no interact_text_opt-shaped cancellable method in dialoguer 0.12; the id prompt therefore exits only through an accepted id or the shared per-row bound of three opens. No disabled-item API is assumed.
 Slice 2 seam contract — module import_picker implements slice2_contract::PromptSeam and CommitSeam behind non-default feature import-prompt-seam. CK_AUTH_IMPORT_PROMPT_SCRIPT and CK_AUTH_IMPORT_COMMIT_SCRIPT name ordered scripts; one response/outcome is consumed per prompt/attempted row, in order, and exhaustion returns ScriptExhausted. An injected prompt script wins before TTY checks; without the feature its env var is ignored. CK_AUTH_IMPORT_SHIPPED_BINARY names the default-feature binary gate builds. ID prompts have three opens per row across every trigger."#;
+
+#[cfg(test)]
+mod platform_path_tests {
+    use super::*;
+
+    #[test]
+    fn windows_import_paths_use_native_dirs_without_xdg_or_home() {
+        let env = BTreeMap::from([
+            (
+                "LOCALAPPDATA".into(),
+                OsString::from("C:/Users/operator/AppData/Local"),
+            ),
+            (
+                "APPDATA".into(),
+                OsString::from("C:/Users/operator/AppData/Roaming"),
+            ),
+            ("USERPROFILE".into(), OsString::from("C:/Users/operator")),
+        ]);
+        assert_eq!(
+            data_home(&env, true),
+            PathBuf::from("C:/Users/operator/AppData/Local")
+        );
+        assert_eq!(
+            config_home(&env, true),
+            PathBuf::from("C:/Users/operator/AppData/Roaming")
+        );
+        assert_eq!(
+            home_dir(&env, true),
+            Some(PathBuf::from("C:/Users/operator"))
+        );
+        assert_eq!(data_home(&env, false), PathBuf::from(".local/share"));
+        assert_eq!(config_home(&env, false), PathBuf::from(".config"));
+    }
+}

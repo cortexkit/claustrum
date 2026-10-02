@@ -4411,6 +4411,7 @@ fn cmd_enroll(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
         }
         "revoke" => {
             let name = required(rest, "--name")?;
+            require_live_enrollment(global, &name)?;
             commit_admin(
                 global,
                 AdminOpBody::EnrollRevoke {
@@ -4427,6 +4428,7 @@ fn cmd_enroll(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
         }
         "reissue" => {
             let name = required(rest, "--name")?;
+            require_live_enrollment(global, &name)?;
             let reply = commit_admin(
                 global,
                 AdminOpBody::EnrollReissue {
@@ -4603,6 +4605,32 @@ fn pending_proposed_name(global: &GlobalArgs, request_id: &str) -> Result<String
                 "no pending request {request_id} (list them with `ck auth enroll list`)"
             ))
         })
+}
+
+/// Refuse `revoke` or `reissue` for a name with no live enrollment, before the admin op.
+///
+/// Without this the op reaches the store, which finds no row and reports it as a storage
+/// failure, so the operator reads "the running module refused the op: store error" for
+/// what is really a typo or an already-revoked name. Checked here, the same way `approve`
+/// reads the pending request first. A name revoked between this read and the op still
+/// fails closed in the store.
+fn require_live_enrollment(global: &GlobalArgs, name: &str) -> Result<(), CliError> {
+    let rows = credentials_core::store::list_enrollments_read_only(&store_path(global))
+        .map_err(|error| CliError::Usage(format!("read enrollments: {error}")))?;
+    if live_enrollment_named(&rows, name) {
+        Ok(())
+    } else {
+        Err(CliError::Usage(format!(
+            "no live enrollment named {name} (list them with `ck auth enroll list`)"
+        )))
+    }
+}
+
+/// Whether the ledger holds an unrevoked enrollment under `name`. The read-only ledger
+/// returns pending requests and unrevoked enrollments only, so any non-pending row is live.
+fn live_enrollment_named(rows: &[credentials_core::store::EnrollmentRow], name: &str) -> bool {
+    rows.iter()
+        .any(|row| row.state != "pending" && row.name == name)
 }
 
 /// Render every category that exists, what it covers, and which grants name it.
@@ -5661,6 +5689,22 @@ mod tests {
             proposer_kind: None,
             proposer_id: None,
         }
+    }
+
+    /// A pending request under a name is not a live enrollment, so revoke and reissue
+    /// must refuse it as well as a name that is absent altogether.
+    #[test]
+    fn only_an_unrevoked_enrollment_counts_as_live() {
+        let rows = vec![
+            enrollment_row("enr-1", "anthropic-auth-opencode", "live", 1),
+            enrollment_row("req-1", "cookie-list-probe", "pending", 0),
+        ];
+        assert!(super::live_enrollment_named(
+            &rows,
+            "anthropic-auth-opencode"
+        ));
+        assert!(!super::live_enrollment_named(&rows, "cookie-list-probe"));
+        assert!(!super::live_enrollment_named(&rows, "no-such-consumer"));
     }
 
     /// Only the handle just minted may appear as a runnable revoke command; the other

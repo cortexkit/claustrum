@@ -275,9 +275,21 @@ impl RefreshAdapter for GithubAppAdapter {
             ));
         }
         if response.status == 403 {
-            return Err(RefreshError::InvalidGrant(
-                "GitHub installation token exchange requires operator repair".into(),
-            ));
+            // Rate limits also produce 403s. Only an explicit suspension needs a human;
+            // missing or malformed messages must keep the retryable classification.
+            let suspended = serde_json::from_slice::<serde_json::Value>(&response.body)
+                .ok()
+                .and_then(|body| {
+                    body.get("message")?
+                        .as_str()
+                        .map(|message| message.to_ascii_lowercase().contains("suspended"))
+                })
+                .unwrap_or(false);
+            if suspended {
+                return Err(RefreshError::InvalidGrant(
+                    "GitHub installation is suspended and requires operator repair".into(),
+                ));
+            }
         }
         if response.status != 201 {
             return Err(RefreshError::Status(
@@ -388,12 +400,58 @@ mod tests {
         include_bytes!("../../tests/fixtures/github_app/access_tokens.json");
 
     #[tokio::test]
-    async fn forbidden_installation_token_exchange_requires_operator_repair() {
-        let http = fixture_transport(vec![(200, RECORDED_INSTALLATIONS), (403, b"{}")]);
+    async fn suspended_installation_token_exchange_requires_operator_repair() {
+        for message in [
+            "This installation has been suspended",
+            "This installation has been SUSPENDED",
+        ] {
+            let body = serde_json::to_vec(&serde_json::json!({"message": message})).unwrap();
+            let http = fixture_transport(vec![(200, RECORDED_INSTALLATIONS), (403, &body)]);
+            assert!(matches!(
+                GithubAppAdapter::new().refresh(&credential(), &http).await,
+                Err(RefreshError::InvalidGrant(_))
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn primary_rate_limit_at_token_exchange_remains_transient() {
+        let http = fixture_transport(vec![
+            (200, RECORDED_INSTALLATIONS),
+            (
+                403,
+                br#"{"message":"API rate limit exceeded for 192.0.2.1."}"#,
+            ),
+        ]);
         assert!(matches!(
             GithubAppAdapter::new().refresh(&credential(), &http).await,
-            Err(RefreshError::InvalidGrant(_))
+            Err(RefreshError::Status(403, _))
         ));
+    }
+
+    #[tokio::test]
+    async fn secondary_rate_limit_at_token_exchange_remains_transient() {
+        let http = fixture_transport(vec![(200, RECORDED_INSTALLATIONS), (403, br#"{"message":"You have exceeded a secondary rate limit. Please wait a few minutes before you try again."}"#)]);
+        assert!(matches!(
+            GithubAppAdapter::new().refresh(&credential(), &http).await,
+            Err(RefreshError::Status(403, _))
+        ));
+    }
+
+    #[tokio::test]
+    async fn suspension_must_be_in_a_parsed_message_field() {
+        for body in [
+            b"suspended".as_slice(),
+            br#"{"detail":"suspended","message":"Request forbidden"}"#,
+            br#"{"message":{"detail":"suspended"}}"#,
+            b"{}",
+        ] {
+            let http = fixture_transport(vec![(200, RECORDED_INSTALLATIONS), (403, body)]);
+            assert!(matches!(
+                GithubAppAdapter::new().refresh(&credential(), &http).await,
+                Err(RefreshError::Status(403, _))
+            ));
+        }
     }
 
     #[tokio::test]

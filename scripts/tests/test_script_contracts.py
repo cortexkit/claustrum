@@ -306,14 +306,14 @@ class ScriptContracts(unittest.TestCase):
             self.assertEqual(result.returncode, 1, result.stdout)
             self.assertIn('REFUSING:', result.stdout)
 
-    def release_step(self, label):
-        workflow = module('lib/workflow-gates').parse_workflow(os.fspath(ROOT / '.github/workflows/release.yml'))
+    def release_step(self, label, path='.github/workflows/release.yml'):
+        workflow = module('lib/workflow-gates').parse_workflow(os.fspath(ROOT / path))
         for job in workflow['jobs'].values():
             for step in job.get('steps', []):
                 if step.get('name') == label:
                     # Preserve Python heredoc indentation; the workflow summary parser
                     # flattens block scalars and is not an execution-source parser.
-                    lines = text('.github/workflows/release.yml').splitlines()
+                    lines = text(path).splitlines()
                     index = lines.index('      - name: ' + label)
                     while lines[index] != '        run: |':
                         index += 1
@@ -374,8 +374,12 @@ class ScriptContracts(unittest.TestCase):
                     self.assertNotRegex(step.get('run', ''), r'\$\{\{\s*(?:inputs\.|github\.ref_name)')
 
     def test_npm_publish_is_master_only_and_bun_matches_ci(self):
-        workflow = module('lib/workflow-gates').parse_workflow(os.fspath(ROOT / '.github/workflows/publish-client.yml'))
-        self.assertEqual(workflow['jobs']['publish'].get('if'), "github.ref == 'refs/heads/master'")
+        # A failing step, not a job `if`: a skipped job reads as green.
+        step = self.release_step('Refuse to publish from anything but master', '.github/workflows/publish-client.yml')
+        refused = self.run_shell(step['run'], dict(self.env, REF='refs/heads/feature'))
+        self.assertEqual(refused.returncode, 1, refused.stdout)
+        self.assertIn('REFUSING', refused.stdout)
+        self.assertEqual(self.run_shell(step['run'], dict(self.env, REF='refs/heads/master')).returncode, 0)
         self.assertIn('bun-version: 1.3.14', text('.github/workflows/publish-client.yml'))
 
     def test_ci_clippy_covers_every_gate_seam(self):

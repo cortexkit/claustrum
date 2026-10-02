@@ -22,9 +22,20 @@ permissions:
 
 jobs:
   publish:
-    if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     steps:
+      # Publish only from master. A failing step, not a job-level `if`: a skipped job
+      # reads as green, so a dispatch from another branch would look like a publish
+      # that happened.
+      - name: Refuse to publish from anything but master
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          if [ "$REF" != "refs/heads/master" ]; then
+            echo "REFUSING: npm publishes only from master; this run is on $REF." >&2
+            exit 1
+          fi
+
       - uses: actions/checkout@v5
 
       - uses: oven-sh/setup-bun@v2

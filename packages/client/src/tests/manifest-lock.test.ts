@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
+import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { basename, join, posix, win32 } from 'node:path'
 
@@ -21,6 +22,27 @@ async function manifestPath(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), 'claustrum-manifest-lock-'))
   roots.push(root)
   return join(root, 'opencode-handles.json')
+}
+
+// The writer walks EVERY ancestor up to `/`, so the two ancestor tests depend on the whole
+// path, not only the directory they chmod. os.tmpdir() follows TMPDIR, which can point under a
+// group-writable directory, and then the refusal test would pass without its own chmod.
+// `/tmp` is root-owned 1777 with `/` above it on Linux and macOS (where it resolves to
+// /private/tmp), so only the test's own chmod decides the outcome.
+async function cleanAncestorManifestPath(): Promise<string> {
+  const root = await mkdtemp(join('/tmp', 'claustrum-manifest-lock-'))
+  roots.push(root)
+  return join(root, 'opencode-handles.json')
+}
+
+// Set mode 1777 with the chmod command, then confirm it took. Bun 1.3.14 on Linux drops the
+// sticky bit from fs.chmod (0o1777 lands as 0777; measured in oven/bun:1.3.14, while macOS
+// keeps it), so a fixture built with fs.chmod is not sticky there and the writer refuses it
+// correctly, which reads as a writer bug.
+async function makeSticky(dir: string): Promise<void> {
+  const result = spawnSync('chmod', ['1777', dir])
+  expect(result.status).toBe(0)
+  expect((await stat(dir)).mode & 0o7777).toBe(0o1777)
 }
 
 function provider(provider: string, tenant: string) {
@@ -82,7 +104,7 @@ const onPosix = process.platform !== 'win32'
 
 describe('manifest writer lock', () => {
   test.skipIf(!onPosix)('writer refuses writable ancestors before creating anything', async () => {
-    const path = await manifestPath()
+    const path = await cleanAncestorManifestPath()
     const root = join(path, '..')
     await chmod(root, 0o775)
     const target = join(root, 'private', 'manifest.json')
@@ -91,8 +113,8 @@ describe('manifest writer lock', () => {
   })
 
   test.skipIf(!onPosix)('writer accepts an owned sticky parent', async () => {
-    const path = await manifestPath()
-    await chmod(join(path, '..'), 0o1777)
+    const path = await cleanAncestorManifestPath()
+    await makeSticky(join(path, '..'))
     await writeHandleFileLocked(path, 'tenant', () => {})
     expect(JSON.parse(await readFile(path, 'utf8'))).toEqual({ version: 1, providers: [] })
   })

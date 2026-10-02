@@ -101,7 +101,7 @@ pub async fn exchange_authorization_code(
     verifier: &str,
     now_ms: i64,
 ) -> Result<LoginTokens, LoginError> {
-    if callback.state != expected_state {
+    if !crate::oauth_login::states_equal(&callback.state, expected_state) {
         return Err(LoginError::StateMismatch);
     }
     let body = form_urlencode(&[

@@ -1,9 +1,8 @@
 //! Devin CLI login and long-lived token support.
 //!
 //! Devin issues one opaque token from its CLI callback exchange. That token is both
-//! access and refresh state; there is no refresh endpoint, so refreshing locally only
-//! renews the stored one-year deadline and lets the engine surface re-login when it
-//! eventually expires.
+//! access and refresh state; there is no refresh endpoint. A refresh request
+//! therefore requires re-login rather than extending the rejected token's deadline.
 
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -50,7 +49,7 @@ pub async fn exchange_authorization_code(
     verifier: &str,
     now_ms: i64,
 ) -> Result<LoginTokens, LoginError> {
-    if callback.state != expected_state {
+    if !crate::oauth_login::states_equal(&callback.state, expected_state) {
         return Err(LoginError::StateMismatch);
     }
     let body = serde_json::to_vec(&serde_json::json!({
@@ -97,28 +96,14 @@ impl RefreshAdapter for DevinAdapter {
 
     async fn refresh(
         &self,
-        cred: &OAuthCredential,
+        _cred: &OAuthCredential,
         _http: &dyn HttpTransport,
     ) -> Result<RefreshedTokens, RefreshError> {
-        // Devin tokens are re-login-only when their one-year lifetime expires; there
-        // is no provider refresh endpoint to call. The engine reaches this method only
-        // when it has decided the record needs an update, so renewing the local deadline
-        // keeps the long-lived token usable without ever sending it to a made-up URL.
-        Ok(RefreshedTokens {
-            access_token: cred.access_token.clone(),
-            refresh_token: cred.refresh_token.clone(),
-            expires_at_ms: Some(now_ms().saturating_add(TOKEN_TTL_MS)),
-            github_app_permissions: None,
-        })
+        // There is no refresh endpoint: a rejected token requires a new login.
+        Err(RefreshError::InvalidGrant(
+            "Devin access tokens are re-login-only".into(),
+        ))
     }
-}
-
-fn now_ms() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -191,13 +176,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn refresh_is_a_local_noop_with_renewed_expiry() {
-        let before = now_ms();
+    async fn refresh_requires_relogin_instead_of_renewing_a_rejected_token() {
         let http = FixtureTransport::new(Vec::new());
-        let result = DevinAdapter::new().refresh(&cred(), &http).await.unwrap();
-        assert_eq!(result.access_token.expose(), "opaque-token");
-        assert_eq!(result.refresh_token.expose(), "opaque-token");
-        assert!(result.expires_at_ms.unwrap() >= before + TOKEN_TTL_MS);
+        assert!(matches!(
+            DevinAdapter::new().refresh(&cred(), &http).await,
+            Err(RefreshError::InvalidGrant(_))
+        ));
         assert!(http.requests().is_empty(), "Devin has no refresh endpoint");
     }
 

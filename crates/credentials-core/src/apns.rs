@@ -52,10 +52,9 @@ const _: () = assert!(
     "the provider-token reuse limit must leave room for the request to arrive"
 );
 
-/// The APNs environments. A token is valid in both, but the HOST is not the same,
-/// and a key configured for one environment is silently ignored by the other —
-/// notifications are accepted and dropped. Kept as an explicit type so a caller
-/// cannot default into one.
+/// The APNs environments use different hosts. An environment-restricted key
+/// submitted to the wrong host is refused with `BadEnvironmentKeyInToken`.
+/// Kept as an explicit type so a caller cannot default into one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApnsEnvironment {
     Production,
@@ -278,18 +277,10 @@ pub fn mint_provider_token(
         }
     })?;
 
-    // Field order inside each JSON object is fixed here rather than left to a
-    // serializer: the signature covers the exact bytes, so a reordering would
-    // produce a different token. It does not need to match Apple's example, only
-    // to be stable.
-    let header = format!(
-        r#"{{"alg":"ES256","kid":"{}","typ":"JWT"}}"#,
-        identity.key_id
-    );
-    let claims = format!(
-        r#"{{"iss":"{}","iat":{}}}"#,
-        identity.team_id, issued_at_secs
-    );
+    // Serialize before signing so identifiers cannot escape their JSON fields.
+    let header =
+        serde_json::json!({"alg": "ES256", "kid": identity.key_id, "typ": "JWT"}).to_string();
+    let claims = serde_json::json!({"iss": identity.team_id, "iat": issued_at_secs}).to_string();
 
     let signing_input = format!(
         "{}.{}",
@@ -341,6 +332,23 @@ OF/2NxApJCzGCEDdfSp6VQO30hyhRANCAAQRWz+jn65BtOMvdyHKcvjBeBSDZH2r\n\
              AwEHoUQDQgAEQXE5PChcWqV3bw8OnWJxTfjcHF+qSH+8el1GrbA/pWnDxKaLjwIs\n\
              8gD3rFdEA8xX1bSEwDFsiwmdde0vvP6ihA==\n\
              -----END EC PRIVATE KEY-----\n";
+
+    #[test]
+    fn jwt_identifiers_are_json_escaped() {
+        let mut id = identity();
+        id.key_id = "ab\"\\\n12345".into();
+        id.team_id = "ab\"\\\n12345".into();
+        let token = mint_provider_token(TEST_P8, &id, 123).unwrap();
+        let header = crate::oauth_login::decode_jwt_claims(&format!(
+            "x.{}.x",
+            token.jwt.split('.').next().unwrap()
+        ))
+        .unwrap();
+        let claims = crate::oauth_login::decode_jwt_claims(&token.jwt).unwrap();
+        assert_eq!(header["kid"], id.key_id);
+        assert_eq!(claims["iss"], id.team_id);
+        assert_eq!(claims["iat"], 123);
+    }
 
     fn identity() -> ApnsKeyIdentity {
         ApnsKeyIdentity {

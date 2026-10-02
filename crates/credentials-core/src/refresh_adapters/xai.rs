@@ -145,7 +145,16 @@ impl RefreshAdapter for XaiAdapter {
                     .map_err(|e| RefreshError::Decode(e.to_string()))?;
                 let expires_at_ms = parsed
                     .expires_in
-                    .map(|secs| now_ms() + secs.saturating_mul(1000));
+                    .and_then(|secs| crate::oauth_login::relative_expiry_ms(now_ms(), Some(secs)))
+                    .or_else(|| {
+                        parsed
+                            .expires_in
+                            .is_none()
+                            .then(|| {
+                                crate::oauth_login::access_token_expiry_ms(&parsed.access_token)
+                            })
+                            .flatten()
+                    });
                 let refresh_token = parsed
                     .refresh_token
                     .unwrap_or_else(|| cred.refresh_token.expose().to_string());

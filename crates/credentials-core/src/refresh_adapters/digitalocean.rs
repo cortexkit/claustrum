@@ -49,7 +49,7 @@ pub fn parse_fragment_capture(
             .into_owned()
             .collect();
     let state = fields.get("state").map(String::as_str).unwrap_or("");
-    if state != expected_state {
+    if !crate::oauth_login::states_equal(state, expected_state) {
         return Err("DigitalOcean callback state did not match".into());
     }
     let access_token = fields

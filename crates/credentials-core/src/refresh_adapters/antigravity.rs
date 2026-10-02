@@ -205,12 +205,18 @@ impl RefreshAdapter for AntigravityAdapter {
             .await?;
 
         // A dead refresh token comes back as 400 invalid_grant (Google's standard).
-        if resp.status == 400 {
+        if resp.status == 400 || resp.status == 401 {
             let text = String::from_utf8_lossy(&resp.body);
-            if text.contains("invalid_grant") {
-                return Err(RefreshError::InvalidGrant(text.into_owned()));
+            let error = serde_json::from_slice::<serde_json::Value>(&resp.body).ok();
+            if matches!(
+                error.as_ref().and_then(|v| v["error"].as_str()),
+                Some("invalid_grant" | "invalid_client" | "unauthorized_client")
+            ) {
+                return Err(RefreshError::InvalidGrant(
+                    "Google grant or OAuth client requires operator repair".into(),
+                ));
             }
-            return Err(RefreshError::Status(400, text.into_owned()));
+            return Err(RefreshError::Status(resp.status, text.into_owned()));
         }
         if resp.status != 200 {
             return Err(RefreshError::Status(
@@ -221,7 +227,8 @@ impl RefreshAdapter for AntigravityAdapter {
 
         let parsed: RefreshResponseBody =
             serde_json::from_slice(&resp.body).map_err(|e| RefreshError::Decode(e.to_string()))?;
-        let expires_at_ms = Some(now_ms() + parsed.expires_in.saturating_mul(1000));
+        let expires_at_ms =
+            crate::oauth_login::relative_expiry_ms(now_ms(), Some(parsed.expires_in));
         // Re-pack: a rotated refresh token replaces the bare segment; an omitted one
         // reuses the existing bare token. The project tail is always preserved.
         let new_bare = crate::secret::SecretString::new(

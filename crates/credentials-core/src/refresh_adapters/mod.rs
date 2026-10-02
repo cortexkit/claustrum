@@ -403,3 +403,123 @@ mod documented_count_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod token_response_rules {
+    use super::*;
+    use fixture::FixtureTransport;
+
+    fn credential() -> crate::oauth::OAuthCredential {
+        crate::oauth::OAuthCredential {
+            access_token: "old-access".to_string().into(),
+            refresh_token: "old-refresh".to_string().into(),
+            expires_at_ms: Some(0),
+            token_url: String::new(),
+            client_id: None,
+            scopes: vec![],
+        }
+    }
+    fn adapters() -> Vec<Box<dyn RefreshAdapter>> {
+        vec![
+            Box::new(anthropic::AnthropicAdapter::new()),
+            Box::new(openai::OpenAiAdapter::new()),
+            Box::new(xai::XaiAdapter::new()),
+            Box::new(google::GoogleAdapter::with_client("c", "s")),
+            Box::new(antigravity::AntigravityAdapter::with_client("c", "s")),
+        ]
+    }
+    #[tokio::test]
+    async fn refresh_lifetimes_saturate_and_negative_lifetimes_are_absent() {
+        for adapter in adapters() {
+            for (seconds, expected) in [(i64::MAX, Some(i64::MAX)), (-1, None)] {
+                let body = serde_json::to_vec(&serde_json::json!({"access_token":"new", "refresh_token":"rotated", "expires_in": seconds})).unwrap();
+                let tokens = adapter
+                    .refresh(&credential(), &FixtureTransport::ok(200, body))
+                    .await
+                    .unwrap();
+                assert_eq!(tokens.expires_at_ms, expected, "{}", adapter.name());
+            }
+        }
+    }
+    #[tokio::test]
+    async fn refresh_without_lifetime_uses_new_access_jwt_expiry() {
+        let jwt = format!(
+            "e30.{}.sig",
+            crate::store::base64url(br#"{"exp":2000000000}"#)
+        );
+        for adapter in [
+            Box::new(openai::OpenAiAdapter::new()) as Box<dyn RefreshAdapter>,
+            Box::new(xai::XaiAdapter::new()),
+        ] {
+            let body = serde_json::to_vec(&serde_json::json!({"access_token":jwt})).unwrap();
+            let tokens = adapter
+                .refresh(&credential(), &FixtureTransport::ok(200, body))
+                .await
+                .unwrap();
+            assert_eq!(
+                tokens.expires_at_ms,
+                Some(2_000_000_000_000),
+                "{}",
+                adapter.name()
+            );
+        }
+    }
+    #[tokio::test]
+    async fn google_refresh_preserves_rotation_and_falls_back_when_absent() {
+        let adapter = google::GoogleAdapter::with_client("c", "s");
+        for rotated in [Some("new-refresh"), None] {
+            let body = serde_json::to_vec(&serde_json::json!({"access_token":"new", "expires_in":60, "refresh_token":rotated})).unwrap();
+            let tokens = adapter
+                .refresh(&credential(), &FixtureTransport::ok(200, body))
+                .await
+                .unwrap();
+            assert_eq!(
+                tokens.refresh_token.expose(),
+                rotated.unwrap_or("old-refresh")
+            );
+        }
+    }
+    #[tokio::test]
+    async fn google_client_refusals_require_operator_repair() {
+        for adapter in [
+            Box::new(google::GoogleAdapter::with_client("c", "s")) as Box<dyn RefreshAdapter>,
+            Box::new(antigravity::AntigravityAdapter::with_client("c", "s")),
+        ] {
+            for (status, error) in [(401, "invalid_client"), (400, "unauthorized_client")] {
+                let body = serde_json::to_vec(&serde_json::json!({"error":error})).unwrap();
+                assert!(
+                    matches!(
+                        adapter
+                            .refresh(&credential(), &FixtureTransport::ok(status, body))
+                            .await,
+                        Err(RefreshError::InvalidGrant(_))
+                    ),
+                    "{}",
+                    adapter.name()
+                );
+            }
+        }
+    }
+    #[tokio::test]
+    async fn openai_dead_refresh_codes_accept_three_envelope_shapes() {
+        for code in [
+            "refresh_token_expired",
+            "refresh_token_reused",
+            "refresh_token_invalidated",
+        ] {
+            for body in [
+                serde_json::json!({"error":{"code":code}}),
+                serde_json::json!({"error":code}),
+                serde_json::json!({"code":code}),
+            ] {
+                let http = FixtureTransport::ok(401, serde_json::to_vec(&body).unwrap());
+                assert!(matches!(
+                    openai::OpenAiAdapter::new()
+                        .refresh(&credential(), &http)
+                        .await,
+                    Err(RefreshError::InvalidGrant(_))
+                ));
+            }
+        }
+    }
+}

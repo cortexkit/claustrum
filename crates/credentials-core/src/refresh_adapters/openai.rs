@@ -12,7 +12,7 @@
 //!   "refresh_token_invalidated"}}`) on a 400 OR 401 — NOT a flat `invalid_grant`.
 //! - The official refresh path does not consume `expires_in` (the CLI reads the
 //!   access token's own JWT expiry), so it is parsed optionally here and absence
-//!   yields no stored expiry rather than a decode failure.
+//!   falls back to the access token's JWT expiry (unknown for opaque tokens).
 //!
 //! The refresh token rotates (single-use), so a response that omits `refresh_token`
 //! reuses the existing one. OpenAI exposes a revocation endpoint but no
@@ -80,18 +80,6 @@ struct RefreshResponseBody {
     expires_in: Option<i64>,
 }
 
-/// An OpenAI error envelope: `{"error":{"code":"..."}}`. Used to recognize the
-/// dead-refresh-token codes.
-#[derive(Debug, Deserialize)]
-struct ErrorEnvelope {
-    error: Option<ErrorBody>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ErrorBody {
-    code: Option<String>,
-}
-
 /// The OpenAI refresh adapter.
 #[derive(Debug, Default)]
 pub struct OpenAiAdapter;
@@ -121,10 +109,15 @@ impl OpenAiAdapter {
 
     /// Whether a body carries one of OpenAI's dead-refresh-token error codes.
     fn is_dead_refresh_token(body: &[u8]) -> bool {
-        serde_json::from_slice::<ErrorEnvelope>(body)
+        serde_json::from_slice::<serde_json::Value>(body)
             .ok()
-            .and_then(|e| e.error)
-            .and_then(|e| e.code)
+            .and_then(|e| {
+                e["error"]["code"]
+                    .as_str()
+                    .or_else(|| e["error"].as_str())
+                    .or_else(|| e["code"].as_str())
+                    .map(str::to_owned)
+            })
             .map(|code| {
                 matches!(
                     code.as_str(),
@@ -151,7 +144,7 @@ impl RefreshAdapter for OpenAiAdapter {
             .post(Self::endpoint(cred), &[], "application/json", body)
             .await?;
 
-        // A dead refresh token arrives as a nested error code on 400 or 401.
+        // Recognize terminal refresh errors in nested, flat-error and top-level-code forms.
         if resp.status == 400 || resp.status == 401 {
             let text = String::from_utf8_lossy(&resp.body);
             if Self::is_dead_refresh_token(&resp.body) {
@@ -170,7 +163,14 @@ impl RefreshAdapter for OpenAiAdapter {
             serde_json::from_slice(&resp.body).map_err(|e| RefreshError::Decode(e.to_string()))?;
         let expires_at_ms = parsed
             .expires_in
-            .map(|secs| now_ms() + secs.saturating_mul(1000));
+            .and_then(|secs| crate::oauth_login::relative_expiry_ms(now_ms(), Some(secs)))
+            .or_else(|| {
+                parsed
+                    .expires_in
+                    .is_none()
+                    .then(|| crate::oauth_login::access_token_expiry_ms(&parsed.access_token))
+                    .flatten()
+            });
         let refresh_token = parsed
             .refresh_token
             .unwrap_or_else(|| cred.refresh_token.expose().to_string());

@@ -40,6 +40,8 @@ impl ReqwestTransport {
     pub fn new() -> Result<Self, RefreshError> {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
+            // Token-exchange bodies contain secrets; redirects must be surfaced, never followed.
+            .redirect(reqwest::redirect::Policy::none())
             .http1_only()
             .build()
             .map_err(|e| RefreshError::Transport(e.to_string()))?;
@@ -138,6 +140,63 @@ mod tests {
             source.contains("impl HttpTransport for ReqwestTransport"),
             "the included source must be this module; if this fails the include path \
              is wrong and the assertion above proves nothing"
+        );
+    }
+}
+
+#[cfg(test)]
+mod redirect_rules {
+    use super::*;
+    #[tokio::test]
+    async fn token_post_surfaces_redirect_without_forwarding_body() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut buffer = [0; 4096];
+            let _ = stream.read(&mut buffer).unwrap();
+            write!(stream, "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://{address}/target\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+            drop(stream);
+            listener.set_nonblocking(true).unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+            while std::time::Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut forwarded, _)) => {
+                        forwarded
+                            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                            .unwrap();
+                        let _ = forwarded.read(&mut buffer).unwrap();
+                        forwarded.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                        return true;
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(5))
+                    }
+                    Err(e) => panic!("accept failed: {e}"),
+                }
+            }
+            false
+        });
+        let response = ReqwestTransport::new()
+            .unwrap()
+            .post(
+                &format!("http://{address}/token"),
+                &[],
+                "application/json",
+                b"refresh-token-fixture".to_vec(),
+            )
+            .await
+            .unwrap();
+        let forwarded = server.join().unwrap();
+        assert_eq!(response.status, 307);
+        assert!(
+            !forwarded,
+            "a token body must never reach a redirect target"
         );
     }
 }

@@ -3,9 +3,8 @@
 //! Refreshes the OAuth tokens minted by the gemini-cli login flow (the
 //! `~/.gemini/oauth_creds.json` `{access_token, refresh_token, expiry_date}` entry).
 //! Unlike Anthropic, Google uses the standard Google OAuth2 token endpoint with a
-//! FORM-ENCODED body that includes a `client_secret`, and Google does NOT rotate
-//! the refresh token on refresh (long-lived refresh tokens), so the response omits
-//! `refresh_token` and the existing one is carried forward.
+//! FORM-ENCODED body that includes a `client_secret`. When the response omits
+//! `refresh_token`, the existing long-lived token is carried forward.
 //!
 //! The wire format mirrors the proven gemini usage provider in the sibling
 //! ai-provider-quota crate (form POST to `oauth2.googleapis.com/token`); it is not
@@ -76,13 +75,14 @@ pub fn oauth_client_secret() -> String {
 }
 
 /// The success response of the refresh exchange: a new access token and a relative
-/// `expires_in` (seconds). Google does not rotate the refresh token, so the
-/// response carries no `refresh_token` and the existing one is reused.
+/// `expires_in` (seconds), plus a refresh token when the provider rotates it.
 #[derive(Debug, Deserialize)]
 struct RefreshResponseBody {
     access_token: String,
     /// Access-token lifetime in seconds from now.
     expires_in: i64,
+    #[serde(default)]
+    refresh_token: Option<String>,
 }
 
 /// The Google refresh adapter. Google's token endpoint requires BOTH a `client_id`
@@ -171,12 +171,18 @@ impl RefreshAdapter for GoogleAdapter {
             .await?;
 
         // A dead refresh token comes back as 400 invalid_grant.
-        if resp.status == 400 {
+        if resp.status == 400 || resp.status == 401 {
             let text = String::from_utf8_lossy(&resp.body);
-            if text.contains("invalid_grant") {
-                return Err(RefreshError::InvalidGrant(text.into_owned()));
+            let error = serde_json::from_slice::<serde_json::Value>(&resp.body).ok();
+            if matches!(
+                error.as_ref().and_then(|v| v["error"].as_str()),
+                Some("invalid_grant" | "invalid_client" | "unauthorized_client")
+            ) {
+                return Err(RefreshError::InvalidGrant(
+                    "Google grant or OAuth client requires operator repair".into(),
+                ));
             }
-            return Err(RefreshError::Status(400, text.into_owned()));
+            return Err(RefreshError::Status(resp.status, text.into_owned()));
         }
         if resp.status != 200 {
             return Err(RefreshError::Status(
@@ -187,11 +193,15 @@ impl RefreshAdapter for GoogleAdapter {
 
         let parsed: RefreshResponseBody =
             serde_json::from_slice(&resp.body).map_err(|e| RefreshError::Decode(e.to_string()))?;
-        let expires_at_ms = Some(now_ms() + parsed.expires_in.saturating_mul(1000));
+        let expires_at_ms =
+            crate::oauth_login::relative_expiry_ms(now_ms(), Some(parsed.expires_in));
         Ok(RefreshedTokens {
             access_token: parsed.access_token.into(),
-            // Google does not rotate; carry the existing refresh token forward.
-            refresh_token: cred.refresh_token.clone(),
+            // Preserve a rotated token if supplied; otherwise retain the existing grant.
+            refresh_token: parsed
+                .refresh_token
+                .map(Into::into)
+                .unwrap_or_else(|| cred.refresh_token.clone()),
             expires_at_ms,
             github_app_permissions: None,
         })

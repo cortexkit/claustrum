@@ -39,6 +39,18 @@ from pathlib import Path
 SKIP = {".git", "node_modules", "target", "dist", ".cortexkit"}
 FIXTURE_DIR_NAMES = {"golden", "fixtures"}
 
+# POSITIVE CONTROL FOR THE MATCHER. The two refusals in main() catch a blind WALK (no
+# directories found) and a blind PARSE (no patterns found), but neither proves that
+# is_covered() can ever say "not covered". A matcher that answered True for every path
+# would pass every directory, and the green run would read exactly like a clean repo.
+# These samples are checked on every run in both directions: (path, patterns, expected).
+MATCHER_CONTROL: tuple[tuple[str, tuple[str, ...], bool], ...] = (
+    ("packages/opencode/golden", ("packages/opencode/golden/**",), True),
+    ("crates/a/tests/fixtures", ("crates/b/tests/fixtures/**",), False),
+    ("crates/a/tests/fixtures", ("*.pem",), False),
+    ("keys/root.pem", ("*.pem",), True),
+)
+
 
 def covered_patterns(root: Path) -> list[str]:
     attrs = root / ".gitattributes"
@@ -82,6 +94,18 @@ def main() -> int:
             check=True,
         ).stdout.strip()
     )
+    broken = [
+        f"{path!r} against {list(pats)}: expected {'covered' if want else 'not covered'}"
+        for path, pats, want in MATCHER_CONTROL
+        if is_covered(path, list(pats)) is not want
+    ]
+    if broken:
+        print("REFUSING: the coverage matcher failed its own control samples:")
+        for line in broken:
+            print(f"  {line}")
+        print("The matcher is broken, so a clean result from it would mean nothing.")
+        return 2
+
     patterns = covered_patterns(root)
     if not patterns:
         print("REFUSING: .gitattributes declares no `-text` patterns at all.")
@@ -122,7 +146,10 @@ def main() -> int:
         print("  git add --renormalize . && git status --short")
         return 1
 
-    print(f"fixture line endings: {len(found)} directories, all -text")
+    print(
+        f"fixture line endings: {len(found)} directories, all -text "
+        f"(matcher control: {len(MATCHER_CONTROL)} samples verified)"
+    )
     return 0
 
 

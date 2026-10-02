@@ -105,6 +105,27 @@ jobs:
           RELEASE_NOTES: ${{ inputs.notes }}
         run: |
           set -euo pipefail
+          cat > release-notes.txt <<'NOTES'
+          Assets are built on the platform they run on. Each zip has a SHA-256
+          sidecar holding the digest of the zip bytes.
+
+          The macOS binaries are ad-hoc signed, not notarized: a browser-downloaded
+          zip carries a quarantine attribute and Gatekeeper will refuse it.
+          Installing via curl does not apply that attribute.
+
+          claustrum does not self-initialize. Run `ck auth bootstrap` before enabling
+          the module, or the daemon will exit with 'no master key has been provisioned'.
+          On Linux and Windows there is no keychain, so bootstrap with `--key-path`
+          and give the daemon the same path via CK_MASTER_KEY_PATH.
+
+          REQUIRES subc 0.17.20 OR NEWER. An older supervisor refuses this module's
+          HELLO with 'malformed HELLO body: missing field `consumes`' and parks it
+          after three restarts. The error names a protocol field rather than a version,
+          so it reads as a broken release; the supervisor predates that field becoming optional.
+          NOTES
+          if [ -n "$RELEASE_NOTES" ]; then
+            printf '\n%s\n' "$RELEASE_NOTES" >> release-notes.txt
+          fi
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             draft=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq '.isDraft')
             if [ "$draft" != "true" ] && [ "$REPLACE_PUBLISHED" != "true" ]; then
@@ -112,11 +133,11 @@ jobs:
               exit 1
             fi
             # Hide the release while its replacement asset set is incomplete.
-            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=true
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=true --notes-file release-notes.txt
           else
             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
               --title "$TAG" --draft --verify-tag \
-              --notes "${RELEASE_NOTES:-Assets are built natively for each platform. Each zip has a SHA-256 sidecar. macOS binaries are ad-hoc signed, not notarized. Run ck auth bootstrap before enabling the module.}"
+              --notes-file release-notes.txt
           fi
 
   assets:
@@ -155,14 +176,13 @@ jobs:
       # Same sibling preamble as ci.yml: cargo loads the whole workspace manifest
       # (including the path-deps on cortexkit/subconscious and cortexkit/commons) before
       # resolving any package, so both must be present or the build dies at manifest-load.
-      # Both are public. Pin their reviewed revisions and do not persist checkout tokens,
-      # because their build scripts execute while this job has release-write authority.
+      # Float on sibling default branches as CI does, but record what each platform built.
+      # Do not persist tokens: sibling build scripts run with release-write authority.
       - name: Checkout subconscious
         uses: actions/checkout@v5
         with:
           repository: cortexkit/subconscious
           path: subconscious
-          ref: e1f9687c9bb6a88f18daba9658bc90ad296a5ccd
           persist-credentials: false
 
       - name: Checkout commons
@@ -170,8 +190,29 @@ jobs:
         with:
           repository: cortexkit/commons
           path: commons
-          ref: 20b7005309075225063f47c0fac3b674efc845d1
           persist-credentials: false
+
+      - name: Record sibling revisions
+        shell: bash
+        env:
+          ASSET_PLATFORM: ${{ matrix.asset_os }}-${{ matrix.asset_arch }}
+        run: |
+          set -euo pipefail
+          mkdir -p provenance
+          subconscious_rev=$(git -C ../subconscious rev-parse HEAD)
+          commons_rev=$(git -C ../commons rev-parse HEAD)
+          printf '%s: subconscious %s; commons %s\n' "$ASSET_PLATFORM" "$subconscious_rev" "$commons_rev" \
+            | tee "provenance/sibling-revisions-$ASSET_PLATFORM.txt"
+
+      # Matrix checkouts can resolve different sibling tips. Preserve each platform's
+      # pair independently rather than relying on whichever matrix job finishes last.
+      - name: Retain sibling provenance
+        uses: actions/upload-artifact@v4
+        with:
+          name: sibling-revisions-${{ matrix.asset_os }}-${{ matrix.asset_arch }}
+          overwrite: true
+          path: claustrum/provenance/*.txt
+          if-no-files-found: error
 
       # THE STAMP MUST NAME THE COMMIT THAT WAS CHECKED OUT, WHICH IS NOT `github.sha`.
       # On a workflow_dispatch for an existing tag, `github.sha` is the DISPATCHED ref
@@ -236,8 +277,8 @@ jobs:
       #   path deps       11   version string ONLY, no source, no hash
       #
       # A path dependency's recorded version is not a reproducibility guarantee: the
-      # sibling source is pinned by the checkout revision above instead. A path version
-      # string alone cannot establish its provenance. Failing on that VERSION STRING costs the
+      # sibling source floats on its default branch and its resolved revision is recorded
+      # above. A path version alone cannot establish provenance. Failing on that VERSION STRING costs the
       # release and buys nothing, while the 254 pins that do matter are unaffected.
       #
       # `cargo update -w` touches workspace and path members only -- verified: it moved
@@ -471,6 +512,13 @@ jobs:
     needs: assets
     runs-on: ubuntu-latest
     steps:
+      - name: Collect sibling provenance
+        uses: actions/download-artifact@v4
+        with:
+          pattern: sibling-revisions-*
+          path: provenance
+          merge-multiple: true
+
       - name: Undraft the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -489,4 +537,14 @@ jobs:
               done
             done
           done
-          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body --jq '.body' > release-notes.txt
+          printf '\n## Sibling source revisions by platform\n' >> release-notes.txt
+          for platform in darwin-arm64 linux-x64 windows-x64; do
+            record="provenance/sibling-revisions-$platform.txt"
+            if [ ! -s "$record" ]; then
+              echo "REFUSING to publish: missing sibling provenance for $platform." >&2
+              exit 1
+            fi
+            cat "$record" >> release-notes.txt
+          done
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file release-notes.txt --draft=false

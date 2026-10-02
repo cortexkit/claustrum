@@ -330,16 +330,16 @@ class ScriptContracts(unittest.TestCase):
         self.executable('gh', 'case "$*" in *--json*isDraft*) echo false;; *) exit 0;; esac')
         step = self.release_step('Create the release if it does not exist')
         env = dict(self.env, TAG='v1', GITHUB_REPOSITORY='scratch/repo', REPLACE_PUBLISHED='false', RELEASE_NOTES='')
-        result = self.run_shell(step['run'], env)
+        result = self.run_shell(step['run'], env, cwd=self.root)
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn('is published', result.stdout)
         env['REPLACE_PUBLISHED'] = 'true'
-        self.assertEqual(self.run_shell(step['run'], env).returncode, 0)
+        self.assertEqual(self.run_shell(step['run'], env, cwd=self.root).returncode, 0)
 
     def test_release_asset_gate_requires_expected_names(self):
         self.executable('gh', 'case "$*" in *--json*) printf "junk\\n%.0s" {1..12};; *) exit 0;; esac')
         step = self.release_step('Undraft the release')
-        result = self.run_shell(step['run'], dict(self.env, TAG='v1', GITHUB_REPOSITORY='scratch/repo'))
+        result = self.run_shell(step['run'], dict(self.env, TAG='v1', GITHUB_REPOSITORY='scratch/repo'), cwd=self.root)
         self.assertEqual(result.returncode, 1)
         self.assertIn('missing ck-auth-darwin-arm64.zip', result.stdout)
 
@@ -347,6 +347,23 @@ class ScriptContracts(unittest.TestCase):
         source = text('.github/workflows/release.yml')
         self.assertNotIn('CARRIES STORE MIGRATION 9', source)
         self.assertIn('RELEASE_NOTES: ${{ inputs.notes }}', source)
+        self.assertNotIn('v0.1.2 does not carry this floor', source)
+        self.executable('gh', 'case "$*" in *"release view"*) exit 1;; *"release create"*) while [ "$#" -gt 0 ]; do case "$1" in --notes-file) cp "$2" "$HOME/captured-notes"; exit $?;; --notes) printf "%s\\n" "$2" > "$HOME/captured-notes"; exit 0;; esac; shift; done; exit 1;; *) exit 1;; esac')
+        step = self.release_step('Create the release if it does not exist')
+        permanent = ('SHA-256', 'sidecar', 'ad-hoc signed, not notarized', 'quarantine',
+                     'Gatekeeper', 'curl', 'does not self-initialize', 'ck auth bootstrap',
+                     'On Linux and Windows', '--key-path', 'CK_MASTER_KEY_PATH',
+                     'REQUIRES subc 0.17.20 OR NEWER', 'malformed HELLO body: missing field `consumes`',
+                     'three restarts')
+        for extra in ('', 'Release-specific migration instructions.'):
+            env = dict(self.env, TAG='v1', GITHUB_REPOSITORY='scratch/repo', REPLACE_PUBLISHED='false', RELEASE_NOTES=extra)
+            result = self.run_shell(step['run'], env, cwd=self.root)
+            self.assertEqual(result.returncode, 0, result.stdout)
+            notes = (self.root / 'captured-notes').read_text()
+            for phrase in permanent:
+                self.assertIn(phrase, notes)
+            if extra:
+                self.assertTrue(notes.endswith(extra + '\n'), notes)
 
     def test_workflow_inputs_are_data_not_shell_source(self):
         gates = module('lib/workflow-gates')
@@ -368,15 +385,40 @@ class ScriptContracts(unittest.TestCase):
         ci_flags = re.search(r'cargo clippy.*--features ([^\s]+)', ci).group(1).split(',')
         self.assertEqual(set(gate_flags), set(ci_flags))
 
-    def test_release_tokens_are_scoped_and_siblings_pinned(self):
+    def test_release_tokens_are_scoped_and_siblings_recorded(self):
         workflow = module('lib/workflow-gates').parse_workflow(os.fspath(ROOT / '.github/workflows/release.yml'))
         self.assertEqual(workflow['permissions'], {'contents': 'read'})
         ci = module('lib/workflow-gates').parse_workflow(os.fspath(ROOT / '.github/workflows/ci.yml'))
         self.assertEqual(ci['permissions'], {'contents': 'read'})
         for step in workflow['jobs']['assets']['steps']:
             if step.get('with', {}).get('repository') in ('cortexkit/subconscious', 'cortexkit/commons'):
-                self.assertRegex(step['with'].get('ref', ''), r'^[0-9a-f]{40}$')
+                self.assertNotIn('ref', step['with'])
                 self.assertIn(step['with'].get('persist-credentials'), (False, 'false'))
+        retain = next(s for s in workflow['jobs']['assets']['steps'] if s.get('name') == 'Retain sibling provenance')
+        self.assertEqual(retain['with']['path'], 'claustrum/provenance/*.txt')
+        self.assertEqual(retain['with']['if-no-files-found'], 'error')
+        collect = next(s for s in workflow['jobs']['publish']['steps'] if s.get('name') == 'Collect sibling provenance')
+        self.assertEqual(collect['with']['path'], 'provenance')
+        self.assertEqual(collect['with']['pattern'], 'sibling-revisions-*')
+        subconscious = '1' * 40
+        commons = '2' * 40
+        self.executable('git', 'case "$*" in "-C ../subconscious rev-parse HEAD") echo "' + subconscious + '";; "-C ../commons rev-parse HEAD") echo "' + commons + '";; *) exit 1;; esac')
+        record = self.release_step('Record sibling revisions')
+        for platform in ('darwin-arm64', 'linux-x64', 'windows-x64'):
+            result = self.run_shell(record['run'], dict(self.env, ASSET_PLATFORM=platform), cwd=self.root)
+            self.assertEqual(result.returncode, 0, result.stdout)
+            self.assertIn(subconscious, result.stdout)
+            self.assertIn(commons, result.stdout)
+            self.assertIn(platform, result.stdout)
+        names = '\n'.join(f'{binary}-{platform}.{suffix}' for platform in ('darwin-arm64', 'linux-x64', 'windows-x64') for binary in ('ck-auth', 'ck-claustrum') for suffix in ('zip', 'zip.sha256'))
+        self.executable('gh', 'case "$*" in *"--json assets"*) printf "%s\\n" "$ASSET_NAMES";; *"--json body"*) echo "Permanent notes plus release-specific instructions.";; *"release edit"*) cp release-notes.txt "$HOME/captured-notes";; *) exit 1;; esac')
+        publish = self.release_step('Undraft the release')
+        result = self.run_shell(publish['run'], dict(self.env, TAG='v1', GITHUB_REPOSITORY='scratch/repo', ASSET_NAMES=names), cwd=self.root)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        notes = (self.root / 'captured-notes').read_text()
+        self.assertIn('Permanent notes plus release-specific instructions.', notes)
+        for platform in ('darwin-arm64', 'linux-x64', 'windows-x64'):
+            self.assertIn(f'{platform}: subconscious {subconscious}; commons {commons}', notes)
 
     def test_fixture_prefix_needs_path_boundary(self):
         fixtures = module('check-fixture-line-endings')

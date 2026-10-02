@@ -175,7 +175,16 @@ for bin in ck-claustrum ck-auth; do
   cp "target/release/$bin" "$STAGE/$bin"
   # Pin the identifier. NEVER re-sign at the destination: a pin is not sticky, and one
   # `codesign --force --sign -` at placement reverts it to the derived form.
-  codesign --force --sign - --identifier "$bin" "$STAGE/$bin"
+  #
+  # HARDENED RUNTIME (`--options runtime`). Without it any same-UID process can attach a
+  # debugger without a prompt and read this process's memory, which for the daemon is the
+  # master key, every unsealed credential, and the launch secret. Ad-hoc is fine; the
+  # runtime flag is what refuses the attach. Neither binary loads unsigned libraries or
+  # uses JIT, so no entitlements file is needed: keychain resolution runs `security` as a
+  # child process, which the runtime does not restrict.
+  codesign --force --sign - --options runtime --identifier "$bin" "$STAGE/$bin"
+  codesign -dv "$STAGE/$bin" 2>&1 | grep -q 'flags=.*runtime' \
+    || { echo "REFUSING: $bin was signed without the hardened runtime" >&2; exit 1; }
   # WRITE the digest beside the artifact, do not merely print it. A hash that exists
   # only in this script's output is a hash that reaches the placer as a CLAIM IN A
   # MESSAGE -- retyped, quotable, and unverifiable against anything at rest. The placer

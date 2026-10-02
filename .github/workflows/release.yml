@@ -296,13 +296,20 @@ jobs:
       # CLI unzip propagates none) -- measured, with a positive control proving the checker
       # can see the attribute when it is present. A BROWSER-downloaded zip is quarantined
       # and will be refused until a Developer ID cert exists.
+      #
+      # HARDENED RUNTIME, as in scripts/release-build.sh: without it a same-UID process can
+      # attach a debugger and read the daemon's memory (master key, unsealed credentials,
+      # launch secret). No entitlements are needed; both binaries load no unsigned
+      # libraries and use no JIT.
       - name: Sign with pinned identifiers (macOS)
         if: matrix.asset_os == 'darwin'
         run: |
           for b in ck-claustrum ck-auth; do
-            codesign --force --sign - --identifier "$b" "target/release/$b"
+            codesign --force --sign - --options runtime --identifier "$b" "target/release/$b"
             codesign -dv "target/release/$b" 2>&1 | grep -q "Identifier=$b" \
               || { echo "REFUSING: $b did not take the pinned identifier"; exit 1; }
+            codesign -dv "target/release/$b" 2>&1 | grep -q 'flags=.*runtime' \
+              || { echo "REFUSING: $b was signed without the hardened runtime"; exit 1; }
           done
 
       # ANSWERED BY THE FIRST RUN: Git Bash on the windows runner has NO `zip`.

@@ -879,6 +879,40 @@ mod tests {
         assert!(matches!(out, AdminOutcome::Refused(ref m) if m.contains("too large")));
     }
 
+    /// A correctly signed op body of exactly `MAX_OP_BODY_LEN` bytes executes, and the
+    /// same op one byte longer is refused for its size alone. Both bodies are real,
+    /// signed store ops (JSON padded with trailing whitespace, which the parser
+    /// accepts), so the only difference between the two outcomes is the length.
+    #[tokio::test]
+    async fn op_body_at_the_cap_executes_and_one_byte_over_is_refused() {
+        let r = rig(12);
+        r.admin.record_bind(5, Principal::Direct);
+        let padded = |id: &str, len: usize| {
+            let mut body = store_op_body(id);
+            assert!(body.len() < len, "the op must fit before padding");
+            body.extend(std::iter::repeat(' ').take(len - body.len()));
+            body
+        };
+
+        let at_cap = padded("apikey:at-cap", MAX_OP_BODY_LEN);
+        let (tag, _) = challenge_and_sign(&r, 5, &at_cap);
+        let out = r.admin.execute(5, at_cap.as_bytes(), &tag).await;
+        assert!(
+            matches!(out, AdminOutcome::Ok(_)),
+            "a body exactly at the cap must execute"
+        );
+        assert!(r.store.get("apikey:at-cap").is_ok());
+
+        let over_cap = padded("apikey:over-cap", MAX_OP_BODY_LEN + 1);
+        let (tag, _) = challenge_and_sign(&r, 5, &over_cap);
+        let out = r.admin.execute(5, over_cap.as_bytes(), &tag).await;
+        assert!(
+            matches!(out, AdminOutcome::Refused(ref m) if m.contains("too large")),
+            "a body one byte over the cap must be refused for its size"
+        );
+        assert!(r.store.get("apikey:over-cap").is_err());
+    }
+
     #[tokio::test]
     async fn compound_invalidate_revokes_handles_atomically() {
         let r = rig(10);

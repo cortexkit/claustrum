@@ -42,15 +42,15 @@ ENROLLMENT_LIVE_LIMIT crates/credentials-core/src/enrollment.rs pending_queue_is
 ENROLLMENT_TERMINAL_MAX_ROWS crates/credentials-core/src/enrollment.rs terminal_rows_and_enrollment_events_stay_bounded_without_chain_growth
 MAX_SIGN_PAYLOAD crates/credentials-core/src/signing.rs the_signing_cap_refuses_one_byte_over_and_accepts_the_cap
 MAX_OUTSTANDING_NONCES crates/credentials-module/src/admin_surface.rs challenge_capacity_is_bounded_and_never_evicts
+AUTH_FILE_MAX_BYTES crates/credentials-module/src/bin/cli_support/opencode_files.rs auth_file_at_the_limit_reads_and_one_byte_over_is_refused
+HANDLE_FILE_MAX_BYTES crates/credentials-module/src/bin/cli_support/opencode_files.rs handle_file_at_the_limit_reads_and_one_byte_over_is_refused
+HEALTH_STALE_LIMIT crates/credentials-module/src/read_surface.rs a_refresh_exactly_at_the_stale_limit_is_trusted_and_one_tick_past_is_stalled
+ID_PROMPT_OPEN_LIMIT_PER_ROW crates/credentials-module/src/bin/cli_support/import_detect.rs id_prompt_accepts_the_last_allowed_open_and_never_opens_one_more
+MAX_ATTEMPTS crates/credentials-core/src/refresh_adapters/cursor.rs poll_accepts_the_last_allowed_attempt_and_never_makes_one_more
+MAX_BACKOFF_MS crates/credentials-core/src/refresh_adapters/cursor.rs backoff_reaches_the_ceiling_exactly_and_never_passes_it
+MAX_LISTED_IDS crates/credentials-core/src/health.rs id_lists_hold_the_cap_and_drop_only_the_id_past_it
+MAX_ONBOARD_ATTEMPTS crates/credentials-core/src/google_login.rs onboarding_accepts_the_last_allowed_attempt_and_never_makes_one_more
+MAX_OP_BODY_LEN crates/credentials-module/src/admin_surface.rs op_body_at_the_cap_executes_and_one_byte_over_is_refused
 
 # Explicitly unchecked thresholds. These are known gaps, not coverage claims.
 # New constants still fail unless deliberately recorded in a reviewed change.
-UNCHECKED AUTH_FILE_MAX_BYTES crates/credentials-module/src/bin/cli_support/opencode_files.rs no exact boundary test yet
-UNCHECKED HANDLE_FILE_MAX_BYTES crates/credentials-module/src/bin/cli_support/opencode_files.rs no exact boundary test yet
-UNCHECKED HEALTH_STALE_LIMIT crates/credentials-module/src/read_surface.rs no exact boundary test yet
-UNCHECKED ID_PROMPT_OPEN_LIMIT_PER_ROW crates/credentials-module/src/bin/cli_support/import_detect.rs no exact boundary test yet
-UNCHECKED MAX_ATTEMPTS crates/credentials-core/src/refresh_adapters/cursor.rs no exact boundary test yet
-UNCHECKED MAX_BACKOFF_MS crates/credentials-core/src/refresh_adapters/cursor.rs no exact boundary test yet
-UNCHECKED MAX_LISTED_IDS crates/credentials-core/src/health.rs no exact boundary test yet
-UNCHECKED MAX_ONBOARD_ATTEMPTS crates/credentials-core/src/google_login.rs no exact boundary test yet
-UNCHECKED MAX_OP_BODY_LEN crates/credentials-module/src/admin_surface.rs no exact boundary test yet

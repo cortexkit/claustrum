@@ -322,6 +322,52 @@ mod tests {
         assert!(h.store_readable);
     }
 
+    /// Each id bucket lists every id up to the cap and stops exactly there, while its
+    /// count keeps the true total. Driven at the cap and one past it for every bucket,
+    /// because each bucket has its own comparison and a cap that drifts by one in a
+    /// single bucket would otherwise go unnoticed.
+    #[test]
+    fn id_lists_hold_the_cap_and_drop_only_the_id_past_it() {
+        for state in [
+            RecordState::NeedsReauth,
+            RecordState::Retired,
+            RecordState::Corrupt,
+        ] {
+            let ids: Vec<String> = (0..=MAX_LISTED_IDS).map(|i| format!("id-{i}")).collect();
+            let bucket = |h: &VaultHealth| match state {
+                RecordState::NeedsReauth => (h.needs_reauth, h.needs_reauth_ids.clone()),
+                RecordState::Retired => (h.retired, h.retired_ids.clone()),
+                RecordState::Corrupt => (h.corrupt, h.corrupt_ids.clone()),
+                RecordState::Active => unreachable!("active records are never listed"),
+            };
+
+            let at_cap: Vec<_> = ids[..MAX_LISTED_IDS]
+                .iter()
+                .map(|id| meta_id(id, state))
+                .collect();
+            let (count, listed) = bucket(&VaultHealth::summarize(&at_cap, 0, false));
+            assert_eq!(count, MAX_LISTED_IDS, "{state:?}: count at the cap");
+            assert_eq!(
+                listed,
+                ids[..MAX_LISTED_IDS].to_vec(),
+                "{state:?}: every id up to the cap is listed"
+            );
+
+            let past_cap: Vec<_> = ids.iter().map(|id| meta_id(id, state)).collect();
+            let (count, listed) = bucket(&VaultHealth::summarize(&past_cap, 0, false));
+            assert_eq!(
+                count,
+                MAX_LISTED_IDS + 1,
+                "{state:?}: the count stays the true total past the cap"
+            );
+            assert_eq!(
+                listed,
+                ids[..MAX_LISTED_IDS].to_vec(),
+                "{state:?}: the id one past the cap is dropped from the list"
+            );
+        }
+    }
+
     #[test]
     fn unreadable_store_is_failing() {
         let h = VaultHealth::unreadable();

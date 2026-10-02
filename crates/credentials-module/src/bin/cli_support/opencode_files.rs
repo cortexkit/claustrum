@@ -2393,3 +2393,60 @@ mod portability_tests {
         fs::remove_file(path).unwrap();
     }
 }
+
+#[cfg(test)]
+mod read_limit_tests {
+    use super::*;
+
+    /// Write `json` padded with trailing whitespace to exactly `len` bytes, as a
+    /// private 0600 file, so the only thing varying between two calls is the size.
+    fn padded_private_file(name: &str, json: &str, len: u64) -> PathBuf {
+        let len = usize::try_from(len).unwrap();
+        assert!(json.len() < len, "the document must fit before padding");
+        let mut bytes = json.as_bytes().to_vec();
+        bytes.resize(len, b' ');
+        let path = std::env::temp_dir().join(format!("ck-{name}-{}", random_nonce().unwrap()));
+        fs::write(&path, &bytes).unwrap();
+        set_mode(&path, 0o600).unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().len(), len as u64);
+        path
+    }
+
+    fn is_size_refusal(error: &OpenCodeFilesError) -> bool {
+        matches!(error, OpenCodeFilesError::Invalid(message) if message.contains("exceeds"))
+    }
+
+    /// An auth file of exactly `AUTH_FILE_MAX_BYTES` is read; the same document one
+    /// byte longer is refused for its size before it is parsed.
+    #[test]
+    fn auth_file_at_the_limit_reads_and_one_byte_over_is_refused() {
+        let at_limit = padded_private_file("auth-at-limit", "{}", AUTH_FILE_MAX_BYTES);
+        let entries = read_auth_entries(&at_limit).expect("an auth file at the limit is read");
+        assert!(entries.is_empty());
+
+        let over_limit = padded_private_file("auth-over-limit", "{}", AUTH_FILE_MAX_BYTES + 1);
+        let error = read_auth_entries(&over_limit).unwrap_err();
+        assert!(is_size_refusal(&error), "{error}");
+
+        fs::remove_file(at_limit).unwrap();
+        fs::remove_file(over_limit).unwrap();
+    }
+
+    /// A handle file of exactly `HANDLE_FILE_MAX_BYTES` is read; the same document one
+    /// byte longer is refused for its size before it is parsed.
+    #[test]
+    fn handle_file_at_the_limit_reads_and_one_byte_over_is_refused() {
+        let document = r#"{"version":1,"providers":[]}"#;
+        let at_limit = padded_private_file("handle-at-limit", document, HANDLE_FILE_MAX_BYTES);
+        let file = read_handle_file(&at_limit).expect("a handle file at the limit is read");
+        assert_eq!(file.version, 1);
+
+        let over_limit =
+            padded_private_file("handle-over-limit", document, HANDLE_FILE_MAX_BYTES + 1);
+        let error = read_handle_file(&over_limit).unwrap_err();
+        assert!(is_size_refusal(&error), "{error}");
+
+        fs::remove_file(at_limit).unwrap();
+        fs::remove_file(over_limit).unwrap();
+    }
+}

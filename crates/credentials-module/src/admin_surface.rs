@@ -68,15 +68,12 @@ pub enum AdminOutcome {
 struct Nonce {
     bytes: [u8; ADMIN_NONCE_LEN],
     issued: Instant,
-    /// The bind generation this nonce was issued to. The op must arrive on the same
-    /// generation — a rebind (new generation on the same channel) invalidates it.
-    generation: u64,
 }
 
 /// Per-bind admin state, keyed by route channel. Replaced wholesale on rebind so a
-/// stale generation cannot reuse a prior bind's principal or nonce.
+/// stale epoch cannot reuse a prior bind's principal or nonce.
 struct BindState {
-    generation: u64,
+    epoch: u32,
     principal: Principal,
     /// At most one outstanding nonce per bind (issuing a new challenge replaces it).
     nonce: Option<Nonce>,
@@ -91,9 +88,6 @@ pub struct AdminSurface {
     vault_id: [u8; VAULT_ID_LEN],
     key_id: KeyId,
     binds: Mutex<HashMap<u16, BindState>>,
-    /// Monotonic generation source: every bind (including a rebind of the same
-    /// channel) gets a fresh generation, so a stale in-flight op is detectable.
-    next_generation: AtomicU64,
     outstanding_nonces: AtomicU64,
 }
 
@@ -113,16 +107,13 @@ impl AdminSurface {
             vault_id,
             key_id,
             binds: Mutex::new(HashMap::new()),
-            next_generation: AtomicU64::new(1),
             outstanding_nonces: AtomicU64::new(0),
         }
     }
 
-    /// Record a bind's principal, replacing any prior state for the channel with a
-    /// FRESH generation (so a lost-Goodbye rebind invalidates the old generation's
-    /// outstanding nonce and in-flight ops). Returns the new generation.
-    pub fn record_bind(&self, channel: u16, principal: Principal) -> u64 {
-        let generation = self.next_generation.fetch_add(1, Ordering::SeqCst);
+    /// Replace a channel's principal and nonce on rebind. The wire epoch lets an
+    /// in-flight request prove it still belongs to this binding before claiming a nonce.
+    pub fn record_bind_at(&self, channel: u16, epoch: u32, principal: Principal) {
         let mut binds = self.binds.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(prev) = binds.get(&channel) {
             // Draining the replaced bind's nonce keeps the global counter honest.
@@ -133,12 +124,16 @@ impl AdminSurface {
         binds.insert(
             channel,
             BindState {
-                generation,
+                epoch,
                 principal,
                 nonce: None,
             },
         );
-        generation
+    }
+
+    #[cfg(test)]
+    pub fn record_bind(&self, channel: u16, principal: Principal) {
+        self.record_bind_at(channel, 0, principal);
     }
 
     /// Test seam: backdate this channel's outstanding nonce so the TTL check sees it
@@ -171,21 +166,27 @@ impl AdminSurface {
         }
     }
 
-    /// Whether this channel is bound by a `direct` principal (Gate 1). A non-direct
-    /// or absent bind can never reach an admin op.
-    fn is_direct(&self, channel: u16) -> bool {
-        let binds = self.binds.lock().unwrap_or_else(|p| p.into_inner());
-        matches!(
-            binds.get(&channel).map(|b| &b.principal),
-            Some(Principal::Direct)
-        )
+    #[cfg(test)]
+    pub fn challenge(&self, channel: u16) -> AdminOutcome {
+        self.challenge_as(channel, 0, self.principal(channel).as_ref())
+    }
+
+    #[cfg(test)]
+    pub async fn execute(&self, channel: u16, body: &[u8], tag: &str) -> AdminOutcome {
+        self.execute_as(channel, 0, self.principal(channel).as_ref(), body, tag)
+            .await
     }
 
     /// Issue a fresh challenge nonce for a bind. Gate 1 enforced. Replaces any prior
     /// nonce on this bind (at most one outstanding per bind). Refused if the global
     /// outstanding cap is reached (never evicts another bind's nonce).
-    pub fn challenge(&self, channel: u16) -> AdminOutcome {
-        if !self.is_direct(channel) {
+    pub fn challenge_as(
+        &self,
+        channel: u16,
+        epoch: u32,
+        principal: Option<&Principal>,
+    ) -> AdminOutcome {
+        if !matches!(principal, Some(Principal::Direct)) {
             return AdminOutcome::Refused("admin ops require a direct bind".into());
         }
         let nonce_bytes = match credentials_core::admin_auth::generate_admin_nonce() {
@@ -194,9 +195,24 @@ impl AdminSurface {
         };
 
         let mut binds = self.binds.lock().unwrap_or_else(|p| p.into_inner());
+        // Sweep only expired challenges: a quiet peer must not hold a capacity slot
+        // forever, and a flood must never evict another peer's live challenge.
+        for state in binds.values_mut() {
+            if state
+                .nonce
+                .as_ref()
+                .is_some_and(|nonce| nonce.issued.elapsed() > NONCE_TTL)
+            {
+                state.nonce = None;
+                self.outstanding_nonces.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
         let Some(state) = binds.get_mut(&channel) else {
             return AdminOutcome::Refused("admin ops require a direct bind".into());
         };
+        if state.epoch != epoch || !matches!(state.principal, Principal::Direct) {
+            return AdminOutcome::Refused("admin ops require the same direct bind".into());
+        }
         // Reissuing replaces this bind's own nonce (net-zero on the counter); a fresh
         // nonce needs a global slot only when this bind had none.
         if state.nonce.is_none() {
@@ -210,7 +226,6 @@ impl AdminSurface {
         state.nonce = Some(Nonce {
             bytes: nonce_bytes,
             issued: Instant::now(),
-            generation: state.generation,
         });
 
         AdminOutcome::Challenge {
@@ -224,9 +239,16 @@ impl AdminSurface {
     /// the caller's MAC over the transcript. Verify-then-claim-then-parse-then-execute:
     /// the nonce is claimed atomically only after the MAC verifies, and the body is
     /// parsed only after the nonce is claimed.
-    pub async fn execute(&self, channel: u16, op_body: &[u8], tag_hex: &str) -> AdminOutcome {
-        // Gate 1.
-        if !self.is_direct(channel) {
+    pub async fn execute_as(
+        &self,
+        channel: u16,
+        epoch: u32,
+        principal: Option<&Principal>,
+        op_body: &[u8],
+        tag_hex: &str,
+    ) -> AdminOutcome {
+        // Gate 1 uses the principal captured when the request was accepted.
+        if !matches!(principal, Some(Principal::Direct)) {
             return AdminOutcome::Refused("admin ops require a direct bind".into());
         }
         if op_body.len() > MAX_OP_BODY_LEN {
@@ -244,16 +266,12 @@ impl AdminSurface {
             let Some(state) = binds.get_mut(&channel) else {
                 return AdminOutcome::Refused("admin ops require a direct bind".into());
             };
+            if state.epoch != epoch || !matches!(state.principal, Principal::Direct) {
+                return AdminOutcome::Refused("admin ops require the same direct bind".into());
+            }
             let Some(nonce) = state.nonce.as_ref() else {
                 return AdminOutcome::Refused("no outstanding challenge".into());
             };
-            // Same-generation requirement: a rebind (new generation) invalidates a
-            // nonce issued to the old one.
-            if nonce.generation != state.generation {
-                state.nonce = None;
-                self.outstanding_nonces.fetch_sub(1, Ordering::SeqCst);
-                return AdminOutcome::Refused("challenge is from a stale bind".into());
-            }
             if nonce.issued.elapsed() > NONCE_TTL {
                 state.nonce = None;
                 self.outstanding_nonces.fetch_sub(1, Ordering::SeqCst);
@@ -348,7 +366,7 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 fn decode_hex(s: &str) -> Option<Vec<u8>> {
-    if !s.len().is_multiple_of(2) {
+    if !s.is_ascii() || !s.len().is_multiple_of(2) {
         return None;
     }
     (0..s.len())
@@ -931,6 +949,94 @@ mod tests {
         let raw = v["handle"].as_str().expect("handle string");
         assert!(raw.starts_with("ckh_"));
         assert_eq!(r.store.resolve_handle(raw).expect("resolve"), "apikey:h");
+    }
+
+    #[tokio::test]
+    async fn admin_requests_require_the_captured_principal_and_current_epoch() {
+        let r = rig(201);
+        r.admin.record_bind_at(5, 1, Principal::Direct);
+        assert!(matches!(
+            r.admin.challenge_as(5, 1, None),
+            AdminOutcome::Refused(_)
+        ));
+        assert_eq!(r.admin.outstanding_nonces.load(Ordering::SeqCst), 0);
+        assert!(matches!(
+            r.admin.challenge_as(5, 1, Some(&Principal::Direct)),
+            AdminOutcome::Challenge { .. }
+        ));
+        r.admin.record_bind_at(5, 2, Principal::Direct);
+        assert!(matches!(
+            r.admin.challenge_as(5, 1, Some(&Principal::Direct)),
+            AdminOutcome::Refused(_)
+        ));
+        assert_eq!(r.admin.outstanding_nonces.load(Ordering::SeqCst), 0);
+        r.admin.record_bind(5, Principal::Direct);
+        let body = store_op_body("apikey:snapshot");
+        let (tag, _) = challenge_and_sign(&r, 5, &body);
+        assert!(matches!(
+            r.admin
+                .execute_as(5, 0, Some(&Principal::Unverified), body.as_bytes(), &tag)
+                .await,
+            AdminOutcome::Refused(_)
+        ));
+        assert_eq!(r.admin.outstanding_nonces.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            r.admin.execute(5, body.as_bytes(), &tag).await,
+            AdminOutcome::Ok(_)
+        ));
+        r.admin.record_bind_at(5, 3, Principal::Unverified);
+        assert!(matches!(
+            r.admin.challenge_as(5, 3, Some(&Principal::Direct)),
+            AdminOutcome::Refused(_)
+        ));
+        assert_eq!(r.admin.outstanding_nonces.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn non_ascii_auth_tags_refuse_without_consuming_the_nonce() {
+        let r = rig(202);
+        r.admin.record_bind(5, Principal::Direct);
+        let body = store_op_body("apikey:ascii-tag");
+        let (tag, _) = challenge_and_sign(&r, 5, &body);
+        for malformed in ["aéb", "é", "💡", "gg", "a"] {
+            assert!(
+                matches!(r.admin.execute(5, body.as_bytes(), malformed).await, AdminOutcome::Refused(ref reason) if reason == "malformed auth tag")
+            );
+        }
+        assert!(matches!(
+            r.admin.execute(5, body.as_bytes(), &tag).await,
+            AdminOutcome::Ok(_)
+        ));
+    }
+
+    #[test]
+    fn expired_challenges_release_capacity_without_evicting_live_nonces() {
+        let r = rig(203);
+        for channel in 0..MAX_OUTSTANDING_NONCES as u16 {
+            r.admin.record_bind(channel, Principal::Direct);
+            assert!(matches!(
+                r.admin.challenge(channel),
+                AdminOutcome::Challenge { .. }
+            ));
+        }
+        let overflow = MAX_OUTSTANDING_NONCES as u16;
+        r.admin.record_bind(overflow, Principal::Direct);
+        assert!(matches!(
+            r.admin.challenge(overflow),
+            AdminOutcome::Refused(_)
+        ));
+        r.admin.backdate_nonce_for_test(0, NONCE_TTL * 2);
+        assert!(matches!(
+            r.admin.challenge(overflow),
+            AdminOutcome::Challenge { .. }
+        ));
+        assert_eq!(
+            r.admin.outstanding_nonces.load(Ordering::SeqCst),
+            MAX_OUTSTANDING_NONCES as u64
+        );
+        let binds = r.admin.binds.lock().unwrap();
+        assert!(binds[&0].nonce.is_none());
+        assert!(binds[&1].nonce.is_some());
     }
 
     #[tokio::test]

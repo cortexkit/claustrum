@@ -877,13 +877,13 @@ pub struct ReadSurface {
     // tokio one) because every critical section here is a trivial clone/swap with
     // no await held across the lock.
     health: std::sync::Mutex<VaultHealth>,
-    // Wall-clock ms of the last SUCCESSFUL health refresh. Read LIVE on the probe path
-    // (never frozen into the snapshot — the QTA rule: an age baked into the cached
+    // Monotonic instant of the last completed health refresh. Read LIVE on the probe path
+    // (never frozen into the snapshot — an age baked into the cached
     // content would let a wedged refresher keep reporting a healthy-but-stale snapshot
     // and mask its own death). If the refresher task wedges (a scan that blocks) OR dies
     // (a panic), this stops advancing; the probe computes the age live and fails closed.
-    // One atomic covers both failure modes uniformly, so no separate task-watch is needed.
-    last_refresh_ms: std::sync::atomic::AtomicI64,
+    // A monotonic clock keeps wall-clock corrections from changing the liveness verdict.
+    last_refresh: std::sync::Mutex<Instant>,
     // The store exposes no public way to make one read query fail. This test-only
     // switch injects that Result after the real lookup so route tests can prove the
     // diagnostic keeps a lookup failure distinct without shipping a test capability.
@@ -915,14 +915,14 @@ pub struct ReadSurface {
 /// limit. A vault would have to hold on the order of a hundred million credentials to
 /// approach it, so the bound is safe across any size this will ever see.
 ///
-/// Note this bound's governing quantity is not stored anywhere: `last_refresh_ms`
+/// Note this bound's governing quantity is not stored anywhere: `last_refresh`
 /// records the completion INSTANT, never the duration, so nothing in the vault can
 /// answer "how long do scans take" after the fact. It has to be measured directly, as
 /// above. That is fine while the work is a local table read; it would stop being fine
 /// if the scan ever grew a network or keychain dependency, whose tail is unbounded in
 /// a way row count is not — whoever adds one should re-measure rather than trust this
 /// note.
-const HEALTH_STALE_LIMIT_MS: i64 = 20_000;
+const HEALTH_STALE_LIMIT: Duration = Duration::from_secs(20);
 
 fn push_u32(out: &mut Vec<u8>, value: usize) {
     out.extend_from_slice(&(value as u32).to_be_bytes());
@@ -1141,7 +1141,7 @@ impl ReadSurface {
             limiter: Mutex::new(limiter),
             open_refusals: Mutex::new(HashMap::new()),
             health: std::sync::Mutex::new(initial),
-            last_refresh_ms: std::sync::atomic::AtomicI64::new(now_ms()),
+            last_refresh: std::sync::Mutex::new(Instant::now()),
             #[cfg(test)]
             scoped_grant_lookup_error_for_test: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
@@ -1233,7 +1233,7 @@ impl ReadSurface {
 
         let payload = base64::engine::general_purpose::STANDARD
             .decode(params.payload_b64.as_bytes())
-            .map_err(|_| ReadError::SignPayloadTooLarge)?;
+            .map_err(|_| ReadError::MalformedEncoding)?;
         let pem = std::str::from_utf8(record.payload.expose()).map_err(|_| ReadError::Corrupt)?;
         match credentials_core::signing::sign_ed25519(pem, &payload) {
             Ok(sig) => Ok(SignResult {
@@ -1284,8 +1284,10 @@ impl ReadSurface {
         {
             return Err(ReadError::SignPayloadTooLarge);
         }
+        // Hold the refusal lock through resolution and counting so pipelined probes
+        // cannot all pass the threshold before any refusal is recorded.
+        let mut counters = self.open_refusals.lock().await;
         {
-            let mut counters = self.open_refusals.lock().await;
             if let Some((start, count)) = counters.get(&connection_id).copied() {
                 if start.elapsed() >= OPEN_REFUSAL_WINDOW {
                     counters.remove(&connection_id);
@@ -1294,6 +1296,9 @@ impl ReadSurface {
                 }
             }
         }
+        // Let concurrent test probes reach the gap that a split check/count would expose.
+        #[cfg(test)]
+        tokio::task::yield_now().await;
         let credential_id = match self
             .resolve_key_address(
                 connection_id,
@@ -1306,7 +1311,6 @@ impl ReadSurface {
         {
             Ok(id) => id,
             Err(ReadError::NotFound) => {
-                let mut counters = self.open_refusals.lock().await;
                 let entry = counters.entry(connection_id).or_insert((Instant::now(), 0));
                 if entry.0.elapsed() >= OPEN_REFUSAL_WINDOW {
                     *entry = (Instant::now(), 0);
@@ -1316,6 +1320,7 @@ impl ReadSurface {
             }
             Err(error) => return Err(error),
         };
+        drop(counters);
         let record = self
             .engine
             .store()
@@ -2229,12 +2234,12 @@ impl ReadSurface {
             // record (`mint_handle` naming a credential but not which handle, a peer's
             // limiter holding a principal and writing `conn-N`, a slot pin recording the
             // slot rather than its occupant) and is not adding a fourth.
-            let actor = match (scoped, principal) {
-                (true, Some(Principal::Reserved { module_id })) => module_id.clone(),
-                // Scoped with no reserved principal cannot happen -- `authorize_scoped`
-                // refused above -- but the actor must stay a total function rather than
-                // panicking on a route-plane input, so it degrades to the channel form.
-                _ => format!("conn-{connection_id}"),
+            let resolved_principal =
+                self.scoped_principal(principal, params.enrollment_token.as_deref());
+            let actor = match (scoped, resolved_principal.as_ref()) {
+                (true, Some((kind, name))) if *kind == "enrolled" => format!("enrolled:{name}"),
+                (true, Some((_, name))) => name.clone(),
+                _ => format!("conn-{}", connection_id as u16),
             };
             let parsed = parse_credential_id(&credential_id);
             let refreshable = default_refresh_adapter(parsed.method, &parsed.provider).is_some();
@@ -2248,9 +2253,8 @@ impl ReadSurface {
             // remains diagnostic detail: 401 and 403 carry different provider facts.
             // Resolved with the SAME helper the authorization used, so the audit line
             // cannot disagree with the decision that let the report through.
-            let enrolled_reporter = self
-                .scoped_principal(principal, params.enrollment_token.as_deref())
-                .and_then(|(kind, id)| (kind == "enrolled").then_some(id));
+            let enrolled_reporter =
+                resolved_principal.and_then(|(kind, id)| (kind == "enrolled").then_some(id));
             let observation = credentials_core::store::AuthObservation {
                 kind: if refreshable {
                     AuthEventKind::ConsumerReportStale.as_str()
@@ -2374,8 +2378,15 @@ impl ReadSurface {
             (Some(handle), None) => {
                 // Rate-limit the handle probe before resolution (enumeration-sweep guard).
                 self.check_limiter(connection_id, handle).await;
-                let Ok(credential_id) = self.engine.store().resolve_handle(handle) else {
-                    return unavailable(None);
+                let resolved = self.engine.store().resolve_handle(handle);
+                let credential_id = match resolved {
+                    Ok(id) => id,
+                    Err(error) => {
+                        return StatusResult {
+                            last_error_code: Some(map_store_error(&error)),
+                            ..unavailable(None)
+                        }
+                    }
                 };
                 (credential_id, false)
             }
@@ -2457,7 +2468,11 @@ impl ReadSurface {
                 // failure may safely include its id. For scoped lookups, omit the id on
                 // failure so callers cannot distinguish a nonexistent credential from one
                 // that exists but is outside their authorization scope.
-                unavailable((!scoped).then_some(credential_id))
+                let mut status = unavailable((!scoped).then_some(credential_id));
+                if !scoped {
+                    status.last_error_code = Some(map_store_error(&error));
+                }
+                status
             }
         }
     }
@@ -2480,11 +2495,12 @@ impl ReadSurface {
         // died, and the cached snapshot is no longer trustworthy — fail closed to
         // `Failing` rather than keep reporting a possibly-healthy frozen snapshot. This
         // is what turns a silent refresher death into an alert instead of a mask.
-        let age = now_ms().saturating_sub(
-            self.last_refresh_ms
-                .load(std::sync::atomic::Ordering::Relaxed),
-        );
-        if age > HEALTH_STALE_LIMIT_MS {
+        let age = self
+            .last_refresh
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .elapsed();
+        if age > HEALTH_STALE_LIMIT {
             snapshot.mark_refresher_stalled();
         }
         snapshot
@@ -2495,10 +2511,8 @@ impl ReadSurface {
     /// test-only discipline — not part of the production surface.
     #[cfg(test)]
     pub(crate) fn force_stale_refresher_for_test(&self) {
-        self.last_refresh_ms.store(
-            now_ms() - (HEALTH_STALE_LIMIT_MS * 2),
-            std::sync::atomic::Ordering::Relaxed,
-        );
+        *self.last_refresh.lock().unwrap_or_else(|p| p.into_inner()) =
+            Instant::now() - HEALTH_STALE_LIMIT * 2;
     }
 
     /// Recompute the domain health from the store and store it as the new cached
@@ -2508,8 +2522,7 @@ impl ReadSurface {
     pub fn refresh_health(&self) {
         let fresh = Self::compute_health(&self.engine);
         *self.health.lock().unwrap_or_else(|p| p.into_inner()) = fresh;
-        self.last_refresh_ms
-            .store(now_ms(), std::sync::atomic::Ordering::Relaxed);
+        *self.last_refresh.lock().unwrap_or_else(|p| p.into_inner()) = Instant::now();
     }
 
     /// The actual domain-health computation: a no-decrypt `list_meta` scan plus the
@@ -2592,7 +2605,7 @@ impl ReadSurface {
                 op: AuditOp::FetchAnomaly,
                 credential_id: None,
                 payload_hash: None,
-                actor: format!("conn-{connection_id}"),
+                actor: format!("conn-{}", connection_id as u16),
                 alarm: Some(AlarmReason::FetchRateAnomaly),
             });
         }
@@ -2603,6 +2616,15 @@ impl ReadSurface {
         if let Some((start, _)) = self.open_refusals.lock().await.get_mut(&connection_id) {
             *start = Instant::now() - OPEN_REFUSAL_WINDOW;
         }
+    }
+
+    /// Clear all old epoch keys before acknowledging a reused route channel.
+    pub async fn drop_channel(&self, channel: u16) {
+        self.open_refusals
+            .lock()
+            .await
+            .retain(|id, _| *id as u16 != channel);
+        self.limiter.lock().await.drop_channel(channel);
     }
 
     /// Forget a closed connection's limiter state.
@@ -2762,7 +2784,7 @@ mod error_class_tests {
                 "code": "malformed_encoding", "class": "permanent"
             })
         );
-        let row = "| `malformed_encoding` | permanent | a `credential.open` byte field failed strict standard base64 decoding |";
+        let row = "| `malformed_encoding` | permanent | a `credential.sign` payload or `credential.open` byte field failed strict standard base64 decoding |";
         assert_eq!(
             doc.matches(row).count(),
             1,

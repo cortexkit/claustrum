@@ -181,21 +181,28 @@ async fn malformed_control_requests_do_not_stop_dispatch_or_goodbye() {
     let (control, mut replies) = mpsc::channel(8);
     let (route, _route_rx) = mpsc::channel(8);
     let egress = Egress { control, route };
-    for body in [b"{".to_vec(), br#"{"op":"future.control"}"#.to_vec()] {
+    // Each is refused on the Error lane with its own corr, so a daemon waiting on it
+    // fails that request at once, and dispatch carries on afterwards.
+    for (corr, body) in [(1, b"{".to_vec()), (3, br#"{"op":"future.control"}"#.to_vec())] {
         let frame = Frame::build_with_version(
             subc_protocol::PROTOCOL_VERSION,
             FrameType::Request,
             control_flags(),
             0,
             0,
-            1,
+            corr,
             body,
         )
         .unwrap();
         assert!(handle_frame(frame, &egress, &surface, &admin, &routes)
             .await
             .unwrap());
-        assert!(replies.try_recv().is_err());
+        let refusal = replies.try_recv().expect("a malformed control request is refused");
+        assert_eq!(refusal.header.ty, FrameType::Error);
+        assert_eq!(refusal.header.corr, corr);
+        let error: ErrorBody = serde_json::from_slice(&refusal.body).unwrap();
+        assert_eq!(error.code, "invalid_control_body");
+        assert!(replies.try_recv().is_err(), "exactly one reply per request");
     }
     let health = Frame::build_with_version(
         subc_protocol::PROTOCOL_VERSION,

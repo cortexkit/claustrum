@@ -908,10 +908,24 @@ async fn handle_control_request(
     let request = match serde_json::from_slice::<ModuleControlRequest>(&frame.body) {
         Ok(request) => request,
         Err(_) => {
-            // Control variants may grow independently of this module. Ignore malformed
-            // or unknown requests without logging their potentially sensitive bodies.
-            tracing::warn!(target: "routes", "ignored undecodable channel-0 control request");
-            return Ok(());
+            // Control variants and their fields grow independently of this module: a
+            // newer daemon can send a `route.bind` whose scope stamp carries a field this
+            // build's protocol crate refuses. REFUSE IT on the Error lane, the protocol's
+            // rejection path, rather than leaving it unanswered. An unanswered bind holds
+            // the opener until the daemon's bind timeout and reads as a slow vault; a
+            // refusal fails that one route at once and leaves every other route alone.
+            // The body is never logged or echoed: it may carry a principal or scope data.
+            tracing::warn!(target: "routes", "refused undecodable channel-0 control request");
+            return send_route_error(
+                writer,
+                frame.header.ver,
+                0,
+                0,
+                frame.header.corr,
+                "invalid_control_body",
+                "this vault build cannot decode the control request",
+            )
+            .await;
         }
     };
     let response_body = match request {
@@ -6762,6 +6776,62 @@ mod tests {
             &overall,
             &["ready", "last_error_code", "lease_held"],
             "overall status",
+        );
+    }
+
+    /// A control request this build cannot decode (here a `route.bind` shaped the way a
+    /// newer daemon might send it) is answered on the Error lane with the same corr,
+    /// so the daemon fails that bind at once instead of waiting out its timeout, and no
+    /// route is installed for it. The fixture is asserted undecodable first, so the
+    /// test cannot pass by decoding it.
+    #[tokio::test]
+    async fn undecodable_control_request_is_refused_on_the_error_lane() {
+        let (surface, _surface_root) = tmp_surface(171);
+        let (admin, _admin_store, _admin_root) = tmp_admin(171);
+        let routes = Arc::new(RouteEpochs::default());
+        let (tx, mut rx) = mpsc::channel::<Frame>(4);
+        let body = serde_json::json!({
+            "op": "route.bind",
+            "route_channel": 7,
+            "epoch": 3,
+            "route": "claustrum",
+            "scope": { "attributes": { "field_from_a_newer_protocol": "x" } }
+        });
+        assert!(
+            serde_json::from_value::<ModuleControlRequest>(body.clone()).is_err(),
+            "the fixture must be undecodable, or this test proves nothing"
+        );
+        let frame = Frame::build_with_version(
+            PROTOCOL_VERSION,
+            FrameType::Request,
+            control_flags(),
+            0,
+            0,
+            77,
+            serde_json::to_vec(&body).unwrap(),
+        )
+        .unwrap();
+
+        handle_control_request(frame, &tx, &surface, &admin, &routes)
+            .await
+            .unwrap();
+
+        let reply = rx
+            .try_recv()
+            .expect("an undecodable request must be answered");
+        assert_eq!(reply.header.ty, FrameType::Error);
+        assert_eq!(reply.header.channel, 0);
+        assert_eq!(reply.header.corr, 77);
+        let error: ErrorBody = serde_json::from_slice(&reply.body).unwrap();
+        assert_eq!(error.code, "invalid_control_body");
+        assert!(
+            !String::from_utf8_lossy(&reply.body).contains("field_from_a_newer_protocol"),
+            "the refusal must not echo the request body"
+        );
+        assert!(rx.try_recv().is_err(), "exactly one reply");
+        assert!(
+            admin.principal(7).is_none(),
+            "no route may be bound for a request that was refused"
         );
     }
 

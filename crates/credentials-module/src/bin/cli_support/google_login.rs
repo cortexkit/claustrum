@@ -188,6 +188,7 @@ pub fn cmd_login(
                 credentials_core::admin_ops::StoreMode::ReplaceUnconditional,
             ),
             preflighted_key,
+            args,
         )?;
         println!("logged in and replaced {id}");
         return Ok(());
@@ -202,6 +203,7 @@ pub fn cmd_login(
             credentials_core::admin_ops::StoreMode::Create,
         ),
         preflighted_key,
+        args,
     );
     let already_exists = match &result {
         Err(CliError::Store(credentials_core::store::StoreOpError::AlreadyExists)) => true,

@@ -7238,6 +7238,7 @@ mod tests {
                     stale_pending: false,
                     categories: Vec::new(),
                     created_by: None,
+                    provider_ids: Vec::new(),
                 },
             )
         }

@@ -95,6 +95,18 @@ pub const SELECTOR_SCHEMA_VERSION: u32 = 10;
 /// unknown proposer rather than failing the listing.
 pub const ENROLLMENT_PROPOSER_SCHEMA_VERSION: u32 = 12;
 
+/// The migration that added `credential_provider_ids`, the operator's record of which
+/// catalog provider ids each credential serves.
+///
+/// The lease-free readers branch on it for the same reason they branch on
+/// [`CATEGORY_SCHEMA_VERSION`]: a new CLI can read the store before the daemon that
+/// migrates has restarted. Below it the table does not exist, and every credential is
+/// read with no provider ids, which is the true reading of that store.
+///
+/// Published because the CLI's behind-store note names this migration as the one that
+/// brings provider ids.
+pub const PROVIDER_ID_SCHEMA_VERSION: u32 = 15;
+
 /// The audit ops that DEPOSIT a credential, so the earliest entry carrying one of
 /// them is that credential's birth instant.
 ///
@@ -580,6 +592,18 @@ const MIGRATIONS: &[Migration] = &[
                      DROP TABLE read_grants; \
                      ALTER TABLE read_grants_v14 RENAME TO read_grants;",
     },
+    // Provider ids are non-secret operator metadata, kept beside the credential row
+    // so writing them never touches the sealed record. Every existing credential
+    // starts with none: the vault never derives one.
+    Migration {
+        version: PROVIDER_ID_SCHEMA_VERSION,
+        statements: "CREATE TABLE credential_provider_ids (\
+                         credential_id TEXT NOT NULL, \
+                         provider_id TEXT NOT NULL, \
+                         PRIMARY KEY (credential_id, provider_id), \
+                         FOREIGN KEY (credential_id) REFERENCES credentials(credential_id) ON DELETE CASCADE\
+                     );",
+    },
 ];
 
 /// The newest store migration THIS BINARY knows how to apply.
@@ -660,6 +684,9 @@ pub struct RecordMeta {
     pub categories: Vec<String>,
     /// Write-once creator; rows predating migration 14 have no known creator.
     pub created_by: Option<String>,
+    /// The catalog provider ids the operator says this credential serves, in ascending
+    /// byte order. Empty on a store below [`PROVIDER_ID_SCHEMA_VERSION`].
+    pub provider_ids: Vec<String>,
 }
 
 /// The operation a principal-scoped credential-prefix grant permits.
@@ -837,6 +864,14 @@ pub struct ScopedListRow {
     /// indirectly through behaviour, and it names no account and no material. Reading it
     /// costs nothing here because the row is already unsealed for identity.
     pub refresh_adapter: Option<String>,
+    /// The catalog provider ids the operator assigned, in ascending byte order. Read
+    /// from their own table without unsealing, so a row reached only through `sign` or
+    /// `open` carries them too.
+    pub provider_ids: Vec<String>,
+    /// Derived from the unsealed record's kind and refresh adapter by
+    /// [`crate::list_auth_method::list_auth_method`]. `None` when the row is reached
+    /// only through `sign` or `open` (it stays sealed) or when the table yields nothing.
+    pub auth_method: Option<crate::list_auth_method::ListAuthMethod>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -848,6 +883,16 @@ pub struct ScopedListSnapshot {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SetCategoryMode {
+    Set,
+    Add,
+    Remove,
+}
+
+/// How an `admin.set_providers` request combines with the credential's stored provider
+/// ids: replace them, add to them, or remove from them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SetProvidersMode {
     Set,
     Add,
     Remove,
@@ -907,6 +952,12 @@ pub enum StoreOpError {
     InvalidCredentialId,
     /// A category name does not match `^[a-z][a-z0-9-]{1,31}$`.
     InvalidCategoryName,
+    /// A provider-id write broke one of the provider-id rules. `value` is the id the
+    /// rule names, which may be empty (an empty id fails `charset`).
+    InvalidProviderId {
+        rule: crate::provider_ids::ProviderIdRule,
+        value: String,
+    },
     /// A grant principal is not a non-empty `reserved` principal id without `|`.
     InvalidPrincipal,
     /// Deposit grants are restricted to reserved principals and browser-session categories.
@@ -990,6 +1041,11 @@ impl std::fmt::Display for StoreOpError {
             }
             StoreOpError::InvalidCredentialId => f.write_str("invalid_credential_id"),
             StoreOpError::InvalidCategoryName => f.write_str("invalid_category_name"),
+            // Labelled fields, so a value that happens to spell a rule token (`count`)
+            // cannot be read as a second rule.
+            StoreOpError::InvalidProviderId { rule, value } => {
+                write!(f, "invalid_provider_id/permanent: rule={rule} value={value}")
+            }
             StoreOpError::InvalidPrincipal => f.write_str("invalid_principal"),
             StoreOpError::InvalidDepositGrant => f.write_str("deposit requires a reserved principal and category browser-session selector"),
             StoreOpError::DepositCookieNotPermitted => f.write_str("not_permitted"),
@@ -1045,6 +1101,7 @@ impl StoreOpError {
         match self {
             StoreOpError::InvalidCredentialId => Some("invalid_credential_id"),
             StoreOpError::InvalidCategoryName => Some("invalid_category_name"),
+            StoreOpError::InvalidProviderId { .. } => Some("invalid_provider_id"),
             StoreOpError::InvalidPrincipal => Some("invalid_principal"),
             _ => None,
         }
@@ -1781,7 +1838,7 @@ impl EncryptedStore {
     pub fn meta(&self, credential_id: &str) -> Result<RecordMeta, StoreOpError> {
         self.store
             .with_conn(|conn| {
-                conn.query_row(
+                let meta = conn.query_row(
                     "SELECT record_version, key_id, state, stale_pending, \
                      COALESCE((SELECT group_concat(category, ',') FROM (\
                          SELECT category FROM credential_categories WHERE credential_id = ?1 ORDER BY category\
@@ -1797,10 +1854,22 @@ impl EncryptedStore {
                             stale_pending: row.get::<_, i64>(3)? != 0,
                             categories: split_categories(categories),
                             created_by: row.get(5)?,
+                            provider_ids: Vec::new(),
                         })
                     },
                 )
-                .optional()
+                .optional()?;
+                match meta {
+                    Some(mut meta) => {
+                        meta.provider_ids = provider_ids_from_conn(
+                            conn,
+                            credential_id,
+                            read_schema_version(conn)?,
+                        )?;
+                        Ok(Some(meta))
+                    }
+                    None => Ok(None),
+                }
             })
             .map_err(StoreOpError::from)?
             .ok_or(StoreOpError::NotFound)
@@ -2889,19 +2958,21 @@ impl EncryptedStore {
         self.store
             .with_conn(|conn| {
                 let tx = conn.unchecked_transaction()?;
+                let schema_version = read_schema_version(&tx)?;
                 let grants = read_grants_from_conn(
                     &tx,
                     Some(principal_kind),
                     Some(principal_id),
-                    read_schema_version(&tx)?,
+                    schema_version,
                 )?;
                 after_grants()?;
-                let mut stmt = tx.prepare(
+                let mut stmt = tx.prepare(&format!(
                     "SELECT credential_id, record_version, state, envelope, \
                      COALESCE((SELECT group_concat(category, ',') FROM (\
                          SELECT category FROM credential_categories WHERE credential_id = credentials.credential_id ORDER BY category\
-                     )), '') FROM credentials ORDER BY credential_id",
-                )?;
+                     )), ''), {} FROM credentials ORDER BY credential_id",
+                    provider_ids_column(schema_version)
+                ))?;
                 let candidates = stmt
                     .query_map([], |row| {
                         Ok((
@@ -2910,13 +2981,16 @@ impl EncryptedStore {
                             RecordState::from_str(&row.get::<_, String>(2)?),
                             row.get::<_, Vec<u8>>(3)?,
                             split_categories(row.get::<_, String>(4)?),
+                            split_provider_ids(row.get::<_, String>(5)?),
                         ))
                     })?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
                 drop(stmt);
 
                 let mut rows = Vec::new();
-                for (id, record_version, state, envelope_bytes, categories) in candidates {
+                for (id, record_version, state, envelope_bytes, categories, provider_ids) in
+                    candidates
+                {
                     let operations: BTreeSet<GrantOperation> = grants
                         .iter()
                         .filter(|grant| grant.operation != GrantOperation::Deposit)
@@ -2963,13 +3037,19 @@ impl EncryptedStore {
                                         )),
                                     )
                                 })?;
-                        Some((record.identity, record.refresh_adapter))
+                        let auth_method = crate::list_auth_method::list_auth_method(
+                            record.kind,
+                            record.refresh_adapter.as_deref(),
+                        );
+                        Some((record.identity, record.refresh_adapter, auth_method))
                     } else {
                         None
                     };
-                    let (identity, refresh_adapter) = match decoded_record {
-                        Some((identity, adapter)) => (Some(identity), adapter),
-                        None => (None, None),
+                    let (identity, refresh_adapter, auth_method) = match decoded_record {
+                        Some((identity, adapter, auth_method)) => {
+                            (Some(identity), adapter, auth_method)
+                        }
+                        None => (None, None, None),
                     };
                     rows.push(ScopedListRow {
                         id,
@@ -2979,6 +3059,8 @@ impl EncryptedStore {
                         operations: operations.into_iter().collect(),
                         identity,
                         refresh_adapter,
+                        provider_ids,
+                        auth_method,
                     });
                 }
                 tx.commit()?;
@@ -3076,6 +3158,116 @@ impl EncryptedStore {
             Ok(Some(true))
         })?;
         outcome.ok_or(StoreOpError::NotFound)
+    }
+
+    /// One credential's provider ids in ascending byte order.
+    pub fn provider_ids(&self, credential_id: &str) -> Result<Vec<String>, StoreOpError> {
+        self.store
+            .with_conn(|conn| {
+                provider_ids_from_conn(conn, credential_id, read_schema_version(conn)?)
+            })
+            .map_err(StoreOpError::from)
+    }
+
+    /// Apply a provider-id transition and return the resulting set in ascending byte
+    /// order, also when it is unchanged or empty.
+    ///
+    /// Checks run in a fixed order and only the first failure is reported:
+    /// `charset` then `length` for each requested id in request order, then
+    /// `duplicate`, then the credential's existence, then `count` on the RESULTING set.
+    /// The stored-state checks, the mapping write and the audit row share one
+    /// transaction, so a refusal changes nothing.
+    ///
+    /// Only a change is audited, as `providers:<credential-id>|<sorted,list>`. The
+    /// credential row and its sealed envelope are never read or written: provider ids
+    /// live beside the record, so this succeeds on a retired or corrupt-envelope row
+    /// and never moves `record_version`.
+    pub fn set_providers_audited(
+        &self,
+        credential_id: &str,
+        mode: SetProvidersMode,
+        provider_ids: &[String],
+        ctx: AuditCtx<'_>,
+    ) -> Result<Vec<String>, StoreOpError> {
+        crate::provider_ids::check_provider_ids(provider_ids)?;
+        let audit_key = self.audit_key.clone();
+        let outcome = self.fenced_write(|tx| {
+            let exists = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM credentials WHERE credential_id = ?1)",
+                rusqlite::params![credential_id],
+                |row| row.get::<_, bool>(0),
+            )?;
+            if !exists {
+                return Ok(Err(StoreOpError::NotFound));
+            }
+            let mut stmt = tx.prepare(
+                "SELECT provider_id FROM credential_provider_ids WHERE credential_id = ?1",
+            )?;
+            let current = stmt
+                .query_map(rusqlite::params![credential_id], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<BTreeSet<_>>>()?;
+            drop(stmt);
+            let resulting = match mode {
+                SetProvidersMode::Remove => {
+                    let mut resulting = current.clone();
+                    for id in provider_ids {
+                        resulting.remove(id);
+                    }
+                    resulting
+                }
+                SetProvidersMode::Set | SetProvidersMode::Add => {
+                    let mut resulting = match mode {
+                        SetProvidersMode::Set => BTreeSet::new(),
+                        _ => current.clone(),
+                    };
+                    // Grow the set in request order so the refusal names the first id
+                    // whose addition crosses the cap (31 stored + `n1 n2` names `n2`).
+                    for id in provider_ids {
+                        resulting.insert(id.clone());
+                        if resulting.len() > crate::provider_ids::MAX_PROVIDER_IDS_PER_CREDENTIAL
+                        {
+                            return Ok(Err(StoreOpError::InvalidProviderId {
+                                rule: crate::provider_ids::ProviderIdRule::Count,
+                                value: id.clone(),
+                            }));
+                        }
+                    }
+                    resulting
+                }
+            };
+            let resulting: Vec<String> = resulting.into_iter().collect();
+            if resulting.iter().eq(current.iter()) {
+                return Ok(Ok(resulting));
+            }
+            tx.execute(
+                "DELETE FROM credential_provider_ids WHERE credential_id = ?1",
+                rusqlite::params![credential_id],
+            )?;
+            for id in &resulting {
+                tx.execute(
+                    "INSERT INTO credential_provider_ids (credential_id, provider_id) VALUES (?1, ?2)",
+                    rusqlite::params![credential_id, id],
+                )?;
+            }
+            // Split on the LAST `|` to parse: provider ids cannot contain one, while
+            // the credential id before it is not constrained here.
+            append_audit_tx(
+                tx,
+                &audit_key,
+                &AuditRecord {
+                    op: ctx.op,
+                    credential_id: Some(format!(
+                        "providers:{credential_id}|{}",
+                        resulting.join(",")
+                    )),
+                    payload_hash: None,
+                    actor: ctx.actor.to_string(),
+                    alarm: ctx.alarm,
+                },
+            )?;
+            Ok(Ok(resulting))
+        })?;
+        outcome
     }
 
     /// Refill empty category sets, or replace non-empty sets when forced. Enumeration,
@@ -4368,6 +4560,15 @@ impl EncryptedStore {
                 for _ in 0..categories {
                     bump_grants_generation_tx(tx)?;
                 }
+                // The same holds for provider ids: a later deposit of this id must
+                // start with none. Removal writes no `set_providers` entry; its own
+                // audit row below records the whole credential going.
+                if read_schema_version(tx)? >= PROVIDER_ID_SCHEMA_VERSION {
+                    tx.execute(
+                        "DELETE FROM credential_provider_ids WHERE credential_id = ?1",
+                        rusqlite::params![credential_id],
+                    )?;
+                }
                 // Diagnostic events go WITH the credential, and this is the one
                 // place they can go.
                 //
@@ -5531,6 +5732,51 @@ fn split_categories(categories: String) -> Vec<String> {
     }
 }
 
+/// Split a comma-joined provider-id list read with `group_concat`, and sort it.
+///
+/// SQLite does not promise that `group_concat` keeps the order of its source rows, and
+/// the wire promises ascending byte order, so the order is established here rather than
+/// trusted. Provider ids cannot contain a comma, so the split is exact.
+fn split_provider_ids(joined: String) -> Vec<String> {
+    let mut ids = split_categories(joined);
+    ids.sort_unstable();
+    ids
+}
+
+/// The SQL expression for one credential's comma-joined provider ids, correlated to
+/// the `credentials` row of the enclosing query, or an empty string on a store below
+/// [`PROVIDER_ID_SCHEMA_VERSION`], where the table does not exist and a credential
+/// truly has none.
+fn provider_ids_column(schema_version: u32) -> &'static str {
+    if schema_version >= PROVIDER_ID_SCHEMA_VERSION {
+        "COALESCE((SELECT group_concat(provider_id, ',') FROM credential_provider_ids \
+         WHERE credential_id = credentials.credential_id), '')"
+    } else {
+        "''"
+    }
+}
+
+/// One credential's provider ids in ascending byte order, or none on a store below
+/// [`PROVIDER_ID_SCHEMA_VERSION`].
+fn provider_ids_from_conn(
+    conn: &rusqlite::Connection,
+    credential_id: &str,
+    schema_version: u32,
+) -> rusqlite::Result<Vec<String>> {
+    if schema_version < PROVIDER_ID_SCHEMA_VERSION {
+        return Ok(Vec::new());
+    }
+    let mut stmt = conn.prepare(
+        "SELECT provider_id FROM credential_provider_ids WHERE credential_id = ?1 ORDER BY provider_id",
+    )?;
+    let ids = stmt
+        .query_map(rusqlite::params![credential_id], |row| {
+            row.get::<_, String>(0)
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(ids)
+}
+
 /// Read the vault's recorded schema version from a connection that may be read-only.
 ///
 /// `MAX(version)` over this namespace's rows, or 0 when the namespace has no rows. A
@@ -5613,9 +5859,12 @@ fn list_meta_from_conn(
     } else {
         "NULL"
     };
+    // The same holds one migration later for provider ids: below
+    // PROVIDER_ID_SCHEMA_VERSION the table is absent and every credential has none.
+    let providers = provider_ids_column(schema_version);
     let sql = sql.replace(
         "FROM credentials ORDER BY",
-        &format!(", {creator} FROM credentials ORDER BY"),
+        &format!(", {creator}, {providers} FROM credentials ORDER BY"),
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt
@@ -5630,6 +5879,7 @@ fn list_meta_from_conn(
                     stale_pending: row.get::<_, i64>(4)? != 0,
                     categories: split_categories(categories),
                     created_by: row.get(6)?,
+                    provider_ids: split_provider_ids(row.get(7)?),
                 },
             ))
         })?
@@ -10676,7 +10926,7 @@ mod tests {
     fn the_newest_migration_version_is_pinned_because_the_manifest_declares_it() {
         assert_eq!(
             newest_migration_version(),
-            14,
+            15,
             "the newest migration changed. This value is DECLARED in the module manifest \
              as store_schema_version, so a supervisor comparing declared-against-actual \
              sees it. Update the literal, and note the manifest consequence."
@@ -14211,3 +14461,7 @@ mod migration_10_tests {
 #[cfg(test)]
 #[path = "deposit_cookie_tests.rs"]
 mod deposit_cookie_tests;
+
+#[cfg(test)]
+#[path = "provider_ids_store_tests.rs"]
+mod provider_ids_store_tests;

@@ -19,7 +19,7 @@ use crate::audit::{AuditCtx, AuditOp};
 use crate::record::{CredentialKind, RecordIdentity, VaultRecord};
 use crate::store::{
     mint_handle, EncryptedStore, GrantOperation, ReadGrant, RecordMeta, SelectorKind,
-    SetCategoryMode, StoreOpError,
+    SetCategoryMode, SetProvidersMode, StoreOpError,
 };
 
 /// The admin-op schema version. Bumped only on a breaking op-body change; the
@@ -173,6 +173,16 @@ pub enum AdminOpBody {
         credential_id: String,
         mode: SetCategoryMode,
         categories: Vec<String>,
+    },
+    /// Set, add to or remove from a credential's catalog provider ids. Non-secret
+    /// operator metadata kept beside the record: the envelope is never opened, and the
+    /// reply carries the resulting set in ascending byte order.
+    #[serde(rename = "admin.set_providers")]
+    SetProviders {
+        v: u32,
+        credential_id: String,
+        mode: SetProvidersMode,
+        provider_ids: Vec<String>,
     },
     #[serde(rename = "admin.reclassify")]
     Reclassify { v: u32, force: bool },
@@ -399,6 +409,18 @@ impl std::fmt::Debug for AdminOpBody {
                 .field("mode", mode)
                 .field("categories", categories)
                 .finish(),
+            AdminOpBody::SetProviders {
+                v,
+                credential_id,
+                mode,
+                provider_ids,
+            } => f
+                .debug_struct("SetProviders")
+                .field("v", v)
+                .field("credential_id", credential_id)
+                .field("mode", mode)
+                .field("provider_ids", provider_ids)
+                .finish(),
             AdminOpBody::Reclassify { v, force } => f
                 .debug_struct("Reclassify")
                 .field("v", v)
@@ -441,6 +463,7 @@ impl AdminOpBody {
             | AdminOpBody::GrantCreateV2 { v, .. }
             | AdminOpBody::GrantRevokeV2 { v, .. }
             | AdminOpBody::SetCategory { v, .. }
+            | AdminOpBody::SetProviders { v, .. }
             | AdminOpBody::Reclassify { v, .. }
             | AdminOpBody::Approval { v, .. }
             | AdminOpBody::EnrollApprove { v, .. }
@@ -458,6 +481,7 @@ impl AdminOpBody {
             AdminOpBody::GrantCreateV2 { .. }
             | AdminOpBody::GrantRevokeV2 { .. }
             | AdminOpBody::SetCategory { .. }
+            | AdminOpBody::SetProviders { .. }
             | AdminOpBody::Reclassify { .. }
             | AdminOpBody::EnrollApprove { .. }
             | AdminOpBody::EnrollDeny { .. }
@@ -509,6 +533,9 @@ impl AdminOpBody {
             | AdminOpBody::MintHandle { id, .. }
             | AdminOpBody::RevokeAllHandles { id, .. }
             | AdminOpBody::SetCategory {
+                credential_id: id, ..
+            }
+            | AdminOpBody::SetProviders {
                 credential_id: id, ..
             } => Some(id),
             AdminOpBody::RevokeHandle { .. }
@@ -842,6 +869,20 @@ pub fn apply(
             )?;
             Ok(serde_json::json!({ "category_changed": changed }))
         }
+        AdminOpBody::SetProviders {
+            credential_id,
+            mode,
+            provider_ids,
+            ..
+        } => {
+            let resulting = store.set_providers_audited(
+                &credential_id,
+                mode,
+                &provider_ids,
+                AuditCtx::route_admin(AuditOp::SetProviders, actor),
+            )?;
+            Ok(serde_json::json!({ "provider_ids": resulting }))
+        }
         AdminOpBody::Reclassify { force, .. } => {
             let changed = store
                 .reclassify_audited(force, AuditCtx::route_admin(AuditOp::SetCategory, actor))?;
@@ -880,6 +921,7 @@ pub fn status_result(
                 "state": m.state.as_str(),
                 "record_version": m.record_version,
                 "categories": m.categories,
+                "provider_ids": m.provider_ids,
             })
         })
         .collect();
@@ -1295,6 +1337,17 @@ mod admin_schema_v2_tests {
                     credential_id: "id".into(),
                     mode: SetCategoryMode::Set,
                     categories: vec!["llm-provider".into()],
+                },
+                v2,
+                Some("id"),
+            ),
+            (
+                "SetProviders",
+                AdminOpBody::SetProviders {
+                    v: v2,
+                    credential_id: "id".into(),
+                    mode: SetProvidersMode::Add,
+                    provider_ids: vec!["zai-coding-plan".into()],
                 },
                 v2,
                 Some("id"),

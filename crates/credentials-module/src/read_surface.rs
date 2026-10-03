@@ -3070,6 +3070,8 @@ mod list_scoped_tests {
             // adapter field exists to separate from the three rows that merely SERVE
             // Anthropic models through their own protocols.
             refresh_adapter: Some("anthropic".to_owned()),
+            provider_ids: Vec::new(),
+            auth_method: None,
         }
     }
 
@@ -3133,6 +3135,8 @@ mod list_scoped_tests {
             operations: vec![GrantOperation::Read],
             identity: None,
             refresh_adapter: adapter.map(str::to_owned),
+            provider_ids: Vec::new(),
+            auth_method: None,
         }
     }
 

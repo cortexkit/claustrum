@@ -822,6 +822,7 @@ fn every_verb_names_on_its_help_page_each_flag_its_parser_accepts() {
         "grant",
         "set-identity",
         "set-category",
+        "set-providers",
         "reclassify",
         "revoke-handle",
     ];
@@ -4361,8 +4362,8 @@ fn every_verb_help_uses_a_flags_table_and_notes_layout() {
     // budget for verbs. It includes the KEM mint ceremony and the approve verb.
     assert_eq!(
         verbs.len(),
-        31,
-        "the rendered verb-table scan narrowed; set-category and reclassify are public verbs"
+        32,
+        "the rendered verb-table scan narrowed; set-providers is a public verb"
     );
     assert!(accepted_help_flags("login").contains(&"--no-browser".to_string()));
     assert!(accepted_help_flags("revoke-handle").contains(&"--hash".to_string()));
@@ -4642,8 +4643,12 @@ fn list_reads_a_store_one_migration_behind_and_says_so_on_stderr_only() {
         stderr.trim(),
         format!(
             "note: store schema 8 is behind this binary's {}; categories and category grants \
-             appear after the daemon restarts (migration 9)",
-            credentials_core::store::newest_migration_version()
+             appear after the daemon restarts (migration 9)\n\
+             note: store schema 8 is behind this binary's {}; provider ids appear after the \
+             daemon restarts (migration {})",
+            credentials_core::store::newest_migration_version(),
+            credentials_core::store::newest_migration_version(),
+            credentials_core::store::PROVIDER_ID_SCHEMA_VERSION
         ),
         "the note must be verbatim and on stderr"
     );
@@ -4728,5 +4733,417 @@ fn enroll_list_reads_a_store_without_proposers_and_says_so_on_stderr_only() {
             credentials_core::store::ENROLLMENT_PROPOSER_SCHEMA_VERSION
         ),
         "the note must be verbatim and on stderr"
+    );
+}
+
+#[test]
+fn provider_cli_round_trip_deposits_union_clear_inventory_and_advisories() {
+    let vault = GrantCliVault::new("provider-roundtrip");
+    vault.bootstrap();
+    let put = vault.run(&["put", "--id", "apikey:zai", "--payload", "secret"]);
+    assert!(
+        put.status.success(),
+        "{}",
+        String::from_utf8_lossy(&put.stderr)
+    );
+    assert!(String::from_utf8_lossy(&put.stderr).contains("ck auth set-providers"));
+    let kimi = vault.run(&["put", "--id", "apikey:kimi-code", "--payload", "secret"]);
+    assert!(kimi.status.success());
+    assert!(!String::from_utf8_lossy(&kimi.stderr).contains("ck auth set-providers"));
+    let set = vault.run(&["set-providers", "--id", "apikey:zai", "--set", "bb", "aa"]);
+    assert!(
+        set.status.success(),
+        "{}",
+        String::from_utf8_lossy(&set.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&set.stdout).trim(),
+        "apikey:zai  aa,bb"
+    );
+    let replace = vault.run(&[
+        "put",
+        "--id",
+        "apikey:zai",
+        "--payload",
+        "rotated",
+        "--replace",
+        "--provider-id",
+        "cc",
+        "--provider-id",
+        "dd",
+    ]);
+    assert!(
+        replace.status.success(),
+        "{}",
+        String::from_utf8_lossy(&replace.stderr)
+    );
+    for verb in ["list", "status"] {
+        let out = vault.run(&[verb]);
+        assert!(out.status.success());
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(text.contains("CATEGORIES  PROVIDERS"), "{text}");
+        assert!(
+            text.lines()
+                .any(|line| line.contains("apikey:zai") && line.contains("aa,bb,cc,dd")),
+            "{text}"
+        );
+    }
+    let remove = vault.run(&["set-providers", "--id", "apikey:zai", "--remove", "bb"]);
+    assert!(remove.status.success());
+    assert!(String::from_utf8_lossy(&remove.stdout).contains("aa,cc,dd"));
+    let clear = vault.run(&["set-providers", "--id", "apikey:zai", "--set"]);
+    assert!(clear.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&clear.stdout).trim(),
+        "apikey:zai  -"
+    );
+    for flags in [
+        vec![],
+        vec!["--set", "--add"],
+        vec!["--add"],
+        vec!["--remove"],
+    ] {
+        let mut args = vec!["set-providers", "--id", "apikey:zai"];
+        args.extend(flags);
+        assert!(!vault.run(&args).status.success());
+    }
+}
+
+#[test]
+fn provider_cli_prechecks_refuse_before_key_resolution_even_with_live_route_requested() {
+    let vault = GrantCliVault::new("provider-precheck");
+    // Without a master key, an offline deposit cannot proceed. The missing
+    // connection file also prevents a routed admin write. Getting the provider
+    // refusal rather than either setup error proves validation runs first.
+    for live in [false, true] {
+        for (ids, rule, value) in [
+            (vec!["Bad".to_string()], "charset", "Bad".to_string()),
+            (vec!["a".to_string()], "length", "a".to_string()),
+            (
+                vec!["aa".to_string(), "aa".to_string()],
+                "duplicate",
+                "aa".to_string(),
+            ),
+            (
+                (0..33).map(|i| format!("p{i}")).collect(),
+                "count",
+                "p32".to_string(),
+            ),
+        ] {
+            for verb in ["set-providers", "put", "login"] {
+                let mut args = vec![verb.to_string(), "--id".into(), "apikey:zai".into()];
+                if verb == "set-providers" {
+                    args.push("--set".into());
+                    args.extend(ids.clone());
+                } else {
+                    if verb == "put" {
+                        args.extend(["--payload".into(), "secret".into()]);
+                    } else {
+                        args.extend(["--provider".into(), "zai".into()]);
+                    }
+                    for id in &ids {
+                        args.extend(["--provider-id".into(), id.clone()]);
+                    }
+                }
+                if live {
+                    args.extend([
+                        "--subc".into(),
+                        vault
+                            .data_dir
+                            .join("missing-conn.json")
+                            .to_string_lossy()
+                            .into_owned(),
+                    ]);
+                }
+                let refs: Vec<_> = args.iter().map(String::as_str).collect();
+                let out = vault.run(&refs);
+                assert!(!out.status.success());
+                assert!(out.stdout.is_empty());
+                assert_eq!(
+                    String::from_utf8_lossy(&out.stderr),
+                    format!("error: invalid_provider_id/permanent: rule={rule} value={value}\n"),
+                    "{verb}, live={live}"
+                );
+            }
+        }
+    }
+    assert!(!vault.data_dir.join("store.db").exists());
+}
+
+#[test]
+fn provider_count_failure_keeps_deposit_and_existing_ids_and_retries_add() {
+    let vault = GrantCliVault::new("provider-cap");
+    vault.bootstrap();
+    let mut put = vec![
+        "put".to_string(),
+        "--id".into(),
+        "apikey:zai".into(),
+        "--payload".into(),
+        "secret".into(),
+    ];
+    for i in 0..32 {
+        put.extend(["--provider-id".into(), format!("p{i}")]);
+    }
+    let refs: Vec<_> = put.iter().map(String::as_str).collect();
+    let out = vault.run(&refs);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let add = vault.run(&["set-providers", "--id", "apikey:zai", "--add", "extra"]);
+    assert_eq!(
+        String::from_utf8_lossy(&add.stderr),
+        "error: invalid_provider_id/permanent: rule=count value=extra\n"
+    );
+    let replace = vault.run(&[
+        "put",
+        "--id",
+        "apikey:zai",
+        "--payload",
+        "rotated",
+        "--replace",
+        "--provider-id",
+        "extra",
+    ]);
+    assert!(!replace.status.success());
+    let stderr = String::from_utf8_lossy(&replace.stderr);
+    assert!(stderr.contains("deposit of apikey:zai stood"), "{stderr}");
+    assert!(
+        stderr.contains("retry: ck auth set-providers --id apikey:zai --add extra"),
+        "{stderr}"
+    );
+    assert!(stderr.ends_with("error: invalid_provider_id/permanent: rule=count value=extra\n"));
+    let list = vault.run(&["list"]);
+    let stdout = String::from_utf8_lossy(&list.stdout);
+    assert!(
+        stdout.lines().any(|line| line.contains("apikey:zai")
+            && line.contains("v2")
+            && line.contains("p31")
+            && !line.contains("extra")),
+        "{stdout}"
+    );
+}
+
+/// A loopback route peer keeps a real vault lease and applies the received admin
+/// bodies. No installed supervisor executable is needed, so CLI sequencing and
+/// refusal rendering remain testable on machines without a running daemon.
+struct ProviderRoutePeer {
+    connection: PathBuf,
+    observed: std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    stop: Option<tokio::sync::oneshot::Sender<()>>,
+    join: Option<std::thread::JoinHandle<()>>,
+}
+
+impl ProviderRoutePeer {
+    fn start(vault: &GrantCliVault) -> Self {
+        use subc_protocol::{Flags, Frame, FrameType, Priority};
+        use subc_transport::{
+            authenticate_server, connection_file, read_frame, write_frame, ConnectionInfo, Endpoint,
+        };
+        let config = credentials_core::resolver::ResolverConfig {
+            data_dir: vault.data_dir.clone(),
+            source: credentials_core::resolver::KeySource::OperatorPath {
+                path: vault.key_path.clone(),
+            },
+        };
+        let key = credentials_core::resolver::resolve(&config, None).unwrap();
+        let key_id = key.key_id().to_hex();
+        let vault_id: String = credentials_core::vault_id_for(&vault.data_dir)
+            .unwrap()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let sqlite = open_sqlite(&StorageDescriptor {
+            module_id: credentials_core::contract::MODULE_ID.into(),
+            storage_namespace: credentials_core::contract::STORAGE_NAMESPACE.into(),
+            isolation: Isolation::Module,
+            backend: StorageBackend::Sqlite {
+                path: vault
+                    .data_dir
+                    .join("store.db")
+                    .to_string_lossy()
+                    .into_owned(),
+            },
+        })
+        .unwrap();
+        EncryptedStore::migrate_with_key(&sqlite, &key).unwrap();
+        let store = EncryptedStore::open(sqlite, key).unwrap();
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let connection = vault.root.join("provider-route.json");
+        let transport_key = vec![9; 32];
+        let daemon_id = [4; 16];
+        connection_file::write_atomic(
+            &connection,
+            &ConnectionInfo {
+                schema: connection_file::SCHEMA_VERSION,
+                wire_version: None,
+                endpoints: vec![Endpoint {
+                    host: "127.0.0.1".into(),
+                    port: listener.local_addr().unwrap().port(),
+                }],
+                key: transport_key.clone(),
+                daemon_id,
+                pid: std::process::id(),
+                daemon_ver: "test".into(),
+            },
+        )
+        .unwrap();
+        let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let ops = observed.clone();
+        let (stop, mut stopped) = tokio::sync::oneshot::channel();
+        let join = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async move {
+                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                loop {
+                    let (mut stream, _) = tokio::select! {
+                        _ = &mut stopped => break,
+                        accepted = listener.accept() => accepted.unwrap(),
+                    };
+                    authenticate_server(&mut stream, &transport_key, &daemon_id, "test", std::time::Duration::from_secs(3)).await.unwrap();
+                    loop {
+                        let request = match tokio::time::timeout(std::time::Duration::from_secs(3), read_frame(&mut stream)).await {
+                            Ok(Ok(Some(frame))) => frame,
+                            Ok(Ok(None)) => break,
+                            other => panic!("route read: {other:?}"),
+                        };
+                        let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                        let (ty, response) = match (body["op"].as_str(), body["method"].as_str()) {
+                            (Some("catalog.list"), _) => (FrameType::Response, serde_json::json!({"modules":[{"module_id":credentials_core::MODULE_ID}]})),
+                            (Some("route.open"), _) => (FrameType::Response, serde_json::json!({"route_channel":7,"route_epoch":3})),
+                            (_, Some("admin.challenge")) => (FrameType::Response, serde_json::json!({"result":{"nonce_hex":"00".repeat(credentials_core::admin_auth::ADMIN_NONCE_LEN),"key_id_hex":key_id,"vault_id_hex":vault_id}})),
+                            (_, Some("admin.op")) => {
+                                let raw = body["params"]["op_body"].as_str().unwrap();
+                                let op: credentials_core::admin_ops::AdminOpBody = serde_json::from_str(raw).unwrap();
+                                ops.lock().unwrap().push(serde_json::from_str(raw).unwrap());
+                                match credentials_core::admin_ops::apply(&store, op, "route-cli-test") {
+                                    Ok(result) => (FrameType::Response, serde_json::json!({"result":result})),
+                                    Err(error) => (FrameType::Error, serde_json::json!({"message":error.to_string()})),
+                                }
+                            }
+                            _ => panic!("unexpected route request: {body}"),
+                        };
+                        let response = Frame::build(ty, Flags::new(false, Priority::Passive, false), request.header.channel, request.header.epoch, request.header.corr, serde_json::to_vec(&response).unwrap()).unwrap();
+                        write_frame(&mut stream, &response).await.unwrap();
+                    }
+                }
+            });
+        });
+        Self {
+            connection,
+            observed,
+            stop: Some(stop),
+            join: Some(join),
+        }
+    }
+}
+
+impl Drop for ProviderRoutePeer {
+    fn drop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        self.join.take().unwrap().join().unwrap();
+    }
+}
+
+#[test]
+fn provider_cli_live_count_refusal_and_deposit_add_order_use_the_route() {
+    if std::env::var_os(CLI_BIN_ENV).is_some() {
+        return;
+    }
+    let vault = GrantCliVault::new("provider-live");
+    vault.bootstrap();
+    let peer = ProviderRoutePeer::start(&vault);
+    let run = |args: &[&str]| {
+        cli()
+            .args(args)
+            .arg("--data-dir")
+            .arg(&vault.data_dir)
+            .arg("--key-path")
+            .arg(&vault.key_path)
+            .arg("--subc")
+            .arg(&peer.connection)
+            .env("CORTEXKIT_TEST_BYPASS_VALIDATION", "1")
+            .output()
+            .unwrap()
+    };
+    let put = run(&[
+        "put",
+        "--id",
+        "apikey:zai",
+        "--payload",
+        "secret",
+        "--provider-id",
+        "aa",
+    ]);
+    assert!(
+        put.status.success(),
+        "{}",
+        String::from_utf8_lossy(&put.stderr)
+    );
+    {
+        let ops = peer.observed.lock().unwrap();
+        let writes: Vec<_> = ops.iter().filter(|op| op["op"] != "admin.status").collect();
+        assert_eq!(writes.len(), 2, "{writes:?}");
+        assert_eq!(writes[0]["op"], "admin.store");
+        assert_eq!(writes[1]["op"], "admin.set_providers");
+        assert_eq!(writes[1]["mode"], "add");
+    }
+    let key_file = vault.root.join("login-payload");
+    std::fs::write(&key_file, "secret").unwrap();
+    peer.observed.lock().unwrap().clear();
+    let login = run(&[
+        "login",
+        "--provider",
+        "zai",
+        "--id",
+        "apikey:zai:work",
+        "--payload-file",
+        key_file.to_str().unwrap(),
+        "--provider-id",
+        "bb",
+    ]);
+    assert!(
+        login.status.success(),
+        "{}",
+        String::from_utf8_lossy(&login.stderr)
+    );
+    {
+        let ops = peer.observed.lock().unwrap();
+        assert_eq!(ops.len(), 2, "{ops:?}");
+        assert_eq!(ops[0]["op"], "admin.store");
+        assert_eq!(ops[1]["op"], "admin.set_providers");
+        assert_eq!(ops[1]["provider_ids"], serde_json::json!(["bb"]));
+    }
+    let mut args = vec![
+        "set-providers".to_owned(),
+        "--id".into(),
+        "apikey:zai".into(),
+        "--set".into(),
+    ];
+    args.extend((0..32).map(|i| format!("p{i}")));
+    assert!(run(&args.iter().map(String::as_str).collect::<Vec<_>>())
+        .status
+        .success());
+    let refusal = run(&["set-providers", "--id", "apikey:zai", "--add", "extra"]);
+    assert_eq!(String::from_utf8_lossy(&refusal.stderr), "error: the running module refused the op: invalid_provider_id/permanent: rule=count value=extra\n");
+    peer.observed.lock().unwrap().clear();
+    let precheck = run(&["set-providers", "--id", "apikey:zai", "--add", "Bad"]);
+    assert_eq!(
+        String::from_utf8_lossy(&precheck.stderr),
+        "error: invalid_provider_id/permanent: rule=charset value=Bad\n"
+    );
+    assert!(peer.observed.lock().unwrap().is_empty());
+    drop(peer);
+    let offline = vault.run(&["set-providers", "--id", "apikey:zai", "--add", "extra"]);
+    assert_eq!(
+        String::from_utf8_lossy(&offline.stderr),
+        "error: invalid_provider_id/permanent: rule=count value=extra\n"
     );
 }

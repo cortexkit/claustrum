@@ -83,7 +83,7 @@ use credentials_core::key::MasterKey;
 use credentials_core::record::{CredentialKind, RecordIdentity, VaultRecord};
 use credentials_core::resolver::{self, KeySource, MasterKeyError, ResolverConfig};
 use credentials_core::store::{
-    EncryptedStore, GrantOperation, SelectorKind, SetCategoryMode, StoreOpError,
+    EncryptedStore, GrantOperation, SelectorKind, SetCategoryMode, SetProvidersMode, StoreOpError,
 };
 use ring::rand::SystemRandom;
 use ring::signature::Ed25519KeyPair;
@@ -340,6 +340,7 @@ fn run_args(mut args: Vec<String>) -> Result<(), CliError> {
         "import" => cmd_import(&global, &args),
         "set-identity" => cmd_set_identity(&global, &args),
         "set-category" => cmd_set_category(&global, &args),
+        "set-providers" => cmd_set_providers(&global, &args),
         "reclassify" => cmd_reclassify(&global, &args),
         "migrate-opencode" => opencode_migration::cmd_migrate_opencode(&global, &args),
         "opencode-account" => opencode_accounts::cmd_opencode_account(&global, &args),
@@ -417,6 +418,7 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
             // but missing HERE is rejected before cmd_put ever runs, so this list and
             // that handler have to move together.
             "--client-id",
+            "--provider-id",
         ],
         "mint-signing-key" | "mint-kem-key" => &["--id"],
         "import" => &[
@@ -431,6 +433,7 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
         ],
         "set-identity" => &["--account-id", "--email", "--org-name"],
         "set-category" => &["--set", "--add", "--remove"],
+        "set-providers" => &["--id"],
         "migrate-opencode" => &[
             "--restore",
             "--auth-file",
@@ -445,7 +448,13 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
             "--before",
             "--handle-file",
         ],
-        "login" => &["--provider", "--id", "--payload-file", "--account"],
+        "login" => &[
+            "--provider",
+            "--id",
+            "--payload-file",
+            "--account",
+            "--provider-id",
+        ],
         "invalidate" | "reactivate" | "mint-handle" | "revoke-all-handles" | "remove" => &["--id"],
         "logout" => &["--provider", "--id"],
         "revoke-handle" => &["--handle", "--hash"],
@@ -470,6 +479,7 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
     };
     // Boolean (valueless) flags accepted per command.
     let bool_flags: &[&str] = match command {
+        "set-providers" => &["--set", "--add", "--remove"],
         "put" => &["--replace"],
         "mint-signing-key" | "mint-kem-key" => &["--replace"],
         "import" => &["--replace", "--clear-identity"],
@@ -501,7 +511,9 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
             "enroll" => &["list", "approve", "deny", "revoke", "reissue"],
             _ => &[],
         };
-        if subcommands.contains(&arg.as_str()) {
+        if subcommands.contains(&arg.as_str())
+            || (command == "set-providers" && !arg.starts_with("--"))
+        {
             i += 1;
             continue;
         }
@@ -547,7 +559,8 @@ fn usage_short() -> String {
          import              import from opencode/pi/gemini-cli/antigravity\n\
          set-identity        attach non-secret account metadata to one credential\n\
          set-category        replace/add/remove authorization categories\n\
-         reclassify          apply registry category defaults atomically\n\
+          set-providers       replace/add/remove catalog provider ids\n\
+          reclassify          apply registry category defaults atomically\n\
          migrate-opencode    custody OpenCode api auth entries idempotently\n\
          opencode-account    add/remove/list labeled OpenCode api accounts\n\
         mint-handle         mint a capability handle for a credential\n\
@@ -589,6 +602,19 @@ fn usage_short() -> String {
 /// An unknown verb falls back to the short table.
 fn help_verb(verb: &str) -> String {
     let body = match verb {
+        "set-providers" => {
+            "ck auth set-providers --id <credential-id> (--add | --remove | --set)\n\
+             \x20                     <provider-id>...\n\
+             \n\
+             \x20 --id <credential-id>  credential whose provider ids are edited\n\
+             \x20 --add                 union ids with the stored set\n\
+             \x20 --remove              remove ids from the stored set\n\
+             \x20 --set                 replace the set; no ids clears it\n\
+             \n\
+             NOTES\n\
+             Choose exactly one mode. --add and --remove need at least one id.\n\
+             Provider ids are lowercase catalog ids, not authorization categories."
+        }
         "login" => {
             "ck auth login [--provider <name>] [--id <id>] [--account <id>] [--replace]\n\
              \x20             [--no-listener] [--no-browser] [--device] [--payload-file <path>]\n\
@@ -598,6 +624,7 @@ fn help_verb(verb: &str) -> String {
              \x20 --id <id>              use the provider default id or its own freely chosen\n\
              \x20                        labeled id\n\
              \x20 --account <id>         required for Snowflake (id oauth:snowflake:<account>)\n\
+             \x20 --provider-id <id>     add a catalog provider id after deposit (repeatable)\n\
              \x20 --replace              swap an existing credential (keeps its handle)\n\
              \x20 --no-listener          paste the address-bar URL instead of using the loopback\n\
              \x20                        listener\n\
@@ -766,6 +793,8 @@ fn help_verb(verb: &str) -> String {
              \x20                              consumers re-fetch, keeping handles\n\
              \x20 --expected-hash <hex>        concurrency-safe CAS overwrite\n\
              \x20 --client-id <id>             required App JWT issuer for a github_app: deposit\n\
+             \x20 --provider-id <id>           add a catalog provider id after deposit\n\
+             \x20                              (repeatable)\n\
              \n\
              NOTES\n\
              Ingest a non-OAuth secret (an api_key, dsn, or opaque blob). Create-only by\n\
@@ -1117,10 +1146,256 @@ fn commit_admin(
 
 fn commit_login_admin(
     global: &GlobalArgs,
-    op: credentials_core::admin_ops::AdminOpBody,
+    op: AdminOpBody,
     preflighted_key: MasterKey,
+    args: &[String],
 ) -> Result<serde_json::Value, CliError> {
-    commit_admin_with_key(global, op, Some(preflighted_key))
+    let ids = provider_id_flags(args)?;
+    let id = match &op {
+        AdminOpBody::Store { id, .. } | AdminOpBody::StoreWithIdentityPolicy { id, .. } => {
+            id.clone()
+        }
+        _ => return Err(CliError::Usage("login requires a deposit op".into())),
+    };
+    let result = commit_login_deposit(global, op, preflighted_key, &id, &ids)?;
+    if ids.is_empty() {
+        print_missing_provider_note(global, &id);
+    }
+    Ok(result)
+}
+
+/// Keep the preflighted key and offline lease for both writes: a successful login
+/// must not ask for the master key again merely to attach non-secret metadata.
+fn commit_login_deposit(
+    global: &GlobalArgs,
+    op: AdminOpBody,
+    key: MasterKey,
+    id: &str,
+    ids: &[String],
+) -> Result<serde_json::Value, CliError> {
+    if ids.is_empty() {
+        return commit_admin_with_key(global, op, Some(key));
+    }
+    let add = set_providers_op(id, SetProvidersMode::Add, ids);
+    if let Some(conn) = &global.subc_conn {
+        match admin_client::commit(
+            &global.data_dir,
+            &resolver_config(global),
+            conn,
+            &op,
+            Some(&key),
+        ) {
+            admin_client::RouteCommit::Committed(result) => {
+                // The live vault already owns the deposit. Keep the metadata write on
+                // that route rather than attempting to acquire its offline writer lease.
+                let second = provider_route_result(admin_client::commit(
+                    &global.data_dir,
+                    &resolver_config(global),
+                    conn,
+                    &add,
+                    Some(&key),
+                ));
+                second.map_err(|error| provider_deposit_error(id, ids, error))?;
+                return Ok(result);
+            }
+            admin_client::RouteCommit::Refused(m) => return Err(CliError::RouteRefused(m)),
+            admin_client::RouteCommit::LocalFailure(m) => return Err(CliError::LocalFailure(m)),
+            admin_client::RouteCommit::Indeterminate(m) => {
+                return Err(CliError::RouteIndeterminate(m))
+            }
+            admin_client::RouteCommit::NoLiveModule(m) => {
+                if non_empty_env("SUBC_CONNECTION_FILE")
+                    .map(PathBuf::from)
+                    .as_ref()
+                    == Some(conn)
+                {
+                    return Err(CliError::LocalFailure(m));
+                }
+                eprintln!("(no live module: {m}; using the offline lease path)");
+            }
+        }
+    }
+    let store = open_for_admin_with_key(global, true, Some(key))?;
+    let result =
+        credentials_core::admin_ops::apply(&store, op, "offline-cli").map_err(CliError::Store)?;
+    credentials_core::admin_ops::apply(&store, add, "offline-cli")
+        .map_err(CliError::Store)
+        .map_err(|error| provider_deposit_error(id, ids, error))?;
+    Ok(result)
+}
+
+fn provider_route_result(outcome: admin_client::RouteCommit) -> Result<(), CliError> {
+    match outcome {
+        admin_client::RouteCommit::Committed(_) => Ok(()),
+        admin_client::RouteCommit::Refused(m) => Err(CliError::RouteRefused(m)),
+        admin_client::RouteCommit::Indeterminate(m) => Err(CliError::RouteIndeterminate(m)),
+        admin_client::RouteCommit::LocalFailure(m) | admin_client::RouteCommit::NoLiveModule(m) => {
+            Err(CliError::LocalFailure(m))
+        }
+    }
+}
+
+fn provider_deposit_error(id: &str, ids: &[String], error: CliError) -> CliError {
+    for line in provider_deposit_error_lines(id, ids, &error) {
+        eprintln!("{line}");
+    }
+    error
+}
+
+fn provider_deposit_error_lines(id: &str, ids: &[String], error: &CliError) -> [String; 2] {
+    [
+        format!("note: deposit of {id} stood; provider ids were not confirmed: {error}"),
+        format!(
+            "retry: ck auth set-providers --id {id} --add {}",
+            ids.join(" ")
+        ),
+    ]
+}
+
+fn set_providers_op(id: &str, mode: SetProvidersMode, ids: &[String]) -> AdminOpBody {
+    AdminOpBody::SetProviders {
+        v: ADMIN_OP_SCHEMA_V2,
+        credential_id: id.into(),
+        mode,
+        provider_ids: ids.to_vec(),
+    }
+}
+
+fn check_cli_provider_ids(ids: &[String], cap: bool) -> Result<(), CliError> {
+    credentials_core::provider_ids::check_provider_ids(ids).map_err(CliError::Store)?;
+    let max = credentials_core::provider_ids::MAX_PROVIDER_IDS_PER_CREDENTIAL;
+    if cap && ids.len() > max {
+        return Err(CliError::Store(StoreOpError::InvalidProviderId {
+            rule: credentials_core::provider_ids::ProviderIdRule::Count,
+            value: ids[max].clone(),
+        }));
+    }
+    Ok(())
+}
+
+fn provider_id_flags(args: &[String]) -> Result<Vec<String>, CliError> {
+    let mut ids = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--provider-id" {
+            let value = args
+                .get(i + 1)
+                .filter(|s| !s.starts_with("--"))
+                .ok_or_else(|| CliError::Usage("--provider-id needs a value".into()))?;
+            ids.push(value.clone());
+            i += 2;
+        } else if matches!(
+            args[i].as_str(),
+            "--id"
+                | "--payload"
+                | "--payload-file"
+                | "--kind"
+                | "--expires-ms"
+                | "--expected-hash"
+                | "--client-id"
+                | "--provider"
+                | "--account"
+        ) {
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    check_cli_provider_ids(&ids, true)?;
+    Ok(ids)
+}
+
+fn cmd_set_providers(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
+    let id = required(args, "--id")?;
+    let modes: Vec<_> = args
+        .iter()
+        .filter(|s| matches!(s.as_str(), "--set" | "--add" | "--remove"))
+        .collect();
+    if modes.len() != 1 {
+        return Err(CliError::Usage(
+            "choose exactly one of --set, --add, --remove".into(),
+        ));
+    }
+    let mode = match modes[0].as_str() {
+        "--set" => SetProvidersMode::Set,
+        "--add" => SetProvidersMode::Add,
+        _ => SetProvidersMode::Remove,
+    };
+    let mut ids = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--id" {
+            i += 2;
+        } else if args[i].starts_with("--") {
+            i += 1;
+        } else {
+            ids.push(args[i].clone());
+            i += 1;
+        }
+    }
+    if mode != SetProvidersMode::Set && ids.is_empty() {
+        return Err(CliError::Usage(
+            "--add and --remove need at least one provider id".into(),
+        ));
+    }
+    check_cli_provider_ids(&ids, mode != SetProvidersMode::Remove)?;
+    let reply = commit_admin(global, set_providers_op(&id, mode, &ids))?;
+    let providers = reply["provider_ids"].as_array().ok_or_else(|| {
+        CliError::StatusReportInvalid("set-providers omitted provider ids".into())
+    })?;
+    let mut providers = providers
+        .iter()
+        .map(|v| v.as_str().map(str::to_owned))
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| {
+            CliError::StatusReportInvalid("set-providers returned invalid provider ids".into())
+        })?;
+    providers.sort();
+    println!(
+        "{id}  {}",
+        if providers.is_empty() {
+            "-".into()
+        } else {
+            providers.join(",")
+        }
+    );
+    Ok(())
+}
+
+fn finish_provider_deposit(global: &GlobalArgs, id: &str, ids: &[String]) -> Result<(), CliError> {
+    if ids.is_empty() {
+        print_missing_provider_note(global, id);
+    } else {
+        commit_admin(global, set_providers_op(id, SetProvidersMode::Add, ids))
+            .map_err(|error| provider_deposit_error(id, ids, error))?;
+    }
+    Ok(())
+}
+
+fn missing_provider_note(result: &serde_json::Value, id: &str) -> Option<String> {
+    let row = result["credentials"]
+        .as_array()?
+        .iter()
+        .find(|row| row["id"].as_str() == Some(id))?;
+    let categories = row["categories"].as_array()?;
+    let providers = row["provider_ids"].as_array()?;
+    if categories
+        .iter()
+        .any(|value| value.as_str() == Some("llm-provider"))
+        && providers.is_empty()
+    {
+        Some(format!("note: {id} has no catalog provider ids; attach them with ck auth set-providers --id {id} --add <provider-id>"))
+    } else {
+        None
+    }
+}
+
+fn print_missing_provider_note(global: &GlobalArgs, id: &str) {
+    if let Ok(status) = request_admin_status(global) {
+        if let Some(note) = missing_provider_note(&status, id) {
+            eprintln!("{note}");
+        }
+    }
 }
 
 fn commit_admin_with_key(
@@ -1409,6 +1684,7 @@ fn pem_wrap_private_key(pkcs8: &[u8]) -> String {
 }
 
 fn cmd_put(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
+    let ids = provider_id_flags(args)?;
     let id = required(args, "--id")?;
     let parsed = parse_credential_id(&id);
     if matches!(parsed.method, Some(AuthMethod::Signing)) {
@@ -1655,6 +1931,7 @@ fn cmd_put(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             }
         }
     }
+    finish_provider_deposit(global, &id, &ids)?;
     Ok(())
 }
 
@@ -2210,7 +2487,7 @@ fn pick_login_interactively(global: &GlobalArgs) -> Result<InteractiveChoice, Cl
 
 fn cmd_device_login(
     global: &GlobalArgs,
-    _args: &[String],
+    args: &[String],
     provider: &str,
     id: &str,
     wire: &LoginProvider,
@@ -2351,6 +2628,7 @@ fn cmd_device_login(
                 StoreMode::ReplaceUnconditional,
             ),
             preflighted_key,
+            args,
         )?;
         println!("logged in and replaced {id}");
     } else {
@@ -2358,6 +2636,7 @@ fn cmd_device_login(
             global,
             store_op(id, record, AdminAuditOp::Login, StoreMode::Create),
             preflighted_key,
+            args,
         );
         if matches!(&result, Err(CliError::Store(StoreOpError::AlreadyExists)))
             || matches!(&result, Err(CliError::RouteRefused(message)) if message.contains("already exists"))
@@ -2373,6 +2652,7 @@ fn cmd_device_login(
 }
 
 fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
+    provider_id_flags(args)?;
     use credentials_core::oauth_login::{
         decode_jwt_claims, exchange_authorization_code, exchange_authorization_code_form,
         extract_chatgpt_account_id, generate_pkce, generate_state, parse_callback,
@@ -2502,6 +2782,7 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
                 global,
                 store_op(&id, record, audit_op, store_mode),
                 preflighted_key,
+                args,
             )?;
             println!("logged in and replaced {id}");
         } else {
@@ -2509,6 +2790,7 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
                 global,
                 store_op(&id, record, audit_op, store_mode),
                 preflighted_key,
+                args,
             );
             let already_exists = match &result {
                 Err(CliError::Store(StoreOpError::AlreadyExists)) => true,
@@ -2573,6 +2855,7 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             global,
             store_op(&special.id, special.record, AdminAuditOp::Login, mode),
             special_key.expect("special login ran preflight"),
+            args,
         )?;
         println!("logged in and stored {}", special.id);
         return Ok(());
@@ -2862,6 +3145,7 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
                 StoreMode::ReplaceUnconditional,
             ),
             preflighted_key,
+            args,
         )?;
         println!("logged in and replaced {id}");
     } else {
@@ -2869,6 +3153,7 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             global,
             store_op(&id, record, AdminAuditOp::Login, StoreMode::Create),
             preflighted_key,
+            args,
         );
         // The create-only refusal must not be a dead end: name both ways forward
         // (another account under a label, or swapping this credential). The route
@@ -3003,7 +3288,7 @@ fn cmd_logout(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
         let status = request_admin_status(global)?;
         parse_inventory(&status)?
             .into_iter()
-            .filter_map(|(_, _, id, _)| id.starts_with("oauth:snowflake:").then_some(id))
+            .filter_map(|(_, _, id, _, _)| id.starts_with("oauth:snowflake:").then_some(id))
             .collect::<Vec<_>>()
     } else {
         vec![id]
@@ -3263,6 +3548,21 @@ fn print_store_behind_note(store_schema: StoreSchemaVersion) {
     }
 }
 
+fn print_inventory_store_behind_note(schema: StoreSchemaVersion) {
+    print_store_behind_note(schema);
+    if let Some(note) = schema.and_then(provider_store_behind_note) {
+        eprintln!("{note}");
+    }
+}
+
+fn provider_store_behind_note(schema: u32) -> Option<String> {
+    let provider_schema = credentials_core::store::PROVIDER_ID_SCHEMA_VERSION;
+    (schema < provider_schema).then(|| format!(
+        "note: store schema {schema} is behind this binary's {}; provider ids appear after the daemon restarts (migration {provider_schema})",
+        credentials_core::store::newest_migration_version()
+    ))
+}
+
 /// The note text, or `None` when the store already has what the note says is missing.
 ///
 /// Gated on the CATEGORY migration, not on "any migration behind": a store that has
@@ -3298,7 +3598,7 @@ fn attach_inventory_creators(
     }
 }
 
-type InventoryRow = (String, u64, String, Vec<String>);
+type InventoryRow = (String, u64, String, Vec<String>, Vec<String>);
 
 fn parse_inventory(result: &serde_json::Value) -> Result<Vec<InventoryRow>, CliError> {
     let rows = result
@@ -3347,13 +3647,30 @@ fn parse_inventory(result: &serde_json::Value) -> Result<Vec<InventoryRow>, CliE
                         .collect::<Option<Vec<_>>>()
                 })
                 .unwrap_or_default();
-            Ok((state.to_string(), version, id.to_string(), categories))
+            let mut providers = row
+                .get("provider_ids")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|values| {
+                    values
+                        .iter()
+                        .map(|v| v.as_str().map(str::to_owned))
+                        .collect::<Option<Vec<_>>>()
+                })
+                .unwrap_or_default();
+            providers.sort();
+            Ok((
+                state.to_string(),
+                version,
+                id.to_string(),
+                categories,
+                providers,
+            ))
         })
         .collect()
 }
 
 fn render_inventory_row(
-    (state, version, id, categories): &InventoryRow,
+    (state, version, id, categories, providers): &InventoryRow,
     result: &serde_json::Value,
 ) -> String {
     let creator = result["credentials"]
@@ -3370,11 +3687,16 @@ fn render_inventory_row(
         categories.join(",")
     };
     let creator = creator.map(|by| format!("  by={by}")).unwrap_or_default();
-    format!("{state:<14} v{version:<4} {id}  {categories}{creator}")
+    let providers = if providers.is_empty() {
+        "-".into()
+    } else {
+        providers.join(",")
+    };
+    format!("{state:<14} v{version:<4} {id}  {categories}  {providers}{creator}")
 }
 
 fn print_inventory(rows: &[InventoryRow], result: &serde_json::Value) {
-    println!("STATE          VER   CREDENTIAL  CATEGORIES");
+    println!("STATE          VER   CREDENTIAL  CATEGORIES  PROVIDERS");
     for row in rows {
         println!("{}", render_inventory_row(row, result));
     }
@@ -3786,7 +4108,7 @@ fn cmd_status(global: &GlobalArgs) -> Result<(), CliError> {
             retired.join(", ")
         );
     }
-    print_store_behind_note(store_schema);
+    print_inventory_store_behind_note(store_schema);
     Ok(())
 }
 
@@ -4433,7 +4755,7 @@ fn cmd_list(global: &GlobalArgs) -> Result<(), CliError> {
     let (result, store_schema) = request_admin_status_with_schema(global)?;
     let rows = parse_inventory(&result)?;
     print_inventory(&rows, &result);
-    print_store_behind_note(store_schema);
+    print_inventory_store_behind_note(store_schema);
     Ok(())
 }
 
@@ -6310,6 +6632,7 @@ mod tests {
                 7,
                 "apikey:test".to_string(),
                 Vec::new(),
+                Vec::new(),
             )]
         );
 
@@ -6968,5 +7291,158 @@ mod explicit_route_regressions {
         assert!(matches!(result, Err(CliError::LocalFailure(_))));
         assert!(!root.join("store.db").exists());
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod provider_cli_tests {
+    use super::*;
+
+    #[test]
+    fn provider_flags_do_not_parse_another_flags_value_as_a_flag() {
+        let args: Vec<String> = [
+            "--id",
+            "apikey:test",
+            "--payload",
+            "--provider-id",
+            "--provider-id",
+            "aa",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        assert_eq!(provider_id_flags(&args).unwrap(), vec!["aa"]);
+        let payload_only: Vec<String> = ["--payload", "--provider-id"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        assert!(provider_id_flags(&payload_only).unwrap().is_empty());
+    }
+
+    #[test]
+    fn provider_second_op_failures_preserve_the_error_and_always_retry_add() {
+        let ids = vec!["aa".into(), "bb".into()];
+        let failures = [
+            CliError::Store(StoreOpError::InvalidProviderId {
+                rule: credentials_core::provider_ids::ProviderIdRule::Count,
+                value: "bb".into(),
+            }),
+            CliError::RouteRefused("invalid_provider_id/permanent: rule=count value=bb".into()),
+            CliError::LocalFailure("key unavailable".into()),
+            CliError::RouteIndeterminate("connection dropped".into()),
+            CliError::Io("read failed".into()),
+        ];
+        for error in failures {
+            let lines = provider_deposit_error_lines("apikey:zai", &ids, &error);
+            assert_eq!(
+                lines[0],
+                format!(
+                    "note: deposit of apikey:zai stood; provider ids were not confirmed: {error}"
+                )
+            );
+            assert_eq!(
+                lines[1],
+                "retry: ck auth set-providers --id apikey:zai --add aa bb"
+            );
+            let code = error.exit_code();
+            let returned = provider_deposit_error("apikey:zai", &ids, error);
+            assert_eq!(returned.exit_code(), code);
+        }
+    }
+
+    #[test]
+    fn every_second_route_outcome_keeps_the_add_retry_and_indeterminate_exit_code() {
+        use admin_client::RouteCommit;
+        let ids = vec!["aa".into()];
+        for outcome in [
+            RouteCommit::Refused("count refusal".into()),
+            RouteCommit::LocalFailure("local failure".into()),
+            RouteCommit::NoLiveModule("gone".into()),
+            RouteCommit::Indeterminate("unknown".into()),
+        ] {
+            let error = provider_route_result(outcome).unwrap_err();
+            let expected_code = if matches!(error, CliError::RouteIndeterminate(_)) {
+                ExitCode::from(5)
+            } else {
+                ExitCode::FAILURE
+            };
+            assert_eq!(
+                provider_deposit_error_lines("oauth:cursor", &ids, &error)[1],
+                "retry: ck auth set-providers --id oauth:cursor --add aa"
+            );
+            assert_eq!(
+                provider_deposit_error("oauth:cursor", &ids, error).exit_code(),
+                expected_code
+            );
+        }
+        assert!(provider_route_result(RouteCommit::Committed(serde_json::json!({}))).is_ok());
+    }
+
+    #[test]
+    fn missing_provider_advisory_requires_explicit_llm_category_and_empty_ids() {
+        let status = serde_json::json!({"credentials": [
+            {"id":"apikey:zai", "categories":["llm-provider"], "provider_ids":[]},
+            {"id":"apikey:kimi-code", "categories":["coding-agent"], "provider_ids":[]},
+            {"id":"apikey:bound", "categories":["llm-provider"], "provider_ids":["aa"]},
+            {"id":"apikey:old", "categories":["llm-provider"]},
+            {"id":"apikey:unknown", "provider_ids":[]}
+        ]});
+        assert!(missing_provider_note(&status, "apikey:zai")
+            .unwrap()
+            .contains("ck auth set-providers"));
+        for id in [
+            "apikey:kimi-code",
+            "apikey:bound",
+            "apikey:old",
+            "apikey:unknown",
+            "missing",
+        ] {
+            assert!(missing_provider_note(&status, id).is_none(), "{id}");
+        }
+    }
+
+    #[test]
+    fn special_login_two_op_helper_uses_the_preflighted_key_without_resolving_again() {
+        let root = credentials_core::test_support::TestTempDir::new("special-provider-key");
+        let global = GlobalArgs {
+            data_dir: root.join("vault"),
+            key_source: KeySource::OperatorPath {
+                path: root.join("absent-master.key"),
+            },
+            subc_conn: None,
+        };
+        std::fs::create_dir_all(&global.data_dir).unwrap();
+        let id = "oauth:cursor";
+        let record =
+            VaultRecord::new_static(CredentialKind::ApiKey, "login", b"secret".to_vec(), None);
+        commit_login_deposit(
+            &global,
+            store_op(id, record, AdminAuditOp::Login, StoreMode::Create),
+            MasterKey::from_bytes([11; 32]),
+            id,
+            &["aa".into()],
+        )
+        .unwrap();
+        let status = request_admin_status(&global).unwrap();
+        assert_eq!(
+            status["credentials"][0]["provider_ids"],
+            serde_json::json!(["aa"])
+        );
+        assert_eq!(status["credentials"][0]["record_version"], 1);
+        assert!(!root.join("absent-master.key").exists());
+    }
+
+    #[test]
+    fn provider_schema_note_is_independent_of_category_schema() {
+        let categories = credentials_core::store::CATEGORY_SCHEMA_VERSION;
+        let providers = credentials_core::store::PROVIDER_ID_SCHEMA_VERSION;
+        assert!(store_behind_note(categories - 1).is_some());
+        assert!(provider_store_behind_note(categories - 1).is_some());
+        assert!(store_behind_note(categories).is_none());
+        assert_eq!(provider_store_behind_note(providers - 1).unwrap(), format!(
+            "note: store schema {} is behind this binary's {}; provider ids appear after the daemon restarts (migration {providers})",
+            providers - 1, credentials_core::store::newest_migration_version()
+        ));
+        assert!(provider_store_behind_note(providers).is_none());
     }
 }

@@ -5,27 +5,34 @@ use credentials_core::{
     key::MasterKey,
     record::{CredentialKind, VaultRecord},
     store::EncryptedStore,
+    test_support::TestTempDir,
 };
 
-fn store() -> EncryptedStore {
+/// A store in its own temp directory, returned with the directory so it outlives the store.
+///
+/// Not `:memory:`: the single-writer lease file lives beside the database path, and an
+/// in-memory path has no directory, so the lease landed in the test's working directory
+/// (the crate root) and was left there as an untracked file after every run.
+fn store() -> (TestTempDir, EncryptedStore) {
     use std::sync::atomic::{AtomicU32, Ordering};
     static SEQ: AtomicU32 = AtomicU32::new(0);
-    let namespace = format!(
-        "test-{}-{}",
+    let dir = TestTempDir::new(format!(
+        "admin-write-rules-{}-{}",
         std::process::id(),
         SEQ.fetch_add(1, Ordering::Relaxed)
-    );
+    ));
     let raw = open_sqlite(&StorageDescriptor {
         module_id: "admin-write-rules".into(),
-        storage_namespace: namespace,
+        storage_namespace: "default".into(),
         isolation: Isolation::Module,
         backend: StorageBackend::Sqlite {
-            path: ":memory:".into(),
+            path: dir.join("store.db").to_string_lossy().into_owned(),
         },
     })
     .unwrap();
     EncryptedStore::migrate(&raw).unwrap();
-    EncryptedStore::open(raw, MasterKey::from_bytes([23; 32])).unwrap()
+    let store = EncryptedStore::open(raw, MasterKey::from_bytes([23; 32])).unwrap();
+    (dir, store)
 }
 
 fn approval(id: &str, hash: &str) -> AdminOpBody {
@@ -39,7 +46,7 @@ fn approval(id: &str, hash: &str) -> AdminOpBody {
 
 #[test]
 fn approval_preserves_admin_origin_without_actor_impersonation() {
-    let store = store();
+    let (_dir, store) = store();
     store
         .create(
             "signing:root",
@@ -69,7 +76,7 @@ fn approval_preserves_admin_origin_without_actor_impersonation() {
 
 #[test]
 fn approval_rejects_invalid_artifact_hash_without_audit_write() {
-    let store = store();
+    let (_dir, store) = store();
     store
         .create(
             "signing:root",
@@ -96,7 +103,7 @@ fn approval_rejects_invalid_artifact_hash_without_audit_write() {
 
 #[test]
 fn approval_requires_an_existing_signing_key_without_audit_write() {
-    let store = store();
+    let (_dir, store) = store();
     store
         .create(
             "apikey:root",
@@ -112,7 +119,7 @@ fn approval_requires_an_existing_signing_key_without_audit_write() {
 
 #[test]
 fn legacy_prefix_grants_are_refused_with_migration_guidance() {
-    let store = store();
+    let (_dir, store) = store();
     let before = store.read_audit(None).unwrap().len();
     for tag in ["admin.grant_create", "admin.grant_revoke"] {
         let op = serde_json::from_value(serde_json::json!({"op":tag,"v":1,"principal_id":"client","credential_prefix":"oauth:","operation":"read"})).unwrap();

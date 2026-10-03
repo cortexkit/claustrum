@@ -47,7 +47,13 @@ CONST_RE = re.compile(
 )
 URL_RE = re.compile(r'"(https://[^"\s]+)"')
 # Standalone test modules and Cargo's feature-gated crash-cut binaries do not ship.
-TEST_ONLY_FILES = {"engine_tests.rs", "kill9_refresh_helper.rs", "rotate_cut_helper.rs", "login_cut_helper.rs"}
+TEST_ONLY_FILES = {
+    "engine_tests.rs",
+    "provider_ids_store_tests.rs",
+    "kill9_refresh_helper.rs",
+    "rotate_cut_helper.rs",
+    "login_cut_helper.rs",
+}
 
 # Byte-string domain separators: `b"cortexkit-credentials/…"`, wherever they appear
 # — as a const, or inline in a `hasher.update(…)` call, which is how three of them

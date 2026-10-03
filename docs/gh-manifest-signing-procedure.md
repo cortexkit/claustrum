@@ -136,7 +136,7 @@ genuinely bounded because minting and revoking are admin operations under the
 master-key gate:
 
 ```
-approval entry   payload_hash = SHA-256(manifest bytes), actor = approver
+approval entry   payload_hash = SHA-256(manifest bytes), actor = <route actor>/approver:<label>
 mint_handle      opens the signing window
   ... signatures happen here, unrecorded and unbounded ...
 revoke_handle    closes it

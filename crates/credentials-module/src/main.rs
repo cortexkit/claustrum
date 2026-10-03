@@ -4643,10 +4643,12 @@ mod tests {
             for operation in [GrantOperation::Read, GrantOperation::Sign] {
                 credentials_core::admin_ops::apply(
                     &store,
-                    credentials_core::admin_ops::AdminOpBody::GrantCreate {
-                        v: credentials_core::admin_ops::ADMIN_OP_SCHEMA_V1,
+                    credentials_core::admin_ops::AdminOpBody::GrantCreateV2 {
+                        v: credentials_core::admin_ops::ADMIN_OP_SCHEMA_V2,
+                        principal_kind: "reserved".into(),
                         principal_id: "prefrontal-core".into(),
-                        credential_prefix: selector.into(),
+                        selector_kind: credentials_core::store::SelectorKind::Exact,
+                        selector: selector.into(),
                         operation,
                     },
                     "test",

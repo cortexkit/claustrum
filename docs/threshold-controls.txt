@@ -51,6 +51,9 @@ MAX_BACKOFF_MS crates/credentials-core/src/refresh_adapters/cursor.rs backoff_re
 MAX_LISTED_IDS crates/credentials-core/src/health.rs id_lists_hold_the_cap_and_drop_only_the_id_past_it
 MAX_ONBOARD_ATTEMPTS crates/credentials-core/src/google_login.rs onboarding_accepts_the_last_allowed_attempt_and_never_makes_one_more
 MAX_OP_BODY_LEN crates/credentials-module/src/admin_surface.rs op_body_at_the_cap_executes_and_one_byte_over_is_refused
+MIN_PROVIDER_ID_LEN crates/credentials-core/src/provider_ids.rs the_vault_accepts_ids_of_the_minimum_and_maximum_length_and_refuses_one_byte_past_either
+MAX_PROVIDER_ID_LEN crates/credentials-core/src/provider_ids.rs the_vault_accepts_ids_of_the_minimum_and_maximum_length_and_refuses_one_byte_past_either
+MAX_PROVIDER_IDS_PER_CREDENTIAL crates/credentials-core/src/provider_ids.rs the_cap_applies_to_the_resulting_set_and_names_the_crossing_id
 
 # Explicitly unchecked thresholds. These are known gaps, not coverage claims.
 # New constants still fail unless deliberately recorded in a reviewed change.

@@ -77,6 +77,8 @@ pub enum AuditOp {
     GrantRevoke,
     /// A credential's authorization categories changed.
     SetCategory,
+    /// A credential's operator-assigned catalog provider ids changed.
+    SetProviders,
     /// Migration 10 assigned a category while converting schema-9 selectors.
     /// An operator approved a pending consumer enrollment.
     EnrollApprove,
@@ -137,6 +139,7 @@ impl AuditOp {
             AuditOp::GrantCreate => "grant_create",
             AuditOp::GrantRevoke => "grant_revoke",
             AuditOp::SetCategory => "set_category",
+            AuditOp::SetProviders => "set_providers",
             AuditOp::EnrollApprove => "enroll.approve",
             AuditOp::EnrollDeny => "enroll.deny",
             AuditOp::EnrollRevoke => "enroll.revoke",
@@ -655,6 +658,7 @@ mod vocabulary_documentation_tests {
                 AuditOp::GrantCreate => AuditOp::GrantCreate.as_str(),
                 AuditOp::GrantRevoke => AuditOp::GrantRevoke.as_str(),
                 AuditOp::SetCategory => AuditOp::SetCategory.as_str(),
+                AuditOp::SetProviders => AuditOp::SetProviders.as_str(),
                 AuditOp::EnrollApprove => AuditOp::EnrollApprove.as_str(),
                 AuditOp::EnrollDeny => AuditOp::EnrollDeny.as_str(),
                 AuditOp::EnrollRevoke => AuditOp::EnrollRevoke.as_str(),

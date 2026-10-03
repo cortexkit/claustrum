@@ -39,8 +39,10 @@ pub mod health;
 pub mod http;
 pub mod kem;
 pub mod key;
+pub mod list_auth_method;
 pub mod oauth;
 pub mod oauth_login;
+pub mod provider_ids;
 pub mod record;
 pub mod refresh_adapters;
 pub mod resolver;
@@ -81,7 +83,12 @@ pub use envelope::{open, seal, EnvelopeError, RecordBinding};
 pub use health::{VaultHealth, VaultHealthStatus};
 pub use http::ReqwestTransport;
 pub use key::{KeyId, MasterKey};
+pub use list_auth_method::{list_auth_method, ListAuthMethod};
 pub use oauth::OAuthCredential;
+pub use provider_ids::{
+    check_provider_ids, ProviderIdRule, MAX_PROVIDER_IDS_PER_CREDENTIAL, MAX_PROVIDER_ID_LEN,
+    MIN_PROVIDER_ID_LEN,
+};
 pub use record::{CredentialKind, VaultRecord, RECORD_SCHEMA_VERSION};
 pub use refresh_adapters::anthropic::AnthropicAdapter;
 pub use refresh_adapters::antigravity::AntigravityAdapter;
@@ -106,5 +113,5 @@ pub use store::{
     handle_hash, mint_handle, payload_hash, refresh_token_hash, DepositCookieOutcome,
     EncryptedStore, GrantOperation, MintedHandle, ReadGrant, RecordMeta, RecordState,
     RefreshIntent, ScopedCoverage, ScopedListRow, ScopedListSnapshot, ScopedReadRefusal,
-    SelectorKind, SetCategoryMode, StoreOpError,
+    SelectorKind, SetCategoryMode, SetProvidersMode, StoreOpError, PROVIDER_ID_SCHEMA_VERSION,
 };

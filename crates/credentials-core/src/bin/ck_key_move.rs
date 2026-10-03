@@ -7,19 +7,13 @@
 //! The key bytes never reach a shell, a file, or a log: `MasterKey` is zeroize-backed and
 //! only its fingerprint (`key_id`) is ever printed.
 
+#![forbid(unsafe_code)]
+
 use credentials_core::resolver::{KeySlot, KeySource};
 use std::path::PathBuf;
 
-/// The key source for an operator tool, honouring `CK_MASTER_KEY_PATH`.
-///
-/// Both migration tools hardcoded `KeySource::Keychain`, which made them unusable on an
-/// OPERATOR-PATH vault -- a headless or CI host, which is a large part of who runs a
-/// migration. The daemon and `ck auth` both honour a key path already; these did not,
-/// and the same defect had been fixed in the usable-audit hours earlier without a sweep
-/// for siblings, which is why it survived here.
-///
-/// Reads the DAEMON's variable rather than inventing a second spelling: one concept,
-/// one name, and an operator who set it for the daemon does not have to learn another.
+/// Honour the daemon's key-source setting. An operator-path store has fixed files,
+/// not data-directory-derived scopes, so moving the data directory needs no key move.
 fn key_source_from_env() -> KeySource {
     match std::env::var_os("CK_MASTER_KEY_PATH") {
         Some(path) => KeySource::OperatorPath {
@@ -45,6 +39,10 @@ fn main() {
     let new_dir = PathBuf::from(args.next().expect("usage: ck_key_move <OLD_DIR> <NEW_DIR>"));
 
     let source = key_source_from_env();
+    if matches!(source, KeySource::OperatorPath { .. }) {
+        eprintln!("REFUSING: the operator-path store has one fixed key file (plus its rotation slot), so there is nothing to move between data-directory scopes");
+        std::process::exit(2);
+    }
     println!("key store: {}", key_source_label(&source));
     let backend = source.backend();
 

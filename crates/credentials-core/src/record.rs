@@ -275,13 +275,7 @@ impl std::fmt::Debug for VaultRecord {
             .field("refresh_adapter", &self.refresh_adapter)
             // Delegates to OAuthCredential's own redacting impl.
             .field("oauth", &self.oauth)
-            // LENGTH ONLY. It is non-secret, and it is the one fact a diagnostic
-            // actually needs here: the empty-payload quarantine path exists precisely
-            // because a zero-length payload is a real corruption mode.
-            .field(
-                "payload",
-                &format_args!("[{} bytes redacted]", self.payload.expose().len()),
-            )
+            .field("payload", &"<redacted>")
             // Non-secret by design: email and org name are returned to consumers as
             // display metadata on every `get`.
             .field("identity", &self.identity)
@@ -424,11 +418,13 @@ mod tests {
             "the payload rendered as a byte array, which is the form the derived impl \
              leaked and the form a reader mistakes for noise: {rendered}"
         );
-        // Proves the rendering happened at all, and that the length -- the one fact a
-        // diagnostic needs -- survives.
-        assert!(
-            rendered.contains("16 bytes redacted"),
-            "the redaction marker and byte count must be present: {rendered}"
+        assert!(rendered.contains("<redacted>"));
+        let shorter =
+            VaultRecord::new_static(CredentialKind::ApiKey, "operator", b"x".to_vec(), None);
+        assert_eq!(
+            rendered,
+            format!("{shorter:?}"),
+            "payload length must not affect Debug"
         );
     }
 

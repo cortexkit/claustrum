@@ -23,6 +23,8 @@
 //! returns a PRE-WAL snapshot, answering confidently about the past. Read-only sees
 //! committed WAL state; immutable is for a store nobody is writing.
 
+#![forbid(unsafe_code)]
+
 use credentials_core::key::KeyId;
 use credentials_core::resolver::{KeySlot, KeySource};
 use rusqlite::{Connection, OpenFlags};
@@ -92,24 +94,30 @@ fn main() {
     // acquires nothing and mutates nothing.
     let source = key_source_from_env();
     let label = key_source_label(&source);
-    let resolved = match source.backend().load_slot(&dir, KeySlot::Current) {
-        Ok(Some(key)) => key.key_id().to_hex(),
-        Ok(None) => {
-            eprintln!("ck_key_verify: no key for {} in {label}", dir.display());
-            std::process::exit(2);
+    let backend = source.backend();
+    let mut matched = None;
+    let mut load_error = None;
+    for slot in [KeySlot::Current, KeySlot::Next] {
+        match backend.load_slot(&dir, slot) {
+            Ok(Some(key)) if key.key_id().to_hex() == anchor => {
+                matched = Some(slot);
+                break;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                load_error.get_or_insert(e);
+            }
         }
-        Err(e) => {
+    }
+    let Some(slot) = matched else {
+        eprintln!("ck_key_verify: no slot matches the database anchor in {label}");
+        if let Some(e) = load_error {
             eprintln!("ck_key_verify: reading {label}: {e}");
-            std::process::exit(2);
         }
+        std::process::exit(2);
     };
-
     println!("  data dir     {}", dir.display());
     println!("  db anchor    {anchor}");
-    println!("  {label:<12} {resolved}");
-    assert_eq!(
-        resolved, anchor,
-        "the key at this vault's keychain scope is NOT the key its database is sealed under"
-    );
-    println!("  MATCH");
+    println!("  {label:<12} {anchor}");
+    println!("  MATCH {slot:?}");
 }

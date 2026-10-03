@@ -601,9 +601,9 @@ fn ensure_vault_dir(data_dir: &Path) -> Result<(), MasterKeyError> {
 }
 
 /// Enforce that the operator key file does NOT live in or under the data tree.
-/// Both directories are canonicalized (so a symlink cannot smuggle the key back
-/// inside the data dir); the key file's parent must already exist (the operator
-/// provisions it out-of-band, e.g. `/run/secrets`).
+/// Resolve the file itself when it exists so a file symlink cannot smuggle the key
+/// inside the data dir. For a new key, its parent must already exist because the
+/// operator provisions that directory out-of-band (e.g. `/run/secrets`).
 fn ensure_outside_data_dir(key_path: &Path, data_dir: &Path) -> Result<(), MasterKeyError> {
     let data_canon = data_dir.canonicalize().map_err(MasterKeyError::Io)?;
     let parent = key_path
@@ -616,9 +616,14 @@ fn ensure_outside_data_dir(key_path: &Path, data_dir: &Path) -> Result<(), Maste
             parent.display()
         ))
     })?;
-    if parent_canon.starts_with(&data_canon) {
+    let key_canon = match key_path.canonicalize() {
+        Ok(path) => path,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => parent_canon.clone(),
+        Err(e) => return Err(MasterKeyError::Io(e)),
+    };
+    if key_canon.starts_with(&data_canon) {
         return Err(MasterKeyError::KeyPathUnderDataDir {
-            key_dir: parent_canon,
+            key_dir: key_canon,
             data_dir: data_canon,
         });
     }
@@ -1866,5 +1871,34 @@ mod tests {
             KeychainFind::Error(_) => {}
             other => panic!("expected Error, got {other:?}"),
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod key_file_location_tests {
+    use super::*;
+
+    #[test]
+    fn a_key_file_symlink_into_the_data_tree_is_refused() {
+        let root = crate::test_support::TestTempDir::new(format!(
+            "key-file-location-{}",
+            std::process::id()
+        ));
+        let data = root.join("data");
+        let secrets = root.join("secrets");
+        std::fs::create_dir(&data).unwrap();
+        std::fs::create_dir(&secrets).unwrap();
+        let key = data.join("master.key");
+        std::fs::write(&key, "a".repeat(64)).unwrap();
+        let link = secrets.join("master.key");
+        std::os::unix::fs::symlink(&key, &link).unwrap();
+        assert!(matches!(
+            ensure_outside_data_dir(&link, &data),
+            Err(MasterKeyError::KeyPathUnderDataDir { .. })
+        ));
+        let external = secrets.join("external.key");
+        assert!(ensure_outside_data_dir(&external, &data).is_ok());
+        std::fs::write(&external, "b".repeat(64)).unwrap();
+        assert!(ensure_outside_data_dir(&external, &data).is_ok());
     }
 }

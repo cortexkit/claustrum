@@ -46,7 +46,7 @@ pub const ADMIN_NONCE_LEN: usize = 32;
 pub const ADMIN_TAG_LEN: usize = 32;
 
 /// The vault identity bound into the transcript: the full (untruncated) SHA-256
-/// of the canonical data_dir bytes. Full width, unlike the 32-bit keychain
+/// of the canonical data_dir bytes. Full width, unlike the 64-bit keychain
 /// service suffix, because this binding is adversarial (cross-vault splice
 /// resistance), not cosmetic namespacing.
 pub const VAULT_ID_LEN: usize = 32;

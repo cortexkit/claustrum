@@ -175,6 +175,27 @@ pub async fn poll_for_tokens<T: CursorPollTransport + ?Sized>(
     uuid: &str,
     verifier: &str,
 ) -> Result<CursorTokens, CursorPollError> {
+    poll_for_tokens_with_sleep(transport, uuid, verifier, |delay_ms| {
+        tokio::time::sleep(std::time::Duration::from_millis(delay_ms))
+    })
+    .await
+}
+
+/// The poll loop with its backoff wait injected. Production waits on the tokio timer;
+/// tests pass a sleeper that records each requested delay and returns at once, so the
+/// attempt limit and the backoff ceiling can be driven to their exact boundaries
+/// without minutes of real waiting.
+async fn poll_for_tokens_with_sleep<T, S, F>(
+    transport: &T,
+    uuid: &str,
+    verifier: &str,
+    sleep: S,
+) -> Result<CursorTokens, CursorPollError>
+where
+    T: CursorPollTransport + ?Sized,
+    S: Fn(u64) -> F,
+    F: std::future::Future<Output = ()>,
+{
     let mut delay_ms = INITIAL_BACKOFF_MS;
     let mut consecutive_errors = 0usize;
     for attempt in 0..MAX_ATTEMPTS {
@@ -186,7 +207,7 @@ pub async fn poll_for_tokens<T: CursorPollTransport + ?Sized>(
                 if consecutive_errors >= 3 {
                     return Err(CursorPollError::TerminalTransport);
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                sleep(delay_ms).await;
                 delay_ms = ((delay_ms as f64) * 1.2).ceil() as u64;
                 delay_ms = delay_ms.min(MAX_BACKOFF_MS);
                 let _ = error;
@@ -215,7 +236,7 @@ pub async fn poll_for_tokens<T: CursorPollTransport + ?Sized>(
                 }
             }
         }
-        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+        sleep(delay_ms).await;
         delay_ms = ((delay_ms as f64) * 1.2).ceil() as u64;
         delay_ms = delay_ms.min(MAX_BACKOFF_MS);
     }
@@ -394,6 +415,116 @@ mod tests {
         };
         let tokens = poll_for_tokens(&fixture, "u", "v").await.unwrap();
         assert_eq!(tokens.access_token, "a");
+    }
+
+    fn not_yet() -> CursorPollResponse {
+        CursorPollResponse {
+            status: 404,
+            body: Vec::new(),
+        }
+    }
+
+    fn finished() -> CursorPollResponse {
+        CursorPollResponse {
+            status: 200,
+            body: br#"{"accessToken":"late-access","refreshToken":"late-refresh"}"#.to_vec(),
+        }
+    }
+
+    /// `pending` not-yet-finished answers followed by a finished login.
+    fn pending_then_finished(pending: usize) -> PollFixture {
+        let mut responses: Vec<_> = (0..pending).map(|_| not_yet()).collect();
+        responses.push(finished());
+        PollFixture {
+            responses: Mutex::new(responses),
+            urls: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// The poll loop gets exactly `MAX_ATTEMPTS` polls. A login the browser finishes
+    /// on the last allowed poll is accepted; one that would finish only on the poll
+    /// after it times out without that poll ever being made.
+    #[tokio::test]
+    async fn poll_accepts_the_last_allowed_attempt_and_never_makes_one_more() {
+        let no_wait = |_| std::future::ready(());
+
+        let at_limit = pending_then_finished(MAX_ATTEMPTS - 1);
+        let tokens = poll_for_tokens_with_sleep(&at_limit, "u", "v", no_wait)
+            .await
+            .expect("a login finished on the last allowed poll is accepted");
+        assert_eq!(tokens.access_token, "late-access");
+        assert_eq!(at_limit.urls.lock().unwrap().len(), MAX_ATTEMPTS);
+
+        let past_limit = pending_then_finished(MAX_ATTEMPTS);
+        let err = poll_for_tokens_with_sleep(&past_limit, "u", "v", no_wait)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, CursorPollError::AttemptLimit), "{err:?}");
+        assert_eq!(
+            past_limit.urls.lock().unwrap().len(),
+            MAX_ATTEMPTS,
+            "no poll is made after the last allowed attempt"
+        );
+        assert_eq!(
+            past_limit.responses.lock().unwrap().len(),
+            1,
+            "the finished login queued after the limit is never fetched"
+        );
+
+        // The limit bounds the loop itself, not only the not-yet-finished answer: when
+        // the last allowed poll gets a retryable error instead, there is still no
+        // further poll.
+        let error_last = pending_then_finished(MAX_ATTEMPTS - 1);
+        error_last.responses.lock().unwrap().insert(
+            MAX_ATTEMPTS - 1,
+            CursorPollResponse {
+                status: 500,
+                body: Vec::new(),
+            },
+        );
+        let err = poll_for_tokens_with_sleep(&error_last, "u", "v", no_wait)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, CursorPollError::AttemptLimit), "{err:?}");
+        assert_eq!(error_last.urls.lock().unwrap().len(), MAX_ATTEMPTS);
+    }
+
+    /// The backoff grows until it reaches `MAX_BACKOFF_MS` exactly and then holds
+    /// there: every wait is at or below the ceiling, the ceiling itself is reached,
+    /// and a wait that would have grown past it is clamped onto it.
+    #[tokio::test]
+    async fn backoff_reaches_the_ceiling_exactly_and_never_passes_it() {
+        let delays = Mutex::new(Vec::new());
+        let record = |delay_ms| {
+            delays.lock().unwrap().push(delay_ms);
+            std::future::ready(())
+        };
+        let fixture = pending_then_finished(MAX_ATTEMPTS);
+        let _ = poll_for_tokens_with_sleep(&fixture, "u", "v", record).await;
+        let delays = delays.into_inner().unwrap();
+
+        assert_eq!(delays.first(), Some(&INITIAL_BACKOFF_MS));
+        assert!(
+            delays.iter().all(|delay| *delay <= MAX_BACKOFF_MS),
+            "a wait passed the ceiling: {delays:?}"
+        );
+        let first_capped = delays
+            .iter()
+            .position(|delay| *delay == MAX_BACKOFF_MS)
+            .unwrap_or_else(|| panic!("the ceiling was never reached: {delays:?}"));
+        assert!(
+            delays[..first_capped].windows(2).all(|w| w[0] < w[1]),
+            "waits grow until the ceiling: {delays:?}"
+        );
+        assert!(
+            delays[first_capped..]
+                .iter()
+                .all(|delay| *delay == MAX_BACKOFF_MS),
+            "once at the ceiling, every later wait stays on it: {delays:?}"
+        );
+        // Enough waits followed the first capped one that the uncapped growth would
+        // have passed the ceiling, so the clamp itself was exercised.
+        assert!(delays.len() > first_capped + 1, "{delays:?}");
     }
 
     #[tokio::test]

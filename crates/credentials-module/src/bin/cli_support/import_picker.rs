@@ -680,4 +680,91 @@ mod selection_tests {
         );
         std::fs::remove_dir_all(root).unwrap();
     }
+
+    /// Answers each id prompt with the next queued id and counts how many prompts
+    /// were opened, so a test can see whether one more open happened.
+    struct QueuedIds {
+        ids: std::collections::VecDeque<String>,
+        opened: usize,
+    }
+
+    impl PromptSeam for QueuedIds {
+        type Error = CliError;
+
+        fn prompt(&mut self, request: PromptRequest) -> Result<PromptResponse, CliError> {
+            assert!(matches!(request, PromptRequest::EditId { .. }));
+            self.opened += 1;
+            let id = self.ids.pop_front().expect("a queued id for every open");
+            Ok(PromptResponse::Id(id))
+        }
+    }
+
+    /// One importable row detected from a single-account Antigravity file.
+    fn importable_row(label: &str) -> PickerRow {
+        let root = std::env::temp_dir().join(format!(
+            "ck-import-prompt-limit-{label}-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("accounts.json");
+        std::fs::write(&file, r#"{"version":4,"activeIndex":0,"accounts":[{"email":"a@x.com","refreshToken":"fixture-a"}]}"#).unwrap();
+        let paths = import_detect::ImportPaths {
+            opencode: root.join("missing-opencode"),
+            pi: root.join("missing-pi"),
+            gemini_cli: root.join("missing-gemini"),
+            antigravity: file,
+        };
+        let detected = import_detect::enumerate(&paths)
+            .into_iter()
+            .find(|row| row.is_selectable())
+            .expect("one importable row");
+        std::fs::remove_dir_all(root).unwrap();
+        let (label, initial_action) = render_row(&detected, &[]);
+        PickerRow {
+            detected,
+            label,
+            initial_action,
+            final_id: None,
+            prompt_opens: 0,
+        }
+    }
+
+    /// A row gets exactly `ID_PROMPT_OPEN_LIMIT_PER_ROW` id prompts. A valid id given
+    /// on the last allowed open is accepted; after that many invalid ids the prompt is
+    /// refused as exhausted without opening again, even though a valid id is waiting.
+    #[test]
+    fn id_prompt_accepts_the_last_allowed_open_and_never_opens_one_more() {
+        let limit = slice2_contract::ID_PROMPT_OPEN_LIMIT_PER_ROW;
+        let script = |row: &PickerRow, invalid: usize| {
+            let base_id = row.detected.metadata.base_id.clone().expect("base id");
+            assert!(login_id_is_valid(&base_id, &base_id));
+            let rejected = format!("{base_id}:a:b");
+            assert!(!login_id_is_valid(&base_id, &rejected));
+            let mut ids: std::collections::VecDeque<String> =
+                std::iter::repeat_n(rejected, invalid).collect();
+            ids.push_back(base_id.clone());
+            (QueuedIds { ids, opened: 0 }, base_id)
+        };
+
+        let mut row = importable_row("at-limit");
+        let (mut prompts, base_id) = script(&row, limit - 1);
+        let accepted = prompt_id(&mut prompts, 0, &mut row).expect("the last open is allowed");
+        assert_eq!(accepted, Some(base_id));
+        assert_eq!(prompts.opened, limit);
+        assert_eq!(row.prompt_opens, limit);
+
+        let mut row = importable_row("past-limit");
+        let (mut prompts, _) = script(&row, limit);
+        let error = prompt_id(&mut prompts, 0, &mut row).unwrap_err();
+        assert!(
+            matches!(&error, CliError::Usage(message) if message.contains("id prompt exhausted")),
+            "{error:?}"
+        );
+        assert_eq!(prompts.opened, limit, "no prompt opens past the limit");
+        assert_eq!(
+            prompts.ids.len(),
+            1,
+            "the valid id after the limit is never read"
+        );
+    }
 }

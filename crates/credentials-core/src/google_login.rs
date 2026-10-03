@@ -378,6 +378,51 @@ mod tests {
         assert_eq!(http.requests().len(), MAX_ONBOARD_ATTEMPTS + 1);
     }
 
+    /// The onboarding loop gets exactly `MAX_ONBOARD_ATTEMPTS` posts. A project that
+    /// completes on the last allowed post is accepted; one that would complete only on
+    /// the post after it is never asked for, so discovery fails closed with the
+    /// finished operation still queued.
+    #[tokio::test]
+    async fn onboarding_accepts_the_last_allowed_attempt_and_never_makes_one_more() {
+        fn ok(body: Vec<u8>) -> Result<crate::refresh_adapters::HttpResponse, RefreshError> {
+            Ok(crate::refresh_adapters::HttpResponse { status: 200, body })
+        }
+        let pending = br#"{"done":false,"name":"operations/1"}"#.to_vec();
+        let done = serde_json::to_vec(&serde_json::json!({
+            "done": true,
+            "response": { "cloudaicompanionProject": { "id": "late-project" } }
+        }))
+        .unwrap();
+        // The load call answers with no project, then `pending_posts` unfinished
+        // operations, then the finished one.
+        let script = |pending_posts: usize| {
+            let mut responses = vec![ok(b"{}".to_vec())];
+            responses.extend((0..pending_posts).map(|_| ok(pending.clone())));
+            responses.push(ok(done.clone()));
+            FixtureTransport::new(responses)
+        };
+
+        let at_limit = script(MAX_ONBOARD_ATTEMPTS - 1);
+        let project =
+            discover_antigravity_project_with_delay(&at_limit, ACCESS_TOKEN, Duration::ZERO)
+                .await
+                .expect("the operation finishing on the last allowed post is accepted");
+        assert_eq!(project.project_id, "late-project");
+        assert_eq!(at_limit.requests().len(), 1 + MAX_ONBOARD_ATTEMPTS);
+
+        let past_limit = script(MAX_ONBOARD_ATTEMPTS);
+        let err =
+            discover_antigravity_project_with_delay(&past_limit, ACCESS_TOKEN, Duration::ZERO)
+                .await
+                .unwrap_err();
+        assert!(matches!(err, GoogleLoginError::NoProject), "{err:?}");
+        assert_eq!(
+            past_limit.requests().len(),
+            1 + MAX_ONBOARD_ATTEMPTS,
+            "no post is made after the last allowed attempt"
+        );
+    }
+
     #[tokio::test]
     async fn userinfo_captures_email_and_ignores_error_shapes() {
         let http = FixtureTransport::ok(200, br#"{"email":"user@example.com"}"#.to_vec());

@@ -2482,6 +2482,20 @@ impl ReadSurface {
     /// the store, keychain, or lease. The snapshot is kept current by
     /// [`Self::refresh_health`] on a background cadence off this path.
     pub fn health_snapshot(&self) -> VaultHealth {
+        // Liveness is measured on the monotonic clock, LIVE on every probe (never
+        // stored in the snapshot), so a wall-clock jump cannot fake a fresh refresher.
+        let age = self
+            .last_refresh
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .elapsed();
+        self.health_snapshot_with_refresh_age(age)
+    }
+
+    /// [`Self::health_snapshot`] judged for a given time since the last completed
+    /// refresh. Production passes the live monotonic age; tests pass ages exactly at
+    /// and just past the stale limit, which a real clock cannot hit precisely.
+    fn health_snapshot_with_refresh_age(&self, age: Duration) -> VaultHealth {
         // The lock guards a trivial clone with no await held; poisoning can only
         // happen if a refresher panicked mid-write, in which case the last-good
         // snapshot under the guard is still a valid read.
@@ -2490,16 +2504,11 @@ impl ReadSurface {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .clone();
-        // Liveness gate, computed LIVE here (never stored in the snapshot): if the
-        // refresher has not completed a scan within the stale limit, it has wedged or
-        // died, and the cached snapshot is no longer trustworthy — fail closed to
-        // `Failing` rather than keep reporting a possibly-healthy frozen snapshot. This
-        // is what turns a silent refresher death into an alert instead of a mask.
-        let age = self
-            .last_refresh
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .elapsed();
+        // Liveness gate: if the refresher has not completed a scan within the stale
+        // limit, it has wedged or died, and the cached snapshot is no longer
+        // trustworthy — fail closed to `Failing` rather than keep reporting a
+        // possibly-healthy frozen snapshot. This is what turns a silent refresher
+        // death into an alert instead of a mask.
         if age > HEALTH_STALE_LIMIT {
             snapshot.mark_refresher_stalled();
         }
@@ -3326,5 +3335,74 @@ mod list_scoped_tests {
         assert_eq!(result.grants, 0);
         assert_eq!(result.grant_tuples, []);
         assert_eq!(result.view, "vGTW0lomfgTvnoZoEYxkS/nUmfm76KhATUyAQCXGpPY=");
+    }
+}
+
+#[cfg(test)]
+mod health_staleness_tests {
+    use super::*;
+    use crate::limiter::Caps;
+    use cortexkit_store::{open_sqlite, Isolation, StorageBackend, StorageDescriptor};
+    use credentials_core::key::{MasterKey, MASTER_KEY_LEN};
+    use credentials_core::record::{CredentialKind, VaultRecord};
+    use credentials_core::store::EncryptedStore;
+    use credentials_core::test_support::TestTempDir;
+
+    /// A surface over a healthy vault holding one active credential, so the
+    /// snapshot is `Ok` and only the staleness gate can turn it `Failing`.
+    fn healthy_surface() -> (ReadSurface, TestTempDir) {
+        let root = TestTempDir::new(format!("ck-health-stale-{}", std::process::id()));
+        let descriptor = StorageDescriptor {
+            module_id: "cortexkit-credentials".into(),
+            storage_namespace: "default".into(),
+            isolation: Isolation::Module,
+            backend: StorageBackend::Sqlite {
+                path: root.join("store.db").to_string_lossy().into_owned(),
+            },
+        };
+        let store = open_sqlite(&descriptor).expect("open");
+        EncryptedStore::migrate(&store).expect("migrate");
+        let store = EncryptedStore::open(store, MasterKey::from_bytes([3; MASTER_KEY_LEN]))
+            .expect("open vault");
+        store
+            .create(
+                "apikey:active",
+                &VaultRecord::new_static(CredentialKind::ApiKey, "test", b"k".to_vec(), None),
+            )
+            .expect("create");
+        let http = Arc::new(crate::test_support::NoHttp);
+        let engine = Arc::new(RefreshEngine::new(Arc::new(store), Vec::new(), http));
+        (
+            ReadSurface::new(engine, FetchLimiter::new(Caps::default())),
+            root,
+        )
+    }
+
+    /// A refresh exactly `HEALTH_STALE_LIMIT` old is still trusted; one a nanosecond
+    /// older marks the refresher stalled and fails the snapshot closed.
+    #[test]
+    fn a_refresh_exactly_at_the_stale_limit_is_trusted_and_one_tick_past_is_stalled() {
+        let (surface, _root) = healthy_surface();
+
+        let at_limit = surface.health_snapshot_with_refresh_age(HEALTH_STALE_LIMIT);
+        assert!(
+            !at_limit.refresher_stalled,
+            "a refresh exactly at the stale limit is not stalled"
+        );
+        assert_ne!(
+            at_limit.status,
+            credentials_core::health::VaultHealthStatus::Failing
+        );
+
+        let past_limit =
+            surface.health_snapshot_with_refresh_age(HEALTH_STALE_LIMIT + Duration::from_nanos(1));
+        assert!(
+            past_limit.refresher_stalled,
+            "a refresh one tick past the stale limit is stalled"
+        );
+        assert_eq!(
+            past_limit.status,
+            credentials_core::health::VaultHealthStatus::Failing
+        );
     }
 }

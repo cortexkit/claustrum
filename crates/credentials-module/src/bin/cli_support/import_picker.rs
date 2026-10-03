@@ -741,7 +741,7 @@ mod selection_tests {
             let rejected = format!("{base_id}:a:b");
             assert!(!login_id_is_valid(&base_id, &rejected));
             let mut ids: std::collections::VecDeque<String> =
-                std::iter::repeat(rejected).take(invalid).collect();
+                std::iter::repeat_n(rejected, invalid).collect();
             ids.push_back(base_id.clone());
             (QueuedIds { ids, opened: 0 }, base_id)
         };

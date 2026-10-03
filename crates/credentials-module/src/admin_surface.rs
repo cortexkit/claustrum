@@ -890,7 +890,7 @@ mod tests {
         let padded = |id: &str, len: usize| {
             let mut body = store_op_body(id);
             assert!(body.len() < len, "the op must fit before padding");
-            body.extend(std::iter::repeat(' ').take(len - body.len()));
+            body.extend(std::iter::repeat_n(' ', len - body.len()));
             body
         };
 

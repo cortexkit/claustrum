@@ -2482,14 +2482,20 @@ impl ReadSurface {
     /// the store, keychain, or lease. The snapshot is kept current by
     /// [`Self::refresh_health`] on a background cadence off this path.
     pub fn health_snapshot(&self) -> VaultHealth {
-        self.health_snapshot_at(Instant::now())
+        // Liveness is measured on the monotonic clock, LIVE on every probe (never
+        // stored in the snapshot), so a wall-clock jump cannot fake a fresh refresher.
+        let age = self
+            .last_refresh
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .elapsed();
+        self.health_snapshot_with_refresh_age(age)
     }
 
-    /// [`Self::health_snapshot`] judged at an explicit instant. Production always
-    /// passes the current time; tests pass instants a known distance after the last
-    /// refresh so the stale limit can be checked at its exact boundary instead of by
-    /// waiting out a real clock.
-    fn health_snapshot_at(&self, now: Instant) -> VaultHealth {
+    /// [`Self::health_snapshot`] judged for a given time since the last completed
+    /// refresh. Production passes the live monotonic age; tests pass ages exactly at
+    /// and just past the stale limit, which a real clock cannot hit precisely.
+    fn health_snapshot_with_refresh_age(&self, age: Duration) -> VaultHealth {
         // The lock guards a trivial clone with no await held; poisoning can only
         // happen if a refresher panicked mid-write, in which case the last-good
         // snapshot under the guard is still a valid read.
@@ -2498,13 +2504,11 @@ impl ReadSurface {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .clone();
-        // Liveness gate, computed LIVE here (never stored in the snapshot): if the
-        // refresher has not completed a scan within the stale limit, it has wedged or
-        // died, and the cached snapshot is no longer trustworthy — fail closed to
-        // `Failing` rather than keep reporting a possibly-healthy frozen snapshot. This
-        // is what turns a silent refresher death into an alert instead of a mask.
-        let last_refresh = *self.last_refresh.lock().unwrap_or_else(|p| p.into_inner());
-        let age = now.saturating_duration_since(last_refresh);
+        // Liveness gate: if the refresher has not completed a scan within the stale
+        // limit, it has wedged or died, and the cached snapshot is no longer
+        // trustworthy — fail closed to `Failing` rather than keep reporting a
+        // possibly-healthy frozen snapshot. This is what turns a silent refresher
+        // death into an alert instead of a mask.
         if age > HEALTH_STALE_LIMIT {
             snapshot.mark_refresher_stalled();
         }
@@ -3379,9 +3383,8 @@ mod health_staleness_tests {
     #[test]
     fn a_refresh_exactly_at_the_stale_limit_is_trusted_and_one_tick_past_is_stalled() {
         let (surface, _root) = healthy_surface();
-        let refreshed = *surface.last_refresh.lock().unwrap();
 
-        let at_limit = surface.health_snapshot_at(refreshed + HEALTH_STALE_LIMIT);
+        let at_limit = surface.health_snapshot_with_refresh_age(HEALTH_STALE_LIMIT);
         assert!(
             !at_limit.refresher_stalled,
             "a refresh exactly at the stale limit is not stalled"
@@ -3392,7 +3395,7 @@ mod health_staleness_tests {
         );
 
         let past_limit =
-            surface.health_snapshot_at(refreshed + HEALTH_STALE_LIMIT + Duration::from_nanos(1));
+            surface.health_snapshot_with_refresh_age(HEALTH_STALE_LIMIT + Duration::from_nanos(1));
         assert!(
             past_limit.refresher_stalled,
             "a refresh one tick past the stale limit is stalled"

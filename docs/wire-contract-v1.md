@@ -60,6 +60,7 @@ cannot be met; retrying unchanged buys another one against the provider's mint b
 | `vault_locked` | transient | the master key could not be resolved |
 | `store_error` | transient | `credential.list_scoped` could not read one complete snapshot |
 | `invalid_category_name` | permanent | a category is outside `^[a-z][a-z0-9-]{1,31}$` |
+| `invalid_provider_id` | permanent | provider metadata fails `charset`, `length`, `duplicate`, or resulting-set `count`; text is `invalid_provider_id/permanent: rule=<rule> value=<value>` |
 | `invalid_credential_id` | permanent | an id begins with reserved `category:` or contains `|` |
 | `invalid_principal` | permanent | a grant principal is not `reserved` or contains `|` |
 | `report_status_not_credential_death` | permanent | `report_auth_failure` carried a `provider_status` outside {401, 403} |
@@ -297,6 +298,91 @@ operation; record-level refusals such as `kind_not_signable` still apply after c
 `grants == grant_tuples.length`. `view` is the deterministic SHA-256 validator over the
 returned rows and tuples; changes outside the caller's visibility do not move it.
 
+### Provider metadata and authentication method
+
+Every `credential.list_scoped` row has `provider_ids`, an array of operator-assigned
+Fusiform catalog provider ids in ascending byte order, including `[]` when unset.
+The vault never derives them from the credential id, catalog, adapter, or `serves`.
+Consumers join on exact provider-id equality, with no fallback. `serves` answers which
+model vendors are reachable; `provider_ids` answers which catalog providers the operator
+assigned to this credential. They are not interchangeable.
+
+`auth_method` is derived only from the unsealed record's `(CredentialKind, refresh_adapter)`.
+It is present only on read/list-covered rows when the table below yields a value; otherwise
+the key is omitted, never null or `""`. Sign/open-only rows remain sealed and omit it,
+including rows with corrupt envelopes; their stored `provider_ids` are still returned.
+An unseal/decode failure on a read/list row still fails the whole snapshot.
+
+The closed values are `apikey`, `chatgpt`, `antigravity`, and `oauth`. Adding a value is a
+breaking wire change and requires a breaking client bump (minor while the client is 0.x).
+Unlike the id-derived `type`, this field never parses the id and does not rewrite `type`
+or `refresh_adapter`. Both `chatgpt:openai` and `oauth:openai` store adapter `openai` and
+report `chatgpt`; antigravity still has `type: "oauth"`.
+
+| Credential kind | Stored refresh adapter | `auth_method` |
+|---|---|---|
+| `ApiKey` | absent or any string | `apikey` |
+| `Oauth` | `anthropic` | `oauth` |
+| `Oauth` | `openai` | `chatgpt` |
+| `Oauth` | `google` | `oauth` |
+| `Oauth` | `xai` | `oauth` |
+| `Oauth` | `kimi` | `oauth` |
+| `Oauth` | `cursor` | `oauth` |
+| `Oauth` | `github-copilot` | `oauth` |
+| `Oauth` | `antigravity` | `antigravity` |
+| `Oauth` | `github_app` | omitted |
+| `Oauth` | `devin` | omitted |
+| `Oauth` | `digitalocean` | omitted |
+| `Oauth` | `snowflake` | omitted |
+| `Oauth` | absent or any other string | omitted |
+| `Dsn`, `Cookie`, `Opaque`, `SigningKey`, `KemKey` | anything | omitted |
+
+Provider-id edits do not bump `record_version`: observers use `view`. Its domain stays
+`claustrum.list_scoped.view.v1`. Inside each credential frame, immediately after the
+`org_name` optional-string frame, append a u32 provider-id count and each string-framed id
+in ascending byte order, then `auth_method` as an optional string. The absent optional
+frame is used whenever the JSON key is omitted, never an empty string. Deployment leaves
+an empty inventory's view unchanged but changes every nonempty visible inventory's view
+once, even if all provider-id arrays are empty and all methods omitted. Subsequent edits
+move only views whose returned rows include that credential.
+
+The TypeScript client 0.6.0 exposes `providerIds` and optional `authMethod`. Missing, null,
+non-array or non-string-element `provider_ids` refuses the whole reply, rather than
+coercing to `[]`; any string element is accepted. Present null, non-string, empty or
+unknown `auth_method` also refuses the whole reply. Deploy the daemon before upgrading
+consumers from client 0.5.0.
+
+### `admin.set_providers`
+
+Only the operator's master-key HMAC authorizes this op;
+no route op, module,
+or enrolled consumer can write provider ids. Request body:
+
+```json
+{"op":"admin.set_providers","v":2,"credential_id":"apikey:zai","mode":"add","provider_ids":["zai-coding-plan"]}
+```
+
+`mode` is `set`, `add`, or `remove`. Success returns `{"provider_ids":["zai-coding-plan"]}`:
+the resulting set, sorted in ascending byte order, even when unchanged or empty.
+`set` with `[]` clears; empty `add`/`remove`, adding a stored id, and removing an absent id
+are successful no-ops. The set read, validation, write, and transition audit are atomic.
+No envelope is opened or re-sealed, and refusals change neither metadata nor audit.
+
+Checks run in this order: each requested id's `charset` then `length`, then request
+`duplicate` (naming the second occurrence), then credential existence, then resulting-set
+`count`. Ids must start with a lowercase ASCII letter and contain only lowercase ASCII
+letters, digits, and hyphens; length is 2–64 bytes. At most 32 ids may result. Count names
+the first requested addition crossing the cap; removing more than 32 valid ids is allowed.
+An unknown credential refuses with `credential not found` live (the store's NotFound
+Display offline), including for empty lists. Other refusals use the permanent
+`invalid_provider_id` code and exact `rule=`/`value=` text above. The admin error envelope
+gains no fields.
+
+Transitions alone write audit op `set_providers` with target
+`providers:<credential-id>|<sorted-comma-list>`, with no spaces; clearing leaves the
+trailing `|`. Parse this provider target by splitting on the **last** `|`, since provider
+ids cannot contain it. An unchanged set writes no audit entry and does not move `view`.
+
 ### Category and grant audit targets
 
 Category transitions use audit op `set_category` and target
@@ -305,7 +391,7 @@ Migration 10's one category backfill row uses audit op `category.migrate`, actor
 `migration:10`, and target `category:forge-identity|<sorted-comma-list-of-credential-ids>`.
 New grant targets use
 `grant:<operation>:<principal-kind>:<principal-id>:<selector-kind>|<stored-selector>`.
-Both formats parse by splitting on the first `|`. Historical grant targets without `|`
+The category and grant formats parse by splitting on the first `|`. Historical grant targets without `|`
 remain valid audit-chain strings and are never rewritten.
 
 ---

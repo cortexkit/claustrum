@@ -510,26 +510,29 @@ export class ClaustrumClient {
 /**
  * A row from the caller's own grant-covered inventory.
  *
- * TWO SELECTION AXES, AND THEY ANSWER DIFFERENT QUESTIONS. Pick by what you are about
+ * Selection fields answer different questions. Pick by what you are about
  * to do with the token:
+ *
+ * - `providerIds` — operator-assigned catalog provider ids; match exactly, with no fallback.
+ * - `authMethod` — the closed authentication method derived from the unsealed record,
+ *   not the id spelling. Absent on sign/open-only rows or when no method is defined.
  *
  * - `refreshAdapter` — whose PROTOCOL the credential speaks. Use it when the token
  *   goes to a provider's own endpoints. Anything else is invalid there.
  * - `serves` — which model VENDORS are reachable through it. Use it when choosing
  *   where a model can be served from, and the protocol is not yours to care about.
  *
- * Never the id spelling, in either case: on a live vault 8 rows serve Anthropic models
- * and 3 of them contain no "anthropic" anywhere in their id.
- *
- * An earlier version of this comment called `serves` "the routing axis" full stop. That
- * was written before `refreshAdapter` existed and is wrong for the protocol-native case:
- * it would send a Claude OAuth request to `apikey:openrouter`.
+ * Never infer these fields from the id spelling. A credential reaching Anthropic models
+ * through OpenRouter still speaks OpenRouter's protocol, not Anthropic's.
  */
 export interface ScopedInventoryRow {
   readonly id: string
   readonly categories: readonly string[]
   readonly credentialType: string
   readonly serves: readonly string[]
+  /** Operator-assigned catalog ids, always present, including an empty set. */
+  readonly providerIds: readonly string[]
+  readonly authMethod?: 'apikey' | 'chatgpt' | 'antigravity' | 'oauth'
   /**
    * Which provider protocol this credential speaks. Absent for static keys.
    *
@@ -587,7 +590,7 @@ export function decodeScopedInventory(
   if (typeof view !== 'string' || view.length === 0) {
     throw asCredentialError(response, 'invalid_response', logUnknownClass)
   }
-  const decoded = rows.map((row) => {
+  const decoded = rows.map<ScopedInventoryRow>((row) => {
     if (!isRecord(row)) throw asCredentialError(response, 'invalid_response', logUnknownClass)
     const recordVersion = asRecordVersion(row.record_version)
     if (recordVersion === undefined) {
@@ -622,6 +625,14 @@ export function decodeScopedInventory(
           ? row.created_at_ms
           : undefined
     if (createdAtMs === undefined) throw asCredentialError(response, 'invalid_response', logUnknownClass)
+    const authMethod = row.auth_method
+    if (
+      authMethod !== undefined &&
+      authMethod !== 'apikey' && authMethod !== 'chatgpt' &&
+      authMethod !== 'antigravity' && authMethod !== 'oauth'
+    ) {
+      throw asCredentialError(response, 'invalid_response', logUnknownClass)
+    }
     if (!isOptionalString(row.refresh_adapter)) {
       throw asCredentialError(response, 'invalid_response', logUnknownClass)
     }
@@ -633,6 +644,8 @@ export function decodeScopedInventory(
       categories: strings(row.categories),
       credentialType: row.type,
       serves: strings(row.serves),
+      providerIds: strings(row.provider_ids),
+      authMethod,
       state: row.state,
       refreshAdapter: row.refresh_adapter,
       recordVersion,

@@ -106,8 +106,7 @@ describe('the client speaks the producer-pinned wire', () => {
     if (reply === undefined) throw new Error('no golden reply for credential.list_scoped')
 
     const inventory = decodeScopedInventory(JSON.parse(reply), () => {})
-    // One row carries every optional field and one carries none, so the decoder is
-    // exercised on each optional key both present and absent.
+    // The Rust enrollment wire fixture covers all four methods and a github_app record with no method.
     expect(inventory.rows.map((row) => row.id)).toEqual([
       'antigravity:google',
       'apikey:openrouter',
@@ -126,6 +125,60 @@ describe('the client speaks the producer-pinned wire', () => {
     expect(bare?.orgName).toBeUndefined()
     expect(bare?.accountId).toBeUndefined()
     expect(inventory.view.length).toBeGreaterThan(0)
+  })
+
+  test('provider metadata survives every producer fixture projection', () => {
+    const fixture = JSON.parse(readFileSync(FIXTURE, 'utf8')) as {
+      operations: (FixtureRow & { row?: string; reply?: string; list_only_reply?: string })[]
+    }
+    const entry = fixture.operations.find((row) => row.op === 'credential.list_scoped')!
+    const responses = [
+      { result: { credentials: [JSON.parse(entry.row!)], view: 'fixture-row' } },
+      JSON.parse(entry.reply!),
+      JSON.parse(entry.list_only_reply!),
+    ]
+    for (const response of responses) {
+      const inventory = decodeScopedInventory(response, () => {})
+      for (const [index, row] of inventory.rows.entries()) {
+        const emitted = response.result.credentials[index]
+        expect(row.providerIds).toEqual(emitted.provider_ids)
+        expect(row.authMethod).toBe(emitted.auth_method)
+      }
+    }
+    const rows = decodeScopedInventory(responses[1], () => {}).rows
+    expect(rows.map((row) => row.authMethod)).toEqual(['antigravity', 'apikey', 'chatgpt', undefined, 'oauth'])
+    expect(rows.some((row) => row.providerIds.length === 0)).toBe(true)
+    expect(rows.some((row) => row.providerIds.length > 1)).toBe(true)
+    const github = rows.find((row) => row.id === 'github_app:plex-alfonso')!
+    expect(github.refreshAdapter).toBe('github_app')
+    expect(github.authMethod).toBeUndefined()
+  })
+
+  for (const [field, invalidValues] of [
+    ['provider_ids', [undefined, null, 'aa', ['aa', 7]]],
+    ['auth_method', [null, 7, '', 'unknown']],
+  ] as const) {
+    for (const [index, invalid] of invalidValues.entries()) {
+      test(`fixture refuses malformed ${field} case ${index}`, () => {
+        const fixture = JSON.parse(readFileSync(FIXTURE, 'utf8')) as {
+          operations: (FixtureRow & { reply?: string })[]
+        }
+        const reply = fixture.operations.find((entry) => entry.op === 'credential.list_scoped')!.reply!
+        const response = JSON.parse(reply)
+        if (invalid === undefined) delete response.result.credentials[1][field]
+        else response.result.credentials[1][field] = invalid
+        expect(() => decodeScopedInventory(response, () => {})).toThrow()
+      })
+    }
+  }
+
+  test('provider ids are decoded as open strings, not client-validated catalog ids', () => {
+    const fixture = JSON.parse(readFileSync(FIXTURE, 'utf8')) as {
+      operations: (FixtureRow & { reply?: string })[]
+    }
+    const response = JSON.parse(fixture.operations.find((entry) => entry.op === 'credential.list_scoped')!.reply!)
+    response.result.credentials[0].provider_ids = ['', 'Unknown.Provider']
+    expect(decodeScopedInventory(response, () => {}).rows[0]!.providerIds).toEqual(['', 'Unknown.Provider'])
   })
 
   /**

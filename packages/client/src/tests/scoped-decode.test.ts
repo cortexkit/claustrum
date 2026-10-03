@@ -50,6 +50,7 @@ const ROW = {
   categories: ['llm-provider'],
   type: 'subscription',
   serves: ['anthropic'],
+  provider_ids: [],
   refresh_adapter: 'anthropic',
   state: 'active',
   record_version: 232,

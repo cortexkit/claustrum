@@ -341,6 +341,12 @@ impl AdminSurface {
 /// more detail than the anonymous read surface is acceptable (the caller holds the
 /// master key), but never secret material.
 fn store_err(e: StoreOpError) -> AdminOutcome {
+    // A provider-id refusal keeps its labelled rule and value. The bare `code/class` below
+    // would drop them, and the operator then could not tell which id broke which rule. The
+    // full Display is the same string the CLI's offline path prints, so both paths agree.
+    if let StoreOpError::InvalidProviderId { .. } = e {
+        return AdminOutcome::Refused(e.to_string());
+    }
     if let (Some(code), Some(class)) = (e.wire_code(), e.wire_class()) {
         return AdminOutcome::Refused(format!("{code}/{class}"));
     }
@@ -848,6 +854,124 @@ mod tests {
         let out = r.admin.execute(5, body.as_bytes(), &tag).await;
         assert!(matches!(out, AdminOutcome::Refused(ref m) if m.contains("challenge")));
         assert!(r.store.get("apikey:rebind").is_err());
+    }
+
+    fn set_providers_body(credential_id: &str, provider_ids: &[&str]) -> String {
+        let op = AdminOpBody::SetProviders {
+            v: credentials_core::admin_ops::ADMIN_OP_SCHEMA_V2,
+            credential_id: credential_id.to_string(),
+            mode: credentials_core::store::SetProvidersMode::Add,
+            provider_ids: provider_ids.iter().map(|id| (*id).to_string()).collect(),
+        };
+        String::from_utf8(op.to_bytes().expect("encode op")).expect("UTF-8 JSON")
+    }
+
+    fn seed_provider_ids(r: &Rig, id: &str, provider_ids: &[&str]) {
+        r.store
+            .create(
+                id,
+                &VaultRecord::new_static(CredentialKind::ApiKey, "test", b"k".to_vec(), None),
+            )
+            .expect("seed credential");
+        let ids: Vec<String> = provider_ids.iter().map(|id| (*id).to_string()).collect();
+        r.store
+            .set_providers_audited(
+                id,
+                credentials_core::store::SetProvidersMode::Set,
+                &ids,
+                AuditCtx::admin(AuditOp::SetProviders),
+            )
+            .expect("seed provider ids");
+    }
+
+    /// `admin.set_providers` is an admin op like any other: signed with a master key
+    /// other than this vault's, it is refused at Gate 2 and neither the provider-id
+    /// table nor the audit log moves. The same body signed correctly then succeeds, so
+    /// the refusal is the MAC's and not a malformed op's.
+    #[tokio::test]
+    async fn set_providers_without_a_valid_gate_2_mac_changes_neither_the_table_nor_the_audit() {
+        let r = rig(21);
+        r.admin.record_bind(5, Principal::Direct);
+        seed_provider_ids(&r, "apikey:zai", &["aa"]);
+        let audit_before = r.store.read_audit(None).expect("audit").len();
+        let body = set_providers_body("apikey:zai", &["zai-coding-plan"]);
+
+        let AdminOutcome::Challenge { nonce_hex, .. } = r.admin.challenge(5) else {
+            panic!("challenge refused");
+        };
+        let nonce: [u8; ADMIN_NONCE_LEN] = decode_hex(&nonce_hex)
+            .unwrap()
+            .as_slice()
+            .try_into()
+            .unwrap();
+        let wrong = AdminMacKey::derive(&MasterKey::from_bytes([99; MASTER_KEY_LEN]));
+        let wrong_tag = hex(&wrong.sign(&TranscriptParts {
+            vault_id: &r.vault_id,
+            key_id: r.key_id,
+            nonce: &nonce,
+            op_body: body.as_bytes(),
+        }));
+        let out = r.admin.execute(5, body.as_bytes(), &wrong_tag).await;
+        assert!(
+            matches!(out, AdminOutcome::Refused(ref m) if m.contains("auth failed")),
+            "a wrong-key tag must be refused at Gate 2"
+        );
+        // A tag that is not hex at all is refused too.
+        let out = r.admin.execute(5, body.as_bytes(), "not-a-tag").await;
+        assert!(matches!(out, AdminOutcome::Refused(_)));
+        assert_eq!(r.store.provider_ids("apikey:zai").unwrap(), ["aa"]);
+        assert_eq!(r.store.read_audit(None).expect("audit").len(), audit_before);
+
+        // Control: the same body with this vault's MAC goes through.
+        let (tag, _) = challenge_and_sign(&r, 5, &body);
+        let out = r.admin.execute(5, body.as_bytes(), &tag).await;
+        assert!(
+            matches!(out, AdminOutcome::Ok(ref v) if *v == serde_json::json!({"provider_ids": ["aa", "zai-coding-plan"]})),
+            "the correctly signed op must succeed"
+        );
+        assert_eq!(
+            r.store.read_audit(None).expect("audit").len(),
+            audit_before + 1
+        );
+    }
+
+    /// A provider-id refusal reaches the caller as the labelled Display, the same string
+    /// the offline path prints, rather than the bare `invalid_provider_id/permanent` code
+    /// that every other coded store error renders as.
+    #[tokio::test]
+    async fn a_provider_id_refusal_renders_its_rule_and_value() {
+        let r = rig(22);
+        r.admin.record_bind(5, Principal::Direct);
+        seed_provider_ids(&r, "apikey:zai", &["aa"]);
+        for (provider_ids, expected) in [
+            (
+                vec!["1a"],
+                "invalid_provider_id/permanent: rule=charset value=1a",
+            ),
+            (
+                vec!["a"],
+                "invalid_provider_id/permanent: rule=length value=a",
+            ),
+            (
+                vec!["bb", "bb"],
+                "invalid_provider_id/permanent: rule=duplicate value=bb",
+            ),
+        ] {
+            let body = set_providers_body("apikey:zai", &provider_ids);
+            let (tag, _) = challenge_and_sign(&r, 5, &body);
+            let AdminOutcome::Refused(message) = r.admin.execute(5, body.as_bytes(), &tag).await
+            else {
+                panic!("{provider_ids:?} must be refused");
+            };
+            assert_eq!(message, expected, "{provider_ids:?}");
+        }
+        assert_eq!(r.store.provider_ids("apikey:zai").unwrap(), ["aa"]);
+
+        // Other coded store errors keep the bare code/class rendering.
+        assert!(matches!(
+            store_err(StoreOpError::InvalidCategoryName),
+            AdminOutcome::Refused(ref m) if m == "invalid_category_name/permanent"
+        ));
     }
 
     #[tokio::test]

@@ -575,26 +575,11 @@ async fn build_surface(
 
     let http =
         Arc::new(ReqwestTransport::new().map_err(|e| ModuleError::Message(format!("http: {e}")))?);
-    let adapters: Vec<Arc<dyn RefreshAdapter>> = vec![
-        Arc::new(AnthropicAdapter::new()),
-        Arc::new(CursorAdapter::new()),
-        Arc::new(DevinAdapter::new()),
-        Arc::new(DigitalOceanAdapter::new()),
-        Arc::new(OpenAiAdapter::new()),
-        // Google defaults to the public gemini-cli client (id + secret) that opencode
-        // mints against; CK_GOOGLE_OAUTH_CLIENT_ID / _SECRET override it. No prod env
-        // is required for the common case.
-        Arc::new(GoogleAdapter::new()),
-        Arc::new(SnowflakeAdapter::new()),
-        Arc::new(XaiAdapter::new()),
-        Arc::new(GithubCopilotAdapter::new()),
-        Arc::new(GithubAppAdapter::new()),
-        Arc::new(KimiAdapter::new(kimi_device_id)),
-        // Antigravity (Google Code-Assist OAuth) — its own public client, distinct
-        // from the gemini-cli client the google adapter uses.
-        Arc::new(AntigravityAdapter::new()),
-    ];
-    let engine = Arc::new(RefreshEngine::new(store, adapters, http));
+    let engine = Arc::new(RefreshEngine::new(
+        store,
+        registered_refresh_adapters(kimi_device_id),
+        http,
+    ));
 
     // THE BOOT GATE: resolve every dangling intent before serving any read.
     //
@@ -629,6 +614,32 @@ async fn build_surface(
         ReadSurface::new(engine, FetchLimiter::new(Caps::default())),
         admin,
     ))
+}
+
+/// Every refresh adapter the daemon registers, in one place so a test can enumerate
+/// them. A new adapter added here must also be given its `auth_method` in
+/// `credentials_core::list_auth_method` and in this crate's expected-map test, which
+/// fails naming any registered adapter it does not list.
+fn registered_refresh_adapters(kimi_device_id: String) -> Vec<Arc<dyn RefreshAdapter>> {
+    vec![
+        Arc::new(AnthropicAdapter::new()),
+        Arc::new(CursorAdapter::new()),
+        Arc::new(DevinAdapter::new()),
+        Arc::new(DigitalOceanAdapter::new()),
+        Arc::new(OpenAiAdapter::new()),
+        // Google defaults to the public gemini-cli client (id + secret) that opencode
+        // mints against; CK_GOOGLE_OAUTH_CLIENT_ID / _SECRET override it. No prod env
+        // is required for the common case.
+        Arc::new(GoogleAdapter::new()),
+        Arc::new(SnowflakeAdapter::new()),
+        Arc::new(XaiAdapter::new()),
+        Arc::new(GithubCopilotAdapter::new()),
+        Arc::new(GithubAppAdapter::new()),
+        Arc::new(KimiAdapter::new(kimi_device_id)),
+        // Antigravity (Google Code-Assist OAuth) — its own public client, distinct
+        // from the gemini-cli client the google adapter uses.
+        Arc::new(AntigravityAdapter::new()),
+    ]
 }
 
 /// Record WHY boot reconciliation forced any credential to `needs_reauth`.
@@ -5150,34 +5161,83 @@ mod tests {
         // my own TypeScript decoder read `credential_type` where the wire says `type`
         // (the Rust field is renamed) and refused every valid row, while the
         // request-shape fixture stayed green throughout.
-        // `type` and `serves` come from the SAME catalog functions the producer calls, not
-        // typed here. Both pinned rows used to carry `"type":"subscription"`, a value this
-        // producer has never emitted for any id -- `credential_type` answers `oauth` for
-        // `oauth:anthropic`. A golden that consumers byte-copy must not carry a value they
-        // can never receive, and hand-typing it is how it got there.
-        let real_type = |id: &str| credentials_core::catalog::credential_type(id).to_string();
-        let real_serves = |id: &str| -> Vec<String> {
-            credentials_core::catalog::serves_for(id)
-                .iter()
-                .map(|vendor| vendor.as_str().to_string())
-                .collect()
+        //
+        // EVERY FIELD COMES FROM THE PRODUCER, not typed here. Each golden row starts as
+        // the `ScopedListRow` the store hands the read surface and goes through the same
+        // `project_list_scoped` that `credential.list_scoped` calls, so `type` and `serves`
+        // come from the catalog, `view` from the production digest, and `auth_method` from
+        // `list_auth_method` over the row's kind and refresh adapter. Both pinned rows used
+        // to carry `"type":"subscription"`, a value this producer has never emitted for
+        // any id; a golden that consumers byte-copy must not carry a value they can never
+        // receive, and hand-typing it is how it got there.
+        //
+        // The inputs below are what the store would return for a `read` or `list` row:
+        // the record is unsealed, so identity and the refresh adapter are present and the
+        // auth method is derived from the record's kind and adapter. `ScopedListRow` is an
+        // exhaustive literal, so a new store field is a compile error here until each
+        // golden row states it.
+        use credentials_core::list_auth_method::list_auth_method;
+        use credentials_core::record::{CredentialKind, RecordIdentity, RecordState};
+        use credentials_core::store::{
+            GrantOperation, ReadGrant, ScopedListRow, ScopedListSnapshot, SelectorKind,
         };
+        struct Stored<'a> {
+            id: &'a str,
+            categories: &'a [&'a str],
+            kind: CredentialKind,
+            refresh_adapter: Option<&'a str>,
+            record_version: u64,
+            identity: bool,
+            provider_ids: &'a [&'a str],
+        }
+        let unsealed_row = |stored: Stored<'_>, operation: GrantOperation| ScopedListRow {
+            id: stored.id.into(),
+            categories: stored.categories.iter().map(|c| (*c).to_string()).collect(),
+            state: RecordState::Active,
+            record_version: stored.record_version,
+            operations: vec![operation],
+            identity: stored.identity.then(|| RecordIdentity {
+                account_id: Some("00000000-0000-4000-8000-000000000000".into()),
+                email: Some("consumer@example.invalid".into()),
+                org_name: Some("Example Org".into()),
+            }),
+            refresh_adapter: stored.refresh_adapter.map(str::to_string),
+            provider_ids: stored
+                .provider_ids
+                .iter()
+                .map(|p| (*p).to_string())
+                .collect(),
+            auth_method: list_auth_method(stored.kind, stored.refresh_adapter),
+        };
+        let category_grant = |category: &str, operation: GrantOperation| ReadGrant {
+            principal_kind: "enrolled".into(),
+            principal_id: "consumer".into(),
+            selector_kind: SelectorKind::Category,
+            selector: category.into(),
+            operation,
+            created_at_ms: 1,
+        };
+
+        let pinned_row = read_surface::project_list_scoped(ScopedListSnapshot {
+            rows: vec![unsealed_row(
+                Stored {
+                    id: "oauth:anthropic",
+                    categories: &["llm-provider"],
+                    kind: CredentialKind::Oauth,
+                    refresh_adapter: Some("anthropic"),
+                    record_version: 232,
+                    identity: false,
+                    provider_ids: &["anthropic"],
+                },
+                GrantOperation::Read,
+            )],
+            grants: Vec::new(),
+        });
         assert_eq!(
-            serde_json::to_string(&read_surface::ListScopedCredential {
-                id: "oauth:anthropic".into(),
-                categories: vec!["llm-provider".into()],
-                credential_type: real_type("oauth:anthropic"),
-                serves: real_serves("oauth:anthropic"),
-                refresh_adapter: Some("anthropic".into()),
-                state: "active".into(),
-                record_version: 232,
-                operations: vec!["read".into()],
-                account_id: None,
-                email: None,
-                org_name: None,
-            })
-            .unwrap(),
-            operation("credential.list_scoped")["row"]
+            serde_json::to_string(&pinned_row.credentials[0]).unwrap(),
+            operation("credential.list_scoped")["row"],
+            "the golden list_scoped row drifted from what this producer serialises: \
+             regenerate it from the assertion's left side"
         );
 
         // AND THE WHOLE REPLY, NOT JUST ONE ROW.
@@ -5190,64 +5250,86 @@ mod tests {
         // lives one key over in `grant_tuples`.
         //
         // This is the golden reply a consumer should BYTE-COPY, with a provenance line
-        // naming the claustrum commit, rather than transcribe. The `view` is computed by
-        // the production digest, not typed, so the golden cannot carry a view the
-        // producer would never emit.
+        // naming the claustrum commit, rather than transcribe.
         //
-        // TWO ROWS THAT SPAN THE KEY SPACE, not one realistic example. A consumer checking
+        // ROWS THAT SPAN THE KEY SPACE, not one realistic example. A consumer checking
         // "every key I read is one the producer sends" against a single row cannot see an
-        // optional key that row happens to omit -- the first consumer to run that check
-        // had to name `org_name` by hand, which is the hand-maintained list this file
-        // exists to remove. So one row carries EVERY optional field and one carries NONE:
-        // together they show each optional key both present and absent.
-        //
-        // A new field reaches both rows without anyone remembering: these are exhaustive
-        // struct literals, so adding a field to `ListScopedCredential` is a compile error
-        // here until both rows state it. Do not convert them to `..Default::default()`.
-        //
-        // Ordered by id because the real reply is sorted by id.
-        let golden_rows = vec![
-            read_surface::ListScopedCredential {
-                id: "apikey:openrouter".into(),
-                categories: vec!["llm-provider".into()],
-                credential_type: real_type("apikey:openrouter"),
-                serves: real_serves("apikey:openrouter"),
-                refresh_adapter: None,
-                state: "active".into(),
-                record_version: 3,
-                operations: vec!["read".into()],
-                account_id: None,
-                email: None,
-                org_name: None,
-            },
-            read_surface::ListScopedCredential {
-                id: "oauth:anthropic".into(),
-                categories: vec!["anthropic-native".into(), "llm-provider".into()],
-                credential_type: real_type("oauth:anthropic"),
-                serves: real_serves("oauth:anthropic"),
-                refresh_adapter: Some("anthropic".into()),
-                state: "active".into(),
-                record_version: 232,
-                operations: vec!["read".into()],
-                account_id: Some("00000000-0000-4000-8000-000000000000".into()),
-                email: Some("consumer@example.invalid".into()),
-                org_name: Some("Example Org".into()),
-            },
-        ];
-        let golden_tuples = vec![read_surface::GrantTuple {
-            selector_kind: "category".into(),
-            selector: "llm-provider".into(),
-            operation: "read".into(),
-        }];
-        let golden_view = read_surface::list_scoped_view(&golden_rows, &golden_tuples);
+        // optional key that row happens to omit. So between them these rows show each
+        // optional key both present and absent: identity only on `oauth:anthropic`,
+        // `refresh_adapter` absent on the static key, and `auth_method` absent on the
+        // GitHub App row, whose adapter maps to no auth method even though the caller can
+        // read it. They carry every `auth_method` value (`antigravity`, `apikey`,
+        // `chatgpt`, `oauth`), and `provider_ids` with several ids, one id, and none.
+        let reply = read_surface::project_list_scoped(ScopedListSnapshot {
+            rows: vec![
+                unsealed_row(
+                    Stored {
+                        id: "oauth:anthropic",
+                        categories: &["anthropic-native", "llm-provider"],
+                        kind: CredentialKind::Oauth,
+                        refresh_adapter: Some("anthropic"),
+                        record_version: 232,
+                        identity: true,
+                        provider_ids: &["anthropic", "claude-code"],
+                    },
+                    GrantOperation::Read,
+                ),
+                unsealed_row(
+                    Stored {
+                        id: "apikey:openrouter",
+                        categories: &["llm-provider"],
+                        kind: CredentialKind::ApiKey,
+                        refresh_adapter: None,
+                        record_version: 3,
+                        identity: false,
+                        provider_ids: &["openrouter"],
+                    },
+                    GrantOperation::Read,
+                ),
+                unsealed_row(
+                    Stored {
+                        id: "chatgpt:openai",
+                        categories: &["llm-provider"],
+                        kind: CredentialKind::Oauth,
+                        refresh_adapter: Some("openai"),
+                        record_version: 11,
+                        identity: false,
+                        provider_ids: &[],
+                    },
+                    GrantOperation::Read,
+                ),
+                unsealed_row(
+                    Stored {
+                        id: "antigravity:google",
+                        categories: &["llm-provider"],
+                        kind: CredentialKind::Oauth,
+                        refresh_adapter: Some("antigravity"),
+                        record_version: 5,
+                        identity: false,
+                        provider_ids: &["google-antigravity"],
+                    },
+                    GrantOperation::Read,
+                ),
+                unsealed_row(
+                    Stored {
+                        id: "github_app:plex-alfonso",
+                        categories: &["github-app-native"],
+                        kind: CredentialKind::Oauth,
+                        refresh_adapter: Some("github_app"),
+                        record_version: 2,
+                        identity: false,
+                        provider_ids: &[],
+                    },
+                    GrantOperation::Read,
+                ),
+            ],
+            grants: vec![
+                category_grant("llm-provider", GrantOperation::Read),
+                category_grant("github-app-native", GrantOperation::Read),
+            ],
+        });
         assert_eq!(
-            serde_json::to_string(&main_wrap_for_fixture(read_surface::ListScopedResult {
-                credentials: golden_rows,
-                grants: 1,
-                grant_tuples: golden_tuples,
-                view: golden_view,
-            }))
-            .unwrap(),
+            serde_json::to_string(&main_wrap_for_fixture(reply)).unwrap(),
             operation("credential.list_scoped")["reply"],
             "the golden list_scoped reply drifted from what this producer serialises. \
              Consumers byte-copy this file: regenerate it from the assertion's left side, \
@@ -5255,42 +5337,103 @@ mod tests {
         );
 
         // A REPLY TO A LIST-ONLY CALLER: the account roster without the tokens. The row
-        // carries identity and the refresh adapter, exactly as a `read` row does, and its
-        // `operations` and the caller's tuple say `list`. A consumer decoding operations
-        // as a closed set would refuse this reply, which is what this golden lets it test.
-        let list_rows = vec![read_surface::ListScopedCredential {
-            id: "oauth:anthropic".into(),
-            categories: vec!["llm-provider".into()],
-            credential_type: real_type("oauth:anthropic"),
-            serves: real_serves("oauth:anthropic"),
-            refresh_adapter: Some("anthropic".into()),
-            state: "active".into(),
-            record_version: 232,
-            operations: vec!["list".into()],
-            account_id: Some("00000000-0000-4000-8000-000000000000".into()),
-            email: Some("consumer@example.invalid".into()),
-            org_name: Some("Example Org".into()),
-        }];
-        let list_tuples = vec![read_surface::GrantTuple {
-            selector_kind: "category".into(),
-            selector: "llm-provider".into(),
-            operation: credentials_core::store::GrantOperation::List
-                .as_str()
-                .into(),
-        }];
-        let list_view = read_surface::list_scoped_view(&list_rows, &list_tuples);
+        // carries identity, the refresh adapter and the auth method, exactly as a `read`
+        // row does, and its `operations` and the caller's tuple say `list`. A consumer
+        // decoding operations as a closed set would refuse this reply, which is what this
+        // golden lets it test.
+        let list_only = read_surface::project_list_scoped(ScopedListSnapshot {
+            rows: vec![unsealed_row(
+                Stored {
+                    id: "oauth:anthropic",
+                    categories: &["llm-provider"],
+                    kind: CredentialKind::Oauth,
+                    refresh_adapter: Some("anthropic"),
+                    record_version: 232,
+                    identity: true,
+                    provider_ids: &["anthropic"],
+                },
+                GrantOperation::List,
+            )],
+            grants: vec![category_grant("llm-provider", GrantOperation::List)],
+        });
         assert_eq!(
-            serde_json::to_string(&main_wrap_for_fixture(read_surface::ListScopedResult {
-                credentials: list_rows,
-                grants: 1,
-                grant_tuples: list_tuples,
-                view: list_view,
-            }))
-            .unwrap(),
+            serde_json::to_string(&main_wrap_for_fixture(list_only)).unwrap(),
             operation("credential.list_scoped")["list_only_reply"],
             "the golden list-only list_scoped reply drifted from what this producer \
              serialises: regenerate it from the assertion's left side"
         );
+
+        // PRESENCE AND ABSENCE, read back from the fixture a consumer copies: every
+        // credential object carries a `provider_ids` array, and `auth_method` appears
+        // exactly where the auth-method table yields a value.
+        let pinned_credentials: Vec<serde_json::Value> = {
+            let list_scoped = operation("credential.list_scoped");
+            let decode = |key: &str| -> serde_json::Value {
+                serde_json::from_str(list_scoped[key].as_str().expect("a JSON string"))
+                    .expect("decode pinned JSON")
+            };
+            let mut rows = vec![decode("row")];
+            for key in ["reply", "list_only_reply"] {
+                rows.extend(
+                    decode(key)["result"]["credentials"]
+                        .as_array()
+                        .expect("credentials array")
+                        .iter()
+                        .cloned(),
+                );
+            }
+            rows
+        };
+        let expected_auth_method = |id: &str| match id {
+            "oauth:anthropic" => Some("oauth"),
+            "apikey:openrouter" => Some("apikey"),
+            "chatgpt:openai" => Some("chatgpt"),
+            "antigravity:google" => Some("antigravity"),
+            "github_app:plex-alfonso" => None,
+            other => panic!("no expected auth_method for pinned row {other}"),
+        };
+        let mut seen_methods = std::collections::BTreeSet::new();
+        let mut provider_id_counts = std::collections::BTreeSet::new();
+        for credential in &pinned_credentials {
+            let object = credential.as_object().expect("credential object");
+            let id = object["id"].as_str().expect("id");
+            let provider_ids = object
+                .get("provider_ids")
+                .unwrap_or_else(|| panic!("{id} has no provider_ids key"))
+                .as_array()
+                .unwrap_or_else(|| panic!("{id} provider_ids is not an array"));
+            assert!(
+                provider_ids.iter().all(serde_json::Value::is_string),
+                "{id}"
+            );
+            provider_id_counts.insert(provider_ids.len().min(2));
+            let method = object.get("auth_method").map(|value| {
+                value
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{id} auth_method is not a string"))
+            });
+            assert_eq!(method, expected_auth_method(id), "{id} auth_method");
+            seen_methods.extend(method);
+        }
+        assert_eq!(
+            seen_methods.into_iter().collect::<Vec<_>>(),
+            ["antigravity", "apikey", "chatgpt", "oauth"],
+            "the golden replies carry every auth_method value"
+        );
+        assert_eq!(
+            provider_id_counts.into_iter().collect::<Vec<_>>(),
+            [0, 1, 2],
+            "the golden replies carry no provider ids, one, and several"
+        );
+        let github_app = pinned_credentials
+            .iter()
+            .find(|credential| credential["id"] == "github_app:plex-alfonso")
+            .expect("a pinned GitHub App row");
+        assert_eq!(
+            github_app["refresh_adapter"], "github_app",
+            "the row without auth_method is a readable GitHub App row, not a sealed one"
+        );
+        assert_eq!(github_app["operations"], json!(["read"]));
 
         assert_eq!(
             serde_json::to_string(&read_surface::ListScopedParams {
@@ -7049,6 +7192,226 @@ mod tests {
             })
             .unwrap_or_else(|| panic!("no list_scoped first use for router: {events:?}"));
         assert_eq!(first_use.detail.as_deref(), Some("list"));
+    }
+
+    /// An OAuth record whose refresh adapter is `adapter`, whatever its id says, so the
+    /// auth method can be shown to follow the record and not the id.
+    fn oauth_record_with_adapter(adapter: &str) -> VaultRecord {
+        let oauth = credentials_core::OAuthCredential {
+            access_token: "opaque-access".to_string().into(),
+            refresh_token: "opaque-refresh".to_string().into(),
+            expires_at_ms: Some(4_102_444_800_000),
+            token_url: "https://example.invalid/token".to_string(),
+            client_id: Some("client".to_string()),
+            scopes: Vec::new(),
+        };
+        VaultRecord::new_oauth("login", adapter, oauth, b"opaque-access".to_vec())
+    }
+
+    /// Every `list_scoped` row carries its provider ids, sealed or not, and the auth
+    /// method appears only on rows the caller can `read` or `list`, where the record is
+    /// unsealed, and only when the record's kind and adapter yield one.
+    ///
+    /// The ids are chosen so the id never predicts the answer: `chatgpt:openai` holds an
+    /// `anthropic` adapter and reports `oauth`, and a GitHub App record the caller can
+    /// read reports no auth method at all.
+    #[test]
+    fn list_scoped_rows_carry_provider_ids_everywhere_and_auth_method_only_for_read_and_list() {
+        use credentials_core::store::{GrantOperation, SetProvidersMode};
+        let (surface, store, _db, _root) = tmp_surface_with_store(201);
+        let roster = "oauth:anthropic:roster";
+        let mismatched = "chatgpt:openai";
+        let app = "github_app:plex-alfonso";
+        let static_key = "apikey:active";
+        store
+            .create_audited(
+                roster,
+                &roster_oauth_record(),
+                AuditCtx::admin(AuditOp::Put),
+            )
+            .expect("seed roster");
+        store
+            .create_audited(
+                mismatched,
+                &oauth_record_with_adapter("anthropic"),
+                AuditCtx::admin(AuditOp::Put),
+            )
+            .expect("seed mismatched");
+        store
+            .create_audited(
+                app,
+                &oauth_record_with_adapter("github_app"),
+                AuditCtx::admin(AuditOp::Put),
+            )
+            .expect("seed app");
+        store
+            .set_providers_audited(
+                roster,
+                SetProvidersMode::Set,
+                &["bb".to_string(), "aa".to_string()],
+                AuditCtx::admin(AuditOp::SetProviders),
+            )
+            .expect("set roster provider ids");
+        store
+            .set_providers_audited(
+                static_key,
+                SetProvidersMode::Set,
+                &["zai-coding-plan".to_string()],
+                AuditCtx::admin(AuditOp::SetProviders),
+            )
+            .expect("set static key provider ids");
+        for (principal, operation) in [
+            ("reader", GrantOperation::Read),
+            ("lister", GrantOperation::List),
+            ("signer", GrantOperation::Sign),
+        ] {
+            for id in [roster, mismatched, app, static_key] {
+                grant_for(&store, principal, id, operation);
+            }
+        }
+        let params = read_surface::ListScopedParams {
+            enrollment_token: None,
+        };
+
+        for (principal, opened) in [("reader", true), ("lister", true), ("signer", false)] {
+            let listed = surface
+                .list_scoped(Some(&reserved(principal)), &params)
+                .unwrap_or_else(|_| panic!("{principal} enumerates"));
+            let wire = serde_json::to_value(&listed.credentials).expect("serialise rows");
+            let rows = wire.as_array().expect("rows");
+            assert_eq!(rows.len(), 4, "{principal}");
+            let row = |id: &str| {
+                rows.iter()
+                    .find(|row| row["id"] == id)
+                    .unwrap_or_else(|| panic!("{principal} has no row {id}"))
+                    .as_object()
+                    .expect("row object")
+            };
+            for (id, provider_ids, auth_method) in [
+                (roster, json!(["aa", "bb"]), "oauth"),
+                (mismatched, json!([]), "oauth"),
+                (app, json!([]), ""),
+                (static_key, json!(["zai-coding-plan"]), "apikey"),
+            ] {
+                assert_eq!(
+                    row(id).get("provider_ids"),
+                    Some(&provider_ids),
+                    "{principal} {id}: provider_ids is on every row"
+                );
+                let expected = (opened && !auth_method.is_empty()).then_some(auth_method);
+                assert_eq!(
+                    row(id).get("auth_method").and_then(|value| value.as_str()),
+                    expected,
+                    "{principal} {id}: auth_method"
+                );
+                if expected.is_none() {
+                    assert!(
+                        !row(id).contains_key("auth_method"),
+                        "{principal} {id}: an absent auth_method is omitted, not null"
+                    );
+                }
+            }
+            if opened {
+                assert_eq!(row(app)["refresh_adapter"], "github_app", "{principal}");
+            }
+        }
+    }
+
+    /// A sign-only row is never unsealed, so a garbage envelope does not stop it from
+    /// listing, and it still carries the provider ids stored beside it. A `read` grant
+    /// over the same row unseals it, and that failure still fails the whole snapshot:
+    /// provider ids are not a reason to serve a row whose record cannot be opened.
+    #[test]
+    fn a_sign_only_garbage_envelope_row_lists_its_provider_ids_and_a_read_grant_still_fails() {
+        use credentials_core::store::{GrantOperation, SetProvidersMode};
+        let (surface, store, db_path, _root) = tmp_surface_with_store(202);
+        let id = "apikey:active";
+        store
+            .set_providers_audited(
+                id,
+                SetProvidersMode::Set,
+                &["zai-coding-plan".to_string()],
+                AuditCtx::admin(AuditOp::SetProviders),
+            )
+            .expect("set provider ids");
+        grant_for(&store, "signer", id, GrantOperation::Sign);
+        rusqlite::Connection::open(&db_path)
+            .expect("raw connection")
+            .execute(
+                "UPDATE credentials SET envelope = X'00' WHERE credential_id = ?1",
+                [id],
+            )
+            .expect("corrupt the envelope");
+        let params = read_surface::ListScopedParams {
+            enrollment_token: None,
+        };
+
+        let signer = surface
+            .list_scoped(Some(&reserved("signer")), &params)
+            .unwrap_or_else(|_| panic!("a sign-only row never opens its envelope"));
+        assert_eq!(signer.credentials.len(), 1);
+        assert_eq!(signer.credentials[0].id, id);
+        assert_eq!(signer.credentials[0].provider_ids, ["zai-coding-plan"]);
+        assert_eq!(signer.credentials[0].auth_method, None);
+
+        grant_for(&store, "reader", id, GrantOperation::Read);
+        assert!(
+            matches!(
+                surface.list_scoped(Some(&reserved("reader")), &params),
+                Err(read_surface::ReadError::StoreError)
+            ),
+            "a read row that cannot be unsealed fails the whole snapshot"
+        );
+    }
+
+    /// Every adapter the daemon registers has an explicit `auth_method` here: eight map
+    /// to a value and four to none. The registered list is the daemon's own, so an
+    /// adapter added there without a decision here fails, naming it. The table's
+    /// catch-all does not count as a decision.
+    #[test]
+    fn every_registered_refresh_adapter_has_an_explicit_auth_method() {
+        use credentials_core::list_auth_method::list_auth_method;
+        let expected: std::collections::BTreeMap<&str, Option<&str>> = [
+            ("anthropic", Some("oauth")),
+            ("openai", Some("chatgpt")),
+            ("google", Some("oauth")),
+            ("xai", Some("oauth")),
+            ("kimi", Some("oauth")),
+            ("cursor", Some("oauth")),
+            ("github-copilot", Some("oauth")),
+            ("antigravity", Some("antigravity")),
+            ("github_app", None),
+            ("devin", None),
+            ("digitalocean", None),
+            ("snowflake", None),
+        ]
+        .into_iter()
+        .collect();
+        let registered: Vec<String> = registered_refresh_adapters("test-device".into())
+            .iter()
+            .map(|adapter| adapter.name().to_string())
+            .collect();
+        for name in &registered {
+            let Some(want) = expected.get(name.as_str()) else {
+                panic!(
+                    "registered refresh adapter `{name}` has no entry in the expected \
+                     auth_method map: decide its value in credentials_core::list_auth_method \
+                     and add it here"
+                );
+            };
+            assert_eq!(
+                list_auth_method(CredentialKind::Oauth, Some(name)).map(|method| method.as_str()),
+                *want,
+                "adapter `{name}`"
+            );
+        }
+        for name in expected.keys() {
+            assert!(
+                registered.iter().any(|registered| registered == name),
+                "`{name}` is in the expected map but not registered"
+            );
+        }
+        assert_eq!(registered.len(), 12);
     }
 
     /// `list` authorizes list_scoped and nothing else. Every scoped surface that can

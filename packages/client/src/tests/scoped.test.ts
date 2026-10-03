@@ -108,7 +108,13 @@ describe('the client speaks the producer-pinned wire', () => {
     const inventory = decodeScopedInventory(JSON.parse(reply), () => {})
     // One row carries every optional field and one carries none, so the decoder is
     // exercised on each optional key both present and absent.
-    expect(inventory.rows.map((row) => row.id)).toEqual(['apikey:openrouter', 'oauth:anthropic'])
+    expect(inventory.rows.map((row) => row.id)).toEqual([
+      'antigravity:google',
+      'apikey:openrouter',
+      'chatgpt:openai',
+      'github_app:plex-alfonso',
+      'oauth:anthropic',
+    ])
     const full = inventory.rows.find((row) => row.id === 'oauth:anthropic')
     const bare = inventory.rows.find((row) => row.id === 'apikey:openrouter')
     expect(full?.credentialType).toBe('oauth')

@@ -292,6 +292,20 @@ pub struct ListScopedCredential {
     pub email: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub org_name: Option<String>,
+    /// The catalog provider ids the operator mapped to this credential, in ascending byte
+    /// order. Present on EVERY row, including a sign-only row whose record stays sealed,
+    /// because the ids live beside the record and reading them opens nothing. Empty when
+    /// the operator has set none; the vault never infers one.
+    pub provider_ids: Vec<String>,
+    /// How this credential authenticates, from the closed set `apikey`, `chatgpt`,
+    /// `antigravity`, `oauth`. Derived only from the unsealed record's kind and refresh
+    /// adapter (`credentials_core::list_auth_method`), never from the id.
+    ///
+    /// Absent, not null and not `""`, on a row the caller can only `sign`/`open` (the
+    /// record is not unsealed for it) and on a record whose kind and adapter map to no
+    /// value, such as a GitHub App.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_method: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -972,6 +986,14 @@ pub(crate) fn list_scoped_view(
         push_optional_string(&mut digest_input, credential.account_id.as_deref());
         push_optional_string(&mut digest_input, credential.email.as_deref());
         push_optional_string(&mut digest_input, credential.org_name.as_deref());
+        // Provider ids are a counted list, so a list of one id `ab` and a list of `a`, `b`
+        // frame differently. They arrive in ascending byte order from the store.
+        push_u32(&mut digest_input, credential.provider_ids.len());
+        for provider_id in &credential.provider_ids {
+            push_string(&mut digest_input, provider_id);
+        }
+        // An omitted `auth_method` frames as absent (0), never as a present empty string.
+        push_optional_string(&mut digest_input, credential.auth_method.as_deref());
     }
     digest_input.push(2);
     push_u32(&mut digest_input, grants.len());
@@ -982,7 +1004,7 @@ pub(crate) fn list_scoped_view(
     base64::engine::general_purpose::STANDARD.encode(digest.as_ref())
 }
 
-fn project_list_scoped(snapshot: ScopedListSnapshot) -> ListScopedResult {
+pub(crate) fn project_list_scoped(snapshot: ScopedListSnapshot) -> ListScopedResult {
     let mut grant_tuples: Vec<GrantTuple> = snapshot
         .grants
         .into_iter()
@@ -1022,6 +1044,8 @@ fn project_list_scoped(snapshot: ScopedListSnapshot) -> ListScopedResult {
                 account_id,
                 email,
                 org_name,
+                provider_ids: row.provider_ids,
+                auth_method: row.auth_method.map(|method| method.as_str().to_string()),
             }
         })
         .collect();
@@ -3212,6 +3236,13 @@ mod list_scoped_tests {
 
     #[test]
     fn list_scoped_view_golden_vector_pins_every_framing_rule() {
+        use credentials_core::list_auth_method::ListAuthMethod;
+        let with_providers =
+            |mut row: ScopedListRow, ids: &[&str], method: Option<ListAuthMethod>| {
+                row.provider_ids = ids.iter().map(|id| (*id).to_string()).collect();
+                row.auth_method = method;
+                row
+            };
         let snapshot = ScopedListSnapshot {
             rows: vec![
                 row(
@@ -3221,16 +3252,20 @@ mod list_scoped_tests {
                     &[GrantOperation::Read],
                     None,
                 ),
-                row(
-                    "a-active",
-                    &["llm-provider", "monitoring"],
-                    RecordState::Active,
-                    &[GrantOperation::Read, GrantOperation::Sign],
-                    Some(RecordIdentity {
-                        account_id: Some("acct".into()),
-                        email: Some("a@example.test".into()),
-                        org_name: Some("Example".into()),
-                    }),
+                with_providers(
+                    row(
+                        "a-active",
+                        &["llm-provider", "monitoring"],
+                        RecordState::Active,
+                        &[GrantOperation::Read, GrantOperation::Sign],
+                        Some(RecordIdentity {
+                            account_id: Some("acct".into()),
+                            email: Some("a@example.test".into()),
+                            org_name: Some("Example".into()),
+                        }),
+                    ),
+                    &["aa", "bb"],
+                    Some(ListAuthMethod::Oauth),
                 ),
                 row(
                     "e-non-opening-active",
@@ -3239,11 +3274,16 @@ mod list_scoped_tests {
                     &[GrantOperation::Read],
                     None,
                 ),
-                row(
-                    "b-needs-reauth",
-                    &["llm-provider"],
-                    RecordState::NeedsReauth,
-                    &[GrantOperation::Sign],
+                // A sign-only row: provider ids but no auth method.
+                with_providers(
+                    row(
+                        "b-needs-reauth",
+                        &["llm-provider"],
+                        RecordState::NeedsReauth,
+                        &[GrantOperation::Sign],
+                        None,
+                    ),
+                    &["cc"],
                     None,
                 ),
                 row(
@@ -3263,7 +3303,7 @@ mod list_scoped_tests {
         assert_eq!(result.grants, result.grant_tuples.len());
         assert_eq!(
             result.view,
-            "ymfBXY4hu+RcsKhEzW2CExWRK1mhqCplTSWkJqcagSA=",
+            "X6pARiUt2FBcjQUnMdHYzXEz3UsnxlkZH/73Furjivg=",
             "state/operation/selector enums are length-prefixed strings; lists carry counts; optionals carry presence bytes"
         );
         assert_eq!(result.credentials[0].id, "a-active");
@@ -3339,6 +3379,164 @@ mod list_scoped_tests {
         assert_eq!(result.grants, 0);
         assert_eq!(result.grant_tuples, []);
         assert_eq!(result.view, "vGTW0lomfgTvnoZoEYxkS/nUmfm76KhATUyAQCXGpPY=");
+    }
+
+    /// The view bytes for one row, assembled by hand rather than through the production
+    /// helpers, so a frame that is skipped, reordered or pushed as `""` for an omitted
+    /// value makes the digests differ. `provider_ids` (a u32 count, then each id
+    /// string-framed) and then `auth_method` (an optional string) follow `org_name`.
+    #[test]
+    fn list_scoped_view_frames_provider_ids_then_auth_method_after_org_name() {
+        fn u32_be(out: &mut Vec<u8>, value: u32) {
+            out.extend_from_slice(&value.to_be_bytes());
+        }
+        fn string(out: &mut Vec<u8>, value: &str) {
+            u32_be(out, value.len() as u32);
+            out.extend_from_slice(value.as_bytes());
+        }
+        let credential = |provider_ids: &[&str], auth_method: Option<&str>| ListScopedCredential {
+            id: "oauth:x".into(),
+            categories: vec!["llm-provider".into()],
+            credential_type: "oauth".into(),
+            serves: Vec::new(),
+            refresh_adapter: Some("anthropic".into()),
+            state: "active".into(),
+            record_version: 9,
+            operations: vec!["read".into()],
+            account_id: None,
+            email: None,
+            org_name: Some("Org".into()),
+            provider_ids: provider_ids.iter().map(|id| (*id).to_string()).collect(),
+            auth_method: auth_method.map(str::to_string),
+        };
+        let expected = |provider_ids: &[&str], auth_method: Option<&str>| {
+            let mut bytes = b"claustrum.list_scoped.view.v1".to_vec();
+            bytes.push(1);
+            u32_be(&mut bytes, 1);
+            string(&mut bytes, "oauth:x");
+            u32_be(&mut bytes, 1);
+            string(&mut bytes, "llm-provider");
+            string(&mut bytes, "active");
+            u32_be(&mut bytes, 1);
+            string(&mut bytes, "read");
+            bytes.push(0); // account_id absent
+            bytes.push(0); // email absent
+            bytes.push(1); // org_name present
+            string(&mut bytes, "Org");
+            u32_be(&mut bytes, provider_ids.len() as u32);
+            for id in provider_ids {
+                string(&mut bytes, id);
+            }
+            match auth_method {
+                Some(method) => {
+                    bytes.push(1);
+                    string(&mut bytes, method);
+                }
+                None => bytes.push(0),
+            }
+            bytes.push(2);
+            u32_be(&mut bytes, 0);
+            let digest = ring::digest::digest(&ring::digest::SHA256, &bytes);
+            base64::engine::general_purpose::STANDARD.encode(digest.as_ref())
+        };
+
+        for (provider_ids, auth_method) in [
+            (&["aa", "bb"][..], Some("oauth")),
+            (&[][..], None),
+            (&["aa"][..], None),
+            (&[][..], Some("apikey")),
+        ] {
+            assert_eq!(
+                list_scoped_view(&[credential(provider_ids, auth_method)], &[]),
+                expected(provider_ids, auth_method),
+                "provider_ids {provider_ids:?}, auth_method {auth_method:?}"
+            );
+        }
+        // A row with no ids and no auth method still carries both frames, so its view
+        // differs from the pre-change layout that ended at `org_name`.
+        assert_ne!(list_scoped_view(&[credential(&[], None)], &[]), {
+            let mut bytes = b"claustrum.list_scoped.view.v1".to_vec();
+            bytes.push(1);
+            u32_be(&mut bytes, 1);
+            string(&mut bytes, "oauth:x");
+            u32_be(&mut bytes, 1);
+            string(&mut bytes, "llm-provider");
+            string(&mut bytes, "active");
+            u32_be(&mut bytes, 1);
+            string(&mut bytes, "read");
+            bytes.extend_from_slice(&[0, 0, 1]);
+            string(&mut bytes, "Org");
+            bytes.push(2);
+            u32_be(&mut bytes, 0);
+            let digest = ring::digest::digest(&ring::digest::SHA256, &bytes);
+            base64::engine::general_purpose::STANDARD.encode(digest.as_ref())
+        },);
+        // The ids are a counted list: one id `ab` is not two ids `a`, `b`.
+        assert_ne!(
+            list_scoped_view(&[credential(&["ab"], None)], &[]),
+            list_scoped_view(&[credential(&["a", "b"], None)], &[]),
+        );
+    }
+
+    /// `project_list_scoped` carries the store's provider ids onto every row and the
+    /// auth method only where the store derived one, as the wire spelling.
+    #[test]
+    fn projection_carries_provider_ids_on_every_row_and_auth_method_only_when_present() {
+        use credentials_core::list_auth_method::ListAuthMethod;
+        let mut read_row = row(
+            "a-read",
+            &[],
+            RecordState::Active,
+            &[GrantOperation::Read],
+            None,
+        );
+        read_row.provider_ids = vec!["aa".into(), "bb".into()];
+        read_row.auth_method = Some(ListAuthMethod::Chatgpt);
+        let mut sign_row = row(
+            "b-sign",
+            &[],
+            RecordState::Active,
+            &[GrantOperation::Sign],
+            None,
+        );
+        sign_row.provider_ids = vec!["cc".into()];
+        let result = project_list_scoped(ScopedListSnapshot {
+            rows: vec![sign_row, read_row],
+            grants: Vec::new(),
+        });
+        assert_eq!(result.credentials[0].provider_ids, ["aa", "bb"]);
+        assert_eq!(
+            result.credentials[0].auth_method.as_deref(),
+            Some("chatgpt")
+        );
+        assert_eq!(result.credentials[1].provider_ids, ["cc"]);
+        assert_eq!(result.credentials[1].auth_method, None);
+
+        let wire = serde_json::to_value(&result.credentials).unwrap();
+        assert_eq!(wire[0]["provider_ids"], serde_json::json!(["aa", "bb"]));
+        assert_eq!(wire[0]["auth_method"], "chatgpt");
+        assert_eq!(wire[1]["provider_ids"], serde_json::json!(["cc"]));
+        assert!(
+            wire[1].as_object().unwrap().get("auth_method").is_none(),
+            "an underived auth method is omitted, not null: {wire}"
+        );
+
+        let empty = project_list_scoped(ScopedListSnapshot {
+            rows: vec![row(
+                "c-empty",
+                &[],
+                RecordState::Active,
+                &[GrantOperation::Read],
+                None,
+            )],
+            grants: Vec::new(),
+        });
+        let wire = serde_json::to_value(&empty.credentials).unwrap();
+        assert_eq!(
+            wire[0]["provider_ids"],
+            serde_json::json!([]),
+            "an empty set is sent as [], never omitted"
+        );
     }
 }
 

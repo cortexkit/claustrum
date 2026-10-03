@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::audit::AuditRecord;
 use crate::audit::{AuditCtx, AuditOp};
-use crate::record::{RecordIdentity, VaultRecord};
+use crate::record::{CredentialKind, RecordIdentity, VaultRecord};
 use crate::store::{
     mint_handle, EncryptedStore, GrantOperation, ReadGrant, RecordMeta, SelectorKind,
     SetCategoryMode, StoreOpError,
@@ -620,18 +620,29 @@ pub fn apply(
             approver,
             ..
         } => {
-            // The approver is recorded as the ACTOR rather than folded into a message,
-            // so the chain answers "who approved" with a field instead of prose a later
-            // reader has to parse.
-            //
-            // The route actor (`route-admin`) is deliberately NOT used here: it names the
-            // path, and this entry exists to name the person.
+            if artifact_sha256.len() != 64
+                || !artifact_sha256
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            {
+                return Err(StoreOpError::Encode(
+                    "artifact_sha256 must be exactly 64 lowercase hex characters".into(),
+                ));
+            }
+            if store.get(&credential_id)?.kind != CredentialKind::SigningKey {
+                return Err(StoreOpError::Encode(
+                    "approval requires a signing key".into(),
+                ));
+            }
+            // Keep the authenticated origin and namespace the human label so it cannot
+            // impersonate a vault-owned actor. The hash remains the artifact commitment.
+            let ctx = AuditCtx::route_admin(AuditOp::Approval, actor);
             store.append_audit(&AuditRecord {
-                op: AuditOp::Approval,
+                op: ctx.op,
                 credential_id: Some(credential_id.clone()),
                 payload_hash: Some(artifact_sha256.clone()),
-                actor: approver.clone(),
-                alarm: None,
+                actor: format!("{}/approver:{}", ctx.actor, approver),
+                alarm: ctx.alarm,
             })?;
             Ok(serde_json::json!({
                 "approved": artifact_sha256,
@@ -764,39 +775,10 @@ pub fn apply(
             let n = store.revoke_all_handles(&id, ctx)?;
             Ok(serde_json::json!({ "handles_revoked": n }))
         }
-        AdminOpBody::GrantCreate {
-            principal_id,
-            credential_prefix,
-            operation,
-            ..
-        } => {
-            let ctx = AuditCtx::route_admin(AuditOp::GrantCreate, actor);
-            store.create_read_grant_audited(
-                "reserved",
-                &principal_id,
-                SelectorKind::Exact,
-                &credential_prefix,
-                operation,
-                ctx,
-            )?;
-            Ok(serde_json::json!({ "grant_created": true }))
-        }
-        AdminOpBody::GrantRevoke {
-            principal_id,
-            credential_prefix,
-            operation,
-            ..
-        } => {
-            let ctx = AuditCtx::route_admin(AuditOp::GrantRevoke, actor);
-            store.revoke_read_grant_audited(
-                "reserved",
-                &principal_id,
-                SelectorKind::Exact,
-                &credential_prefix,
-                operation,
-                ctx,
-            )?;
-            Ok(serde_json::json!({ "grant_revoked": true }))
+        AdminOpBody::GrantCreate { .. } | AdminOpBody::GrantRevoke { .. } => {
+            Err(StoreOpError::Encode(
+                "prefix grants were removed; use v2 exact or category grants".into(),
+            ))
         }
         AdminOpBody::GrantCreateV2 {
             principal_kind,

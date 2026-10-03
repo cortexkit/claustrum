@@ -5,7 +5,7 @@
 //! cannot: whether a record is STRANDED -- holding neither a usable access token nor any
 //! refresh material, so it can never serve again without an operator login.
 //!
-//! # Expiry is reported but never scored
+//! # Expiry only strands records that cannot refresh
 //!
 //! An expired access token is not a fault: [`crate::engine::RefreshEngine`] treats it as
 //! the trigger to refresh on the next get, so expired-with-refresh-material is the
@@ -98,7 +98,7 @@ pub enum Usability {
     /// the session.
     Cookie { written_at_ms: i64 },
     /// OAuth with material the engine can serve or refresh from. `expires_at_ms` is
-    /// carried for display and deliberately not scored.
+    /// carried for display; expiry alone is harmless when refresh is possible.
     Serviceable { expires_at_ms: Option<i64> },
     /// Neither a usable access token nor refresh material: cannot serve, cannot
     /// recover on its own, and needs an operator login.
@@ -171,10 +171,18 @@ impl std::fmt::Display for ScanError {
 /// and an all-serviceable report is equally consistent with a function that has no
 /// stranded arm at all.
 pub fn is_serviceable(oauth: Option<&OAuthCredential>) -> bool {
+    is_serviceable_at(oauth, None, chrono::Utc::now().timestamp_millis())
+}
+
+fn is_serviceable_at(oauth: Option<&OAuthCredential>, adapter: Option<&str>, now_ms: i64) -> bool {
     match oauth {
         None => true,
         Some(oauth) => {
-            !oauth.refresh_token.expose().is_empty() || !oauth.access_token.expose().is_empty()
+            let can_refresh = adapter != Some(crate::refresh_adapters::digitalocean::ADAPTER_NAME)
+                && !oauth.refresh_token.expose().is_empty();
+            let usable_access = !oauth.access_token.expose().is_empty()
+                && oauth.expires_at_ms.is_none_or(|exp| now_ms < exp);
+            can_refresh || usable_access
         }
     }
 }
@@ -184,10 +192,9 @@ pub fn is_serviceable(oauth: Option<&OAuthCredential>) -> bool {
 /// Pure and instant-taking rather than reading the clock, so a test can pin the moment
 /// -- the scan itself stays deterministic and the caller supplies `now_ms`.
 ///
-/// Deliberately NOT applied to OAuth records. There an expired access token is the
-/// routine state of a healthy credential (it is the trigger to refresh on the next
-/// get), so scoring it would report normal operation as a fault. A non-refreshable
-/// record has no such recovery: once its declared lifetime passes, only an operator
+/// OAuth expiry is handled separately by `is_serviceable`: it strands a record only
+/// when refresh is impossible. A non-refreshable static record has no such recovery:
+/// once its declared lifetime passes, only an operator
 /// re-provisioning it changes anything.
 ///
 /// This reports the DECLARATION, never the provider's opinion. An operator who
@@ -195,12 +202,9 @@ pub fn is_serviceable(oauth: Option<&OAuthCredential>) -> bool {
 /// it -- which is the correct failure direction for a credential audit, and the reason
 /// the renderer says "declared" rather than "expired".
 ///
-/// SO "DECLARED" IS A PROVENANCE CLAIM, NOT A HEDGE, and a plausible future change
-/// would quietly break it. A collaborator observing a real cookie expiry (2026-08-17,
-/// MiniMax, ~58d then a 9d replacement on the same account) proposed sorting
-/// cookie-shaped credentials automatically: if the payload decodes as a JWT, read its
-/// `exp` at put time instead of asking the operator. Cheap, needs no declaration, and
-/// the provider's own number is better evidence than a guess.
+/// "Declared" identifies provenance. Automatically reading a JWT's `exp` at put
+/// time would instead infer expiry from the payload; that inference must not be
+/// presented as a lifetime the operator explicitly declared.
 ///
 /// IT IS ALSO A DIFFERENT FACT WEARING THIS FUNCTION'S LABEL. Today `expires_at_ms`
 /// arrives from one place -- an operator typing `--expires-ms` -- so a false callout is
@@ -280,6 +284,7 @@ pub fn scan(conn: &Connection, key: &MasterKey) -> Result<Vec<RecordUsability>, 
         .map_err(|e| ScanError::Read(e.to_string()))?;
 
     let mut out = Vec::new();
+    let now_ms = chrono::Utc::now().timestamp_millis();
     for row in rows {
         let (id, version, state, blob, written_at_ms) =
             row.map_err(|e| ScanError::Read(e.to_string()))?;
@@ -325,7 +330,7 @@ pub fn scan(conn: &Connection, key: &MasterKey) -> Result<Vec<RecordUsability>, 
         };
 
         let oauth = record.oauth.as_ref();
-        let usability = if !is_serviceable(oauth) {
+        let usability = if !is_serviceable_at(oauth, record.refresh_adapter.as_deref(), now_ms) {
             Usability::Stranded
         } else {
             match oauth {
@@ -539,7 +544,7 @@ mod tests {
     }
 
     #[test]
-    fn expiry_never_makes_a_record_stranded() {
+    fn expiry_does_not_strand_a_refreshable_record() {
         // An access token that expired an hour ago, with refresh material beside it, is
         // the ROUTINE state of a healthy credential. Pinned because scoring expiry is
         // the exact mistake this module's doc comment argues against, and a future
@@ -548,6 +553,21 @@ mod tests {
         let mut expired = creds("stale-access", "refresh");
         expired.expires_at_ms = Some(0);
         assert!(is_serviceable(Some(&expired)));
+    }
+
+    #[test]
+    fn expired_access_requires_a_working_refresh_path() {
+        let mut expired = creds("access", "");
+        expired.expires_at_ms = Some(100);
+        assert!(super::is_serviceable_at(Some(&expired), None, 99));
+        assert!(!super::is_serviceable_at(Some(&expired), None, 100));
+        expired.refresh_token = "refresh".to_string().into();
+        assert!(super::is_serviceable_at(Some(&expired), None, 100));
+        assert!(!super::is_serviceable_at(
+            Some(&expired),
+            Some("digitalocean"),
+            100
+        ));
     }
 
     #[test]

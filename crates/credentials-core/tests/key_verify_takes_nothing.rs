@@ -168,3 +168,75 @@ fn key_verify_still_works_while_the_daemon_holds_the_lease() {
     drop(held);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn key_verify_accepts_the_next_slot_without_changing_keys_or_taking_a_lease() {
+    use credentials_core::key::MasterKey;
+    use credentials_core::resolver::{KeySlot, KeySource};
+    let root = rig();
+    let data = root.join("data");
+    let path = root.join("secrets/master.key");
+    let source = KeySource::OperatorPath { path: path.clone() };
+    let backend = source.backend();
+    let current = MasterKey::from_bytes([31; 32]);
+    let next = MasterKey::from_bytes([32; 32]);
+    backend
+        .store_slot(&data, KeySlot::Current, &current)
+        .unwrap();
+    backend.store_slot(&data, KeySlot::Next, &next).unwrap();
+    let raw = open_sqlite(&descriptor(&data)).unwrap();
+    EncryptedStore::migrate(&raw).unwrap();
+    let held = EncryptedStore::open(raw, next).unwrap();
+    held.append_audit(&credentials_core::audit::AuditRecord {
+        op: AuditOp::MintHandle,
+        credential_id: None,
+        payload_hash: None,
+        actor: "test".into(),
+        alarm: None,
+    })
+    .unwrap();
+    let original = std::fs::read(&path).unwrap();
+    let next_path = path.with_extension("key.next");
+    let original_next = std::fs::read(&next_path).unwrap();
+    for damaged_current in [false, true] {
+        if damaged_current {
+            std::fs::write(&path, "invalid").unwrap();
+        }
+        let before = std::fs::read(&path).unwrap();
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_ck_key_verify"))
+            .arg(&data)
+            .env("CK_MASTER_KEY_PATH", &path)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(String::from_utf8_lossy(&out.stdout).contains("MATCH Next"));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(std::fs::read(&next_path).unwrap(), original_next);
+    }
+    std::fs::write(&path, original).unwrap();
+}
+
+#[test]
+fn key_move_refuses_fixed_operator_path_before_reading_either_scope() {
+    let root = rig();
+    let path = root.join("secrets/master.key");
+    std::fs::write(&path, "invalid").unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_ck_key_move"))
+        .arg(root.join("missing-old"))
+        .arg(root.join("missing-new"))
+        .env("CK_MASTER_KEY_PATH", &path)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("one fixed key file") && stderr.contains("nothing to move"),
+        "{stderr}"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}

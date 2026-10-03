@@ -109,7 +109,7 @@ pub fn keychain_service_for(data_dir: &Path) -> Option<String> {
     // only removes the aliasing edge for exotic byte paths.
     hasher.update(canonical_path_bytes(id.as_path()));
     let digest = hasher.finalize();
-    // 8 bytes (32 bits) of scope is ample: a machine holds a handful of vaults, not
+    // 8 bytes (64 bits) of scope is ample: a machine holds a handful of vaults, not
     // billions, so a distinct-data_dir collision is astronomically unlikely. And even
     // a hypothetical collision is FAIL-CLOSED, not a wrong-vault open: two vaults that
     // collided to the same keychain service would still have store.db sealed under

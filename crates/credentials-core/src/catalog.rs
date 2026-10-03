@@ -203,7 +203,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         display_name: "Fireworks AI",
         default_id: "apikey:fireworks-ai",
         dashboard_url: "https://app.fireworks.ai/settings/users/api-keys",
-        placeholder: "fw-...",
+        placeholder: "fw_...",
         // Not `/inference/v1/models`, which this row used to probe. oh-my-pi's
         // fireworks.kdl records why: "The OpenAI-compatible inference listing
         // (`/inference/v1/models`) enumerates the caller's *deployed* models and returns
@@ -1361,6 +1361,7 @@ pub fn credential_type(credential_id: &str) -> &'static str {
     match method {
         "cookie" => "cookie",
         "signing" => "signing",
+        "kem" => "kem",
         "github_app" => "github_app",
         "apple" => "apple",
         _ => "unknown",
@@ -1893,6 +1894,7 @@ mod tests {
             ("oauth:snowflake", "oauth"),
             ("cookie:x", "cookie"),
             ("signing:x", "signing"),
+            ("kem:x", "kem"),
             ("github_app:x", "github_app"),
             ("apple:x", "apple"),
         ] {
@@ -2225,5 +2227,19 @@ mod source_ownership_tests {
                 ("oauth:digitalocean", vec![]),
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod key_label_tests {
+    use super::*;
+
+    #[test]
+    fn fireworks_placeholder_uses_the_provider_key_prefix() {
+        let fireworks = API_KEY_PROVIDERS
+            .iter()
+            .find(|entry| entry.default_id == "apikey:fireworks-ai")
+            .unwrap();
+        assert!(fireworks.placeholder.starts_with("fw_"));
     }
 }

@@ -617,9 +617,10 @@ async fn build_surface(
 }
 
 /// Every refresh adapter the daemon registers, in one place so a test can enumerate
-/// them. A new adapter added here must also be given its `auth_method` in
-/// `credentials_core::list_auth_method` and in this crate's expected-map test, which
-/// fails naming any registered adapter it does not list.
+/// them. A new adapter added here also needs its `auth_method` decided in
+/// `credentials_core::list_auth_method` and listed in the expected map of
+/// `every_registered_refresh_adapter_has_an_explicit_auth_method` below, which fails
+/// naming any registered adapter the map does not list.
 fn registered_refresh_adapters(kimi_device_id: String) -> Vec<Arc<dyn RefreshAdapter>> {
     vec![
         Arc::new(AnthropicAdapter::new()),
@@ -7366,8 +7367,9 @@ mod tests {
 
     /// Every adapter the daemon registers has an explicit `auth_method` here: eight map
     /// to a value and four to none. The registered list is the daemon's own, so an
-    /// adapter added there without a decision here fails, naming it. The table's
-    /// catch-all does not count as a decision.
+    /// adapter added there without an entry here fails, naming it. `list_auth_method`
+    /// answers "none" for any adapter name it does not know, so a new adapter would
+    /// otherwise pass silently with no auth method; only this map records a decision.
     #[test]
     fn every_registered_refresh_adapter_has_an_explicit_auth_method() {
         use credentials_core::list_auth_method::list_auth_method;

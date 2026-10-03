@@ -885,9 +885,10 @@ mod tests {
     }
 
     /// `admin.set_providers` is an admin op like any other: signed with a master key
-    /// other than this vault's, it is refused at Gate 2 and neither the provider-id
-    /// table nor the audit log moves. The same body signed correctly then succeeds, so
-    /// the refusal is the MAC's and not a malformed op's.
+    /// other than this vault's, it is refused by the master-key MAC check (Gate 2) and
+    /// neither the provider-id table nor the audit log moves. The same body signed with
+    /// this vault's key then succeeds, so the refusal is the MAC's and not a malformed
+    /// op's.
     #[tokio::test]
     async fn set_providers_without_a_valid_gate_2_mac_changes_neither_the_table_nor_the_audit() {
         let r = rig(21);
@@ -916,13 +917,14 @@ mod tests {
             matches!(out, AdminOutcome::Refused(ref m) if m.contains("auth failed")),
             "a wrong-key tag must be refused at Gate 2"
         );
-        // A tag that is not hex at all is refused too.
+        // An authentication tag that is not hex at all is refused too.
         let out = r.admin.execute(5, body.as_bytes(), "not-a-tag").await;
         assert!(matches!(out, AdminOutcome::Refused(_)));
         assert_eq!(r.store.provider_ids("apikey:zai").unwrap(), ["aa"]);
         assert_eq!(r.store.read_audit(None).expect("audit").len(), audit_before);
 
-        // Control: the same body with this vault's MAC goes through.
+        // The same body signed with this vault's MAC succeeds, so the refusals above
+        // were about the tag.
         let (tag, _) = challenge_and_sign(&r, 5, &body);
         let out = r.admin.execute(5, body.as_bytes(), &tag).await;
         assert!(

@@ -142,6 +142,14 @@ That is deliberate — the nonce is kept out of grandchildren so a module cannot
 
 A host-launched plugin has no nonce and can never have one; it uses an enrollment token.
 
+**A route opened under a flow's scope is refused at bind.** If the `route.bind` stamp's
+scope carries `flow_id`, the vault answers the bind with an error frame, code
+`flow_scopes_unsupported`, and binds nothing. The vault authorizes on the bind's principal
+and never on its scope, so serving such a route would hand a flow whatever the opening
+module's grants reach. A scoped route without a `flow_id` binds as before. A `route.bind`
+this build cannot decode at all is refused the same way, code `invalid_control_body`, so it
+fails at once instead of waiting out the daemon's bind timeout.
+
 The earlier wording here said this principal was "ambient on your connection", which is
 true of what the vault SEES and false about what a caller must DO. A consumer read it,
 dialled correctly, and could not understand why every scoped call refused.

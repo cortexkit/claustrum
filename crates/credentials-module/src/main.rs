@@ -933,8 +933,35 @@ async fn handle_control_request(
             route_channel,
             epoch,
             principal,
+            scope,
             ..
         } => {
+            // A route opened under a FLOW's scope is refused at bind. The vault authorizes
+            // on the bind's principal and never on the scope, so serving it would hand a
+            // flow whatever the opening module's grants reach: credential material read on
+            // a flow's behalf, attributed to the module. Nothing in the fleet reads
+            // credentials for a flow, so this refuses by name rather than guessing a
+            // policy, and no route is installed for it.
+            if scope
+                .as_ref()
+                .is_some_and(|stamp| stamp.attributes.flow_id.is_some())
+            {
+                tracing::warn!(
+                    target: "routes",
+                    route_channel,
+                    "refused a route bind under a flow scope"
+                );
+                return send_route_error(
+                    writer,
+                    frame.header.ver,
+                    0,
+                    0,
+                    frame.header.corr,
+                    "flow_scopes_unsupported",
+                    "the vault does not serve routes opened under a flow scope",
+                )
+                .await;
+            }
             // Wire v2: install the (channel → epoch) binding in the local route map.
             // Installed here — when the accepted ack is being queued — so no route
             // traffic can pass layer-2 validation before the bind is acknowledged
@@ -6835,6 +6862,86 @@ mod tests {
         );
     }
 
+    /// A bind whose scope stamp carries a `flow_id` is refused by name and binds nothing;
+    /// the same bind with the flow removed is acknowledged and records its principal.
+    /// The second half is the control: without it a vault that refused every scoped
+    /// bind would pass.
+    #[tokio::test]
+    async fn a_route_bind_under_a_flow_scope_is_refused_and_binds_nothing() {
+        let (surface, _surface_root) = tmp_surface(172);
+        let (admin, _admin_store, _admin_root) = tmp_admin(172);
+        let routes = Arc::new(RouteEpochs::default());
+        let (tx, mut rx) = mpsc::channel::<Frame>(4);
+        let bind = |route_channel: u16, flow_id: Option<&str>| {
+            let attributes = subc_protocol::scope::ScopeAttributes {
+                flow_id: flow_id.map(str::to_string),
+                ..Default::default()
+            };
+            let request = ModuleControlRequest::RouteBind {
+                route_channel,
+                epoch: 1,
+                target: subc_protocol::RouteTarget::ToolProvider {
+                    module_id: credentials_core::contract::MODULE_ID.to_string(),
+                },
+                identity: subc_protocol::BindIdentity::new("/tmp/p", "h", "s"),
+                principal: Some(subc_protocol::Principal::Reserved {
+                    module_id: "prefrontal-core".to_string(),
+                }),
+                consumer_capabilities: None,
+                role_versions: None,
+                admission_facts: None,
+                scope: Some(subc_protocol::scope::ScopeStamp {
+                    owner: subc_protocol::Principal::Reserved {
+                        module_id: "prefrontal-core".to_string(),
+                    },
+                    scope_ref: "scope-1".to_string(),
+                    scope_epoch: 1,
+                    kind: subc_protocol::scope::ScopeKind::Worker,
+                    parent: None,
+                    parent_state: None,
+                    attributes,
+                    owner_authorized: true,
+                }),
+            };
+            Frame::build_with_version(
+                PROTOCOL_VERSION,
+                FrameType::Request,
+                control_flags(),
+                0,
+                0,
+                u64::from(route_channel),
+                serde_json::to_vec(&request).unwrap(),
+            )
+            .unwrap()
+        };
+
+        handle_control_request(bind(5, Some("flow-1")), &tx, &surface, &admin, &routes)
+            .await
+            .unwrap();
+        let refusal = rx.try_recv().expect("a flow-scoped bind is answered");
+        assert_eq!(refusal.header.ty, FrameType::Error);
+        assert_eq!(refusal.header.corr, 5);
+        let error: ErrorBody = serde_json::from_slice(&refusal.body).unwrap();
+        assert_eq!(error.code, "flow_scopes_unsupported");
+        assert!(
+            admin.principal(5).is_none(),
+            "a refused bind installs nothing"
+        );
+
+        handle_control_request(bind(6, None), &tx, &surface, &admin, &routes)
+            .await
+            .unwrap();
+        let ack = rx
+            .try_recv()
+            .expect("a scoped bind without a flow is answered");
+        assert_eq!(ack.header.ty, FrameType::Response);
+        assert_eq!(ack.header.corr, 6);
+        assert!(
+            admin.principal(6).is_some(),
+            "a scoped bind without a flow is bound as before"
+        );
+    }
+
     #[tokio::test]
     async fn health_check_control_request_returns_domain_report() {
         let (surface, _surface_root) = tmp_surface(7);
@@ -11877,6 +11984,8 @@ mod tests {
     ///   eprintln! a corrupt KEM record's capped escaped id and container only
     ///   warn!     route-epoch drop: frame-header integers and a value this module chose
     ///   warn!     undecodable channel-0 request: fixed text only, no body or decode error
+    ///   warn!     route bind refused under a flow scope: fixed text and the daemon-chosen
+    ///             route channel number, never the stamp, its flow id, or the principal
     ///
     /// This test cannot see WHAT a new site logs. What it does is make a new site
     /// impossible to add without editing the count here, which puts the question in front
@@ -11907,7 +12016,7 @@ mod tests {
         let observed = (println, eprintln, tracing, other);
         assert_eq!(
             observed,
-            (1, 2, 2, 0),
+            (1, 2, 3, 0),
             "the daemon's output sites changed (println, eprintln, tracing, other). Before \
              updating this count, confirm the new site logs no secret and bounds any \
              request field -- then add it to the list in \

@@ -101,6 +101,25 @@ bash scripts/mutation-check.sh
 REV="$(git rev-parse HEAD)"
 echo "building at ${REV}"
 
+# RECORD THE SIBLING CHECKOUTS THIS BUILD COMPILES. The subc-* and cortexkit-* crates
+# are path dependencies on ../subconscious and ../commons, so a claustrum commit alone
+# does not name what was built: the same commit against a newer sibling is different
+# code, and with --locked it may not build at all. A rebuild from the card needs these
+# revisions. A dirty sibling is recorded as such rather than refused, because those trees
+# belong to other agents; a "+dirty" line means this build cannot be reproduced exactly.
+sibling_rev() {
+  local dir="$1" rev
+  rev="$(git -C "$dir" rev-parse HEAD 2>/dev/null)" \
+    || { echo "REFUSING: sibling checkout $dir is missing or not a git tree" >&2; exit 1; }
+  if [ -n "$(git -C "$dir" status --porcelain --untracked-files=no 2>/dev/null)" ]; then
+    rev="${rev}+dirty"
+  fi
+  printf '%s\n' "$rev"
+}
+SUBCONSCIOUS_REV="$(sibling_rev ../subconscious)"
+COMMONS_REV="$(sibling_rev ../commons)"
+echo "siblings: subconscious ${SUBCONSCIOUS_REV}, commons ${COMMONS_REV}"
+
 # --locked so the build cannot silently resolve a different dependency set than CI did.
 CK_BUILD_REV="$REV" cargo build --locked --release -p credentials-module \
   --bin ck-claustrum --bin ck-auth
@@ -133,6 +152,8 @@ CK_BUILD_REV="$REV" cargo build --locked --release -p credentials-module \
 # If a stage ever needs to survive a clean, it has to leave target/ entirely.
 STAGE="target/staged/${REV}"
 mkdir -p "$STAGE"
+printf 'claustrum=%s\nsubconscious=%s\ncommons=%s\n' \
+  "$REV" "$SUBCONSCIOUS_REV" "$COMMONS_REV" > "$STAGE/build-info.txt"
 
 # PRUNE OLD STAGES. Each is ~16MB of two binaries and they accumulate silently --
 # 15 of them (242MB) had piled up before anyone looked, because nothing in the
@@ -353,6 +374,7 @@ fi
 
 echo
 echo "staged in ${STAGE}/ -- outside cargo's reach, so these hashes stay true."
+echo "built against: $(tr '\n' ' ' < "$STAGE/build-info.txt")(also in ${STAGE}/build-info.txt)"
 # PLACE BY RENAME. This line said "copy into place with a plain cp" until 2026-09-13,
 # and it is read at the exact moment someone is about to place a binary -- so it is more
 # load-bearing than the runbook paragraph that said the same thing. `cp` rewrites the

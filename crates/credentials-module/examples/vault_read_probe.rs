@@ -1305,7 +1305,56 @@ fn describe_shape(raw: &[u8]) -> String {
             "mixed"
         }
     ));
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
+        });
+    notes.extend(describe_cookie_jwts(text, now_ms));
     notes.join(", ")
+}
+
+/// For a Cookie-header payload (`name=value; name=value`), name each cookie whose VALUE is
+/// a JWT and say how far its `exp` is from now. This answers whether a deposited browser
+/// session carries a token-stated expiry at all, which decides whether reading `exp` at
+/// deposit time has anything to read.
+///
+/// Non-disclosing by the rule above: cookie NAMES are chosen by the site and authenticate
+/// nothing, and an `exp` offset is a time, not a credential. No value byte is printed.
+/// A JWT here means three dot-separated base64url segments whose payload decodes as a JSON
+/// object with an integer `exp`; anything else is not reported, so silence means "no
+/// token-stated expiry found", never "no cookies".
+fn describe_cookie_jwts(text: &str, now_ms: i64) -> Vec<String> {
+    if !text.contains('=') {
+        return Vec::new();
+    }
+    let pairs: Vec<(&str, &str)> = text
+        .split(';')
+        .filter_map(|pair| pair.trim().split_once('='))
+        .collect();
+    let mut notes = vec![format!("cookie pairs: {}", pairs.len())];
+    for (name, value) in pairs {
+        let segments: Vec<&str> = value.trim_matches('"').split('.').collect();
+        if segments.len() != 3 {
+            continue;
+        }
+        let Some(payload) = base64url_decode(segments[1].trim_end_matches('=')) else {
+            continue;
+        };
+        let Some(exp) = serde_json::from_slice::<Value>(&payload)
+            .ok()
+            .and_then(|claims| claims.get("exp").and_then(Value::as_i64))
+        else {
+            continue;
+        };
+        let delta_min = (exp.saturating_mul(1000) - now_ms) / 60_000;
+        notes.push(if delta_min >= 0 {
+            format!("cookie '{name}' is a jwt, exp in {delta_min}m")
+        } else {
+            format!("cookie '{name}' is a jwt, exp {}m ago", -delta_min)
+        });
+    }
+    notes
 }
 
 fn fnv1a64(bytes: &[u8]) -> u64 {
@@ -1416,5 +1465,54 @@ fn report(frame: &Frame, show_account_id: bool, show_claims: bool, describe: boo
             println!("UNEXPECTED terminal frame {ty:?}");
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::describe_cookie_jwts;
+
+    fn jwt_with_exp(exp_secs: i64) -> String {
+        use base64::Engine as _;
+        let b64 = |s: &str| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(s);
+        format!(
+            "{}.{}.sig",
+            b64(r#"{"alg":"HS256"}"#),
+            b64(&format!(r#"{{"exp":{exp_secs}}}"#))
+        )
+    }
+
+    /// The JWT-valued cookie is named with its offset; the opaque one and a three-segment
+    /// value without an `exp` are not, and no value byte appears in any note.
+    #[test]
+    fn names_only_the_cookies_that_carry_a_jwt_exp() {
+        let now_ms = 1_000_000_000_000;
+        let token = jwt_with_exp(now_ms / 1000 + 3600);
+        let header = format!("sid=opaque123; _token={token}; v=a.b.c");
+        let notes = describe_cookie_jwts(&header, now_ms);
+        assert_eq!(
+            notes,
+            vec![
+                "cookie pairs: 3".to_string(),
+                "cookie '_token' is a jwt, exp in 60m".to_string(),
+            ]
+        );
+        assert!(notes
+            .iter()
+            .all(|note| !note.contains("opaque123") && !note.contains(&token)));
+    }
+
+    #[test]
+    fn reports_a_past_exp_and_ignores_non_cookie_payloads() {
+        let now_ms = 1_000_000_000_000;
+        let past = format!("a={}", jwt_with_exp(now_ms / 1000 - 120));
+        assert_eq!(
+            describe_cookie_jwts(&past, now_ms),
+            vec![
+                "cookie pairs: 1".to_string(),
+                "cookie 'a' is a jwt, exp 2m ago".to_string()
+            ]
+        );
+        assert!(describe_cookie_jwts("sk-plain-api-key", now_ms).is_empty());
     }
 }

@@ -530,7 +530,11 @@ export interface ScopedInventoryRow {
   readonly categories: readonly string[]
   readonly credentialType: string
   readonly serves: readonly string[]
-  /** Operator-assigned catalog ids, always present, including an empty set. */
+  /**
+   * Operator-assigned catalog ids; empty when none are set. Always present on this type.
+   * A daemon older than the field omits it from the wire, and that decodes as empty,
+   * which is also what an unmapped credential reports.
+   */
   readonly providerIds: readonly string[]
   readonly authMethod?: 'apikey' | 'chatgpt' | 'antigravity' | 'oauth'
   /**
@@ -644,7 +648,11 @@ export function decodeScopedInventory(
       categories: strings(row.categories),
       credentialType: row.type,
       serves: strings(row.serves),
-      providerIds: strings(row.provider_ids),
+      // ABSENT DECODES AS EMPTY, PRESENT MUST BE AN ARRAY. Daemons before provider ids
+      // existed omit the key, and refusing that would fail the whole listing against a
+      // still-supported daemon. Absent and empty mean the same thing to every consumer:
+      // no ids set. A present non-array is a malformed reply and still refuses.
+      providerIds: row.provider_ids === undefined ? [] : strings(row.provider_ids),
       authMethod,
       state: row.state,
       refreshAdapter: row.refresh_adapter,

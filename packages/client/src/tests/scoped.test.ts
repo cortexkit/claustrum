@@ -155,7 +155,7 @@ describe('the client speaks the producer-pinned wire', () => {
   })
 
   for (const [field, invalidValues] of [
-    ['provider_ids', [undefined, null, 'aa', ['aa', 7]]],
+    ['provider_ids', [null, 'aa', ['aa', 7]]],
     ['auth_method', [null, 7, '', 'unknown']],
   ] as const) {
     for (const [index, invalid] of invalidValues.entries()) {
@@ -171,6 +171,23 @@ describe('the client speaks the producer-pinned wire', () => {
       })
     }
   }
+
+  // A daemon from before provider ids omits the key on every row. The listing must still
+  // decode, with each row reporting no ids, or a newer client cannot talk to an older
+  // daemon at all.
+  test('a reply without provider_ids, as an older daemon sends it, decodes as no ids', () => {
+    const fixture = JSON.parse(readFileSync(FIXTURE, 'utf8')) as {
+      operations: (FixtureRow & { reply?: string })[]
+    }
+    const response = JSON.parse(fixture.operations.find((entry) => entry.op === 'credential.list_scoped')!.reply!)
+    for (const row of response.result.credentials) {
+      delete row.provider_ids
+      delete row.auth_method
+    }
+    const decoded = decodeScopedInventory(response, () => {})
+    expect(decoded.rows.length).toBe(response.result.credentials.length)
+    expect(decoded.rows.every((row) => row.providerIds.length === 0)).toBe(true)
+  })
 
   test('provider ids are decoded as open strings, not client-validated catalog ids', () => {
     const fixture = JSON.parse(readFileSync(FIXTURE, 'utf8')) as {

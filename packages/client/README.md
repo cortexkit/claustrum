@@ -23,6 +23,11 @@ credential caching, refresh, account scheduling, and retry policy.
   as a version older than every real one.
 • Unknown server error classes are bounded to `transient`; callers must retry them
   rather than treating a forward-compatible class as permanent.
+• `listScoped` rows always carry `providerIds` (a required field since 0.6.0, so code
+  that builds rows by hand, such as test fixtures, must set it). An empty array means
+  no provider ids are set. Since 0.6.2 a daemon too old to send the field decodes the
+  same way, so a newer client still lists against an older daemon. `authMethod` stays
+  optional.
 
 The client sends `consumerIdentity: null` for every managed request so inherited
 `SUBC_MODULE_ID` and `SUBC_LAUNCH_NONCE` cannot impersonate a supervising host.

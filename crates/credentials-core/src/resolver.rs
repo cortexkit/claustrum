@@ -786,8 +786,18 @@ fn spawn_error(e: std::io::Error) -> MasterKeyError {
     }
 }
 
+/// The macOS keychain tool, by absolute path.
+///
+/// A bare `security` would be resolved through `PATH`, and the operator CLI runs with
+/// the caller's environment. So a directory placed earlier on `PATH` would receive the
+/// master key on a key write (it is fed on stdin) and could hand back a key of its
+/// choosing on a read. `/usr/bin` is on the system volume, which SIP protects. On a
+/// platform without it, spawning fails with `NotFound`, which [`spawn_error`] reports
+/// as no keychain, exactly as the bare name did.
+const SECURITY_BIN: &str = "/usr/bin/security";
+
 fn load_from_keychain(service: &str, account: &str) -> Result<MasterKey, MasterKeyError> {
-    let output = std::process::Command::new("security")
+    let output = std::process::Command::new(SECURITY_BIN)
         .args(["find-generic-password", "-s", service, "-a", account, "-w"])
         .output()
         .map_err(spawn_error)?;
@@ -832,7 +842,7 @@ fn replace_in_keychain(
     stdin_bytes.push(b'\n');
     hex.zeroize();
 
-    let mut child = std::process::Command::new("security")
+    let mut child = std::process::Command::new(SECURITY_BIN)
         .args([
             "add-generic-password",
             "-U",
@@ -867,7 +877,7 @@ fn replace_in_keychain(
 
 /// Delete a keychain slot's item (idempotent — a missing item is success).
 fn delete_from_keychain(service: &str, account: &str) -> Result<(), MasterKeyError> {
-    let output = std::process::Command::new("security")
+    let output = std::process::Command::new(SECURITY_BIN)
         .args(["delete-generic-password", "-s", service, "-a", account])
         .output()
         .map_err(spawn_error)?;
@@ -1030,6 +1040,29 @@ fn hex_val(c: u8) -> Result<u8, MasterKeyError> {
 
 #[cfg(test)]
 mod tests {
+
+    /// Every keychain call spawns the tool by absolute path, never a bare name looked up
+    /// through `PATH`, which the caller controls (see [`super::SECURITY_BIN`]).
+    ///
+    /// The pattern is built by concatenation so this test's own text is not a match.
+    #[test]
+    fn keychain_tool_is_spawned_by_absolute_path() {
+        assert!(super::SECURITY_BIN.starts_with('/'));
+        let source = include_str!("resolver.rs");
+        let bare = format!("{}{}", "Command::new(\"", "security\")");
+        assert_eq!(
+            source.matches(&bare).count(),
+            0,
+            "a keychain call spawns `security` via PATH"
+        );
+        // Positive control: the constant is what the three call sites use, so the scan
+        // must find it at least three times, or it is reading the wrong text.
+        let pinned = format!("{}{}", "Command::new(", "SECURITY_BIN)");
+        assert!(
+            source.matches(&pinned).count() >= 3,
+            "control: call sites not found"
+        );
+    }
 
     /// A locked keychain over SSH is exit 36 with NOTHING on stderr, and no operator
     /// line renders a Rust `Option`.

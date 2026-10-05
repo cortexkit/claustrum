@@ -1,3 +1,4 @@
+import { withSharedAncestorGroup } from './ancestor-fixture.js'
 import { afterEach, describe, expect, test } from 'bun:test'
 import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
 import { spawnSync } from 'node:child_process'
@@ -108,7 +109,9 @@ describe('manifest writer lock', () => {
     const root = join(path, '..')
     await chmod(root, 0o775)
     const target = join(root, 'private', 'manifest.json')
-    await expect(writeHandleFileLocked(target, 'tenant', () => {})).rejects.toThrow('without sticky bit')
+    await withSharedAncestorGroup(root, async () => {
+      await expect(writeHandleFileLocked(target, 'tenant', () => {})).rejects.toThrow('without sticky bit')
+    })
     expect(await readdir(root)).toEqual([])
   })
 
@@ -538,7 +541,9 @@ describe('manifest writer lock', () => {
     const parent = join(path, '..')
     await chmod(parent, 0o770)
 
-    await expect(writeHandleFileLocked(path, 'anthropic-auth', () => {})).rejects.toThrow('group- or world-writable without sticky bit')
+    await withSharedAncestorGroup(parent, async () => {
+      await expect(writeHandleFileLocked(path, 'anthropic-auth', () => {})).rejects.toThrow('group- or world-writable without sticky bit')
+    })
     expect((await stat(parent)).mode & 0o777).toBe(0o770)
   })
 

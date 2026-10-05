@@ -1245,6 +1245,26 @@ fn effective_ids() -> (u32, u32) {
 }
 
 #[cfg(unix)]
+struct AncestorIdentity {
+    euid: u32,
+    egid: u32,
+    passwd_path: PathBuf,
+    group_path: PathBuf,
+}
+#[cfg(unix)]
+impl AncestorIdentity {
+    fn system() -> Self {
+        let (euid, egid) = effective_ids();
+        Self {
+            euid,
+            egid,
+            passwd_path: PathBuf::from("/etc/passwd"),
+            group_path: PathBuf::from("/etc/group"),
+        }
+    }
+}
+
+#[cfg(unix)]
 fn account_records(source: &str, count: usize) -> Option<Vec<Vec<&str>>> {
     source
         .lines()
@@ -1277,6 +1297,12 @@ fn account_records(source: &str, count: usize) -> Option<Vec<Vec<&str>>> {
         .collect()
 }
 
+/// Debian OpenSSH's user-group-modes rule: ancestors without group/world-write, or with sticky, are safe.
+/// Without sticky, group-write requires effective uid/gid ownership and local passwd/group
+/// files proving the group contains only this user, with no other primary-group users.
+/// World-write never qualifies; anything the local account files cannot prove refuses.
+/// The twin acceptsAncestor in packages/client/src/ancestor-permissions.ts must keep
+/// the identical permission rule.
 #[cfg(unix)]
 fn accepts_ancestor(
     mode: u32,
@@ -1338,7 +1364,10 @@ fn accepts_ancestor(
 /// A parent that cannot be canonicalised is not checked here; allow the later file
 /// operation to report the resulting filesystem error.
 #[cfg(unix)]
-fn refuse_writable_ancestor(parent: &Path) -> Result<(), OpenCodeFilesError> {
+fn refuse_writable_ancestor(
+    parent: &Path,
+    identity: &AncestorIdentity,
+) -> Result<(), OpenCodeFilesError> {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
     let Ok(resolved) = fs::canonicalize(parent) else {
@@ -1353,15 +1382,14 @@ fn refuse_writable_ancestor(parent: &Path) -> Result<(), OpenCodeFilesError> {
         // into a permissions verdict, the same trade the canonicalise arm declines.
         if let Ok(metadata) = fs::metadata(component) {
             let mode = metadata.permissions().mode();
-            let (euid, egid) = effective_ids();
             if !accepts_ancestor(
                 mode,
                 metadata.uid(),
                 metadata.gid(),
-                euid,
-                egid,
-                Path::new("/etc/passwd"),
-                Path::new("/etc/group"),
+                identity.euid,
+                identity.egid,
+                &identity.passwd_path,
+                &identity.group_path,
             ) {
                 return Err(OpenCodeFilesError::InsecureParent {
                     path: component.to_path_buf(),
@@ -1384,6 +1412,20 @@ fn refuse_writable_ancestor(_parent: &Path) -> Result<(), OpenCodeFilesError> {
 }
 
 fn validate_secure_parent(path: &Path) -> Result<(), OpenCodeFilesError> {
+    #[cfg(unix)]
+    {
+        validate_secure_parent_with_identity(path, &AncestorIdentity::system())
+    }
+    #[cfg(not(unix))]
+    {
+        validate_secure_parent_with_identity(path)
+    }
+}
+
+fn validate_secure_parent_with_identity(
+    path: &Path,
+    #[cfg(unix)] identity: &AncestorIdentity,
+) -> Result<(), OpenCodeFilesError> {
     let metadata = fs::symlink_metadata(path).map_err(|source| OpenCodeFilesError::Io {
         action: "stat parent directory",
         source,
@@ -1402,18 +1444,22 @@ fn validate_secure_parent(path: &Path) -> Result<(), OpenCodeFilesError> {
                 reason: "not owned by the current uid",
             });
         }
-        // Directory writers can replace a mode-0600 file. Sticky or a proven
-        // user-private group prevents other users from exercising that power.
+        // Group-write counts as well as world-write: directory writers can unlink and
+        // replace a mode-0600 file regardless of its file permissions or owner. Owning
+        // the directory does not exclude other group members. Sticky exempts both bits
+        // because writers may unlink only files they own. Without sticky, group-write
+        // is safe only when local account files prove a user-private effective group;
+        // world-write is never exempt. Keep this identical to the client parent check
+        // and acceptsAncestor in packages/client/src/ancestor-permissions.ts.
         let mode = metadata.permissions().mode();
-        let (euid, egid) = effective_ids();
         if !accepts_ancestor(
             mode,
             metadata.uid(),
             metadata.gid(),
-            euid,
-            egid,
-            Path::new("/etc/passwd"),
-            Path::new("/etc/group"),
+            identity.euid,
+            identity.egid,
+            &identity.passwd_path,
+            &identity.group_path,
         ) {
             return Err(OpenCodeFilesError::InsecureParent {
                 path: path.into(),
@@ -1433,7 +1479,7 @@ fn validate_secure_parent(path: &Path) -> Result<(), OpenCodeFilesError> {
         //
         // Shape agreed with SUBC 2026-09-18 and mirrored from subc-transport 0.7.0
         // (refuse_writable_ancestor), read at source rather than from their description.
-        refuse_writable_ancestor(path)?;
+        refuse_writable_ancestor(path, identity)?;
     }
     Ok(())
 }
@@ -1911,6 +1957,45 @@ mod manifest_lock_aba_regression {
         let _ = fs::remove_dir_all(root);
     }
 
+    #[cfg(unix)]
+    struct SharedGroupFixture {
+        directory: PathBuf,
+        identity: AncestorIdentity,
+    }
+    #[cfg(unix)]
+    impl SharedGroupFixture {
+        fn new(directory: &Path) -> Self {
+            use std::os::unix::fs::MetadataExt;
+            let metadata = fs::metadata(directory).unwrap();
+            let fixture =
+                std::env::temp_dir().join(format!("shared-group-{}", random_nonce().unwrap()));
+            fs::create_dir(&fixture).unwrap();
+            let passwd_path = fixture.join("passwd");
+            let group_path = fixture.join("group");
+            fs::write(
+                &passwd_path,
+                format!("alice:x:{}:{}::/:/bin/sh\n", metadata.uid(), metadata.gid()),
+            )
+            .unwrap();
+            fs::write(&group_path, format!("alice:x:{}:bob\n", metadata.gid())).unwrap();
+            Self {
+                directory: fixture,
+                identity: AncestorIdentity {
+                    euid: metadata.uid(),
+                    egid: metadata.gid(),
+                    passwd_path,
+                    group_path,
+                },
+            }
+        }
+    }
+    #[cfg(unix)]
+    impl Drop for SharedGroupFixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.directory);
+        }
+    }
+
     // AN ANCESTOR IS REFUSED, NOT ONLY THE IMMEDIATE PARENT.
     //
     // The immediate parent being 0700 protects nothing if a directory above it is
@@ -1932,16 +2017,18 @@ mod manifest_lock_aba_regression {
         fs::set_permissions(&leaf, fs::Permissions::from_mode(0o700)).unwrap();
         fs::set_permissions(root.join("mid"), fs::Permissions::from_mode(0o700)).unwrap();
 
+        let account_fixture = SharedGroupFixture::new(&root);
+        let identity = &account_fixture.identity;
         // Control: the whole chain tight, so a later refusal is attributable to the bit
         // this test sets and not to anything else about the fixture.
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
         assert!(
-            validate_secure_parent(&leaf).is_ok(),
+            validate_secure_parent_with_identity(&leaf, identity).is_ok(),
             "a fully locked-down chain must pass, or the refusal below proves nothing"
         );
 
         fs::set_permissions(&root, fs::Permissions::from_mode(0o770)).unwrap();
-        let refused = match validate_secure_parent(&leaf) {
+        let refused = match validate_secure_parent_with_identity(&leaf, identity) {
             Err(e) => e.to_string(),
             Ok(()) => panic!(
                 "a group-writable ANCESTOR must be refused; the immediate \
@@ -1971,8 +2058,10 @@ mod manifest_lock_aba_regression {
         fs::write(&path, b"{}").unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
 
+        let account_fixture = SharedGroupFixture::new(&root);
+        let identity = &account_fixture.identity;
         fs::set_permissions(&root, fs::Permissions::from_mode(0o770)).unwrap();
-        let refused = validate_secure_parent(&root);
+        let refused = validate_secure_parent_with_identity(&root, identity);
         let refused_message = match refused {
             Err(e) => e.to_string(),
             Ok(()) => panic!("a group-writable parent must be refused, but it passed"),
@@ -1984,7 +2073,7 @@ mod manifest_lock_aba_regression {
 
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
         assert!(
-            validate_secure_parent(&root).is_ok(),
+            validate_secure_parent_with_identity(&root, identity).is_ok(),
             "the same fixture without the group bit must pass, or the refusal proves nothing"
         );
         let _ = fs::remove_dir_all(root);

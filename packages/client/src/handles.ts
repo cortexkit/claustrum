@@ -236,8 +236,13 @@ async function readHandleSnapshot(path = defaultHandleFilePath(), io: HandleFile
     if (expectedUid !== undefined && parent.uid !== undefined && parent.uid !== expectedUid) {
       invalid('handle file parent is not owned by the current uid')
     }
-    // Directory writers can replace a mode-0600 file. Only sticky directories or
-    // a group proven exclusive to the effective user may bypass the write-bit check.
+    // Group-write counts as well as world-write: a directory writer can unlink and
+    // replace a mode-0600 file regardless of its file permissions or owner. Owning
+    // the directory does not exclude other group members. Sticky exempts both bits
+    // because a writer may unlink only files they own. Without sticky, group-write
+    // is safe only when local account files prove a user-private effective group;
+    // world-write is never exempt. Keep this rule identical to Rust's accepts_ancestor
+    // and parent check in opencode_files.rs.
     if (!(await acceptsAncestor(parent))) {
       invalid('handle file parent is group- or world-writable without sticky bit')
     }

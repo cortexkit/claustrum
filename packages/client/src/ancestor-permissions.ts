@@ -16,6 +16,13 @@ function records(source: string, count: number): string[][] {
   })
 }
 
+/**
+ * Debian OpenSSH's user-group-modes rule: ancestors without group/world-write, or with sticky, are safe.
+ * Without sticky, group-write requires effective uid/gid ownership and local passwd/group
+ * files proving the group contains only this user, with no other primary-group users.
+ * World-write never qualifies; anything the local account files cannot prove refuses.
+ * The twin accepts_ancestor in opencode_files.rs must keep the identical permission rule.
+ */
 export async function acceptsAncestor(metadata: { mode: number; uid?: number; gid?: number }, identity: AncestorIdentity = ancestorIdentityContext.getStore() ?? {
   euid: process.geteuid?.(), egid: process.getegid?.(), passwdPath: '/etc/passwd', groupPath: '/etc/group',
 }): Promise<boolean> {

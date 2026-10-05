@@ -1,3 +1,4 @@
+import { withSharedAncestorGroup } from './ancestor-fixture.js'
 import { afterEach, describe, expect, test } from 'bun:test'
 import { chmod, mkdtemp, mkdir, readFile, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -26,19 +27,26 @@ describe('enrollment token file', () => {
     expect(JSON.parse(await readFile(path, 'utf8'))).toEqual(value)
   })
 
-  test.skipIf(!onPosix)('refuses a 0777 non-sticky ancestor before creating the token file', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'claustrum-enrollment-'))
-    roots.push(root)
-    await chmod(root, 0o700)
-    const unsafe = join(root, 'unsafe')
-    const child = join(unsafe, 'private')
-    await mkdir(child, { recursive: true, mode: 0o700 })
-    await chmod(unsafe, 0o777)
+  for (const [mode, name] of [
+    [0o777, 'refuses a 0777 non-sticky ancestor before creating the token file'],
+    [0o775, 'refuses a 0775 shared-group ancestor before creating the token file'],
+  ] as const) {
+    test.skipIf(!onPosix)(name, async () => {
+      const root = await mkdtemp(join(tmpdir(), 'claustrum-enrollment-'))
+      roots.push(root)
+      await chmod(root, 0o700)
+      const unsafe = join(root, 'unsafe')
+      const child = join(unsafe, 'private')
+      await mkdir(child, { recursive: true, mode: 0o700 })
+      await chmod(unsafe, mode)
 
-    const path = join(child, 'consumer.json')
-    await expect(
-      writeEnrollmentTokenFile(path, { token: 'cd'.repeat(32), token_generation: 1 }),
-    ).rejects.toThrow('group- or world-writable without sticky bit')
-    await expect(stat(path)).rejects.toMatchObject({ code: 'ENOENT' })
-  })
+      const path = join(child, 'consumer.json')
+      await withSharedAncestorGroup(unsafe, async () => {
+        await expect(
+          writeEnrollmentTokenFile(path, { token: 'cd'.repeat(32), token_generation: 1 }),
+        ).rejects.toThrow('group- or world-writable without sticky bit')
+      })
+      await expect(stat(path)).rejects.toMatchObject({ code: 'ENOENT' })
+    })
+  }
 })

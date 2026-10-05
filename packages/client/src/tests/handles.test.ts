@@ -1,3 +1,4 @@
+import { withSharedAncestorGroup } from './ancestor-fixture.js'
 import { afterEach, describe, expect, test } from 'bun:test'
 import { chmod, mkdir, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -79,7 +80,9 @@ describe('client handle-file contract', () => {
     const path = join(root, 'handles.json')
     await writeFile(path, JSON.stringify(validFile()), { mode: 0o600 })
     await chmod(root, 0o770)
-    await expect(readHandleFile(path)).rejects.toThrow('group- or world-writable')
+    await withSharedAncestorGroup(root, async () => {
+      await expect(readHandleFile(path)).rejects.toThrow('group- or world-writable')
+    })
     // The same directory without the group bit reads cleanly -- proving the refusal came
     // from that bit and not from something else about the fixture.
     await chmod(root, 0o700)
@@ -107,7 +110,9 @@ describe('client handle-file contract', () => {
     expect(await readHandleFile(path)).toEqual(validFile())
 
     await chmod(root, 0o770)
-    await expect(readHandleFile(path)).rejects.toThrow('ancestor')
+    await withSharedAncestorGroup(root, async () => {
+      await expect(readHandleFile(path)).rejects.toThrow('ancestor')
+    })
     await chmod(root, 0o700)
   })
 

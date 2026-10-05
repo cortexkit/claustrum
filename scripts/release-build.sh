@@ -101,12 +101,13 @@ bash scripts/mutation-check.sh
 REV="$(git rev-parse HEAD)"
 echo "building at ${REV}"
 
-# RECORD THE SIBLING CHECKOUTS THIS BUILD COMPILES. The subc-* and cortexkit-* crates
-# are path dependencies on ../subconscious and ../commons, so a claustrum commit alone
-# does not name what was built: the same commit against a newer sibling is different
-# code, and with --locked it may not build at all. A rebuild from the card needs these
-# revisions. A dirty sibling is recorded as such rather than refused, because those trees
-# belong to other agents; a "+dirty" line means this build cannot be reproduced exactly.
+# RECORD THE SIBLING CHECKOUT THIS BUILD COMPILES. The cortexkit-* crates are path
+# dependencies on ../commons, so a claustrum commit alone does not name what was built:
+# the same commit against a newer commons is different code, and with --locked it may
+# not build at all. A rebuild from the card needs this revision. (The subc-* crates come
+# from crates.io at the versions Cargo.lock pins, so the claustrum commit already names
+# them.) A dirty sibling is recorded as such rather than refused, because that tree
+# belongs to other agents; a "+dirty" line means this build cannot be reproduced exactly.
 sibling_rev() {
   local dir="$1" rev
   rev="$(git -C "$dir" rev-parse HEAD 2>/dev/null)" \
@@ -116,9 +117,8 @@ sibling_rev() {
   fi
   printf '%s\n' "$rev"
 }
-SUBCONSCIOUS_REV="$(sibling_rev ../subconscious)"
 COMMONS_REV="$(sibling_rev ../commons)"
-echo "siblings: subconscious ${SUBCONSCIOUS_REV}, commons ${COMMONS_REV}"
+echo "sibling: commons ${COMMONS_REV}"
 
 # --locked so the build cannot silently resolve a different dependency set than CI did.
 CK_BUILD_REV="$REV" cargo build --locked --release -p credentials-module \
@@ -152,8 +152,7 @@ CK_BUILD_REV="$REV" cargo build --locked --release -p credentials-module \
 # If a stage ever needs to survive a clean, it has to leave target/ entirely.
 STAGE="target/staged/${REV}"
 mkdir -p "$STAGE"
-printf 'claustrum=%s\nsubconscious=%s\ncommons=%s\n' \
-  "$REV" "$SUBCONSCIOUS_REV" "$COMMONS_REV" > "$STAGE/build-info.txt"
+printf 'claustrum=%s\ncommons=%s\n' "$REV" "$COMMONS_REV" > "$STAGE/build-info.txt"
 
 # PRUNE OLD STAGES. Each is ~16MB of two binaries and they accumulate silently --
 # 15 of them (242MB) had piled up before anyone looked, because nothing in the

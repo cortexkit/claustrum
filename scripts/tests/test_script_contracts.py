@@ -395,23 +395,26 @@ class ScriptContracts(unittest.TestCase):
         ci = module('lib/workflow-gates').parse_workflow(os.fspath(ROOT / '.github/workflows/ci.yml'))
         self.assertEqual(ci['permissions'], {'contents': 'read'})
         for step in workflow['jobs']['assets']['steps']:
-            if step.get('with', {}).get('repository') in ('cortexkit/subconscious', 'cortexkit/commons'):
+            if step.get('with', {}).get('repository') == 'cortexkit/commons':
                 self.assertNotIn('ref', step['with'])
                 self.assertIn(step['with'].get('persist-credentials'), (False, 'false'))
+        # The subc crates come from crates.io, so a release must not check out the
+        # cortexkit/subconscious repository; needing it would mean a path dependency
+        # on ../subconscious was reintroduced.
+        repositories = [step.get('with', {}).get('repository') for step in workflow['jobs']['assets']['steps']]
+        self.assertNotIn('cortexkit/subconscious', repositories)
         retain = next(s for s in workflow['jobs']['assets']['steps'] if s.get('name') == 'Retain sibling provenance')
         self.assertEqual(retain['with']['path'], 'claustrum/provenance/*.txt')
         self.assertEqual(retain['with']['if-no-files-found'], 'error')
         collect = next(s for s in workflow['jobs']['publish']['steps'] if s.get('name') == 'Collect sibling provenance')
         self.assertEqual(collect['with']['path'], 'provenance')
         self.assertEqual(collect['with']['pattern'], 'sibling-revisions-*')
-        subconscious = '1' * 40
         commons = '2' * 40
-        self.executable('git', 'case "$*" in "-C ../subconscious rev-parse HEAD") echo "' + subconscious + '";; "-C ../commons rev-parse HEAD") echo "' + commons + '";; *) exit 1;; esac')
+        self.executable('git', 'case "$*" in "-C ../commons rev-parse HEAD") echo "' + commons + '";; *) exit 1;; esac')
         record = self.release_step('Record sibling revisions')
         for platform in ('darwin-arm64', 'linux-x64', 'windows-x64'):
             result = self.run_shell(record['run'], dict(self.env, ASSET_PLATFORM=platform), cwd=self.root)
             self.assertEqual(result.returncode, 0, result.stdout)
-            self.assertIn(subconscious, result.stdout)
             self.assertIn(commons, result.stdout)
             self.assertIn(platform, result.stdout)
         names = '\n'.join(f'{binary}-{platform}.{suffix}' for platform in ('darwin-arm64', 'linux-x64', 'windows-x64') for binary in ('ck-auth', 'ck-claustrum') for suffix in ('zip', 'zip.sha256'))
@@ -422,7 +425,7 @@ class ScriptContracts(unittest.TestCase):
         notes = (self.root / 'captured-notes').read_text()
         self.assertIn('Permanent notes plus release-specific instructions.', notes)
         for platform in ('darwin-arm64', 'linux-x64', 'windows-x64'):
-            self.assertIn(f'{platform}: subconscious {subconscious}; commons {commons}', notes)
+            self.assertIn(f'{platform}: commons {commons}', notes)
 
     def test_fixture_prefix_needs_path_boundary(self):
         fixtures = module('check-fixture-line-endings')

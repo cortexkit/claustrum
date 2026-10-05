@@ -173,18 +173,12 @@ jobs:
           path: claustrum
           ref: ${{ inputs.tag || github.ref }}
 
-      # Same sibling preamble as ci.yml: cargo loads the whole workspace manifest
-      # (including the path-deps on cortexkit/subconscious and cortexkit/commons) before
-      # resolving any package, so both must be present or the build dies at manifest-load.
-      # Float on sibling default branches as CI does, but record what each platform built.
-      # Do not persist tokens: sibling build scripts run with release-write authority.
-      - name: Checkout subconscious
-        uses: actions/checkout@v5
-        with:
-          repository: cortexkit/subconscious
-          path: subconscious
-          persist-credentials: false
-
+      # Cargo loads the whole workspace manifest, including the path dependencies on
+      # cortexkit/commons, before resolving any package, so commons must be present or the
+      # build dies at manifest-load. The subc crates come from crates.io at the versions
+      # Cargo.lock pins, so the release needs no subconscious checkout. Float on commons'
+      # default branch as CI does, but record what each platform built. Do not persist
+      # tokens: sibling build scripts run with release-write authority.
       - name: Checkout commons
         uses: actions/checkout@v5
         with:
@@ -199,9 +193,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p provenance
-          subconscious_rev=$(git -C ../subconscious rev-parse HEAD)
           commons_rev=$(git -C ../commons rev-parse HEAD)
-          printf '%s: subconscious %s; commons %s\n' "$ASSET_PLATFORM" "$subconscious_rev" "$commons_rev" \
+          printf '%s: commons %s\n' "$ASSET_PLATFORM" "$commons_rev" \
             | tee "provenance/sibling-revisions-$ASSET_PLATFORM.txt"
 
       # Matrix checkouts can resolve different sibling tips. Preserve each platform's

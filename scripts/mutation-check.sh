@@ -21,7 +21,7 @@ ROOT="$(pwd -P)"
 TARGET_DIR="$ROOT/target"
 # Path dependencies resolve relative to the repository checkout, so place the
 # temporary worktree beside that checkout rather than under /tmp. This keeps the
-# sibling repositories (../commons and ../subconscious) addressable in Cargo.toml.
+# sibling repository (../commons) addressable in Cargo.toml.
 COMMON_DIR="$(git rev-parse --git-common-dir)"
 case "$COMMON_DIR" in
   /*) ;;

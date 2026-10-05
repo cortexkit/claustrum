@@ -19,20 +19,21 @@ members = ["crates/credentials-core", "crates/credentials-module"]
 #   credentials-module = the thin subc-wire binary: read surface + admin surface,
 #                        capability handles, fault isolation, audit.
 #
-# Wire + storage crates are sibling PATH dependencies for dev (the arrangement
-# AFT and ai-provider-quota use). This repo path-deps TWO siblings:
-#   ../subconscious/crates/*  — subc wire (subc-protocol/subc-transport; subc-core
-#                               dev-only for the in-process daemon in e2e tests)
-#   ../commons/crates/*       — shared storage (cortexkit-store with the epoch-CAS
-#                               with_conn_fenced write path the vault requires,
-#                               cortexkit-lease, cortexkit-store-types)
-# CI must check out both siblings (cargo loads the whole workspace manifest before
-# resolving any -p package).
+# The subc wire crates come from crates.io, never from a path into ../subconscious.
+# They publish automatically on a version bump, and a path dependency left every
+# sibling release breaking this repo's `--locked` builds until the lock was refreshed
+# by hand. Move forward deliberately with `cargo update -p <crate>`.
+#
+# The storage and logging crates are still PATH dependencies on ../commons/crates/*
+# (cortexkit-store with the epoch-CAS with_conn_fenced write path the vault requires,
+# cortexkit-lease, cortexkit-store-types, cortexkit-paths, cortexkit-log), so CI must
+# check out commons (cargo loads the whole workspace manifest before resolving any -p
+# package). CI also checks out ../subconscious, but only to build the standalone
+# `ck-subc` daemon the real-daemon e2e tests supervise the vault with.
 [workspace.dependencies]
-subc-protocol = { path = "../subconscious/crates/subc-protocol" }
-subc-transport = { path = "../subconscious/crates/subc-transport" }
-subc-os = { path = "../subconscious/crates/subc-os" }
-subc-core = { path = "../subconscious/crates/subc-core" }
+subc-protocol = "0.29.1"
+subc-transport = "0.10.0"
+subc-os = "0.1.6"
 
 cortexkit-store = { path = "../commons/crates/cortexkit-store" }
 cortexkit-lease = { path = "../commons/crates/cortexkit-lease" }

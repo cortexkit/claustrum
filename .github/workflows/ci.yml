@@ -136,10 +136,12 @@ jobs:
             bun run test:hermetic
           fi
 
-      # This repo path-deps the public cortexkit/subconscious (subc wire) and
-      # cortexkit/commons (storage libs) siblings. Cargo loads the whole workspace
-      # manifest (incl. the sibling path-deps) before resolving any package, so both
-      # must be present or the build fails at manifest-load. Both are public, so the
+      # Two public siblings, for different reasons. cortexkit/commons (storage libs) is
+      # a path dependency: cargo loads the whole workspace manifest before resolving any
+      # package, so it must be present or the build fails at manifest-load.
+      # cortexkit/subconscious is NOT a build dependency (the subc crates come from
+      # crates.io); it is checked out for the `ck-subc` daemon the real-daemon e2e rig
+      # builds below, and for the inbound-contract spec check. Both are public, so the
       # default token checks them out and no GitHub App token is minted.
       - name: Checkout subconscious
         uses: actions/checkout@v5

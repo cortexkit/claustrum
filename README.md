@@ -85,9 +85,10 @@ installs core first by construction.
 
 ## Development
 
-Two sibling repos are path-dependencies and must be checked out alongside this
-one: [`subconscious`](https://github.com/cortexkit/subconscious) (the supervisor
-wire) and [`commons`](https://github.com/cortexkit/commons) (storage libraries).
+All published CortexKit crates come from crates.io; normal locked builds need
+no sibling checkout. Check out [`subconscious`](https://github.com/cortexkit/subconscious)
+alongside this repo only for the real-daemon e2e tests and the gate's
+push-envelope specification check.
 
 ```
 cargo check --workspace --locked

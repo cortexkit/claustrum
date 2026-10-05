@@ -288,23 +288,10 @@ class ScriptContracts(unittest.TestCase):
         (self.root / 'catalog.rs').write_text('fn probe() { get("https://api.example.test/token"); get("https://{host}/token"); }\n#[cfg(test)] mod tests { const URL: &str = "https://fixture.test"; }')
         self.assertEqual(endpoints.discover(), [('catalog.rs', 'INLINE_001', 'api.example.test')])
 
-    def test_registry_pin_additions_and_multiple_versions_are_refused(self):
-        before = self.root / 'before'
-        after = self.root / 'after'
-        package = lambda version: f'[[package]]\nname = "dep"\nversion = "{version}"\nsource = "registry+test"\nchecksum = "abc"\n'
-        before.write_text(package('1') + package('2'))
-        after.write_text(package('2'))
-        after.write_text(before.read_text() + package('3'))
-        work = self.root / 'workspace'
-        work.mkdir()
-        self.executable('cargo', 'cp "$HOME/after" Cargo.lock')
-        step = self.release_step('Absorb sibling bumps without disturbing registry pins')
-        for new_lock in (package('2'), before.read_text() + package('3')):
-            (work / 'Cargo.lock').write_text(before.read_text())
-            after.write_text(new_lock)
-            result = self.run_shell(step['run'], cwd=work)
-            self.assertEqual(result.returncode, 1, result.stdout)
-            self.assertIn('REFUSING:', result.stdout)
+    def test_release_uses_committed_lock_without_updates(self):
+        workflow = text('.github/workflows/release.yml')
+        self.assertNotIn('cargo update', workflow)
+        self.assertIn('cargo build --locked', workflow)
 
     def release_step(self, label, path='.github/workflows/release.yml'):
         workflow = module('lib/workflow-gates').parse_workflow(os.fspath(ROOT / path))
@@ -389,34 +376,16 @@ class ScriptContracts(unittest.TestCase):
         ci_flags = re.search(r'cargo clippy.*--features ([^\s]+)', ci).group(1).split(',')
         self.assertEqual(set(gate_flags), set(ci_flags))
 
-    def test_release_tokens_are_scoped_and_siblings_recorded(self):
+    def test_release_tokens_are_scoped_and_build_is_registry_only(self):
         workflow = module('lib/workflow-gates').parse_workflow(os.fspath(ROOT / '.github/workflows/release.yml'))
         self.assertEqual(workflow['permissions'], {'contents': 'read'})
         ci = module('lib/workflow-gates').parse_workflow(os.fspath(ROOT / '.github/workflows/ci.yml'))
         self.assertEqual(ci['permissions'], {'contents': 'read'})
-        for step in workflow['jobs']['assets']['steps']:
-            if step.get('with', {}).get('repository') == 'cortexkit/commons':
-                self.assertNotIn('ref', step['with'])
-                self.assertIn(step['with'].get('persist-credentials'), (False, 'false'))
-        # The subc crates come from crates.io, so a release must not check out the
-        # cortexkit/subconscious repository; needing it would mean a path dependency
-        # on ../subconscious was reintroduced.
-        repositories = [step.get('with', {}).get('repository') for step in workflow['jobs']['assets']['steps']]
+        steps = [step for job in workflow['jobs'].values() for step in job['steps']]
+        repositories = [step.get('with', {}).get('repository') for step in steps]
         self.assertNotIn('cortexkit/subconscious', repositories)
-        retain = next(s for s in workflow['jobs']['assets']['steps'] if s.get('name') == 'Retain sibling provenance')
-        self.assertEqual(retain['with']['path'], 'claustrum/provenance/*.txt')
-        self.assertEqual(retain['with']['if-no-files-found'], 'error')
-        collect = next(s for s in workflow['jobs']['publish']['steps'] if s.get('name') == 'Collect sibling provenance')
-        self.assertEqual(collect['with']['path'], 'provenance')
-        self.assertEqual(collect['with']['pattern'], 'sibling-revisions-*')
-        commons = '2' * 40
-        self.executable('git', 'case "$*" in "-C ../commons rev-parse HEAD") echo "' + commons + '";; *) exit 1;; esac')
-        record = self.release_step('Record sibling revisions')
-        for platform in ('darwin-arm64', 'linux-x64', 'windows-x64'):
-            result = self.run_shell(record['run'], dict(self.env, ASSET_PLATFORM=platform), cwd=self.root)
-            self.assertEqual(result.returncode, 0, result.stdout)
-            self.assertIn(commons, result.stdout)
-            self.assertIn(platform, result.stdout)
+        self.assertNotIn('cortexkit/commons', repositories)
+        self.assertFalse(any('sibling' in step.get('name', '').lower() for step in steps))
         names = '\n'.join(f'{binary}-{platform}.{suffix}' for platform in ('darwin-arm64', 'linux-x64', 'windows-x64') for binary in ('ck-auth', 'ck-claustrum') for suffix in ('zip', 'zip.sha256'))
         self.executable('gh', 'case "$*" in *"--json assets"*) printf "%s\\n" "$ASSET_NAMES";; *"--json body"*) echo "Permanent notes plus release-specific instructions.";; *"release edit"*) cp release-notes.txt "$HOME/captured-notes";; *) exit 1;; esac')
         publish = self.release_step('Undraft the release')
@@ -424,8 +393,6 @@ class ScriptContracts(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout)
         notes = (self.root / 'captured-notes').read_text()
         self.assertIn('Permanent notes plus release-specific instructions.', notes)
-        for platform in ('darwin-arm64', 'linux-x64', 'windows-x64'):
-            self.assertIn(f'{platform}: commons {commons}', notes)
 
     def test_fixture_prefix_needs_path_boundary(self):
         fixtures = module('check-fixture-line-endings')

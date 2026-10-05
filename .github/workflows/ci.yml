@@ -63,18 +63,9 @@ jobs:
     # change, proven on its own, rather than riding this one.
   test:
     name: Test (${{ matrix.os }})
-    # FORK PRS RUN THIS JOB. It needs no secret: the two sibling path-dependencies
-    # (cortexkit/subconscious and cortexkit/commons) are public, so the default token
-    # checks them out.
-    #
-    # Until they went public this job was skipped on fork PRs, because checking them
-    # out needed a GitHub App token and GitHub withholds secrets from fork-triggered
-    # runs. Before that skip, 11 of 11 fork-PR runs failed at manifest-load, and a
-    # genuine failure on a fork PR could not be told apart from that systemic one.
-    #
-    # `pull_request_target` stays REFUSED here: it runs with secrets in scope while
-    # checking out the PR's own code. This job has no secrets to protect any more,
-    # which is exactly why the plain `pull_request` trigger is now enough.
+    # Fork PRs need no secrets. The public subconscious checkout supplies only
+    # the e2e daemon and inbound-contract spec; all Rust dependencies use crates.io.
+    # Keep pull_request_target refused: it exposes secrets to PR code.
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -136,24 +127,13 @@ jobs:
             bun run test:hermetic
           fi
 
-      # Two public siblings, for different reasons. cortexkit/commons (storage libs) is
-      # a path dependency: cargo loads the whole workspace manifest before resolving any
-      # package, so it must be present or the build fails at manifest-load.
-      # cortexkit/subconscious is NOT a build dependency (the subc crates come from
-      # crates.io); it is checked out for the `ck-subc` daemon the real-daemon e2e rig
-      # builds below, and for the inbound-contract spec check. Both are public, so the
-      # default token checks them out and no GitHub App token is minted.
+      # The public subconscious checkout supplies the real-daemon e2e binary
+      # and inbound-contract spec, not a Cargo dependency.
       - name: Checkout subconscious
         uses: actions/checkout@v5
         with:
           repository: cortexkit/subconscious
           path: subconscious
-
-      - name: Checkout commons
-        uses: actions/checkout@v5
-        with:
-          repository: cortexkit/commons
-          path: commons
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -196,6 +176,9 @@ jobs:
         shell: bash
         run: python3 scripts/check-path-rendering.py
 
+      - name: Outside path deps
+        run: python3 scripts/check-outside-path-deps.py
+
       - name: Design doc status claims
         run: python3 scripts/check-doc-status.py
 
@@ -220,9 +203,8 @@ jobs:
         run: python3 scripts/threshold-controls.py
 
       - name: Format check
-        # SCOPED TO THIS REPO'S OWN CRATES. `--all` reaches through the sibling path
-        # dependencies and checks sources owned by other repos, so a peer's
-        # unformatted Rust would fail THIS build for code no commit here can fix.
+        # Scoped to workspace members. Before dependencies moved to crates.io,
+        # --all also checked sibling sources no commit here could fix.
         # Their formatting is their CI's job. Members are DERIVED rather than typed,
         # so adding a crate cannot silently drop it from the check, and an empty
         # derivation refuses rather than passing vacuously.

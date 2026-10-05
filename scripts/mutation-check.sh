@@ -19,9 +19,9 @@ cd "$(dirname "$0")/.."
 
 ROOT="$(pwd -P)"
 TARGET_DIR="$ROOT/target"
-# Path dependencies resolve relative to the repository checkout, so place the
-# temporary worktree beside that checkout rather than under /tmp. This keeps the
-# sibling repository (../commons) addressable in Cargo.toml.
+# Keep the temporary worktree beside the main checkout so checks that read the
+# push-envelope spec at ../subconscious/docs/specs/push-sealed-payload.md can
+# find it using the same sibling layout as CI.
 COMMON_DIR="$(git rev-parse --git-common-dir)"
 case "$COMMON_DIR" in
   /*) ;;

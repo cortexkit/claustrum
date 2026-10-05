@@ -4,6 +4,8 @@ import { lstat as nodeLstat, open as nodeOpen, readFile, realpath, stat as nodeS
 import { userInfo } from 'node:os'
 import { dirname, join } from 'node:path'
 
+import { acceptsAncestor } from './ancestor-permissions.js'
+
 export const HANDLE_FILE_CONTRACT = {
   maxBytes: 256 * 1024,
   mode: 0o600,
@@ -149,6 +151,7 @@ type HandleFileStat = {
   isSymbolicLink?(): boolean
   mode: number
   size?: number
+  gid?: number
   uid?: number
   mtimeMs?: number
 }
@@ -233,16 +236,9 @@ async function readHandleSnapshot(path = defaultHandleFilePath(), io: HandleFile
     if (expectedUid !== undefined && parent.uid !== undefined && parent.uid !== expectedUid) {
       invalid('handle file parent is not owned by the current uid')
     }
-    // GROUP-WRITABLE COUNTS, NOT ONLY WORLD-WRITABLE. Directory write permission governs
-    // unlink and create, so anyone who can write the parent can replace a mode-0600 file
-    // wholesale however tightly the file itself is locked. The owner check above does not
-    // close it: a directory I own can still be 0770, and then any other uid in that group
-    // can swap the handle file for one of theirs. A cross-uid attacker is not conceded by
-    // this threat model the way a same-uid one is.
-    //
-    // Sticky exempts both bits for one reason: with it set, a writer may only unlink files
-    // they own. Mirrors the Rust check in opencode_files.rs; the two must not drift.
-    if ((parent.mode & 0o022) !== 0 && (parent.mode & 0o1000) === 0) {
+    // Directory writers can replace a mode-0600 file. Only sticky directories or
+    // a group proven exclusive to the effective user may bypass the write-bit check.
+    if (!(await acceptsAncestor(parent))) {
       invalid('handle file parent is group- or world-writable without sticky bit')
     }
     // EVERY ANCESTOR, NOT JUST THIS ONE, OR THE GUARANTEE DOES NOT COMPOSE. The immediate
@@ -275,7 +271,7 @@ async function readHandleSnapshot(path = defaultHandleFilePath(), io: HandleFile
         } catch {
           ancestor = undefined
         }
-        if (ancestor && (ancestor.mode & 0o022) !== 0 && (ancestor.mode & 0o1000) === 0) {
+        if (ancestor && !(await acceptsAncestor(ancestor))) {
           invalid(`handle file ancestor ${component} is group- or world-writable without sticky bit`)
         }
         const next = dirname(component)

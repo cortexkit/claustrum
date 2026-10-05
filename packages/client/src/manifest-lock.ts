@@ -1,3 +1,4 @@
+import { acceptsAncestor } from './ancestor-permissions.js'
 import { constants as fsConstants } from 'node:fs'
 import { chmod, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat, unlink } from 'node:fs/promises'
 import { randomBytes, randomInt } from 'node:crypto'
@@ -163,7 +164,7 @@ async function refuseWritableAncestors(parent: string): Promise<void> {
   }
   for (;;) {
     const metadata = await stat(component)
-    if ((metadata.mode & 0o022) !== 0 && (metadata.mode & 0o1000) === 0) throw new Error('handle file ancestor is group- or world-writable without sticky bit')
+    if (!(await acceptsAncestor(metadata))) throw new Error('handle file ancestor is group- or world-writable without sticky bit')
     const next = dirname(component)
     if (next === component) return
     component = next

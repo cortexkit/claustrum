@@ -1236,7 +1236,93 @@ fn read_limited(path: &Path, max_bytes: u64, kind: &str) -> Result<Vec<u8>, Open
     })
 }
 
-/// Refuse when any ancestor of `parent` is group- or world-writable without sticky.
+#[cfg(unix)]
+fn effective_ids() -> (u32, u32) {
+    (
+        rustix::process::geteuid().as_raw(),
+        rustix::process::getegid().as_raw(),
+    )
+}
+
+#[cfg(unix)]
+fn account_records(source: &str, count: usize) -> Option<Vec<Vec<&str>>> {
+    source
+        .lines()
+        .filter(|line| !line.trim().is_empty() && !line.trim_start().starts_with('#'))
+        .map(|line| {
+            let fields: Vec<_> = line.split(':').collect();
+            let number = |text: &str| {
+                !text.is_empty()
+                    && text.bytes().all(|b| b.is_ascii_digit())
+                    && text.parse::<u32>().is_ok()
+            };
+            if fields.len() != count
+                || fields[0].is_empty()
+                || fields[0].chars().any(char::is_whitespace)
+                || !number(fields[2])
+                || (count == 7 && !number(fields[3]))
+            {
+                return None;
+            }
+            if count == 4
+                && !fields[3].is_empty()
+                && fields[3]
+                    .split(',')
+                    .any(|name| name.is_empty() || name.chars().any(char::is_whitespace))
+            {
+                return None;
+            }
+            Some(fields)
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+fn accepts_ancestor(
+    mode: u32,
+    uid: u32,
+    gid: u32,
+    euid: u32,
+    egid: u32,
+    passwd_path: &Path,
+    group_path: &Path,
+) -> bool {
+    if mode & 0o022 == 0 || mode & 0o1000 != 0 {
+        return true;
+    }
+    if mode & 0o002 != 0 || uid != euid || gid != egid {
+        return false;
+    }
+    let check = || -> Option<bool> {
+        let passwd_source = fs::read_to_string(passwd_path).ok()?;
+        let group_source = fs::read_to_string(group_path).ok()?;
+        let passwd = account_records(&passwd_source, 7)?;
+        let groups = account_records(&group_source, 4)?;
+        let users: Vec<_> = passwd
+            .iter()
+            .filter(|entry| entry[2].parse::<u32>().ok() == Some(euid))
+            .collect();
+        let matching: Vec<_> = groups
+            .iter()
+            .filter(|entry| entry[2].parse::<u32>().ok() == Some(egid))
+            .collect();
+        if users.len() != 1 || matching.len() != 1 {
+            return Some(false);
+        }
+        let name = users[0][0];
+        Some(
+            (matching[0][3].is_empty() || matching[0][3].split(',').all(|member| member == name))
+                && !passwd.iter().any(|entry| {
+                    entry[2].parse::<u32>().ok() != Some(euid)
+                        && entry[3].parse::<u32>().ok() == Some(egid)
+                }),
+        )
+    };
+    // Only complete local account data can prove exclusivity.
+    check().unwrap_or(false)
+}
+
+/// Refuse writable ancestors unless sticky or proven exclusive to the effective user.
 ///
 /// CANONICALISE FIRST, THEN WALK THE CANONICAL COMPONENTS. An unresolved walk is defeated
 /// by a symlink component pointing somewhere permissive: every individual stat passes, the
@@ -1249,12 +1335,11 @@ fn read_limited(path: &Path, max_bytes: u64, kind: &str) -> Result<Vec<u8>, Open
 /// configuration gets disabled, after which the real signal reaches nobody. Load-bearing
 /// rather than a courtesy.
 ///
-/// A parent that cannot be canonicalised returns Ok: the operation that follows reports the
-/// real errno, and refusing here would replace a precise "no such file" with a permissions
-/// verdict about a path we could not resolve.
+/// A parent that cannot be canonicalised is not checked here; allow the later file
+/// operation to report the resulting filesystem error.
 #[cfg(unix)]
 fn refuse_writable_ancestor(parent: &Path) -> Result<(), OpenCodeFilesError> {
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
     let Ok(resolved) = fs::canonicalize(parent) else {
         return Ok(());
@@ -1268,7 +1353,16 @@ fn refuse_writable_ancestor(parent: &Path) -> Result<(), OpenCodeFilesError> {
         // into a permissions verdict, the same trade the canonicalise arm declines.
         if let Ok(metadata) = fs::metadata(component) {
             let mode = metadata.permissions().mode();
-            if mode & 0o022 != 0 && mode & 0o1000 == 0 {
+            let (euid, egid) = effective_ids();
+            if !accepts_ancestor(
+                mode,
+                metadata.uid(),
+                metadata.gid(),
+                euid,
+                egid,
+                Path::new("/etc/passwd"),
+                Path::new("/etc/group"),
+            ) {
                 return Err(OpenCodeFilesError::InsecureParent {
                     path: component.to_path_buf(),
                     reason: "an ancestor is group- or world-writable without sticky bit",
@@ -1308,22 +1402,19 @@ fn validate_secure_parent(path: &Path) -> Result<(), OpenCodeFilesError> {
                 reason: "not owned by the current uid",
             });
         }
-        // GROUP-WRITABLE COUNTS, NOT ONLY WORLD-WRITABLE. Directory write permission
-        // governs unlink and create, so anyone who can write the parent can replace a
-        // mode-0600 file wholesale no matter how tightly the file itself is locked.
-        // The owner check above does not close this: a directory I own can still be
-        // group-writable (0770), and then any other uid in that group can swap the
-        // handle file for one of theirs.
-        //
-        // That matters more than the file's own mode, because a cross-uid attacker is
-        // NOT conceded by this threat model the way a same-uid one is. Latent here --
-        // the real directories are 0700/0755 -- which is exactly why a guard against
-        // misconfiguration must cover the misconfiguration.
-        //
-        // The sticky exemption applies to both bits for the same reason it applies to
-        // one: with it set, a writer may only unlink files they own.
+        // Directory writers can replace a mode-0600 file. Sticky or a proven
+        // user-private group prevents other users from exercising that power.
         let mode = metadata.permissions().mode();
-        if mode & 0o022 != 0 && mode & 0o1000 == 0 {
+        let (euid, egid) = effective_ids();
+        if !accepts_ancestor(
+            mode,
+            metadata.uid(),
+            metadata.gid(),
+            euid,
+            egid,
+            Path::new("/etc/passwd"),
+            Path::new("/etc/group"),
+        ) {
             return Err(OpenCodeFilesError::InsecureParent {
                 path: path.into(),
                 reason: "group- or world-writable without sticky bit",
@@ -2449,4 +2540,77 @@ mod read_limit_tests {
         fs::remove_file(at_limit).unwrap();
         fs::remove_file(over_limit).unwrap();
     }
+}
+
+#[cfg(all(test, unix))]
+mod private_group_tests {
+    use super::*;
+    struct Fixture {
+        passwd: &'static str,
+        group: &'static str,
+        mode: u32,
+        uid: u32,
+        gid: u32,
+        missing: Option<&'static str>,
+        unreadable: Option<&'static str>,
+    }
+    impl Default for Fixture {
+        fn default() -> Self {
+            Self {
+                passwd: "# comment\n\nalice:x:10:20::/:/bin/sh\n",
+                group: "# comment\n\nalice:x:20:\n",
+                mode: 0o775,
+                uid: 10,
+                gid: 20,
+                missing: None,
+                unreadable: None,
+            }
+        }
+    }
+    fn check(fixture: Fixture) -> bool {
+        let dir = std::env::temp_dir().join(format!("private-group-{}", random_nonce().unwrap()));
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join("passwd"), fixture.passwd).unwrap();
+        fs::write(dir.join("group"), fixture.group).unwrap();
+        if let Some(file) = fixture.missing {
+            fs::remove_file(dir.join(file)).unwrap();
+        }
+        // Reading a directory fails even for privileged test runners.
+        if let Some(file) = fixture.unreadable {
+            fs::remove_file(dir.join(file)).unwrap();
+            fs::create_dir(dir.join(file)).unwrap();
+        }
+        let accepted = accepts_ancestor(
+            fixture.mode,
+            fixture.uid,
+            fixture.gid,
+            10,
+            20,
+            &dir.join("passwd"),
+            &dir.join("group"),
+        );
+        fs::remove_dir_all(dir).unwrap();
+        accepted
+    }
+    macro_rules! case {
+        ($name:ident, $expected:expr, $($field:ident: $value:expr),* $(,)?) => {
+            #[test] fn $name() { assert_eq!(check(Fixture { $($field: $value,)* ..Fixture::default() }), $expected); }
+        }
+    }
+    case!(ancestor_rule_private_group, true,);
+    case!(ancestor_rule_self_member, true, group: "alice:x:20:alice\n");
+    case!(ancestor_rule_other_member, false, group: "alice:x:20:bob\n");
+    case!(ancestor_rule_other_primary, false, passwd: "alice:x:10:20::/:/bin/sh\nbob:x:11:20::/:/bin/sh\n");
+    case!(ancestor_rule_absent_uid, false, passwd: "bob:x:11:21::/:/bin/sh\n");
+    case!(ancestor_rule_absent_gid, false, group: "bob:x:21:\n");
+    case!(ancestor_rule_missing_passwd, false, missing: Some("passwd"));
+    case!(ancestor_rule_missing_group, false, missing: Some("group"));
+    case!(ancestor_rule_unreadable_passwd, false, unreadable: Some("passwd"));
+    case!(ancestor_rule_unreadable_group, false, unreadable: Some("group"));
+    case!(ancestor_rule_world_writable, false, mode: 0o777);
+    case!(ancestor_rule_sticky, true, mode: 0o1777);
+    case!(ancestor_rule_other_owner, false, uid: 11);
+    case!(ancestor_rule_other_gid, false, gid: 21);
+    case!(ancestor_rule_malformed_passwd, false, passwd: "broken\n");
+    case!(ancestor_rule_malformed_group, false, group: "broken\n");
 }

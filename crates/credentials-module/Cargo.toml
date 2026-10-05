@@ -55,6 +55,10 @@ chrono = { workspace = true }
 # add-vs-replace account prompt. CLI-only; the daemon never prompts.
 dialoguer = { version = "0.12", features = ["fuzzy-select"] }
 
+[target.'cfg(unix)'.dependencies]
+# Effective uid/gid for ancestor checks; the CLI forbids unsafe code.
+rustix = { version = "1.1.4", features = ["process"] }
+
 [dev-dependencies]
 credentials-core = { path = "../credentials-core", features = ["test-support"] }
 # Unix PTY smoke coverage drives dialoguer's real terminal adapter under the gate.

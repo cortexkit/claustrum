@@ -1,3 +1,4 @@
+import { acceptsAncestor } from './ancestor-permissions.js'
 import { randomBytes } from 'node:crypto'
 import { chmod, mkdir, open, realpath, rename, stat, unlink } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
@@ -30,7 +31,7 @@ async function refuseWritableAncestor(parent: string): Promise<void> {
     const metadata = await stat(component).catch(() => undefined)
     // Canonicalisation already traversed this component. If a later stat races with a
     // rename, let the create/rename operation below report the concrete failure.
-    if (metadata && (metadata.mode & 0o022) !== 0 && (metadata.mode & 0o1000) === 0) {
+    if (metadata && !(await acceptsAncestor(metadata))) {
       throw new Error(`enrollment token ancestor ${component} is group- or world-writable without sticky bit`)
     }
     const next = dirname(component)
@@ -42,8 +43,8 @@ async function refuseWritableAncestor(parent: string): Promise<void> {
 /**
  * Atomically replace a consumer's enrollment credential.
  *
- * The file is always mode 0600 and every canonical ancestor is rejected when it is
- * group- or world-writable without sticky. This is the same rule implemented by the
+ * The file is always mode 0600. Writable canonical ancestors require sticky or a
+ * proven user-private group. This is the same rule implemented by the
  * shipped `refuse_writable_ancestor` symbol in `opencode_files.rs`.
  */
 export async function writeEnrollmentTokenFile(path: string, value: EnrollmentTokenFile): Promise<void> {

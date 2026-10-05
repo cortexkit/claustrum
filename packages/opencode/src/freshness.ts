@@ -27,6 +27,9 @@ type Slot = {
   // Reporting-only: a warm budget miss. Must not feed #canWarm — a cooldown here
   // would skip the next request for TRANSIENT_BACKOFF_MS after a one-request blip.
   warmTimedOut?: boolean;
+  // The generation of a warm whose caller gave up on it at the budget. Its late SUCCESS is
+  // still kept (see #bounded); its late FAILURE is not applied (see the `.catch` in #warm).
+  abandonedGeneration?: number;
 };
 
 type IntervalHandle = { unref?: () => unknown };
@@ -51,6 +54,14 @@ const OAUTH_FRESH_MS = 60_000;
 const OAUTH_TICK_MS = 60_000;
 const DEFAULT_MIN_TTL_MS = 270 * 60_000;
 const WARM_BUDGET_MS = 100;
+// Lateness at or above which a budget timer fire is treated as the result of a blocked
+// event loop (Bun drains an expired timer before buffered socket I/O after a synchronous
+// block past the budget) rather than a genuinely slow RPC.
+const WARM_LATE_MS = 20;
+// A single short re-arm when the first fire is late: long enough for the poll phase to
+// run and the buffered reply to land, short enough that a hung RPC still ends near
+// `WARM_BUDGET_MS + WARM_GRACE_MS`.
+const WARM_GRACE_MS = 10;
 const TRANSIENT_BACKOFF_MS = 60_000;
 const REAUTH_BACKOFF_MS = 5 * 60_000;
 export const DEFAULT_RETRY_AFTER_MS = 60_000;
@@ -141,10 +152,12 @@ export class FreshnessController {
     await this.#refreshHandleVersion();
     await Promise.all(this.#accounts.map(async (account) => {
       const slot = this.#slot(account);
-      // Expire on timeout: a hung `credential.get` must not pin the in-flight generation
-      // for every later tick -- the only consequence of leaving it bound is that the
-      // idle account never warms or retries. The detached original completion is already
-      // fenced by `#isCurrent` against the bumped generation, so it cannot poison the slot.
+      // Expire on timeout: a hung `credential.get` must not pin the slot's `inFlight` for
+      // every later tick -- the only consequence of leaving it bound is that the idle
+      // account never warms or retries. The detached original completion is not discarded:
+      // a late success is kept unless a newer warm (which bumps the generation when it
+      // starts) or an `invalidate()` has superseded it, and a late failure is never applied
+      // (see #bounded and the `.catch` in #warm).
       if (this.#canWarm(slot)) await this.#bounded(account, this.#warm(account, true), true);
     }));
   }
@@ -227,7 +240,15 @@ export class FreshnessController {
         return served;
       })
       .catch((error: unknown) => {
-        if (this.#isCurrent(slot, version, generation)) this.#markFailure(account, slot, error);
+        // A failure from a warm its caller already abandoned is not applied. Unlike a late
+        // success, it carries no material, only a verdict that may be older than reality: an
+        // RPC that hung across an operator re-login comes back `auth_required` for a
+        // credential that is now fine, and applying it would block retries for
+        // REAUTH_BACKOFF_MS (or, for `not_found`, mark the slot `gone` for good). Skipping it
+        // costs one re-fetch, which returns the current verdict.
+        if (this.#isCurrent(slot, version, generation) && slot.abandonedGeneration !== generation) {
+          this.#markFailure(account, slot, error);
+        }
         return undefined;
       })
       .finally(() => {
@@ -242,9 +263,26 @@ export class FreshnessController {
   }
 
   async #bounded(account: FreshnessAccount, promise: Promise<ServedCredential | undefined>, expire = true): Promise<ServedCredential | undefined> {
+    const armedAt = this.#now();
     let timeout: unknown;
+    let resolveDeadline!: () => void;
+    let rearmed = false;
+    const fireTimer = () => {
+      // Expired-budget ordering fires the timer before buffered I/O drains after a
+      // synchronous loop block. A setImmediate defer was measured and did not help.
+      // Re-arming once gives the poll phase a chance to run before the verdict lands;
+      // a second late fire would just stall again, so the re-arm is bounded.
+      const late = this.#now() - armedAt - WARM_BUDGET_MS;
+      if (late >= WARM_LATE_MS && !rearmed) {
+        rearmed = true;
+        timeout = this.#setTimeout(fireTimer, WARM_GRACE_MS);
+      } else {
+        resolveDeadline();
+      }
+    };
     const deadline = new Promise<void>((resolve) => {
-      timeout = this.#setTimeout(() => resolve(), WARM_BUDGET_MS);
+      resolveDeadline = resolve;
+      timeout = this.#setTimeout(fireTimer, WARM_BUDGET_MS);
     });
     const result = await Promise.race([
       promise.then((served) => ({ kind: "completed" as const, served })),
@@ -253,9 +291,20 @@ export class FreshnessController {
     if (timeout !== undefined) this.#clearTimeout(timeout);
     if (result.kind === "timeout") {
       const slot = this.#slot(account);
+      // Clear `inFlight` so the next tick re-arms a slot whose RPC hung -- but do NOT bump
+      // `slot.generation`. The budget bounds how long a CALLER waits; it must not invalidate
+      // work the vault has already done. A generation bump makes the late result fail
+      // `#isCurrent` at the end of #warm, discarding a fetch that succeeded, so on any lane
+      // where the vault reliably exceeds the budget the cache never populates and every
+      // request re-fetches and misses again. A genuinely superseding warm still invalidates
+      // this one by bumping the generation itself when it starts.
+      // Record the abandoned generation so that a late FAILURE from it is not applied: the
+      // two outcomes are deliberately asymmetric (a late success carries material the vault
+      // served; a late failure carries only a possibly-stale verdict). `inFlight === promise`
+      // means no newer warm has started, so `slot.generation` is still this warm's.
       if (expire && slot.inFlight === promise) {
         slot.inFlight = undefined;
-        slot.generation += 1;
+        slot.abandonedGeneration = slot.generation;
       }
       slot.warmTimedOut = true;
       this.#log?.warn({

@@ -39,8 +39,12 @@ for (const [name, accepted, overrides] of cases) {
     } finally { await rm(dir, { recursive: true, force: true }) }
   })
 }
+// POSIX only, like the other permission tests: Windows reports every directory as
+// group- and world-writable and has no effective uid or gid, so the client refuses
+// there regardless of the account files, exactly as before this rule.
+const onPosix = process.platform !== 'win32'
 for (const otherMember of [false, true]) {
-  test(`enrollment private ancestor ${otherMember ? 'refuses other member' : 'succeeds'}`, async () => {
+  test.skipIf(!onPosix)(`enrollment private ancestor ${otherMember ? 'refuses other member' : 'succeeds'}`, async () => {
     const dir = await mkdtemp(join(tmpdir(), 'enrollment-private-'))
     try {
       const metadata = await stat(dir)

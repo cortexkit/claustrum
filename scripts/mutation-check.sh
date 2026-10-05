@@ -19,9 +19,9 @@ cd "$(dirname "$0")/.."
 
 ROOT="$(pwd -P)"
 TARGET_DIR="$ROOT/target"
-# Keep the temporary worktree beside the main checkout so checks that read the
-# push-envelope spec at ../subconscious/docs/specs/push-sealed-payload.md can
-# find it using the same sibling layout as CI.
+# The temporary worktree sits beside the main checkout. That placement once kept
+# sibling path dependencies (../commons, ../subconscious) resolvable from it; every
+# dependency now comes from crates.io, so nothing here requires it any more.
 COMMON_DIR="$(git rev-parse --git-common-dir)"
 case "$COMMON_DIR" in
   /*) ;;

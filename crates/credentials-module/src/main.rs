@@ -482,6 +482,86 @@ fn init_fleet_log(module_id: &str, data_dir: &std::path::Path) {
     }
 }
 
+/// The backup descriptor for this module, written to `<data_dir>/engram-catalog.json`.
+/// engram, the fleet's backup module, reads that file in every module's data dir to
+/// learn which paths to capture and how. The daemon writes it at every start, so this
+/// constant is the only copy anyone edits. It used to be placed by hand, and that copy
+/// fell behind: `signed-envelopes/` was kept for weeks and never backed up.
+///
+/// `signed-payloads/` and `signed-envelopes/` are written by hand during manifest
+/// signing ceremonies (see `docs/gh-manifest-signing-procedure.md`), not by the daemon,
+/// so nothing else would notice them missing from a backup. Any new directory the vault
+/// retains in its data dir belongs here, and the test beside this constant names them.
+const ENGRAM_CATALOG_JSON: &str = r#"{
+  "schema_version": 1,
+  "module_id": "claustrum",
+  "entries": [
+    {
+      "entry_id": "claustrum/store",
+      "class": "portable",
+      "mechanism": "whole-db",
+      "path": "store.db",
+      "writer_interaction": "backup-api-live"
+    },
+    {
+      "entry_id": "claustrum/signed-payloads",
+      "class": "portable",
+      "mechanism": "filetree",
+      "path": "signed-payloads",
+      "writer_interaction": "none"
+    },
+    {
+      "entry_id": "claustrum/signed-envelopes",
+      "class": "portable",
+      "mechanism": "filetree",
+      "path": "signed-envelopes",
+      "writer_interaction": "none"
+    }
+  ]
+}
+"#;
+
+/// Write [`ENGRAM_CATALOG_JSON`] to `<data_dir>/engram-catalog.json` unless the file
+/// already holds exactly those bytes. Returns whether it wrote.
+///
+/// Owner-only (0600) and atomic: a temp file is written and synced, renamed over the
+/// old one, and the directory is synced, so engram never reads a half-written
+/// descriptor. engram refuses to capture a module whose descriptor fails to parse, so
+/// a torn one would stop the vault being backed up.
+fn place_engram_catalog(data_dir: &std::path::Path) -> std::io::Result<bool> {
+    use std::io::Write as _;
+    let path = data_dir.join("engram-catalog.json");
+    if std::fs::read(&path).ok().as_deref() == Some(ENGRAM_CATALOG_JSON.as_bytes()) {
+        return Ok(false);
+    }
+    let tmp = data_dir.join("engram-catalog.json.tmp");
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&tmp)?;
+    file.write_all(ENGRAM_CATALOG_JSON.as_bytes())?;
+    file.sync_all()?;
+    drop(file);
+    std::fs::rename(&tmp, &path)?;
+    // Syncing the directory makes the rename itself durable across a crash. Only unix
+    // can open a directory to sync it; elsewhere the file's own sync is all there is.
+    #[cfg(unix)]
+    match std::fs::File::open(data_dir).and_then(|dir| dir.sync_all()) {
+        Ok(()) => {}
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::Unsupported | std::io::ErrorKind::InvalidInput
+            ) => {}
+        Err(error) => return Err(error),
+    }
+    Ok(true)
+}
+
 /// Spawn the background task that keeps the cached health snapshot current. It
 /// ticks on [`HEALTH_REFRESH_INTERVAL`] and recomputes off the probe path, so the
 /// channel-0 `health.check` reply is always a cheap in-memory read of the last
@@ -559,6 +639,17 @@ async fn build_surface(
         None => resolver::resolve(&resolver_config, None),
     }
     .map_err(|e| ModuleError::Message(format!("master key: {e}")))?;
+    // After key resolution, because the resolver creates the data dir and sets it
+    // owner-only. Failing to write the descriptor only means engram keeps backing up
+    // whatever descriptor is already there (or none), so it is logged and the vault
+    // still starts.
+    if let Err(error) = place_engram_catalog(&resolver_config.data_dir) {
+        tracing::warn!(
+            target: "backup",
+            kind = ?error.kind(),
+            "could not write engram-catalog.json; engram backs up the previous descriptor, if any"
+        );
+    }
     EncryptedStore::migrate_with_key(&store, &key)
         .map_err(|e| ModuleError::Message(format!("migrate: {e}")))?;
 
@@ -11986,6 +12077,8 @@ mod tests {
     ///   warn!     undecodable channel-0 request: fixed text only, no body or decode error
     ///   warn!     route bind refused under a flow scope: fixed text and the daemon-chosen
     ///             route channel number, never the stamp, its flow id, or the principal
+    ///   warn!     engram-catalog.json could not be written: fixed text and the io error
+    ///             KIND only (never its message, which can carry a path)
     ///
     /// This test cannot see WHAT a new site logs. What it does is make a new site
     /// impossible to add without editing the count here, which puts the question in front
@@ -12016,7 +12109,7 @@ mod tests {
         let observed = (println, eprintln, tracing, other);
         assert_eq!(
             observed,
-            (1, 2, 3, 0),
+            (1, 2, 4, 0),
             "the daemon's output sites changed (println, eprintln, tracing, other). Before \
              updating this count, confirm the new site logs no secret and bounds any \
              request field -- then add it to the list in \
@@ -12029,5 +12122,87 @@ mod tests {
             sources[0].contains("route-epoch drop"),
             "positive control failed: the scan could not see the route-epoch drop line"
         );
+    }
+}
+
+#[cfg(test)]
+mod engram_catalog_tests {
+    use super::{place_engram_catalog, ENGRAM_CATALOG_JSON};
+    use credentials_core::test_support::TestTempDir;
+
+    fn temp_dir(tag: &str) -> TestTempDir {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        TestTempDir::new(format!(
+            "ck-cred-catalog-{tag}-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    /// The engram backup descriptor must name this module and every path the vault keeps
+    /// in its data dir. An omitted directory is the defect this constant replaced: the
+    /// descriptor that used to be placed by hand never listed `signed-envelopes/`, so
+    /// those files were never backed up, and nothing reported it.
+    #[test]
+    fn catalog_declares_the_store_and_every_retained_directory() {
+        let catalog: serde_json::Value =
+            serde_json::from_str(ENGRAM_CATALOG_JSON).expect("catalog parses");
+        assert_eq!(catalog["schema_version"], 1);
+        assert_eq!(catalog["module_id"], credentials_core::contract::MODULE_ID);
+        let entries = catalog["entries"].as_array().expect("entries array");
+        let declared = |path: &str, mechanism: &str| {
+            entries
+                .iter()
+                .any(|entry| entry["path"] == path && entry["mechanism"] == mechanism)
+        };
+        assert!(
+            declared("store.db", "whole-db"),
+            "the store must be captured"
+        );
+        for retained in ["signed-payloads", "signed-envelopes"] {
+            assert!(
+                declared(retained, "filetree"),
+                "{retained}/ is kept in the data dir and must be backed up"
+            );
+        }
+    }
+
+    /// The first start writes `engram-catalog.json` at mode 0600 (owner-only); a second
+    /// start with the same bytes on disk writes nothing; a file with different bytes,
+    /// such as an old hand-written descriptor, is replaced.
+    #[test]
+    fn placement_writes_owner_only_and_is_idempotent() {
+        let dir = temp_dir("place");
+        let path = dir.join("engram-catalog.json");
+
+        assert!(place_engram_catalog(&dir).expect("first write"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), ENGRAM_CATALOG_JSON);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "the descriptor is owner-only");
+        }
+        assert!(
+            !dir.join("engram-catalog.json.tmp").exists(),
+            "no temp file left behind"
+        );
+
+        assert!(
+            !place_engram_catalog(&dir).expect("second start"),
+            "unchanged bytes: no write"
+        );
+
+        std::fs::write(
+            &path,
+            b"{\"schema_version\":1,\"module_id\":\"claustrum\",\"entries\":[]}",
+        )
+        .unwrap();
+        assert!(
+            place_engram_catalog(&dir).expect("stale copy"),
+            "a stale copy is replaced"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), ENGRAM_CATALOG_JSON);
     }
 }

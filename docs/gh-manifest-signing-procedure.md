@@ -219,6 +219,11 @@ one. Keep envelopes beside the store, not in it:
 <data_dir>/signed-envelopes/v<N>-envelope.json   0600
 ```
 
+Both directories are backed up by engram, the fleet's backup module, using the descriptor
+the daemon writes at every start (`ENGRAM_CATALOG_JSON` in
+`crates/credentials-module/src/main.rs`). A new directory kept beside them needs an entry
+in that descriptor; otherwise it is not backed up and no warning is reported.
+
 The v13 envelope sat inside `signed-payloads/` for three weeks, so every audit reported two
 findings that were not holes. An audit that always reports something teaches its reader to
 skim past findings, including a real missing payload.

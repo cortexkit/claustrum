@@ -1425,6 +1425,26 @@ fn report(frame: &Frame, show_account_id: bool, show_claims: bool, describe: boo
                             println!("   {key}: {v}");
                         }
                     }
+                    // THE SERVED EXPIRY, PRINTED EVEN WHEN NULL. Consumers refresh a token early
+                    // only when the vault serves an expiry with it, so a null here means no
+                    // consumer will refresh it before it dies. When the payload is a JWT, its
+                    // own `exp` is printed beside the served value so a stored expiry that has
+                    // drifted from the token's real one shows up as two different numbers.
+                    match result.and_then(|r| r.get("expires_at_ms")) {
+                        Some(Value::Number(ms)) => println!("   expires_at_ms (served): {ms}"),
+                        Some(Value::Null) | None => {
+                            println!("   expires_at_ms (served): null -- no early refresh possible")
+                        }
+                        Some(other) => println!("   expires_at_ms (served): unexpected {other}"),
+                    }
+                    if let Some(exp) = jwt_claims_from_payload(&bytes)
+                        .and_then(|claims| claims.get("exp").and_then(Value::as_i64))
+                    {
+                        println!(
+                            "   token exp (from the JWT, ms): {}",
+                            exp.saturating_mul(1000)
+                        );
+                    }
                     if show_account_id {
                         match chatgpt_account_id_from_payload(&bytes) {
                             Some(account) => println!("   chatgpt account id (client-side decode): {account}"),

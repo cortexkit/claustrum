@@ -93,6 +93,29 @@ pub async fn validate_key(
                 Err(e) => ValidationOutcome::Warning(format!("transport error: {}", e)),
             }
         }
+        KeyValidation::AwsApiKeyGet { url } => {
+            // Request from decolua/9router src/lib/oauth/services/kiro.js,
+            // listAvailableApiKeyModels at a99cf57239ff778b61e434c2786009d5ed1c412c.
+            // TokenType makes Amazon Q authenticate the bearer as an API key.
+            // Curl with invalid keys returned 403 here but 200 with empty profiles
+            // on bearer-only profile listing; the catalog records those observations.
+            let auth = format!("Bearer {}", key);
+            let headers = [
+                ("Authorization", auth.as_str()),
+                ("TokenType", "API_KEY"),
+                ("Accept", "application/json"),
+            ];
+            match transport.get(url, &headers).await {
+                Ok(resp) if (200..=299).contains(&resp.status) => ValidationOutcome::Valid,
+                Ok(resp) if resp.status == 403 => {
+                    ValidationOutcome::Invalid("unauthorized (status 403)".to_string())
+                }
+                Ok(resp) => {
+                    ValidationOutcome::Warning(format!("unexpected status {}", resp.status))
+                }
+                Err(e) => ValidationOutcome::Warning(format!("transport error: {}", e)),
+            }
+        }
         KeyValidation::GetEndpoint { url, auth_header } => {
             let headers = match auth_header {
                 AuthHeaderScheme::Bearer => vec![("Authorization", format!("Bearer {}", key))],
@@ -225,6 +248,64 @@ mod tests {
                 "placeholder must not be empty"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn aws_api_key_get_pins_request_shape() {
+        let provider = API_KEY_PROVIDERS.iter().find(|p| p.key == "kiro").unwrap();
+        let transport = FixtureTransport::ok(200, r#"{"models":[{"modelId":"test"}]}"#);
+        assert_eq!(
+            validate_key(&transport, &provider.validation, "ksk_test_fixture").await,
+            ValidationOutcome::Valid
+        );
+        let reqs = transport.requests();
+        assert_eq!(reqs.len(), 1);
+        assert_eq!(
+            reqs[0].url,
+            "https://q.us-east-1.amazonaws.com/ListAvailableModels?origin=AI_EDITOR"
+        );
+        assert_eq!(
+            reqs[0].headers,
+            vec![
+                (
+                    "Authorization".to_string(),
+                    "Bearer ksk_test_fixture".to_string()
+                ),
+                ("TokenType".to_string(), "API_KEY".to_string()),
+                ("Accept".to_string(), "application/json".to_string()),
+            ]
+        );
+        assert!(reqs[0].body.is_empty());
+        assert!(reqs[0].content_type.is_empty());
+    }
+
+    #[tokio::test]
+    async fn aws_api_key_get_classifies_observed_auth_refusal() {
+        let validation = KeyValidation::AwsApiKeyGet {
+            url: "https://q.us-east-1.amazonaws.com/ListAvailableModels?origin=AI_EDITOR",
+        };
+        for status in [200, 299, 400, 401, 403, 429, 500] {
+            let transport = FixtureTransport::ok(
+                status,
+                r#"{"message":"The bearer token included in the request is invalid.","reason":null}"#,
+            );
+            let outcome = validate_key(&transport, &validation, "ksk_test_fixture").await;
+            match status {
+                200 | 299 => assert_eq!(outcome, ValidationOutcome::Valid),
+                403 => assert!(matches!(outcome, ValidationOutcome::Invalid(_))),
+                _ => assert!(
+                    matches!(outcome, ValidationOutcome::Warning(_)),
+                    "status {status}"
+                ),
+            }
+        }
+        let transport = FixtureTransport::new(vec![Err(RefreshError::Transport(
+            "network down".to_string(),
+        ))]);
+        assert!(matches!(
+            validate_key(&transport, &validation, "ksk_test_fixture").await,
+            ValidationOutcome::Warning(_)
+        ));
     }
 
     #[tokio::test]

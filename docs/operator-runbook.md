@@ -306,11 +306,20 @@ ck auth login
 The picker covers OAuth (`anthropic`, `openai`, `xai`, `google`, `antigravity`),
 device-flow (`github-copilot`, `kimi`, and `--device` for openai/xai), custom
 browser flows (`cursor`, `devin`, `snowflake`, `digitalocean`), and API-key
-providers (`zai`, `openrouter`, `deepseek`, `groq`, …), which are validated against
+providers (`zai`, `openrouter`, `kiro`, `deepseek`, `groq`, …), which are validated against
 the provider before being stored. A few API-key providers have no probe that can
 tell a bad key from a good one (for example `opencode-go`, `vercel-ai-gateway`,
 `cline-pass`); for those, login prints a `NOTE:` line saying the key was stored
 without being checked, and why.
+
+For Kiro, create a long-lived `ksk_` key at https://app.kiro.dev under
+Account → Settings → API Keys, then run `ck auth login --provider kiro` to
+store it as `apikey:kiro` (or a labeled account). Login checks the key with
+Amazon Q's model catalog using bearer auth and `TokenType: API_KEY`; the
+CodeWhisperer profile-list endpoint accepts invalid keys and is not a key check.
+A successful response verifies the key; the observed 403 auth refusal rejects
+it, while other statuses or network errors produce a warning. No profile ARN
+is stored or served.
 
 API-key credentials are stamped with a category at creation: model providers get
 `llm-provider`, and the web-search keys (`tavily`, `kagi`, `exa`, `parallel`) get

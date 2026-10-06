@@ -115,6 +115,12 @@ pub enum KeyValidation {
         base_url: &'static str,
         model: &'static str,
     },
+    /// Amazon Q's API-key GET requires `TokenType: API_KEY` as well as a bearer.
+    /// Curl probes on 2026-10-06 with prefixed and malformed synthetic keys both
+    /// returned 403 (AccessDeniedException header; body: "The bearer token included
+    /// in the request is invalid."). CodeWhisperer ListAvailableProfiles instead
+    /// returned 200 with empty profiles for an invalid key, so it cannot verify keys.
+    AwsApiKeyGet { url: &'static str },
     GetEndpoint {
         url: &'static str,
         auth_header: AuthHeaderScheme,
@@ -146,6 +152,21 @@ use ModelVendor::{
 };
 
 pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
+    ApiKeyProvider {
+        key: "kiro",
+        display_name: "Kiro",
+        default_id: "apikey:kiro",
+        dashboard_url: "https://app.kiro.dev",
+        placeholder: "ksk_...",
+        validation: KeyValidation::AwsApiKeyGet {
+            url: "https://q.us-east-1.amazonaws.com/ListAvailableModels?origin=AI_EDITOR",
+        },
+        categories: LLM,
+        // 9router's open-sse/providers/registry/kiro.js lists Claude, DeepSeek,
+        // Qwen, GLM and MiniMax models. Its kiroConstants.js adds thinking/agentic
+        // suffix variants of those models, not additional model vendors.
+        serves: &[Anthropic, DeepSeek, Qwen, Zhipu, MiniMax],
+    },
     ApiKeyProvider {
         key: "zai",
         display_name: "Z.AI (GLM Coding Plan)",
@@ -1455,9 +1476,28 @@ mod tests {
     }
 
     #[test]
+    fn kiro_api_key_catalog_entry_is_llm_provider() {
+        let row = api_key_provider("kiro").expect("Kiro api-key row");
+        assert_eq!(row.default_id, "apikey:kiro");
+        assert_eq!(row.display_name, "Kiro");
+        assert_eq!(row.dashboard_url, "https://app.kiro.dev");
+        assert_eq!(row.placeholder, "ksk_...");
+        assert_eq!(category_defaults("apikey:kiro"), ["llm-provider"]);
+        assert_eq!(category_defaults("apikey:kiro:work"), ["llm-provider"]);
+        assert_eq!(row.serves, &[Anthropic, DeepSeek, Qwen, Zhipu, MiniMax]);
+        assert_eq!(
+            row.validation,
+            KeyValidation::AwsApiKeyGet {
+                url: "https://q.us-east-1.amazonaws.com/ListAvailableModels?origin=AI_EDITOR",
+            }
+        );
+    }
+
+    #[test]
     fn both_catalogs_have_exact_owner_supplied_assignments() {
-        // 15 original rows, 37 model providers mirrored from oh-my-pi, 4 search APIs.
-        assert_eq!(API_KEY_PROVIDERS.len(), 56);
+        // 15 original API-key rows, 37 model providers mirrored from oh-my-pi,
+        // Kiro, and 4 search APIs.
+        assert_eq!(API_KEY_PROVIDERS.len(), 57);
         assert_eq!(LOGIN_PROVIDERS.len(), 11);
         // Which api-key rows are `llm-provider` and which are `web-search` is pinned by
         // the two category tests below, which also require every row to be listed.
@@ -1631,7 +1671,11 @@ mod tests {
     /// for the bare id and for a labeled account, since both are stamped at creation.
     #[test]
     fn every_model_provider_row_is_stamped_llm_provider() {
-        for key in ORIGINAL_LLM_KEYS.iter().chain(MIRRORED_LLM_KEYS) {
+        for key in ORIGINAL_LLM_KEYS
+            .iter()
+            .chain(MIRRORED_LLM_KEYS)
+            .chain([&"kiro"])
+        {
             let row = api_key_provider(key).unwrap_or_else(|| panic!("no api-key row {key}"));
             assert_eq!(row.default_id, format!("apikey:{key}"));
             for id in [format!("apikey:{key}"), format!("apikey:{key}:work")] {
@@ -1644,7 +1688,8 @@ mod tests {
             assert!(
                 ORIGINAL_LLM_KEYS.contains(&entry.key)
                     || MIRRORED_LLM_KEYS.contains(&entry.key)
-                    || SEARCH_KEYS.contains(&entry.key),
+                    || SEARCH_KEYS.contains(&entry.key)
+                    || entry.key == "kiro",
                 "api-key row {} is in no category list",
                 entry.key
             );
@@ -1991,6 +2036,10 @@ mod source_ownership_tests {
         assert_eq!(
             api,
             vec![
+                (
+                    "kiro",
+                    vec!["anthropic", "deepseek", "qwen", "zhipu", "minimax"]
+                ),
                 ("zai", vec!["zhipu"]),
                 (
                     "openrouter",

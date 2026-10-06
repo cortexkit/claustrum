@@ -6616,6 +6616,15 @@ mod tests {
         assert!(zai_provider.is_some());
         let zai = zai_provider.unwrap();
         assert_eq!(zai.default_id, "apikey:zai");
+
+        let kiro = api_key_login::API_KEY_PROVIDERS
+            .iter()
+            .find(|p| p.key == "kiro")
+            .unwrap();
+        assert_eq!(default_login_id("kiro"), "apikey:kiro");
+        assert_eq!(kiro.default_id, "apikey:kiro");
+        assert!(login_id_is_valid(kiro.default_id, "apikey:kiro:work"));
+        assert!(!login_id_is_valid(kiro.default_id, "apikey:openai"));
     }
 
     #[test]

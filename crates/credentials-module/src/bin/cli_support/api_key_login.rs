@@ -11,6 +11,10 @@ pub enum ValidationOutcome {
     Unchecked(&'static str),
 }
 
+/// The message Amazon Q returns, with a 403, for a bearer it does not accept. Observed on
+/// 2026-10-06 for both a `ksk_`-prefixed and a malformed synthetic key.
+const AWS_INVALID_BEARER_MESSAGE: &str = "The bearer token included in the request is invalid.";
+
 pub async fn validate_key(
     transport: &dyn HttpTransport,
     validation: &KeyValidation,
@@ -107,7 +111,15 @@ pub async fn validate_key(
             ];
             match transport.get(url, &headers).await {
                 Ok(resp) if (200..=299).contains(&resp.status) => ValidationOutcome::Valid,
-                Ok(resp) if resp.status == 403 => {
+                // Only the refusal actually observed for a bad key counts as Invalid. AWS
+                // also answers 403 AccessDenied for reasons that say nothing about the key
+                // (no subscription, a policy denial), and refusing a good key blocks the
+                // login outright; those 403s fall through to Warning and the key is kept.
+                Ok(resp)
+                    if resp.status == 403
+                        && String::from_utf8_lossy(&resp.body)
+                            .contains(AWS_INVALID_BEARER_MESSAGE) =>
+                {
                     ValidationOutcome::Invalid("unauthorized (status 403)".to_string())
                 }
                 Ok(resp) => {
@@ -302,6 +314,16 @@ mod tests {
         let transport = FixtureTransport::new(vec![Err(RefreshError::Transport(
             "network down".to_string(),
         ))]);
+        assert!(matches!(
+            validate_key(&transport, &validation, "ksk_test_fixture").await,
+            ValidationOutcome::Warning(_)
+        ));
+        // A 403 that is not the invalid-bearer refusal says nothing about the key, so
+        // it must not refuse the login.
+        let transport = FixtureTransport::ok(
+            403,
+            r#"{"message":"User is not authorized to access this resource","reason":null}"#,
+        );
         assert!(matches!(
             validate_key(&transport, &validation, "ksk_test_fixture").await,
             ValidationOutcome::Warning(_)

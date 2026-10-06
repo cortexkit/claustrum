@@ -1,10 +1,10 @@
-//! CLI driver for the two Google-family vault-native login flows.
+//! CLI driver for the Google-family vault-native login flows.
 //!
 //! The core crate owns the provider wire helpers; this module owns only the
 //! interactive browser/listener and admin-store integration.
 
 use credentials_core::google_login::{
-    self as google, GoogleLoginProvider, AUTHORIZE_URL, SCOPES, TOKEN_URL,
+    self as google, GoogleLoginProvider, AUTHORIZE_URL, TOKEN_URL,
 };
 use credentials_core::oauth_login::{
     build_authorize_url_google, exchange_authorization_code_google, generate_state, parse_callback,
@@ -27,6 +27,54 @@ pub fn default_id(provider: &str) -> Option<&'static str> {
     GoogleLoginProvider::parse(provider).map(GoogleLoginProvider::default_id)
 }
 
+const GMAIL_COMMAND: &str =
+    "ck auth login --provider gmail --client-id <id> --client-secret-file <path>";
+
+/// Refuse client flags before touching the vault or opening a browser. The picker
+/// uses the same validation so selecting Gmail cannot use a public Google client.
+pub fn validate_client_flags(args: &[String], provider: &str) -> Result<(), CliError> {
+    if provider != "gmail" {
+        if has_flag(args, "--client-id") || has_flag(args, "--client-secret-file") {
+            return Err(CliError::Usage(
+                "--client-id and --client-secret-file are only supported for --provider gmail"
+                    .into(),
+            ));
+        }
+        return Ok(());
+    }
+    for flag in ["--client-id", "--client-secret-file"] {
+        if optional(args, flag).is_none_or(|value| value.trim().is_empty()) {
+            return Err(CliError::Usage(format!(
+                "gmail requires {flag}; run: {GMAIL_COMMAND}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn client_credentials(
+    args: &[String],
+    wire: GoogleLoginProvider,
+) -> Result<(String, credentials_core::secret::SecretString), CliError> {
+    validate_client_flags(args, wire.adapter_name())?;
+    if wire != GoogleLoginProvider::Gmail {
+        return Ok((wire.client_id(), wire.client_secret().into()));
+    }
+    let path = optional(args, "--client-secret-file").expect("validated secret file flag");
+    let raw = std::fs::read_to_string(&path)
+        .map_err(|error| CliError::Io(format!("reading client secret file {path}: {error}")))?;
+    let secret = raw.trim_end().to_string();
+    if secret.trim().is_empty() {
+        return Err(CliError::Usage(
+            "gmail --client-secret-file is empty".into(),
+        ));
+    }
+    Ok((
+        optional(args, "--client-id").expect("validated client id"),
+        secret.into(),
+    ))
+}
+
 /// Drive a Google authorization-code login and commit the resulting record.
 pub fn cmd_login(
     global: &GlobalArgs,
@@ -36,6 +84,7 @@ pub fn cmd_login(
     replace_override: bool,
 ) -> Result<(), CliError> {
     let wire = GoogleLoginProvider::parse(provider).expect("caller checked Google provider");
+    let (client_id, client_secret) = client_credentials(args, wire)?;
     let id = optional(args, "--id")
         .or(id_override)
         .unwrap_or_else(|| wire.default_id().to_string());
@@ -56,14 +105,12 @@ pub fn cmd_login(
         ),
     )?;
 
-    let client_id = wire.client_id();
-    let client_secret = wire.client_secret();
     let state = generate_state().map_err(|error| CliError::Io(format!("csprng: {error}")))?;
     let authorize_url = build_authorize_url_google(
         AUTHORIZE_URL,
         &client_id,
         wire.redirect_uri(),
-        SCOPES,
+        wire.scopes(),
         &state,
         google::AUTHORIZE_EXTRA_PARAMS,
     )
@@ -99,6 +146,7 @@ pub fn cmd_login(
             let port = match wire {
                 GoogleLoginProvider::Gemini => 8085,
                 GoogleLoginProvider::Antigravity => 51121,
+                GoogleLoginProvider::Gmail => 8086,
             };
             println!(
                 "The browser may show a connection-refused page at 127.0.0.1:{port}; that is expected.\n\
@@ -121,7 +169,7 @@ pub fn cmd_login(
         &http,
         TOKEN_URL,
         &client_id,
-        &client_secret,
+        client_secret.expose(),
         wire.redirect_uri(),
         &callback,
         &state,
@@ -145,38 +193,48 @@ pub fn cmd_login(
         println!("account: {email}");
     }
 
-    let refresh_token = match project.as_ref() {
-        Some(project) => google::pack_antigravity_refresh(&tokens.refresh_token, project),
-        None => tokens.refresh_token.clone(),
+    let record = if wire == GoogleLoginProvider::Gmail {
+        google::gmail_login_record(tokens, client_id, client_secret, email)
+            .map_err(|message| CliError::Usage(message.into()))?
+    } else {
+        let refresh_token = match project.as_ref() {
+            Some(project) => google::pack_antigravity_refresh(&tokens.refresh_token, project),
+            None => tokens.refresh_token.clone(),
+        };
+        let oauth = credentials_core::oauth::OAuthCredential {
+            access_token: tokens.access_token.clone().into(),
+            refresh_token: refresh_token.into(),
+            expires_at_ms: tokens.expires_at_ms,
+            token_url: TOKEN_URL.to_string(),
+            client_id: Some(client_id),
+            client_secret: None,
+            scopes: wire
+                .scopes()
+                .iter()
+                .map(|scope| (*scope).to_string())
+                .collect(),
+        };
+        VaultRecord::new_oauth(
+            "login",
+            wire.adapter_name(),
+            oauth,
+            tokens.access_token.into_bytes(),
+        )
+        .with_identity(RecordIdentity {
+            // The email is the identity, not just a label. The read surface serves
+            // `account_id` as the field consumers join on and treats `email` as display
+            // metadata, so populating only `email` yields a record that renders a value
+            // while resolving no identity -- a consumer labelling per account collapses
+            // its accounts into one unlabelled entry and the wire looks unchanged. The
+            // read surface states the invariant: email never ships without account_id.
+            //
+            // Google/antigravity access tokens are opaque rather than JWTs, so there is no
+            // claim to parse live and no other stable per-account identifier available.
+            account_id: email.clone(),
+            email,
+            org_name: None,
+        })
     };
-    let oauth = credentials_core::oauth::OAuthCredential {
-        access_token: tokens.access_token.clone().into(),
-        refresh_token: refresh_token.into(),
-        expires_at_ms: tokens.expires_at_ms,
-        token_url: TOKEN_URL.to_string(),
-        client_id: Some(client_id),
-        scopes: SCOPES.iter().map(|scope| (*scope).to_string()).collect(),
-    };
-    let record = VaultRecord::new_oauth(
-        "login",
-        wire.adapter_name(),
-        oauth,
-        tokens.access_token.into_bytes(),
-    )
-    .with_identity(RecordIdentity {
-        // The email is the identity, not just a label. The read surface serves
-        // `account_id` as the field consumers join on and treats `email` as display
-        // metadata, so populating only `email` yields a record that renders a value
-        // while resolving no identity -- a consumer labelling per account collapses
-        // its accounts into one unlabelled entry and the wire looks unchanged. The
-        // read surface states the invariant: email never ships without account_id.
-        //
-        // Google/antigravity access tokens are opaque rather than JWTs, so there is no
-        // claim to parse live and no other stable per-account identifier available.
-        account_id: email.clone(),
-        email,
-        org_name: None,
-    });
 
     if replace {
         commit_login_admin(
@@ -218,4 +276,32 @@ pub fn cmd_login(
     result?;
     println!("logged in and stored {id}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gmail_secret_file_trims_only_trailing_whitespace() {
+        let dir = credentials_core::test_support::TestTempDir::new(format!(
+            "gmail-secret-{}",
+            std::process::id()
+        ));
+        let path = dir.join("secret");
+        std::fs::write(&path, " test-client-secret \n\t").unwrap();
+        let args = vec![
+            "--client-id".into(),
+            "test-client-id".into(),
+            "--client-secret-file".into(),
+            path.to_string_lossy().into_owned(),
+        ];
+        let (id, secret) = client_credentials(&args, GoogleLoginProvider::Gmail).unwrap();
+        assert_eq!(id, "test-client-id");
+        assert_eq!(secret.expose(), " test-client-secret");
+        std::fs::write(&path, " \n").unwrap();
+        assert!(
+            matches!(client_credentials(&args, GoogleLoginProvider::Gmail), Err(CliError::Usage(message)) if message == "gmail --client-secret-file is empty")
+        );
+    }
 }

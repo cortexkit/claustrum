@@ -520,6 +520,7 @@ mod tests {
             expires_at_ms: Some(123),
             token_url: "https://t.test/token".into(),
             client_id: Some("c".into()),
+            client_secret: None,
             scopes: vec![],
         }
     }

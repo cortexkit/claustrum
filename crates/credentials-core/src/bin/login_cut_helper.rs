@@ -50,6 +50,7 @@ fn oauth_record(refresh: &str, access: &str) -> VaultRecord {
         expires_at_ms: Some(1),
         token_url: "https://platform.claude.com/v1/oauth/token".to_string(),
         client_id: Some("9d1c250a-e61b-44d9-88ed-5944d1962f5e".to_string()),
+        client_secret: None,
         scopes: vec!["user:inference".to_string()],
     };
     VaultRecord::new_oauth("login", "anthropic", oauth, access.as_bytes().to_vec())

@@ -723,6 +723,7 @@ fn registered_refresh_adapters(kimi_device_id: String) -> Vec<Arc<dyn RefreshAda
         // mints against; CK_GOOGLE_OAUTH_CLIENT_ID / _SECRET override it. No prod env
         // is required for the common case.
         Arc::new(GoogleAdapter::new()),
+        Arc::new(GoogleAdapter::gmail()),
         Arc::new(SnowflakeAdapter::new()),
         Arc::new(XaiAdapter::new()),
         Arc::new(GithubCopilotAdapter::new()),
@@ -2233,6 +2234,7 @@ mod tests {
                 expires_at_ms: Some(0),
                 token_url: "https://example.invalid/token".into(),
                 client_id: None,
+                client_secret: None,
                 scopes: Vec::new(),
             },
             b"payload".to_vec(),
@@ -2448,6 +2450,7 @@ mod tests {
                         expires_at_ms: Some(test_now_ms().saturating_add(initial_ttl_ms)),
                         token_url: "https://example.invalid/token".into(),
                         client_id: None,
+                        client_secret: None,
                         scopes: Vec::new(),
                     },
                     b"stored-before-refresh".to_vec(),
@@ -6642,6 +6645,7 @@ mod tests {
                 expires_at_ms: Some(4_102_444_800_000),
                 token_url: "https://oauth2.googleapis.com/token".to_string(),
                 client_id: Some("client".to_string()),
+                client_secret: None,
                 scopes: Vec::new(),
             },
             b"opaque-access".to_vec(),
@@ -7372,6 +7376,7 @@ mod tests {
             expires_at_ms: Some(4_102_444_800_000),
             token_url: "https://api.anthropic.com/v1/oauth/token".to_string(),
             client_id: Some("client".to_string()),
+            client_secret: None,
             scopes: Vec::new(),
         };
         VaultRecord::new_oauth("login", "anthropic", oauth, b"sk-ant-oat01-roster".to_vec())
@@ -7472,6 +7477,7 @@ mod tests {
             expires_at_ms: Some(4_102_444_800_000),
             token_url: "https://example.invalid/token".to_string(),
             client_id: Some("client".to_string()),
+            client_secret: None,
             scopes: Vec::new(),
         };
         VaultRecord::new_oauth("login", adapter, oauth, b"opaque-access".to_vec())
@@ -7645,6 +7651,7 @@ mod tests {
             ("anthropic", Some("oauth")),
             ("openai", Some("chatgpt")),
             ("google", Some("oauth")),
+            ("gmail", None),
             ("xai", Some("oauth")),
             ("kimi", Some("oauth")),
             ("cursor", Some("oauth")),
@@ -7681,7 +7688,7 @@ mod tests {
                 "`{name}` is in the expected map but not registered"
             );
         }
-        assert_eq!(registered.len(), 12);
+        assert_eq!(registered.len(), 13);
     }
 
     /// `list` authorizes list_scoped and nothing else. Every scoped surface that can
@@ -9604,6 +9611,7 @@ mod tests {
             expires_at_ms: Some(1),
             token_url: String::new(),
             client_id: None,
+            client_secret: None,
             scopes: Vec::new(),
         };
         let record = VaultRecord::new_oauth("test", "no-such-adapter", oauth, Vec::new());
@@ -9776,6 +9784,7 @@ mod tests {
                         expires_at_ms: Some(i64::MAX),
                         token_url: "https://example.invalid/token".into(),
                         client_id: None,
+                        client_secret: None,
                         scopes: Vec::new(),
                     },
                     b"locally-valid".to_vec(),
@@ -9941,6 +9950,7 @@ mod tests {
                         expires_at_ms: Some(i64::MAX),
                         token_url: "https://example.invalid/token".into(),
                         client_id: None,
+                        client_secret: None,
                         scopes: Vec::new(),
                     },
                     b"locally-valid".to_vec(),
@@ -10344,6 +10354,7 @@ mod tests {
                 expires_at_ms: None,
                 token_url: String::new(),
                 client_id: None,
+                client_secret: None,
                 scopes: Vec::new(),
             },
             Vec::new(),
@@ -10648,6 +10659,7 @@ mod tests {
                     expires_at_ms: Some(i64::MAX),
                     token_url: "https://example.invalid/token".into(),
                     client_id: None,
+                    client_secret: None,
                     scopes: Vec::new(),
                 },
                 b"live".to_vec(),
@@ -11324,6 +11336,7 @@ mod tests {
                         expires_at_ms: Some(i64::MAX),
                         token_url: "https://example.invalid/token".into(),
                         client_id: None,
+                        client_secret: None,
                         scopes: Vec::new(),
                     },
                     b"live".to_vec(),
@@ -11479,6 +11492,7 @@ mod tests {
                         expires_at_ms: Some(i64::MAX),
                         token_url: "https://example.invalid/token".into(),
                         client_id: None,
+                        client_secret: None,
                         scopes: Vec::new(),
                     },
                     b"still-locally-valid".to_vec(),
@@ -11701,6 +11715,7 @@ mod tests {
             expires_at_ms: Some(4_102_444_800_000),
             token_url: "https://auth.openai.com/oauth/token".to_string(),
             client_id: Some("app_x".to_string()),
+            client_secret: None,
             scopes: Vec::new(),
         };
         let record =
@@ -11786,6 +11801,7 @@ mod tests {
             expires_at_ms: Some(4_102_444_800_000),
             token_url: "https://api.anthropic.com/v1/oauth/token".to_string(),
             client_id: Some("client".to_string()),
+            client_secret: None,
             scopes: Vec::new(),
         };
         let record = VaultRecord::new_oauth(
@@ -11880,6 +11896,7 @@ mod tests {
             expires_at_ms: Some(4_102_444_800_000),
             token_url: "https://example.invalid/token".to_string(),
             client_id: None,
+            client_secret: None,
             scopes: Vec::new(),
         };
         store

@@ -86,6 +86,7 @@ fn run_cursor(
         expires_at_ms: tokens.expires_at_ms,
         token_url: cursor::TOKEN_URL.to_string(),
         client_id: None,
+        client_secret: None,
         scopes: Vec::new(),
     };
     Ok(SpecialLogin {
@@ -149,6 +150,7 @@ fn run_devin(
         expires_at_ms: tokens.expires_at_ms,
         token_url: devin::TOKEN_URL.to_string(),
         client_id: None,
+        client_secret: None,
         scopes: Vec::new(),
     };
     Ok(SpecialLogin {
@@ -238,6 +240,7 @@ fn run_snowflake(
         expires_at_ms: tokens.expires_at_ms,
         token_url,
         client_id: Some(snowflake::CLIENT_ID.to_string()),
+        client_secret: None,
         scopes: Vec::new(),
     };
     Ok(SpecialLogin {
@@ -290,6 +293,7 @@ fn run_digitalocean(
         expires_at_ms: tokens.expires_at_ms,
         token_url: digitalocean::AUTHORIZE_URL.to_string(),
         client_id: Some(digitalocean::CLIENT_ID.to_string()),
+        client_secret: None,
         scopes: digitalocean::SCOPES
             .iter()
             .map(|scope| (*scope).to_string())

@@ -451,6 +451,8 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
         "login" => &[
             "--provider",
             "--id",
+            "--client-id",
+            "--client-secret-file",
             "--payload-file",
             "--account",
             "--provider-id",
@@ -625,6 +627,8 @@ fn help_verb(verb: &str) -> String {
              \x20                        labeled id\n\
              \x20 --account <id>         required for Snowflake (id oauth:snowflake:<account>)\n\
              \x20 --provider-id <id>     add a catalog provider id after deposit (repeatable)\n\
+             \x20 --client-id <id>       gmail only: your Google Cloud Desktop OAuth client id\n\
+             \x20 --client-secret-file <path>  gmail only: read your client secret from a file\n\
              \x20 --replace              swap an existing credential (keeps its handle)\n\
              \x20 --no-listener          paste the address-bar URL instead of using the loopback\n\
              \x20                        listener\n\
@@ -644,9 +648,10 @@ fn help_verb(verb: &str) -> String {
              storing where the provider offers a check; otherwise login says the key\n\
              was stored unchecked, and why.\n\
              \n\
-             Providers: anthropic, openai, xai, google, antigravity, github-copilot, kimi,\n\
-             cursor, devin, snowflake, digitalocean, plus api-key providers (zai, openrouter,\n\
-             deepseek, groq, ...) and web-search keys (tavily, kagi, exa, parallel).\n\
+             Providers: anthropic, openai, xai, google, gmail, antigravity, github-copilot,\n\
+             kimi, cursor, devin, snowflake, digitalocean, plus api-key providers\n\
+             (zai, openrouter, deepseek, groq, ...) and web-search keys\n\
+             (tavily, kagi, exa, parallel).\n\
              \n\
              MULTIPLE ACCOUNTS per provider — give each its own labeled id: ck auth login\n\
              --provider anthropic --id oauth:anthropic:work (label freely chosen; each\n\
@@ -1821,6 +1826,7 @@ fn cmd_put(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
                 expires_at_ms: None,
                 token_url: String::new(),
                 client_id: Some(client_id),
+                client_secret: None,
                 scopes: Vec::new(),
             };
             VaultRecord::new_oauth("operator", "github_app", oauth, Vec::new())
@@ -2310,6 +2316,7 @@ const LOGIN_PICKER_ROWS: &[(&str, &str)] = &[
     ("github-copilot", "GitHub Copilot"),
     ("kimi", "Kimi Code"),
     ("google", "Google Gemini CLI (Code Assist)"),
+    ("gmail", "Gmail (send as you)"),
     ("antigravity", "Antigravity (Gemini 3)"),
     ("cursor", "Cursor"),
     ("devin", "Devin"),
@@ -2375,7 +2382,10 @@ fn new_login_id(provider: &str, default_id: &str, label: Option<&str>) -> Option
     ))
 }
 
-fn pick_login_interactively(global: &GlobalArgs) -> Result<InteractiveChoice, CliError> {
+fn pick_login_interactively(
+    global: &GlobalArgs,
+    args: &[String],
+) -> Result<InteractiveChoice, CliError> {
     use dialoguer::{theme::ColorfulTheme, FuzzySelect, Input, Select};
 
     let inventory = inventory_for_picker(global).unwrap_or_default();
@@ -2421,6 +2431,7 @@ fn pick_login_interactively(global: &GlobalArgs) -> Result<InteractiveChoice, Cl
             ))
         })?;
     let (provider, _, default_id) = &combined_rows[pick];
+    google_login::validate_client_flags(args, provider)?;
     let default_id = default_id.as_str();
     let existing = provider_ids(&inventory, default_id);
 
@@ -2579,6 +2590,7 @@ fn cmd_device_login(
             expires_at_ms: None,
             token_url: github_copilot::TOKEN_URL.into(),
             client_id: Some(github_copilot::CLIENT_ID.into()),
+            client_secret: None,
             scopes: vec!["read:user".into()],
         };
         let exchanged = tokio_block_on(
@@ -2591,6 +2603,7 @@ fn cmd_device_login(
             expires_at_ms: exchanged.expires_at_ms,
             token_url: github_copilot::TOKEN_URL.into(),
             client_id: Some(github_copilot::CLIENT_ID.into()),
+            client_secret: None,
             scopes: vec!["read:user".into()],
         };
         let payload = credentials_core::secret::SecretBytes::new(
@@ -2607,6 +2620,7 @@ fn cmd_device_login(
             expires_at_ms: tokens.expires_at_ms,
             token_url: wire.token_url.to_string(),
             client_id: Some(wire.client_id.to_string()),
+            client_secret: None,
             scopes: wire.scopes.iter().map(|scope| scope.to_string()).collect(),
         };
         let payload = credentials_core::secret::SecretBytes::new(
@@ -2666,9 +2680,10 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             id_override: None,
             replace: false,
         },
-        None => pick_login_interactively(global)?,
+        None => pick_login_interactively(global, args)?,
     };
     let provider = interactive.provider.clone();
+    google_login::validate_client_flags(args, &provider)?;
 
     // Resolve the target credential id BEFORE routing so the dispatch can key on the
     // credential METHOD, not the bare provider name. openai/xai/google each name both
@@ -3123,6 +3138,7 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
         expires_at_ms,
         token_url: wire.token_url.to_string(),
         client_id: Some(wire.client_id.to_string()),
+        client_secret: None,
         scopes: wire.scopes.iter().map(|s| s.to_string()).collect(),
     };
     let payload =

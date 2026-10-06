@@ -1,7 +1,8 @@
 //! Google-family login wire helpers shared by the offline CLI.
 //!
-//! Gemini CLI and Antigravity use the same Google authorization-code endpoints but
-//! different public installed-app clients and loopback redirects. This module keeps
+//! Gemini CLI and Antigravity use public installed-app clients; Gmail uses the
+//! operator's own Desktop client. All share Google authorization-code endpoints
+//! with separate loopback redirects. This module keeps
 //! those provider-specific constants together with the Code Assist project
 //! provisioning needed before an Antigravity credential can be stored.
 
@@ -21,6 +22,15 @@ pub const USERINFO_URL: &str = "https://www.googleapis.com/oauth2/v1/userinfo?al
 pub const GEMINI_REDIRECT_URI: &str = "http://127.0.0.1:8085/oauth2callback";
 /// Antigravity's registered loopback redirect.
 pub const ANTIGRAVITY_REDIRECT_URI: &str = "http://127.0.0.1:51121/callback";
+/// Desktop clients permit arbitrary loopback ports (RFC 8252). Keep Gmail
+/// separate from the two public Code Assist clients' listeners.
+pub const GMAIL_REDIRECT_URI: &str = "http://127.0.0.1:8086/oauth2callback";
+/// Send-only mailbox authority plus the identity required by consumers.
+pub const GMAIL_SCOPES: &[&str] = &[
+    "https://www.googleapis.com/auth/gmail.send",
+    "openid",
+    "email",
+];
 /// The scope set used by both Google desktop clients.
 pub const SCOPES: &[&str] = &[
     "https://www.googleapis.com/auth/cloud-platform",
@@ -43,13 +53,15 @@ const ONBOARD_USER_BODY: &str =
 const MAX_ONBOARD_ATTEMPTS: usize = 5;
 const ONBOARD_POLL_DELAY: Duration = Duration::from_secs(2);
 
-/// Which public Google client and redirect belong to a login provider.
+/// Which Google client policy, scopes and redirect belong to a login provider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GoogleLoginProvider {
     /// Google Code Assist as used by Gemini CLI.
     Gemini,
     /// Google Code Assist as used by Antigravity.
     Antigravity,
+    /// Send email as the operator using their own Desktop OAuth client.
+    Gmail,
 }
 
 impl GoogleLoginProvider {
@@ -58,6 +70,7 @@ impl GoogleLoginProvider {
         match provider {
             "google" => Some(Self::Gemini),
             "antigravity" => Some(Self::Antigravity),
+            "gmail" => Some(Self::Gmail),
             _ => None,
         }
     }
@@ -67,6 +80,7 @@ impl GoogleLoginProvider {
         match self {
             Self::Gemini => "oauth:google",
             Self::Antigravity => "antigravity:google",
+            Self::Gmail => "oauth:gmail",
         }
     }
 
@@ -75,6 +89,7 @@ impl GoogleLoginProvider {
         match self {
             Self::Gemini => GEMINI_REDIRECT_URI,
             Self::Antigravity => ANTIGRAVITY_REDIRECT_URI,
+            Self::Gmail => GMAIL_REDIRECT_URI,
         }
     }
 
@@ -83,24 +98,72 @@ impl GoogleLoginProvider {
         match self {
             Self::Gemini => "google",
             Self::Antigravity => "antigravity",
+            Self::Gmail => "gmail",
         }
     }
 
     /// The public client id, including the operator override used by refresh.
+    /// Gmail has no public default; its CLI requires the operator's client id.
     pub fn client_id(self) -> String {
         match self {
             Self::Gemini => crate::refresh_adapters::google::oauth_client_id(),
             Self::Antigravity => crate::refresh_adapters::antigravity::oauth_client_id(),
+            Self::Gmail => String::new(), // supplied by the operator, never a public default
         }
     }
 
     /// The public client secret, including the operator override used by refresh.
+    /// Gmail has no public default; its CLI requires a client-secret file.
     pub fn client_secret(self) -> String {
         match self {
             Self::Gemini => crate::refresh_adapters::google::oauth_client_secret(),
             Self::Antigravity => crate::refresh_adapters::antigravity::oauth_client_secret(),
+            Self::Gmail => String::new(), // supplied by file, never an environment default
         }
     }
+
+    pub const fn scopes(self) -> &'static [&'static str] {
+        match self {
+            Self::Gmail => GMAIL_SCOPES,
+            Self::Gemini | Self::Antigravity => SCOPES,
+        }
+    }
+}
+
+/// Build a Gmail record only when the durable refresh grant and account identity
+/// are both usable. Keeping this before the store operation makes refusal atomic.
+pub fn gmail_login_record(
+    tokens: crate::oauth_login::LoginTokens,
+    client_id: String,
+    client_secret: crate::secret::SecretString,
+    email: Option<String>,
+) -> Result<crate::record::VaultRecord, &'static str> {
+    if tokens.refresh_token.trim().is_empty() {
+        return Err("Gmail token response omitted refresh_token; login again with consent");
+    }
+    let email = email.filter(|email| !email.trim().is_empty()).ok_or(
+        "Gmail userinfo omitted email; refusing to store a credential without account identity",
+    )?;
+    let oauth = crate::oauth::OAuthCredential {
+        access_token: tokens.access_token.clone().into(),
+        refresh_token: tokens.refresh_token.into(),
+        expires_at_ms: tokens.expires_at_ms,
+        token_url: TOKEN_URL.into(),
+        client_id: Some(client_id),
+        client_secret: Some(client_secret),
+        scopes: GMAIL_SCOPES.iter().map(|s| (*s).to_string()).collect(),
+    };
+    Ok(crate::record::VaultRecord::new_oauth(
+        "login",
+        "gmail",
+        oauth,
+        tokens.access_token.into_bytes(),
+    )
+    .with_identity(crate::record::RecordIdentity {
+        account_id: Some(email.clone()),
+        email: Some(email),
+        org_name: None,
+    }))
 }
 
 /// A discovered Code Assist project binding. Both ids are persisted in the

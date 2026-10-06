@@ -489,6 +489,7 @@ mod tests {
             expires_at_ms: Some(0),
             token_url: String::new(),
             client_id: Some(recorded_client_id()),
+            client_secret: None,
             scopes: vec![],
         }
     }

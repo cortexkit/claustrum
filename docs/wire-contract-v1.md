@@ -333,6 +333,7 @@ report `chatgpt`; antigravity still has `type: "oauth"`.
 | `Oauth` | `anthropic` | `oauth` |
 | `Oauth` | `openai` | `chatgpt` |
 | `Oauth` | `google` | `oauth` |
+| `Oauth` | `gmail` (login id `oauth:gmail[:<label>]`) | omitted |
 | `Oauth` | `xai` | `oauth` |
 | `Oauth` | `kimi` | `oauth` |
 | `Oauth` | `cursor` | `oauth` |
@@ -344,6 +345,13 @@ report `chatgpt`; antigravity still has `type: "oauth"`.
 | `Oauth` | `snowflake` | omitted |
 | `Oauth` | absent or any other string | omitted |
 | `Dsn`, `Cookie`, `Opaque`, `SigningKey`, `KemKey` | anything | omitted |
+
+Gmail login uses the operator's Desktop OAuth client and the `gmail` refresh
+adapter. It stores `account_id = email` from Google userinfo and refuses login
+without an email or refresh token. Its sole default category is `gmail-native`
+(including labeled ids); it has no `serves`. Reads deliver only the current access
+token with the existing identity metadata, never the sealed client secret or
+refresh token. No wire shape or store schema migration is required.
 
 Provider-id edits do not bump `record_version`: observers use `view`. Its domain stays
 `claustrum.list_scoped.view.v1`. Inside each credential frame, immediately after the

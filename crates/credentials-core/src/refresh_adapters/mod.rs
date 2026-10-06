@@ -416,6 +416,7 @@ mod token_response_rules {
             expires_at_ms: Some(0),
             token_url: String::new(),
             client_id: None,
+            client_secret: None,
             scopes: vec![],
         }
     }

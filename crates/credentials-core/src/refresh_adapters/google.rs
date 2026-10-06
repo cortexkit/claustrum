@@ -93,6 +93,7 @@ struct RefreshResponseBody {
 pub struct GoogleAdapter {
     client_id: String,
     client_secret: String,
+    record_client_only: bool,
 }
 
 impl Default for GoogleAdapter {
@@ -110,6 +111,7 @@ impl GoogleAdapter {
         GoogleAdapter {
             client_id: oauth_client_id(),
             client_secret: oauth_client_secret(),
+            record_client_only: false,
         }
     }
 
@@ -119,25 +121,51 @@ impl GoogleAdapter {
         GoogleAdapter {
             client_id: client_id.into(),
             client_secret: client_secret.into(),
+            record_client_only: false,
+        }
+    }
+
+    /// Gmail grants belong to the operator's Desktop client, never Gemini's
+    /// public client. Do not even load environment/default clients in this mode.
+    pub fn gmail() -> Self {
+        Self {
+            client_id: String::new(),
+            client_secret: String::new(),
+            record_client_only: true,
         }
     }
 
     /// The form-encoded refresh request body. Separated so the conformance test can
     /// assert the exact bytes sent. Prefers a per-credential `client_id` when the
     /// import carried one, else the adapter's default (public gemini-cli) client.
-    fn request_body(&self, cred: &OAuthCredential) -> Vec<u8> {
-        let client_id = cred
-            .client_id
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .unwrap_or(&self.client_id);
-        form_urlencode(&[
+    fn request_body(&self, cred: &OAuthCredential) -> Result<Vec<u8>, RefreshError> {
+        let client_id = cred.client_id.as_deref().filter(|s| !s.is_empty());
+        let (client_id, client_secret) = if self.record_client_only {
+            let client_id = client_id.filter(|s| !s.trim().is_empty()).ok_or_else(|| {
+                RefreshError::InvalidGrant(
+                    "gmail refresh requires record client_id; login again with --client-id".into(),
+                )
+            })?;
+            let client_secret = cred.client_secret.as_ref()
+                .map(|secret| secret.expose().as_str())
+                .filter(|s| !s.trim().is_empty())
+                .ok_or_else(|| RefreshError::InvalidGrant(
+                    "gmail refresh requires record client_secret; login again with --client-secret-file".into()
+                ))?;
+            (client_id, client_secret)
+        } else {
+            (
+                client_id.unwrap_or(&self.client_id),
+                self.client_secret.as_str(),
+            )
+        };
+        Ok(form_urlencode(&[
             ("client_id", client_id),
-            ("client_secret", &self.client_secret),
+            ("client_secret", client_secret),
             ("refresh_token", cred.refresh_token.expose()),
             ("grant_type", "refresh_token"),
         ])
-        .into_bytes()
+        .into_bytes())
     }
 
     fn endpoint(cred: &OAuthCredential) -> &str {
@@ -152,7 +180,11 @@ impl GoogleAdapter {
 #[async_trait]
 impl RefreshAdapter for GoogleAdapter {
     fn name(&self) -> &str {
-        ADAPTER_NAME
+        if self.record_client_only {
+            "gmail"
+        } else {
+            ADAPTER_NAME
+        }
     }
 
     async fn refresh(
@@ -160,10 +192,14 @@ impl RefreshAdapter for GoogleAdapter {
         cred: &OAuthCredential,
         http: &dyn HttpTransport,
     ) -> Result<RefreshedTokens, RefreshError> {
-        let body = self.request_body(cred);
+        let body = self.request_body(cred)?;
         let resp = http
             .post(
-                Self::endpoint(cred),
+                if self.record_client_only {
+                    TOKEN_URL
+                } else {
+                    Self::endpoint(cred)
+                },
                 &[],
                 "application/x-www-form-urlencoded",
                 body,
@@ -182,12 +218,23 @@ impl RefreshAdapter for GoogleAdapter {
                     "Google grant or OAuth client requires operator repair".into(),
                 ));
             }
-            return Err(RefreshError::Status(resp.status, text.into_owned()));
+            return Err(RefreshError::Status(
+                resp.status,
+                if self.record_client_only {
+                    "Gmail token endpoint rejected refresh".into()
+                } else {
+                    text.into_owned()
+                },
+            ));
         }
         if resp.status != 200 {
             return Err(RefreshError::Status(
                 resp.status,
-                String::from_utf8_lossy(&resp.body).into_owned(),
+                if self.record_client_only {
+                    "Gmail token endpoint rejected refresh".into()
+                } else {
+                    String::from_utf8_lossy(&resp.body).into_owned()
+                },
             ));
         }
 
@@ -228,6 +275,7 @@ mod tests {
             expires_at_ms: Some(0),
             token_url: TOKEN_URL.into(),
             client_id: Some("client.apps.googleusercontent.com".into()),
+            client_secret: None,
             scopes: vec![],
         }
     }
@@ -235,6 +283,74 @@ mod tests {
     // A recorded-shape Google token refresh response (access_token + expires_in,
     // no refresh_token — Google does not rotate).
     const RECORDED_SUCCESS: &str = r#"{"access_token":"ya29.new-access","expires_in":3599,"scope":"https://www.googleapis.com/auth/cloud-platform","token_type":"Bearer"}"#;
+
+    #[tokio::test]
+    async fn gmail_refresh_uses_only_record_client_and_exact_form() {
+        let http = FixtureTransport::ok(200, RECORDED_SUCCESS);
+        let mut credential = cred();
+        credential.client_id = Some("test-client-id".into());
+        credential.client_secret = Some("test-client-secret".to_string().into());
+        // A Gmail record must never redirect its client secret to a stored override.
+        credential.token_url = "https://example.test/not-google".into();
+        let adapter = GoogleAdapter::gmail();
+        assert_eq!(adapter.name(), "gmail");
+        adapter.refresh(&credential, &http).await.unwrap();
+        let requests = http.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].url, "https://oauth2.googleapis.com/token");
+        assert_eq!(
+            requests[0].content_type,
+            "application/x-www-form-urlencoded"
+        );
+        assert!(requests[0].headers.is_empty());
+        assert_eq!(requests[0].body, b"client_id=test-client-id&client_secret=test-client-secret&refresh_token=1%2F%2F0refresh-token&grant_type=refresh_token");
+    }
+
+    #[tokio::test]
+    async fn gmail_missing_client_fails_closed_without_http() {
+        for missing in ["client_id", "client_secret"] {
+            for empty in [None, Some(""), Some(" ")] {
+                let http = FixtureTransport::ok(200, RECORDED_SUCCESS);
+                let mut credential = cred();
+                credential.client_id = Some("test-client-id".into());
+                credential.client_secret = Some("test-client-secret".to_string().into());
+                if missing == "client_id" {
+                    credential.client_id = empty.map(Into::into);
+                } else {
+                    credential.client_secret = empty.map(|s| s.to_string().into());
+                }
+                let error = GoogleAdapter::gmail()
+                    .refresh(&credential, &http)
+                    .await
+                    .unwrap_err();
+                assert!(
+                    matches!(&error, RefreshError::InvalidGrant(message) if message.contains(missing)),
+                    "{error}"
+                );
+                assert!(
+                    http.requests().is_empty(),
+                    "missing {missing} must not call Google"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn gmail_invalid_grant_is_dead_token_and_errors_do_not_echo_secrets() {
+        let mut credential = cred();
+        credential.client_secret = Some("test-client-secret".to_string().into());
+        let http = FixtureTransport::ok(400, br#"{"error":"invalid_grant"}"#);
+        assert!(matches!(
+            GoogleAdapter::gmail().refresh(&credential, &http).await,
+            Err(RefreshError::InvalidGrant(_))
+        ));
+        let http = FixtureTransport::ok(503, b"test-client-secret");
+        let error = GoogleAdapter::gmail()
+            .refresh(&credential, &http)
+            .await
+            .unwrap_err();
+        assert!(!format!("{error:?} {error}").contains("test-client-secret"));
+    }
 
     #[tokio::test]
     async fn refresh_parses_access_token_and_reuses_refresh() {

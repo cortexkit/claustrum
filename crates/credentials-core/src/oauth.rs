@@ -44,6 +44,10 @@ pub struct OAuthCredential {
     pub token_url: String,
     /// The OAuth client id, when the provider's refresh grant requires one.
     pub client_id: Option<String>,
+    /// The minting client's secret, when supplied by the operator. Sealed with
+    /// the tokens; never part of a consumer read or non-secret metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_secret: Option<SecretString>,
     /// The granted scopes, when the source records them (re-sent on refresh by
     /// providers that require it). Empty when not applicable.
     #[serde(default)]
@@ -148,6 +152,7 @@ impl OAuthCredential {
             // The GoogleAdapter supplies the gemini-cli public client + token URL.
             token_url: String::new(),
             client_id: None,
+            client_secret: None,
             scopes: Vec::new(),
         })
     }
@@ -182,6 +187,7 @@ impl OAuthCredential {
             // file does not carry them.
             token_url: String::new(),
             client_id: None,
+            client_secret: None,
             scopes: Vec::new(),
         })
     }
@@ -277,6 +283,7 @@ pub fn import_antigravity_account(
             expires_at_ms: None,
             token_url: String::new(),
             client_id: None,
+            client_secret: None,
             scopes: Vec::new(),
         },
         // Empty is not a value: the field is optional in the store, and an empty
@@ -388,6 +395,10 @@ impl std::fmt::Debug for OAuthCredential {
             .field("expires_at_ms", &self.expires_at_ms)
             .field("token_url", &self.token_url)
             .field("client_id", &self.client_id)
+            .field(
+                "client_secret",
+                &self.client_secret.as_ref().map(|_| "<redacted>"),
+            )
             .field("scopes", &self.scopes)
             .finish()
     }
@@ -404,6 +415,7 @@ mod tests {
             expires_at_ms: Some(1_000_000),
             token_url: "https://example.test/oauth/token".into(),
             client_id: Some("client-1".into()),
+            client_secret: Some("test-client-secret".to_string().into()),
             scopes: vec!["a".into(), "b".into()],
         }
     }
@@ -427,6 +439,25 @@ mod tests {
         );
         // Non-secret metadata is fine to show.
         assert!(rendered.contains("example.test"));
+    }
+
+    #[test]
+    fn debug_redacts_client_secret_and_its_bytes() {
+        let rendered = format!("{:?}", sample());
+        assert!(rendered.contains("client_secret"));
+        assert!(!rendered.contains("test-client-secret"));
+        assert!(!rendered.contains(&format!("{:?}", b"test-client-secret")));
+    }
+
+    #[test]
+    fn legacy_oauth_without_client_secret_still_decodes_and_omits_it() {
+        let raw = r#"{"access_token":"test-access","refresh_token":"test-refresh","expires_at_ms":null,"token_url":"","client_id":null}"#;
+        let credential: OAuthCredential = serde_json::from_str(raw).unwrap();
+        assert!(credential.client_secret.is_none());
+        assert!(serde_json::to_value(credential)
+            .unwrap()
+            .get("client_secret")
+            .is_none());
     }
 
     #[test]

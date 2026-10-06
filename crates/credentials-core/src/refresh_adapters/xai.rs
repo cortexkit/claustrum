@@ -206,6 +206,7 @@ mod tests {
             expires_at_ms: Some(0),
             token_url: TOKEN_URL.into(),
             client_id: None, // exercise the default client id
+            client_secret: None,
             scopes: vec![],
         }
     }

@@ -94,6 +94,7 @@ fn oauth_record() -> VaultRecord {
             expires_at_ms: Some(9_999),
             token_url: "https://t.test/token".into(),
             client_id: Some("c".into()),
+            client_secret: None,
             scopes: vec!["scope-a".into()],
         },
         b"payload-bytes".to_vec(),

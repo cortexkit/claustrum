@@ -94,6 +94,7 @@ async fn main() {
             expires_at_ms: Some(0),
             token_url: "https://t.test/token".into(),
             client_id: Some("c".into()),
+            client_secret: None,
             scopes: vec![],
         },
         b"old-access".to_vec(),

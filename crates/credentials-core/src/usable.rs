@@ -521,6 +521,7 @@ mod tests {
             expires_at_ms: None,
             token_url: "https://example.invalid/token".to_string(),
             client_id: None,
+            client_secret: None,
             scopes: Vec::new(),
         }
     }

@@ -629,6 +629,7 @@ fn apply_refreshed(
         expires_at_ms: tokens.expires_at_ms,
         token_url: old_oauth.token_url.clone(),
         client_id: old_oauth.client_id.clone(),
+        client_secret: old_oauth.client_secret.clone(),
         scopes: old_oauth.scopes.clone(),
     };
     let mut new_record = record.clone();

@@ -232,6 +232,7 @@ mod tests {
             expires_at_ms: Some(0),
             token_url: token_url("acme").unwrap(),
             client_id: Some(CLIENT_ID.into()),
+            client_secret: None,
             scopes: vec![],
         }
     }

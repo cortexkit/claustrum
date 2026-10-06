@@ -145,6 +145,7 @@ mod tests {
             expires_at_ms: Some(0),
             token_url: String::new(),
             client_id: Some(CLIENT_ID.into()),
+            client_secret: None,
             scopes: vec![SCOPE.into()],
         };
         assert!(matches!(

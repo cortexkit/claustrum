@@ -2008,6 +2008,7 @@ fn import_and_set_identity_attach_sticky_account_metadata_without_replacing_secr
             expires_at_ms: Some(4_102_444_800_000),
             token_url: "https://fixture.invalid/token".to_string(),
             client_id: Some("fixture-client".to_string()),
+            client_secret: Some("test-client-secret".to_string().into()),
             scopes: vec!["scope-a".to_string(), "scope-b".to_string()],
         },
         b"opaque-fixture-access".to_vec(),
@@ -2021,6 +2022,15 @@ fn import_and_set_identity_attach_sticky_account_metadata_without_replacing_secr
         .expect("replace with field-complete OAuth fixture");
     let before_set = store.get("oauth:anthropic").expect("before set");
     drop(store);
+    for verb in ["list", "status", "usable"] {
+        let output = run(&[verb]);
+        assert!(output.status.success(), "{verb}: {:?}", output.stderr);
+        assert!(
+            !String::from_utf8_lossy(&output.stdout).contains("test-client-secret"),
+            "{verb} must not print the client secret"
+        );
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("test-client-secret"));
+    }
     let set = run(&[
         "set-identity",
         "oauth:anthropic",
@@ -3936,6 +3946,7 @@ fn usable_does_not_promise_a_refresh_the_state_makes_unreachable() {
                     expires_at_ms: Some(expired_at),
                     token_url: "https://example.invalid/token".into(),
                     client_id: None,
+                    client_secret: None,
                     scopes: Vec::new(),
                 },
                 b"stale".to_vec(),

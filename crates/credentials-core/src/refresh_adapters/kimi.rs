@@ -229,6 +229,7 @@ mod tests {
             expires_at_ms: Some(0),
             token_url: TOKEN_URL.into(),
             client_id: Some(CLIENT_ID.into()),
+            client_secret: None,
             scopes: Vec::new(),
         }
     }

@@ -1137,6 +1137,26 @@ pub const LOGIN_PROVIDERS: &[LoginProvider] = &[
         serves: &[Google],
     },
     LoginProvider {
+        key: "gmail",
+        authorize_url: google::AUTHORIZE_URL,
+        token_url: google::TOKEN_URL,
+        client_id: "", // operator-owned Desktop client; supplied by the login flags
+        redirect_uri: google::GMAIL_REDIRECT_URI,
+        scopes: google::GMAIL_SCOPES,
+        extra_authorize_params: google::AUTHORIZE_EXTRA_PARAMS,
+        adapter_name: "gmail",
+        default_id: "oauth:gmail",
+        exchange: ExchangeWire::RfcForm,
+        needs_oidc_nonce: false,
+        exchange_echoes_challenge: false,
+        paste_prompt: "Copy the FULL URL from the browser address bar and paste it here, then Enter:",
+        code_redirect_uri: None,
+        code_paste_prompt: None,
+        device: None,
+        categories: NO_CATEGORIES,
+        serves: &[],
+    },
+    LoginProvider {
         key: "antigravity",
         authorize_url: google::AUTHORIZE_URL,
         token_url: google::TOKEN_URL,
@@ -1498,7 +1518,7 @@ mod tests {
         // 15 original API-key rows, 37 model providers mirrored from oh-my-pi,
         // Kiro, and 4 search APIs.
         assert_eq!(API_KEY_PROVIDERS.len(), 57);
-        assert_eq!(LOGIN_PROVIDERS.len(), 11);
+        assert_eq!(LOGIN_PROVIDERS.len(), 12);
         // Which api-key rows are `llm-provider` and which are `web-search` is pinned by
         // the two category tests below, which also require every row to be listed.
         let login_categories: Vec<_> = LOGIN_PROVIDERS
@@ -1523,6 +1543,7 @@ mod tests {
                 ("copilot:github", vec!["llm-provider"]),
                 ("oauth:kimi", vec!["llm-provider"]),
                 ("oauth:google", vec!["llm-provider"]),
+                ("oauth:gmail", vec![]),
                 ("antigravity:google", vec!["llm-provider"]),
                 ("oauth:cursor", vec!["llm-provider"]),
                 ("oauth:devin", vec![]),
@@ -2269,6 +2290,7 @@ mod source_ownership_tests {
                 ),
                 ("oauth:kimi", vec!["moonshot"]),
                 ("oauth:google", vec!["google"]),
+                ("oauth:gmail", vec![]),
                 ("antigravity:google", vec!["google", "anthropic", "openai"]),
                 ("oauth:cursor", vec!["anthropic", "openai", "google", "xai"]),
                 ("oauth:devin", vec![]),

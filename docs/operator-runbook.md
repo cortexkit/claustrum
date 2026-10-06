@@ -349,6 +349,43 @@ usual recovery for a `needs_reauth` credential, and the reason a re-login never
 requires re-distributing handles. Without it, `login` is create-only. A native login
 records a distinct `Login` audit entry (not `Import`).
 
+### Gmail send login
+
+Gmail uses **your own Google Cloud OAuth client**, not the public Gemini or
+Antigravity clients. Create an OAuth client of type **Desktop app** in your Google
+Cloud project and enable the **Gmail API**. Configure the consent screen for exactly
+these scopes: `https://www.googleapis.com/auth/gmail.send`, `openid`, and `email`.
+Publish the app **In production**. According to
+[Google's OAuth documentation](https://developers.google.com/identity/protocols/oauth2#expiration),
+an external-user app in **Testing** gets refresh tokens that expire after **7 days**
+unless it requests only basic identity scopes; `gmail.send` is not exempt. Publishing
+may require Google's verification process for the requested scopes.
+
+Keep the client secret in a **0600 file** (not a command argument or shell history):
+
+```sh
+chmod 600 /secure/path/gmail-client-secret
+ck auth login --provider gmail --client-id YOUR_DESKTOP_CLIENT_ID --client-secret-file /secure/path/gmail-client-secret
+rm /secure/path/gmail-client-secret
+ck auth grant --principal reserved:plexus --selector-kind exact --selector oauth:gmail --operation read
+```
+
+The file contains only the secret value, not the downloaded client JSON; trailing
+whitespace is stripped. Delete it after a successful login. The refresh token and
+client secret are sealed together in the vault. The browser flow requests offline
+access and consent, listens on `http://127.0.0.1:8086/oauth2callback`, and supports
+`--no-browser` / `--no-listener` with the usual full-URL paste fallback.
+Login refuses a missing refresh token or missing userinfo email rather than storing
+an unusable account. `account_id` and `email` both identify the signed-in mailbox.
+
+Use `--id oauth:gmail:work` for a labeled account and grant that **exact** id instead.
+`--replace` keeps handles when re-authenticating. Gmail gets only the `gmail-native`
+category, no model, search, or browser-session categories, and no `serves` vendors.
+Do not grant a model category to plexus or add `llm-provider` to a Gmail record:
+model consumers must never acquire mailbox authority. Plexus reads the short-lived
+access token by name through `credential.get_scoped`; refresh/client secrets never
+leave the vault on the read surface.
+
 ### Anthropic credentials expire about a month after login, and that is not a defect
 
 Measured on this vault 2026-09-15, across seven deaths, three accounts, and two

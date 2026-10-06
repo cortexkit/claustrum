@@ -120,6 +120,7 @@ crates/credentials-core/src/google_login.rs AUTHORIZE_URL accounts.google.com
 crates/credentials-core/src/google_login.rs INLINE_001 www.googleapis.com
 crates/credentials-core/src/google_login.rs INLINE_002 www.googleapis.com
 crates/credentials-core/src/google_login.rs INLINE_003 www.googleapis.com
+crates/credentials-core/src/google_login.rs INLINE_004 www.googleapis.com
 crates/credentials-core/src/google_login.rs LOAD_CODE_ASSIST_URL cloudcode-pa.googleapis.com
 crates/credentials-core/src/google_login.rs ONBOARD_USER_URL cloudcode-pa.googleapis.com
 crates/credentials-core/src/google_login.rs TOKEN_URL oauth2.googleapis.com

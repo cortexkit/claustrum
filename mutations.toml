@@ -768,3 +768,21 @@ only = false
 timeout_s = 600
 build_timeout_s = 3600
 
+
+[[control]]
+id = "keychain-exact-security-path"
+guards = "keychain calls use exactly /usr/bin/security, not some other absolute path"
+file = "crates/credentials-core/src/resolver.rs"
+old = 'const SECURITY_BIN: &str = "/usr/bin/security";'
+new = 'const SECURITY_BIN: &str = "/tmp/security"; // NON-VACUITY BREAK'
+edits = []
+test_file = "crates/credentials-core/src/resolver.rs"
+runner = "command"
+command = ["python3", "scripts/mutation-cargo-test.py", "--target=--lib", "--features=test-support", "{test}"]
+test_count_pattern = "running {count} test"
+expect_red = ["resolver::tests::keychain_tool_is_spawned_by_absolute_path"]
+expect_message = 'right: "/usr/bin/security"'
+only = false
+timeout_s = 4200
+build_timeout_s = 3600
+

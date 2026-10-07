@@ -1,7 +1,7 @@
 # Mutation proof catalogue
 
-The catalogue is replayed by ck-mutate 0.7.2, pinned to commons
-`22648cd29230aea9e815bab872ee71de9879ef6d`. Every row was appended by `prove`,
+The catalogue is replayed by ckdev-mutate 0.8.0 (the `cortexkit-mutate` crate), pinned to commons
+`46cc166b0df2edcfd14b3eb54ed6eeac588fed69`. Every row was appended by `prove`,
 never by inventing a catch.
 
 ## Runner boundary, closed in 0.7.2
@@ -15,7 +15,7 @@ through a wrapper with explicit features and had no `--broad` breadth audit.
 0.7.2 added `features` to cargo rows (applied to every cargo invocation,
 including the baseline listing and `--broad`) and fixed the dropped selector, so
 the 17 rows are cargo rows again and the wrapper is gone. The same release
-retries an LF anchor in CRLF form on a CRLF checkout, so `ck-mutate check` also
+retries an LF anchor in CRLF form on a CRLF checkout, so `ckdev-mutate check` also
 runs on the Windows CI job.
 
 The original four release arms retain their source sites and named tests. The
@@ -24,7 +24,7 @@ planner or the read-only CLI listing. The scoped key fence remains anchored on
 its unique comment, rather than TTL/engine-call plumbing. The stale-marker and
 wire-key edits are unchanged mechanisms. The old script was deleted; no test
 existed solely for its four arms. The release probe-order test now names the
-replacement `ck-mutate check`, preserving its ordering claim.
+replacement `ckdev-mutate check`, preserving its ordering claim.
 
 ## Findings deliberately not repaired
 
@@ -75,7 +75,7 @@ seventh proves that skipping the planted control is not accepted as execution.
   and run `--all --broad` on the existing nightly schedule. Reports are uploaded
   from `target/mutations/`, even on failure.
 - The master/train workflow is the landing gate used by `train-push.sh`.
-- The local gate adds only `ck-mutate check`, preserving the test-job arm parity
+- The local gate adds only `ckdev-mutate check`, preserving the test-job arm parity
   bound. Runner installation is setup, not an additional local test arm.
 - Release removes the bespoke script and checks anchors only. Its ancestor guard
   requires a landed source revision; the explicit unlanded override forfeits
@@ -89,13 +89,13 @@ one guard and supplies `expect_message`. On this macOS worktree, with
 `cortexkit-mutate 0.7.0`, the final full replay was:
 
 ```text
-/usr/bin/time -p ck-mutate run --all --report target/mutations/all.json
+/usr/bin/time -p ckdev-mutate run --all --report target/mutations/all.json
 37 CAUGHT; 0 survivors; 0 errors; 0 platform skips
 real 366.56 s
 ```
 
 The preceding full breadth audit of the original 36 rows ran
-`ck-mutate run --all --broad --report target/mutations/broad.json` in **491.85 s**.
+`ckdev-mutate run --all --broad --report target/mutations/broad.json` in **491.85 s**.
 All 36 were CAUGHT; all observed collateral was in the named daemon target
 `ck_claustrum`, so no HUB declaration was warranted. The added self-control row
 was then audited with `--only scan-self-control-cannot-skip --broad` (CAUGHT,
@@ -115,7 +115,7 @@ GATE PASSED -- every local CI check, on this working tree (full mutation replay 
 
 Independent checks passed: all 52 hermetic script tests (Python 3.9.6), all six
 standalone scan checkers with their controls, Python syntax compilation of eight
-changed files, Bash 3.2.57 syntax checks, and `ck-mutate check` on 37 rows.
+changed files, Bash 3.2.57 syntax checks, and `ckdev-mutate check` on 37 rows.
 The full gate also ran Bun 1.4.2's frozen install, TypeScript typecheck/build and
 hermetic tests, Cargo 1.99.0 formatting/clippy (default and seam features), and
 Windows cross type-check. Manifests and lockfiles were not changed.

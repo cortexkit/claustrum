@@ -92,7 +92,7 @@ fi
 # The ancestor guard above means the full catalogue already replayed in the
 # green master/train CI landing gate. Only check for stale anchors here; repeating
 # every mutant would add minutes without testing a different source revision.
-ck-mutate check
+ckdev-mutate check
 
 # FULL 40-HEX, NOT --short. This value is stamped into CK_BUILD_REV and becomes the
 # manifest's build_git_sha, whose canonical form under subc-protocol 0.17 is 40 lowercase

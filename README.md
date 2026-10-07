@@ -120,16 +120,16 @@ works.
 
 ## Mutation proofs
 
-A passing safety test proves little until it has been seen to fail. [`mutations.toml`](mutations.toml) is the checked-in catalogue of exact-once source edits and the full test names that must catch them. The shared `ck-mutate` runner saves and restores source bytes and verifies `Cargo.lock`; compilation errors, missing anchors or tests, timeouts and unrelated failures are not catches. Install the reviewed immutable revision:
+A passing safety test proves little until it has been seen to fail. [`mutations.toml`](mutations.toml) is the checked-in catalogue of exact-once source edits and the full test names that must catch them. The shared `ckdev-mutate` runner saves and restores source bytes and verifies `Cargo.lock`; compilation errors, missing anchors or tests, timeouts and unrelated failures are not catches. Install the reviewed immutable revision:
 
 ```sh
-cargo install --locked --git https://github.com/cortexkit/commons --rev 22648cd29230aea9e815bab872ee71de9879ef6d cortexkit-mutate
+cargo install --locked --git https://github.com/cortexkit/commons --rev 46cc166b0df2edcfd14b3eb54ed6eeac588fed69 cortexkit-mutate
 mkdir -p target/mutations
-ck-mutate check
-ck-mutate run --only refresh-intent-before-provider --report target/mutations/one.json
-ck-mutate run --all --report target/mutations/all.json
-ck-mutate run --diff origin/master --report target/mutations/diff.json
-ck-mutate run --all --broad --report target/mutations/broad.json
+ckdev-mutate check
+ckdev-mutate run --only refresh-intent-before-provider --report target/mutations/one.json
+ckdev-mutate run --all --report target/mutations/all.json
+ckdev-mutate run --diff origin/master --report target/mutations/diff.json
+ckdev-mutate run --all --broad --report target/mutations/broad.json
 ```
 
 Run from a clean tree, with no external test-binary overrides. Never check out an edited file while a replay is running. A successful full replay reports every executable row `CAUGHT`; the real-SIGKILL row runs on Linux and macOS only. Reports live under gitignored `target/mutations/` and CI uploads them as artifacts. PR CI selects rows touched by the committed diff against `origin/master`; master and train pushes replay all rows in isolated shards. The nightly scheduled run audits Cargo rows with `--broad`, against every test target in the package. Reviewed HUB rows name the shared property and only the other targets asserting it; a new cross-target catch still requires review. Diff selection cannot see helpers or fixtures absent from an edit target and `test_file`, so full replay remains necessary.
@@ -139,7 +139,7 @@ Build and test deadlines are 3600 seconds and 600 seconds, respectively, not mea
 To add a row, first resolve the full test name with `cargo test -p <package> --test <target> --locked -- --list` (include `--features test-support` for core tests). Read the current production source and prove an exact-once edit. This existing control illustrates the shape; choose a new ID and mechanism for a new row:
 
 ```sh
-ck-mutate prove --id scoped-private-key-proof \
+ckdev-mutate prove --id scoped-private-key-proof \
   --guards 'scoped get cannot serve vault-held private keys' \
   --file crates/credentials-module/src/read_surface.rs \
   --old '                if record.kind.is_vault_held_key() {
@@ -153,9 +153,9 @@ ck-mutate prove --id scoped-private-key-proof \
   --build-timeout-s 3600 --timeout-s 600 --report target/mutations/proof.json
 ```
 
-`prove` appends only a caught row. Use `expect_message` to distinguish the intended assertion from unrelated failures, inspect the appended row, run `check`, and commit the catalogue with its guarded behavior. For a core row, add `--features test-support`. See the [pinned runner README](https://github.com/cortexkit/commons/blob/22648cd29230aea9e815bab872ee71de9879ef6d/crates/cortexkit-mutate/README.md) for multi-file catalogue edits, command rows and HUB review. [`docs/mutation-proofs.md`](docs/mutation-proofs.md) records the adoption evidence, survivors and scan-guard boundaries.
+`prove` appends only a caught row. Use `expect_message` to distinguish the intended assertion from unrelated failures, inspect the appended row, run `check`, and commit the catalogue with its guarded behavior. For a core row, add `--features test-support`. See the [pinned runner README](https://github.com/cortexkit/commons/blob/46cc166b0df2edcfd14b3eb54ed6eeac588fed69/crates/cortexkit-mutate/README.md) for multi-file catalogue edits, command rows and HUB review. [`docs/mutation-proofs.md`](docs/mutation-proofs.md) records the adoption evidence, survivors and scan-guard boundaries.
 
-The local gate and release build run only `ck-mutate check`. The full replay is the CI landing gate; release-build's ancestor check requires a landed revision, so replaying every mutant there would repeat CI on the same sources. An explicit unlanded-release override also bypasses that assurance.
+The local gate and release build run only `ckdev-mutate check`. The full replay is the CI landing gate; release-build's ancestor check requires a landed revision, so replaying every mutant there would repeat CI on the same sources. An explicit unlanded-release override also bypasses that assurance.
 
 ## License
 

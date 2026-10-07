@@ -475,7 +475,7 @@ class ScriptContracts(unittest.TestCase):
 
     def test_probe_is_required_before_build_work(self):
         source = text('scripts/release-build.sh')
-        self.assertLess(source.index('if [ -z "${PROBE:-}" ]'), source.index('ck-mutate check'))
+        self.assertLess(source.index('if [ -z "${PROBE:-}" ]'), source.index('ckdev-mutate check'))
 
     def test_endpoint_host_and_separator_drift_are_refused(self):
         endpoints = cast(Any, module('endpoint-hosts'))

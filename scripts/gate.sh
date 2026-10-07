@@ -95,7 +95,7 @@ run_check "outside path deps" python3 scripts/check-outside-path-deps.py
 run_check "script contracts" python3 -m unittest discover -s scripts/tests -v
 # Anchor/name validation mirrors CI. Full replay is the master landing gate and
 # nightly breadth audit, not work repeated on every local push.
-run_check "mutation catalogue" ck-mutate check
+run_check "mutation catalogue" ckdev-mutate check
 # Format workspace members only. Derive the package list from Cargo metadata so
 # new members are included automatically; refuse an empty list rather than let
 # a format command that checks nothing report success.

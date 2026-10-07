@@ -191,10 +191,10 @@ jobs:
       # checkout is retried in CRLF form, so the check reads the catalogue, not the
       # checkout's line endings.
       - name: Install mutation runner (immutable revision)
-        run: cargo install --locked --git https://github.com/cortexkit/commons --rev 22648cd29230aea9e815bab872ee71de9879ef6d cortexkit-mutate
+        run: cargo install --locked --git https://github.com/cortexkit/commons --rev 46cc166b0df2edcfd14b3eb54ed6eeac588fed69 cortexkit-mutate
 
       - name: Mutation catalogue check
-        run: ck-mutate check
+        run: ckdev-mutate check
 
       - name: Fixture line endings
         # Guards a defect only the Windows job can see: git rewrites LF to CRLF on
@@ -316,9 +316,9 @@ jobs:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - name: Install mutation runner (immutable revision)
-        run: cargo install --locked --git https://github.com/cortexkit/commons --rev 22648cd29230aea9e815bab872ee71de9879ef6d cortexkit-mutate
+        run: cargo install --locked --git https://github.com/cortexkit/commons --rev 46cc166b0df2edcfd14b3eb54ed6eeac588fed69 cortexkit-mutate
       - name: Mutation catalogue check
-        run: ck-mutate check
+        run: ckdev-mutate check
       - name: Replay selected safety proofs
         shell: bash
         env:
@@ -327,11 +327,11 @@ jobs:
         run: |
           mkdir -p target/mutations
           if [[ "$EVENT" == "pull_request" ]]; then
-            ck-mutate run --diff origin/master --shard "$SHARD/2" --report target/mutations/diff.json
+            ckdev-mutate run --diff origin/master --shard "$SHARD/2" --report target/mutations/diff.json
           elif [[ "$EVENT" == "schedule" ]]; then
-            ck-mutate run --all --broad --shard "$SHARD/2" --report target/mutations/broad.json
+            ckdev-mutate run --all --broad --shard "$SHARD/2" --report target/mutations/broad.json
           else
-            ck-mutate run --all --shard "$SHARD/2" --report target/mutations/all.json
+            ckdev-mutate run --all --shard "$SHARD/2" --report target/mutations/all.json
           fi
       - name: Upload mutation reports
         if: always()

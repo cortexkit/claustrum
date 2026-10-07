@@ -1,9 +1,8 @@
-# Safety proofs appended only by ck-mutate prove at commons 22648cd29230aea9e815bab872ee71de9879ef6d (0.7.2).
-# Cargo rows allow 3600s builds and 600s tests. Core command rows allow 4200s
-# overall, with the wrapper enforcing those same separate deadlines.
-# Core integrations require test-support. In 0.7.0 Control::targets rejects
-# --features and command(Scope::Package) drops target flags from name listing.
-# Core command rows therefore have NO --broad breadth audit; module Cargo rows do.
+# Safety proofs appended only by ckdev-mutate prove at commons 46cc166b0df2edcfd14b3eb54ed6eeac588fed69 (0.8.0).
+# Cargo rows allow 3600s builds and 600s tests. Core rows declare
+# features = ["test-support"] (the crash-cut row adds kill9-test-seam); the runner
+# applies a row's features to every cargo invocation, so every Rust row gets the
+# --broad breadth audit.
 # Reports stay under gitignored target/mutations/.
 # The first four release arms retain their source sites and expected guards:
 # online read_grants_from_conn (not the migration planner/read-only CLI path),

@@ -682,19 +682,27 @@ describe('thrown errors carry a stable code', () => {
     expect(error).toBeInstanceOf(EnrollRefusal)
     expect((error as Error).message).toBe('identity mismatch')
     await expect(stat(`${path}.lock`)).rejects.toThrow()
-    // The consumer-visible consequence: the next claimant is not stalled for a TTL.
-    // Bounded by a race rather than by awaiting and measuring afterwards -- if release
-    // regressed, the await itself would block for the full 30s TTL and the suite would
-    // report a timeout with no attribution, which is indistinguishable from a slow box
-    // or a hang anywhere else. Failing fast with the property named beats hanging.
-    const started = Date.now()
+    // The consumer-visible consequence: the next claimant is not stalled for the 30s
+    // TTL. The lock file being gone (asserted above) is the release proof; this checks
+    // that a second claim then succeeds. The race only stops a hang and names the
+    // property. It does not measure speed: the bound sits well under the TTL so a
+    // regressed release still fails here, and well above how long a claim takes on a
+    // loaded Windows runner, where a 1s bound once failed with the lock file already
+    // removed.
+    let deadline: ReturnType<typeof setTimeout> | undefined
     const outcome = await Promise.race([
       withManifestLock(path, 'probe', async () => 'reacquired' as const),
-      sleep(1_000).then(() => 'lock not released on throw: re-acquire exceeded 1000ms' as const),
-    ])
+      new Promise<string>((resolve) => {
+        deadline = setTimeout(
+          () => resolve('lock not released on throw: re-acquire still blocked after 10s'),
+          10_000,
+        )
+      }),
+    ]).finally(() => clearTimeout(deadline))
     expect(outcome).toBe('reacquired')
-    expect(Date.now() - started).toBeLessThan(1_000)
-  })
+    // The test's own limit sits above the race's, so a hang fails with the message
+    // above rather than as bun's unattributed per-test timeout.
+  }, 20_000)
 
   test('distinct manifest paths do not contend', async () => {
     const first = await manifestPath()

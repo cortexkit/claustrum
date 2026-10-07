@@ -459,7 +459,10 @@ class ScriptContracts(unittest.TestCase):
         start = source.index('models=') if 'models=' in source else source.index('MODEL_ID=')
         block = source[start:source.index('if [[ -z "$MODEL_ID"', start)]
         self.executable('opencode', 'echo synthetic/hf:moonshotai/Kimi-K3; python3 -c "print(\'x\' * 2097152)"')
-        result = self.run_shell(block + '\necho "$MODEL_ID"')
+        # The defect this guards is a hang (a reader that stops draining leaves the writer
+        # blocked forever), so the timeout only has to end a hang, not measure speed. The
+        # default 10s failed under a loaded gate with the pipeline still making progress.
+        result = self.run_shell(block + '\necho "$MODEL_ID"', timeout=120)
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertIn('synthetic/hf:moonshotai/Kimi-K3', result.stdout)
 

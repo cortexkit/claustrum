@@ -85,13 +85,16 @@ run_check() {
 # The endpoint-host manifest is a population check, which no unit test can be: a
 # per-constant assertion cannot fail when a NEW endpoint appears, and "is this URL
 # asserted somewhere" is satisfied by a test comparing a constant to itself.
-run_check "inbound contracts" bash scripts/check-inbound-contracts.sh
+SUBCONSCIOUS_ROOT="${CRED_SUBCONSCIOUS_ROOT-../subconscious}"
+[[ -d "$SUBCONSCIOUS_ROOT" ]] || fail "supervisor checkout not found: $SUBCONSCIOUS_ROOT"
+run_check "inbound contracts" bash scripts/check-inbound-contracts.sh "$SUBCONSCIOUS_ROOT/docs/specs/push-sealed-payload.md"
 run_check "endpoint hosts" python3 scripts/endpoint-hosts.py
 run_check "threshold controls" python3 scripts/threshold-controls.py
 run_check "path rendering" python3 scripts/check-path-rendering.py
 run_check "fixture line endings" python3 scripts/check-fixture-line-endings.py
 run_check "doc status" python3 scripts/check-doc-status.py
 run_check "outside path deps" python3 scripts/check-outside-path-deps.py
+run_check "development binary names" python3 scripts/check-ckdev-execution.py
 run_check "script contracts" python3 -m unittest discover -s scripts/tests -v
 # Anchor/name validation mirrors CI. Full replay is the master landing gate and
 # nightly breadth audit, not work repeated on every local push.
@@ -398,7 +401,7 @@ assert_floor_not_lowered() {
 #
 # THE FLOOR IS RATCHETED AGAINST THE MERGE TARGET BY `assert_floor_not_lowered` BELOW,
 # because a floor alone does not defend the property it exists for. See that function.
-run_expect 804 "workspace unit + integration" \
+run_expect 805 "workspace unit + integration" \
   cargo test --locked --workspace --features credentials-core/test-support
 
 assert_floor_not_lowered "$SCRIPT_PATH"

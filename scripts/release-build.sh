@@ -190,6 +190,9 @@ find target/staged -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null \
       rm -rf "$old"
     done
 
+source scripts/lib/ckdev-binary.sh
+SMOKE_SCRATCH="$(mktemp -d)"
+trap 'rm -rf "$SMOKE_SCRATCH"' EXIT
 for bin in ck-claustrum ck-auth; do
   cp "target/release/$bin" "$STAGE/$bin"
   # Pin the identifier. NEVER re-sign at the destination: a pin is not sticky, and one
@@ -239,9 +242,10 @@ for bin in ck-claustrum ck-auth; do
     echo "REFUSING: $bin.sha256 is not parseable by the command a verifier runs" >&2
     exit 1
   }
+  smoke_binary="$(ckdev_binary "$STAGE/$bin" "$SMOKE_SCRATCH")"
   printf '%-14s rev=%s sha256=%s\n' \
     "$bin" \
-    "$("$STAGE/$bin" --version | sed -E 's/.*\((.*)\)/\1/')" \
+    "$("$smoke_binary" --version | sed -E 's/.*\((.*)\)/\1/')" \
     "$(awk '{print $1}' "$STAGE/$bin.sha256")"
 done
 

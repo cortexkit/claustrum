@@ -2,7 +2,7 @@
 set -euo pipefail
 
 WT="${WT:-$(cd "$(dirname "$0")/.." && pwd -P)}"
-CK_AUTH="$WT/target/release/ck-auth"
+source "$WT/scripts/lib/ckdev-binary.sh"
 umask 077
 ROOT="$(mktemp -d)"
 # The scratch auth files contain a real credential, so even early refusals remove them.
@@ -58,6 +58,7 @@ if [[ "$(opencode --version)" != "1.18.25" ]]; then
 fi
 
 cargo build --release --locked --offline -p credentials-module --bin ck-auth
+CK_AUTH="$(ckdev_binary "$WT/target/release/ck-auth" "$ROOT")"
 bun run build
 
 REAL_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"

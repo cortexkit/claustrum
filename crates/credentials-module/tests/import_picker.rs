@@ -1,5 +1,6 @@
 #![cfg(feature = "import-prompt-seam")]
 
+use credentials_core::test_support::ckdev_binary;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -47,7 +48,7 @@ impl Fixture {
     }
 
     fn command(&self, binary: impl AsRef<Path>) -> Command {
-        let mut command = Command::new(binary.as_ref());
+        let mut command = Command::new(ckdev_binary(binary.as_ref(), &self.root));
         command
             .env("XDG_DATA_HOME", self.root.join("data"))
             .env("XDG_CONFIG_HOME", self.root.join("config"))

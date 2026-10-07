@@ -38,7 +38,7 @@ pub fn warmed(helper: &'static str) -> &'static str {
         guard.insert(helper)
     };
     if first {
-        let _ = std::process::Command::new(helper)
+        let _ = credentials_core::test_support::ckdev_command(helper)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status();

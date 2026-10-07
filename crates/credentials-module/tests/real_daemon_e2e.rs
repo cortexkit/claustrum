@@ -19,6 +19,7 @@
 //! `#[ignore]` by default: it builds the `ck-subc` daemon in the sibling repo and binds
 //! loopback ports. Run with
 //! `cargo test -p credentials-module --test real_daemon_e2e -- --ignored --nocapture`.
+//! Set `CRED_SUBCONSCIOUS_ROOT` to an isolated supervisor checkout instead of the sibling.
 
 mod common;
 
@@ -38,7 +39,7 @@ use common::{
 use cortexkit_store::{open_sqlite, Isolation, StorageBackend, StorageDescriptor};
 use credentials_core::resolver::{KeySource, ResolverConfig};
 use credentials_core::store::EncryptedStore;
-use credentials_core::test_support::TestTempDir;
+use credentials_core::test_support::{ckdev_binary, ckdev_command, TestTempDir};
 
 const SUBCONSCIOUS_REL: &str = "../../../subconscious";
 
@@ -172,10 +173,21 @@ fn why_required() -> &'static str {
 /// Resolve the sibling subconscious checkout, or `None` if it is not present.
 /// `None` + `REQUIRE_DAEMON_ENV` set ⇒ panic (CI must not skip silently).
 fn subconscious_root() -> Option<PathBuf> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(SUBCONSCIOUS_REL);
+    let override_root = std::env::var_os("CRED_SUBCONSCIOUS_ROOT");
+    let path = override_root
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join(SUBCONSCIOUS_REL));
     match path.canonicalize() {
         Ok(root) => Some(root),
         Err(e) => {
+            if override_root.is_some() {
+                panic!(
+                    "CRED_SUBCONSCIOUS_ROOT points at {} which cannot be resolved ({e}) — \
+                     refusing to fall back to the sibling supervisor checkout",
+                    path.display()
+                );
+            }
             if require_daemon() {
                 panic!(
                     "the real-daemon gate is required ({}) but the sibling subconscious \
@@ -232,7 +244,7 @@ fn run_cli(args: &[&str]) -> String {
 /// exit code / stderr (e.g. the offline path refusing while the daemon is up).
 fn run_cli_raw(args: &[&str]) -> std::process::Output {
     let bin = cli_binary();
-    std::process::Command::new(&bin)
+    ckdev_command(&bin)
         .args(args)
         .output()
         .expect("run ck-auth")
@@ -313,6 +325,8 @@ where
     assert!(credentials_module.exists());
 
     let rig = unique_temp_dir("cred-real-daemon");
+    let subc_core = ckdev_binary(&subc_core, &rig);
+    let credentials_module = ckdev_binary(&credentials_module, &rig);
     let config_dir = rig.join("config/cortexkit");
     let runtime_dir = rig.join("runtime");
     let data_home = rig.join("data");
@@ -409,7 +423,7 @@ where
         subc_core.as_path(),
         std::path::Path::new(&credentials_module),
     ] {
-        let _ = std::process::Command::new(bin)
+        let _ = std::process::Command::new(ckdev_binary(bin, &rig))
             .arg("--version")
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -1263,7 +1277,7 @@ async fn fixture_dogfood_import_opencode_round_trips_through_real_daemon() {
         .join("secrets/master.key")
         .to_string_lossy()
         .to_string();
-    let verify = std::process::Command::new(cli_binary())
+    let verify = ckdev_command(cli_binary())
         .args([
             "verify-audit",
             "--data-dir",

@@ -356,6 +356,7 @@ jobs:
         run: |
           set -euo pipefail
           # Same detection shape as packaging: the archiver, not the platform, is the fact.
+          source scripts/lib/ckdev-binary.sh
           extract() {
             if command -v unzip >/dev/null 2>&1; then
               unzip -qo "$1"
@@ -371,9 +372,11 @@ jobs:
           }
           ext=""; [ "${{ matrix.asset_os }}" = "windows" ] && ext=".exe"
           t=$(mktemp -d); cp dist/*.zip "$t/"
+          trap 'rm -rf "$t"' EXIT
           (cd "$t" && for z in *.zip; do extract "$z"; done)
           for b in ck-claustrum ck-auth; do
-            v=$("$t/$b$ext" --version)
+            smoke_binary="$(ckdev_binary "$t/$b$ext" "$t")"
+            v=$("$smoke_binary" --version)
             echo "$b -> $v"
             case "$v" in
               *"unknown"*) echo "REFUSING: $b cannot name its own revision"; exit 1 ;;

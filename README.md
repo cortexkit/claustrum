@@ -98,6 +98,19 @@ cargo check --workspace --locked
 The gate is exact rather than approximate: it asserts test counts per suite, so a
 suite that silently stops running fails the gate instead of passing quietly.
 
+### Development executable names
+
+`ck-*` is reserved for production execution from `~/.local/share/cortexkit/bin/`
+or `~/.local/share/cortexkit/staging/` (`ck` itself lives in `~/.local/bin`).
+Tests, rigs and build-artifact smoke checks link artifacts into their own scratch
+space as `ckdev-*`, using `credentials_core::test_support::ckdev_binary` (or
+`ckdev_command` for command factories) and `scripts/lib/ckdev-binary.sh`.
+Hard links preserve macOS's signed inode; copying is the cross-volume fallback.
+Cargo, packaging, signing and production process-lookup names do not change.
+The gate and CI enforce this with `scripts/check-ckdev-execution.py`, including
+statement-local positive/negative controls and two mutation-catalogue proofs.
+See the [site audit and process measurement](scripts/ckdev-execution-audit.md).
+
 ### The TypeScript packages need a build before they can be imported
 
 ```

@@ -175,3 +175,41 @@ Detailed JSON reports and local evidence remain in gitignored
 | `stale-report-forces-refresh` | `engine_tests::report_stale_then_invalid_grant_latches_needs_reauth` | CAUGHT |
 | `status-wire-stale-pending-key` | `tests::the_status_wire_key_set_is_a_contract_and_a_rename_obliges_an_announcement` | CAUGHT |
 | `store-ahead-refuses-migration` | `store::tests::a_store_ahead_of_this_binary_refuses_to_migrate` | CAUGHT |
+
+## Development executable-name fence
+
+The fleet's `ck-*` namespace is reserved for production executables in the
+operator's bin/staging directories. Test and build-artifact execution uses the
+shared Rust or shell `ckdev_binary` helper without renaming shipped artifacts.
+`scripts/check-ckdev-execution.py` scans 79 test/example/script/workflow sources
+and runs its statement-local planted controls before the live scan. A direct
+spawn immediately after a wrapped spawn is refused; helper calls in nearby
+statements cannot authorize it. Multiline Rust strings, lifetimes, aliases,
+inline workflow commands and the shell's production-only paths have controls.
+
+Two rows were appended by `ckdev-mutate prove` (0.8.0):
+
+| Row | Exact expected red test | Applied mutation |
+|---|---|---|
+| `scan-ckdev-direct-spawn` | `scripts.tests.test_script_contracts.ScriptContracts.test_repo_ckdev_execution_fence` | Restore `Command::new(env!("CARGO_BIN_EXE_ck-auth"))` in `cli_admin::cli` |
+| `scan-ckdev-matcher-control` | `scripts.tests.test_script_contracts.ScriptContracts.test_ckdev_matcher_has_statement_local_controls` | Neutralize the Rust constructor matcher predicate |
+
+Each row caught exactly its one named test, with no unrelated failures. The
+first direct-spawn attempt survived because an escaped newline in an existing
+Rust message confused the initial lexer. That boundary was fixed and given a
+planted regression control; the identical direct-spawn edit was then caught.
+Reports are retained under `target/mutations/ckdev-{direct-spawn-caught,matcher-caught}.json`
+(the initial survivor is `ckdev-direct-spawn.json`). The proof wrapper prints
+the applied one-file `2 +-` diff while the mutant is live. The index held the
+implementation first, and each restored source ended with an empty unstaged
+diff after checkout/touch.
+
+This is a source fence, not full cross-language dataflow analysis: arbitrary
+dynamic Python factories and shell indirection require explicit helper use and
+additional planted controls. It proves source-population coverage, not runtime
+reachability of every factory. A separate genuine nine-test real-daemon run
+sampled `ps -axo pid=,comm=` every 0.5 seconds, positively observed both renamed
+daemons, and found zero forbidden paths or residual test processes belonging to
+the worktree. The [execution audit](../scripts/ckdev-execution-audit.md) records
+every site, exact proofs, the supervisor revision, raw-evidence paths, external
+seat sightings and the full gate verdict.

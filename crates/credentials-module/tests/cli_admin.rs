@@ -4874,7 +4874,10 @@ fn provider_cli_prechecks_refuse_before_key_resolution_even_with_live_route_requ
                 assert_eq!(
                     String::from_utf8_lossy(&out.stderr),
                     format!("error: invalid_provider_id/permanent: rule={rule} value={value}\n"),
-                    "{verb}, live={live}"
+                    // The exit status says whether an empty stderr was a refusal or the
+                    // process dying before it wrote anything (a signal under host load).
+                    "{verb}, live={live}, status={:?}",
+                    out.status
                 );
             }
         }

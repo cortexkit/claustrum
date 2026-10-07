@@ -12,6 +12,7 @@ import shutil
 import sqlite3
 import subprocess
 import tempfile
+from typing import Any, cast
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -469,7 +470,7 @@ class ScriptContracts(unittest.TestCase):
         self.assertLess(source.index('if [ -z "${PROBE:-}" ]'), source.index('ck-mutate check'))
 
     def test_endpoint_host_and_separator_drift_are_refused(self):
-        endpoints = module('endpoint-hosts')
+        endpoints = cast(Any, module('endpoint-hosts'))
         endpoints.ROOT = self.root
         endpoints.SOURCE_DIRS = [self.root]
         endpoints.MANIFEST = self.root / 'hosts'
@@ -498,7 +499,7 @@ class ScriptContracts(unittest.TestCase):
             self.assertEqual(fixtures.main(), 1)
 
     def test_path_scan_refuses_planted_platform_rendering(self):
-        paths = module('check-path-rendering')
+        paths = cast(Any, module('check-path-rendering'))
         paths.ROOT = self.root
         paths.SCRIPTS = self.root / 'scripts'
         paths.SCRIPTS.mkdir()

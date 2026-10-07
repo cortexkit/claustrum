@@ -15,7 +15,8 @@
 # THE SET MUST MATCH CI, AND SO MUST EACH INVOCATION. Every arm here corresponds to
 # a step in .github/workflows/ci.yml; when a step is added there, add it here. A
 # local gate covering a subset is worse than none, because it earns trust and then
-# lets through exactly what it was trusted to catch.
+# lets through exactly what it was trusted to catch. This refers to CI's `test`
+# job; the separate mutation replay job is deliberately a landing/nightly gate.
 #
 # Matching the SET is not matching the STEPS: this gate once ran every CI arm and
 # still diverged, because the e2e arm dropped CI's --test-threads=1. Copy the
@@ -597,5 +598,5 @@ printf '  (macOS IS unix). Touching platform APIs? See the probe in this file.\n
 if [ -n "${GATE_UNCHECKED:-}" ]; then
   printf '\nGATE PASSED WITH UNCHECKED ARMS -- %s\n' "$GATE_UNCHECKED"
 else
-  printf '\nGATE PASSED -- every check CI runs, on this working tree\n'
+  printf '\nGATE PASSED -- every local CI check, on this working tree (full mutation replay runs in landing CI)\n'
 fi

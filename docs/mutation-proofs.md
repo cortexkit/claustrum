@@ -63,9 +63,10 @@ controls are temporary input trees; they never mutate shipped Rust source.
 | `spikes/opencode-config-fetch.sh` fetch-install/config comparisons | Spike has its own disabled-install mutation arm | Manual spike, not a landing scan. Its stub-startup budget is in script contracts. Unchanged. |
 
 The new script controls invoke exact hermetic unittests from a shared small
-helper, and require an executed test count. Importing the checked script bypasses
+helper, and require an executed, non-skipped test count. Importing the checked script bypasses
 its executable entry point, so control execution cannot recurse. Six catalogue
-rows prove the comparison/refusal logic itself goes red when neutralized.
+rows prove the comparison/refusal logic itself goes red when neutralized; a
+seventh proves that skipping the planted control is not accepted as execution.
 
 ## Wiring
 
@@ -83,5 +84,95 @@ rows prove the comparison/refusal logic itself goes red when neutralized.
 
 ## Replay evidence
 
-The final replay results and the catalogue's row-to-test index are recorded below
-once the full clean-tree replay and breadth audit have completed.
+The final catalogue has **37 proved rows**: 14 Cargo/module rows, 16
+feature-explicit core command rows, and 7 script command rows. Every row names
+one guard and supplies `expect_message`. On this macOS worktree, with
+`cortexkit-mutate 0.7.0`, the final full replay was:
+
+```text
+/usr/bin/time -p ck-mutate run --all --report target/mutations/all.json
+37 CAUGHT; 0 survivors; 0 errors; 0 platform skips
+real 366.56 s
+```
+
+The preceding full breadth audit of the original 36 rows ran
+`ck-mutate run --all --broad --report target/mutations/broad.json` in **491.85 s**.
+All 36 were CAUGHT; all observed collateral was in the named daemon target
+`ck_claustrum`, so no HUB declaration was warranted. The added self-control row
+was then audited with `--only scan-self-control-cannot-skip --broad` (CAUGHT,
+0.28 s). All 14 Cargo rows observed package breadth; the 23 command rows did
+not. Final type-only fixture annotations were followed by individual successful
+replays of the endpoint and path scan rows; no guard behavior changed.
+
+The local `./scripts/gate.sh` passed on the final script behavior in **208.00 s**,
+with its workspace floor satisfied, 9 real-daemon tests, 1 kill-9 crash cut,
+5 rotation cuts, 2 login cuts, 2 OpenCode custody cuts, 8 picker tests,
+3 migration-tool tests, and both release-artifact/compatibility arms. Exact
+verdict:
+
+```text
+GATE PASSED -- every local CI check, on this working tree (full mutation replay runs in landing CI)
+```
+
+Independent checks passed: all 52 hermetic script tests (Python 3.9.6), all six
+standalone scan checkers with their controls, Python syntax compilation of eight
+changed files, Bash 3.2.57 syntax checks, and `ck-mutate check` on 37 rows.
+The full gate also ran Bun 1.4.2's frozen install, TypeScript typecheck/build and
+hermetic tests, Cargo 1.99.0 formatting/clippy (default and seam features), and
+Windows cross type-check. Manifests and lockfiles were not changed.
+Fresh inspection reports 16 pre-existing Pyright errors in unchanged dynamic
+module-loading/fixture assignments and optional regex accesses in
+`test_script_contracts.py`; the new tests' fixture annotations avoid adding to
+those errors. The two new Python helpers have no diagnostics.
+
+Proof collection staged the live implementation before each mutant and checked
+an empty worktree diff. A local command observer captured non-empty source
+`git diff --stat` while the named test ran. The shared runner restored bytes;
+only after it exited did collection perform checkout/touch, confirm the source
+diff empty, and stage its appended catalogue output before requiring the next
+global diff empty. Each named guard was also run in isolation for mutation
+evidence: exactly that test red, no other test red. Cargo target-wide collateral
+in the shared replay is reported separately, never mislabelled exclusive.
+The two survivor controls have caught controls reaching the same files/targets.
+Detailed JSON reports and local evidence remain in gitignored
+`target/mutations/`; this table is the durable row/test index.
+
+| Row id | Exact named test | Full replay |
+|---|---|---|
+| `audit-chain-detects-tampered-row` | `audit::tests::tampered_entry_breaks_chain` | CAUGHT |
+| `bedrock-short-term-deposit-refused` | `store::tests::operator_deposits_refuse_short_term_bedrock_keys_and_accept_long_term_ones` | CAUGHT |
+| `cookie-replace-requires-creator` | `tests::deposit_cookie_creator_refusals_preserve_envelope_and_first_use` | CAUGHT |
+| `corrupt-record-invalidate-stays-quarantined` | `store::tests::operator_invalidations_preserve_corrupt_and_audit_only_transitions` | CAUGHT |
+| `corrupt-record-report-stays-quarantined` | `store::tests::consumer_reports_only_invalidate_active_records` | CAUGHT |
+| `daemon-output-sites-no-new-secret-log` | `tests::every_daemon_output_site_is_enumerated` | CAUGHT |
+| `deposit-grant-is-not-a-read-grant` | `tests::deposit_only_denial_on_every_read_and_key_operation_has_positive_controls` | CAUGHT |
+| `gmail-never-uses-public-client` | `refresh_adapters::google::tests::gmail_missing_client_fails_closed_without_http` | CAUGHT |
+| `grant-list-read-sign-separation` | `store::tests::the_online_grant_listing_keeps_read_and_sign_separate_and_orders_by_prefix` | CAUGHT |
+| `keychain-security-absolute-path` | `resolver::tests::keychain_tool_is_spawned_by_absolute_path` | CAUGHT |
+| `launch-nonce-no-direct-env-read` | `tests::no_shipped_source_reads_the_launch_nonce_directly` | CAUGHT |
+| `list-grant-authorizes-inventory` | `tests::a_list_only_principal_sees_identity_and_adapter_in_list_scoped` | CAUGHT |
+| `list-grant-does-not-fetch-tokens` | `tests::a_list_only_principal_is_refused_by_every_other_scoped_surface` | CAUGHT |
+| `oauth-debug-redacts-client-secret` | `oauth::tests::debug_redacts_client_secret_and_its_bytes` | CAUGHT |
+| `oauth-debug-redacts-tokens` | `oauth::tests::debug_redacts_tokens` | CAUGHT |
+| `reclassify-preserves-granted-category` | `store::taxonomy_tests::force_refuses_to_strip_a_category_an_active_grant_selects_on` | CAUGHT |
+| `refresh-commit-clears-intent` | `engine_tests::refresh_on_stale_commits_new_tokens_and_bumps_version` | CAUGHT |
+| `refresh-intent-before-provider` | `kill9_between_response_and_commit_resolves_to_needs_reauth` | CAUGHT |
+| `refresh-preserves-client-secret` | `gmail_engine_two_refreshes_preserve_record_client_secret` | CAUGHT |
+| `revoked-enrollment-token-unspendable` | `tests::an_enrollment_token_authorizes_a_scoped_read_until_it_is_revoked` | CAUGHT |
+| `revoked-handle-refusal-is-uniform` | `tests::unknown_and_revoked_get_handles_refuse_without_disclosing_a_credential_id` | CAUGHT |
+| `route-bind-refuses-flow-scope` | `tests::a_route_bind_under_a_flow_scope_is_refused_and_binds_nothing` | CAUGHT |
+| `scan-doc-status-falsifier` | `scripts.tests.test_script_contracts.ScriptContracts.test_doc_status_checks_all_markers_and_identifier_boundaries` | CAUGHT |
+| `scan-endpoint-host-manifest-drift` | `scripts.tests.test_script_contracts.ScriptContracts.test_endpoint_host_and_separator_drift_are_refused` | CAUGHT |
+| `scan-fixture-directory-coverage` | `scripts.tests.test_script_contracts.ScriptContracts.test_uncovered_fixture_directory_is_refused` | CAUGHT |
+| `scan-inbound-wire-comparison` | `scripts.tests.test_script_contracts.ScriptContracts.test_inbound_mismatch_is_refused` | CAUGHT |
+| `scan-path-rendering` | `scripts.tests.test_script_contracts.ScriptContracts.test_path_scan_refuses_planted_platform_rendering` | CAUGHT |
+| `scan-self-control-cannot-skip` | `scripts.tests.test_script_contracts.ScriptContracts.test_scan_self_control_must_execute_not_skip` | CAUGHT |
+| `scan-threshold-missing-control` | `scripts.tests.test_script_contracts.ScriptContracts.test_new_threshold_and_stale_unchecked_row_fail_closed` | CAUGHT |
+| `scoped-get-keeps-private-keys-sealed` | `tests::scoped_get_reveals_signing_kind_only_after_read_grant` | CAUGHT |
+| `scoped-read-honors-enrollment-token` | `tests::every_scoped_surface_answers_an_enrolled_token_differently_than_no_token` | CAUGHT |
+| `scoped-refusal-is-uniform` | `tests::scoped_get_uncovered_and_unknown_ids_have_identical_wire_bodies` | CAUGHT |
+| `scoped-status-refusal-is-uniform` | `tests::scoped_status_unknown_and_no_grant_are_indistinguishable_on_the_wire` | CAUGHT |
+| `secret-debug-is-redacted` | `secret::tests::a_secret_is_unprintable_and_serialises_transparently` | CAUGHT |
+| `stale-report-forces-refresh` | `engine_tests::report_stale_then_invalid_grant_latches_needs_reauth` | CAUGHT |
+| `status-wire-stale-pending-key` | `tests::the_status_wire_key_set_is_a_contract_and_a_rename_obliges_an_announcement` | CAUGHT |
+| `store-ahead-refuses-migration` | `store::tests::a_store_ahead_of_this_binary_refuses_to_migrate` | CAUGHT |

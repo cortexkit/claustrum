@@ -321,7 +321,7 @@ runner = "command"
 command = ["python3", "scripts/mutation-cargo-test.py", "--target=--lib", "--features=test-support", "{test}"]
 test_count_pattern = "running {count} test"
 expect_red = ["resolver::tests::keychain_tool_is_spawned_by_absolute_path"]
-expect_message = "super::SECURITY_BIN.starts_with('/')"
+expect_message = 'right: "/usr/bin/security"'
 only = false
 timeout_s = 4200
 build_timeout_s = 3600
@@ -750,3 +750,21 @@ expect_message = "AssertionError: 0 != 2"
 only = false
 timeout_s = 600
 build_timeout_s = 3600
+
+[[control]]
+id = "daemon-existing-output-does-not-read-secrets"
+guards = "an existing daemon output site must not read a secret through expose()"
+file = "crates/credentials-module/src/read_surface.rs"
+old = 'eprintln!("kem credential {diagnostic_id:?} unusable: {error}");'
+new = 'eprintln!("kem credential {diagnostic_id:?} unusable: {error} {}", credentials_core::secret::SecretString::from("x".to_string()).expose()); // NON-VACUITY BREAK'
+edits = []
+test_file = "crates/credentials-module/src/main.rs"
+runner = "cargo"
+package = "credentials-module"
+target = "--bin ck-claustrum"
+expect_red = ["tests::every_daemon_output_site_is_enumerated"]
+expect_message = "a daemon output site reads a secret"
+only = false
+timeout_s = 600
+build_timeout_s = 3600
+

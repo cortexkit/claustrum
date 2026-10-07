@@ -1047,7 +1047,9 @@ mod tests {
     /// The pattern is built by concatenation so this test's own text is not a match.
     #[test]
     fn keychain_tool_is_spawned_by_absolute_path() {
-        assert!(super::SECURITY_BIN.starts_with('/'));
+        // The exact path, not just an absolute one: any other absolute path (a writable
+        // directory, a look-alike tool) would hand the master key to whatever sits there.
+        assert_eq!(super::SECURITY_BIN, "/usr/bin/security");
         let source = include_str!("resolver.rs");
         let bare = format!("{}{}", "Command::new(\"", "security\")");
         assert_eq!(

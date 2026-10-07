@@ -12097,9 +12097,12 @@ mod tests {
     ///   warn!     engram-catalog.json could not be written: fixed text and the io error
     ///             KIND only (never its message, which can carry a path)
     ///
-    /// This test cannot see WHAT a new site logs. What it does is make a new site
-    /// impossible to add without editing the count here, which puts the question in front
-    /// of whoever does it. Covers the four files linked into the daemon binary.
+    /// The count makes a new site impossible to add without editing this test, which puts
+    /// the question in front of whoever does it. The count alone cannot see what an
+    /// EXISTING site logs, so the test also reads every site's arguments and refuses any
+    /// that call `.expose(`: a `Secret` can be read only through `expose()`, so that is
+    /// the one shape every secret read must take. Covers the four files linked into the
+    /// daemon binary.
     ///
     /// Patterns are built by concatenation so this test's own text is not counted, and
     /// `println!` is counted net of `eprintln!` because one contains the other.
@@ -12139,6 +12142,72 @@ mod tests {
             sources[0].contains("route-epoch drop"),
             "positive control failed: the scan could not see the route-epoch drop line"
         );
+
+        // WHAT each site logs: no argument may read a secret.
+        let shapes = [
+            "println", "eprintln", "trace", "debug", "info", "warn", "error",
+        ];
+        let mut sites = 0;
+        for source in sources {
+            for (call, args) in output_site_arguments(source, &shapes) {
+                sites += 1;
+                assert!(
+                    !args.contains(&format!("{}{}", ".expose", "(")),
+                    "a daemon output site reads a secret: {call}!({args})"
+                );
+            }
+        }
+        // The argument reader must see exactly the sites the count saw, or it could be
+        // passing because it read nothing. `println!` sites include `eprintln!` ones here,
+        // so the total is the sum of the per-shape counts above.
+        assert_eq!(
+            sites,
+            println + eprintln + tracing,
+            "control: the argument reader missed output sites the count found"
+        );
+        // And it must flag a planted read, so a reader that never matches cannot pass.
+        let planted = format!(
+            "{}{}{}",
+            "eprintln", "!(\"x {}\", record.payload.expose", "());"
+        );
+        let flagged = output_site_arguments(&planted, &shapes)
+            .into_iter()
+            .any(|(_, args)| args.contains(&format!("{}{}", ".expose", "(")));
+        assert!(flagged, "control: a planted secret read was not flagged");
+    }
+
+    /// Each `<shape>!(` call in `source` and the text of its arguments, read up to the
+    /// matching close paren so multi-line format arguments are included. A shape is
+    /// matched only at a word boundary, so `eprintln` is not also counted as `println`.
+    fn output_site_arguments(source: &str, shapes: &[&str]) -> Vec<(String, String)> {
+        let bytes = source.as_bytes();
+        let mut found = Vec::new();
+        for shape in shapes {
+            let pattern = format!("{shape}{}", "!(");
+            for (at, _) in source.match_indices(&pattern) {
+                if at > 0 && (bytes[at - 1].is_ascii_alphanumeric() || bytes[at - 1] == b'_') {
+                    continue;
+                }
+                let open = at + pattern.len();
+                let mut depth = 1usize;
+                let mut end = open;
+                for (offset, byte) in source[open..].bytes().enumerate() {
+                    match byte {
+                        b'(' => depth += 1,
+                        b')' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                end = open + offset;
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                found.push(((*shape).to_string(), source[open..end].to_string()));
+            }
+        }
+        found
     }
 }
 

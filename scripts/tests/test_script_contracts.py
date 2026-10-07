@@ -421,13 +421,21 @@ class ScriptContracts(unittest.TestCase):
         docs = module('check-doc-status')
         docs.DOCS = self.root / 'docs'
         docs.DOCS.mkdir()
-        source = self.root / 'source.rs'
-        source.write_text('fn longer_symbol_suffix() {}\nfn shipped() {}')
+        (self.root / 'source.rs').write_text('fn longer_symbol_suffix() {}\nfn shipped() {}')
         doc = docs.DOCS / 'design.md'
-        doc.write_text(f'**Status: NOT BUILT**\n<!-- built-when: {source.as_posix()}::symbol -->\n')
-        self.assertEqual(docs.main(), 0)
-        doc.write_text(doc.read_text() + f'<!-- built-when: {source.as_posix()}::shipped -->\n')
-        self.assertEqual(docs.main(), 1)
+        # Markers name repo-relative paths, resolved from the working directory, exactly
+        # as real docs do. An absolute path would carry a drive colon on Windows, which
+        # the marker grammar (`path::symbol`) cannot hold, and this control also runs
+        # there as the doc-status scan's planted violation.
+        previous = os.getcwd()
+        os.chdir(self.root)
+        try:
+            doc.write_text('**Status: NOT BUILT**\n<!-- built-when: source.rs::symbol -->\n')
+            self.assertEqual(docs.main(), 0)
+            doc.write_text(doc.read_text() + '<!-- built-when: source.rs::shipped -->\n')
+            self.assertEqual(docs.main(), 1)
+        finally:
+            os.chdir(previous)
 
     def test_non_utf8_doc_is_readable(self):
         docs = module('check-doc-status')

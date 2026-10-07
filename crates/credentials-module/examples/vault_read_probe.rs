@@ -47,6 +47,7 @@ async fn main() {
     let mut status_ids: Option<Vec<String>> = None;
     let mut scoped_id: Option<String> = None;
     let mut list_scoped = false;
+    let mut wire = false;
     let mut as_module: Option<String> = None;
     let mut enroll_propose: Option<String> = None;
     let mut enroll_poll: Option<String> = None;
@@ -167,6 +168,10 @@ async fn main() {
             // absence is how `list_scoped` shipped querying grants under a hardcoded
             // `reserved` kind: nothing an operator could run would have shown it.
             "--list-scoped" => list_scoped = true,
+            // Print each scoped reply as the exact JSON the daemon served, with the
+            // payload bytes replaced. Consumers pin real wire bytes in their fixtures;
+            // a description of the reply is not a substitute for its keys and values.
+            "--wire" => wire = true,
             "--scoped-id" => {
                 let Some(id) = args.next() else {
                     eprintln!("vault_read_probe: --scoped-id needs a credential id");
@@ -345,6 +350,9 @@ async fn main() {
         )
         .await;
         let parsed: Value = serde_json::from_slice(&body.body).unwrap_or(Value::Null);
+        if wire {
+            println!("{}", redacted_wire(&parsed));
+        }
         let rows = parsed["result"]["credentials"].as_array();
         match rows {
             Some(rows) => {
@@ -619,6 +627,9 @@ async fn main() {
             )
             .await;
             let parsed: Value = serde_json::from_slice(&body.body).unwrap_or(Value::Null);
+            if wire {
+                println!("{}", redacted_wire(&parsed));
+            }
             // Print the FINGERPRINT and length, never the payload: this arm is run against
             // production credentials and its output lands in a terminal scrollback.
             let served = parsed.pointer("/result/payload").and_then(Value::as_array);
@@ -1357,6 +1368,18 @@ fn describe_cookie_jwts(text: &str, now_ms: i64) -> Vec<String> {
     notes
 }
 
+/// A reply as the daemon served it, with `result.payload` (the only secret any scoped
+/// reply carries) replaced by its length. Every other key and value is kept exactly,
+/// absent keys included, so the output can be pinned as a consumer's wire fixture.
+fn redacted_wire(reply: &Value) -> String {
+    let mut reply = reply.clone();
+    if let Some(payload) = reply.pointer_mut("/result/payload") {
+        let len = payload.as_array().map_or(0, Vec::len);
+        *payload = Value::String(format!("<redacted payload: {len} bytes>"));
+    }
+    serde_json::to_string(&reply).unwrap_or_default()
+}
+
 fn fnv1a64(bytes: &[u8]) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for &b in bytes {
@@ -1491,6 +1514,29 @@ fn report(frame: &Frame, show_account_id: bool, show_claims: bool, describe: boo
 #[cfg(test)]
 mod tests {
     use super::describe_cookie_jwts;
+
+    /// The payload bytes never reach the output; every other key, and its value, does.
+    #[test]
+    fn wire_output_replaces_only_the_payload() {
+        let reply = serde_json::json!({"result": {
+            "payload": [115, 101, 99, 114, 101, 116],
+            "project_id": "proj-1",
+            "record_version": 7,
+        }});
+        let out = super::redacted_wire(&reply);
+        assert!(
+            out.contains("\"payload\":\"<redacted payload: 6 bytes>\""),
+            "{out}"
+        );
+        assert!(!out.contains("115"), "payload bytes leaked: {out}");
+        assert!(out.contains("\"project_id\":\"proj-1\"") && out.contains("\"record_version\":7"));
+        // A reply without a payload (a list_scoped inventory, a refusal) is unchanged.
+        let list = serde_json::json!({"result": {"credentials": [{"id": "x", "type": "oauth"}]}});
+        assert_eq!(
+            super::redacted_wire(&list),
+            serde_json::to_string(&list).unwrap()
+        );
+    }
 
     fn jwt_with_exp(exp_secs: i64) -> String {
         use base64::Engine as _;

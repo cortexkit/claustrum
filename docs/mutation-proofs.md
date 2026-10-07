@@ -1,23 +1,22 @@
 # Mutation proof catalogue
 
-The catalogue is replayed by ck-mutate 0.7.0, pinned to commons
-`7d08e73722fa3e79bbcc2607753978ab768f1c6b`. Every row was appended by `prove`,
-never by inventing a catch. No production source or Rust test was changed.
+The catalogue is replayed by ck-mutate 0.7.2, pinned to commons
+`22648cd29230aea9e815bab872ee71de9879ef6d`. Every row was appended by `prove`,
+never by inventing a catch.
 
-## Runner boundary
+## Runner boundary, closed in 0.7.2
 
-At the pinned revision, `crates/cortexkit-mutate/src/lib.rs::Control::targets`
-accepts target selectors only and rejects `--features`. `command` passes targets
-for `Scope::Row` and `Scope::Broad`, but **not** `Scope::Package`.
-`ReplaySession::baselines_scoped` uses package-wide listing to resolve names;
-`prove` also prepares package-wide baseline data. Consequently, core Cargo
-proofs fail before mutation: its integration tests import `test_support`, which
-is not a default feature. The task reviewer approved feature-explicit command
-rows after this behavior was checked in the pinned source. The small
-`scripts/mutation-cargo-test.py` wrapper enforces 3600-second builds and
-600-second exact-test runs. Core command rows therefore do not audit breadth.
-Module Cargo rows do. This is a limitation, not an assertion that core mutants
-have no collateral catches.
+The catalogue was first written against 0.7.0, which had no cargo feature field:
+`Control::targets` rejected `--features`, and `ReplaySession::baselines_scoped`
+listed test names package-wide and dropped the row's target selector. Core
+integration tests import `test_support`, a non-default feature, so a core cargo
+row stopped at E0432 before any mutation. Those 17 rows ran as `command` rows
+through a wrapper with explicit features and had no `--broad` breadth audit.
+0.7.2 added `features` to cargo rows (applied to every cargo invocation,
+including the baseline listing and `--broad`) and fixed the dropped selector, so
+the 17 rows are cargo rows again and the wrapper is gone. The same release
+retries an LF anchor in CRLF form on a CRLF checkout, so `ck-mutate check` also
+runs on the Windows CI job.
 
 The original four release arms retain their source sites and named tests. The
 online listing proof still edits `read_grants_from_conn`, not the migration

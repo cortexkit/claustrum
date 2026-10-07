@@ -1,4 +1,4 @@
-# Safety proofs appended only by ck-mutate prove at commons 7d08e73722fa3e79bbcc2607753978ab768f1c6b (0.7.0).
+# Safety proofs appended only by ck-mutate prove at commons 22648cd29230aea9e815bab872ee71de9879ef6d (0.7.2).
 # Cargo rows allow 3600s builds and 600s tests. Core command rows allow 4200s
 # overall, with the wrapper enforcing those same separate deadlines.
 # Core integrations require test-support. In 0.7.0 Control::targets rejects
@@ -42,13 +42,14 @@ old = '             FROM read_grants ORDER BY principal_kind, principal_id, {sel
 new = '             FROM read_grants GROUP BY {selector_order} ORDER BY principal_kind, principal_id, {selector_kind_column}, {selector_order}, operation" /* NON-VACUITY BREAK */'
 edits = []
 test_file = "crates/credentials-core/src/store.rs"
-runner = "command"
-command = ["python3", "scripts/mutation-cargo-test.py", "--target=--lib", "{test}"]
-test_count_pattern = "running {count} test"
+runner = "cargo"
+package = "credentials-core"
+target = "--lib"
+features = ["test-support"]
 expect_red = ["store::tests::the_online_grant_listing_keeps_read_and_sign_separate_and_orders_by_prefix"]
 expect_message = "assertion `left == right` failed"
 only = false
-timeout_s = 4200
+timeout_s = 600
 build_timeout_s = 3600
 
 
@@ -60,13 +61,14 @@ old = "        let wants_refresh = force_refresh || stale_pending || self.is_sta
 new = "        let wants_refresh = force_refresh || self.is_stale(&initial, min_ttl_ms); // NON-VACUITY BREAK"
 edits = []
 test_file = "crates/credentials-core/src/engine_tests.rs"
-runner = "command"
-command = ["python3", "scripts/mutation-cargo-test.py", "--target=--lib", "{test}"]
-test_count_pattern = "running {count} test"
+runner = "cargo"
+package = "credentials-core"
+target = "--lib"
+features = ["test-support"]
 expect_red = ["engine_tests::report_stale_then_invalid_grant_latches_needs_reauth"]
 expect_message = "must fail: VaultRecord"
 only = false
-timeout_s = 4200
+timeout_s = 600
 build_timeout_s = 3600
 
 
@@ -176,19 +178,22 @@ build_timeout_s = 3600
 
 [[control]]
 id = "gmail-never-uses-public-client"
+hub = "Gmail refresh sends only the record's own OAuth client, asserted by the adapter unit test and by the engine's two-refresh integration test"
+hub_targets = ["gmail_login"]
 guards = "Gmail missing record client must fail closed instead of using public gemini client"
 file = "crates/credentials-core/src/refresh_adapters/google.rs"
 old = "let (client_id, client_secret) = if self.record_client_only {"
 new = "let (client_id, client_secret) = if false { // NON-VACUITY BREAK"
 edits = []
 test_file = "crates/credentials-core/src/refresh_adapters/google.rs"
-runner = "command"
-command = ["python3", "scripts/mutation-cargo-test.py", "--target=--lib", "--features=test-support", "{test}"]
-test_count_pattern = "running {count} test"
+runner = "cargo"
+package = "credentials-core"
+target = "--lib"
+features = ["test-support"]
 expect_red = ["refresh_adapters::google::tests::gmail_missing_client_fails_closed_without_http"]
 expect_message = "called `Result::unwrap_err()` on an `Ok` value"
 only = false
-timeout_s = 4200
+timeout_s = 600
 build_timeout_s = 3600
 
 
@@ -200,13 +205,14 @@ old = "client_secret: old_oauth.client_secret.clone(),"
 new = "client_secret: None, // NON-VACUITY BREAK"
 edits = []
 test_file = "crates/credentials-core/tests/gmail_login.rs"
-runner = "command"
-command = ["python3", "scripts/mutation-cargo-test.py", "--target=--test gmail_login", "--features=test-support", "{test}"]
-test_count_pattern = "running {count} test"
+runner = "cargo"
+package = "credentials-core"
+target = "--test gmail_login"
+features = ["test-support"]
 expect_red = ["gmail_engine_two_refreshes_preserve_record_client_secret"]
 expect_message = "client_secret"
 only = false
-timeout_s = 4200
+timeout_s = 600
 build_timeout_s = 3600
 
 
@@ -220,14 +226,15 @@ old = """
 new = "        let _ = old_hash; // NON-VACUITY BREAK: provider call without durable intent"
 edits = []
 test_file = "crates/credentials-core/tests/kill9_mid_refresh.rs"
-runner = "command"
-command = ["python3", "scripts/mutation-cargo-test.py", "--target=--test kill9_mid_refresh", "--features=test-support,kill9-test-seam", "{test}"]
-test_count_pattern = "running {count} test"
+runner = "cargo"
+package = "credentials-core"
+target = "--test kill9_mid_refresh"
+features = ["test-support", "kill9-test-seam"]
 expect_red = ["kill9_between_response_and_commit_resolves_to_needs_reauth"]
 expect_message = "the interrupted refresh left a dangling intent"
 only = false
 platforms = ["macos", "linux"]
-timeout_s = 4200
+timeout_s = 600
 build_timeout_s = 3600
 
 
@@ -253,13 +260,14 @@ new = """
                         op: AuditOp::RefreshCommit,"""
 edits = []
 test_file = "crates/credentials-core/src/engine_tests.rs"
-runner = "command"
-command = ["python3", "scripts/mutation-cargo-test.py", "--target=--lib", "--features=test-support", "{test}"]
-test_count_pattern = "running {count} test"
+runner = "cargo"
+package = "credentials-core"
+target = "--lib"
+features = ["test-support"]
 expect_red = ["engine_tests::refresh_on_stale_commits_new_tokens_and_bumps_version"]
 expect_message = "read_intent"
 only = false
-timeout_s = 4200
+timeout_s = 600
 build_timeout_s = 3600
 
 
@@ -271,13 +279,14 @@ old = '&self.client_secret.as_ref().map(|_| "<redacted>"),'
 new = "&self.client_secret.as_ref().map(|secret| secret.expose()), // NON-VACUITY BREAK"
 edits = []
 test_file = "crates/credentials-core/src/oauth.rs"
-runner = "command"
-command = ["python3", "scripts/mutation-cargo-test.py", "--target=--lib", "--features=test-support", "{test}"]
-test_count_pattern = "running {count} test"
+runner = "cargo"
+package = "credentials-core"
+target = "--lib"
+features = ["test-support"]
 expect_red = ["oauth::tests::debug_redacts_client_secret_and_its_bytes"]
 expect_message = "client-secret"
 only = false
-timeout_s = 4200
+timeout_s = 600
 build_timeout_s = 3600
 
 
@@ -299,13 +308,14 @@ impl<T: Zeroize + Clone + std::fmt::Debug> std::fmt::Debug for Secret<T> {
 }"""
 edits = []
 test_file = "crates/credentials-core/src/secret.rs"
-runner = "command"
-command = ["python3", "scripts/mutation-cargo-test.py", "--target=--lib", "--features=test-support", "{test}"]
-test_count_pattern = "running {count} test"
+runner = "cargo"
+package = "credentials-core"
+target = "--lib"
+features = ["test-support"]
 expect_red = ["secret::tests::a_secret_is_unprintable_and_serialises_transparently"]
 expect_message = "sk-SECRET-TOKEN"
 only = false
-timeout_s = 4200
+timeout_s = 600
 build_timeout_s = 3600
 
 
@@ -317,13 +327,14 @@ old = 'const SECURITY_BIN: &str = "/usr/bin/security";'
 new = 'const SECURITY_BIN: &str = "security"; // NON-VACUITY BREAK'
 edits = []
 test_file = "crates/credentials-core/src/resolver.rs"
-runner = "command"
-command = ["python3", "scripts/mutation-cargo-test.py", "--target=--lib", "--features=test-support", "{test}"]
-test_count_pattern = "running {count} test"
+runner = "cargo"
+package = "credentials-core"
+target = "--lib"
+features = ["test-support"]
 expect_red = ["resolver::tests::keychain_tool_is_spawned_by_absolute_path"]
 expect_message = 'right: "/usr/bin/security"'
 only = false
-timeout_s = 4200
+timeout_s = 600
 build_timeout_s = 3600
 
 
@@ -397,13 +408,14 @@ old = """WHERE credential_id = ?1 AND record_version = ?4 AND state = 'active'""
 new = """WHERE credential_id = ?1 AND record_version = ?4 AND state IN ('active', 'corrupt')" /* NON-VACUITY BREAK */"""
 edits = []
 test_file = "crates/credentials-core/src/store.rs"
-runner = "command"
-command = ["python3", "scripts/mutation-cargo-test.py", "--target=--lib", "--features=test-support", "{test}"]
-test_count_pattern = "running {count} test"
+runner = "cargo"
+package = "credentials-core"
+target = "--lib"
+features = ["test-support"]
 expect_red = ["store::tests::consumer_reports_only_invalidate_active_records"]
 expect_message = "left: true"
 only = false
-timeout_s = 4200
+timeout_s = 600
 build_timeout_s = 3600
 
 
@@ -415,13 +427,14 @@ old = "if recomputed != e.entry_mac {"
 new = "if false { // NON-VACUITY BREAK"
 edits = []
 test_file = "crates/credentials-core/src/audit.rs"
-runner = "command"
-command = ["python3", "scripts/mutation-cargo-test.py", "--target=--lib", "--features=test-support", "{test}"]
-test_count_pattern = "running {count} test"
+runner = "cargo"
+package = "credentials-core"
+target = "--lib"
+features = ["test-support"]
 expect_red = ["audit::tests::tampered_entry_breaks_chain"]
 expect_message = "broken at e2"
 only = false
-timeout_s = 4200
+timeout_s = 600
 build_timeout_s = 3600
 
 
@@ -433,13 +446,14 @@ old = "if recorded > newest {"
 new = "if false { // NON-VACUITY BREAK"
 edits = []
 test_file = "crates/credentials-core/src/store.rs"
-runner = "command"
-command = ["python3", "scripts/mutation-cargo-test.py", "--target=--lib", "--features=test-support", "{test}"]
-test_count_pattern = "running {count} test"
+runner = "cargo"
+package = "credentials-core"
+target = "--lib"
+features = ["test-support"]
 expect_red = ["store::tests::a_store_ahead_of_this_binary_refuses_to_migrate"]
 expect_message = "a store ahead of this binary must refuse"
 only = false
-timeout_s = 4200
+timeout_s = 600
 build_timeout_s = 3600
 
 
@@ -560,13 +574,14 @@ old = '.field("access_token", &"<redacted>")'
 new = '.field("access_token", self.access_token.expose()) // NON-VACUITY BREAK'
 edits = []
 test_file = "crates/credentials-core/src/oauth.rs"
-runner = "command"
-command = ["python3", "scripts/mutation-cargo-test.py", "--target=--lib", "--features=test-support", "{test}"]
-test_count_pattern = "running {count} test"
+runner = "cargo"
+package = "credentials-core"
+target = "--lib"
+features = ["test-support"]
 expect_red = ["oauth::tests::debug_redacts_tokens"]
 expect_message = "no access token in Debug"
 only = false
-timeout_s = 4200
+timeout_s = 600
 build_timeout_s = 3600
 
 
@@ -578,13 +593,14 @@ old = """WHERE credential_id = ?1 AND state NOT IN (?2, 'corrupt')""""
 new = 'WHERE credential_id = ?1 AND state NOT IN (?2)" /* NON-VACUITY BREAK */'
 edits = []
 test_file = "crates/credentials-core/src/store.rs"
-runner = "command"
-command = ["python3", "scripts/mutation-cargo-test.py", "--target=--lib", "--features=test-support", "{test}"]
-test_count_pattern = "running {count} test"
+runner = "cargo"
+package = "credentials-core"
+target = "--lib"
+features = ["test-support"]
 expect_red = ["store::tests::operator_invalidations_preserve_corrupt_and_audit_only_transitions"]
 expect_message = "assertion failed: !outcome.state_changed"
 only = false
-timeout_s = 4200
+timeout_s = 600
 build_timeout_s = 3600
 
 
@@ -596,13 +612,14 @@ old = "match crate::bedrock::short_term_bedrock_key(record.payload.expose()) {"
 new = "match None::<crate::bedrock::ShortTermBedrockKey> { // NON-VACUITY BREAK"
 edits = []
 test_file = "crates/credentials-core/src/store.rs"
-runner = "command"
-command = ["python3", "scripts/mutation-cargo-test.py", "--target=--lib", "--features=test-support", "{test}"]
-test_count_pattern = "running {count} test"
+runner = "cargo"
+package = "credentials-core"
+target = "--lib"
+features = ["test-support"]
 expect_red = ["store::tests::operator_deposits_refuse_short_term_bedrock_keys_and_accept_long_term_ones"]
 expect_message = "called `Result::unwrap_err()` on an `Ok` value: ()"
 only = false
-timeout_s = 4200
+timeout_s = 600
 build_timeout_s = 3600
 
 
@@ -614,13 +631,14 @@ old = ".filter(|category| granted_categories.contains(*category))"
 new = ".filter(|_category| false) // NON-VACUITY BREAK"
 edits = []
 test_file = "crates/credentials-core/src/store.rs"
-runner = "command"
-command = ["python3", "scripts/mutation-cargo-test.py", "--target=--lib", "--features=test-support", "{test}"]
-test_count_pattern = "running {count} test"
+runner = "cargo"
+package = "credentials-core"
+target = "--lib"
+features = ["test-support"]
 expect_red = ["store::taxonomy_tests::force_refuses_to_strip_a_category_an_active_grant_selects_on"]
 expect_message = "force must refuse while a grant selects on a stripped category"
 only = false
-timeout_s = 4200
+timeout_s = 600
 build_timeout_s = 3600
 
 
@@ -777,12 +795,13 @@ old = 'const SECURITY_BIN: &str = "/usr/bin/security";'
 new = 'const SECURITY_BIN: &str = "/tmp/security"; // NON-VACUITY BREAK'
 edits = []
 test_file = "crates/credentials-core/src/resolver.rs"
-runner = "command"
-command = ["python3", "scripts/mutation-cargo-test.py", "--target=--lib", "--features=test-support", "{test}"]
-test_count_pattern = "running {count} test"
+runner = "cargo"
+package = "credentials-core"
+target = "--lib"
+features = ["test-support"]
 expect_red = ["resolver::tests::keychain_tool_is_spawned_by_absolute_path"]
 expect_message = 'right: "/usr/bin/security"'
 only = false
-timeout_s = 4200
+timeout_s = 600
 build_timeout_s = 3600
 

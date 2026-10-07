@@ -519,6 +519,18 @@ class ScriptContracts(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertIn('MISMATCH in control', result.stdout)
 
+    def test_scan_self_control_must_execute_not_skip(self):
+        from contextlib import redirect_stdout, redirect_stderr
+        from io import StringIO
+        from unittest.mock import patch
+        control = module('lib/scan_self_test')
+        for stderr, expected in [('Ran 1 test\nOK\n', 0),
+                                 ('Ran 1 test\nOK (skipped=1)\n', 2),
+                                 ('Ran 0 tests\nOK\n', 2)]:
+            result = subprocess.CompletedProcess([], 0, stdout='', stderr=stderr)
+            with patch.object(control.subprocess, 'run', return_value=result), redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                self.assertEqual(control.check('fixture'), expected)
+
     def test_stub_startup_budget_exceeds_cold_start(self):
         source = text('scripts/spikes/opencode-config-fetch.sh')
         tries = int(re.search(r'for _ in \{1\.\.(\d+)\}', source).group(1))

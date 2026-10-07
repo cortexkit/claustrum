@@ -15,7 +15,7 @@ def check(test):
          "scripts.tests.test_script_contracts.ScriptContracts." + test],
         cwd=root, capture_output=True, text=True,
     )
-    if result.returncode or "Ran 1 test" not in result.stderr:
+    if result.returncode or "Ran 1 test" not in result.stderr or "skipped" in result.stderr:
         print("REFUSING: planted scan control did not pass:\n" +
               result.stdout + result.stderr, file=sys.stderr)
         return 2

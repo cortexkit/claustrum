@@ -187,10 +187,16 @@ jobs:
         if: runner.os != 'Windows'
         run: python3 -m unittest discover -s scripts/tests -v
 
+      # Not on Windows: git checks sources out with CRLF there, while catalogue anchors
+      # are byte-exact LF text, so every multi-line anchor reads as missing. Mutants are
+      # replayed only on Linux (the mutations job), so a Windows anchor check would test
+      # the checkout's line endings, not the catalogue.
       - name: Install mutation runner (immutable revision)
+        if: runner.os != 'Windows'
         run: cargo install --locked --git https://github.com/cortexkit/commons --rev 7d08e73722fa3e79bbcc2607753978ab768f1c6b cortexkit-mutate
 
       - name: Mutation catalogue check
+        if: runner.os != 'Windows'
         run: ck-mutate check
 
       - name: Fixture line endings

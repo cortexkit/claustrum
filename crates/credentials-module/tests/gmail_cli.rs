@@ -1,7 +1,7 @@
-use std::process::Command;
+use credentials_core::test_support::ckdev_command;
 
 fn login(args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_ck-auth"))
+    ckdev_command(env!("CARGO_BIN_EXE_ck-auth"))
         .arg("login")
         .args(args)
         .stdin(std::process::Stdio::null())

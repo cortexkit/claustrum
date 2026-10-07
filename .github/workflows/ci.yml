@@ -179,6 +179,9 @@ jobs:
       - name: Outside path deps
         run: python3 scripts/check-outside-path-deps.py
 
+      - name: Check development binary execution names
+        run: python3 scripts/check-ckdev-execution.py
+
       - name: Design doc status claims
         run: python3 scripts/check-doc-status.py
 

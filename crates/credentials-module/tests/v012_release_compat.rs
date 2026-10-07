@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use credentials_core::test_support::TestTempDir;
+use credentials_core::test_support::{ckdev_command, TestTempDir};
 
 const TAG: &str = "v0.1.2";
 
@@ -27,7 +27,7 @@ fn assert_ok(label: &str, output: Output) -> Output {
 }
 
 fn current_cli(data_dir: &Path, key_path: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_ck-auth"))
+    ckdev_command(env!("CARGO_BIN_EXE_ck-auth"))
         .args(args)
         .arg("--data-dir")
         .arg(data_dir)
@@ -38,7 +38,7 @@ fn current_cli(data_dir: &Path, key_path: &Path, args: &[&str]) -> Output {
 }
 
 fn released_cli(binary: &Path, data_dir: &Path, key_path: &Path, verb: &str) -> Output {
-    Command::new(binary)
+    ckdev_command(binary)
         .arg(verb)
         .arg("--data-dir")
         .arg(data_dir)

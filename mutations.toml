@@ -804,3 +804,39 @@ only = false
 timeout_s = 600
 build_timeout_s = 3600
 
+
+[[control]]
+id = "scan-ckdev-direct-spawn"
+guards = "development execution must use a ckdev filename even immediately after a wrapped spawn"
+file = "crates/credentials-module/tests/cli_admin.rs"
+old = '        None => ckdev_command(env!("CARGO_BIN_EXE_ck-auth")),'
+new = '        None => Command::new(env!("CARGO_BIN_EXE_ck-auth")), // NON-VACUITY BREAK'
+edits = []
+test_file = "scripts/tests/test_script_contracts.py"
+runner = "command"
+command = ["python3", "scripts/tests/prove-ckdev-controls.py", "{test}"]
+test_count_pattern = "Ran {count} test"
+expect_red = ["scripts.tests.test_script_contracts.ScriptContracts.test_repo_ckdev_execution_fence"]
+expect_message = "development execution bypasses ckdev helper"
+only = false
+timeout_s = 600
+build_timeout_s = 1800
+
+
+[[control]]
+id = "scan-ckdev-matcher-control"
+guards = "the execution matcher must refuse planted direct spawns beside wrapped spawns"
+file = "scripts/check-ckdev-execution.py"
+old = "                if not safe_expr(arg, bindings):"
+new = "                if False:  # NON-VACUITY BREAK"
+edits = []
+test_file = "scripts/tests/test_script_contracts.py"
+runner = "command"
+command = ["python3", "scripts/tests/prove-ckdev-controls.py", "{test}"]
+test_count_pattern = "Ran {count} test"
+expect_red = ["scripts.tests.test_script_contracts.ScriptContracts.test_ckdev_matcher_has_statement_local_controls"]
+expect_message = "direct spawn immediately after a wrapped spawn must be refused"
+only = false
+timeout_s = 600
+build_timeout_s = 1800
+

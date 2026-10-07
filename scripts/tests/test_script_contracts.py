@@ -37,6 +37,77 @@ def shell_function(path, name):
 
 
 class ScriptContracts(unittest.TestCase):
+    def test_ckdev_matcher_has_statement_local_controls(self):
+        guard = module('check-ckdev-execution')
+        rust = '''
+        let wrapped = Command::new(ckdev_binary(Path::new(env!("CARGO_BIN_EXE_ck-auth")), &root));
+        let direct = Command::new(env!("CARGO_BIN_EXE_ck-auth"));
+        let safe = ckdev_binary(Path::new("target/debug/ck-claustrum"), &root);
+        let wrapped_alias = Command::new(&safe);
+        let direct_alias = "target/debug/ck-claustrum";
+        Command::new(direct_alias);
+        // Command::new("ck-auth");
+        let fixture = r#"Command::new("ck-auth")"#;
+        Command::new("curl");
+        '''
+        self.assertEqual(guard.code_violations(rust), [
+            'Command::new(env!("CARGO_BIN_EXE_ck-auth"))',
+            'Command::new(direct_alias)',
+        ], 'direct spawn immediately after a wrapped spawn must be refused')
+        ts = 'Bun.spawn([ckdev_binary(binary, scratch)]);\nBun.spawn(["target/release/ck-auth", "--version"]);'
+        self.assertEqual(guard.code_violations(ts, True), ['spawn("target/release/ck-auth")'])
+        shell = '''
+        smoke_binary="$(ckdev_binary "$STAGE/$bin" "$scratch")"
+        "$smoke_binary" --version
+        "$STAGE/$bin" --version
+        DEPLOYED_BIN="${HOME}/.local/share/cortexkit/bin/ck-auth"
+        "$DEPLOYED_BIN" --version
+        codesign -dv "$STAGE/$bin"
+        for b in ck-auth ck-claustrum; do
+          "$b" --version
+        done
+        '''
+        self.assertEqual(guard.shell_violations(shell), ['$STAGE/$bin', '$b'])
+        self.assertEqual(guard.python_violations('subprocess.run(["/tmp/ck-auth", "--version"])'),
+                         ["subprocess.run(['/tmp/ck-auth', '--version'])"])
+        self.assertEqual(len(guard.python_violations('binary = Path("/tmp") / "ck-auth"\nsubprocess.run([binary])')), 1)
+        self.assertEqual(guard.code_violations('fn one() { let bin = ckdev_binary(src, root); Command::new(bin); } fn two(bin: &Path) { Command::new(bin); }'), ['Command::new(bin)'])
+        self.assertEqual(guard.code_violations('let reason = "long message\\\n next line";\nCommand::new(env!("CARGO_BIN_EXE_ck-auth"));'), ['Command::new(env!("CARGO_BIN_EXE_ck-auth"))'])
+        self.assertEqual(guard.code_violations("fn launch(binary: &'static str) { Command::new(binary); }"), ['Command::new(binary)'])
+        self.assertEqual(guard.code_violations('Command::new(env!("CUSTOM_BINARY"));'), ['Command::new(env!("CUSTOM_BINARY"))'])
+        self.assertEqual(guard.violations(Path('ci.yml'), 'run: target/debug/ck-auth --version'), ['target/debug/ck-auth'])
+        self.assertEqual(guard.shell_violations('fake="$(echo ckdev_binary /tmp/ck-auth)"\n"$fake" --version'), ['$fake'])
+
+    def test_process_measurement_recognizes_only_production_directories(self):
+        measure = module('measure-ckdev-processes')
+        home = Path.home()
+        self.assertFalse(measure.forbidden(os.fspath(home / '.local/share/cortexkit/bin/ck-auth')))
+        self.assertFalse(measure.forbidden(os.fspath(home / '.local/share/cortexkit/staging/rev/ck-auth')))
+        self.assertFalse(measure.forbidden('/tmp/ckdev-auth'))
+        self.assertTrue(measure.forbidden('/tmp/ck-auth'))
+        self.assertTrue(measure.forbidden('/repo/target/staged/rev/ck-auth'))
+
+    def test_repo_ckdev_execution_fence(self):
+        guard = module('check-ckdev-execution')
+        paths, bad = guard.scan(ROOT)
+        self.assertGreater(len(paths), 50, 'source population must not disappear')
+        self.assertEqual(bad, [], 'development execution bypasses ckdev helper')
+
+    def test_ckdev_shell_link_preserves_artifact_and_copy_fallback(self):
+        artifact = self.root / 'ck-auth'
+        artifact.write_text('artifact bytes')
+        result = self.run_shell('source scripts/lib/ckdev-binary.sh; ckdev_binary "$HOME/ck-auth" "$HOME"')
+        self.assertEqual(result.returncode, 0, result.stdout)
+        link = Path(result.stdout.strip())
+        self.assertEqual(link.name, 'ckdev-auth')
+        self.assertEqual(link.stat().st_ino, artifact.stat().st_ino)
+        result = self.run_shell('source scripts/lib/ckdev-binary.sh; ln() { return 1; }; ckdev_binary "$HOME/ck-auth" "$HOME"')
+        self.assertEqual(result.returncode, 0, result.stdout)
+        copy = Path(result.stdout.strip())
+        self.assertEqual(copy.name, 'ckdev-auth')
+        self.assertNotEqual(copy.stat().st_ino, artifact.stat().st_ino)
+        self.assertEqual(copy.read_bytes(), artifact.read_bytes())
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

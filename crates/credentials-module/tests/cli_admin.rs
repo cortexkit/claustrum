@@ -14,6 +14,7 @@ use cortexkit_store::{open_sqlite, Isolation, StorageBackend, StorageDescriptor}
 use credentials_core::key::MasterKey;
 use credentials_core::record::CredentialKind;
 use credentials_core::store::EncryptedStore;
+use credentials_core::test_support::ckdev_command;
 use ring::signature::{UnparsedPublicKey, ED25519};
 
 mod common;
@@ -45,9 +46,9 @@ fn cli() -> Command {
                  staged artifact as verified when it was never run",
                 path.display()
             );
-            Command::new(path)
+            ckdev_command(path)
         }
-        None => Command::new(env!("CARGO_BIN_EXE_ck-auth")),
+        None => ckdev_command(env!("CARGO_BIN_EXE_ck-auth")),
     }
 }
 
@@ -3469,7 +3470,7 @@ fn both_binaries_report_a_build_revision_without_a_supervisor() {
     for label in ["ck-auth", "ck-claustrum"] {
         let mut cmd = match label {
             "ck-auth" => cli(),
-            _ => std::process::Command::new(env!("CARGO_BIN_EXE_ck-claustrum")),
+            _ => ckdev_command(env!("CARGO_BIN_EXE_ck-claustrum")),
         };
         let out = cmd
             .arg("--version")
@@ -4050,7 +4051,7 @@ fn a_temp_dir_connection_file_is_found_and_ambiguity_refuses() {
     // keychain binary at all rather than on discovery. (--key-path is safe here
     // because only an explicit --data-dir disables auto-discovery.)
     let run = |key: Option<&std::path::Path>| -> String {
-        let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_ck-auth"));
+        let mut cmd = ckdev_command(env!("CARGO_BIN_EXE_ck-auth"));
         cmd.arg("list");
         if let Some(k) = key {
             cmd.arg("--key-path").arg(k);
@@ -4069,7 +4070,7 @@ fn a_temp_dir_connection_file_is_found_and_ambiguity_refuses() {
     // no-candidate paths produce byte-identical output ("no master key has been
     // provisioned") and the assertion below proves nothing -- measured, not assumed.
     let key_path = root.join("master.key");
-    let mut boot = std::process::Command::new(env!("CARGO_BIN_EXE_ck-auth"));
+    let mut boot = ckdev_command(env!("CARGO_BIN_EXE_ck-auth"));
     boot.arg("bootstrap").arg("--key-path").arg(&key_path);
     point_at_probe_dirs(&mut boot);
     let bootstrap = boot.output().expect("bootstrap");

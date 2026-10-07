@@ -193,4 +193,8 @@ def fail(message: str) -> int:
 
 
 if __name__ == "__main__":
+    from lib.scan_self_test import check as planted_control
+    control = planted_control("test_new_threshold_and_stale_unchecked_row_fail_closed")
+    if control:
+        sys.exit(control)
     raise SystemExit(main())

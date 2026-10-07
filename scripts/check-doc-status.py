@@ -263,4 +263,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    from lib.scan_self_test import check as planted_control
+    control = planted_control("test_doc_status_checks_all_markers_and_identifier_boundaries")
+    if control:
+        sys.exit(control)
     sys.exit(main())

@@ -74,7 +74,7 @@ fi
 # FETCH AND REPRODUCE. A local-only commit cannot be fetched, so the claim is false even
 # when the code is perfect.
 #
-# Placed HERE, above the mutation arms, because those take minutes -- a guard that
+# Placed HERE, above the build, because that takes minutes -- a guard that
 # refuses after the expensive work teaches people to skip the script.
 git fetch --quiet origin master 2>/dev/null || true
 if ! git merge-base --is-ancestor HEAD origin/master 2>/dev/null; then
@@ -89,7 +89,10 @@ if ! git merge-base --is-ancestor HEAD origin/master 2>/dev/null; then
   echo "*** STAGING A COMMIT CI HAS NOT EVALUATED -- override in effect ***" >&2
 fi
 
-bash scripts/mutation-check.sh
+# The ancestor guard above means the full catalogue already replayed in the
+# green master/train CI landing gate. Only check for stale anchors here; repeating
+# every mutant would add minutes without testing a different source revision.
+ck-mutate check
 
 # FULL 40-HEX, NOT --short. This value is stamped into CK_BUILD_REV and becomes the
 # manifest's build_git_sha, whose canonical form under subc-protocol 0.17 is 40 lowercase

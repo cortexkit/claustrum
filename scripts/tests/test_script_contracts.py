@@ -466,7 +466,58 @@ class ScriptContracts(unittest.TestCase):
 
     def test_probe_is_required_before_build_work(self):
         source = text('scripts/release-build.sh')
-        self.assertLess(source.index('if [ -z "${PROBE:-}" ]'), source.index('bash scripts/mutation-check.sh'))
+        self.assertLess(source.index('if [ -z "${PROBE:-}" ]'), source.index('ck-mutate check'))
+
+    def test_endpoint_host_and_separator_drift_are_refused(self):
+        endpoints = module('endpoint-hosts')
+        endpoints.ROOT = self.root
+        endpoints.SOURCE_DIRS = [self.root]
+        endpoints.MANIFEST = self.root / 'hosts'
+        endpoints.DOMAIN_MANIFEST = self.root / 'domains'
+        source = self.root / 'adapter.rs'
+        source.write_text('const TOKEN_URL: &str = "https://provider.example/token";\n'
+                          'const DOMAIN: &[u8] = b"cortexkit-credentials/control/v1";\n')
+        endpoints.MANIFEST.write_text(endpoints.render(endpoints.discover()))
+        endpoints.DOMAIN_MANIFEST.write_text(endpoints.render_domains(endpoints.discover_domains()))
+        self.assertEqual(endpoints.main(), 0)
+        source.write_text(source.read_text().replace('provider.example', 'attacker.example'))
+        self.assertEqual(endpoints.main(), 1)
+        source.write_text(source.read_text().replace('attacker.example', 'provider.example')
+                          .replace('cortexkit-credentials/control/v1', 'cortexkit-credentials/control/v2'))
+        self.assertEqual(endpoints.main(), 1)
+
+    def test_uncovered_fixture_directory_is_refused(self):
+        from unittest.mock import patch
+        fixtures = module('check-fixture-line-endings')
+        (self.root / 'a' / 'fixtures').mkdir(parents=True)
+        attributes = self.root / '.gitattributes'
+        attributes.write_text('a/fixtures/** -text\n')
+        with patch.object(fixtures.subprocess, 'run', return_value=type('Result', (), {'stdout': os.fspath(self.root)})()):
+            self.assertEqual(fixtures.main(), 0)
+            (self.root / 'b' / 'fixtures').mkdir(parents=True)
+            self.assertEqual(fixtures.main(), 1)
+
+    def test_path_scan_refuses_planted_platform_rendering(self):
+        paths = module('check-path-rendering')
+        paths.ROOT = self.root
+        paths.SCRIPTS = self.root / 'scripts'
+        paths.SCRIPTS.mkdir()
+        source = paths.SCRIPTS / 'probe.py'
+        source.write_text('rel = path.relative_to(root).as_posix()\n')
+        (self.root / 'packages' / 'tests').mkdir(parents=True)
+        (self.root / 'packages' / 'tests' / 'control.ts').write_text('')
+        paths.TYPESCRIPT_GLOBS = ['packages/**/*.ts']
+        paths.MUTATION_CONTROL = self.root / 'packages' / 'tests' / 'control.ts'
+        self.assertEqual(paths.main(), 0)
+        source.write_text('rel = str(path.relative_to(root))\n')
+        self.assertEqual(paths.main(), 1)
+
+    def test_inbound_mismatch_is_refused(self):
+        block = shell_function('scripts/check-inbound-contracts.sh', 'compare')
+        result = self.run_shell('source_file=fixture; fail=0;\n' + block +
+                                '\ncompare control wrong expected\n[ "$fail" = 1 ]')
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn('MISMATCH in control', result.stdout)
 
     def test_stub_startup_budget_exceeds_cold_start(self):
         source = text('scripts/spikes/opencode-config-fetch.sh')

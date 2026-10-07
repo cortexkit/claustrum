@@ -1,0 +1,735 @@
+# Safety proofs appended only by ck-mutate prove at commons 7d08e73722fa3e79bbcc2607753978ab768f1c6b (0.7.0).
+# Cargo rows allow 3600s builds and 600s tests. Core command rows allow 4200s
+# overall, with the wrapper enforcing those same separate deadlines.
+# Core integrations require test-support. In 0.7.0 Control::targets rejects
+# --features and command(Scope::Package) drops target flags from name listing.
+# Core command rows therefore have NO --broad breadth audit; module Cargo rows do.
+# Reports stay under gitignored target/mutations/.
+# The first four release arms retain their source sites and expected guards:
+# online read_grants_from_conn (not the migration planner/read-only CLI path),
+# the stale marker, the scoped vault-held kind fence, and the status wire field.
+# Anchoring the scoped kind fence separately from the engine call survives TTL
+# plumbing changes; the unique comment distinguishes it from the handle fence.
+
+[[control]]
+id = "status-wire-stale-pending-key"
+guards = "status stale_pending wire key cannot be silently renamed"
+file = "crates/credentials-module/src/read_surface.rs"
+old = """
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stale_pending: Option<bool>,"""
+new = """
+    #[serde(rename = "stalePending")] // NON-VACUITY BREAK
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stale_pending: Option<bool>,"""
+edits = []
+test_file = "crates/credentials-module/src/main.rs"
+runner = "cargo"
+package = "credentials-module"
+target = "--bin ck-claustrum"
+expect_red = ["tests::the_status_wire_key_set_is_a_contract_and_a_rename_obliges_an_announcement"]
+expect_message = "stale_pending"
+only = false
+timeout_s = 600
+build_timeout_s = 3600
+
+
+[[control]]
+id = "grant-list-read-sign-separation"
+guards = "online grant listing preserves distinct read and sign rows ordered by selector"
+file = "crates/credentials-core/src/store.rs"
+old = '             FROM read_grants ORDER BY principal_kind, principal_id, {selector_kind_column}, {selector_order}, operation"'
+new = '             FROM read_grants GROUP BY {selector_order} ORDER BY principal_kind, principal_id, {selector_kind_column}, {selector_order}, operation" /* NON-VACUITY BREAK */'
+edits = []
+test_file = "crates/credentials-core/src/store.rs"
+runner = "command"
+command = ["python3", "scripts/mutation-cargo-test.py", "--target=--lib", "{test}"]
+test_count_pattern = "running {count} test"
+expect_red = ["store::tests::the_online_grant_listing_keeps_read_and_sign_separate_and_orders_by_prefix"]
+expect_message = "assertion `left == right` failed"
+only = false
+timeout_s = 4200
+build_timeout_s = 3600
+
+
+[[control]]
+id = "stale-report-forces-refresh"
+guards = "consumer stale marker forces refresh and invalid-grant terminal latch"
+file = "crates/credentials-core/src/engine.rs"
+old = "        let wants_refresh = force_refresh || stale_pending || self.is_stale(&initial, min_ttl_ms);"
+new = "        let wants_refresh = force_refresh || self.is_stale(&initial, min_ttl_ms); // NON-VACUITY BREAK"
+edits = []
+test_file = "crates/credentials-core/src/engine_tests.rs"
+runner = "command"
+command = ["python3", "scripts/mutation-cargo-test.py", "--target=--lib", "{test}"]
+test_count_pattern = "running {count} test"
+expect_red = ["engine_tests::report_stale_then_invalid_grant_latches_needs_reauth"]
+expect_message = "must fail: VaultRecord"
+only = false
+timeout_s = 4200
+build_timeout_s = 3600
+
+
+[[control]]
+id = "scoped-get-keeps-private-keys-sealed"
+guards = "scoped get refuses private signing and KEM key material after read authorization"
+file = "crates/credentials-module/src/read_surface.rs"
+old = """
+                if record.kind.is_vault_held_key() {
+                    // The caller's read grant already authorized this record, so this is"""
+new = """
+                if false { // NON-VACUITY BREAK
+                    // The caller's read grant already authorized this record, so this is"""
+edits = []
+test_file = "crates/credentials-module/src/main.rs"
+runner = "cargo"
+package = "credentials-module"
+target = "--bin ck-claustrum"
+expect_red = ["tests::scoped_get_reveals_signing_kind_only_after_read_grant"]
+expect_message = "a granted caller must learn to use the signing verb"
+only = false
+timeout_s = 600
+build_timeout_s = 3600
+
+
+[[control]]
+id = "revoked-handle-refusal-is-uniform"
+guards = "unknown and revoked handles both get not_found without credential identity"
+file = "crates/credentials-module/src/read_surface.rs"
+old = "Err(StoreOpError::NotFound) => return err(ReadError::NotFound),"
+new = "Err(StoreOpError::NotFound) => return err(ReadError::KindNotGettable), // NON-VACUITY BREAK"
+edits = []
+test_file = "crates/credentials-module/src/main.rs"
+runner = "cargo"
+package = "credentials-module"
+target = "--bin ck-claustrum"
+expect_red = ["tests::unknown_and_revoked_get_handles_refuse_without_disclosing_a_credential_id"]
+expect_message = "not_found"
+only = false
+timeout_s = 600
+build_timeout_s = 3600
+
+
+[[control]]
+id = "list-grant-does-not-fetch-tokens"
+guards = "list-only caller cannot fetch token material through scoped get"
+file = "crates/credentials-module/src/read_surface.rs"
+old = """
+            &params.credential_id,
+            GrantOperation::Read,
+        ) {"""
+new = """
+            &params.credential_id,
+            GrantOperation::List, // NON-VACUITY BREAK
+        ) {"""
+edits = []
+test_file = "crates/credentials-module/src/main.rs"
+runner = "cargo"
+package = "credentials-module"
+target = "--bin ck-claustrum"
+expect_red = ["tests::a_list_only_principal_is_refused_by_every_other_scoped_surface"]
+expect_message = "get_scoped must refuse a list-only principal"
+only = false
+timeout_s = 600
+build_timeout_s = 3600
+
+
+[[control]]
+id = "list-grant-authorizes-inventory"
+guards = "list-only grant discloses identity and adapter in scoped inventory"
+file = "crates/credentials-core/src/store.rs"
+old = """
+                    let decoded_record = if operations.contains(&GrantOperation::Read)
+                        || operations.contains(&GrantOperation::List)"""
+new = """
+                    let decoded_record = if operations.contains(&GrantOperation::Read)
+                        || false // NON-VACUITY BREAK"""
+edits = []
+test_file = "crates/credentials-module/src/main.rs"
+runner = "cargo"
+package = "credentials-module"
+target = "--bin ck-claustrum"
+expect_red = ["tests::a_list_only_principal_sees_identity_and_adapter_in_list_scoped"]
+expect_message = "identity"
+only = false
+timeout_s = 600
+build_timeout_s = 3600
+
+
+[[control]]
+id = "deposit-grant-is-not-a-read-grant"
+guards = "deposit grant authorizes cookie write only, never scoped reads or key operations"
+file = "crates/credentials-core/src/store.rs"
+old = 'WHERE principal_kind = ?1 AND principal_id = ?2 AND operation = ?3",'
+new = """WHERE principal_kind = ?1 AND principal_id = ?2 AND (operation = ?3 OR operation = 'deposit')", // NON-VACUITY BREAK"""
+edits = []
+test_file = "crates/credentials-module/src/main.rs"
+runner = "cargo"
+package = "credentials-module"
+target = "--bin ck-claustrum"
+expect_red = ["tests::deposit_only_denial_on_every_read_and_key_operation_has_positive_controls"]
+expect_message = "not_found"
+only = false
+timeout_s = 600
+build_timeout_s = 3600
+
+
+[[control]]
+id = "gmail-never-uses-public-client"
+guards = "Gmail missing record client must fail closed instead of using public gemini client"
+file = "crates/credentials-core/src/refresh_adapters/google.rs"
+old = "let (client_id, client_secret) = if self.record_client_only {"
+new = "let (client_id, client_secret) = if false { // NON-VACUITY BREAK"
+edits = []
+test_file = "crates/credentials-core/src/refresh_adapters/google.rs"
+runner = "command"
+command = ["python3", "scripts/mutation-cargo-test.py", "--target=--lib", "--features=test-support", "{test}"]
+test_count_pattern = "running {count} test"
+expect_red = ["refresh_adapters::google::tests::gmail_missing_client_fails_closed_without_http"]
+expect_message = "called `Result::unwrap_err()` on an `Ok` value"
+only = false
+timeout_s = 4200
+build_timeout_s = 3600
+
+
+[[control]]
+id = "refresh-preserves-client-secret"
+guards = "successful refresh preserves sealed client_secret for the next Gmail refresh"
+file = "crates/credentials-core/src/engine.rs"
+old = "client_secret: old_oauth.client_secret.clone(),"
+new = "client_secret: None, // NON-VACUITY BREAK"
+edits = []
+test_file = "crates/credentials-core/tests/gmail_login.rs"
+runner = "command"
+command = ["python3", "scripts/mutation-cargo-test.py", "--target=--test gmail_login", "--features=test-support", "{test}"]
+test_count_pattern = "running {count} test"
+expect_red = ["gmail_engine_two_refreshes_preserve_record_client_secret"]
+expect_message = "client_secret"
+only = false
+timeout_s = 4200
+build_timeout_s = 3600
+
+
+[[control]]
+id = "refresh-intent-before-provider"
+guards = "real engine refresh must durably open intent before provider call and precommit crash"
+file = "crates/credentials-core/src/engine.rs"
+old = """
+        self.store
+            .open_intent(credential_id, record.record_version, &old_hash)?;"""
+new = "        let _ = old_hash; // NON-VACUITY BREAK: provider call without durable intent"
+edits = []
+test_file = "crates/credentials-core/tests/kill9_mid_refresh.rs"
+runner = "command"
+command = ["python3", "scripts/mutation-cargo-test.py", "--target=--test kill9_mid_refresh", "--features=test-support,kill9-test-seam", "{test}"]
+test_count_pattern = "running {count} test"
+expect_red = ["kill9_between_response_and_commit_resolves_to_needs_reauth"]
+expect_message = "the interrupted refresh left a dangling intent"
+only = false
+platforms = ["macos", "linux"]
+timeout_s = 4200
+build_timeout_s = 3600
+
+
+[[control]]
+id = "refresh-commit-clears-intent"
+guards = "new token and intent clear commit in the same fenced refresh transaction"
+file = "crates/credentials-core/src/store.rs"
+old = """
+            if n > 0 {
+                clear_intent_tx(tx, credential_id)?;
+                append_audit_tx(
+                    tx,
+                    &audit_key,
+                    &AuditRecord {
+                        op: AuditOp::RefreshCommit,"""
+new = """
+            if n > 0 {
+                // NON-VACUITY BREAK: leave intent dangling after token commit
+                append_audit_tx(
+                    tx,
+                    &audit_key,
+                    &AuditRecord {
+                        op: AuditOp::RefreshCommit,"""
+edits = []
+test_file = "crates/credentials-core/src/engine_tests.rs"
+runner = "command"
+command = ["python3", "scripts/mutation-cargo-test.py", "--target=--lib", "--features=test-support", "{test}"]
+test_count_pattern = "running {count} test"
+expect_red = ["engine_tests::refresh_on_stale_commits_new_tokens_and_bumps_version"]
+expect_message = "read_intent"
+only = false
+timeout_s = 4200
+build_timeout_s = 3600
+
+
+[[control]]
+id = "oauth-debug-redacts-client-secret"
+guards = "OAuthCredential Debug never renders client_secret bytes"
+file = "crates/credentials-core/src/oauth.rs"
+old = '&self.client_secret.as_ref().map(|_| "<redacted>"),'
+new = "&self.client_secret.as_ref().map(|secret| secret.expose()), // NON-VACUITY BREAK"
+edits = []
+test_file = "crates/credentials-core/src/oauth.rs"
+runner = "command"
+command = ["python3", "scripts/mutation-cargo-test.py", "--target=--lib", "--features=test-support", "{test}"]
+test_count_pattern = "running {count} test"
+expect_red = ["oauth::tests::debug_redacts_client_secret_and_its_bytes"]
+expect_message = "client-secret"
+only = false
+timeout_s = 4200
+build_timeout_s = 3600
+
+
+[[control]]
+id = "secret-debug-is-redacted"
+guards = "Secret Debug cannot leak either token strings or opaque payloads"
+file = "crates/credentials-core/src/secret.rs"
+old = """
+impl<T: Zeroize + Clone> std::fmt::Debug for Secret<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("<redacted>")
+    }
+}"""
+new = """
+impl<T: Zeroize + Clone + std::fmt::Debug> std::fmt::Debug for Secret<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self.0) // NON-VACUITY BREAK
+    }
+}"""
+edits = []
+test_file = "crates/credentials-core/src/secret.rs"
+runner = "command"
+command = ["python3", "scripts/mutation-cargo-test.py", "--target=--lib", "--features=test-support", "{test}"]
+test_count_pattern = "running {count} test"
+expect_red = ["secret::tests::a_secret_is_unprintable_and_serialises_transparently"]
+expect_message = "sk-SECRET-TOKEN"
+only = false
+timeout_s = 4200
+build_timeout_s = 3600
+
+
+[[control]]
+id = "keychain-security-absolute-path"
+guards = "keychain calls must not resolve attacker-controlled PATH security binary"
+file = "crates/credentials-core/src/resolver.rs"
+old = 'const SECURITY_BIN: &str = "/usr/bin/security";'
+new = 'const SECURITY_BIN: &str = "security"; // NON-VACUITY BREAK'
+edits = []
+test_file = "crates/credentials-core/src/resolver.rs"
+runner = "command"
+command = ["python3", "scripts/mutation-cargo-test.py", "--target=--lib", "--features=test-support", "{test}"]
+test_count_pattern = "running {count} test"
+expect_red = ["resolver::tests::keychain_tool_is_spawned_by_absolute_path"]
+expect_message = "super::SECURITY_BIN.starts_with('/')"
+only = false
+timeout_s = 4200
+build_timeout_s = 3600
+
+
+[[control]]
+id = "launch-nonce-no-direct-env-read"
+guards = "shipped source reads launch nonce only through descriptor-aware subc_os helper"
+file = "crates/credentials-module/src/main.rs"
+old = "fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> ModuleManifest {"
+new = """
+fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> ModuleManifest {
+    let _ = std::env::var("SUBC_LAUNCH_NONCE"); // NON-VACUITY BREAK"""
+edits = []
+test_file = "crates/credentials-module/src/main.rs"
+runner = "cargo"
+package = "credentials-module"
+target = "--bin ck-claustrum"
+expect_red = ["tests::no_shipped_source_reads_the_launch_nonce_directly"]
+expect_message = "read the launch nonce through subc_os::launch_nonce"
+only = false
+timeout_s = 600
+build_timeout_s = 3600
+
+
+[[control]]
+id = "route-bind-refuses-flow-scope"
+guards = "flow-scoped bind installs no route and cannot borrow opening module grants"
+file = "crates/credentials-module/src/main.rs"
+old = ".is_some_and(|stamp| stamp.attributes.flow_id.is_some())"
+new = ".is_some_and(|_stamp| false) // NON-VACUITY BREAK"
+edits = []
+test_file = "crates/credentials-module/src/main.rs"
+runner = "cargo"
+package = "credentials-module"
+target = "--bin ck-claustrum"
+expect_red = ["tests::a_route_bind_under_a_flow_scope_is_refused_and_binds_nothing"]
+expect_message = "flow"
+only = false
+timeout_s = 600
+build_timeout_s = 3600
+
+
+[[control]]
+id = "scoped-read-honors-enrollment-token"
+guards = "scoped differential token identity test catches token-less authorization"
+file = "crates/credentials-module/src/read_surface.rs"
+old = """
+        if let Err(code) = self.authorize_scoped_as(
+            principal,
+            params.enrollment_token.as_deref(),"""
+new = """
+        if let Err(code) = self.authorize_scoped_as(
+            principal,
+            None, // NON-VACUITY BREAK"""
+edits = []
+test_file = "crates/credentials-module/src/main.rs"
+runner = "cargo"
+package = "credentials-module"
+target = "--bin ck-claustrum"
+expect_red = ["tests::every_scoped_surface_answers_an_enrolled_token_differently_than_no_token"]
+expect_message = "get_scoped"
+only = false
+timeout_s = 600
+build_timeout_s = 3600
+
+
+[[control]]
+id = "corrupt-record-report-stays-quarantined"
+guards = "consumer reports cannot downgrade corrupt record to needs_reauth"
+file = "crates/credentials-core/src/store.rs"
+old = """WHERE credential_id = ?1 AND record_version = ?4 AND state = 'active'""""
+new = """WHERE credential_id = ?1 AND record_version = ?4 AND state IN ('active', 'corrupt')" /* NON-VACUITY BREAK */"""
+edits = []
+test_file = "crates/credentials-core/src/store.rs"
+runner = "command"
+command = ["python3", "scripts/mutation-cargo-test.py", "--target=--lib", "--features=test-support", "{test}"]
+test_count_pattern = "running {count} test"
+expect_red = ["store::tests::consumer_reports_only_invalidate_active_records"]
+expect_message = "left: true"
+only = false
+timeout_s = 4200
+build_timeout_s = 3600
+
+
+[[control]]
+id = "audit-chain-detects-tampered-row"
+guards = "chain MAC verification detects mutation to recorded audit fields"
+file = "crates/credentials-core/src/audit.rs"
+old = "if recomputed != e.entry_mac {"
+new = "if false { // NON-VACUITY BREAK"
+edits = []
+test_file = "crates/credentials-core/src/audit.rs"
+runner = "command"
+command = ["python3", "scripts/mutation-cargo-test.py", "--target=--lib", "--features=test-support", "{test}"]
+test_count_pattern = "running {count} test"
+expect_red = ["audit::tests::tampered_entry_breaks_chain"]
+expect_message = "broken at e2"
+only = false
+timeout_s = 4200
+build_timeout_s = 3600
+
+
+[[control]]
+id = "store-ahead-refuses-migration"
+guards = "binary refuses store schema newer than its shipped migrations"
+file = "crates/credentials-core/src/store.rs"
+old = "if recorded > newest {"
+new = "if false { // NON-VACUITY BREAK"
+edits = []
+test_file = "crates/credentials-core/src/store.rs"
+runner = "command"
+command = ["python3", "scripts/mutation-cargo-test.py", "--target=--lib", "--features=test-support", "{test}"]
+test_count_pattern = "running {count} test"
+expect_red = ["store::tests::a_store_ahead_of_this_binary_refuses_to_migrate"]
+expect_message = "a store ahead of this binary must refuse"
+only = false
+timeout_s = 4200
+build_timeout_s = 3600
+
+
+[[control]]
+id = "revoked-enrollment-token-unspendable"
+guards = "revoked enrollment token cannot authorize scoped read"
+file = "crates/credentials-core/src/store.rs"
+old = 'WHERE token_hash = ?1 AND revoked_at_ms IS NULL",'
+new = 'WHERE token_hash = ?1", // NON-VACUITY BREAK'
+edits = []
+test_file = "crates/credentials-module/src/main.rs"
+runner = "cargo"
+package = "credentials-module"
+target = "--bin ck-claustrum"
+expect_red = ["tests::an_enrollment_token_authorizes_a_scoped_read_until_it_is_revoked"]
+expect_message = "a revoked token must stop working immediately"
+only = false
+timeout_s = 600
+build_timeout_s = 3600
+
+
+[[control]]
+id = "daemon-output-sites-no-new-secret-log"
+guards = "new daemon output site emitting credential bytes must be reviewed rather than silently added"
+file = "crates/credentials-module/src/read_surface.rs"
+old = """
+        if let Err(code) = self.authorize_scoped_as(
+            principal,
+            params.enrollment_token.as_deref(),"""
+new = """
+        eprintln!("{:?}", params.enrollment_token); // NON-VACUITY BREAK
+        if let Err(code) = self.authorize_scoped_as(
+            principal,
+            params.enrollment_token.as_deref(),"""
+edits = []
+test_file = "crates/credentials-module/src/main.rs"
+runner = "cargo"
+package = "credentials-module"
+target = "--bin ck-claustrum"
+expect_red = ["tests::every_daemon_output_site_is_enumerated"]
+expect_message = "the daemon's output sites changed"
+only = false
+timeout_s = 600
+build_timeout_s = 3600
+
+
+[[control]]
+id = "scoped-refusal-is-uniform"
+guards = "unknown and ungranted scoped ids have identical not_found replies"
+file = "crates/credentials-module/src/read_surface.rs"
+old = """
+                refusal,
+            );
+            return Err(ReadError::NotFound);"""
+new = """
+                refusal,
+            );
+            return Err(if refusal == ScopedReadRefusal::NoGrant { ReadError::KindNotGettable } else { ReadError::NotFound }); // NON-VACUITY BREAK"""
+edits = []
+test_file = "crates/credentials-module/src/main.rs"
+runner = "cargo"
+package = "credentials-module"
+target = "--bin ck-claustrum"
+expect_red = ["tests::scoped_get_uncovered_and_unknown_ids_have_identical_wire_bodies"]
+expect_message = "must be indistinguishable"
+only = false
+timeout_s = 600
+build_timeout_s = 3600
+
+
+[[control]]
+id = "scoped-status-refusal-is-uniform"
+guards = "scoped status cannot disclose unknown versus ungranted ids"
+file = "crates/credentials-module/src/read_surface.rs"
+old = """
+                    return unavailable(None);
+                }
+                (credential_id.clone(), true)"""
+new = """
+                    return unavailable(self.engine.store().meta(credential_id).ok().map(|_| credential_id.clone())); // NON-VACUITY BREAK
+                }
+                (credential_id.clone(), true)"""
+edits = []
+test_file = "crates/credentials-module/src/main.rs"
+runner = "cargo"
+package = "credentials-module"
+target = "--bin ck-claustrum"
+expect_red = ["tests::scoped_status_unknown_and_no_grant_are_indistinguishable_on_the_wire"]
+expect_message = "wire-identical"
+only = false
+timeout_s = 600
+build_timeout_s = 3600
+
+
+[[control]]
+id = "cookie-replace-requires-creator"
+guards = "cookie ownership checks prevent another depositing module or operator replacement"
+file = "crates/credentials-module/src/read_surface.rs"
+old = '&format!("{kind}:{id}"),'
+new = '&self.engine.store().meta(&params.id).ok().and_then(|meta| meta.created_by).unwrap_or(format!("{kind}:{id}")), // NON-VACUITY BREAK'
+edits = []
+test_file = "crates/credentials-module/src/main.rs"
+runner = "cargo"
+package = "credentials-module"
+target = "--bin ck-claustrum"
+expect_red = ["tests::deposit_cookie_creator_refusals_preserve_envelope_and_first_use"]
+expect_message = "not_permitted"
+only = false
+timeout_s = 600
+build_timeout_s = 3600
+
+
+[[control]]
+id = "oauth-debug-redacts-tokens"
+guards = "OAuthCredential Debug never renders access or refresh token bytes"
+file = "crates/credentials-core/src/oauth.rs"
+old = '.field("access_token", &"<redacted>")'
+new = '.field("access_token", self.access_token.expose()) // NON-VACUITY BREAK'
+edits = []
+test_file = "crates/credentials-core/src/oauth.rs"
+runner = "command"
+command = ["python3", "scripts/mutation-cargo-test.py", "--target=--lib", "--features=test-support", "{test}"]
+test_count_pattern = "running {count} test"
+expect_red = ["oauth::tests::debug_redacts_tokens"]
+expect_message = "no access token in Debug"
+only = false
+timeout_s = 4200
+build_timeout_s = 3600
+
+
+[[control]]
+id = "corrupt-record-invalidate-stays-quarantined"
+guards = "operator invalidate cannot downgrade corrupt record to needs_reauth"
+file = "crates/credentials-core/src/store.rs"
+old = """WHERE credential_id = ?1 AND state NOT IN (?2, 'corrupt')""""
+new = 'WHERE credential_id = ?1 AND state NOT IN (?2)" /* NON-VACUITY BREAK */'
+edits = []
+test_file = "crates/credentials-core/src/store.rs"
+runner = "command"
+command = ["python3", "scripts/mutation-cargo-test.py", "--target=--lib", "--features=test-support", "{test}"]
+test_count_pattern = "running {count} test"
+expect_red = ["store::tests::operator_invalidations_preserve_corrupt_and_audit_only_transitions"]
+expect_message = "assertion failed: !outcome.state_changed"
+only = false
+timeout_s = 4200
+build_timeout_s = 3600
+
+
+[[control]]
+id = "bedrock-short-term-deposit-refused"
+guards = "short-term Bedrock static keys must be refused at operator deposit"
+file = "crates/credentials-core/src/store.rs"
+old = "match crate::bedrock::short_term_bedrock_key(record.payload.expose()) {"
+new = "match None::<crate::bedrock::ShortTermBedrockKey> { // NON-VACUITY BREAK"
+edits = []
+test_file = "crates/credentials-core/src/store.rs"
+runner = "command"
+command = ["python3", "scripts/mutation-cargo-test.py", "--target=--lib", "--features=test-support", "{test}"]
+test_count_pattern = "running {count} test"
+expect_red = ["store::tests::operator_deposits_refuse_short_term_bedrock_keys_and_accept_long_term_ones"]
+expect_message = "called `Result::unwrap_err()` on an `Ok` value: ()"
+only = false
+timeout_s = 4200
+build_timeout_s = 3600
+
+
+[[control]]
+id = "reclassify-preserves-granted-category"
+guards = "reclassify force cannot strip a category selected by active grant"
+file = "crates/credentials-core/src/store.rs"
+old = ".filter(|category| granted_categories.contains(*category))"
+new = ".filter(|_category| false) // NON-VACUITY BREAK"
+edits = []
+test_file = "crates/credentials-core/src/store.rs"
+runner = "command"
+command = ["python3", "scripts/mutation-cargo-test.py", "--target=--lib", "--features=test-support", "{test}"]
+test_count_pattern = "running {count} test"
+expect_red = ["store::taxonomy_tests::force_refuses_to_strip_a_category_an_active_grant_selects_on"]
+expect_message = "force must refuse while a grant selects on a stripped category"
+only = false
+timeout_s = 4200
+build_timeout_s = 3600
+
+
+[[control]]
+id = "scan-endpoint-host-manifest-drift"
+guards = "planted violations must be refused by scripts/endpoint-hosts.py"
+file = "scripts/endpoint-hosts.py"
+old = "if recorded == rows:"
+new = "if True:  # NON-VACUITY BREAK"
+edits = []
+test_file = "scripts/tests/test_script_contracts.py"
+runner = "command"
+command = ["python3", "-m", "unittest", "-v", "{test}"]
+test_count_pattern = "Ran {count} test"
+expect_red = ["scripts.tests.test_script_contracts.ScriptContracts.test_endpoint_host_and_separator_drift_are_refused"]
+expect_message = "AssertionError: 0 != 1"
+only = false
+timeout_s = 600
+build_timeout_s = 3600
+
+
+[[control]]
+id = "scan-fixture-directory-coverage"
+guards = "planted violations must be refused by scripts/check-fixture-line-endings.py"
+file = "scripts/check-fixture-line-endings.py"
+old = "gaps = [d for d in sorted(found) if not is_covered(d, patterns)]"
+new = "gaps = []  # NON-VACUITY BREAK"
+edits = []
+test_file = "scripts/tests/test_script_contracts.py"
+runner = "command"
+command = ["python3", "-m", "unittest", "-v", "{test}"]
+test_count_pattern = "Ran {count} test"
+expect_red = ["scripts.tests.test_script_contracts.ScriptContracts.test_uncovered_fixture_directory_is_refused"]
+expect_message = "AssertionError: 0 != 1"
+only = false
+timeout_s = 600
+build_timeout_s = 3600
+
+
+[[control]]
+id = "scan-doc-status-falsifier"
+guards = "planted violations must be refused by scripts/check-doc-status.py"
+file = "scripts/check-doc-status.py"
+old = 'if re.search(rf"(?<!\w){re.escape(symbol)}(?!\w)", target.read_text(encoding="utf-8", errors="replace")):'
+new = "if False:  # NON-VACUITY BREAK"
+edits = []
+test_file = "scripts/tests/test_script_contracts.py"
+runner = "command"
+command = ["python3", "-m", "unittest", "-v", "{test}"]
+test_count_pattern = "Ran {count} test"
+expect_red = ["scripts.tests.test_script_contracts.ScriptContracts.test_doc_status_checks_all_markers_and_identifier_boundaries"]
+expect_message = "AssertionError: 0 != 1"
+only = false
+timeout_s = 600
+build_timeout_s = 3600
+
+
+[[control]]
+id = "scan-threshold-missing-control"
+guards = "planted violations must be refused by scripts/threshold-controls.py"
+file = "scripts/threshold-controls.py"
+old = "if name not in manifest:"
+new = """
+if name not in manifest:  # NON-VACUITY BREAK
+            continue
+        if name not in manifest:"""
+edits = []
+test_file = "scripts/tests/test_script_contracts.py"
+runner = "command"
+command = ["python3", "-m", "unittest", "-v", "{test}"]
+test_count_pattern = "Ran {count} test"
+expect_red = ["scripts.tests.test_script_contracts.ScriptContracts.test_new_threshold_and_stale_unchecked_row_fail_closed"]
+expect_message = "AssertionError: 0 != 1"
+only = false
+timeout_s = 600
+build_timeout_s = 3600
+
+
+[[control]]
+id = "scan-path-rendering"
+guards = "planted violations must be refused by scripts/check-path-rendering.py"
+file = "scripts/check-path-rendering.py"
+old = "if BAD.search(line):"
+new = "if False:  # NON-VACUITY BREAK"
+edits = []
+test_file = "scripts/tests/test_script_contracts.py"
+runner = "command"
+command = ["python3", "-m", "unittest", "-v", "{test}"]
+test_count_pattern = "Ran {count} test"
+expect_red = ["scripts.tests.test_script_contracts.ScriptContracts.test_path_scan_refuses_planted_platform_rendering"]
+expect_message = "AssertionError: 0 != 1"
+only = false
+timeout_s = 600
+build_timeout_s = 3600
+
+
+[[control]]
+id = "scan-inbound-wire-comparison"
+guards = "planted violations must be refused by scripts/check-inbound-contracts.sh"
+file = "scripts/check-inbound-contracts.sh"
+old = 'if [[ "$ours" != "$theirs" ]]; then'
+new = "if false; then # NON-VACUITY BREAK"
+edits = []
+test_file = "scripts/tests/test_script_contracts.py"
+runner = "command"
+command = ["python3", "-m", "unittest", "-v", "{test}"]
+test_count_pattern = "Ran {count} test"
+expect_red = ["scripts.tests.test_script_contracts.ScriptContracts.test_inbound_mismatch_is_refused"]
+expect_message = "AssertionError: 1 != 0"
+only = false
+timeout_s = 600
+build_timeout_s = 3600

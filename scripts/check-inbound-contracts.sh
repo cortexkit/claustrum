@@ -67,6 +67,22 @@ compare() {
   echo "  ok  $what = $ours"
 }
 
+# Use the real comparison function against planted disagreements before trusting
+# the extracted values. Subshells keep the controls out of the live failure flag.
+if ! (
+  compare control same same >/dev/null 2>&1
+  [[ "$fail" == 0 ]] || exit 1
+  compare control wrong expected >/dev/null 2>&1
+  [[ "$fail" == 1 ]] || exit 1
+  fail=0
+  compare control "" expected >/dev/null 2>&1
+  [[ "$fail" == 1 ]] || exit 1
+); then
+  echo "REFUSED: inbound comparison failed its planted-violation control" >&2
+  exit 1
+fi
+echo "inbound comparison self-test: 3 controls passed"
+
 echo "checking transcribed wire facts against $spec"
 
 # The payload key holding the sealed blob.

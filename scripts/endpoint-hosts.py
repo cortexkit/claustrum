@@ -289,4 +289,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    from lib.scan_self_test import check as planted_control
+    control = planted_control("test_endpoint_host_and_separator_drift_are_refused")
+    if control:
+        sys.exit(control)
     raise SystemExit(main())

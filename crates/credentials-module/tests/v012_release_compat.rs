@@ -15,6 +15,13 @@ const ASSET: &str = "ck-auth-darwin-arm64.zip";
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const ASSET: &str = "ck-auth-linux-x64.zip";
 
+// Pinned from the published v0.1.2 sidecars. A changed upstream artifact must not
+// silently redefine the rollback binary this test exercises.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const SHA256: &str = "6fde0f610062e0cba8b14e3e2488d5853e985e839b6cbdf8e621f0b501b97afb";
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+const SHA256: &str = "8ee4f4faef44851d55cfba4cfa7c32ec6b141cfb36d9a07ed3cb61fb3a079b1d";
+
 fn assert_ok(label: &str, output: Output) -> Output {
     assert!(
         output.status.success(),
@@ -48,39 +55,66 @@ fn released_cli(binary: &Path, data_dir: &Path, key_path: &Path, verb: &str) -> 
         .unwrap_or_else(|error| panic!("execute released {TAG} artifact: {error}"))
 }
 
-fn download_release(root: &Path) -> PathBuf {
-    let archive = root.join(ASSET);
-    let sidecar = root.join(format!("{ASSET}.sha256"));
-    let base = format!("https://github.com/cortexkit/claustrum/releases/download/{TAG}");
-    assert_ok(
-        "download released artifact",
-        Command::new("curl")
-            .args(["--fail", "--location", "--silent", "--show-error"])
-            .arg(format!("{base}/{ASSET}"))
-            .args(["--output"])
-            .arg(&archive)
-            .output()
-            .expect("run curl for artifact"),
-    );
-    assert_ok(
-        "download release checksum",
-        Command::new("curl")
-            .args(["--fail", "--location", "--silent", "--show-error"])
-            .arg(format!("{base}/{ASSET}.sha256"))
-            .args(["--output"])
-            .arg(&sidecar)
-            .output()
-            .expect("run curl for checksum"),
-    );
-    assert_ok(
-        "verify published sidecar",
+fn archive_matches_pin(archive: &Path) -> bool {
+    if !archive.is_file() {
+        return false;
+    }
+    let output = assert_ok(
+        "hash released artifact",
         Command::new("shasum")
-            .args(["-a", "256", "-c"])
-            .arg(&sidecar)
-            .current_dir(root)
+            .args(["-a", "256"])
+            .arg(archive)
             .output()
             .expect("run shasum"),
     );
+    String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .next()
+        == Some(SHA256)
+}
+
+fn download_release(root: &Path) -> PathBuf {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("target"));
+    let cache = workspace.join(target).join("release-compat").join(SHA256);
+    std::fs::create_dir_all(&cache).expect("create release artifact cache");
+    let archive = cache.join(ASSET);
+    // Check the bytes on every use, not just the filename or a cached sidecar.
+    if archive_matches_pin(&archive) {
+        eprintln!(
+            "verified cached {TAG} artifact: {}; no download",
+            archive.display()
+        );
+    } else {
+        if archive.exists() {
+            eprintln!(
+                "cached {TAG} artifact checksum mismatch; re-downloading {}",
+                archive.display()
+            );
+        }
+        let base = format!("https://github.com/cortexkit/claustrum/releases/download/{TAG}");
+        // Publish only complete, verified downloads. Separate process names keep
+        // concurrent test processes from reading or overwriting a partial zip.
+        let download = cache.join(format!("{ASSET}.{}.download", std::process::id()));
+        eprintln!("downloading {TAG} artifact: {base}/{ASSET}");
+        assert_ok(
+            "download released artifact",
+            Command::new("curl")
+                .args(["--fail", "--location", "--silent", "--show-error"])
+                .arg(format!("{base}/{ASSET}"))
+                .arg("--output")
+                .arg(&download)
+                .output()
+                .expect("run curl for artifact"),
+        );
+        assert!(
+            archive_matches_pin(&download),
+            "released {TAG} artifact does not match pinned SHA-256 {SHA256}"
+        );
+        std::fs::rename(&download, &archive).expect("cache verified release artifact");
+    }
     assert_ok(
         "unpack released artifact",
         Command::new("unzip")

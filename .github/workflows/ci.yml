@@ -139,12 +139,18 @@ jobs:
         with:
           components: clippy, rustfmt
 
+      - uses: Swatinem/rust-cache@bc2d2e71bd35c5549942babaa51a89c586b981d1 # v2.8.1
+        with:
+          workspaces: |
+            claustrum -> target
+            subconscious -> target
+
       # The real-daemon e2e rig spawns the subc daemon (exe `ck-subc`; the PACKAGE
       # is still subc-core) as a subprocess. Build it from the sibling checkout so
       # the rig finds it under ../subconscious/target/debug.
       - name: Build subc binaries (real-daemon e2e)
         working-directory: subconscious
-        run: cargo build -p subc-core --bins
+        run: cargo build --bin ck-subc
 
       # Compare the wire facts this repo transcribes against the document that owns
       # them. Runs here rather than as a test because it reads a sibling checkout,
@@ -193,7 +199,16 @@ jobs:
       # Runs on Windows too: from 0.7.2 an LF anchor that finds nothing in a CRLF
       # checkout is retried in CRLF form, so the check reads the catalogue, not the
       # checkout's line endings.
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        id: mutate-cache
+        with:
+          path: |
+            ~/.cargo/bin/ckdev-mutate
+            ~/.cargo/bin/ckdev-mutate.exe
+          key: ckdev-mutate-${{ runner.os }}-${{ runner.arch }}-46cc166b0df2edcfd14b3eb54ed6eeac588fed69
+
       - name: Install mutation runner (immutable revision)
+        if: steps.mutate-cache.outputs.cache-hit != 'true'
         run: cargo install --locked --git https://github.com/cortexkit/commons --rev 46cc166b0df2edcfd14b3eb54ed6eeac588fed69 cortexkit-mutate
 
       - name: Mutation catalogue check
@@ -244,19 +259,17 @@ jobs:
       - name: Test
         run: cargo test --locked --workspace --all-targets
 
-      # Run the security-conformance suite with both crash-safety seams enabled: the
-      # real-SIGKILL mid-refresh test and the master-key-rotation crash-cut test (both
-      # ship-gate requirements). They are Unix-only (rely on SIGKILL + kernel
-      # lease-lock release) and compile to nothing on Windows, so the step is harmless
-      # there.
+      # Run only the seam targets; the workspace suite above already ran everything
+      # else. One feature set matches the gate's four core arms and also exercises
+      # the migration-tool key-identity diagnostic. The crash cuts are Unix-only.
       - name: Security-conformance suite (crash-safety seams)
-        run: cargo test --locked --workspace --all-targets --features kill9-test-seam,rotate-test-seam,login-test-seam
+        run: cargo test --locked --workspace --features credentials-core/test-support,credentials-core/kill9-test-seam,credentials-core/rotate-test-seam,credentials-core/login-test-seam,credentials-core/migration-tools --test kill9_mid_refresh --test rotate_crash_cut --test login_crash_cut --test key_verify_takes_nothing
 
       - name: OpenCode custody crash cuts
         if: matrix.os == 'ubuntu'
         run: |
-          cargo test --locked -p credentials-module --test cli_opencode the_migrate_opencode_tombstone_reread_failure_keeps_the_old_handle_until_rerun
-          cargo test --locked -p credentials-module --test cli_opencode the_opencode_account_add_recovers_a_mint_before_handle_write_with_one_live_handle
+          cargo test --locked --workspace --features credentials-core/test-support --test cli_opencode the_migrate_opencode_tombstone_reread_failure_keeps_the_old_handle_until_rerun
+          cargo test --locked --workspace --features credentials-core/test-support --test cli_opencode the_opencode_account_add_recovers_a_mint_before_handle_write_with_one_live_handle
 
       # Run the #[ignore]'d real-daemon e2e (incl. the on-the-wire malicious-client
       # harness) under a real supervised subc-core. This is the ONLY layer that
@@ -272,7 +285,7 @@ jobs:
         if: matrix.os == 'ubuntu'
         env:
           CRED_REQUIRE_DAEMON: "1"
-        run: cargo test --locked -p credentials-module --test real_daemon_e2e -- --ignored --test-threads=1
+        run: cargo test --locked --workspace --features credentials-core/test-support --test real_daemon_e2e -- --ignored --test-threads=1
 
       # Match the local gate: probe a default-feature release artifact separately
       # from the seam-enabled binary. CI covers Linux; the pre-train local gate
@@ -283,7 +296,7 @@ jobs:
         run: |
           cargo build --release --locked -p credentials-module --bin ck-auth
           export CK_AUTH_IMPORT_SHIPPED_BINARY="$PWD/target/release/ck-auth"
-          cargo test --locked -p credentials-module --features import-prompt-seam --test import_picker -- --test-threads=1
+          cargo test --locked --workspace --features credentials-core/test-support,credentials-module/import-prompt-seam --test import_picker -- --test-threads=1
 
       # Assert test-only environment hatches are absent from a REAL release binary. It
       # is #[ignore]'d because it builds the release profile, so without this step it
@@ -292,7 +305,7 @@ jobs:
       # is the expensive part.
       - name: Release-artifact assertions (ship gate)
         if: matrix.os == 'ubuntu'
-        run: cargo test --locked -p credentials-module --test cli_admin test_escape_hatches_are_absent -- --ignored
+        run: cargo test --locked --workspace --features credentials-core/test-support --test cli_admin test_escape_hatches_are_absent -- --ignored
 
       # The released v0.1.2 artifact must keep reading a store that carries every
       # later migration: it predates the store-ahead refusal, so it is the binary a
@@ -301,7 +314,7 @@ jobs:
       # and linux-x64, the two the test knows how to fetch.
       - name: Released v0.1.2 reads a migration-N store
         if: matrix.os == 'ubuntu'
-        run: cargo test --locked -p credentials-module --test v012_release_compat -- --ignored --nocapture
+        run: cargo test --locked --workspace --features credentials-core/test-support --test v012_release_compat -- --ignored --nocapture
 
   # Separate checkouts per shard: never replay two mutants in one tree. Include
   # train pushes because train-push.sh waits for this workflow before landing.
@@ -318,7 +331,14 @@ jobs:
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@bc2d2e71bd35c5549942babaa51a89c586b981d1 # v2.8.1
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        id: mutate-cache
+        with:
+          path: ~/.cargo/bin/ckdev-mutate
+          key: ckdev-mutate-${{ runner.os }}-${{ runner.arch }}-46cc166b0df2edcfd14b3eb54ed6eeac588fed69
       - name: Install mutation runner (immutable revision)
+        if: steps.mutate-cache.outputs.cache-hit != 'true'
         run: cargo install --locked --git https://github.com/cortexkit/commons --rev 46cc166b0df2edcfd14b3eb54ed6eeac588fed69 cortexkit-mutate
       - name: Mutation catalogue check
         run: ckdev-mutate check

@@ -107,12 +107,15 @@ echo "building at ${REV}"
 # The current checkout revision names the binary sources and Cargo.lock pins
 # every dependency compiled into them; no sibling revision is needed.
 # --locked so the build cannot silently resolve a different dependency set than CI did.
-CK_BUILD_REV="$REV" cargo build --locked --release -p credentials-module \
+# Isolate the stamped graph: unstamped gate/acceptance builds must not invalidate
+# core's option_env!("CK_BUILD_REV") and rebuild the release profile on every switch.
+# Scope this to the stamped command; debug verification reuses the gate's target.
+CK_BUILD_REV="$REV" CARGO_TARGET_DIR=target/stamped cargo build --locked --release -p credentials-module \
   --bin ck-claustrum --bin ck-auth
 
 # COPY OUT OF target/ BEFORE PUBLISHING ANYTHING ABOUT THESE FILES.
 #
-# target/release/ belongs to cargo, and any later `--release` command silently
+# target/stamped/release/ belongs to cargo, and a later stamped build silently
 # overwrites what is in it. Measured the hard way: an e2e run with `--release` REBUILT
 # ck-claustrum on top of a staged, signed artifact, so a sha published from that path
 # stopped describing the file within one command. A hash is a promise about a specific
@@ -121,8 +124,7 @@ CK_BUILD_REV="$REV" cargo build --locked --release -p credentials-module \
 #
 # The staging dir is keyed by revision, so two builds of one commit land in the same
 # place and a different commit cannot quietly replace the first.
-# WHY target/staged AND NOT target/release: a later release-profile build --
-# including `cargo test --release`, including the verification run below --
+# WHY target/staged AND NOT target/stamped/release: a later stamped build
 # recompiles the binary IN PLACE, after the sha has been computed. You publish a
 # hash that no longer names the file, and nothing errors. Cargo does not write
 # build output here, so the hashes stay true.
@@ -131,7 +133,7 @@ CK_BUILD_REV="$REV" cargo build --locked --release -p credentials-module \
 # it was. `cargo clean` removes the WHOLE target directory: measured 2026-08-16
 # with `cargo clean --dry-run -v`, which names these staged paths in its removal
 # list. Two different hazards, and only one is fixed by this placement:
-#   OVERWRITE (target/release) -- silent, corrupts a published hash, artifact
+#   OVERWRITE (cargo's release output) -- silent, corrupts a published hash, artifact
 #     still present and wrong. This is the one that placement fixes.
 #   DELETION (anywhere under target/) -- loud, file simply gone, recoverable by
 #     re-running this script at the named rev. Accepted, not fixed.
@@ -194,7 +196,7 @@ source scripts/lib/ckdev-binary.sh
 SMOKE_SCRATCH="$(mktemp -d)"
 trap 'rm -rf "$SMOKE_SCRATCH"' EXIT
 for bin in ck-claustrum ck-auth; do
-  cp "target/release/$bin" "$STAGE/$bin"
+  cp "target/stamped/release/$bin" "$STAGE/$bin"
   # Pin the identifier. NEVER re-sign at the destination: a pin is not sticky, and one
   # `codesign --force --sign -` at placement reverts it to the derived form.
   #

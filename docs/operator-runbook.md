@@ -1256,17 +1256,21 @@ tree: a stamped revision that names a commit whose contents are not what was bui
 is worse than no stamp, because the whole point is to be trusted during an
 incident.
 
-Artifacts land in `target/staged/<rev>/`, **not** `target/release/`. That
-directory belongs to cargo, and any later `--release` command silently overwrites
-what is in it — measured: an e2e run rebuilt a staged, signed daemon on top of
-itself, so a published hash stopped describing the file within one command.
+Stamped builds use `CARGO_TARGET_DIR=target/stamped`, separate from the unstamped
+gate and acceptance builds in `target/release/`. This prevents switching
+`CK_BUILD_REV` from recompiling core and module at release optimisation.
+Artifacts are then copied to `target/staged/<rev>/`, **not** left in
+`target/stamped/release/`. Cargo owns that build directory and a later stamped
+build can overwrite it. Before staging was separate, an e2e run rebuilt a signed
+daemon on top of itself, so a published hash stopped describing the file within
+one command.
 
 **A stage is safe from overwrite, NOT from `cargo clean`.** `target/staged` is
 still under `target/`, and clean takes the whole tree — measured 2026-08-16 with
 `cargo clean --dry-run -v`, which names the staged paths in its removal list.
 The two hazards differ in severity and only the first is addressed here:
 
-- **Overwrite** (`target/release/`) is SILENT. The artifact still exists, the
+- **Overwrite** (cargo's release output) is SILENT. The artifact still exists, the
   published hash no longer describes it, and nothing errors. This is the one
   the placement fixes.
 - **Deletion** (anywhere under `target/`) is LOUD. The file is gone and the
@@ -1421,11 +1425,13 @@ Match the attribute pattern loosely: `#[tokio::test(flavor = "multi_thread")]` i
 test and an exact-string search for `#[tokio::test]` misses it, which reports a
 mismatch in the file rather than in the search.
 
-**Sign with a pinned identifier at build time, then place with a plain copy:**
+**Sign the staged binaries with pinned identifiers before placement:**
+`release-build.sh` does this for both binaries (including the hardened runtime),
+before writing their checksums. Its signing commands are:
 
 ```sh
-codesign --force --sign - --identifier ck-claustrum   target/release/ck-claustrum
-codesign --force --sign - --identifier ck-auth        target/release/ck-auth
+codesign --force --sign - --options runtime --identifier ck-claustrum target/staged/<rev>/ck-claustrum
+codesign --force --sign - --options runtime --identifier ck-auth target/staged/<rev>/ck-auth
 ```
 
 This is not cosmetic. macOS's default ad-hoc identifier embeds the binary's

@@ -473,18 +473,20 @@ fi
 # Raise this WITH the arm count. A floor that trails is worse than no floor: it
 # reports a bound it is not enforcing, and the gap is invisible from a green run.
 CRED_REQUIRE_DAEMON=1 run_expect 9 "real-daemon e2e (ship gate)" \
-  cargo test --locked -p credentials-module --test real_daemon_e2e -- \
+  cargo test --locked --workspace --features credentials-core/test-support --test real_daemon_e2e -- \
     --ignored --nocapture --test-threads=1
 
 # The crash-safety proofs are gated at FILE level: without the feature the file is
 # not compiled and the run reports "running 0 tests ... ok". Nothing inside a file
 # that does not exist can warn, so the counts are the only available instrument.
+# Resolve from the workspace, with one feature set for all four core targets, so
+# changing test files does not rebuild core or its shared dependencies.
 run_expect 1 "kill-9 mid-refresh crash cut" \
-  cargo test --locked -p credentials-core --features kill9-test-seam --test kill9_mid_refresh
+  cargo test --locked --workspace --features credentials-core/test-support,credentials-core/kill9-test-seam,credentials-core/rotate-test-seam,credentials-core/login-test-seam,credentials-core/migration-tools --test kill9_mid_refresh
 run_expect 5 "master-key rotation crash cuts" \
-  cargo test --locked -p credentials-core --features rotate-test-seam --test rotate_crash_cut
+  cargo test --locked --workspace --features credentials-core/test-support,credentials-core/kill9-test-seam,credentials-core/rotate-test-seam,credentials-core/login-test-seam,credentials-core/migration-tools --test rotate_crash_cut
 run_expect 2 "login crash cut" \
-  cargo test --locked -p credentials-core --features login-test-seam --test login_crash_cut
+  cargo test --locked --workspace --features credentials-core/test-support,credentials-core/kill9-test-seam,credentials-core/rotate-test-seam,credentials-core/login-test-seam,credentials-core/migration-tools --test login_crash_cut
 # These debug-only seams prove the custody cleanup paths without making an
 # environment-triggered interruption reachable in a release binary.
 # --nocapture IS LOAD-BEARING, NOT TIDINESS. Both arms can now print a SKIPPING notice
@@ -494,11 +496,11 @@ run_expect 2 "login crash cut" \
 # ran nothing, reported as coverage. The gate refuses this combination by name, which is
 # how this line came to exist: adding the skip notices made it fire.
 run_expect 1 "opencode tombstone reread crash cut" \
-  cargo test --locked -p credentials-module \
+  cargo test --locked --workspace --features credentials-core/test-support \
     --test cli_opencode the_migrate_opencode_tombstone_reread_failure_keeps_the_old_handle_until_rerun \
     -- --nocapture
 run_expect 1 "opencode account handle-write crash cut" \
-  cargo test --locked -p credentials-module \
+  cargo test --locked --workspace --features credentials-core/test-support \
     --test cli_opencode the_opencode_account_add_recovers_a_mint_before_handle_write_with_one_live_handle \
     -- --nocapture
 # Rebuild the shipped CLI with default features so every later check and the caller use
@@ -509,13 +511,13 @@ run_check "release ck-auth (default features)" \
 # when this export is absent so a seam-enabled CARGO_BIN_EXE cannot impersonate shipping.
 export CK_AUTH_IMPORT_SHIPPED_BINARY="$PWD/target/release/ck-auth"
 run_expect 8 "interactive import picker + real-terminal smoke" \
-  cargo test --locked -p credentials-module --features import-prompt-seam \
+  cargo test --locked --workspace --features credentials-core/test-support,credentials-module/import-prompt-seam \
     --test import_picker -- --test-threads=1
 # The migration tools are feature-gated, so clippy compiles them but nothing RAN them
 # until this arm existed. Compiling proves they build; the property that matters -- the
 # key-identity diagnostic works while the daemon holds the lease -- is a runtime fact.
 run_expect 1 "migration tools" \
-  cargo test --locked -p credentials-core --features migration-tools \
+  cargo test --locked --workspace --features credentials-core/test-support,credentials-core/kill9-test-seam,credentials-core/rotate-test-seam,credentials-core/login-test-seam,credentials-core/migration-tools \
   --test key_verify_takes_nothing
 
 # The release-artifact assertion CI runs as its own step: the debug-only
@@ -526,11 +528,11 @@ run_expect 1 "migration tools" \
 # as the rollback floor). The test downloads the artifact, so it is its own arm:
 # offline it fails here by name rather than reading as a workspace regression.
 run_expect 1 "released v0.1.2 reads a migration-N store" \
-  cargo test --locked -p credentials-module --test v012_release_compat \
+  cargo test --locked --workspace --features credentials-core/test-support --test v012_release_compat \
   -- --ignored --nocapture
 
 run_expect 1 "release artifact (test seams absent)" \
-  cargo test --locked -p credentials-module --test cli_admin \
+  cargo test --locked --workspace --features credentials-core/test-support --test cli_admin \
   test_escape_hatches_are_absent -- --ignored --nocapture
 
 # PROVE the scope claim rather than asserting it. "Every check CI runs" rots the

@@ -26,6 +26,7 @@ mod common;
 use std::{
     path::{Path, PathBuf},
     process::Stdio,
+    sync::OnceLock,
     time::Duration,
 };
 
@@ -208,24 +209,33 @@ fn subconscious_root() -> Option<PathBuf> {
 /// subc-core) — building by explicit bin name also guards against silently running
 /// a stale binary left under the old name in the sibling's target dir.
 fn build_subc_core() -> Option<PathBuf> {
-    let root = subconscious_root()?;
-    let status = std::process::Command::new(env!("CARGO"))
-        .current_dir(&root)
-        .args(["build", "--bin", "ck-subc"])
-        .status()
-        .expect("run cargo build for ck-subc");
-    if !status.success() {
-        if require_daemon() {
-            panic!(
+    // All rigs in this process use the same checkout and binary. Serialize the
+    // build even when tests run in parallel, and reuse both success and skip.
+    static BINARY: OnceLock<Result<Option<PathBuf>, String>> = OnceLock::new();
+    let result = BINARY.get_or_init(|| {
+        let Some(root) = subconscious_root() else {
+            return Ok(None);
+        };
+        let status = std::process::Command::new(env!("CARGO"))
+            .current_dir(&root)
+            .args(["build", "--bin", "ck-subc"])
+            .status()
+            .expect("run cargo build for ck-subc");
+        if !status.success() {
+            return Err(format!(
                 "the real-daemon gate is required ({}) but building ck-subc failed",
                 why_required()
-            );
+            ));
         }
-        return None;
+        let bin = root.join("target/debug/ck-subc");
+        assert!(bin.exists(), "ck-subc binary missing at {}", bin.display());
+        Ok(Some(bin))
+    });
+    match result {
+        Ok(bin) => bin.clone(),
+        Err(error) if require_daemon() => panic!("{error}"),
+        Err(_) => None,
     }
-    let bin = root.join("target/debug/ck-subc");
-    assert!(bin.exists(), "ck-subc binary missing at {}", bin.display());
-    Some(bin)
 }
 
 /// Run the admin CLI with the given args; panics with stderr on failure. Returns

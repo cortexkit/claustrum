@@ -140,7 +140,7 @@ works.
 A passing safety test proves little until it has been seen to fail. [`mutations.toml`](mutations.toml) is the checked-in catalogue of exact-once source edits and the full test names that must catch them. The shared `ckdev-mutate` runner saves and restores source bytes and verifies `Cargo.lock`; compilation errors, missing anchors or tests, timeouts and unrelated failures are not catches. Install the reviewed immutable revision:
 
 ```sh
-cargo install --locked --git https://github.com/cortexkit/commons --rev 46cc166b0df2edcfd14b3eb54ed6eeac588fed69 cortexkit-mutate
+cargo install --locked --git https://github.com/cortexkit/commons --rev 73c7e66145e131eadffdd874c82d93548868b668 cortexkit-mutate
 mkdir -p target/mutations
 ckdev-mutate check
 ckdev-mutate run --only refresh-intent-before-provider --report target/mutations/one.json
@@ -170,7 +170,7 @@ ckdev-mutate prove --id scoped-private-key-proof \
   --build-timeout-s 3600 --timeout-s 600 --report target/mutations/proof.json
 ```
 
-`prove` appends only a caught row. Use `expect_message` to distinguish the intended assertion from unrelated failures, inspect the appended row, run `check`, and commit the catalogue with its guarded behavior. For a core row, add `--features test-support`. See the [pinned runner README](https://github.com/cortexkit/commons/blob/46cc166b0df2edcfd14b3eb54ed6eeac588fed69/crates/cortexkit-mutate/README.md) for multi-file catalogue edits, command rows and HUB review. [`docs/mutation-proofs.md`](docs/mutation-proofs.md) records the adoption evidence, survivors and scan-guard boundaries.
+`prove` appends only a caught row. Use `expect_message` to distinguish the intended assertion from unrelated failures, inspect the appended row, run `check`, and commit the catalogue with its guarded behavior. For a core row, add `--features test-support`. See the [pinned runner README](https://github.com/cortexkit/commons/blob/73c7e66145e131eadffdd874c82d93548868b668/crates/cortexkit-mutate/README.md) for multi-file catalogue edits, command rows and HUB review. [`docs/mutation-proofs.md`](docs/mutation-proofs.md) records the adoption evidence, survivors and scan-guard boundaries.
 
 The local gate and release build run only `ckdev-mutate check`. The full replay is the CI landing gate; release-build's ancestor check requires a landed revision, so replaying every mutant there would repeat CI on the same sources. An explicit unlanded-release override also bypasses that assurance.
 

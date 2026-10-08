@@ -213,7 +213,9 @@ jobs:
 
       - name: Install mutation runner (immutable revision)
         if: steps.mutate-cache.outputs.cache-hit != 'true'
-        run: cargo install --locked --git https://github.com/cortexkit/commons --rev "$CKDEV_MUTATE_REV" cortexkit-mutate
+        # An expression, not "$CKDEV_MUTATE_REV": this step runs in PowerShell on
+        # Windows, where that form is an empty PowerShell variable.
+        run: cargo install --locked --git https://github.com/cortexkit/commons --rev ${{ env.CKDEV_MUTATE_REV }} cortexkit-mutate
 
       - name: Mutation catalogue check
         run: ckdev-mutate check
@@ -343,7 +345,9 @@ jobs:
           key: ckdev-mutate-${{ runner.os }}-${{ runner.arch }}-${{ env.CKDEV_MUTATE_REV }}
       - name: Install mutation runner (immutable revision)
         if: steps.mutate-cache.outputs.cache-hit != 'true'
-        run: cargo install --locked --git https://github.com/cortexkit/commons --rev "$CKDEV_MUTATE_REV" cortexkit-mutate
+        # An expression, not "$CKDEV_MUTATE_REV": this step runs in PowerShell on
+        # Windows, where that form is an empty PowerShell variable.
+        run: cargo install --locked --git https://github.com/cortexkit/commons --rev ${{ env.CKDEV_MUTATE_REV }} cortexkit-mutate
       - name: Mutation catalogue check
         run: ckdev-mutate check
       - name: Replay selected safety proofs

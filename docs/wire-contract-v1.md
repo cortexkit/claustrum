@@ -368,6 +368,13 @@ coercing to `[]`; any string element is accepted. Present null, non-string, empt
 unknown `auth_method` also refuses the whole reply. Deploy the daemon before upgrading
 consumers from client 0.5.0.
 
+The Rust client `cortexkit-claustrum-client` 0.1.0 exposes `provider_ids` and optional
+`auth_method` on `ListedCredential`. It retains the supervised consumer's row-local
+decoding: malformed credentials are skipped into `undecodable_credentials`, not logged
+by the library. Grant tuples require non-empty string `selector_kind`, `selector` and
+`operation`; malformed tuples are skipped into `undecodable_grants`, leaving healthy
+tuples available. This differs from the TypeScript client's whole-reply refusal above.
+
 ### `admin.set_providers`
 
 Only the operator's master-key HMAC authorizes this op;
@@ -443,6 +450,10 @@ at. Decode each of the three as optional. `@cortexkit/claustrum-client` does so 
 0.5.0: `recordVersion` and `credentialId` are optional on `CredentialStatus` and are
 omitted from the object when the reply omits them; 0.4.x threw `invalid_status` on this
 shape.
+
+The Rust client's `CredentialStatus` retains optional `record_version` and
+`last_error_code`; an absent `stale_pending` decodes as `false`. It does not expose
+`credential_id` or `lease_held`. Its producer-fixture tests cover both status replies.
 
 The exact reply bytes for a resolved and an unresolved handle, and for `credential.get`
 with every optional field present and with every one absent, are pinned in

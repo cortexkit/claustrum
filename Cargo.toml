@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/credentials-core", "crates/credentials-module"]
+members = ["crates/credentials-core", "crates/credentials-module", "crates/claustrum-client"]
 
 # cortexkit-credentials — a subc-supervised module that holds credentials
 # (OAuth tokens, API keys, DSNs) encrypted at rest and serves each consumer the
@@ -18,6 +18,7 @@ members = ["crates/credentials-core", "crates/credentials-module"]
 #                        machine, master-key resolution). No subc dep.
 #   credentials-module = the thin subc-wire binary: read surface + admin surface,
 #                        capability handles, fault isolation, audit.
+#   claustrum-client   = publishable Rust consumer for supervised modules.
 #
 # All published CortexKit crates come from crates.io, pinned by Cargo.lock.
 # Move forward deliberately with `cargo update -p <crate>`.

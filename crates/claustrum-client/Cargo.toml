@@ -1,0 +1,19 @@
+[package]
+name = "cortexkit-claustrum-client"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Rust credential vault client for subc-supervised CortexKit modules."
+repository = "https://github.com/cortexkit/claustrum"
+readme = "README.md"
+keywords = ["credentials", "vault", "cortexkit", "subc"]
+categories = ["authentication", "api-bindings"]
+
+[dependencies]
+base64 = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+subc-protocol = { workspace = true }
+subc-transport = { workspace = true }
+subc-os = { workspace = true }
+tokio = { workspace = true }

@@ -61,6 +61,10 @@ asserting authority it no longer holds.
   signing, APNs provider-token minting.
 - `crates/credentials-module` — the daemon and the operator CLI. Read surface,
   master-key-gated admin surface, capability handles, health probing.
+- `packages/client` — the TypeScript client, `@cortexkit/claustrum-client`.
+- [`crates/claustrum-client`](crates/claustrum-client) — the Rust client,
+  `cortexkit-claustrum-client`, for subc-supervised modules. Both clients live with
+  the vault so their wire decoders can be checked against the producer.
 
 ## Using it
 

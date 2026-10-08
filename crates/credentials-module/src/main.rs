@@ -5284,16 +5284,13 @@ mod tests {
         // token. The ceremony rows were pinned first because they were built first, and an
         // enrolled consumer that can enrol and then cannot read is not a consumer.
         //
-        // These are REQUEST shapes only. The success bodies are deliberately absent: a
-        // `get_scoped` result carries decrypted payload bytes, and a fixture with a real
-        // one in it is a secret in the repository. The request shape is what a decoder has
-        // to agree on; the reply shape is pinned by the wire-key contract tests next to
-        // each op, which assert presence AND absence without materialising a payload.
+        // The request examples here are independent of the scratch-store success cases
+        // below. Those replies use only synthetic material: a fixed non-secret payload
+        // and a publicly known test signing seed, never an operator's credentials.
         // AND THE ROW SHAPE, WHICH THE REQUEST PINS CANNOT SEE.
         //
         // A list_scoped row carries no secret -- ids, categories, vendors, state -- so
-        // unlike a get_scoped body it is safe to pin, and it is the only fixture a
-        // consumer's REPLY decoder can be checked against. The gap was not theoretical:
+        // it can be pinned without even a synthetic payload. The gap was not theoretical:
         // my own TypeScript decoder read `credential_type` where the wire says `type`
         // (the Rust field is renamed) and refused every valid row, while the
         // request-shape fixture stayed green throughout.
@@ -5900,6 +5897,146 @@ mod tests {
             status[1],
             "{regenerate}"
         );
+    }
+
+    /// Pin successful key and scoped replies from the real request dispatcher. Only the
+    /// inputs are fixed here; the signing, public-key derivation, read, report receipt
+    /// and result envelope all run through production code. A fixed Ed25519 seed and
+    /// message make the signature deterministic without publishing any real key material.
+    #[tokio::test]
+    async fn key_and_scoped_wire_fixture_pins_real_success_replies() {
+        use base64::Engine as _;
+
+        let (surface, admin, store) = scoped_rig(22);
+        let principal = "wire-fixture-consumer";
+        let key_id = "signing:wire-fixture";
+        // RFC 8410 PKCS#8 v1 container followed by a publicly known, synthetic seed.
+        // The vault parses this private input and derives both public outputs itself.
+        let mut der = vec![
+            0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22,
+            0x04, 0x20,
+        ];
+        der.extend(0_u8..32);
+        let pem = format!(
+            "-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----",
+            base64::engine::general_purpose::STANDARD.encode(der)
+        );
+        store
+            .create(
+                key_id,
+                &VaultRecord::new_static(
+                    CredentialKind::SigningKey,
+                    "test",
+                    pem.into_bytes(),
+                    None,
+                ),
+            )
+            .expect("create synthetic signing key");
+        store
+            .create(
+                "oauth:anthropic",
+                &VaultRecord::new_oauth(
+                    "test",
+                    "anthropic",
+                    credentials_core::oauth::OAuthCredential {
+                        access_token: "fixture-not-a-secret".to_string().into(),
+                        refresh_token: "fixture-not-a-refresh-token".to_string().into(),
+                        expires_at_ms: Some(4_102_444_800_000),
+                        token_url: "https://example.invalid/token".into(),
+                        client_id: None,
+                        client_secret: None,
+                        scopes: Vec::new(),
+                    },
+                    b"fixture-not-a-secret".to_vec(),
+                ),
+            )
+            .expect("create synthetic scoped credential");
+        for (id, operation) in [
+            (key_id, GrantOperation::Sign),
+            (key_id, GrantOperation::Read),
+            ("oauth:anthropic", GrantOperation::Read),
+        ] {
+            store
+                .create_read_grant_audited(
+                    "reserved",
+                    principal,
+                    SelectorKind::Exact,
+                    id,
+                    operation,
+                    AuditCtx::admin(AuditOp::GrantCreate),
+                )
+                .expect("grant fixture operation");
+        }
+        admin.record_bind(22, reserved(principal));
+
+        let payload_b64 =
+            base64::engine::general_purpose::STANDARD.encode(b"fixture-ed25519-message");
+        let requests = [
+            (
+                OP_SIGN,
+                json!({"credential_id": key_id, "payload_b64": payload_b64}),
+            ),
+            (OP_PUBLIC_KEY, json!({"credential_id": key_id})),
+            (
+                OP_GET_SCOPED,
+                json!({"credential_id": "oauth:anthropic", "min_ttl_ms": 300_000}),
+            ),
+            (
+                OP_REPORT_AUTH_FAILURE,
+                json!({"credential_id": "oauth:anthropic", "provider_status": 401,
+                "record_version": 1, "reporter_source": "direct"}),
+            ),
+        ];
+        let mut produced = Vec::new();
+        let mut key_requests = Vec::new();
+        for (op, params) in requests {
+            if matches!(op, OP_SIGN | OP_PUBLIC_KEY) {
+                key_requests.push((op, serde_json::to_string(&params).unwrap()));
+            }
+            let reply = scoped_route_request(&surface, &admin, 22, op, params).await;
+            assert!(reply["result"]["error"].is_null(), "{op}: {reply}");
+            produced.push((op, serde_json::to_string(&reply).unwrap()));
+        }
+
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/enrollment_wire_contract.json"
+        ))
+        .expect("decode wire fixture");
+        let pinned: Vec<_> = produced
+            .iter()
+            .map(|(op, _)| {
+                let row = fixture["operations"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|row| row["op"] == *op);
+                (
+                    *op,
+                    row.map_or(serde_json::Value::Null, |row| row["success"][0].clone()),
+                )
+            })
+            .collect();
+        let produced: Vec<_> = produced
+            .into_iter()
+            .map(|(op, reply)| (op, serde_json::Value::String(reply)))
+            .collect();
+        assert_eq!(
+            produced, pinned,
+            "regenerate only these fixture successes from the producer bytes on the left; \
+             preserve all other entries byte-for-byte"
+        );
+        for (op, request) in key_requests {
+            let row = fixture["operations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["op"] == op)
+                .unwrap();
+            assert_eq!(
+                request, row["request"],
+                "pin the {op} input used for the real reply"
+            );
+        }
     }
 
     /// Enrollment refusals carry their retry policy in `class`, the field every

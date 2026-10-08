@@ -17,3 +17,6 @@ subc-protocol = { workspace = true }
 subc-transport = { workspace = true }
 subc-os = { workspace = true }
 tokio = { workspace = true }
+
+[dev-dependencies]
+ring = { workspace = true }

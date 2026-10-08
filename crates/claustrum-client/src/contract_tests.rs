@@ -241,8 +241,8 @@ impl CredentialGetTarget for ProducerGetTarget {
 #[tokio::test]
 async fn producer_get_result_bytes_decode_through_handle_and_scoped_reads() {
     // read_surface.rs serializes both get and get_scoped as GetOutcome::Ok(GetResult).
-    // The fixture has get bytes, not dedicated get_scoped bytes; the shared producer
-    // type makes these exact replies valid pins for both client decoder paths.
+    // The shared producer type makes these present/absent optional-field cases valid
+    // for both client decoder paths. A dedicated real get_scoped reply is pinned below.
     let operation = producer_operation("credential.get");
     let replies = operation["success"].as_array().unwrap();
     assert_eq!(replies.len(), 2);
@@ -288,4 +288,68 @@ fn producer_status_replies_decode_resolved_and_unresolved_handles() {
             last_error_code: Some("not_found".into()),
         }
     );
+}
+
+fn fixture_hex_bytes(hex: &str) -> Vec<u8> {
+    assert_eq!(hex.len() % 2, 0);
+    (0..hex.len())
+        .step_by(2)
+        .map(|index| u8::from_str_radix(&hex[index..index + 2], 16).expect("fixture hex"))
+        .collect()
+}
+
+#[test]
+fn producer_read_surface_sign_reply_decodes_and_verifies_ed25519() {
+    let sign = producer_operation("credential.sign");
+    let decoded = decode_signature_reply(producer_reply(&sign["success"][0])).unwrap();
+    assert_eq!(decoded.key_id, "56475aa75463474c");
+    assert_eq!(
+        decoded.signature_hex,
+        "8ff89352b18d737f7e06040db6e5d2b4f40782bbb3b31babed28aafdf9441b381\
+         f8c221b23456cd32d53a636f27022977d8d302e6d8c97fd87764f53b0f3f302"
+    );
+
+    // Use the producer's public bytes directly here so a public-key decoder defect
+    // fails its own test, independently of this signature decoder and crypto check.
+    let public = producer_operation("credential.public_key");
+    let reply = producer_reply(&public["success"][0]);
+    let public_bytes = fixture_hex_bytes(reply["result"]["public_key_hex"].as_str().unwrap());
+    let request = producer_reply(&sign["request"]);
+    let message = base64::engine::general_purpose::STANDARD
+        .decode(request["payload_b64"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(message, b"fixture-ed25519-message");
+    let signature = fixture_hex_bytes(&decoded.signature_hex);
+    let verifier = ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, public_bytes);
+    verifier
+        .verify(&message, &signature)
+        .expect("valid Ed25519 signature over exact input bytes");
+    assert!(verifier.verify(b"different-message", &signature).is_err());
+}
+
+#[test]
+fn producer_read_surface_public_key_reply_decodes_exact_metadata() {
+    let operation = producer_operation("credential.public_key");
+    assert_eq!(
+        decode_public_key_reply(producer_reply(&operation["success"][0])).unwrap(),
+        CredentialPublicKey {
+            key_id: "56475aa75463474c".into(),
+            algorithm: "ed25519".into(),
+            public_key_hex: "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8"
+                .into(),
+        }
+    );
+}
+
+#[tokio::test]
+async fn producer_read_surface_get_scoped_reply_decodes_served_material() {
+    let operation = producer_operation("credential.get_scoped");
+    let resolver = ClaustrumCredentialResolver::with_target(
+        Arc::new(ProducerGetTarget(producer_reply(&operation["success"][0]))),
+        0,
+    );
+    let decoded = resolver.get_scoped("oauth:anthropic").await.unwrap();
+    assert_eq!(decoded.expose(), b"fixture-not-a-secret");
+    assert_eq!(decoded.record_version, "1");
+    assert_eq!(decoded.expires_at_ms, Some(4_102_444_800_000));
 }

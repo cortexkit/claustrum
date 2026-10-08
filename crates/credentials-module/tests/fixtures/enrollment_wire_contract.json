@@ -34,12 +34,30 @@
     {
       "op": "credential.get_scoped",
       "request": "{\"enrollment_token\":\"tttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt\",\"min_ttl_ms\":300000,\"credential_id\":\"oauth:anthropic\"}",
-      "success": "pinned by the wire-key contract tests beside each op, which assert presence AND absence without materialising a decrypted payload"
+      "success": [
+        "{\"result\":{\"credential_id\":\"oauth:anthropic\",\"expires_at_ms\":4102444800000,\"payload\":[102,105,120,116,117,114,101,45,110,111,116,45,97,45,115,101,99,114,101,116],\"record_version\":1}}"
+      ]
     },
     {
       "op": "credential.report_auth_failure",
       "request": "{\"credential_id\":\"oauth:anthropic\",\"enrollment_token\":\"tttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt\",\"provider_status\":401,\"record_version\":12,\"reporter_source\":\"direct\"}",
-      "success": "pinned by the wire-key contract tests beside each op, which assert presence AND absence without materialising a decrypted payload"
+      "success": [
+        "{\"result\":{\"accepted\":true}}"
+      ]
+    },
+    {
+      "op": "credential.sign",
+      "request": "{\"credential_id\":\"signing:wire-fixture\",\"payload_b64\":\"Zml4dHVyZS1lZDI1NTE5LW1lc3NhZ2U=\"}",
+      "success": [
+        "{\"result\":{\"key_id\":\"56475aa75463474c\",\"signature_b64\":\"j/iTUrGNc39+BgQNtuXStPQHgruzsxur7Siq/flEGzgfjCIbI0Vs0y1TpjbycCKXfY0wLm2Ml/2Hdk9TsPPzAg==\"}}"
+      ]
+    },
+    {
+      "op": "credential.public_key",
+      "request": "{\"credential_id\":\"signing:wire-fixture\"}",
+      "success": [
+        "{\"result\":{\"algorithm\":\"ed25519\",\"key_id\":\"56475aa75463474c\",\"public_key_hex\":\"03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8\"}}"
+      ]
     },
     {
       "op": "credential.get",

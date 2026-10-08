@@ -39,9 +39,13 @@ is not part of the published package:
 cargo test --locked -p cortexkit-claustrum-client
 ```
 
-The fixture holds real `list_scoped`, `credential.get` and `credential.status`
-replies. `get` and `get_scoped` serialise the same vault type, so the `get` bytes
-cover `get_scoped` too. `sign` and `public_key` replies are not in the fixture
-yet; their decoders are covered by hand-written replies in the unit tests.
+The fixture holds real `list_scoped`, `credential.get`, `credential.get_scoped`,
+`credential.status`, `credential.sign`, `credential.public_key` and
+`credential.report_auth_failure` replies. The signing and scoped successes run
+through the vault's real read surface and request dispatcher with synthetic test
+material. Rust tests pin the decoded Ed25519 key ID, algorithm and exact signature
+and public-key hex, and verify the signature over the fixture's message with
+`ring`. The Rust client has no auth-failure report decoder; the TypeScript client
+tests that receipt as well as the dedicated scoped-read reply.
 
 License: MIT.

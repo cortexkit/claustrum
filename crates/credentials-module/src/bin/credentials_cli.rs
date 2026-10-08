@@ -698,9 +698,10 @@ fn help_verb(verb: &str) -> String {
              \n\
              NOTES\n\
              Print every principal-scoped grant as one stable row: principal kind, principal\n\
-             id, credential prefix, operation, and creation time. Read-only; it uses the\n\
-             authenticated admin.status path, reading the running daemon when available and\n\
-             the offline lease path otherwise. An empty grant table prints `no grants`."
+             id, selector kind (exact or category), selector, operation, how many credentials\n\
+             it reaches, and creation time. Read-only; it uses the authenticated admin.status\n\
+             path, reading the running daemon when available and the offline lease path\n\
+             otherwise. An empty grant table prints `no grants`."
         }
         "categories" => {
             "ck auth categories\n\

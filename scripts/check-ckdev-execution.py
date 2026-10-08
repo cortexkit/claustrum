@@ -82,10 +82,15 @@ def code_violations(source, typescript=False):
             bindings.clear()
         # Inspect each constructor, not the surrounding statement's helper text.
         for i, token in enumerate(statement):
-            if token == 'new' and statement[max(0, i-2):i] == ['Command', '::'] and statement[i+1:i+2] == ['(']:
+            constructor = None
+            if token == 'new' and statement[max(0, i-2):i] == ['Command', '::']:
+                constructor = 'Command::new'
+            elif not typescript and token == 'dev_command':
+                constructor = 'dev_command'
+            if constructor and statement[i+1:i+2] == ['(']:
                 arg, _ = argument(statement, i+1)
                 if not safe_expr(arg, bindings):
-                    bad.append('Command::new(' + ''.join(arg) + ')')
+                    bad.append(constructor + '(' + ''.join(arg) + ')')
             if typescript and token in ('spawn', 'spawnSync', 'execFile', 'execFileSync') and statement[i+1:i+2] == ['(']:
                 arg, _ = argument(statement, i+1)
                 # For TS arrays and argument lists only argv[0] is executable.

@@ -1,6 +1,6 @@
 #![cfg(feature = "import-prompt-seam")]
 
-use credentials_core::test_support::ckdev_binary;
+use cortexkit_test_support::ckdev_binary;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};

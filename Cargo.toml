@@ -25,6 +25,7 @@ members = ["crates/credentials-core", "crates/credentials-module", "crates/claus
 # CI checks out ../subconscious only to build the ck-subc daemon for real-daemon
 # e2e tests and read the push-envelope spec for scripts/check-inbound-contracts.sh.
 [workspace.dependencies]
+cortexkit-test-support = "0.1.0"
 subc-protocol = "0.29.1"
 subc-transport = "0.10.0"
 subc-os = "0.1.6"

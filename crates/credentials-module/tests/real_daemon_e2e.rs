@@ -38,9 +38,10 @@ use common::{
     wait_for_catalog, MODULE_ID, SETUP_TIMEOUT,
 };
 use cortexkit_store::{open_sqlite, Isolation, StorageBackend, StorageDescriptor};
+use cortexkit_test_support::{ckdev_binary, dev_command};
 use credentials_core::resolver::{KeySource, ResolverConfig};
 use credentials_core::store::EncryptedStore;
-use credentials_core::test_support::{ckdev_binary, ckdev_command, TestTempDir};
+use credentials_core::test_support::TestTempDir;
 
 const SUBCONSCIOUS_REL: &str = "../../../subconscious";
 
@@ -254,7 +255,7 @@ fn run_cli(args: &[&str]) -> String {
 /// exit code / stderr (e.g. the offline path refusing while the daemon is up).
 fn run_cli_raw(args: &[&str]) -> std::process::Output {
     let bin = cli_binary();
-    ckdev_command(&bin)
+    dev_command(ckdev_binary(&bin))
         .args(args)
         .output()
         .expect("run ck-auth")
@@ -1289,7 +1290,7 @@ async fn fixture_dogfood_import_opencode_round_trips_through_real_daemon() {
         .join("secrets/master.key")
         .to_string_lossy()
         .to_string();
-    let verify = ckdev_command(cli_binary())
+    let verify = dev_command(ckdev_binary(cli_binary()))
         .args([
             "verify-audit",
             "--data-dir",

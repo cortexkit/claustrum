@@ -29,8 +29,8 @@ use std::process::{Command, Output, Stdio};
 use std::sync::{Arc, Mutex};
 
 use cortexkit_store::{open_sqlite, Isolation, StorageBackend, StorageDescriptor};
+use cortexkit_test_support::{ckdev_binary, dev_command};
 use credentials_core::store::EncryptedStore;
-use credentials_core::test_support::ckdev_command;
 #[path = "../src/bin/cli_support/credential_client.rs"]
 mod credential_client;
 #[path = "../src/bin/cli_support/opencode_files.rs"]
@@ -100,8 +100,8 @@ fn skip_if_seam_is_compiled_out(arm: &str) -> bool {
 
 fn cli() -> Command {
     match std::env::var_os("CRED_CLI_BIN") {
-        Some(path) => ckdev_command(path),
-        None => ckdev_command(env!("CARGO_BIN_EXE_ck-auth")),
+        Some(path) => dev_command(ckdev_binary(path)),
+        None => dev_command(ckdev_binary(env!("CARGO_BIN_EXE_ck-auth"))),
     }
 }
 

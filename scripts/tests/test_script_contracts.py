@@ -78,6 +78,27 @@ class ScriptContracts(unittest.TestCase):
         self.assertEqual(guard.violations(Path('ci.yml'), 'run: target/debug/ck-auth --version'), ['target/debug/ck-auth'])
         self.assertEqual(guard.shell_violations('fake="$(echo ckdev_binary /tmp/ck-auth)"\n"$fake" --version'), ['$fake'])
 
+    def test_ckdev_shared_command_has_argument_local_controls(self):
+        guard = module('check-ckdev-execution')
+        rust = '''
+        use cortexkit_test_support::{ckdev_binary, dev_command};
+        dev_command(ckdev_binary(src));
+        cortexkit_test_support::dev_command(cortexkit_test_support::ckdev_binary(src));
+        let staged = ckdev_binary(src);
+        dev_command(&staged);
+        dev_command(env!("CARGO_BIN_EXE_ck-auth"));
+        cortexkit_test_support::dev_command("target/debug/ck-claustrum");
+        let raw = "target/debug/ck-auth";
+        dev_command(raw);
+        dev_command(ckdev_binary(src)); dev_command(src);
+        '''
+        self.assertEqual(guard.code_violations(rust), [
+            'dev_command(env!("CARGO_BIN_EXE_ck-auth"))',
+            'dev_command("target/debug/ck-claustrum")',
+            'dev_command(raw)',
+            'dev_command(src)',
+        ])
+
     def test_process_measurement_recognizes_only_production_directories(self):
         measure = module('measure-ckdev-processes')
         home = Path.home()

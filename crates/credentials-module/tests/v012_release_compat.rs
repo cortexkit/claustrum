@@ -6,7 +6,8 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use credentials_core::test_support::{ckdev_command, TestTempDir};
+use cortexkit_test_support::{ckdev_binary, dev_command};
+use credentials_core::test_support::TestTempDir;
 
 const TAG: &str = "v0.1.2";
 
@@ -34,7 +35,7 @@ fn assert_ok(label: &str, output: Output) -> Output {
 }
 
 fn current_cli(data_dir: &Path, key_path: &Path, args: &[&str]) -> Output {
-    ckdev_command(env!("CARGO_BIN_EXE_ck-auth"))
+    dev_command(ckdev_binary(env!("CARGO_BIN_EXE_ck-auth")))
         .args(args)
         .arg("--data-dir")
         .arg(data_dir)
@@ -45,7 +46,7 @@ fn current_cli(data_dir: &Path, key_path: &Path, args: &[&str]) -> Output {
 }
 
 fn released_cli(binary: &Path, data_dir: &Path, key_path: &Path, verb: &str) -> Output {
-    ckdev_command(binary)
+    dev_command(ckdev_binary(binary))
         .arg(verb)
         .arg("--data-dir")
         .arg(data_dir)

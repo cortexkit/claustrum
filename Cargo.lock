@@ -315,6 +315,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "cortexkit-test-support"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e62f7642eb194655979868dc48755a2474225c58f229427d99fb64b05d28eddb"
+dependencies = [
+ "rustix",
+ "sha2",
+ "subc-os",
+ "tokio",
+]
+
+[[package]]
 name = "cpufeatures"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -344,6 +356,7 @@ dependencies = [
  "cortexkit-paths",
  "cortexkit-store",
  "cortexkit-store-types",
+ "cortexkit-test-support",
  "getrandom 0.2.17",
  "hmac",
  "hpke",
@@ -370,6 +383,7 @@ dependencies = [
  "chrono",
  "cortexkit-log",
  "cortexkit-store",
+ "cortexkit-test-support",
  "credentials-core",
  "dialoguer",
  "libc",
@@ -1827,9 +1841,9 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "subc-os"
-version = "0.1.6"
+version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a5e60f23e1c51148c8a0db750481a5659726583bd05bff5bdd3b97cee4b59c6a"
+checksum = "deaa591b1073aed5dcc9af687eb2bf45839bd3296a04b598b29cc2bee1bfe8d9"
 dependencies = [
  "libc",
  "rustix",

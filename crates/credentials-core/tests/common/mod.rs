@@ -38,7 +38,7 @@ pub fn warmed(helper: &'static str) -> &'static str {
         guard.insert(helper)
     };
     if first {
-        let _ = credentials_core::test_support::ckdev_command(helper)
+        let _ = cortexkit_test_support::dev_command(cortexkit_test_support::ckdev_binary(helper))
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status();

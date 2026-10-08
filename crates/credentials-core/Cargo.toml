@@ -114,6 +114,7 @@ ring = { workspace = true }
 hpke = { workspace = true }
 
 [dev-dependencies]
+cortexkit-test-support = { workspace = true }
 tokio = { workspace = true }
 proptest = { workspace = true }
 # Direct sqlite access for the §13 corrupt-envelope conformance test (tamper with a

@@ -1,7 +1,7 @@
-use credentials_core::test_support::ckdev_command;
+use cortexkit_test_support::{ckdev_binary, dev_command};
 
 fn login(args: &[&str]) -> std::process::Output {
-    ckdev_command(env!("CARGO_BIN_EXE_ck-auth"))
+    dev_command(ckdev_binary(env!("CARGO_BIN_EXE_ck-auth")))
         .arg("login")
         .args(args)
         .stdin(std::process::Stdio::null())

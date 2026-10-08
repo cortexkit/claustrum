@@ -68,9 +68,7 @@ pub fn ckdev_binary(src: &Path) -> PathBuf {
             std::process::id(),
             SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));
-        // fs::copy carries the permission bits; the ad-hoc signature is in the file.
-        std::fs::copy(src, &tmp)
-            .unwrap_or_else(|e| panic!("copy test binary {}: {e}", src.display()));
+        copy_without_holding_a_write_handle(src, &tmp);
         // Another process may publish the same content first; replacing it with
         // identical bytes is harmless, and the rename keeps the path whole either way.
         std::fs::rename(&tmp, &dst)
@@ -78,6 +76,37 @@ pub fn ckdev_binary(src: &Path) -> PathBuf {
     }
     published.insert(src.to_path_buf(), (meta.len(), modified, dst.clone()));
     dst
+}
+
+/// Copy an executable so this process never holds an open write descriptor to it.
+///
+/// On Linux, a parallel test that forks while this process has the copy open for
+/// writing hands that descriptor to its child until the child execs, and an exec of
+/// the copy during that window fails with ETXTBSY. A `cp` child writes the file
+/// instead, so no descriptor exists here for a fork to inherit. `-p` keeps the
+/// execute bits; the ad-hoc signature is in the file. Windows has no such window
+/// and no `cp`, so it copies in-process.
+fn copy_without_holding_a_write_handle(src: &Path, dst: &Path) {
+    #[cfg(unix)]
+    {
+        let status = Command::new("cp")
+            .arg("-p")
+            .arg(src)
+            .arg(dst)
+            .status()
+            .unwrap_or_else(|e| panic!("run cp for test binary {}: {e}", src.display()));
+        assert!(
+            status.success(),
+            "cp test binary {} -> {}: {status:?}",
+            src.display(),
+            dst.display()
+        );
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::copy(src, dst)
+            .unwrap_or_else(|e| panic!("copy test binary {}: {e}", src.display()));
+    }
 }
 
 /// A `Command` for a test artifact, run under its development name.

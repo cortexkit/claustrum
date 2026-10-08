@@ -479,8 +479,9 @@ CRED_REQUIRE_DAEMON=1 run_expect 9 "real-daemon e2e (ship gate)" \
 # The crash-safety proofs are gated at FILE level: without the feature the file is
 # not compiled and the run reports "running 0 tests ... ok". Nothing inside a file
 # that does not exist can warn, so the counts are the only available instrument.
-# Resolve from the workspace, with one feature set for all four core targets, so
-# changing test files does not rebuild core or its shared dependencies.
+# Resolve from the workspace, with one feature set for all four core targets, so the
+# four arms share one core build and the workspace arm's dependency graph instead of
+# each rebuilding core (and, under -p, about 90 shared crates).
 run_expect 1 "kill-9 mid-refresh crash cut" \
   cargo test --locked --workspace --features credentials-core/test-support,credentials-core/kill9-test-seam,credentials-core/rotate-test-seam,credentials-core/login-test-seam,credentials-core/migration-tools --test kill9_mid_refresh
 run_expect 5 "master-key rotation crash cuts" \

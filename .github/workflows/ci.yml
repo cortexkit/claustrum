@@ -42,6 +42,10 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # The commons revision the mutation runner is installed from. It also keys the
+  # runner's cache, so bumping it here both reinstalls and stops a cached binary
+  # from an older revision being reused.
+  CKDEV_MUTATE_REV: 46cc166b0df2edcfd14b3eb54ed6eeac588fed69
 
 jobs:
   # Linux + Windows matrix. Windows is the load-bearing leg (the cfg(windows)
@@ -205,11 +209,11 @@ jobs:
           path: |
             ~/.cargo/bin/ckdev-mutate
             ~/.cargo/bin/ckdev-mutate.exe
-          key: ckdev-mutate-${{ runner.os }}-${{ runner.arch }}-46cc166b0df2edcfd14b3eb54ed6eeac588fed69
+          key: ckdev-mutate-${{ runner.os }}-${{ runner.arch }}-${{ env.CKDEV_MUTATE_REV }}
 
       - name: Install mutation runner (immutable revision)
         if: steps.mutate-cache.outputs.cache-hit != 'true'
-        run: cargo install --locked --git https://github.com/cortexkit/commons --rev 46cc166b0df2edcfd14b3eb54ed6eeac588fed69 cortexkit-mutate
+        run: cargo install --locked --git https://github.com/cortexkit/commons --rev "$CKDEV_MUTATE_REV" cortexkit-mutate
 
       - name: Mutation catalogue check
         run: ckdev-mutate check
@@ -336,10 +340,10 @@ jobs:
         id: mutate-cache
         with:
           path: ~/.cargo/bin/ckdev-mutate
-          key: ckdev-mutate-${{ runner.os }}-${{ runner.arch }}-46cc166b0df2edcfd14b3eb54ed6eeac588fed69
+          key: ckdev-mutate-${{ runner.os }}-${{ runner.arch }}-${{ env.CKDEV_MUTATE_REV }}
       - name: Install mutation runner (immutable revision)
         if: steps.mutate-cache.outputs.cache-hit != 'true'
-        run: cargo install --locked --git https://github.com/cortexkit/commons --rev 46cc166b0df2edcfd14b3eb54ed6eeac588fed69 cortexkit-mutate
+        run: cargo install --locked --git https://github.com/cortexkit/commons --rev "$CKDEV_MUTATE_REV" cortexkit-mutate
       - name: Mutation catalogue check
         run: ckdev-mutate check
       - name: Replay selected safety proofs

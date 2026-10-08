@@ -106,10 +106,10 @@ suite that silently stops running fails the gate instead of passing quietly.
 
 `ck-*` is reserved for production execution from `~/.local/share/cortexkit/bin/`
 or `~/.local/share/cortexkit/staging/` (`ck` itself lives in `~/.local/bin`).
-Tests, rigs and build-artifact smoke checks link artifacts into their own scratch
-space as `ckdev-*`, using `credentials_core::test_support::ckdev_binary` (or
-`ckdev_command` for command factories) and `scripts/lib/ckdev-binary.sh`.
-Hard links preserve macOS's signed inode; copying is the cross-volume fallback.
+Tests, rigs and build-artifact smoke checks run artifacts under `ckdev-*` names:
+Rust tests use `cortexkit_test_support::{ckdev_binary, dev_command}` from crates.io,
+and shell scripts use `scripts/lib/ckdev-binary.sh`. Both make a copy, never a hard
+link: on a loaded Mac, fresh hard links to cargo's binary were killed at exec.
 Cargo, packaging, signing and production process-lookup names do not change.
 The gate and CI enforce this with `scripts/check-ckdev-execution.py`, including
 statement-local positive/negative controls and two mutation-catalogue proofs.

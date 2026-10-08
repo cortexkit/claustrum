@@ -2,12 +2,11 @@
 
 Only execution is renamed. Cargo artifacts, staged artifacts, signatures,
 production process lookups and deployment destinations retain their names.
-Rust's shared `credentials_core::test_support::ckdev_binary` hard-links each
-artifact into a distinct subdirectory of caller-owned scratch space, copying if
-linking fails. `ckdev_command` owns scratch space for command factories that run
-before vault setup; Rust test threads remove it on exit. Separate link directories
-prevent a shipped CLI and a seam-enabled CLI with the same basename from sharing
-a stale alias. Shell uses `scripts/lib/ckdev-binary.sh` for the same operation.
+Rust tests stage each artifact with `cortexkit_test_support::ckdev_binary` (a
+content-addressed copy, never a hard link, published once and reused) and spawn
+it with `dev_command`. Shell uses `scripts/lib/ckdev-binary.sh`, which copies into
+caller-owned scratch space. The table below records the sites as first audited;
+where it names `ckdev_command`, read `dev_command(ckdev_binary(...))`.
 
 ## Execution sites
 

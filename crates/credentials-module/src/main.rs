@@ -5284,9 +5284,12 @@ mod tests {
         // token. The ceremony rows were pinned first because they were built first, and an
         // enrolled consumer that can enrol and then cannot read is not a consumer.
         //
-        // The request examples here are independent of the scratch-store success cases
-        // below. Those replies use only synthetic material: a fixed non-secret payload
-        // and a publicly known test signing seed, never an operator's credentials.
+        // These are request examples. The success replies for get_scoped, sign,
+        // public_key and report_auth_failure are pinned separately by
+        // `key_and_scoped_wire_fixture_pins_real_success_replies`, which produces them
+        // from synthetic records (a fixed non-secret payload and a publicly known test
+        // signing seed), never an operator's credentials.
+        //
         // AND THE ROW SHAPE, WHICH THE REQUEST PINS CANNOT SEE.
         //
         // A list_scoped row carries no secret -- ids, categories, vendors, state -- so

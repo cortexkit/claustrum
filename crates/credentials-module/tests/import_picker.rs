@@ -48,7 +48,7 @@ impl Fixture {
     }
 
     fn command(&self, binary: impl AsRef<Path>) -> Command {
-        let mut command = Command::new(ckdev_binary(binary.as_ref(), &self.root));
+        let mut command = Command::new(ckdev_binary(binary.as_ref()));
         command
             .env("XDG_DATA_HOME", self.root.join("data"))
             .env("XDG_CONFIG_HOME", self.root.join("config"))

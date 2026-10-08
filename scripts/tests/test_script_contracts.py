@@ -93,20 +93,19 @@ class ScriptContracts(unittest.TestCase):
         self.assertGreater(len(paths), 50, 'source population must not disappear')
         self.assertEqual(bad, [], 'development execution bypasses ckdev helper')
 
-    def test_ckdev_shell_link_preserves_artifact_and_copy_fallback(self):
+    def test_ckdev_shell_helper_copies_and_never_links(self):
         artifact = self.root / 'ck-auth'
         artifact.write_text('artifact bytes')
+        artifact.chmod(0o755)
+        # A hard link would succeed here, so a helper that still links fails the
+        # inode check below rather than slipping through a copy fallback.
         result = self.run_shell('source scripts/lib/ckdev-binary.sh; ckdev_binary "$HOME/ck-auth" "$HOME"')
-        self.assertEqual(result.returncode, 0, result.stdout)
-        link = Path(result.stdout.strip())
-        self.assertEqual(link.name, 'ckdev-auth')
-        self.assertEqual(link.stat().st_ino, artifact.stat().st_ino)
-        result = self.run_shell('source scripts/lib/ckdev-binary.sh; ln() { return 1; }; ckdev_binary "$HOME/ck-auth" "$HOME"')
         self.assertEqual(result.returncode, 0, result.stdout)
         copy = Path(result.stdout.strip())
         self.assertEqual(copy.name, 'ckdev-auth')
         self.assertNotEqual(copy.stat().st_ino, artifact.stat().st_ino)
         self.assertEqual(copy.read_bytes(), artifact.read_bytes())
+        self.assertTrue(os.access(copy, os.X_OK), 'the copy must stay executable')
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

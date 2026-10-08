@@ -335,8 +335,8 @@ where
     assert!(credentials_module.exists());
 
     let rig = unique_temp_dir("cred-real-daemon");
-    let subc_core = ckdev_binary(&subc_core, &rig);
-    let credentials_module = ckdev_binary(&credentials_module, &rig);
+    let subc_core = ckdev_binary(&subc_core);
+    let credentials_module = ckdev_binary(&credentials_module);
     let config_dir = rig.join("config/cortexkit");
     let runtime_dir = rig.join("runtime");
     let data_home = rig.join("data");
@@ -429,11 +429,13 @@ where
     // exec genuinely cannot run, the barrier below fails with a message that names
     // what it observed. Swallowing here cannot hide a real failure, only a redundant
     // report of one.
-    for bin in [
-        subc_core.as_path(),
-        std::path::Path::new(&credentials_module),
+    // Warm the exact development copies the rig runs (blocking std commands, so each
+    // exec completes before the supervisor starts).
+    for mut warm in [
+        std::process::Command::new(&subc_core),
+        std::process::Command::new(&credentials_module),
     ] {
-        let _ = std::process::Command::new(ckdev_binary(bin, &rig))
+        let _ = warm
             .arg("--version")
             .stdout(Stdio::null())
             .stderr(Stdio::null())

@@ -355,14 +355,25 @@ impl GrantCliVault {
     }
 
     fn run(&self, args: &[&str]) -> std::process::Output {
-        cli()
+        let out = cli()
             .args(args)
             .arg("--data-dir")
             .arg(&self.data_dir)
             .arg("--key-path")
             .arg(&self.key_path)
             .output()
-            .expect("run ck-auth")
+            .expect("run ck-auth");
+        // No test here expects ck-auth to die by a signal. Under host load a killed
+        // child otherwise surfaces as a caller's bare `!success()` with empty stderr,
+        // which reads like a CLI refusal; naming the signal here tells the two apart.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            if let Some(signal) = out.status.signal() {
+                panic!("ck-auth {args:?} was killed by signal {signal}, not refused");
+            }
+        }
+        out
     }
 
     fn bootstrap(&self) {

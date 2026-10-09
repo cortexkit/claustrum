@@ -297,7 +297,9 @@ pub struct ListScopedCredential {
     /// because the ids live beside the record and reading them opens nothing. Empty when
     /// the operator has set none; the vault never infers one.
     pub provider_ids: Vec<String>,
-    /// Effective tier, disclosed with identity only under read/list authority.
+    /// The subscription tier to price this account by: the operator's `set-plan` value
+    /// when one is set, otherwise the tier detected from the provider. Like identity, it
+    /// is returned only on rows the caller can read or list.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan_tier: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

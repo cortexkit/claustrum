@@ -7,8 +7,10 @@ use crate::refresh_adapters::{HttpTransport, RefreshError};
 pub const PROFILE_URL: &str = "https://api.anthropic.com/api/oauth/profile";
 pub const PROFILE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Provider subscription metadata encrypted inside VaultRecord beside its tokens.
-/// An unknown provider string is retained for diagnosis, never given a guessed tier.
+/// The subscription plan a provider reported, stored encrypted inside the VaultRecord
+/// beside its tokens. `raw` is the provider's own string (a ChatGPT `chatgpt_plan_type`,
+/// a Claude `rate_limit_tier`); one the mapping does not recognise is kept in `raw` for
+/// diagnosis and gets no `tier`, never a guessed one.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DetectedPlan {
     pub tier: Option<String>,
@@ -69,7 +71,8 @@ pub fn anthropic_profile(body: &[u8]) -> Result<DetectedPlan, RefreshError> {
     Ok(DetectedPlan::observed(raw, tier))
 }
 
-/// A separate deadline bounds metadata work, not the token endpoint's request.
+/// The profile request has its own timeout, separate from the token endpoint's, so a slow
+/// profile service can only lose the plan reading, never delay a token.
 pub async fn fetch_anthropic_plan(
     http: &dyn HttpTransport,
     access_token: &str,
@@ -91,7 +94,8 @@ pub async fn fetch_anthropic_plan(
     .map_err(|_| RefreshError::Transport("profile timed out".into()))?
 }
 
-/// Interactive login tolerates an unavailable profile and deposits its tokens anyway.
+/// Ask Claude's profile endpoint for the plan before an interactive login stores its
+/// record. The caller stores the tokens even when this returns an error.
 pub async fn detect_login_plan(
     http: &dyn HttpTransport,
     record: &mut crate::record::VaultRecord,

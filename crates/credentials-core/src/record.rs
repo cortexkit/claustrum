@@ -668,9 +668,10 @@ mod tests {
 mod plan_rollback_tests {
     use super::*;
 
-    // The VaultRecord decoder before subscription detection (at 4ddc294), with
-    // every field reproduced. It ignores unknown JSON fields: a rollback reads
-    // detected_plan without error, then drops that metadata when rewriting tokens.
+    // A copy of VaultRecord as it was before `detected_plan` existed, every field
+    // reproduced, standing in for an older binary after a rollback. It ignores unknown
+    // JSON fields, so it reads a record carrying `detected_plan` without error and drops
+    // that field when it rewrites the tokens.
     #[derive(Deserialize, Serialize)]
     struct LegacyRecord {
         schema_version: u32,

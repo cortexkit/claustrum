@@ -536,7 +536,11 @@ export interface ScopedInventoryRow {
    * which is also what an unmapped credential reports.
    */
   readonly providerIds: readonly string[]
-  /** Effective subscription tier, unknown when absent; operator overrides win. */
+  /**
+   * Subscription tier to price this account by; absent means unknown. An operator's
+   * `ck auth set-plan` value takes precedence over the tier detected from the provider;
+   * `planTierSource` says which one this is.
+   */
   readonly planTier?: string
   readonly planTierSource?: 'operator' | 'detected'
   readonly authMethod?: 'apikey' | 'chatgpt' | 'antigravity' | 'oauth'

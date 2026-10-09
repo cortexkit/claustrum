@@ -921,9 +921,10 @@ pub fn apply(
             Ok(serde_json::json!({ "credentials_reclassified": changed }))
         }
         AdminOpBody::Status { .. } => {
-            // Status health uses credential lifecycle columns; subscription tiers from
-            // encrypted records supplement its account inventory. This read neither
-            // quarantines unreadable rows nor writes an audit entry.
+            // Status health uses credential lifecycle columns. Each row's detected
+            // subscription tier is read from its encrypted record and added to the
+            // status result. This read neither quarantines unreadable rows nor writes an
+            // audit entry.
             let metas = store.list_meta()?;
             let grants = store.list_read_grants()?;
             let open_intents = store.list_intents()?.len();
@@ -1003,7 +1004,9 @@ pub fn status_result(
     })
 }
 
-/// Supplement a status snapshot only with observations from the same record version.
+/// Add each credential's detected plan to a status snapshot, but only when the plan was
+/// read from the same `record_version` the snapshot row reports, so a row and its tier
+/// always describe the same stored record.
 pub fn attach_detected_plans(
     result: &mut serde_json::Value,
     plans: &std::collections::BTreeMap<String, (u64, crate::plan_detection::DetectedPlan)>,

@@ -5269,6 +5269,30 @@ mod tests {
                 .find(|row| row["op"] == name)
                 .unwrap_or_else(|| panic!("missing {name} fixture row"))
         };
+        let pin_list_scoped = |key: &str, actual: String| {
+            if std::env::var_os("UPDATE_ENROLLMENT_WIRE_FIXTURE").is_some() {
+                let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/fixtures/enrollment_wire_contract.json");
+                let text = std::fs::read_to_string(&path).unwrap();
+                let generated: serde_json::Value = serde_json::from_str(&text).unwrap();
+                let row = generated["operations"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|row| row["op"] == "credential.list_scoped")
+                    .unwrap();
+                let old = serde_json::to_string(&row[key]).unwrap();
+                assert_eq!(
+                    text.matches(&old).count(),
+                    1,
+                    "fixture value must be unique"
+                );
+                let new = serde_json::to_string(&actual).unwrap();
+                std::fs::write(path, text.replacen(&old, &new, 1)).unwrap();
+            } else {
+                assert_eq!(actual, operation("credential.list_scoped")[key], "producer list_scoped {key} drifted; regenerate with UPDATE_ENROLLMENT_WIRE_FIXTURE=1 and review the diff");
+            }
+        };
         let raw = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
 
         assert_eq!(
@@ -5325,6 +5349,7 @@ mod tests {
             record_version: u64,
             identity: bool,
             provider_ids: &'a [&'a str],
+            plan_tier: Option<&'a str>,
         }
         let unsealed_row = |stored: Stored<'_>, operation: GrantOperation| ScopedListRow {
             id: stored.id.into(),
@@ -5344,6 +5369,7 @@ mod tests {
                 .map(|p| (*p).to_string())
                 .collect(),
             auth_method: list_auth_method(stored.kind, stored.refresh_adapter),
+            plan_tier: stored.plan_tier.map(str::to_owned),
         };
         let category_grant = |category: &str, operation: GrantOperation| ReadGrant {
             principal_kind: "enrolled".into(),
@@ -5364,16 +5390,15 @@ mod tests {
                     record_version: 232,
                     identity: false,
                     provider_ids: &["anthropic"],
+                    plan_tier: Some("max_5x"),
                 },
                 GrantOperation::Read,
             )],
             grants: Vec::new(),
         });
-        assert_eq!(
+        pin_list_scoped(
+            "row",
             serde_json::to_string(&pinned_row.credentials[0]).unwrap(),
-            operation("credential.list_scoped")["row"],
-            "the golden list_scoped row drifted from what this producer serialises: \
-             regenerate it from the assertion's left side"
         );
 
         // AND THE WHOLE REPLY, NOT JUST ONE ROW.
@@ -5396,6 +5421,8 @@ mod tests {
         // GitHub App row, whose adapter maps to no auth method even though the caller can
         // read it. They carry every `auth_method` value (`antigravity`, `apikey`,
         // `chatgpt`, `oauth`), and `provider_ids` with several ids, one id, and none.
+        // The subscription assertion is present on the Anthropic rows and absent on
+        // the other rows, so consumers exercise both `plan_tier` shapes.
         let reply = read_surface::project_list_scoped(ScopedListSnapshot {
             rows: vec![
                 unsealed_row(
@@ -5407,6 +5434,7 @@ mod tests {
                         record_version: 232,
                         identity: true,
                         provider_ids: &["anthropic", "claude-code"],
+                        plan_tier: Some("max_20x"),
                     },
                     GrantOperation::Read,
                 ),
@@ -5419,6 +5447,7 @@ mod tests {
                         record_version: 3,
                         identity: false,
                         provider_ids: &["openrouter"],
+                        plan_tier: None,
                     },
                     GrantOperation::Read,
                 ),
@@ -5431,6 +5460,7 @@ mod tests {
                         record_version: 11,
                         identity: false,
                         provider_ids: &[],
+                        plan_tier: None,
                     },
                     GrantOperation::Read,
                 ),
@@ -5443,6 +5473,7 @@ mod tests {
                         record_version: 5,
                         identity: false,
                         provider_ids: &["google-antigravity"],
+                        plan_tier: None,
                     },
                     GrantOperation::Read,
                 ),
@@ -5455,6 +5486,7 @@ mod tests {
                         record_version: 2,
                         identity: false,
                         provider_ids: &[],
+                        plan_tier: None,
                     },
                     GrantOperation::Read,
                 ),
@@ -5464,12 +5496,9 @@ mod tests {
                 category_grant("github-app-native", GrantOperation::Read),
             ],
         });
-        assert_eq!(
+        pin_list_scoped(
+            "reply",
             serde_json::to_string(&main_wrap_for_fixture(reply)).unwrap(),
-            operation("credential.list_scoped")["reply"],
-            "the golden list_scoped reply drifted from what this producer serialises. \
-             Consumers byte-copy this file: regenerate it from the assertion's left side, \
-             announce the change, and expect every consumer fixture to need re-copying"
         );
 
         // A REPLY TO A LIST-ONLY CALLER: the account roster without the tokens. The row
@@ -5487,21 +5516,21 @@ mod tests {
                     record_version: 232,
                     identity: true,
                     provider_ids: &["anthropic"],
+                    plan_tier: Some("max_5x"),
                 },
                 GrantOperation::List,
             )],
             grants: vec![category_grant("llm-provider", GrantOperation::List)],
         });
-        assert_eq!(
+        pin_list_scoped(
+            "list_only_reply",
             serde_json::to_string(&main_wrap_for_fixture(list_only)).unwrap(),
-            operation("credential.list_scoped")["list_only_reply"],
-            "the golden list-only list_scoped reply drifted from what this producer \
-             serialises: regenerate it from the assertion's left side"
         );
 
         // PRESENCE AND ABSENCE, read back from the fixture a consumer copies: every
-        // credential object carries a `provider_ids` array, and `auth_method` appears
-        // exactly where the auth-method table yields a value.
+        // credential object carries a `provider_ids` array, `auth_method` appears
+        // exactly where the auth-method table yields a value, and `plan_tier` is
+        // exercised both present and absent.
         let pinned_credentials: Vec<serde_json::Value> = {
             let list_scoped = operation("credential.list_scoped");
             let decode = |key: &str| -> serde_json::Value {
@@ -5561,6 +5590,14 @@ mod tests {
             [0, 1, 2],
             "the golden replies carry no provider ids, one, and several"
         );
+        if std::env::var_os("UPDATE_ENROLLMENT_WIRE_FIXTURE").is_none() {
+            assert!(pinned_credentials
+                .iter()
+                .any(|row| row["plan_tier"] == "max_20x"));
+            assert!(pinned_credentials
+                .iter()
+                .any(|row| row.get("plan_tier").is_none()));
+        }
         let github_app = pinned_credentials
             .iter()
             .find(|credential| credential["id"] == "github_app:plex-alfonso")
@@ -7675,6 +7712,11 @@ mod tests {
                 AuditCtx::admin(AuditOp::SetProviders),
             )
             .expect("set static key provider ids");
+        for id in [roster, mismatched, app, static_key] {
+            store
+                .set_plan_audited(id, Some("max_5x"), AuditCtx::admin(AuditOp::SetPlan))
+                .unwrap();
+        }
         for (principal, operation) in [
             ("reader", GrantOperation::Read),
             ("lister", GrantOperation::List),
@@ -7713,6 +7755,17 @@ mod tests {
                     Some(&provider_ids),
                     "{principal} {id}: provider_ids is on every row"
                 );
+                assert_eq!(
+                    row(id).get("plan_tier").and_then(|value| value.as_str()),
+                    opened.then_some("max_5x"),
+                    "{principal} {id}: plan_tier follows identity, not provider_ids"
+                );
+                if !opened {
+                    assert!(
+                        !row(id).contains_key("plan_tier"),
+                        "sign-only tier must be omitted"
+                    );
+                }
                 let expected = (opened && !auth_method.is_empty()).then_some(auth_method);
                 assert_eq!(
                     row(id).get("auth_method").and_then(|value| value.as_str()),
@@ -8019,6 +8072,7 @@ mod tests {
                     categories: Vec::new(),
                     created_by: None,
                     provider_ids: Vec::new(),
+                    plan_tier: None,
                 },
             )
         }

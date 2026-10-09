@@ -241,6 +241,7 @@ mod tests {
                 stale_pending: false,
                 categories: Vec::new(),
                 created_by: None,
+                plan_tier: None,
                 provider_ids: Vec::new(),
             },
         )

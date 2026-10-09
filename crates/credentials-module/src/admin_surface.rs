@@ -860,6 +860,74 @@ mod tests {
         assert!(r.store.get("apikey:rebind").is_err());
     }
 
+    #[tokio::test]
+    async fn set_plan_requires_gate_2_and_dispatches_set_clear_and_refusals() {
+        let r = rig(23);
+        r.admin.record_bind(5, Principal::Direct);
+        seed_provider_ids(&r, "apikey:zai", &["aa"]);
+        let body = |id: &str, tier: Option<&str>| {
+            String::from_utf8(
+                AdminOpBody::SetPlan {
+                    v: credentials_core::admin_ops::ADMIN_OP_SCHEMA_V2,
+                    credential_id: id.to_owned(),
+                    plan_tier: tier.map(str::to_owned),
+                }
+                .to_bytes()
+                .unwrap(),
+            )
+            .unwrap()
+        };
+        let set = body("apikey:zai", Some("pro_200"));
+        let AdminOutcome::Challenge { nonce_hex, .. } = r.admin.challenge(5) else {
+            panic!("challenge refused");
+        };
+        let nonce: [u8; ADMIN_NONCE_LEN] = decode_hex(&nonce_hex)
+            .unwrap()
+            .as_slice()
+            .try_into()
+            .unwrap();
+        let wrong = AdminMacKey::derive(&MasterKey::from_bytes([99; MASTER_KEY_LEN]));
+        let wrong_tag = hex(&wrong.sign(&TranscriptParts {
+            vault_id: &r.vault_id,
+            key_id: r.key_id,
+            nonce: &nonce,
+            op_body: set.as_bytes(),
+        }));
+        let before = r.store.read_audit(None).unwrap().len();
+        assert!(
+            matches!(r.admin.execute(5, set.as_bytes(), &wrong_tag).await, AdminOutcome::Refused(ref m) if m.contains("auth failed"))
+        );
+        assert_eq!(r.store.meta("apikey:zai").unwrap().plan_tier, None);
+        assert_eq!(r.store.read_audit(None).unwrap().len(), before);
+        for (id, tier, expected) in [
+            (
+                "apikey:zai",
+                Some("pro_200"),
+                Some(serde_json::json!({"plan_tier":"pro_200"})),
+            ),
+            (
+                "apikey:zai",
+                None,
+                Some(serde_json::json!({"plan_tier":null})),
+            ),
+            ("apikey:zai", Some("Pro"), None),
+            ("missing", Some("max_5x"), None),
+        ] {
+            let body = body(id, tier);
+            let (tag, _) = challenge_and_sign(&r, 5, &body);
+            let outcome = r.admin.execute(5, body.as_bytes(), &tag).await;
+            if let Some(expected) = expected {
+                assert!(matches!(outcome, AdminOutcome::Ok(value) if value == expected));
+            } else {
+                assert!(
+                    matches!(outcome, AdminOutcome::Refused(ref message) if message == if id == "missing" { "credential not found" } else { "invalid_plan_tier/permanent" })
+                );
+            }
+        }
+        assert_eq!(r.store.read_audit(None).unwrap().len(), before + 2);
+        assert_eq!(r.store.verify_audit_chain().unwrap(), None);
+    }
+
     fn set_providers_body(credential_id: &str, provider_ids: &[&str]) -> String {
         let op = AdminOpBody::SetProviders {
             v: credentials_core::admin_ops::ADMIN_OP_SCHEMA_V2,

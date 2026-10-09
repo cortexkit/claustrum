@@ -839,3 +839,60 @@ only = false
 timeout_s = 600
 build_timeout_s = 1800
 
+
+[[control]]
+id = "plan-account-change-clears-tier"
+guards = "replacement deposits cannot retain the previous account subscription tier"
+file = "crates/credentials-core/src/store.rs"
+old = "    if old.is_none_or(|old| old.clone().normalized().account_id != new.account_id) {"
+new = "    if { let _ = (old, new); false } { // NON-VACUITY BREAK: keep the old account tier"
+edits = []
+test_file = "crates/credentials-core/src/plan_tier_store_tests.rs"
+runner = "cargo"
+package = "credentials-core"
+target = "--lib"
+features = ["test-support"]
+select = "expected"
+expect_red = ["store::plan_tier_store_tests::plan_replacement_paths_clear_only_when_the_effective_account_changes"]
+expect_message = 'Some("max_20x")'
+only = false
+timeout_s = 600
+build_timeout_s = 3600
+
+
+[[control]]
+id = "plan-tier-moves-scoped-view"
+guards = "the scoped inventory digest frames the optional subscription tier"
+file = "crates/credentials-module/src/read_surface.rs"
+old = "        push_optional_string(&mut digest_input, credential.plan_tier.as_deref());"
+new = "        // NON-VACUITY BREAK: omit the plan tier from the inventory view"
+edits = []
+test_file = "crates/credentials-module/src/read_surface.rs"
+runner = "cargo"
+package = "credentials-module"
+target = "--bin ck-claustrum"
+select = "expected"
+expect_red = ["read_surface::list_scoped_tests::list_scoped_view_frames_plan_tier_presence_and_bytes_after_auth_method"]
+expect_message = "plan tier None"
+only = false
+timeout_s = 600
+build_timeout_s = 3600
+
+
+[[control]]
+id = "plan-tier-absent-is-unknown"
+guards = "client inventory remains compatible with vaults that omit plan_tier"
+file = "packages/client/src/wire.ts"
+old = '''    if (planTier !== undefined && (typeof planTier !== 'string' || !/^[a-z][a-z0-9_]{0,31}(?![\s\S])/.test(planTier))) {'''
+new = '''    if (planTier === undefined || (typeof planTier !== 'string' || !/^[a-z][a-z0-9_]{0,31}(?![\s\S])/.test(planTier))) { // NON-VACUITY BREAK'''
+edits = []
+test_file = "packages/client/src/tests/scoped.test.ts"
+runner = "command"
+command = ["bun", "test", "packages/client/src/tests/scoped.test.ts", "-t", "{test}"]
+test_count_pattern = "Ran {count} test"
+expect_red = ["a reply without plan_tier decodes as an unknown tier against older vaults"]
+expect_message = "invalid_response"
+only = false
+timeout_s = 600
+build_timeout_s = 1800
+

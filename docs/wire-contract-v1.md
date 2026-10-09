@@ -306,7 +306,7 @@ operation; record-level refusals such as `kind_not_signable` still apply after c
 `grants == grant_tuples.length`. `view` is the deterministic SHA-256 validator over the
 returned rows and tuples; changes outside the caller's visibility do not move it.
 
-### Provider metadata and authentication method
+### Provider metadata, plan tier and authentication method
 
 Every `credential.list_scoped` row has `provider_ids`, an array of operator-assigned
 Fusiform catalog provider ids in ascending byte order, including `[]` when unset.
@@ -353,20 +353,24 @@ without an email or refresh token. Its sole default category is `gmail-native`
 token with the existing identity metadata, never the sealed client secret or
 refresh token. No wire shape or store schema migration is required.
 
-Provider-id edits do not bump `record_version`: observers use `view`. Its domain stays
+Provider-id and tier edits do not bump `record_version`: observers use `view`. Its domain stays
 `claustrum.list_scoped.view.v1`. Inside each credential frame, immediately after the
 `org_name` optional-string frame, append a u32 provider-id count and each string-framed id
-in ascending byte order, then `auth_method` as an optional string. The absent optional
+in ascending byte order, then `auth_method` as an optional string, then `plan_tier` as
+an optional string. The absent optional
 frame is used whenever the JSON key is omitted, never an empty string. Deployment leaves
 an empty inventory's view unchanged but changes every nonempty visible inventory's view
 once, even if all provider-id arrays are empty and all methods omitted. Subsequent edits
 move only views whose returned rows include that credential.
 
-The TypeScript client 0.6.0 exposes `providerIds` and optional `authMethod`. Missing, null,
-non-array or non-string-element `provider_ids` refuses the whole reply, rather than
-coercing to `[]`; any string element is accepted. Present null, non-string, empty or
-unknown `auth_method` also refuses the whole reply. Deploy the daemon before upgrading
-consumers from client 0.5.0.
+The TypeScript client 0.7.0 exposes `providerIds`, optional `authMethod`, and optional
+`planTier`. Absent `provider_ids` decodes as `[]` for older vaults; present null, non-array
+or non-string-element values refuse the whole reply. Any string element is accepted.
+Present null, non-string, empty or unknown `auth_method` also refuses the whole reply.
+Absent `plan_tier` means unknown and decodes as `undefined`, including against vaults
+without migration 16. Present non-string or syntactically malformed tiers refuse the
+whole reply with `invalid_response`, just like malformed provider metadata. The 0.7.0
+minor bump changes an exported type; do not publish it until the vault is deployed.
 
 The Rust client `cortexkit-claustrum-client` 0.1.0 exposes `provider_ids` and optional
 `auth_method` on `ListedCredential`. It retains the supervised consumer's row-local
@@ -405,6 +409,54 @@ Transitions alone write audit op `set_providers` with target
 `providers:<credential-id>|<sorted-comma-list>`, with no spaces; clearing leaves the
 trailing `|`. Parse this provider target by splitting on the **last** `|`, since provider
 ids cannot contain it. An unchanged set writes no audit entry and does not move `view`.
+
+### Operator-asserted `plan_tier` (migration 16)
+
+A credential can hold one optional plaintext subscription tier beside its provider ids.
+It is an **operator assertion**, not a provider observation: the vault cannot verify it
+and keeps no valid-tier vocabulary. Pricing owns that vocabulary. Current examples are
+Anthropic `pro`, `max_5x`, `max_20x` and OpenAI `plus`, `pro_100`, `pro_200`, `pro_500`.
+The assertion becomes stale when the subscription changes out of band; the operator must
+update it, and consumers must treat an absent tier as unknown, never infer a plan.
+
+`credential.list_scoped` emits `plan_tier` only when set **and** the caller has `read` or
+`list` authority on the row. It follows **identity**, not `provider_ids`: sign/open-only
+rows still carry their provider ids but omit the tier. Unset tiers are omitted, never
+null or an empty string. A tier edit does not bump `record_version`; it moves the scoped
+`view` via a presence byte and, when present, a u32 byte length and UTF-8 bytes, after the
+`auth_method` frame. Even an omitted tier contributes its absence byte. Thus deployment
+changes nonempty inventory views once; the empty-inventory view remains unchanged.
+
+Replacement deposits (`put --replace`, CAS replace, native re-login, import replace,
+OpenCode migration/picker replacement, and cookie replacement) compare the stored and
+resulting normalized `account_id`. A different account clears the tier and audits the
+clear in the same transaction as the replacement. Equal account ids, including two
+absent ids, keep it; a retained identity is compared after preservation. If the previous
+envelope cannot be decoded, repair clears any tier because account equality cannot be
+established. Refresh never changes account identity and does not touch the assertion.
+Removing a credential removes its tier, even without foreign-key enforcement.
+
+### `admin.set_plan`
+
+Gate 2, the operator master-key transcript HMAC, authorizes this v2 admin operation.
+Modules and enrolled consumers cannot write tiers. Set and clear request bodies:
+
+```json
+{"op":"admin.set_plan","v":2,"credential_id":"oauth:anthropic","plan_tier":"max_20x"}
+{"op":"admin.set_plan","v":2,"credential_id":"oauth:anthropic","plan_tier":null}
+```
+
+Success returns `{"plan_tier":"max_20x"}` or `{"plan_tier":null}`, also for an unchanged
+assertion. A tier must match `[a-z][a-z0-9_]{0,31}`: lowercase ASCII, 1–32 characters,
+starting with a letter. Syntax is checked before credential lookup. Bad syntax refuses
+with permanent `invalid_plan_tier`; an unknown credential refuses with `credential not
+found`, including a clear. Refusals change neither metadata nor audit.
+
+Only actual old-to-new transitions write an HMAC audit row with op `set_plan` and target
+`plan:<credential-id>|<old-tier>|<new-tier>`. An absent old or new tier is the empty field;
+parse by splitting off the **last two** `|` delimiters. Automatic account-change clears
+use the replacement actor and the same audit format. Manual tier edits never open or
+re-seal the envelope, and never change provider ids or authorization categories.
 
 ### Category and grant audit targets
 

@@ -79,6 +79,8 @@ pub enum AuditOp {
     SetCategory,
     /// A credential's operator-assigned catalog provider ids changed.
     SetProviders,
+    /// An operator assertion of a subscription tier changed or was cleared.
+    SetPlan,
     /// Migration 10 assigned a category while converting schema-9 selectors.
     /// An operator approved a pending consumer enrollment.
     EnrollApprove,
@@ -140,6 +142,7 @@ impl AuditOp {
             AuditOp::GrantRevoke => "grant_revoke",
             AuditOp::SetCategory => "set_category",
             AuditOp::SetProviders => "set_providers",
+            AuditOp::SetPlan => "set_plan",
             AuditOp::EnrollApprove => "enroll.approve",
             AuditOp::EnrollDeny => "enroll.deny",
             AuditOp::EnrollRevoke => "enroll.revoke",
@@ -659,6 +662,7 @@ mod vocabulary_documentation_tests {
                 AuditOp::GrantRevoke => AuditOp::GrantRevoke.as_str(),
                 AuditOp::SetCategory => AuditOp::SetCategory.as_str(),
                 AuditOp::SetProviders => AuditOp::SetProviders.as_str(),
+                AuditOp::SetPlan => AuditOp::SetPlan.as_str(),
                 AuditOp::EnrollApprove => AuditOp::EnrollApprove.as_str(),
                 AuditOp::EnrollDeny => AuditOp::EnrollDeny.as_str(),
                 AuditOp::EnrollRevoke => AuditOp::EnrollRevoke.as_str(),
@@ -674,6 +678,7 @@ mod vocabulary_documentation_tests {
         assert_documented(section, "audit_log.op", value(AuditOp::Login));
         assert_documented(section, "audit_log.op", value(AuditOp::Overwrite));
         assert_documented(section, "audit_log.op", value(AuditOp::SetIdentity));
+        assert_documented(section, "audit_log.op", value(AuditOp::SetPlan));
         assert_documented(section, "audit_log.op", value(AuditOp::Invalidate));
         assert_documented(section, "audit_log.op", value(AuditOp::RotateMasterKey));
         assert_documented(section, "audit_log.op", value(AuditOp::RefreshCommit));

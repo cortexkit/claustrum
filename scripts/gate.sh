@@ -401,7 +401,10 @@ assert_floor_not_lowered() {
 #
 # THE FLOOR IS RATCHETED AGAINST THE MERGE TARGET BY `assert_floor_not_lowered` BELOW,
 # because a floor alone does not defend the property it exists for. See that function.
-run_expect 805 "workspace unit + integration" \
+# Raised 805 -> 1049 with plan-tier metadata. Measured from the complete workspace
+# command below: 25 + 510 + 4 + 2 + 6 + 9 + 110 + 195 + 62 + 104 + 2 + 20.
+# Empty and ignored-only targets contribute zero.
+run_expect 1049 "workspace unit + integration" \
   cargo test --locked --workspace --features credentials-core/test-support
 
 assert_floor_not_lowered "$SCRIPT_PATH"

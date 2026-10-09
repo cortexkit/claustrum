@@ -54,6 +54,7 @@ MAX_OP_BODY_LEN crates/credentials-module/src/admin_surface.rs op_body_at_the_ca
 MIN_PROVIDER_ID_LEN crates/credentials-core/src/provider_ids.rs the_vault_accepts_ids_of_the_minimum_and_maximum_length_and_refuses_one_byte_past_either
 MAX_PROVIDER_ID_LEN crates/credentials-core/src/provider_ids.rs the_vault_accepts_ids_of_the_minimum_and_maximum_length_and_refuses_one_byte_past_either
 MAX_PROVIDER_IDS_PER_CREDENTIAL crates/credentials-core/src/provider_ids.rs the_cap_applies_to_the_resulting_set_and_names_the_crossing_id
+MAX_PLAN_TIER_LEN crates/credentials-core/src/plan_tier.rs plan_tiers_check_syntax_not_a_pricing_vocabulary
 
 # Explicitly unchecked thresholds. These are known gaps, not coverage claims.
 # New constants still fail unless deliberately recorded in a reviewed change.

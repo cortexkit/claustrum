@@ -58,7 +58,7 @@ use crate::envelope::{self, EnvelopeError, RecordBinding};
 use crate::key::{KeyId, MasterKey};
 use crate::oauth::{is_custody_tombstone, CUSTODY_TOMBSTONE_PREFIX};
 pub use crate::record::RecordState;
-use crate::record::{CredentialKind, VaultRecord};
+use crate::record::{CredentialKind, RecordIdentity, VaultRecord};
 
 /// The schema namespace for the credential vault's migrations (independent of any
 /// other domain chain in the same database).
@@ -604,6 +604,15 @@ const MIGRATIONS: &[Migration] = &[
                          FOREIGN KEY (credential_id) REFERENCES credentials(credential_id) ON DELETE CASCADE\
                      );",
     },
+    // No tier is inferred for existing credentials: only an operator can assert it.
+    Migration {
+        version: 16,
+        statements: "CREATE TABLE credential_plan_tiers (\
+                         credential_id TEXT NOT NULL PRIMARY KEY, \
+                         plan_tier TEXT NOT NULL, \
+                         FOREIGN KEY (credential_id) REFERENCES credentials(credential_id) ON DELETE CASCADE\
+                     );",
+    },
 ];
 
 /// The newest store migration THIS BINARY knows how to apply.
@@ -687,6 +696,8 @@ pub struct RecordMeta {
     /// The catalog provider ids the operator says this credential serves, in ascending
     /// byte order. Empty on a store below [`PROVIDER_ID_SCHEMA_VERSION`].
     pub provider_ids: Vec<String>,
+    /// Operator-asserted subscription tier, unknown when absent.
+    pub plan_tier: Option<String>,
 }
 
 /// The operation a principal-scoped credential-prefix grant permits.
@@ -868,6 +879,8 @@ pub struct ScopedListRow {
     /// from their own table without unsealing, so a row reached only through `sign` or
     /// `open` carries them too.
     pub provider_ids: Vec<String>,
+    /// Operator tier disclosed only to callers with read or list authority.
+    pub plan_tier: Option<String>,
     /// Derived from the unsealed record's kind and refresh adapter by
     /// [`crate::list_auth_method::list_auth_method`]. `None` when the row is reached
     /// only through `sign` or `open` (it stays sealed) or when the table yields nothing.
@@ -952,6 +965,8 @@ pub enum StoreOpError {
     InvalidCredentialId,
     /// A category name does not match `^[a-z][a-z0-9-]{1,31}$`.
     InvalidCategoryName,
+    /// A tier is not a lowercase ASCII identifier of 1–32 characters.
+    InvalidPlanTier,
     /// A provider-id write broke one of the provider-id rules. `value` is the id the
     /// rule names, which may be empty (an empty id fails `charset`).
     InvalidProviderId {
@@ -1041,6 +1056,7 @@ impl std::fmt::Display for StoreOpError {
             }
             StoreOpError::InvalidCredentialId => f.write_str("invalid_credential_id"),
             StoreOpError::InvalidCategoryName => f.write_str("invalid_category_name"),
+            StoreOpError::InvalidPlanTier => f.write_str("invalid_plan_tier/permanent: expected [a-z][a-z0-9_]{0,31}"),
             // Labelled fields, so a value that happens to spell a rule token (`count`)
             // cannot be read as a second rule.
             StoreOpError::InvalidProviderId { rule, value } => {
@@ -1101,6 +1117,7 @@ impl StoreOpError {
         match self {
             StoreOpError::InvalidCredentialId => Some("invalid_credential_id"),
             StoreOpError::InvalidCategoryName => Some("invalid_category_name"),
+            StoreOpError::InvalidPlanTier => Some("invalid_plan_tier"),
             StoreOpError::InvalidProviderId { .. } => Some("invalid_provider_id"),
             StoreOpError::InvalidPrincipal => Some("invalid_principal"),
             _ => None,
@@ -1855,6 +1872,7 @@ impl EncryptedStore {
                             categories: split_categories(categories),
                             created_by: row.get(5)?,
                             provider_ids: Vec::new(),
+                            plan_tier: None,
                         })
                     },
                 )
@@ -1866,6 +1884,7 @@ impl EncryptedStore {
                             credential_id,
                             read_schema_version(conn)?,
                         )?;
+                        meta.plan_tier = plan_tier_from_conn(conn, credential_id, read_schema_version(conn)?)?;
                         Ok(Some(meta))
                     }
                     None => Ok(None),
@@ -2970,8 +2989,8 @@ impl EncryptedStore {
                     "SELECT credential_id, record_version, state, envelope, \
                      COALESCE((SELECT group_concat(category, ',') FROM (\
                          SELECT category FROM credential_categories WHERE credential_id = credentials.credential_id ORDER BY category\
-                     )), ''), {} FROM credentials ORDER BY credential_id",
-                    provider_ids_column(schema_version)
+                      )), ''), {}, {} FROM credentials ORDER BY credential_id",
+                    provider_ids_column(schema_version), plan_tier_column(schema_version)
                 ))?;
                 let candidates = stmt
                     .query_map([], |row| {
@@ -2982,13 +3001,14 @@ impl EncryptedStore {
                             row.get::<_, Vec<u8>>(3)?,
                             split_categories(row.get::<_, String>(4)?),
                             split_provider_ids(row.get::<_, String>(5)?),
+                            row.get::<_, Option<String>>(6)?,
                         ))
                     })?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
                 drop(stmt);
 
                 let mut rows = Vec::new();
-                for (id, record_version, state, envelope_bytes, categories, provider_ids) in
+                for (id, record_version, state, envelope_bytes, categories, provider_ids, plan_tier) in
                     candidates
                 {
                     let operations: BTreeSet<GrantOperation> = grants
@@ -3057,6 +3077,7 @@ impl EncryptedStore {
                         state,
                         record_version,
                         operations: operations.into_iter().collect(),
+                        plan_tier: identity.as_ref().and(plan_tier),
                         identity,
                         refresh_adapter,
                         provider_ids,
@@ -3270,6 +3291,31 @@ impl EncryptedStore {
         outcome
     }
 
+    /// Set or clear a plaintext operator assertion without opening the envelope.
+    /// Only a transition writes an audit row; the target records both old and new tiers.
+    pub fn set_plan_audited(
+        &self,
+        credential_id: &str,
+        plan_tier: Option<&str>,
+        ctx: AuditCtx<'_>,
+    ) -> Result<Option<String>, StoreOpError> {
+        if plan_tier.is_some_and(|tier| !crate::plan_tier::valid_plan_tier(tier)) {
+            return Err(StoreOpError::InvalidPlanTier);
+        }
+        self.fenced_write(|tx| {
+            let exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM credentials WHERE credential_id = ?1)",
+                [credential_id],
+                |row| row.get(0),
+            )?;
+            if !exists {
+                return Ok(Err(StoreOpError::NotFound));
+            }
+            write_plan_tier_tx(tx, &self.audit_key, credential_id, plan_tier, ctx)?;
+            Ok(Ok(plan_tier.map(str::to_owned)))
+        })?
+    }
+
     /// Refill empty category sets, or replace non-empty sets when forced. Enumeration,
     /// category writes, and all audit appends share one fenced transaction.
     pub fn reclassify_audited(
@@ -3451,12 +3497,13 @@ impl EncryptedStore {
                 if creator.as_deref() != Some(principal_str) {
                     return Ok(None);
                 }
+                let existing_identity = envelope::open(&self.key, &existing, &RecordBinding {
+                    credential_id, record_version: version as u64,
+                }).ok().and_then(|plain| VaultRecord::decode(&plain).ok())
+                  .map(|record| record.identity).filter(|identity| identity.validate().is_ok())
+                  .map(RecordIdentity::normalized);
                 if email.is_none() {
-                    incoming.identity = envelope::open(&self.key, &existing, &RecordBinding {
-                        credential_id, record_version: version as u64,
-                    }).ok().and_then(|plain| VaultRecord::decode(&plain).ok())
-                      .map(|record| record.identity).filter(|identity| identity.validate().is_ok())
-                      .unwrap_or_default().normalized();
+                    incoming.identity = existing_identity.clone().unwrap_or_default();
                 }
                 let next = version.checked_add(1).ok_or(rusqlite::Error::InvalidQuery)?;
                 incoming.record_version = next as u64;
@@ -3468,6 +3515,7 @@ impl EncryptedStore {
                     rusqlite::params![credential_id, next, key_id_hex, blob, now, principal_str, version],
                 )?;
                 if changed != 1 { return Err(rusqlite::Error::InvalidQuery); }
+                clear_plan_on_account_change_tx(tx, &self.audit_key, credential_id, existing_identity.as_ref(), &incoming.identity, AuditCtx::route_admin(AuditOp::SetPlan, principal_str))?;
                 (DepositCookieOutcome::Replaced { record_version: next as u64 }, AuditOp::DepositCookieReplace)
             };
             clear_intent_tx(tx, credential_id)?;
@@ -3650,6 +3698,14 @@ impl EncryptedStore {
             // reconciliation's hash-mismatch check would later undo this re-login.
             if n > 0 {
                 clear_intent_tx(tx, credential_id)?;
+                clear_plan_on_account_change_tx(
+                    tx,
+                    &audit_key,
+                    credential_id,
+                    Some(&current.identity),
+                    &record.identity,
+                    ctx,
+                )?;
                 append_audit_tx(
                     tx,
                     &audit_key,
@@ -3762,23 +3818,22 @@ impl EncryptedStore {
             };
             let next_version = (current_version as u64).saturating_add(1);
 
+            let existing_identity = envelope::open(
+                &self.key,
+                &existing_envelope,
+                &RecordBinding {
+                    credential_id,
+                    record_version: current_version as u64,
+                },
+            )
+            .ok()
+            .and_then(|plaintext| VaultRecord::decode(&plaintext).ok())
+            .map(|existing| existing.identity)
+            .filter(|identity| identity.validate().is_ok())
+            .map(RecordIdentity::normalized);
             let mut sealed = incoming.clone();
             if preserve_existing_identity && sealed.identity.is_empty() {
-                let existing_identity = envelope::open(
-                    &self.key,
-                    &existing_envelope,
-                    &RecordBinding {
-                        credential_id,
-                        record_version: current_version as u64,
-                    },
-                )
-                .ok()
-                .and_then(|plaintext| VaultRecord::decode(&plaintext).ok())
-                .map(|existing| existing.identity);
-                if let Some(identity) =
-                    existing_identity.filter(|identity| identity.validate().is_ok())
-                {
-                    let identity = identity.normalized();
+                if let Some(identity) = existing_identity.clone() {
                     if let (Some(retained_account_id), Some(incoming_account_id)) =
                         (identity.account_id.as_ref(), incoming_account_id.as_ref())
                     {
@@ -3824,6 +3879,16 @@ impl EncryptedStore {
                         actor: ctx.actor.to_string(),
                         alarm: ctx.alarm,
                     },
+                )?;
+            }
+            if n > 0 {
+                clear_plan_on_account_change_tx(
+                    tx,
+                    &audit_key,
+                    credential_id,
+                    existing_identity.as_ref(),
+                    &sealed.identity,
+                    ctx,
                 )?;
             }
             Ok(IdentityPolicyOverwriteOutcome::Updated(n))
@@ -4559,6 +4624,12 @@ impl EncryptedStore {
                 )?;
                 for _ in 0..categories {
                     bump_grants_generation_tx(tx)?;
+                }
+                if read_schema_version(tx)? >= 16 {
+                    tx.execute(
+                        "DELETE FROM credential_plan_tiers WHERE credential_id = ?1",
+                        [credential_id],
+                    )?;
                 }
                 // The same holds for provider ids: a later deposit of this id must
                 // start with none. Removal writes no `set_providers` entry; its own
@@ -5777,6 +5848,85 @@ fn provider_ids_from_conn(
     Ok(ids)
 }
 
+fn plan_tier_column(schema_version: u32) -> &'static str {
+    if schema_version >= 16 {
+        "(SELECT plan_tier FROM credential_plan_tiers WHERE credential_id = credentials.credential_id)"
+    } else {
+        "NULL"
+    }
+}
+
+fn plan_tier_from_conn(
+    conn: &rusqlite::Connection,
+    id: &str,
+    schema_version: u32,
+) -> rusqlite::Result<Option<String>> {
+    if schema_version < 16 {
+        return Ok(None);
+    }
+    conn.query_row(
+        "SELECT plan_tier FROM credential_plan_tiers WHERE credential_id = ?1",
+        [id],
+        |row| row.get(0),
+    )
+    .optional()
+}
+
+fn write_plan_tier_tx(
+    tx: &rusqlite::Transaction,
+    audit_key: &[u8; 32],
+    id: &str,
+    tier: Option<&str>,
+    ctx: AuditCtx<'_>,
+) -> rusqlite::Result<()> {
+    let old = plan_tier_from_conn(tx, id, read_schema_version(tx)?)?;
+    if old.as_deref() == tier {
+        return Ok(());
+    }
+    tx.execute(
+        "DELETE FROM credential_plan_tiers WHERE credential_id = ?1",
+        [id],
+    )?;
+    if let Some(tier) = tier {
+        tx.execute(
+            "INSERT INTO credential_plan_tiers (credential_id, plan_tier) VALUES (?1, ?2)",
+            rusqlite::params![id, tier],
+        )?;
+    }
+    append_audit_tx(
+        tx,
+        audit_key,
+        &AuditRecord {
+            op: AuditOp::SetPlan,
+            credential_id: Some(format!(
+                "plan:{id}|{}|{}",
+                old.as_deref().unwrap_or(""),
+                tier.unwrap_or("")
+            )),
+            payload_hash: None,
+            actor: ctx.actor.to_owned(),
+            alarm: ctx.alarm,
+        },
+    )?;
+    Ok(())
+}
+
+fn clear_plan_on_account_change_tx(
+    tx: &rusqlite::Transaction,
+    audit_key: &[u8; 32],
+    id: &str,
+    old: Option<&RecordIdentity>,
+    new: &RecordIdentity,
+    ctx: AuditCtx<'_>,
+) -> rusqlite::Result<()> {
+    // An unreadable previous envelope cannot prove the account stayed the same.
+    // Clearing its assertion is safer than pricing replacement material with a stale tier.
+    if old.is_none_or(|old| old.clone().normalized().account_id != new.account_id) {
+        write_plan_tier_tx(tx, audit_key, id, None, ctx)?;
+    }
+    Ok(())
+}
+
 /// Read the vault's recorded schema version from a connection that may be read-only.
 ///
 /// `MAX(version)` over this namespace's rows, or 0 when the namespace has no rows. A
@@ -5864,7 +6014,10 @@ fn list_meta_from_conn(
     let providers = provider_ids_column(schema_version);
     let sql = sql.replace(
         "FROM credentials ORDER BY",
-        &format!(", {creator}, {providers} FROM credentials ORDER BY"),
+        &format!(
+            ", {creator}, {providers}, {} FROM credentials ORDER BY",
+            plan_tier_column(schema_version)
+        ),
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt
@@ -5880,6 +6033,7 @@ fn list_meta_from_conn(
                     categories: split_categories(categories),
                     created_by: row.get(6)?,
                     provider_ids: split_provider_ids(row.get(7)?),
+                    plan_tier: row.get(8)?,
                 },
             ))
         })?
@@ -10929,7 +11083,7 @@ mod tests {
     fn the_newest_migration_version_is_pinned_because_the_manifest_declares_it() {
         assert_eq!(
             newest_migration_version(),
-            15,
+            16,
             "the newest migration changed. This value is DECLARED in the module manifest \
              as store_schema_version, so a supervisor comparing declared-against-actual \
              sees it. Update the literal, and note the manifest consequence."
@@ -14468,3 +14622,7 @@ mod deposit_cookie_tests;
 #[cfg(test)]
 #[path = "provider_ids_store_tests.rs"]
 mod provider_ids_store_tests;
+
+#[cfg(test)]
+#[path = "plan_tier_store_tests.rs"]
+mod plan_tier_store_tests;

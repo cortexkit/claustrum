@@ -143,6 +143,7 @@ describe('the client speaks the producer-pinned wire', () => {
         const emitted = response.result.credentials[index]
         expect(row.providerIds).toEqual(emitted.provider_ids)
         expect(row.authMethod).toBe(emitted.auth_method)
+        expect(row.planTier).toBe(emitted.plan_tier)
       }
     }
     const rows = decodeScopedInventory(responses[1], () => {}).rows
@@ -157,6 +158,7 @@ describe('the client speaks the producer-pinned wire', () => {
   for (const [field, invalidValues] of [
     ['provider_ids', [null, 'aa', ['aa', 7]]],
     ['auth_method', [null, 7, '', 'unknown']],
+    ['plan_tier', [null, 7, [], '', 'Pro', '2x', '_max', 'max-5x', 'a b', 'é', 'max_5x\n', 'a'.repeat(33)]],
   ] as const) {
     for (const [index, invalid] of invalidValues.entries()) {
       test(`fixture refuses malformed ${field} case ${index}`, () => {
@@ -187,6 +189,24 @@ describe('the client speaks the producer-pinned wire', () => {
     const decoded = decodeScopedInventory(response, () => {})
     expect(decoded.rows.length).toBe(response.result.credentials.length)
     expect(decoded.rows.every((row) => row.providerIds.length === 0)).toBe(true)
+  })
+
+  test('a reply without plan_tier decodes as an unknown tier against older vaults', () => {
+    const fixture = JSON.parse(readFileSync(FIXTURE, 'utf8')) as { operations: (FixtureRow & { reply?: string })[] }
+    const response = JSON.parse(fixture.operations.find((entry) => entry.op === 'credential.list_scoped')!.reply!)
+    for (const row of response.result.credentials) delete row.plan_tier
+    const decoded = decodeScopedInventory(response, () => {})
+    expect(decoded.rows.length).toBe(response.result.credentials.length)
+    expect(decoded.rows.every((row) => row.planTier === undefined)).toBe(true)
+  })
+
+  test('plan tiers accept bounded syntax including digits after underscores, not a vocabulary', () => {
+    const fixture = JSON.parse(readFileSync(FIXTURE, 'utf8')) as { operations: (FixtureRow & { reply?: string })[] }
+    const response = JSON.parse(fixture.operations.find((entry) => entry.op === 'credential.list_scoped')!.reply!)
+    for (const tier of ['a', 'pro_200', 'unrecognised_tier', 'a'.repeat(32)]) {
+      response.result.credentials[0].plan_tier = tier
+      expect(decodeScopedInventory(response, () => {}).rows[0]!.planTier).toBe(tier)
+    }
   })
 
   test('provider ids are decoded as open strings, not client-validated catalog ids', () => {

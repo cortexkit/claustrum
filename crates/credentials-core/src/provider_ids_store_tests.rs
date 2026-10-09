@@ -104,7 +104,7 @@ fn oauth_record() -> VaultRecord {
 #[test]
 fn migration_15_adds_only_the_provider_id_table_and_conserves_every_row() {
     assert_eq!(PROVIDER_ID_SCHEMA_VERSION, 15);
-    assert_eq!(newest_migration_version(), PROVIDER_ID_SCHEMA_VERSION);
+    assert_eq!(newest_migration_version(), 16);
     let (root, sqlite) = sqlite("provider-migration", 160);
     migrate_through_for_test(&sqlite, PROVIDER_ID_SCHEMA_VERSION - 1).unwrap();
     let store = EncryptedStore::open(sqlite, MasterKey::from_bytes([160; 32])).unwrap();

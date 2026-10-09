@@ -536,6 +536,8 @@ export interface ScopedInventoryRow {
    * which is also what an unmapped credential reports.
    */
   readonly providerIds: readonly string[]
+  /** Operator assertion, unknown when absent; pricing owns the vocabulary. */
+  readonly planTier?: string
   readonly authMethod?: 'apikey' | 'chatgpt' | 'antigravity' | 'oauth'
   /**
    * Which provider protocol this credential speaks. Absent for static keys.
@@ -629,6 +631,11 @@ export function decodeScopedInventory(
           ? row.created_at_ms
           : undefined
     if (createdAtMs === undefined) throw asCredentialError(response, 'invalid_response', logUnknownClass)
+    // A negative end assertion refuses trailing newlines too; JavaScript's $ accepts one.
+    const planTier = row.plan_tier
+    if (planTier !== undefined && (typeof planTier !== 'string' || !/^[a-z][a-z0-9_]{0,31}(?![\s\S])/.test(planTier))) {
+      throw asCredentialError(response, 'invalid_response', logUnknownClass)
+    }
     const authMethod = row.auth_method
     if (
       authMethod !== undefined &&
@@ -654,6 +661,7 @@ export function decodeScopedInventory(
       // no ids set. A present non-array is a malformed reply and still refuses.
       providerIds: row.provider_ids === undefined ? [] : strings(row.provider_ids),
       authMethod,
+      planTier,
       state: row.state,
       refreshAdapter: row.refresh_adapter,
       recordVersion,

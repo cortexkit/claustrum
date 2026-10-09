@@ -539,6 +539,46 @@ ck auth grants   # one row per principal-scoped grant
 None of these commands prints a secret. All read the running daemon when one is up and
 fall back to the store directly when it is not.
 
+### Routing metadata: provider ids and subscription tier
+
+Provider ids are operator-written catalog mappings, not authorization categories. Set
+or clear them independently from the sealed credential; no provider id or plan tier is
+inferred from the credential's name:
+
+```sh
+ck auth set-providers --id oauth:anthropic --set anthropic claude-code
+ck auth set-plan --id oauth:anthropic --tier max_20x
+ck auth set-plan --id chatgpt:openai --tier pro_200
+ck auth set-plan --id oauth:anthropic --clear
+ck auth list
+```
+
+`set-plan` needs exactly one of `--tier` or `--clear`. Tier syntax is a lowercase ASCII
+letter followed by lowercase letters, digits or underscores, 1–32 characters total.
+The pricing service owns the vocabulary; the vault cannot verify the subscription.
+Current tiers include Anthropic `pro`, `max_5x`, `max_20x` and OpenAI `plus`, `pro_100`,
+`pro_200`, `pro_500`. Reassert the tier after an out-of-band plan change. An unset tier
+means unknown, not a default plan. A replacement deposit that changes `account_id`
+clears it atomically and audits the clear; same-account re-login and token refresh keep
+it. Repair of an unreadable old envelope also clears it. Removing a credential removes
+its tier. These metadata edits require the master key and audit only actual changes.
+
+`list_scoped` gives tiers only to callers who can read/list the account, just like
+identity. Sign/open-only callers still see provider ids but not the account's tier.
+Migration 16 stores the assertion in plaintext beside the credential. Lease-free list
+readers tolerate an older store and show no tier; the client treats absence as unknown.
+
+**Table parser change:** when any row has a tier, `ck auth list` and the inventory in
+`status` add a sixth header word, `PLAN_TIER`, after `PROVIDERS`, and every row has a sixth
+field (the tier or `-`). An optional `by=<principal>` follows as field seven, a trailing
+annotation with no header word of its own. With no
+tiers, the five-word `STATE VER CREDENTIAL CATEGORIES PROVIDERS` header and optional
+sixth `by=` field are unchanged. Update parsers, including `cortexkit-account`, to accept
+both layouts; neither tier values nor the unset marker contains whitespace.
+
+The exact wire and audit formats are in [wire contract v1](wire-contract-v1.md#operator-asserted-plan_tier-migration-16).
+
+
 `status` is the one to run when something is wrong. It reports the same health the
 supervisor probes:
 
@@ -830,6 +870,7 @@ These values come from the closed `AuditOp` enum and name the mutation or chain 
 | `login` | Mint a vault-native first-party OAuth credential. |
 | `overwrite` | Replace a credential under an unconditional or compare-and-set write path. |
 | `set_identity` | Re-seal unchanged credential material with updated non-secret account identity. |
+| `set_plan` | Change an operator tier assertion, or clear it atomically when a replacement changes accounts. |
 | `invalidate` | Mark a credential as needing re-authentication. |
 | `rotate_master_key` | Re-wrap the vault under a new master key. |
 | `refresh_commit` | Commit new tokens from a vault-owned refresh. |

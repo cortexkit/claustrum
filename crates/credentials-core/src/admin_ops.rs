@@ -184,6 +184,13 @@ pub enum AdminOpBody {
         mode: SetProvidersMode,
         provider_ids: Vec<String>,
     },
+    /// Set or clear an operator-asserted subscription tier; pricing owns its vocabulary.
+    #[serde(rename = "admin.set_plan")]
+    SetPlan {
+        v: u32,
+        credential_id: String,
+        plan_tier: Option<String>,
+    },
     #[serde(rename = "admin.reclassify")]
     Reclassify { v: u32, force: bool },
     /// Record that a NAMED APPROVER approved a specific artifact, identified by the
@@ -421,6 +428,16 @@ impl std::fmt::Debug for AdminOpBody {
                 .field("mode", mode)
                 .field("provider_ids", provider_ids)
                 .finish(),
+            AdminOpBody::SetPlan {
+                v,
+                credential_id,
+                plan_tier,
+            } => f
+                .debug_struct("SetPlan")
+                .field("v", v)
+                .field("credential_id", credential_id)
+                .field("plan_tier", plan_tier)
+                .finish(),
             AdminOpBody::Reclassify { v, force } => f
                 .debug_struct("Reclassify")
                 .field("v", v)
@@ -464,6 +481,7 @@ impl AdminOpBody {
             | AdminOpBody::GrantRevokeV2 { v, .. }
             | AdminOpBody::SetCategory { v, .. }
             | AdminOpBody::SetProviders { v, .. }
+            | AdminOpBody::SetPlan { v, .. }
             | AdminOpBody::Reclassify { v, .. }
             | AdminOpBody::Approval { v, .. }
             | AdminOpBody::EnrollApprove { v, .. }
@@ -482,6 +500,7 @@ impl AdminOpBody {
             | AdminOpBody::GrantRevokeV2 { .. }
             | AdminOpBody::SetCategory { .. }
             | AdminOpBody::SetProviders { .. }
+            | AdminOpBody::SetPlan { .. }
             | AdminOpBody::Reclassify { .. }
             | AdminOpBody::EnrollApprove { .. }
             | AdminOpBody::EnrollDeny { .. }
@@ -535,6 +554,7 @@ impl AdminOpBody {
             | AdminOpBody::SetCategory {
                 credential_id: id, ..
             }
+            | AdminOpBody::SetPlan { credential_id: id, .. }
             | AdminOpBody::SetProviders {
                 credential_id: id, ..
             } => Some(id),
@@ -883,6 +903,18 @@ pub fn apply(
             )?;
             Ok(serde_json::json!({ "provider_ids": resulting }))
         }
+        AdminOpBody::SetPlan {
+            credential_id,
+            plan_tier,
+            ..
+        } => {
+            let resulting = store.set_plan_audited(
+                &credential_id,
+                plan_tier.as_deref(),
+                AuditCtx::route_admin(AuditOp::SetPlan, actor),
+            )?;
+            Ok(serde_json::json!({ "plan_tier": resulting }))
+        }
         AdminOpBody::Reclassify { force, .. } => {
             let changed = store
                 .reclassify_audited(force, AuditCtx::route_admin(AuditOp::SetCategory, actor))?;
@@ -922,6 +954,7 @@ pub fn status_result(
                 "record_version": m.record_version,
                 "categories": m.categories,
                 "provider_ids": m.provider_ids,
+                "plan_tier": m.plan_tier,
             })
         })
         .collect();
@@ -1348,6 +1381,16 @@ mod admin_schema_v2_tests {
                     credential_id: "id".into(),
                     mode: SetProvidersMode::Add,
                     provider_ids: vec!["zai-coding-plan".into()],
+                },
+                v2,
+                Some("id"),
+            ),
+            (
+                "SetPlan",
+                AdminOpBody::SetPlan {
+                    v: v2,
+                    credential_id: "id".into(),
+                    plan_tier: Some("pro_200".into()),
                 },
                 v2,
                 Some("id"),

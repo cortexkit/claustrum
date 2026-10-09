@@ -341,6 +341,7 @@ fn run_args(mut args: Vec<String>) -> Result<(), CliError> {
         "set-identity" => cmd_set_identity(&global, &args),
         "set-category" => cmd_set_category(&global, &args),
         "set-providers" => cmd_set_providers(&global, &args),
+        "set-plan" => cmd_set_plan(&global, &args),
         "reclassify" => cmd_reclassify(&global, &args),
         "migrate-opencode" => opencode_migration::cmd_migrate_opencode(&global, &args),
         "opencode-account" => opencode_accounts::cmd_opencode_account(&global, &args),
@@ -434,6 +435,7 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
         "set-identity" => &["--account-id", "--email", "--org-name"],
         "set-category" => &["--set", "--add", "--remove"],
         "set-providers" => &["--id"],
+        "set-plan" => &["--id", "--tier"],
         "migrate-opencode" => &[
             "--restore",
             "--auth-file",
@@ -485,7 +487,7 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
         "put" => &["--replace"],
         "mint-signing-key" | "mint-kem-key" => &["--replace"],
         "import" => &["--replace", "--clear-identity"],
-        "set-identity" => &["--clear"],
+        "set-identity" | "set-plan" => &["--clear"],
         "reclassify" => &["--from-registry", "--force"],
         "login" => &["--replace", "--no-listener", "--no-browser", "--device"],
         "migrate-opencode" => &["--dry-run", "--replace", "--force-shape"],
@@ -561,7 +563,8 @@ fn usage_short() -> String {
          import              import from opencode/pi/gemini-cli/antigravity\n\
          set-identity        attach non-secret account metadata to one credential\n\
          set-category        replace/add/remove authorization categories\n\
-          set-providers       replace/add/remove catalog provider ids\n\
+           set-providers       replace/add/remove catalog provider ids\n\
+           set-plan            set/clear an operator-asserted subscription tier\n\
           reclassify          apply registry category defaults atomically\n\
          migrate-opencode    custody OpenCode api auth entries idempotently\n\
          opencode-account    add/remove/list labeled OpenCode api accounts\n\
@@ -604,6 +607,19 @@ fn usage_short() -> String {
 /// An unknown verb falls back to the short table.
 fn help_verb(verb: &str) -> String {
     let body = match verb {
+        "set-plan" => {
+            "ck auth set-plan --id <credential-id> (--tier <id> | --clear)\n\
+             \n\
+             \x20 --id <credential-id>  credential whose subscription tier is edited\n\
+             \x20 --tier <id>           operator assertion of the plan tier\n\
+             \x20 --clear               remove the assertion (unknown tier)\n\
+             \n\
+             NOTES\n\
+             Choose exactly one of --tier and --clear. Tiers start with a lowercase\n\
+             letter, contain only lowercase ASCII letters, digits and _, and are\n\
+             1-32 characters. Pricing owns the vocabulary; the vault cannot verify\n\
+             the subscription. Update this assertion after an out-of-band plan change."
+        }
         "set-providers" => {
             "ck auth set-providers --id <credential-id> (--add | --remove | --set)\n\
              \x20                     <provider-id>...\n\
@@ -1309,6 +1325,52 @@ fn provider_id_flags(args: &[String]) -> Result<Vec<String>, CliError> {
     }
     check_cli_provider_ids(&ids, true)?;
     Ok(ids)
+}
+
+fn cmd_set_plan(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
+    let id = required(args, "--id")?;
+    let tier = optional(args, "--tier");
+    let clear = args.iter().any(|arg| arg == "--clear");
+    if tier.is_some() == clear
+        || args
+            .iter()
+            .filter(|arg| arg.as_str() == "--tier" || arg.as_str() == "--clear")
+            .count()
+            != 1
+    {
+        return Err(CliError::Usage(
+            "choose exactly one of --tier <id> and --clear".into(),
+        ));
+    }
+    if tier
+        .as_deref()
+        .is_some_and(|tier| !credentials_core::plan_tier::valid_plan_tier(tier))
+    {
+        return Err(CliError::Store(StoreOpError::InvalidPlanTier));
+    }
+    let reply = commit_admin(
+        global,
+        AdminOpBody::SetPlan {
+            v: ADMIN_OP_SCHEMA_V2,
+            credential_id: id.clone(),
+            plan_tier: tier,
+        },
+    )?;
+    let tier = match reply.get("plan_tier") {
+        Some(serde_json::Value::Null) => "-",
+        Some(serde_json::Value::String(tier))
+            if credentials_core::plan_tier::valid_plan_tier(tier) =>
+        {
+            tier
+        }
+        _ => {
+            return Err(CliError::StatusReportInvalid(
+                "set-plan returned an invalid tier".into(),
+            ))
+        }
+    };
+    println!("{id}  {tier}");
+    Ok(())
 }
 
 fn cmd_set_providers(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
@@ -3674,6 +3736,16 @@ fn parse_inventory(result: &serde_json::Value) -> Result<Vec<InventoryRow>, CliE
                         .collect::<Option<Vec<_>>>()
                 })
                 .unwrap_or_default();
+            if row.get("plan_tier").is_some_and(|tier| {
+                !tier.is_null()
+                    && !tier
+                        .as_str()
+                        .is_some_and(credentials_core::plan_tier::valid_plan_tier)
+            }) {
+                return Err(CliError::StatusReportInvalid(format!(
+                    "admin.status returned an invalid plan tier at credential row {index}"
+                )));
+            }
             providers.sort();
             Ok((
                 state.to_string(),
@@ -3709,11 +3781,35 @@ fn render_inventory_row(
     } else {
         providers.join(",")
     };
-    format!("{state:<14} v{version:<4} {id}  {categories}  {providers}{creator}")
+    let plan = if inventory_has_plan(result) {
+        let tier = result["credentials"]
+            .as_array()
+            .and_then(|rows| {
+                rows.iter()
+                    .find(|row| row["id"].as_str() == Some(id.as_str()))
+            })
+            .and_then(|row| row["plan_tier"].as_str())
+            .unwrap_or("-");
+        format!("  {tier}")
+    } else {
+        String::new()
+    };
+    format!("{state:<14} v{version:<4} {id}  {categories}  {providers}{plan}{creator}")
+}
+
+fn inventory_has_plan(result: &serde_json::Value) -> bool {
+    result["credentials"]
+        .as_array()
+        .is_some_and(|rows| rows.iter().any(|row| row["plan_tier"].is_string()))
 }
 
 fn print_inventory(rows: &[InventoryRow], result: &serde_json::Value) {
-    println!("STATE          VER   CREDENTIAL  CATEGORIES  PROVIDERS");
+    let plan_header = if inventory_has_plan(result) {
+        "  PLAN_TIER"
+    } else {
+        ""
+    };
+    println!("STATE          VER   CREDENTIAL  CATEGORIES  PROVIDERS{plan_header}");
     for row in rows {
         println!("{}", render_inventory_row(row, result));
     }

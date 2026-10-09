@@ -4385,8 +4385,8 @@ fn every_verb_help_uses_a_flags_table_and_notes_layout() {
     // budget for verbs. It includes the KEM mint ceremony and the approve verb.
     assert_eq!(
         verbs.len(),
-        32,
-        "the rendered verb-table scan narrowed; set-providers is a public verb"
+        33,
+        "the rendered verb-table scan narrowed; set-plan is a public verb"
     );
     assert!(accepted_help_flags("login").contains(&"--no-browser".to_string()));
     assert!(accepted_help_flags("revoke-handle").contains(&"--hash".to_string()));
@@ -5172,4 +5172,218 @@ fn provider_cli_live_count_refusal_and_deposit_add_order_use_the_route() {
         String::from_utf8_lossy(&offline.stderr),
         "error: invalid_provider_id/permanent: rule=count value=extra\n"
     );
+}
+
+#[test]
+fn plan_cli_sets_clears_and_renders_a_conditional_parseable_column() {
+    let vault = GrantCliVault::new("plan-roundtrip");
+    vault.bootstrap();
+    let run = |args: &[&str]| {
+        let out = vault.run(args);
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap()
+    };
+    run(&["put", "--id", "apikey:zai", "--payload", "secret"]);
+    run(&["put", "--id", "apikey:kimi-code", "--payload", "other"]);
+    let list = run(&["list"]);
+    assert_eq!(
+        list.lines()
+            .next()
+            .unwrap()
+            .split_whitespace()
+            .collect::<Vec<_>>(),
+        ["STATE", "VER", "CREDENTIAL", "CATEGORIES", "PROVIDERS"]
+    );
+    assert_eq!(
+        run(&["set-plan", "--id", "apikey:zai", "--tier", "pro_200"]).trim(),
+        "apikey:zai  pro_200"
+    );
+    run(&[
+        "set-providers",
+        "--id",
+        "apikey:zai",
+        "--set",
+        "zai-coding-plan",
+    ]);
+    run(&[
+        "put",
+        "--id",
+        "apikey:zai",
+        "--payload",
+        "rotated",
+        "--replace",
+    ]);
+    for verb in ["list", "status"] {
+        let list = run(&[verb]);
+        assert!(
+            list.lines()
+                .any(|line| line.split_whitespace().collect::<Vec<_>>()
+                    == [
+                        "STATE",
+                        "VER",
+                        "CREDENTIAL",
+                        "CATEGORIES",
+                        "PROVIDERS",
+                        "PLAN_TIER"
+                    ]),
+            "{list}"
+        );
+        let row = list
+            .lines()
+            .find(|line| line.contains("apikey:zai"))
+            .unwrap()
+            .split_whitespace()
+            .collect::<Vec<_>>();
+        assert_eq!(row.len(), 6);
+        assert_eq!(
+            &row[2..],
+            &["apikey:zai", "llm-provider", "zai-coding-plan", "pro_200"]
+        );
+        let unset = list
+            .lines()
+            .find(|line| line.contains("apikey:kimi-code"))
+            .unwrap()
+            .split_whitespace()
+            .collect::<Vec<_>>();
+        assert_eq!(unset.len(), 6);
+        assert_eq!(unset[5], "-");
+    }
+    assert_eq!(
+        run(&["set-plan", "--id", "apikey:zai", "--clear"]).trim(),
+        "apikey:zai  -"
+    );
+    assert!(!run(&["list"]).contains("PLAN_TIER"));
+    assert!(!vault
+        .run(&["set-plan", "--id", "missing", "--clear"])
+        .status
+        .success());
+    assert!(run(&["verify-audit"]).contains("intact"));
+}
+
+#[test]
+fn plan_cli_preflight_refuses_invalid_or_conflicting_tiers_before_key_resolution() {
+    let root = tmp_root("plan-prechecks");
+    for live in [false, true] {
+        for args in [
+            vec!["set-plan", "--id", "apikey:zai"],
+            vec!["set-plan", "--id", "apikey:zai", "--tier"],
+            vec!["set-plan", "--id", "apikey:zai", "--tier", "Pro"],
+            vec!["set-plan", "--id", "apikey:zai", "--tier", "_max"],
+            vec!["set-plan", "--id", "apikey:zai", "--tier", "2x"],
+            vec!["set-plan", "--id", "apikey:zai", "--tier", "max-5x"],
+            vec![
+                "set-plan",
+                "--id",
+                "apikey:zai",
+                "--tier",
+                "max_5x",
+                "--clear",
+            ],
+            vec!["set-plan", "--id", "apikey:zai", "--clear", "--clear"],
+        ] {
+            let mut command = cli();
+            command
+                .args(&args)
+                .arg("--data-dir")
+                .arg(root.join("absent-vault"))
+                .arg("--key-path")
+                .arg(root.join("absent-key"));
+            if live {
+                command
+                    .arg("--subc")
+                    .arg(root.join("absent-connection.json"));
+            }
+            let out = command.output().unwrap();
+            assert!(!out.status.success(), "{args:?}");
+            let err = String::from_utf8_lossy(&out.stderr);
+            assert!(
+                err.contains("invalid_plan_tier") || err.contains("choose exactly one"),
+                "{args:?}: {err}"
+            );
+        }
+    }
+    assert!(
+        !root.join("absent-vault").exists(),
+        "preflight must not create a vault"
+    );
+}
+
+#[test]
+fn plan_cli_import_replace_keeps_same_account_but_clears_a_new_or_removed_account() {
+    let vault = GrantCliVault::new("plan-import-replace");
+    vault.bootstrap();
+    let source = vault.root.join("auth.json");
+    std::fs::write(
+        &source,
+        r#"{"refresh":"refresh","access":"opaque","expires":4102444800000}"#,
+    )
+    .unwrap();
+    let source = source.to_str().unwrap();
+    let run = |args: &[&str]| {
+        let out = vault.run(args);
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap()
+    };
+    run(&[
+        "import",
+        "--source",
+        "opencode",
+        "--id",
+        "oauth:anthropic",
+        "--json",
+        source,
+        "--account-id",
+        "old",
+    ]);
+    run(&["set-plan", "--id", "oauth:anthropic", "--tier", "max_20x"]);
+    run(&[
+        "import",
+        "--source",
+        "opencode",
+        "--id",
+        "oauth:anthropic",
+        "--json",
+        source,
+        "--replace",
+        "--account-id",
+        "old",
+    ]);
+    assert!(run(&["list"]).contains("max_20x"));
+    run(&[
+        "import",
+        "--source",
+        "opencode",
+        "--id",
+        "oauth:anthropic",
+        "--json",
+        source,
+        "--replace",
+        "--account-id",
+        "new",
+    ]);
+    assert!(!run(&["list"]).contains("PLAN_TIER"));
+    run(&["set-plan", "--id", "oauth:anthropic", "--tier", "max_5x"]);
+    run(&[
+        "import",
+        "--source",
+        "opencode",
+        "--id",
+        "oauth:anthropic",
+        "--json",
+        source,
+        "--replace",
+        "--clear-identity",
+    ]);
+    assert!(!run(&["list"]).contains("PLAN_TIER"));
+    let audit = run(&["audit"]);
+    assert!(audit.contains("plan:oauth:anthropic|max_20x|"), "{audit}");
+    assert!(run(&["verify-audit"]).contains("intact"));
 }

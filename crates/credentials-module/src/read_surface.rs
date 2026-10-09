@@ -3392,7 +3392,8 @@ mod list_scoped_tests {
     /// helpers, so a frame that is skipped, reordered or pushed as `""` for an omitted
     /// value makes the digests differ. `provider_ids` (a u32 count, then each id
     /// string-framed) and then `auth_method` (an optional string) follow `org_name`.
-    /// These vectors also retain the absence byte for the unset plan tier.
+    /// Every expected byte string below ends that row with a `0` absence byte for
+    /// `plan_tier`, which is unset in this test.
     #[test]
     fn list_scoped_view_frames_provider_ids_then_auth_method_after_org_name() {
         fn u32_be(out: &mut Vec<u8>, value: u32) {

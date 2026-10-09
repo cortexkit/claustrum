@@ -169,7 +169,12 @@ fn set_plan_validates_syntax_refuses_unknown_and_audits_only_old_to_new_transiti
 #[test]
 fn plan_replacement_paths_clear_only_when_the_effective_account_changes() {
     let (_root, store) = rig("plan-replacements", 182);
-    // Both admin.store wire variants share these modes, but use different identity policies.
+    // Each deposit path that can replace a credential's payload: `put` (a plain store,
+    // compare-and-swap on the payload hash), `import` and `login` (a store that always
+    // takes the incoming identity, even when it is empty), and the legacy import (an
+    // unconditional plain store, which keeps the stored identity when the incoming
+    // record carries none). The tier must be cleared exactly when the account_id
+    // stored after the write differs from the one before it.
     for (path, identity_policy, cas) in [
         ("put", false, true),
         ("import", true, false),
@@ -221,7 +226,8 @@ fn plan_replacement_paths_clear_only_when_the_effective_account_changes() {
                 }
             };
             apply(&store, op, "operator").unwrap();
-            // The legacy unconditional path preserves identity when no new one is supplied.
+            // Only the legacy import keeps the stored account_id when the incoming record
+            // has none, so after step 1 it stays "new" and the tier is never cleared again.
             let effective = store.get(&id).unwrap();
             let (expected_account, changed) = if path == "legacy-import" {
                 [
@@ -410,7 +416,8 @@ fn tier_lifecycle_preserves_refresh_and_removes_without_foreign_key_enforcement(
         2,
         "remove records removal, not an asserted tier change"
     );
-    // Repair cannot prove that an unreadable envelope still belongs to the same account.
+    // When the stored envelope can't be decrypted, a replacement can't show that the
+    // account behind the credential stayed the same, so the tier is cleared.
     set(&store, id, Some("max_5x"));
     store
         .with_raw_conn(|conn| {

@@ -5421,8 +5421,8 @@ mod tests {
         // GitHub App row, whose adapter maps to no auth method even though the caller can
         // read it. They carry every `auth_method` value (`antigravity`, `apikey`,
         // `chatgpt`, `oauth`), and `provider_ids` with several ids, one id, and none.
-        // The subscription assertion is present on the Anthropic rows and absent on
-        // the other rows, so consumers exercise both `plan_tier` shapes.
+        // `plan_tier` is present on the Anthropic rows and absent on the others, so a
+        // consumer's decoder meets both shapes.
         let reply = read_surface::project_list_scoped(ScopedListSnapshot {
             rows: vec![
                 unsealed_row(

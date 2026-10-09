@@ -5350,6 +5350,7 @@ mod tests {
             identity: bool,
             provider_ids: &'a [&'a str],
             plan_tier: Option<&'a str>,
+            plan_tier_source: Option<&'a str>,
         }
         let unsealed_row = |stored: Stored<'_>, operation: GrantOperation| ScopedListRow {
             id: stored.id.into(),
@@ -5370,6 +5371,7 @@ mod tests {
                 .collect(),
             auth_method: list_auth_method(stored.kind, stored.refresh_adapter),
             plan_tier: stored.plan_tier.map(str::to_owned),
+            plan_tier_source: stored.plan_tier_source.map(str::to_owned),
         };
         let category_grant = |category: &str, operation: GrantOperation| ReadGrant {
             principal_kind: "enrolled".into(),
@@ -5391,6 +5393,7 @@ mod tests {
                     identity: false,
                     provider_ids: &["anthropic"],
                     plan_tier: Some("max_5x"),
+                    plan_tier_source: Some("operator"),
                 },
                 GrantOperation::Read,
             )],
@@ -5421,8 +5424,8 @@ mod tests {
         // GitHub App row, whose adapter maps to no auth method even though the caller can
         // read it. They carry every `auth_method` value (`antigravity`, `apikey`,
         // `chatgpt`, `oauth`), and `provider_ids` with several ids, one id, and none.
-        // `plan_tier` is present on the Anthropic rows and absent on the others, so a
-        // consumer's decoder meets both shapes.
+        // Tier sources span operator, detected, and absent, so consumers see both
+        // precedence origins as well as accounts without a known pricing tier.
         let reply = read_surface::project_list_scoped(ScopedListSnapshot {
             rows: vec![
                 unsealed_row(
@@ -5435,6 +5438,7 @@ mod tests {
                         identity: true,
                         provider_ids: &["anthropic", "claude-code"],
                         plan_tier: Some("max_20x"),
+                        plan_tier_source: Some("operator"),
                     },
                     GrantOperation::Read,
                 ),
@@ -5448,6 +5452,7 @@ mod tests {
                         identity: false,
                         provider_ids: &["openrouter"],
                         plan_tier: None,
+                        plan_tier_source: None,
                     },
                     GrantOperation::Read,
                 ),
@@ -5460,7 +5465,8 @@ mod tests {
                         record_version: 11,
                         identity: false,
                         provider_ids: &[],
-                        plan_tier: None,
+                        plan_tier: Some("pro_200"),
+                        plan_tier_source: Some("detected"),
                     },
                     GrantOperation::Read,
                 ),
@@ -5474,6 +5480,7 @@ mod tests {
                         identity: false,
                         provider_ids: &["google-antigravity"],
                         plan_tier: None,
+                        plan_tier_source: None,
                     },
                     GrantOperation::Read,
                 ),
@@ -5487,6 +5494,7 @@ mod tests {
                         identity: false,
                         provider_ids: &[],
                         plan_tier: None,
+                        plan_tier_source: None,
                     },
                     GrantOperation::Read,
                 ),
@@ -5517,6 +5525,7 @@ mod tests {
                     identity: true,
                     provider_ids: &["anthropic"],
                     plan_tier: Some("max_5x"),
+                    plan_tier_source: Some("detected"),
                 },
                 GrantOperation::List,
             )],

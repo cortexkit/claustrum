@@ -126,6 +126,8 @@ crates/credentials-core/src/google_login.rs ONBOARD_USER_URL cloudcode-pa.google
 crates/credentials-core/src/google_login.rs TOKEN_URL oauth2.googleapis.com
 crates/credentials-core/src/google_login.rs USERINFO_URL www.googleapis.com
 crates/credentials-core/src/oauth_login.rs INLINE_001 api.openai.com
+crates/credentials-core/src/plan_detection.rs INLINE_001 api.openai.com
+crates/credentials-core/src/plan_detection.rs PROFILE_URL api.anthropic.com
 crates/credentials-core/src/refresh_adapters/anthropic.rs AUTHORIZE_URL claude.ai
 crates/credentials-core/src/refresh_adapters/anthropic.rs LOGIN_CODE_REDIRECT_URI platform.claude.com
 crates/credentials-core/src/refresh_adapters/anthropic.rs LOGIN_TOKEN_URL api.anthropic.com

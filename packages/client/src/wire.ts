@@ -536,8 +536,9 @@ export interface ScopedInventoryRow {
    * which is also what an unmapped credential reports.
    */
   readonly providerIds: readonly string[]
-  /** Operator assertion, unknown when absent; pricing owns the vocabulary. */
+  /** Effective subscription tier, unknown when absent; operator overrides win. */
   readonly planTier?: string
+  readonly planTierSource?: 'operator' | 'detected'
   readonly authMethod?: 'apikey' | 'chatgpt' | 'antigravity' | 'oauth'
   /**
    * Which provider protocol this credential speaks. Absent for static keys.
@@ -637,6 +638,10 @@ export function decodeScopedInventory(
       throw asCredentialError(response, 'invalid_response', logUnknownClass)
     }
     const authMethod = row.auth_method
+    const planTierSource = row.plan_tier_source
+    if (planTierSource !== undefined && planTierSource !== 'operator' && planTierSource !== 'detected') {
+      throw asCredentialError(response, 'invalid_response', logUnknownClass)
+    }
     if (
       authMethod !== undefined &&
       authMethod !== 'apikey' && authMethod !== 'chatgpt' &&
@@ -662,6 +667,7 @@ export function decodeScopedInventory(
       providerIds: row.provider_ids === undefined ? [] : strings(row.provider_ids),
       authMethod,
       planTier,
+      planTierSource,
       state: row.state,
       refreshAdapter: row.refresh_adapter,
       recordVersion,

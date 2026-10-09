@@ -612,13 +612,13 @@ fn help_verb(verb: &str) -> String {
              \n\
              \x20 --id <credential-id>  credential whose subscription tier is edited\n\
              \x20 --tier <id>           operator assertion of the plan tier\n\
-             \x20 --clear               remove the assertion (unknown tier)\n\
+             \x20 --clear               remove the override (detected tier reappears)\n\
              \n\
              NOTES\n\
              Choose exactly one of --tier and --clear. Tiers start with a lowercase\n\
              letter, contain only lowercase ASCII letters, digits and _, and are\n\
-             1-32 characters. Pricing owns the vocabulary; the vault cannot verify\n\
-             the subscription. Update this assertion after an out-of-band plan change."
+             1-32 characters. Pricing owns the override vocabulary. Automatic detection\n\
+             cannot verify an operator override; clear it to use the detected tier."
         }
         "set-providers" => {
             "ck auth set-providers --id <credential-id> (--add | --remove | --set)\n\
@@ -3206,8 +3206,19 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     };
     let payload =
         credentials_core::secret::SecretBytes::new(oauth.access_token.expose().as_bytes().to_vec());
-    let record =
+    let mut record =
         VaultRecord::new_oauth("login", wire.adapter_name, oauth, payload).with_identity(identity);
+    if wire.adapter_name == "anthropic"
+        && tokio_block_on(credentials_core::plan_detection::detect_login_plan(
+            &http,
+            &mut record,
+        ))
+        .is_err()
+    {
+        println!(
+            "NOTE: subscription profile unavailable; storing login without a newly detected tier."
+        );
+    }
 
     // Login records a distinct `Login` audit op (not `Import`) so forensics can tell
     // a native mint from a foreign import. `--replace` overwrites an existing id (the
@@ -3603,6 +3614,11 @@ fn request_admin_status_with_schema(
     };
     let mut result =
         credentials_core::admin_ops::status_result(&metas, &grants, open_intents, false);
+    if let Ok(key) = resolve_store_key(global) {
+        if let Ok(plans) = credentials_core::store::detected_plans_read_only(&db, &key) {
+            credentials_core::admin_ops::attach_detected_plans(&mut result, &plans);
+        }
+    }
     attach_inventory_creators(&mut result, &metas);
     Ok((result, meta_schema.or(grant_schema)))
 }
@@ -3782,15 +3798,17 @@ fn render_inventory_row(
         providers.join(",")
     };
     let plan = if inventory_has_plan(result) {
-        let tier = result["credentials"]
-            .as_array()
-            .and_then(|rows| {
-                rows.iter()
-                    .find(|row| row["id"].as_str() == Some(id.as_str()))
-            })
-            .and_then(|row| row["plan_tier"].as_str())
-            .unwrap_or("-");
-        format!("  {tier}")
+        let row = result["credentials"].as_array().and_then(|rows| {
+            rows.iter()
+                .find(|row| row["id"].as_str() == Some(id.as_str()))
+        });
+        let tier = row.and_then(|row| row["plan_tier"].as_str()).unwrap_or("-");
+        let marker = if row.is_some_and(|row| row["plan_tier_source"] == "detected") {
+            "*"
+        } else {
+            ""
+        };
+        format!("  {tier}{marker}")
     } else {
         String::new()
     };
@@ -3813,23 +3831,16 @@ fn print_inventory(rows: &[InventoryRow], result: &serde_json::Value) {
     for row in rows {
         println!("{}", render_inventory_row(row, result));
     }
+    if result["credentials"]
+        .as_array()
+        .is_some_and(|rows| rows.iter().any(|row| row["plan_tier_source"] == "detected"))
+    {
+        println!("\n* detected subscription tier; an operator set-plan override always wins.");
+    }
 
-    // SAY WHAT `active` DOES NOT MEAN, because the word claims more than the column
-    // knows. This inventory is built from plaintext metadata with no decrypt and no
-    // provider call, so `active` means ONLY "nothing has reported this dead". A
-    // credential nobody has called in a month and one serving perfectly render as the
-    // same row, and the vault cannot tell them apart -- it learns a credential is dead
-    // when a refresh is refused or a consumer reports it, and neither happens to a
-    // credential nobody uses.
-    //
-    // An external operator reached the adjacent conclusion on 2026-08-24 while reading
-    // elapsed time as evidence of durability, and named the general form better than
-    // this comment could: UNTESTED IS NOT THE SAME AS PROVEN. A credential that has not
-    // been exercised has demonstrated nothing, and no gauge computed from metadata can
-    // close that gap -- only a call can.
-    //
-    // One line, unconditional. A caveat that only prints in the interesting case is one
-    // an operator has never seen when they need it.
+    // Keep this caveat unconditional: stored lifecycle state and subscription
+    // observations cannot prove that a provider currently accepts a token.
+    // Only an actual credential read or consumer request can establish that.
     if !rows.is_empty() {
         println!(
             "\n(`active` = nothing has reported it dead. Not a check that the provider \

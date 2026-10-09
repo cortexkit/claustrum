@@ -297,9 +297,11 @@ pub struct ListScopedCredential {
     /// because the ids live beside the record and reading them opens nothing. Empty when
     /// the operator has set none; the vault never infers one.
     pub provider_ids: Vec<String>,
-    /// Operator-asserted tier, disclosed with identity only under read/list authority.
+    /// Effective tier, disclosed with identity only under read/list authority.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan_tier: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan_tier_source: Option<String>,
     /// How this credential authenticates, from the closed set `apikey`, `chatgpt`,
     /// `antigravity`, `oauth`. Derived only from the unsealed record's kind and refresh
     /// adapter (`credentials_core::list_auth_method`), never from the id.
@@ -998,6 +1000,7 @@ pub(crate) fn list_scoped_view(
         // An omitted `auth_method` frames as absent (0), never as a present empty string.
         push_optional_string(&mut digest_input, credential.auth_method.as_deref());
         push_optional_string(&mut digest_input, credential.plan_tier.as_deref());
+        push_optional_string(&mut digest_input, credential.plan_tier_source.as_deref());
     }
     digest_input.push(2);
     push_u32(&mut digest_input, grants.len());
@@ -1050,6 +1053,7 @@ pub(crate) fn project_list_scoped(snapshot: ScopedListSnapshot) -> ListScopedRes
                 org_name,
                 provider_ids: row.provider_ids,
                 plan_tier: row.plan_tier,
+                plan_tier_source: row.plan_tier_source,
                 auth_method: row.auth_method.map(|method| method.as_str().to_string()),
             }
         })
@@ -3110,6 +3114,7 @@ mod list_scoped_tests {
             refresh_adapter: Some("anthropic".to_owned()),
             provider_ids: Vec::new(),
             plan_tier: None,
+            plan_tier_source: None,
             auth_method: None,
         }
     }
@@ -3176,6 +3181,7 @@ mod list_scoped_tests {
             refresh_adapter: adapter.map(str::to_owned),
             provider_ids: Vec::new(),
             plan_tier: None,
+            plan_tier_source: None,
             auth_method: None,
         }
     }
@@ -3310,7 +3316,7 @@ mod list_scoped_tests {
         assert_eq!(result.grants, result.grant_tuples.len());
         assert_eq!(
             result.view,
-            "Z7WawFzlxU9IJ+orEz7koPLn2o43oN6kbfj9T4Bt3Tc=",
+            "XezWe7v4wKXK7EYC7td/JZiNqbw3z/e1/UUgaMaAbxE=",
             "state/operation/selector enums are length-prefixed strings; lists carry counts; optionals carry presence bytes"
         );
         assert_eq!(result.credentials[0].id, "a-active");
@@ -3392,8 +3398,8 @@ mod list_scoped_tests {
     /// helpers, so a frame that is skipped, reordered or pushed as `""` for an omitted
     /// value makes the digests differ. `provider_ids` (a u32 count, then each id
     /// string-framed) and then `auth_method` (an optional string) follow `org_name`.
-    /// Every expected byte string below ends that row with a `0` absence byte for
-    /// `plan_tier`, which is unset in this test.
+    /// Every expected byte string below ends that row with absence bytes for the
+    /// unset `plan_tier` and `plan_tier_source`.
     #[test]
     fn list_scoped_view_frames_provider_ids_then_auth_method_after_org_name() {
         fn u32_be(out: &mut Vec<u8>, value: u32) {
@@ -3417,6 +3423,7 @@ mod list_scoped_tests {
             org_name: Some("Org".into()),
             provider_ids: provider_ids.iter().map(|id| (*id).to_string()).collect(),
             plan_tier: None,
+            plan_tier_source: None,
             auth_method: auth_method.map(str::to_string),
         };
         let expected = |provider_ids: &[&str], auth_method: Option<&str>| {
@@ -3445,6 +3452,7 @@ mod list_scoped_tests {
                 None => bytes.push(0),
             }
             bytes.push(0); // plan_tier absent
+            bytes.push(0); // plan_tier_source absent
             bytes.push(2);
             u32_be(&mut bytes, 0);
             let digest = ring::digest::digest(&ring::digest::SHA256, &bytes);
@@ -3505,8 +3513,15 @@ mod list_scoped_tests {
         );
         source.provider_ids = vec!["anthropic".into()];
         source.auth_method = Some(credentials_core::list_auth_method::ListAuthMethod::Oauth);
-        for tier in [None, Some("max_5x"), Some("max_20x"), Some("pro_200")] {
+        for (tier, origin) in [
+            (None, None),
+            (Some("max_5x"), Some("operator")),
+            (Some("max_20x"), Some("detected")),
+            (Some("max_20x"), Some("operator")),
+            (Some("pro_200"), Some("detected")),
+        ] {
             source.plan_tier = tier.map(str::to_owned);
+            source.plan_tier_source = origin.map(str::to_owned);
             let result = project_list_scoped(ScopedListSnapshot {
                 rows: vec![source.clone()],
                 grants: Vec::new(),
@@ -3531,6 +3546,13 @@ mod list_scoped_tests {
                 }
                 None => bytes.push(0),
             }
+            match origin {
+                Some(origin) => {
+                    bytes.push(1);
+                    string(&mut bytes, origin);
+                }
+                None => bytes.push(0),
+            }
             bytes.push(2);
             bytes.extend_from_slice(&0u32.to_be_bytes()); // grants
             let expected = base64::engine::general_purpose::STANDARD
@@ -3539,8 +3561,10 @@ mod list_scoped_tests {
             let wire = serde_json::to_value(&result.credentials[0]).unwrap();
             if let Some(tier) = tier {
                 assert_eq!(wire["plan_tier"], tier);
+                assert_eq!(wire["plan_tier_source"], origin.unwrap());
             } else {
                 assert!(wire.get("plan_tier").is_none());
+                assert!(wire.get("plan_tier_source").is_none());
             }
         }
     }

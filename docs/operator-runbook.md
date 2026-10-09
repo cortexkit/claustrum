@@ -555,22 +555,49 @@ ck auth list
 
 `set-plan` needs exactly one of `--tier` or `--clear`. Tier syntax is a lowercase ASCII
 letter followed by lowercase letters, digits or underscores, 1–32 characters total.
-The pricing service owns the vocabulary; the vault cannot verify the subscription.
+The pricing service owns the override vocabulary. `--tier` always wins over automatic
+detection; `--clear` removes only that override and reveals the detected tier again.
 Current tiers include Anthropic `pro`, `max_5x`, `max_20x` and OpenAI `plus`, `pro_100`,
-`pro_200`, `pro_500`. Reassert the tier after an out-of-band plan change. An unset tier
-means unknown, not a default plan. A replacement deposit that changes `account_id`
-clears it atomically and audits the clear; same-account re-login and token refresh keep
-it. Repair of an unreadable old envelope also clears it. Removing a credential removes
-its tier. These metadata edits require the master key and audit only actual changes.
+`pro_200`, `pro_500`. An absent tier means unknown, not a default plan. Account-changing
+replacements and `set-identity` clear both the old override and old detection atomically; fresh login
+observations belong to the new account. Same-account replacements retain detection when
+profile fetching fails. Repair of unreadable envelopes cannot retain old observations.
+Overrides require the master key and audit only actual changes.
+
+Automatic detection reads ChatGPT's access-token JWT at login and every refresh:
+`pro` maps to `pro_200`, `prolite` to `pro_100`, `plus` to `plus`. No network request is
+added. Claude uses one bearer profile GET at login and after each successful refresh.
+Only exact `organization.rate_limit_tier` values `default_claude_max_20x`,
+`default_claude_max_5x`, and `default_claude_pro` map to `max_20x`, `max_5x`, and `pro`;
+when missing, `organization.organization_type: claude_pro` maps to `pro`.
+Unknown strings, including future plans, give no tier, never a guess. Claude's field
+contract comes from public Claude Code examples; a real response has not been captured.
+
+Claude CLI login allows up to five seconds for the profile before depositing tokens.
+A failure prints a note but cannot fail login. Daemon refresh never waits for a profile:
+tokens commit first, then a five-second-bounded background GET runs. Its result waits in
+memory for the next refresh's existing commit, with no extra write or version bump. A
+restart loses held observations; a failed profile keeps the old detected value.
+
+ChatGPT tokens live about **10 days**, so out-of-band plan changes can take that long to
+appear. Claude tokens live about **8 hours** (roughly three profile requests a day per
+account); holding a result for the next commit adds an interval, so changes normally
+show within about **16 hours**. Idle accounts and repeated failures have no finite
+wall-clock guarantee. Override values do not update automatically: reassert or clear
+one after an out-of-band plan change.
 
 `list_scoped` gives tiers only to callers who can read/list the account, just like
-identity. Sign/open-only callers still see provider ids but not the account's tier.
-Migration 16 stores the assertion in plaintext beside the credential. Lease-free list
-readers tolerate an older store and show no tier; the client treats absence as unknown.
+identity, with `plan_tier_source` equal to `operator` or `detected`. Sign/open-only callers
+see neither field. Migration 16 stores the override in plaintext; detection (raw string,
+mapped tier, and observation timestamp) is sealed beside identity using additive JSON
+fields readable by `4ddc294`. Lease-free inventory opens detection only when the master
+key is available; without it the plaintext inventory and operator tiers still work.
 
 **Table parser change:** when any row has a tier, `ck auth list` and the inventory in
 `status` add a sixth header word, `PLAN_TIER`, after `PROVIDERS`, and every row has a sixth
-field (the tier or `-`). An optional `by=<principal>` follows as field seven, a trailing
+field (the tier or `-`). Detected tiers have a `*` suffix, e.g. `max_20x*`, with an
+explanatory footnote after the table; the suffix adds no whitespace field. An optional
+`by=<principal>` follows as field seven, a trailing
 annotation with no header word of its own. With no
 tiers, the five-word `STATE VER CREDENTIAL CATEGORIES PROVIDERS` header and optional
 sixth `by=` field are unchanged. Update parsers, including `cortexkit-account`, to accept

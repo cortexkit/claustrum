@@ -144,12 +144,16 @@ describe('the client speaks the producer-pinned wire', () => {
         expect(row.providerIds).toEqual(emitted.provider_ids)
         expect(row.authMethod).toBe(emitted.auth_method)
         expect(row.planTier).toBe(emitted.plan_tier)
+        expect(row.planTierSource).toBe(emitted.plan_tier_source)
       }
     }
     const rows = decodeScopedInventory(responses[1], () => {}).rows
     expect(rows.map((row) => row.authMethod)).toEqual(['antigravity', 'apikey', 'chatgpt', undefined, 'oauth'])
     expect(rows.some((row) => row.providerIds.length === 0)).toBe(true)
     expect(rows.some((row) => row.providerIds.length > 1)).toBe(true)
+    expect(rows.some((row) => row.planTierSource === 'operator')).toBe(true)
+    expect(rows.some((row) => row.planTierSource === 'detected')).toBe(true)
+    expect(rows.some((row) => row.planTier === undefined && row.planTierSource === undefined)).toBe(true)
     const github = rows.find((row) => row.id === 'github_app:plex-alfonso')!
     expect(github.refreshAdapter).toBe('github_app')
     expect(github.authMethod).toBeUndefined()
@@ -158,6 +162,7 @@ describe('the client speaks the producer-pinned wire', () => {
   for (const [field, invalidValues] of [
     ['provider_ids', [null, 'aa', ['aa', 7]]],
     ['auth_method', [null, 7, '', 'unknown']],
+    ['plan_tier_source', [null, 7, '', 'unknown', 'Detected']],
     ['plan_tier', [null, 7, [], '', 'Pro', '2x', '_max', 'max-5x', 'a b', 'é', 'max_5x\n', 'a'.repeat(33)]],
   ] as const) {
     for (const [index, invalid] of invalidValues.entries()) {
@@ -194,10 +199,14 @@ describe('the client speaks the producer-pinned wire', () => {
   test('a reply without plan_tier decodes as an unknown tier against older vaults', () => {
     const fixture = JSON.parse(readFileSync(FIXTURE, 'utf8')) as { operations: (FixtureRow & { reply?: string })[] }
     const response = JSON.parse(fixture.operations.find((entry) => entry.op === 'credential.list_scoped')!.reply!)
-    for (const row of response.result.credentials) delete row.plan_tier
+    for (const row of response.result.credentials) {
+      delete row.plan_tier
+      delete row.plan_tier_source
+    }
     const decoded = decodeScopedInventory(response, () => {})
     expect(decoded.rows.length).toBe(response.result.credentials.length)
     expect(decoded.rows.every((row) => row.planTier === undefined)).toBe(true)
+    expect(decoded.rows.every((row) => row.planTierSource === undefined)).toBe(true)
   })
 
   test('plan tiers accept bounded syntax including digits after underscores, not a vocabulary', () => {

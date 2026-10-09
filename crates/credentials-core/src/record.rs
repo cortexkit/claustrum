@@ -239,6 +239,9 @@ pub struct VaultRecord {
     /// evolution under the same `schema_version`, like any other optional field).
     #[serde(default, skip_serializing_if = "RecordIdentity::is_empty")]
     pub identity: RecordIdentity,
+    /// Additive JSON metadata: older decoders ignore this field under schema 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detected_plan: Option<crate::plan_detection::DetectedPlan>,
 }
 
 /// Redacted `Debug`, because the derived one printed the secret this struct exists to
@@ -294,16 +297,20 @@ impl VaultRecord {
         payload: impl Into<SecretBytes>,
     ) -> Self {
         let expires_at_ms = oauth.expires_at_ms;
+        let refresh_adapter = refresh_adapter.into();
+        let detected_plan = (refresh_adapter == "openai")
+            .then(|| crate::plan_detection::chatgpt_plan(oauth.access_token.expose()));
         VaultRecord {
             schema_version: RECORD_SCHEMA_VERSION,
             kind: CredentialKind::Oauth,
             source: source.into(),
             record_version: 1,
             expires_at_ms,
-            refresh_adapter: Some(refresh_adapter.into()),
+            refresh_adapter: Some(refresh_adapter),
             oauth: Some(oauth),
             payload: payload.into(),
             identity: RecordIdentity::default(),
+            detected_plan,
         }
     }
 
@@ -354,6 +361,7 @@ impl VaultRecord {
             oauth: None,
             payload: payload.into(),
             identity: RecordIdentity::default(),
+            detected_plan: None,
         }
     }
 
@@ -653,5 +661,49 @@ mod tests {
                 "whitespace-only {field} must be rejected"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod plan_rollback_tests {
+    use super::*;
+
+    // The VaultRecord decoder before subscription detection (at 4ddc294), with
+    // every field reproduced. It ignores unknown JSON fields: a rollback reads
+    // detected_plan without error, then drops that metadata when rewriting tokens.
+    #[derive(Deserialize, Serialize)]
+    struct LegacyRecord {
+        schema_version: u32,
+        kind: CredentialKind,
+        source: String,
+        record_version: u64,
+        expires_at_ms: Option<i64>,
+        refresh_adapter: Option<String>,
+        oauth: Option<OAuthCredential>,
+        payload: SecretBytes,
+        #[serde(default, skip_serializing_if = "RecordIdentity::is_empty")]
+        identity: RecordIdentity,
+    }
+
+    #[test]
+    fn sealed_detection_is_readable_by_the_4ddc294_record_decoder() {
+        let mut record =
+            VaultRecord::new_static(CredentialKind::ApiKey, "login", b"secret".to_vec(), None);
+        record.detected_plan = Some(crate::plan_detection::DetectedPlan {
+            tier: Some("pro_200".into()),
+            raw: Some("pro".into()),
+            observed_at_ms: 123,
+        });
+        let bytes = record.encode().unwrap();
+        assert!(serde_json::from_slice::<serde_json::Value>(&bytes)
+            .unwrap()
+            .get("detected_plan")
+            .is_some());
+        let legacy: LegacyRecord = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(legacy.schema_version, RECORD_SCHEMA_VERSION);
+        assert_eq!(legacy.payload.expose(), b"secret");
+        let roundtrip = VaultRecord::decode(&serde_json::to_vec(&legacy).unwrap()).unwrap();
+        assert_eq!(roundtrip.detected_plan, None);
+        assert_eq!(roundtrip.payload, record.payload);
     }
 }

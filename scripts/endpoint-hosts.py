@@ -49,6 +49,7 @@ URL_RE = re.compile(r'"(https://[^"\s]+)"')
 # Standalone test modules and Cargo's feature-gated crash-cut binaries do not ship.
 TEST_ONLY_FILES = {
     "engine_tests.rs",
+    "plan_detection_tests.rs",
     "provider_ids_store_tests.rs",
     "kill9_refresh_helper.rs",
     "rotate_cut_helper.rs",

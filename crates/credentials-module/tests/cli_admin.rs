@@ -5387,3 +5387,60 @@ fn plan_cli_import_replace_keeps_same_account_but_clears_a_new_or_removed_accoun
     assert!(audit.contains("plan:oauth:anthropic|max_20x|"), "{audit}");
     assert!(run(&["verify-audit"]).contains("intact"));
 }
+
+#[test]
+fn plan_cli_detected_marker_keeps_fields_and_clear_reveals_detection() {
+    use base64::Engine;
+    let vault = GrantCliVault::new("detected-plan-cli");
+    vault.bootstrap();
+    let claims = serde_json::json!({"https://api.openai.com/auth":{"chatgpt_account_id":"account","chatgpt_plan_type":"pro"}});
+    let token = format!(
+        "e30.{}.sig",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&claims).unwrap())
+    );
+    let path = vault.root.join("auth.json");
+    std::fs::write(
+        &path,
+        serde_json::to_vec(
+            &serde_json::json!({"refresh":"refresh","access":token,"expires":4102444800000_i64}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let run = |args: &[&str]| {
+        let out = vault.run(args);
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap()
+    };
+    run(&[
+        "import",
+        "--source",
+        "opencode",
+        "--id",
+        "chatgpt:openai",
+        "--json",
+        path.to_str().unwrap(),
+    ]);
+    let tier = |list: String| {
+        let fields = list
+            .lines()
+            .find(|line| line.contains("chatgpt:openai"))
+            .unwrap()
+            .split_whitespace()
+            .collect::<Vec<_>>();
+        assert_eq!(fields.len(), 6, "{list}");
+        fields[5].to_owned()
+    };
+    let list = run(&["list"]);
+    assert!(list.contains("* detected subscription tier"));
+    assert_eq!(tier(list), "pro_200*");
+    run(&["set-plan", "--id", "chatgpt:openai", "--tier", "pro_100"]);
+    assert_eq!(tier(run(&["list"])), "pro_100");
+    run(&["set-plan", "--id", "chatgpt:openai", "--clear"]);
+    assert_eq!(tier(run(&["list"])), "pro_200*");
+}

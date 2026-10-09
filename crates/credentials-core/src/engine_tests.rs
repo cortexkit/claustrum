@@ -1134,3 +1134,261 @@ async fn reconciliation_isolates_decrypt_and_decode_failures_and_continues() {
     assert!(engine.store().read_intent("c-good").unwrap().is_none());
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
+
+struct PlanHttp {
+    posts: crate::refresh_adapters::fixture::FixtureTransport,
+    profiles: Mutex<VecDeque<Result<crate::refresh_adapters::HttpResponse, RefreshError>>>,
+    observed: tokio::sync::Notify,
+    hung: bool,
+}
+
+#[async_trait]
+impl HttpTransport for PlanHttp {
+    async fn post(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+        content_type: &str,
+        body: Vec<u8>,
+    ) -> Result<crate::refresh_adapters::HttpResponse, RefreshError> {
+        self.posts.post(url, headers, content_type, body).await
+    }
+    async fn get(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+    ) -> Result<crate::refresh_adapters::HttpResponse, RefreshError> {
+        assert_eq!(url, crate::plan_detection::PROFILE_URL);
+        assert_eq!(
+            headers,
+            &[("Authorization", "Bearer sk-ant-oat01-new-access")]
+        );
+        self.observed.notify_one();
+        if self.hung {
+            std::future::pending().await
+        } else {
+            self.profiles
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("configured profile response")
+        }
+    }
+}
+
+fn plan_http(
+    profiles: Vec<Result<crate::refresh_adapters::HttpResponse, RefreshError>>,
+    count: usize,
+    hung: bool,
+) -> Arc<PlanHttp> {
+    Arc::new(PlanHttp {
+        posts: crate::refresh_adapters::fixture::FixtureTransport::new(
+            (0..count)
+                .map(|_| {
+                    Ok(crate::refresh_adapters::HttpResponse {
+                        status: 200,
+                        body: crate::plan_detection::tests::ANTHROPIC_TOKENS.to_vec(),
+                    })
+                })
+                .collect(),
+        ),
+        profiles: Mutex::new(profiles.into()),
+        observed: tokio::sync::Notify::new(),
+        hung,
+    })
+}
+
+fn anthropic_plan_record() -> VaultRecord {
+    let mut record = stale_oauth_record();
+    record.refresh_adapter = Some("anthropic".into());
+    record.identity.account_id = Some("account".into());
+    record.detected_plan = Some(crate::plan_detection::DetectedPlan {
+        tier: Some("max_5x".into()),
+        raw: Some("default_claude_max_5x".into()),
+        observed_at_ms: 1,
+    });
+    record
+}
+
+#[tokio::test]
+async fn anthropic_profile_failure_keeps_refresh_green_and_old_detected_value() {
+    let (_root, descriptor) = tmp_descriptor();
+    let store = open_store(&descriptor, 191);
+    let before = anthropic_plan_record();
+    store.create("oauth:anthropic", &before).unwrap();
+    let http = plan_http(
+        vec![
+            Err(RefreshError::Transport("offline".into())),
+            Ok(crate::refresh_adapters::HttpResponse {
+                status: 503,
+                body: vec![],
+            }),
+            Ok(crate::refresh_adapters::HttpResponse {
+                status: 200,
+                body: b"invalid".to_vec(),
+            }),
+        ],
+        3,
+        false,
+    );
+    let engine = RefreshEngine::new(
+        Arc::new(store),
+        vec![Arc::new(
+            crate::refresh_adapters::anthropic::AnthropicAdapter::new(),
+        )],
+        http.clone(),
+    );
+    for version in 2..=4 {
+        let record = engine.get("oauth:anthropic", None, true).await.unwrap();
+        http.observed.notified().await;
+        assert_eq!(record.record_version, version);
+        assert_eq!(record.detected_plan, before.detected_plan);
+        assert_eq!(
+            engine
+                .store()
+                .get("oauth:anthropic")
+                .unwrap()
+                .record_version,
+            version
+        );
+        assert!(engine.store().list_intents().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn hung_anthropic_profile_does_not_delay_refresh_or_bump_version() {
+    let (_root, descriptor) = tmp_descriptor();
+    let store = open_store(&descriptor, 192);
+    store
+        .create("oauth:anthropic", &anthropic_plan_record())
+        .unwrap();
+    let http = plan_http(vec![], 1, true);
+    let engine = RefreshEngine::new(
+        Arc::new(store),
+        vec![Arc::new(
+            crate::refresh_adapters::anthropic::AnthropicAdapter::new(),
+        )],
+        http.clone(),
+    );
+    let record = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        engine.get("oauth:anthropic", None, true),
+    )
+    .await
+    .expect("profile must not hold token availability")
+    .unwrap();
+    http.observed.notified().await;
+    assert_eq!(record.record_version, 2);
+    assert_eq!(engine.store().get("oauth:anthropic").unwrap(), record);
+}
+
+#[tokio::test]
+async fn anthropic_profile_lands_on_next_refresh_without_extra_version_bump() {
+    let (_root, descriptor) = tmp_descriptor();
+    let store = open_store(&descriptor, 193);
+    store
+        .create("oauth:anthropic", &anthropic_plan_record())
+        .unwrap();
+    let http = plan_http(
+        vec![
+            Ok(crate::refresh_adapters::HttpResponse {
+                status: 200,
+                body: crate::plan_detection::tests::PROFILE.to_vec(),
+            }),
+            Err(RefreshError::Transport("offline".into())),
+        ],
+        2,
+        false,
+    );
+    let engine = RefreshEngine::new(
+        Arc::new(store),
+        vec![Arc::new(
+            crate::refresh_adapters::anthropic::AnthropicAdapter::new(),
+        )],
+        http.clone(),
+    );
+    let first = engine.get("oauth:anthropic", None, true).await.unwrap();
+    http.observed.notified().await;
+    assert_eq!(first.record_version, 2);
+    assert_eq!(
+        first.detected_plan.as_ref().unwrap().tier.as_deref(),
+        Some("max_5x")
+    );
+    assert_eq!(
+        engine.store().get("oauth:anthropic").unwrap(),
+        first,
+        "observation must not write"
+    );
+    let second = engine.get("oauth:anthropic", None, true).await.unwrap();
+    http.observed.notified().await;
+    assert_eq!(second.record_version, 3);
+    assert_eq!(
+        second.detected_plan.as_ref().unwrap().tier.as_deref(),
+        Some("max_20x")
+    );
+    assert_eq!(engine.store().get("oauth:anthropic").unwrap(), second);
+}
+
+#[tokio::test]
+async fn held_anthropic_profile_cannot_follow_an_account_replacement() {
+    let (_root, descriptor) = tmp_descriptor();
+    let store = open_store(&descriptor, 194);
+    store
+        .create("oauth:anthropic", &anthropic_plan_record())
+        .unwrap();
+    let http = plan_http(
+        vec![
+            Ok(crate::refresh_adapters::HttpResponse {
+                status: 200,
+                body: crate::plan_detection::tests::PROFILE.to_vec(),
+            }),
+            Err(RefreshError::Transport("offline".into())),
+        ],
+        2,
+        false,
+    );
+    let engine = RefreshEngine::new(
+        Arc::new(store),
+        vec![Arc::new(
+            crate::refresh_adapters::anthropic::AnthropicAdapter::new(),
+        )],
+        http.clone(),
+    );
+    let mut first = engine.get("oauth:anthropic", None, true).await.unwrap();
+    http.observed.notified().await;
+    first.identity.account_id = Some("other".into());
+    engine
+        .store()
+        .overwrite_unconditional_audited("oauth:anthropic", &first, AuditCtx::admin(AuditOp::Login))
+        .unwrap();
+    let next = engine.get("oauth:anthropic", None, true).await.unwrap();
+    http.observed.notified().await;
+    assert_eq!(next.record_version, 4);
+    assert_eq!(next.detected_plan, None);
+}
+
+#[tokio::test]
+async fn chatgpt_refresh_detects_each_new_token_in_the_token_commit() {
+    let (_root, descriptor) = tmp_descriptor();
+    let store = open_store(&descriptor, 195);
+    let mut old = stale_oauth_record();
+    old.refresh_adapter = Some("openai".into());
+    store.create("chatgpt:openai", &old).unwrap();
+    let http = Arc::new(crate::refresh_adapters::fixture::FixtureTransport::new([Some("pro"), Some("prolite"), Some("future"), None].into_iter().map(|tier| Ok(crate::refresh_adapters::HttpResponse { status: 200, body: serde_json::to_vec(&serde_json::json!({"access_token":crate::plan_detection::tests::jwt(tier), "refresh_token":"refresh", "expires_in":864000})).unwrap() })).collect()));
+    let engine = RefreshEngine::new(
+        Arc::new(store),
+        vec![Arc::new(
+            crate::refresh_adapters::openai::OpenAiAdapter::new(),
+        )],
+        http.clone(),
+    );
+    for (index, tier) in [Some("pro_200"), Some("pro_100"), None, None]
+        .into_iter()
+        .enumerate()
+    {
+        let record = engine.get("chatgpt:openai", None, true).await.unwrap();
+        assert_eq!(record.record_version, index as u64 + 2);
+        assert_eq!(record.detected_plan.as_ref().unwrap().tier.as_deref(), tier);
+    }
+    assert_eq!(http.requests().len(), 4, "no profile calls for ChatGPT");
+}

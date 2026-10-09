@@ -879,8 +879,9 @@ pub struct ScopedListRow {
     /// from their own table without unsealing, so a row reached only through `sign` or
     /// `open` carries them too.
     pub provider_ids: Vec<String>,
-    /// Operator tier disclosed only to callers with read or list authority.
+    /// Effective tier disclosed only to callers with read or list authority.
     pub plan_tier: Option<String>,
+    pub plan_tier_source: Option<String>,
     /// Derived from the unsealed record's kind and refresh adapter by
     /// [`crate::list_auth_method::list_auth_method`]. `None` when the row is reached
     /// only through `sign` or `open` (it stays sealed) or when the table yields nothing.
@@ -3061,23 +3062,27 @@ impl EncryptedStore {
                             record.kind,
                             record.refresh_adapter.as_deref(),
                         );
-                        Some((record.identity, record.refresh_adapter, auth_method))
+                        Some((record.identity, record.refresh_adapter, auth_method, record.detected_plan))
                     } else {
                         None
                     };
-                    let (identity, refresh_adapter, auth_method) = match decoded_record {
-                        Some((identity, adapter, auth_method)) => {
-                            (Some(identity), adapter, auth_method)
+                    let (identity, refresh_adapter, auth_method, detected_plan) = match decoded_record {
+                        Some((identity, adapter, auth_method, detected_plan)) => {
+                            (Some(identity), adapter, auth_method, detected_plan)
                         }
-                        None => (None, None, None),
+                        None => (None, None, None, None),
                     };
+                    let (plan_tier, plan_tier_source) = crate::plan_detection::effective_plan(
+                        identity.as_ref().and(plan_tier), detected_plan.as_ref(),
+                    );
                     rows.push(ScopedListRow {
                         id,
                         categories,
                         state,
                         record_version,
                         operations: operations.into_iter().collect(),
-                        plan_tier: identity.as_ref().and(plan_tier),
+                        plan_tier,
+                        plan_tier_source,
                         identity,
                         refresh_adapter,
                         provider_ids,
@@ -3316,6 +3321,17 @@ impl EncryptedStore {
         })?
     }
 
+    pub fn detected_plans(
+        &self,
+    ) -> Result<
+        std::collections::BTreeMap<String, (u64, crate::plan_detection::DetectedPlan)>,
+        StoreOpError,
+    > {
+        self.store
+            .with_conn(|conn| detected_plans_from_conn(conn, &self.key))
+            .map_err(StoreOpError::from)
+    }
+
     /// Refill empty category sets, or replace non-empty sets when forced. Enumeration,
     /// category writes, and all audit appends share one fenced transaction.
     pub fn reclassify_audited(
@@ -3497,14 +3513,16 @@ impl EncryptedStore {
                 if creator.as_deref() != Some(principal_str) {
                     return Ok(None);
                 }
-                let existing_identity = envelope::open(&self.key, &existing, &RecordBinding {
+                let existing_record = envelope::open(&self.key, &existing, &RecordBinding {
                     credential_id, record_version: version as u64,
-                }).ok().and_then(|plain| VaultRecord::decode(&plain).ok())
-                  .map(|record| record.identity).filter(|identity| identity.validate().is_ok())
+                }).ok().and_then(|plain| VaultRecord::decode(&plain).ok());
+                let existing_identity = existing_record.as_ref()
+                  .map(|record| record.identity.clone()).filter(|identity| identity.validate().is_ok())
                   .map(RecordIdentity::normalized);
                 if email.is_none() {
                     incoming.identity = existing_identity.clone().unwrap_or_default();
                 }
+                retain_detected_plan(&mut incoming, existing_record.as_ref());
                 let next = version.checked_add(1).ok_or(rusqlite::Error::InvalidQuery)?;
                 incoming.record_version = next as u64;
                 let blob = self.seal_record(credential_id, &incoming)
@@ -3668,6 +3686,7 @@ impl EncryptedStore {
         let next_version = current.record_version.saturating_add(1);
         let mut record = normalize_record_identity(record.clone());
         validate_record_identity(&record)?;
+        retain_detected_plan(&mut record, Some(&current));
         record.record_version = next_version;
         let blob = self.seal_record(credential_id, &record)?;
         let key_id_hex = self.key_id.to_hex();
@@ -3818,7 +3837,7 @@ impl EncryptedStore {
             };
             let next_version = (current_version as u64).saturating_add(1);
 
-            let existing_identity = envelope::open(
+            let existing_record = envelope::open(
                 &self.key,
                 &existing_envelope,
                 &RecordBinding {
@@ -3827,10 +3846,12 @@ impl EncryptedStore {
                 },
             )
             .ok()
-            .and_then(|plaintext| VaultRecord::decode(&plaintext).ok())
-            .map(|existing| existing.identity)
-            .filter(|identity| identity.validate().is_ok())
-            .map(RecordIdentity::normalized);
+            .and_then(|plaintext| VaultRecord::decode(&plaintext).ok());
+            let existing_identity = existing_record
+                .as_ref()
+                .map(|existing| existing.identity.clone())
+                .filter(|identity| identity.validate().is_ok())
+                .map(RecordIdentity::normalized);
             let mut sealed = incoming.clone();
             if preserve_existing_identity && sealed.identity.is_empty() {
                 if let Some(identity) = existing_identity.clone() {
@@ -3847,6 +3868,7 @@ impl EncryptedStore {
                     sealed.identity = identity;
                 }
             }
+            retain_detected_plan(&mut sealed, existing_record.as_ref());
             sealed.record_version = next_version;
             // seal_record is pure crypto (no DB), safe to call inside the txn.
             let blob = self
@@ -3959,7 +3981,8 @@ impl EncryptedStore {
                 }
             };
             let next_version = (current_version as u64).saturating_add(1);
-            let mut updated = record.with_identity(identity.clone());
+            let mut updated = record.clone().with_identity(identity.clone());
+            retain_detected_plan(&mut updated, Some(&record));
             updated.record_version = next_version;
             let payload_hash_hex = hex32(&payload_hash(updated.payload.expose()));
             let blob = self
@@ -3978,6 +4001,14 @@ impl EncryptedStore {
                 ],
             )?;
             if changed > 0 {
+                clear_plan_on_account_change_tx(
+                    tx,
+                    &audit_key,
+                    credential_id,
+                    Some(&record.identity),
+                    &updated.identity,
+                    ctx,
+                )?;
                 append_audit_tx(
                     tx,
                     &audit_key,
@@ -5925,6 +5956,77 @@ fn clear_plan_on_account_change_tx(
         write_plan_tier_tx(tx, audit_key, id, None, ctx)?;
     }
     Ok(())
+}
+
+fn retain_detected_plan(incoming: &mut VaultRecord, old: Option<&VaultRecord>) {
+    if let Some(old) = old {
+        if old.identity.clone().normalized().account_id != incoming.identity.account_id {
+            // A copied record may still carry the old account's observation. A fresh
+            // login observation belongs to the incoming tokens and can be retained.
+            if incoming.detected_plan == old.detected_plan {
+                incoming.detected_plan = None;
+            }
+            return;
+        }
+    }
+    if incoming.detected_plan.is_none() {
+        if let Some(old) = old.filter(|old| {
+            old.identity.clone().normalized().account_id == incoming.identity.account_id
+        }) {
+            incoming.detected_plan = old.detected_plan.clone();
+        }
+    }
+}
+
+/// Read sealed observations without a lease, mutations, or quarantine side effects.
+/// Inventory remains available if a key is missing or an individual envelope is bad.
+pub fn detected_plans_read_only(
+    path: &std::path::Path,
+    key: &MasterKey,
+) -> Result<
+    std::collections::BTreeMap<String, (u64, crate::plan_detection::DetectedPlan)>,
+    StoreOpError,
+> {
+    let map = |e: rusqlite::Error| StoreOpError::from(StoreError::Backend(e.to_string()));
+    let conn =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(map)?;
+    detected_plans_from_conn(&conn, key).map_err(map)
+}
+
+fn detected_plans_from_conn(
+    conn: &rusqlite::Connection,
+    key: &MasterKey,
+) -> rusqlite::Result<std::collections::BTreeMap<String, (u64, crate::plan_detection::DetectedPlan)>>
+{
+    let mut stmt =
+        conn.prepare("SELECT credential_id, record_version, envelope FROM credentials")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)? as u64,
+            row.get::<_, Vec<u8>>(2)?,
+        ))
+    })?;
+    let mut plans = std::collections::BTreeMap::new();
+    for row in rows {
+        let (id, version, envelope) = row?;
+        if let Some(plan) = envelope::open(
+            key,
+            &envelope,
+            &RecordBinding {
+                credential_id: &id,
+                record_version: version,
+            },
+        )
+        .ok()
+        .and_then(|plain| VaultRecord::decode(&plain).ok())
+        .and_then(|record| record.detected_plan)
+        {
+            plans.insert(id, (version, plan));
+        }
+    }
+    Ok(plans)
 }
 
 /// Read the vault's recorded schema version from a connection that may be read-only.

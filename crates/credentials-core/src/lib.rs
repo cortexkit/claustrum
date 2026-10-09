@@ -42,6 +42,7 @@ pub mod key;
 pub mod list_auth_method;
 pub mod oauth;
 pub mod oauth_login;
+pub mod plan_detection;
 pub mod plan_tier;
 pub mod provider_ids;
 pub mod record;

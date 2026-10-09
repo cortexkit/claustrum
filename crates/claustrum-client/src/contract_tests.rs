@@ -177,7 +177,7 @@ fn producer_list_scoped_reply_decodes_every_metadata_field_and_grant() {
                     operation: "read".into()
                 },
             ],
-            view: "BEaFLLnZc/gEGQQJVYgTPmF7vmuZ/DWwqhs4Km3eCyU=".into(),
+            view: "z6YPRoaEbsvZCVjeHcMgtww8l+K7efcxytUM+ysoaDI=".into(),
             undecodable_credentials: vec![],
             undecodable_grants: vec![],
         }
@@ -211,7 +211,7 @@ fn producer_list_only_reply_preserves_list_operation_and_identity() {
                 selector: "llm-provider".into(),
                 operation: "list".into()
             }],
-            view: "zWK2k+YnBRLtcqH745ioXqOHTEkUvqp6bxQW9brZsDk=".into(),
+            view: "0GMjpr28i6Slz1xMqyevm73ZGL6qMU/yR0DehAT6OsA=".into(),
             undecodable_credentials: vec![],
             undecodable_grants: vec![],
         }

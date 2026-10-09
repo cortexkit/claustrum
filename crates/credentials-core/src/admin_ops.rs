@@ -921,18 +921,17 @@ pub fn apply(
             Ok(serde_json::json!({ "credentials_reclassified": changed }))
         }
         AdminOpBody::Status { .. } => {
-            // A no-decrypt inventory plus the same fail-closed health summary used by
-            // the probe, so `ck auth status` explains a degraded health result from one
-            // authenticated read. No mutation, no audit.
+            // Status health uses credential lifecycle columns; subscription tiers from
+            // encrypted records supplement its account inventory. This read neither
+            // quarantines unreadable rows nor writes an audit entry.
             let metas = store.list_meta()?;
             let grants = store.list_read_grants()?;
             let open_intents = store.list_intents()?.len();
-            Ok(status_result(
-                &metas,
-                &grants,
-                open_intents,
-                store.is_fenced_out(),
-            ))
+            let mut result = status_result(&metas, &grants, open_intents, store.is_fenced_out());
+            if let Ok(plans) = store.detected_plans() {
+                attach_detected_plans(&mut result, &plans);
+            }
+            Ok(result)
         }
     }
 }
@@ -1002,6 +1001,28 @@ pub fn status_result(
         "credentials": credentials,
         "read_grants": read_grants,
     })
+}
+
+/// Supplement a status snapshot only with observations from the same record version.
+pub fn attach_detected_plans(
+    result: &mut serde_json::Value,
+    plans: &std::collections::BTreeMap<String, (u64, crate::plan_detection::DetectedPlan)>,
+) {
+    if let Some(rows) = result["credentials"].as_array_mut() {
+        for row in rows {
+            let operator = row["plan_tier"].as_str().map(str::to_owned);
+            let detected = row["id"]
+                .as_str()
+                .and_then(|id| plans.get(id))
+                .filter(|(version, _)| Some(*version) == row["record_version"].as_u64())
+                .map(|(_, plan)| plan);
+            let (tier, source) = crate::plan_detection::effective_plan(operator, detected);
+            row["plan_tier"] = serde_json::json!(tier);
+            if let Some(source) = source {
+                row["plan_tier_source"] = serde_json::json!(source);
+            }
+        }
+    }
 }
 
 fn decode_hash32(s: &str) -> Option<[u8; 32]> {

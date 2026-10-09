@@ -434,3 +434,89 @@ fn tier_lifecycle_preserves_refresh_and_removes_without_foreign_key_enforcement(
     assert_eq!(store.meta(id).unwrap().plan_tier, None);
     assert_eq!(store.verify_audit_chain().unwrap(), None);
 }
+
+#[test]
+fn detected_plan_override_precedence_and_clear_reveal_the_observation() {
+    let (_root, store) = rig("detected-plan-override", 192);
+    let mut incoming = record(Some("account"));
+    incoming.detected_plan = Some(crate::plan_detection::DetectedPlan {
+        tier: Some("max_20x".into()),
+        raw: Some("default_claude_max_20x".into()),
+        observed_at_ms: 123,
+    });
+    store.create(ID, &incoming).unwrap();
+    for (principal, operation) in [
+        ("reader", GrantOperation::Read),
+        ("lister", GrantOperation::List),
+        ("signer", GrantOperation::Sign),
+    ] {
+        store
+            .create_read_grant_audited(
+                "reserved",
+                principal,
+                SelectorKind::Exact,
+                ID,
+                operation,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .unwrap();
+    }
+    for (override_tier, expected, source) in [
+        (None, "max_20x", "detected"),
+        (Some("max_5x"), "max_5x", "operator"),
+        (None, "max_20x", "detected"),
+    ] {
+        set(&store, ID, override_tier);
+        for principal in ["reader", "lister"] {
+            let row = store
+                .list_scoped_snapshot("reserved", principal)
+                .unwrap()
+                .rows
+                .remove(0);
+            assert_eq!(row.plan_tier.as_deref(), Some(expected));
+            assert_eq!(row.plan_tier_source.as_deref(), Some(source));
+        }
+        let hidden = store
+            .list_scoped_snapshot("reserved", "signer")
+            .unwrap()
+            .rows
+            .remove(0);
+        assert_eq!(hidden.plan_tier, None);
+        assert_eq!(hidden.plan_tier_source, None);
+        assert_eq!(
+            store.get(ID).unwrap().record_version,
+            1,
+            "override and clear must not write the record"
+        );
+    }
+    let mut copied = store.get(ID).unwrap();
+    copied.identity.account_id = Some("new-account".into());
+    store
+        .overwrite_unconditional_audited(ID, &copied, AuditCtx::admin(AuditOp::Login))
+        .unwrap();
+    assert_eq!(store.get(ID).unwrap().detected_plan, None);
+    for cas in [true, false] {
+        store
+            .overwrite_unconditional_audited(ID, &incoming, AuditCtx::admin(AuditOp::Login))
+            .unwrap();
+        set(&store, ID, Some("max_5x"));
+        let mut changed = store.get(ID).unwrap();
+        changed.identity.account_id = Some("other".into());
+        if cas {
+            store
+                .overwrite_cas_audited(
+                    ID,
+                    &changed,
+                    &payload_hash(changed.payload.expose()),
+                    AuditCtx::admin(AuditOp::Login),
+                )
+                .unwrap();
+        } else {
+            store
+                .set_identity_audited(ID, changed.identity, AuditCtx::admin(AuditOp::SetIdentity))
+                .unwrap();
+        }
+        assert_eq!(store.get(ID).unwrap().detected_plan, None);
+        assert_eq!(store.meta(ID).unwrap().plan_tier, None);
+    }
+}

@@ -338,6 +338,13 @@ jobs:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@bc2d2e71bd35c5549942babaa51a89c586b981d1 # v2.8.1
+      # Rows whose runner is `bun test` (the TypeScript client) need bun and the
+      # workspace's packages installed, just as the test job has.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - name: Bun install
+        run: bun install --frozen-lockfile
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         id: mutate-cache
         with:

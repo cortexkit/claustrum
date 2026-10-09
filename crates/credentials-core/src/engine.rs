@@ -421,7 +421,9 @@ impl RefreshEngine {
                     .commit_refresh(credential_id, record.record_version, &new_record)
                 {
                     Ok(record_version) => {
-                        if adapter_name == "anthropic" {
+                        if let ("anthropic", Some(new_oauth)) =
+                            (adapter_name, new_record.oauth.as_ref())
+                        {
                             self.detected_plans
                                 .lock()
                                 .unwrap_or_else(|p| p.into_inner())
@@ -429,7 +431,7 @@ impl RefreshEngine {
                             let http = self.http.clone();
                             let held = self.detected_plans.clone();
                             let id = credential_id.to_owned();
-                            let access = new_record.oauth.as_ref().unwrap().access_token.clone();
+                            let access = new_oauth.access_token.clone();
                             let identity = new_record.identity.clone();
                             tokio::spawn(async move {
                                 if let Ok(plan) = crate::plan_detection::fetch_anthropic_plan(

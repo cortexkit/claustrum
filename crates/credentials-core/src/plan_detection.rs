@@ -96,15 +96,16 @@ pub async fn detect_login_plan(
     http: &dyn HttpTransport,
     record: &mut crate::record::VaultRecord,
 ) -> Result<(), RefreshError> {
-    if record.refresh_adapter.as_deref() == Some("anthropic") {
-        let access = record
-            .oauth
-            .as_ref()
-            .expect("OAuth login record")
-            .access_token
-            .expose();
-        record.detected_plan = Some(fetch_anthropic_plan(http, access).await?);
+    if record.refresh_adapter.as_deref() != Some("anthropic") {
+        return Ok(());
     }
+    // A record without OAuth material has no access token to ask with; it simply
+    // gets no detected tier.
+    let Some(oauth) = record.oauth.as_ref() else {
+        return Ok(());
+    };
+    let plan = fetch_anthropic_plan(http, oauth.access_token.expose()).await?;
+    record.detected_plan = Some(plan);
     Ok(())
 }
 

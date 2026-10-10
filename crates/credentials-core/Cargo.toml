@@ -113,6 +113,11 @@ base64 = { workspace = true }
 ring = { workspace = true }
 hpke = { workspace = true }
 
+[target.'cfg(unix)'.dependencies]
+# Effective uid for the operator key-file owner check, through a safe API: this crate
+# forbids unsafe code.
+rustix = { version = "1.1.4", features = ["process"] }
+
 [dev-dependencies]
 cortexkit-test-support = { workspace = true }
 tokio = { workspace = true }

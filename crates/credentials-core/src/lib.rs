@@ -11,6 +11,7 @@
 //! docs/charter.md for the build plan. Built behind a security-conformance suite
 //! (kill -9 mid-refresh, lease-handover mid-write, fail-closed matrix, envelope
 //! fuzz) that is a ship gate, not a nice-to-have.
+#![forbid(unsafe_code)]
 
 // Implemented so far: the credential vault's at-rest encryption (the `envelope`
 // module) and master-key custody (`key`, `resolver`). Not yet present in this

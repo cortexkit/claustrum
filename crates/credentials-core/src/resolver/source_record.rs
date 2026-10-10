@@ -7,6 +7,12 @@ use std::path::{Path, PathBuf};
 const VERSION: &str = "version:1";
 
 fn file_source(path: &Path) -> Result<KeySource, MasterKeyError> {
+    Ok(KeySource::OperatorPath {
+        path: normalize_file_path(path)?,
+    })
+}
+
+fn normalize_file_path(path: &Path) -> Result<PathBuf, MasterKeyError> {
     if path.as_os_str().is_empty() {
         return Err(MasterKeyError::KeyPathInvalid(
             "key path must not be empty".into(),
@@ -21,21 +27,17 @@ fn file_source(path: &Path) -> Result<KeySource, MasterKeyError> {
         .ok_or_else(|| MasterKeyError::KeyPathInvalid("key path must name a file".into()))?;
     // Selection can name a conflicting override even when its directory is absent.
     // The file backend enforces directory existence before loading or provisioning.
-    let path = parent
+    Ok(parent
         .canonicalize()
         .unwrap_or_else(|_| parent.into())
-        .join(name);
-    Ok(KeySource::OperatorPath { path })
+        .join(name))
 }
 
 fn name(source: &KeySource) -> Result<String, MasterKeyError> {
     match source {
         KeySource::Keychain => Ok("keychain".into()),
         KeySource::OperatorPath { path } => {
-            let normalized = file_source(path)?;
-            let KeySource::OperatorPath { path } = normalized else {
-                unreachable!()
-            };
+            let path = normalize_file_path(path)?;
             let raw = path
                 .to_str()
                 .filter(|s| !s.contains(['\n', '\r']))
@@ -460,20 +462,15 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn checked_key_file_refuses_another_owner_when_chown_is_permitted() {
-        use std::os::unix::ffi::OsStrExt;
         use std::os::unix::fs::MetadataExt;
-        extern "C" {
-            fn chown(path: *const std::ffi::c_char, owner: u32, group: u32) -> i32;
-        }
         let (_root, config) = fixture("source-owner");
         bootstrap(&config).unwrap();
         let KeySource::OperatorPath { path } = &config.source else {
             unreachable!()
         };
         let uid = std::fs::metadata(path).unwrap().uid();
-        let raw = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
-        // The CString is live for the call; -1 leaves the group unchanged.
-        if unsafe { chown(raw.as_ptr(), uid.wrapping_add(1), u32::MAX) } != 0 {
+        // Only root can give a file away; elsewhere this is skipped, and says so.
+        if std::os::unix::fs::chown(path, Some(uid.wrapping_add(1)), None).is_err() {
             eprintln!(
                 "SKIPPING owner refusal: cannot chown {} to another uid",
                 path.display()

@@ -691,9 +691,6 @@ fn load_from_operator_path(path: &Path) -> Result<MasterKey, MasterKeyError> {
 #[cfg(unix)]
 fn open_checked_key_file(path: &Path) -> Result<std::fs::File, MasterKeyError> {
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-    extern "C" {
-        fn geteuid() -> u32;
-    }
     let before = std::fs::symlink_metadata(path).map_err(MasterKeyError::Io)?;
     let check = |metadata: &std::fs::Metadata| {
         if !metadata.file_type().is_file() {
@@ -702,8 +699,8 @@ fn open_checked_key_file(path: &Path) -> Result<std::fs::File, MasterKeyError> {
                 path.display()
             )));
         }
-        // geteuid has no arguments or memory access; the effective uid is the custody owner.
-        let uid = unsafe { geteuid() };
+        // The effective uid is the custody owner.
+        let uid = rustix::process::geteuid().as_raw();
         if metadata.uid() != uid {
             return Err(MasterKeyError::KeyPathUnsafe(format!(
                 "{} is owned by uid {}, not effective uid {uid}; run chown {uid} {}",

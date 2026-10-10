@@ -1,7 +1,7 @@
 # Mutation proof catalogue
 
-The catalogue is replayed by ckdev-mutate 0.9.5 (the `cortexkit-mutate` crate), pinned to commons
-`73c7e66145e131eadffdd874c82d93548868b668`. Every row was appended by `prove` (the rows
+The catalogue is replayed by ckdev-mutate 0.9.8 (the `cortexkit-mutate` crate), pinned to commons
+`0c99c7e16d8ae22b6e114136b6b7b68be6f1394e`. Every row was appended by `prove` (the rows
 so far by 0.8.0 and earlier), never by inventing a catch.
 
 ## Runner boundary, closed in 0.7.2

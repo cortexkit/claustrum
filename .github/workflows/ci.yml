@@ -45,7 +45,7 @@ env:
   # The commons revision the mutation runner is installed from. It also keys the
   # runner's cache, so bumping it here both reinstalls and stops a cached binary
   # from an older revision being reused.
-  CKDEV_MUTATE_REV: 73c7e66145e131eadffdd874c82d93548868b668
+  CKDEV_MUTATE_REV: 0c99c7e16d8ae22b6e114136b6b7b68be6f1394e
 
 jobs:
   # Linux + Windows matrix. Windows is the load-bearing leg (the cfg(windows)

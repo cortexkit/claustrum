@@ -252,9 +252,13 @@ mod tests {
         let error = key_source_with_overrides(&config.data_dir, Some(&different), None)
             .unwrap_err()
             .to_string();
+        // Match on the file names: both paths are canonicalised, which on Windows adds
+        // a `\\?\` verbatim prefix, so the full input paths don't appear verbatim.
+        let names = |p: &Path| p.file_name().unwrap().to_string_lossy().into_owned();
         assert!(
-            error.contains(&path.display().to_string())
-                && error.contains(&different.display().to_string()),
+            error.contains("key-source records file:")
+                && error.contains(&names(path))
+                && error.contains(&names(&different)),
             "{error}"
         );
         let other = root.join("keychain-vault");

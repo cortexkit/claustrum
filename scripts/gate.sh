@@ -406,7 +406,10 @@ assert_floor_not_lowered() {
 # Empty and ignored-only targets contribute zero.
 # Raised 1049 -> 1062 with subscription detection. Measured from this arm's output:
 # 25 + 522 + 4 + 2 + 6 + 9 + 110 + 195 + 63 + 104 + 2 + 20.
-run_expect 1062 "workspace unit + integration" \
+# Raised 1062 -> 1075 with recorded master-key sources and Unix key-file custody.
+# Measured from the workspace test command below on Linux:
+# 25 + 532 + 4 + 2 + 6 + 9 + 110 + 196 + 65 + 104 + 2 + 20.
+run_expect 1075 "workspace unit + integration" \
   cargo test --locked --workspace --features credentials-core/test-support
 
 assert_floor_not_lowered "$SCRIPT_PATH"

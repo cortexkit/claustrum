@@ -208,6 +208,34 @@ the CLI refuses a key path inside `--data-dir`.
 ck auth bootstrap --data-dir "$DATA_DIR" --key-path /etc/cortexkit/master.key
 ```
 
+On Linux and Windows there is no native default backend yet: fresh bootstrap
+requires `--key-path <file>` or `CK_MASTER_KEY_PATH=<file>`. There is no fallback
+from a missing or locked backend. Create the key's parent directory beforehand;
+bootstrap creates the key file. On Unix every load checks that it is a regular
+file, not a symlink, owned by the current effective user, with no group or other
+permission bits. Use `chmod 600 <file>` and, if needed, `chown <uid> <file>`.
+Windows currently retains the previous file-loading behavior: owner and ACL
+checks await the shared commons custody primitive; Unix modes do not protect a
+Windows file.
+
+Bootstrap also writes `$DATA_DIR/key-source`, a non-secret, versioned custody
+record. Its two lines are `version:1` and either `keychain` or
+`file:<absolute path>`. Keep it with the vault metadata, not with the secret key.
+Both the daemon and `ck auth` read this same choice, so subsequent commands need
+no key-path override. Unknown versions or backend names are refused, not guessed.
+
+Both programs honour **both** `--key-path` and `CK_MASTER_KEY_PATH`. An override
+must agree with the recorded choice; a different file, or a file override for a
+keychain vault, is refused with both choices named. If both override names are
+set, they must name the same file too. Remove conflicting overrides rather than
+editing the record to redirect a live vault to a different backend.
+
+A pre-existing vault with `store.db` but no `key-source` is migrated on its first
+successful key resolution: an explicit file override records that path;
+otherwise the existing keychain source is recorded. A failed load or fingerprint
+mismatch writes nothing. No key material is moved. Concurrent daemon and CLI
+resolutions cannot overwrite each other's choice.
+
 `$DATA_DIR` is the vault's data directory. Under subc supervision the daemon
 resolves it to `<data_home>/cortexkit/claustrum/` — the admin CLI must
 point `--data-dir` at that **same** directory so both operate on one vault.

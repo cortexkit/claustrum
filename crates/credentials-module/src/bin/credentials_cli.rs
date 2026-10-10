@@ -5574,15 +5574,9 @@ fn parse_global(args: &mut Vec<String>) -> Result<GlobalArgs, CliError> {
         // uses. So the default IS the directory the supervised vault serves.
         None => (default_data_home().join("cortexkit").join(MODULE_ID), false),
     };
-    let key_source = match take_flag(args, "--key-path") {
-        Some(path) => KeySource::OperatorPath {
-            path: PathBuf::from(path),
-        },
-        // Fieldless: the keychain item is scoped per-vault by the data dir inside the
-        // backend (contract::keychain_service_for), so there is no service/account
-        // here for the CLI and daemon to set differently.
-        None => KeySource::Keychain,
-    };
+    let key_path = take_flag(args, "--key-path").map(PathBuf::from);
+    let key_source =
+        resolver::key_source(&data_dir, key_path.as_deref()).map_err(CliError::MasterKey)?;
     // --subc resolution:
     // - explicit --subc: use it verbatim (the operator named a specific daemon).
     // - no --subc AND default data-dir: DISCOVER the connection file the way `ck`

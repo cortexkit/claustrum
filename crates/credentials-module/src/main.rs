@@ -40,7 +40,7 @@ use credentials_core::refresh_adapters::{
     github_copilot::GithubCopilotAdapter, google::GoogleAdapter, kimi::KimiAdapter,
     openai::OpenAiAdapter, snowflake::SnowflakeAdapter, xai::XaiAdapter, RefreshAdapter,
 };
-use credentials_core::resolver::{self, KeySource, ResolverConfig};
+use credentials_core::resolver::{self, ResolverConfig};
 use credentials_core::store::EncryptedStore;
 #[cfg(test)]
 use credentials_core::store::SelectorKind;
@@ -611,7 +611,7 @@ async fn build_surface(
     let kimi_device_id = credentials_core::refresh_adapters::kimi::read_device_id_or_unknown(
         &data_dir.join("kimi-device-id"),
     );
-    let resolver_config = resolver_config_from_env(data_dir);
+    let resolver_config = resolver_config_from_env(data_dir)?;
 
     // Open the store, resolve the master key from its plaintext fingerprint, then
     // migrate. Migration 10 needs the key before it can append its category-backfill
@@ -1703,20 +1703,41 @@ fn sqlite_data_dir(descriptor: &StorageDescriptor) -> Result<PathBuf, ModuleErro
     }
 }
 
-/// Resolve the master-key source from the environment: an operator key path
-/// (`CK_MASTER_KEY_PATH`, headless) takes precedence; otherwise the macOS keychain
-/// (the desktop default) with fixed service/account strings.
-fn resolver_config_from_env(data_dir: PathBuf) -> ResolverConfig {
-    let source = if let Some(path) = std::env::var_os("CK_MASTER_KEY_PATH") {
-        KeySource::OperatorPath {
-            path: PathBuf::from(path),
+/// Read the master-key backend recorded in `key-source`; file overrides from the
+/// flag and environment must agree with it, using the same resolver as `ck auth`.
+fn resolver_config_from_env(data_dir: PathBuf) -> Result<ResolverConfig, ModuleError> {
+    resolver_config_from_args(data_dir, std::env::args_os().skip(1))
+}
+
+fn resolver_config_from_args(
+    data_dir: PathBuf,
+    args: impl IntoIterator<Item = std::ffi::OsString>,
+) -> Result<ResolverConfig, ModuleError> {
+    let mut args = args.into_iter();
+    let mut key_path = None;
+    while let Some(arg) = args.next() {
+        let value = if arg == "--key-path" {
+            Some(
+                args.next()
+                    .ok_or_else(|| ModuleError::Message("--key-path requires a value".into()))?,
+            )
+        } else {
+            arg.to_str()
+                .and_then(|s| s.strip_prefix("--key-path="))
+                .map(Into::into)
+        };
+        if let Some(value) = value {
+            if value.is_empty() || key_path.is_some() {
+                return Err(ModuleError::Message(
+                    "--key-path requires one non-empty value".into(),
+                ));
+            }
+            key_path = Some(PathBuf::from(value));
         }
-    } else {
-        // Fieldless: the keychain item is scoped per-vault by the data dir inside the
-        // backend (contract::keychain_service_for), identical to the CLI's derivation.
-        KeySource::Keychain
-    };
-    ResolverConfig { data_dir, source }
+    }
+    let source = resolver::key_source(&data_dir, key_path.as_deref())
+        .map_err(|e| ModuleError::Message(format!("master key: {e}")))?;
+    Ok(ResolverConfig { data_dir, source })
 }
 
 /// The module's capability manifest: a ManagementSurface exposing its read
@@ -2086,6 +2107,33 @@ impl std::error::Error for ModuleError {}
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn daemon_uses_shared_record_and_key_path_override_rules() {
+        use credentials_core::resolver::KeySource;
+        let root = credentials_core::test_support::TestTempDir::new(format!(
+            "daemon-key-source-{}",
+            std::process::id()
+        ));
+        let data_dir = root.join("vault");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let key_path = root.canonicalize().unwrap().join("master.key");
+        std::fs::write(
+            data_dir.join("key-source"),
+            format!("version:1\nfile:{}\n", key_path.display()),
+        )
+        .unwrap();
+        let args = vec!["--key-path".into(), key_path.clone().into_os_string()];
+        let daemon = super::resolver_config_from_args(data_dir.clone(), args).unwrap();
+        let shared = credentials_core::resolver::key_source(&data_dir, Some(&key_path)).unwrap();
+        assert_eq!(daemon.source, shared);
+        assert_eq!(daemon.source, KeySource::OperatorPath { path: key_path });
+        assert!(super::resolver_config_from_args(
+            data_dir,
+            vec!["--key-path".into(), root.join("other.key").into_os_string()]
+        )
+        .is_err());
+    }
+
     /// This daemon declares NO consumer role, and that is a security property rather
     /// than an empty field nobody filled in.
     ///

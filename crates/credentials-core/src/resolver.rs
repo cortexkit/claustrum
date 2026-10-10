@@ -45,8 +45,11 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::key::{KeyId, MasterKey, MASTER_KEY_LEN};
 
+mod source_record;
+pub use source_record::{key_source, key_source_with_overrides, read_key_source};
+
 /// How the master key is stored for this vault.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeySource {
     /// macOS Keychain generic password (the desktop default). Fieldless on purpose:
     /// the keychain item's service is DERIVED from the vault's canonical data
@@ -55,7 +58,7 @@ pub enum KeySource {
     /// the CLI and daemon to set differently and drift apart. Two vaults on one
     /// machine get distinct keychain items because their data directories differ.
     Keychain,
-    /// An operator-provisioned key file (the headless default). Must live OUTSIDE
+    /// An explicitly selected operator key file (headless/server). Must live OUTSIDE
     /// the vault data tree (enforced at resolve/bootstrap time).
     OperatorPath {
         /// Absolute path to the key file (64 hex chars = 32 bytes).
@@ -100,6 +103,12 @@ pub enum MasterKeyError {
     /// The operator key path is structurally unusable (no parent, parent dir
     /// absent). The operator must provision the directory out-of-band.
     KeyPathInvalid(String),
+    /// A Unix key file is not regular, has the wrong owner, or permits group/other access.
+    KeyPathUnsafe(String),
+    /// The recorded backend or format is not supported by this build.
+    KeySourceInvalid(String),
+    /// A file override disagrees with the recorded backend or master-key file path.
+    KeySourceConflict { recorded: String, requested: String },
     /// Bootstrap could not write the new key to the chosen store.
     KeyStoreUnwritable(String),
     /// Stored key material is not a valid 32-byte hex key.
@@ -162,7 +171,8 @@ impl std::fmt::Display for MasterKeyError {
                 "vault is locked (key store unavailable)\n  the login keychain is locked \
                  (typical over SSH or on a headless session); unlock it with \
                  `security unlock-keychain ~/Library/Keychains/login.keychain-db` and \
-                 retry, or pass --key-path to use an operator key file instead",
+                 retry; --key-path / CK_MASTER_KEY_PATH can select an operator key file \
+                 for a new vault, but cannot redirect a recorded keychain vault",
             ),
             MasterKeyError::NotBootstrapped => f.write_str("no master key has been provisioned"),
             MasterKeyError::KeyMismatch { loaded, expected } => write!(
@@ -183,6 +193,12 @@ impl std::fmt::Display for MasterKeyError {
                 data_dir.display()
             ),
             MasterKeyError::KeyPathInvalid(m) => write!(f, "operator key path is unusable: {m}"),
+            MasterKeyError::KeyPathUnsafe(m) => write!(f, "unsafe operator key file: {m}"),
+            MasterKeyError::KeySourceInvalid(m) => write!(f, "invalid key-source: {m}"),
+            MasterKeyError::KeySourceConflict { recorded, requested } => write!(
+                f,
+                "key-source records {recorded}, but the override requests {requested}; remove the conflicting --key-path / CK_MASTER_KEY_PATH override"
+            ),
             MasterKeyError::KeyAlreadyProvisioned(m) => {
                 write!(f, "a master key is already provisioned: {m}")
             }
@@ -203,7 +219,8 @@ impl std::fmt::Display for MasterKeyError {
                         "key store is not writable: {m}\n  the login keychain is locked \
                          (typical over SSH or on a headless session); unlock it with \
                          `security unlock-keychain ~/Library/Keychains/login.keychain-db` \
-                         and retry, or pass --key-path to use an operator key file instead"
+                          and retry; --key-path / CK_MASTER_KEY_PATH can select an operator \
+                          key file for a new vault, but cannot redirect a recorded keychain vault"
                     )
                 } else {
                     write!(f, "key store is not writable: {m}")
@@ -215,7 +232,8 @@ impl std::fmt::Display for MasterKeyError {
             MasterKeyError::KeychainExec(m) => write!(f, "keychain command failed: {m}"),
             MasterKeyError::KeychainUnavailable => f.write_str(
                 "this platform has no macOS keychain (the `security` command is not \
-                 present); pass --key-path <file> to use an operator key file instead",
+                 present); pass --key-path <file> or CK_MASTER_KEY_PATH=<file> for a new vault; \
+                 a recorded keychain vault must be opened on macOS",
             ),
             MasterKeyError::Io(e) => write!(f, "key resolution io: {e}"),
             MasterKeyError::Csprng => f.write_str("OS CSPRNG failed generating a master key"),
@@ -428,10 +446,16 @@ pub fn resolve(
     config: &ResolverConfig,
     expected_key_id: Option<KeyId>,
 ) -> Result<MasterKey, MasterKeyError> {
+    resolve_with_backend(config, expected_key_id, config.source.backend().as_ref())
+}
+
+fn resolve_with_backend(
+    config: &ResolverConfig,
+    expected_key_id: Option<KeyId>,
+    backend: &dyn MasterKeyStore,
+) -> Result<MasterKey, MasterKeyError> {
     ensure_vault_dir(&config.data_dir)?;
-    let key = config
-        .source
-        .backend()
+    let key = backend
         .load_slot(&config.data_dir, KeySlot::Current)?
         .ok_or(MasterKeyError::NotBootstrapped)?;
     if let Some(expected) = expected_key_id {
@@ -440,6 +464,7 @@ pub fn resolve(
             return Err(MasterKeyError::KeyMismatch { loaded, expected });
         }
     }
+    source_record::record_migration(config)?;
     Ok(key)
 }
 
@@ -468,7 +493,10 @@ pub fn resolve_for_db(
     let mut load_err: Option<MasterKeyError> = None;
     for slot in [KeySlot::Current, KeySlot::Next] {
         match backend.load_slot(&config.data_dir, slot) {
-            Ok(Some(key)) if key.key_id() == db_key_id => return Ok(key),
+            Ok(Some(key)) if key.key_id() == db_key_id => {
+                source_record::record_migration(config)?;
+                return Ok(key);
+            }
             Ok(_) => {}
             Err(e) => {
                 load_err.get_or_insert(e);
@@ -545,6 +573,13 @@ pub fn heal_pending_rotation(
 /// already bootstrapped, so this refuses rather than overwrite.
 pub fn bootstrap(config: &ResolverConfig) -> Result<MasterKey, MasterKeyError> {
     ensure_vault_dir(&config.data_dir)?;
+    source_record::check_record(config)?;
+    #[cfg(not(target_os = "macos"))]
+    if config.source == KeySource::Keychain && !config.data_dir.join("key-source").exists() {
+        return Err(MasterKeyError::KeySourceInvalid(
+            "no native master-key backend is available on this platform yet; pass --key-path <file> or CK_MASTER_KEY_PATH=<file> to bootstrap (no fallback)".into(),
+        ));
+    }
     let backend = config.source.backend();
     if backend
         .load_slot(&config.data_dir, KeySlot::Current)?
@@ -556,6 +591,7 @@ pub fn bootstrap(config: &ResolverConfig) -> Result<MasterKey, MasterKeyError> {
     }
     let key = MasterKey::generate().map_err(|_| MasterKeyError::Csprng)?;
     backend.store_slot(&config.data_dir, KeySlot::Current, &key)?;
+    source_record::record_source(&config.data_dir, &config.source)?;
     Ok(key)
 }
 
@@ -638,15 +674,88 @@ fn ensure_outside_data_dir(key_path: &Path, data_dir: &Path) -> Result<(), Maste
 /// [`MasterKeyError::InvalidKeyMaterial`]. The raw file bytes are scrubbed after
 /// decoding.
 fn load_from_operator_path(path: &Path) -> Result<MasterKey, MasterKeyError> {
-    let raw = match std::fs::read(path) {
-        Ok(bytes) => Zeroizing::new(bytes),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+    use std::io::Read;
+    let mut file = match open_checked_key_file(path) {
+        Ok(file) => file,
+        Err(MasterKeyError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
             return Err(MasterKeyError::NotBootstrapped)
         }
-        Err(e) => return Err(MasterKeyError::Io(e)),
+        Err(e) => return Err(e),
     };
+    let mut raw = Zeroizing::new(Vec::new());
+    file.read_to_end(&mut raw).map_err(MasterKeyError::Io)?;
     let key_bytes = decode_hex_key(&raw)?;
     Ok(MasterKey::from_bytes(*key_bytes))
+}
+
+#[cfg(unix)]
+fn open_checked_key_file(path: &Path) -> Result<std::fs::File, MasterKeyError> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    extern "C" {
+        fn geteuid() -> u32;
+    }
+    let before = std::fs::symlink_metadata(path).map_err(MasterKeyError::Io)?;
+    let check = |metadata: &std::fs::Metadata| {
+        if !metadata.file_type().is_file() {
+            return Err(MasterKeyError::KeyPathUnsafe(format!(
+                "{} must be a regular file, not a symlink; provision a regular key file and pass its path",
+                path.display()
+            )));
+        }
+        // geteuid has no arguments or memory access; the effective uid is the custody owner.
+        let uid = unsafe { geteuid() };
+        if metadata.uid() != uid {
+            return Err(MasterKeyError::KeyPathUnsafe(format!(
+                "{} is owned by uid {}, not effective uid {uid}; run chown {uid} {}",
+                path.display(),
+                metadata.uid(),
+                path.display()
+            )));
+        }
+        if metadata.mode() & 0o077 != 0 {
+            return Err(MasterKeyError::KeyPathUnsafe(format!(
+                "{} has group or other permissions; run chmod 600 {}",
+                path.display(),
+                path.display()
+            )));
+        }
+        Ok(())
+    };
+    check(&before)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    // O_NOFOLLOW prevents a final-component symlink swap between lstat and open.
+    #[cfg(target_os = "linux")]
+    options.custom_flags(0x20000);
+    #[cfg(target_os = "macos")]
+    options.custom_flags(0x100);
+    let file = options.open(path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            MasterKeyError::Io(e)
+        } else {
+            MasterKeyError::KeyPathUnsafe(format!(
+                "cannot safely open {}: {e}; provision a regular key file owned by the current user, run chmod 600 {}, and retry",
+                path.display(), path.display()
+            ))
+        }
+    })?;
+    let opened = file.metadata().map_err(MasterKeyError::Io)?;
+    check(&opened)?;
+    if before.dev() != opened.dev() || before.ino() != opened.ino() {
+        return Err(MasterKeyError::KeyPathUnsafe(format!(
+            "{} changed while opening; stop replacing the key file and retry",
+            path.display()
+        )));
+    }
+    Ok(file)
+}
+
+#[cfg(not(unix))]
+fn open_checked_key_file(path: &Path) -> Result<std::fs::File, MasterKeyError> {
+    // Windows currently loads without owner or ACL checks. Those checks are deferred
+    // until commons provides a shared filesystem-permissions primitive; it is not
+    // available yet. Unix mode bits cannot establish safe Windows access control.
+    std::fs::File::open(path).map_err(MasterKeyError::Io)
 }
 
 /// Map an open failure: an existing file is the "already provisioned" outcome
@@ -1449,7 +1558,7 @@ mod tests {
         let key_dir = root.join("secrets");
         std::fs::create_dir_all(&key_dir).unwrap();
         let key_path = key_dir.join("master.key");
-        std::fs::write(&key_path, b"not-a-valid-hex-key").unwrap();
+        write_key_file(&key_path, b"not-a-valid-hex-key").unwrap();
         let config = ResolverConfig {
             data_dir,
             source: KeySource::OperatorPath { path: key_path },

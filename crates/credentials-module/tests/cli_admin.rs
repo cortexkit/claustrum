@@ -52,6 +52,167 @@ fn cli() -> Command {
     }
 }
 
+fn write_operator_master_key(path: &std::path::Path, hex: &str) {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options
+        .open(path)
+        .unwrap()
+        .write_all(hex.as_bytes())
+        .unwrap();
+}
+
+#[test]
+fn cli_honours_env_key_path_and_the_shared_record_without_overrides() {
+    let root = tmp_root("key-source-env");
+    let data_dir = root.join("vault");
+    let key_path = root.join("master.key");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    let out = cli()
+        .args(["bootstrap", "--data-dir"])
+        .arg(&data_dir)
+        .env("CK_MASTER_KEY_PATH", &key_path)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = cli()
+        .args([
+            "put",
+            "--id",
+            "operator:source",
+            "--payload",
+            "test-secret",
+            "--data-dir",
+        ])
+        .arg(&data_dir)
+        .env("CK_MASTER_KEY_PATH", &key_path)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let source =
+        credentials_core::resolver::key_source_with_overrides(&data_dir, None, None).unwrap();
+    assert_eq!(
+        source,
+        credentials_core::resolver::KeySource::OperatorPath {
+            path: key_path
+                .parent()
+                .unwrap()
+                .canonicalize()
+                .unwrap()
+                .join("master.key")
+        }
+    );
+    for (flag, env) in [
+        (None, None),
+        (Some(&key_path), None),
+        (None, Some(&key_path)),
+    ] {
+        let mut command = cli();
+        command
+            .args(["list", "--data-dir"])
+            .arg(&data_dir)
+            .env_remove("CK_MASTER_KEY_PATH");
+        if let Some(path) = flag {
+            command.arg("--key-path").arg(path);
+        }
+        if let Some(path) = env {
+            command.env("CK_MASTER_KEY_PATH", path);
+        }
+        let out = command.output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let other_path = root.join("other.key");
+    let out = cli()
+        .args(["list", "--data-dir"])
+        .arg(&data_dir)
+        .env("CK_MASTER_KEY_PATH", &other_path)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let error = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        error.contains("key-source records")
+            && error.contains("master.key")
+            && error.contains("other.key"),
+        "{error}"
+    );
+}
+
+#[test]
+fn cli_migrates_a_legacy_file_vault_only_after_successful_load() {
+    let root = tmp_root("key-source-migrate");
+    let data_dir = root.join("vault");
+    let key_path = root.join("master.key");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    let out = cli()
+        .args(["bootstrap", "--data-dir"])
+        .arg(&data_dir)
+        .arg("--key-path")
+        .arg(&key_path)
+        .env_remove("CK_MASTER_KEY_PATH")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    std::fs::remove_file(data_dir.join("key-source")).unwrap();
+    let missing = root.join("missing.key");
+    let out = cli()
+        .args([
+            "put",
+            "--id",
+            "operator:migrated",
+            "--payload",
+            "test-secret",
+            "--data-dir",
+        ])
+        .arg(&data_dir)
+        .env("CK_MASTER_KEY_PATH", missing)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(!data_dir.join("key-source").exists());
+    let out = cli()
+        .args([
+            "put",
+            "--id",
+            "operator:migrated",
+            "--payload",
+            "test-secret",
+            "--data-dir",
+        ])
+        .arg(&data_dir)
+        .env("CK_MASTER_KEY_PATH", &key_path)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(data_dir.join("key-source").is_file());
+}
+
 /// Both documented orders of a global flag must reach the same vault.
 ///
 /// The verb is positional and is read before the flags, so a flag written BEFORE it
@@ -207,7 +368,7 @@ fn a_github_app_deposit_lands_oauth_shaped_rather_than_static() {
     let rig = tmp_root("github-app-put");
     std::fs::create_dir_all(&rig).unwrap();
     let key = rig.join("master.key");
-    std::fs::write(&key, "11".repeat(32)).unwrap();
+    write_operator_master_key(&key, &"11".repeat(32));
     let data_dir = rig.join("vault");
     let pem = rig.join("app.pem");
     // Shape only -- this test never signs, so PEM-looking text is enough.
@@ -1389,7 +1550,7 @@ fn mint_signing_key_custodies_a_usable_key_and_prints_its_public_half() {
     let root = tmp_root("mint-signing-key");
     let data_dir = root.join("vault");
     let key_path = root.join("master.key");
-    std::fs::write(&key_path, "11".repeat(32)).expect("write operator master key");
+    write_operator_master_key(&key_path, &"11".repeat(32));
 
     let run = |args: &[&str]| {
         cli()
@@ -3065,7 +3226,7 @@ fn login_key_preflight_refuses_before_printing_the_authorize_url() {
     // Control: the same flow reaches the URL when only the key-resolution failure is
     // removed. Closed stdin then makes callback parsing fail without making a network call.
     let valid_key_path = key_dir.join("master.key");
-    std::fs::write(&valid_key_path, "17".repeat(32)).expect("write operator key");
+    write_operator_master_key(&valid_key_path, &"17".repeat(32));
     let reached_browser_flow = run(&valid_key_path);
     assert!(
         !reached_browser_flow.status.success(),
@@ -3095,7 +3256,7 @@ fn login_without_a_listener_sends_anthropic_the_code_display_redirect() {
     std::fs::create_dir_all(&data_dir).expect("create vault dir");
     std::fs::create_dir_all(&key_dir).expect("create key dir");
     let key_path = key_dir.join("master.key");
-    std::fs::write(&key_path, "17".repeat(32)).expect("write operator key");
+    write_operator_master_key(&key_path, &"17".repeat(32));
 
     let mut command = cli();
     command

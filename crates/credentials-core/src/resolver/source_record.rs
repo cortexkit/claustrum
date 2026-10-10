@@ -469,7 +469,8 @@ mod tests {
             unreachable!()
         };
         let uid = std::fs::metadata(path).unwrap().uid();
-        // Only root can give a file away; elsewhere this is skipped, and says so.
+        // Only root can change a file's owner. When chown fails, the test prints a
+        // skip line and returns instead of passing silently.
         if std::os::unix::fs::chown(path, Some(uid.wrapping_add(1)), None).is_err() {
             eprintln!(
                 "SKIPPING owner refusal: cannot chown {} to another uid",

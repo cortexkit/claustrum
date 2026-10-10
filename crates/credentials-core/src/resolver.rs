@@ -571,15 +571,31 @@ pub fn heal_pending_rotation(
 /// Clobber-safety is enforced HERE (above the backend), since the slot store ops are
 /// replace-not-create: a `Current` slot that already holds a key means the vault is
 /// already bootstrapped, so this refuses rather than overwrite.
-pub fn bootstrap(config: &ResolverConfig) -> Result<MasterKey, MasterKeyError> {
-    ensure_vault_dir(&config.data_dir)?;
-    source_record::check_record(config)?;
-    #[cfg(not(target_os = "macos"))]
-    if config.source == KeySource::Keychain && !config.data_dir.join("key-source").exists() {
+/// A fresh vault can bootstrap into the keychain only where a native keychain
+/// exists. Elsewhere it needs an explicit key file until native stores for Linux and
+/// Windows land, and it refuses rather than falling back. The platform is a
+/// parameter so the refusal is tested on every OS, not only where it fires.
+fn refuse_unsupported_bootstrap(
+    source: &KeySource,
+    recorded: bool,
+    native_keychain: bool,
+) -> Result<(), MasterKeyError> {
+    if *source == KeySource::Keychain && !recorded && !native_keychain {
         return Err(MasterKeyError::KeySourceInvalid(
             "no native master-key backend is available on this platform yet; pass --key-path <file> or CK_MASTER_KEY_PATH=<file> to bootstrap (no fallback)".into(),
         ));
     }
+    Ok(())
+}
+
+pub fn bootstrap(config: &ResolverConfig) -> Result<MasterKey, MasterKeyError> {
+    ensure_vault_dir(&config.data_dir)?;
+    source_record::check_record(config)?;
+    refuse_unsupported_bootstrap(
+        &config.source,
+        config.data_dir.join("key-source").exists(),
+        cfg!(target_os = "macos"),
+    )?;
     let backend = config.source.backend();
     if backend
         .load_slot(&config.data_dir, KeySlot::Current)?

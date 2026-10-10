@@ -404,17 +404,27 @@ mod tests {
         }
     }
 
-    #[cfg(not(target_os = "macos"))]
+    /// Runs on every OS: the platform is passed in, so the non-macOS refusal is
+    /// exercised on macOS too and the test count is the same everywhere.
     #[test]
     fn fresh_bootstrap_without_path_names_both_override_remedies() {
-        let (_root, mut config) = fixture("source-platform-default");
-        config.source = KeySource::Keychain;
-        let error = bootstrap(&config).unwrap_err().to_string();
+        use crate::resolver::refuse_unsupported_bootstrap;
+        let error = refuse_unsupported_bootstrap(&KeySource::Keychain, false, false)
+            .unwrap_err()
+            .to_string();
         assert!(
             error.contains("--key-path") && error.contains("CK_MASTER_KEY_PATH"),
             "{error}"
         );
-        assert!(!config.data_dir.join("key-source").exists());
+        assert!(refuse_unsupported_bootstrap(&KeySource::Keychain, false, true).is_ok());
+        assert!(refuse_unsupported_bootstrap(&KeySource::Keychain, true, false).is_ok());
+        #[cfg(not(target_os = "macos"))]
+        {
+            let (_root, mut config) = fixture("source-platform-default");
+            config.source = KeySource::Keychain;
+            assert!(bootstrap(&config).is_err());
+            assert!(!config.data_dir.join("key-source").exists());
+        }
     }
 
     #[cfg(unix)]

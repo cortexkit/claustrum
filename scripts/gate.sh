@@ -340,80 +340,18 @@ assert_floor_not_lowered() {
   printf 'workspace floor %s >= %s %s at %s\n' "$ours" "$target" "$theirs" "$target_sha"
 }
 
-# The floor is the MEASURED total, not a round number below it. A floor with slack
-# is a check that tolerates exactly the defect it exists to catch: tests vanish one
-# at a time (a misplaced #[test] attribute silently unregisters the function that
-# follows it), and any gap between the floor and the real count is how many can go
-# before anyone is told. Measured 402 across the workspace's suites at the time of
-# writing; an earlier floor of 200 left a third of them free to disappear.
-# The 704 count is measured by the same debug test command used below. It is the
-# total workspace test population, including taxonomy, scoped-list golden,
-# released-v0.1.2 behavior, and rendered per-verb help checks; it is not the sum
-# of branch-specific test changes.
+# The minimum number of passing tests across the workspace. It is the MEASURED total,
+# not a round number below it: tests disappear one at a time (a misplaced #[test]
+# attribute silently unregisters the function after it), and any slack between the
+# floor and the real count is how many can vanish before anyone is told.
 #
-# Raised 796 -> 801 on 2026-09-30 with the metadata-only `list` grant operation (migration
-# 13, the list-only list_scoped and refusal tests, the admin-op wire test, and the CLI
-# round trip). Read off this arm's own test-result lines on the final tree.
-#
-# Raised 790 -> 796 on 2026-09-28 with the api-key providers mirrored from oh-my-pi and
-# the web-search category (catalog category, absence and probe pins, plus the unchecked
-# login outcome). Read off this arm's own test-result lines on the final tree.
-#
-# Raised 789 -> 790 on 2026-09-28 with the golden credential.get / credential.status reply
-# pin. Read off this arm's own test-result lines on the final tree (the same awk sum the
-# arm runs), not added up.
-#
-# Raised 779 -> 789 on 2026-09-26 with migration 12 and the mint-handle note test (the proposer of a pending
-# enrollment). Read off the final tree with the command below, not added up.
-#
-# Raised 714 -> 724 on 2026-09-19 with the enrollment ceremony. Measured on the
-# merged campaign tree with the exact command below: 394 + 2 + 9 + 53 + 121 + 49 +
-# 77 + 19 passing tests across the non-empty targets. Zero-test and ignored-only
-# targets contribute zero; the number was not derived by adding a planned test delta.
-#
-# Raised 704 -> 714 on 2026-09-19 on campaign/enrollment-selectors, with migration 10
-# and the enrollment tables. MEASURED on the merged tree, not summed: the slice's own
-# suite reported 707 against a 696 line it left alone, master reached 704 independently
-# from the login work, and neither number was right for the merge of the two. The
-# ratchet caught the branch carrying a floor BELOW master's, which is the case the
-# ratchet exists for and the reason a floor cannot simply be 'left for later' on a
-# long-lived branch: master moves underneath it.
-#
-# Raised 696 -> 704 on 2026-09-19 with the login-redirect work (one redirect for the
-# authorize URL and the token exchange, plus the code-display redirect used when no
-# listener is bound). Read off the final tree with the command below, NOT by adding
-# the six tests that change added: running the same command on the parent commit
-# measured 698, so this line had ALREADY drifted two below its population and the
-# arithmetic answer (702) would have carried that slack forward.
-#
-# MEASURED, NOT ARITHMETIC -- and this rebase is the third time it mattered. The branch bumped
-# 564 to 568, master reached 578 independently, and their sum (582) was already wrong because
-# later branch commits added Rust tests without touching the floor. At this rebase master carried
-# 580 and the branch 603; adding the deltas is wrong again, and master ALSO changed the command
-# itself (--features credentials-core/test-support), so the two numbers were never counting the
-# same set. A mid-rebase measurement is wrong too: replaying commit N gives the count at N, not
-# at the tip. Take master's invocation, run it on the FINAL tree, and read the number.
-# Do not measure it with `--release`: one login test deliberately fails there and the
-# pipeline still prints a number, 32 short of the truth.
-#
-# Raise this when tests are added. A failure here is normally that, not a defect --
-# but it should be a deliberate edit rather than a number nobody revisits.
-#
-# THE FLOOR IS RATCHETED AGAINST THE MERGE TARGET BY `assert_floor_not_lowered` BELOW,
-# because a floor alone does not defend the property it exists for. See that function.
-# Raised 805 -> 1049 with plan-tier metadata. Measured from the complete workspace
-# command below: 25 + 510 + 4 + 2 + 6 + 9 + 110 + 195 + 62 + 104 + 2 + 20.
-# Empty and ignored-only targets contribute zero.
-# Raised 1049 -> 1062 with subscription detection. Measured from this arm's output:
-# 25 + 522 + 4 + 2 + 6 + 9 + 110 + 195 + 63 + 104 + 2 + 20.
-# Raised 1062 -> 1075 with recorded master-key sources and Unix key-file custody.
-# Measured from the workspace test command below on Linux:
-# 25 + 532 + 4 + 2 + 6 + 9 + 110 + 196 + 65 + 104 + 2 + 20.
-# Measured 1083 on Linux with native custody: the two real-store tests are registered
-# here but run against OS services in the separate native-store arm below.
-# Measured 1090 on Linux with Windows ACL wrappers: 25 + 538 + 4 + 2 + 6 + 2 +
-# 9 + 3 + 112 + 196 + 65 + 106 + 2 + 20. CLI file-helper wrappers also run in
-# cli_opencode, which includes that source module; non-Windows bodies report skips.
+# To raise it after adding tests, run the command below on the final tree (debug, not
+# --release, with the same features) and sum the "N passed" counts across its
+# targets. Never add a planned delta to the old number: branches and rebases have
+# repeatedly made the arithmetic wrong. Every test must be registered on every OS
+# (platform-specific bodies print a skip line), so the count is the same on macOS,
+# Linux and Windows. `assert_floor_not_lowered` below stops a branch from lowering
+# the floor below its merge target. The history of each raise is in git log.
 run_expect 1090 "workspace unit + integration" \
   cargo test --locked --workspace --features credentials-core/test-support
 

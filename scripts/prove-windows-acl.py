@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Replay the two key-file custody mutations against real Windows DACL tests."""
+"""On Windows, break the master-key file checks twice and confirm the tests catch it.
+
+One mutation skips the owner-only ACL check when a key file is loaded, the other
+creates the key file without an owner-only ACL. Each must turn exactly its named
+test in crates/credentials-core/tests/windows_acl.rs red while the others stay
+green; the source is restored after each run."""
 
 import json
 import os

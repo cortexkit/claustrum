@@ -7202,10 +7202,8 @@ mod tests {
         let routes = Arc::new(RouteEpochs::default());
         let (tx, mut rx) = mpsc::channel::<Frame>(4);
         let bind = |route_channel: u16, flow_id: Option<&str>| {
-            let attributes = subc_protocol::scope::ScopeAttributes {
-                flow_id: flow_id.map(str::to_string),
-                ..Default::default()
-            };
+            let attributes = subc_protocol::scope::ScopeAttributes::new()
+                .with_flow_id(flow_id.map(str::to_string));
             let request = ModuleControlRequest::RouteBind {
                 route_channel,
                 epoch: 1,
@@ -7219,18 +7217,21 @@ mod tests {
                 consumer_capabilities: None,
                 role_versions: None,
                 admission_facts: None,
-                scope: Some(subc_protocol::scope::ScopeStamp {
-                    owner: subc_protocol::Principal::Reserved {
-                        module_id: "prefrontal-core".to_string(),
-                    },
-                    scope_ref: "scope-1".to_string(),
-                    scope_epoch: 1,
-                    kind: subc_protocol::scope::ScopeKind::Worker,
-                    parent: None,
-                    parent_state: None,
-                    attributes,
-                    owner_authorized: true,
-                }),
+                scope: Some(
+                    subc_protocol::scope::ScopeStamp::new(
+                        subc_protocol::Principal::Reserved {
+                            module_id: "prefrontal-core".to_string(),
+                        },
+                        "scope-1",
+                        1,
+                        subc_protocol::scope::ScopeKind::Worker,
+                    )
+                    .with_attributes(attributes)
+                    .with_owner_authorized(true),
+                ),
+                // The vault does not declare call-modes/v1, so a daemon never sends it a
+                // mode; the refusal must not depend on one.
+                call_mode: None,
             };
             Frame::build_with_version(
                 PROTOCOL_VERSION,

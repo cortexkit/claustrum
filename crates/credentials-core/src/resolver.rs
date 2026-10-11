@@ -4,17 +4,20 @@
 //! ## Pluggable backends
 //!
 //! Custody is a pluggable [`MasterKeyStore`] backend trait so new mechanisms slot
-//! in without restructuring the resolver. Two backends ship in v1:
+//! in without restructuring the resolver. Native stores are the default on each OS:
 //! - [`KeychainCli`] (desktop): a macOS Keychain generic password, addressed by a
 //!   fixed service/account read via the `security` CLI. A locked keychain fails
 //!   closed as `vault_locked` rather than blocking on an interactive unlock prompt.
+//! - [`CredentialManager`] (Windows): a per-user DPAPI-protected generic credential.
+//! - [`SecretService`] (Linux): the unlocked default collection on the session bus.
+//!   No backend requests an interactive unlock or executes a Secret Service prompt.
 //! - [`OperatorPathStore`] (headless/server): an operator-provisioned key file that
 //!   MUST live OUTSIDE the vault data tree. Co-locating the key beside `store.db` is
 //!   forbidden — a single backup that captured both the ciphertext and its key would
 //!   defeat at-rest encryption entirely — so resolution fails closed if the key file
 //!   resolves to a directory under the data dir.
 //!
-//! Future backends (a signed-app key delivery, Windows DPAPI, Linux Secret Service)
+//! Future backends (such as signed-app key delivery)
 //! implement the same trait and add a [`KeySource`] variant; the orchestration below
 //! is backend-agnostic, so they need no resolver changes.
 //!
@@ -45,7 +48,9 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::key::{KeyId, MasterKey, MASTER_KEY_LEN};
 
+mod native;
 mod source_record;
+pub use native::{CredentialManager, SecretService};
 pub use source_record::{key_source, key_source_with_overrides, read_key_source};
 
 /// How the master key is stored for this vault.
@@ -58,6 +63,10 @@ pub enum KeySource {
     /// the CLI and daemon to set differently and drift apart. Two vaults on one
     /// machine get distinct keychain items because their data directories differ.
     Keychain,
+    /// Windows Credential Manager, scoped by the same per-vault service and slots.
+    CredentialManager,
+    /// Linux Secret Service, in an already-unlocked default collection.
+    SecretService,
     /// An explicitly selected operator key file (headless/server). Must live OUTSIDE
     /// the vault data tree (enforced at resolve/bootstrap time).
     OperatorPath {
@@ -129,6 +138,12 @@ pub enum MasterKeyError {
     /// the remedy. Reported from a real Linux deployment 2026-08-17 (issue #3): the
     /// message sends the reader looking for a keychain they can never have.
     KeychainUnavailable,
+    /// The native store is absent, locked, or refuses key access without user
+    /// interaction. A refusal cannot authorize switching to another custody backend.
+    NativeStoreUnavailable {
+        backend: &'static str,
+        reason: String,
+    },
     /// A filesystem error preparing the vault dir or reading/writing the key.
     Io(std::io::Error),
     /// The OS CSPRNG failed during bootstrap.
@@ -143,6 +158,7 @@ impl MasterKeyError {
         matches!(
             self,
             MasterKeyError::VaultLocked
+                | MasterKeyError::NativeStoreUnavailable { .. }
                 | MasterKeyError::KeyMismatch { .. }
                 | MasterKeyError::NoSlotMatchesDb { .. }
         )
@@ -174,7 +190,11 @@ impl std::fmt::Display for MasterKeyError {
                  retry; --key-path / CK_MASTER_KEY_PATH can select an operator key file \
                  for a new vault, but cannot redirect a recorded keychain vault",
             ),
-            MasterKeyError::NotBootstrapped => f.write_str("no master key has been provisioned"),
+            MasterKeyError::NotBootstrapped => f.write_str(
+                "no master key has been provisioned; run `ck auth bootstrap` for a new vault, \
+                 optionally selecting --key-path / CK_MASTER_KEY_PATH; for a recorded vault, \
+                 restore the missing key in its recorded backend instead of bootstrapping",
+            ),
             MasterKeyError::KeyMismatch { loaded, expected } => write!(
                 f,
                 "loaded master key {} does not match the vault's key {}",
@@ -234,6 +254,15 @@ impl std::fmt::Display for MasterKeyError {
                 "this platform has no macOS keychain (the `security` command is not \
                  present); pass --key-path <file> or CK_MASTER_KEY_PATH=<file> for a new vault; \
                  a recorded keychain vault must be opened on macOS",
+            ),
+            MasterKeyError::NativeStoreUnavailable { backend, reason } => write!(
+                f,
+                "{backend} master-key store unavailable: {reason}; {}; pass --key-path <file> or CK_MASTER_KEY_PATH=<file> to select a checked key file for a new vault (no fallback); a recorded {backend} vault cannot be redirected by an override",
+                if *backend == "secret-service" {
+                    "start a D-Bus session with Secret Service and unlock the keyring before retrying"
+                } else {
+                    "sign in as the vault owner and restore access to Windows Credential Manager before retrying"
+                }
             ),
             MasterKeyError::Io(e) => write!(f, "key resolution io: {e}"),
             MasterKeyError::Csprng => f.write_str("OS CSPRNG failed generating a master key"),
@@ -428,6 +457,8 @@ impl KeySource {
     pub fn backend(&self) -> Box<dyn MasterKeyStore> {
         match self {
             KeySource::Keychain => Box::new(KeychainCli),
+            KeySource::CredentialManager => Box::new(CredentialManager),
+            KeySource::SecretService => Box::new(SecretService),
             KeySource::OperatorPath { path } => Box::new(OperatorPathStore { path: path.clone() }),
         }
     }
@@ -564,39 +595,53 @@ pub fn heal_pending_rotation(
     })
 }
 
-/// First-run provisioning: generate a CSPRNG master key and persist it to the
-/// `Current` slot, failing closed if the slot already holds a key (first-run only)
-/// or the store is not writable. Returns the new key.
-///
-/// Clobber-safety is enforced HERE (above the backend), since the slot store ops are
-/// replace-not-create: a `Current` slot that already holds a key means the vault is
-/// already bootstrapped, so this refuses rather than overwrite.
-/// A fresh vault can bootstrap into the keychain only where a native keychain
-/// exists. Elsewhere it needs an explicit key file until native stores for Linux and
-/// Windows land, and it refuses rather than falling back. The platform is a
-/// parameter so the refusal is tested on every OS, not only where it fires.
+/// Native default for a fresh vault. Legacy unrecorded databases retain their
+/// keychain selection; the caller must supply an explicit path for legacy file keys.
+pub(super) fn native_source_for(platform: &str) -> KeySource {
+    match platform {
+        "windows" => KeySource::CredentialManager,
+        "linux" => KeySource::SecretService,
+        _ => KeySource::Keychain,
+    }
+}
+
+/// Refuse provisioning into another OS's native backend, without changing custody.
+/// Actual reachability and lock state are checked by the backend before generating a key.
 fn refuse_unsupported_bootstrap(
     source: &KeySource,
     recorded: bool,
-    native_keychain: bool,
+    platform: &str,
 ) -> Result<(), MasterKeyError> {
-    if *source == KeySource::Keychain && !recorded && !native_keychain {
+    let supported = match source {
+        KeySource::Keychain => platform == "macos",
+        KeySource::CredentialManager => platform == "windows",
+        KeySource::SecretService => platform == "linux",
+        KeySource::OperatorPath { .. } => true,
+    };
+    if !recorded && !supported {
         return Err(MasterKeyError::KeySourceInvalid(
-            "no native master-key backend is available on this platform yet; pass --key-path <file> or CK_MASTER_KEY_PATH=<file> to bootstrap (no fallback)".into(),
+            "the selected native master-key backend is not supported on this platform; pass --key-path <file> or CK_MASTER_KEY_PATH=<file> to bootstrap a new vault (no fallback)".into(),
         ));
     }
     Ok(())
 }
 
+/// First-run provisioning, refusing to overwrite a key or fall back from a native store.
 pub fn bootstrap(config: &ResolverConfig) -> Result<MasterKey, MasterKeyError> {
+    bootstrap_with_backend(config, config.source.backend().as_ref())
+}
+
+fn bootstrap_with_backend(
+    config: &ResolverConfig,
+    backend: &dyn MasterKeyStore,
+) -> Result<MasterKey, MasterKeyError> {
     ensure_vault_dir(&config.data_dir)?;
     source_record::check_record(config)?;
     refuse_unsupported_bootstrap(
         &config.source,
         config.data_dir.join("key-source").exists(),
-        cfg!(target_os = "macos"),
+        std::env::consts::OS,
     )?;
-    let backend = config.source.backend();
     if backend
         .load_slot(&config.data_dir, KeySlot::Current)?
         .is_some()

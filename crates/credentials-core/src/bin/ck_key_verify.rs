@@ -50,23 +50,10 @@ fn db_key_id(data_dir: &std::path::Path) -> Option<KeyId> {
     KeyId::from_hex(&hex)
 }
 
-/// The key source for an operator tool, honouring `CK_MASTER_KEY_PATH`.
-///
-/// Both migration tools hardcoded `KeySource::Keychain`, which made them unusable on an
-/// OPERATOR-PATH vault -- a headless or CI host, which is a large part of who runs a
-/// migration. The daemon and `ck auth` both honour a key path already; these did not,
-/// and the same defect had been fixed in the usable-audit hours earlier without a sweep
-/// for siblings, which is why it survived here.
-///
-/// Reads the DAEMON's variable rather than inventing a second spelling: one concept,
-/// one name, and an operator who set it for the daemon does not have to learn another.
-fn key_source_from_env() -> KeySource {
-    match std::env::var_os("CK_MASTER_KEY_PATH") {
-        Some(path) => KeySource::OperatorPath {
-            path: PathBuf::from(path),
-        },
-        None => KeySource::Keychain,
-    }
+/// Share custody selection with the daemon, without publishing or modifying its record.
+fn key_source_from_env(dir: &std::path::Path) -> KeySource {
+    credentials_core::resolver::key_source(dir, None)
+        .unwrap_or_else(|e| panic!("REFUSING: cannot select recorded key store: {e}"))
 }
 
 /// How the key source will be described in output, so a refusal names WHICH store was
@@ -76,6 +63,8 @@ fn key_source_label(source: &KeySource) -> String {
     match source {
         KeySource::OperatorPath { path } => format!("key file {}", path.display()),
         KeySource::Keychain => "the macOS keychain".to_string(),
+        KeySource::CredentialManager => "Windows Credential Manager".to_string(),
+        KeySource::SecretService => "Linux Secret Service".to_string(),
     }
 }
 
@@ -90,9 +79,8 @@ fn main() {
         .expect("audit-key row has a valid fingerprint")
         .to_hex();
 
-    // What the resolver would actually reach for this data dir. Reading a keychain slot
-    // acquires nothing and mutates nothing.
-    let source = key_source_from_env();
+    // Read the selected store directly: unlike resolve, this must not publish custody.
+    let source = key_source_from_env(&dir);
     let label = key_source_label(&source);
     let backend = source.backend();
     let mut matched = None;

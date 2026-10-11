@@ -36,6 +36,8 @@ fn normalize_file_path(path: &Path) -> Result<PathBuf, MasterKeyError> {
 fn name(source: &KeySource) -> Result<String, MasterKeyError> {
     match source {
         KeySource::Keychain => Ok("keychain".into()),
+        KeySource::CredentialManager => Ok("credential-manager".into()),
+        KeySource::SecretService => Ok("secret-service".into()),
         KeySource::OperatorPath { path } => {
             let path = normalize_file_path(path)?;
             let raw = path
@@ -69,6 +71,10 @@ pub fn read_key_source(data_dir: &Path) -> Result<Option<KeySource>, MasterKeyEr
     let backend = lines.next().unwrap_or("<missing>");
     let source = if backend == "keychain" {
         KeySource::Keychain
+    } else if backend == "credential-manager" {
+        KeySource::CredentialManager
+    } else if backend == "secret-service" {
+        KeySource::SecretService
     } else if let Some(raw_path) = backend.strip_prefix("file:") {
         let path = PathBuf::from(raw_path);
         if !path.is_absolute() {
@@ -127,9 +133,15 @@ pub fn key_source_with_overrides(
         }
         return Ok(recorded);
     }
-    // Unrecorded legacy vaults used Keychain unless the operator supplied a path.
-    // Fresh non-macOS provisioning is refused by bootstrap, never auto-fallback.
-    Ok(requested.unwrap_or(KeySource::Keychain))
+    // Do not reinterpret an existing unrecorded database as a fresh native vault.
+    // A fresh vault's OS default is only a choice of store, not a fallback on failure.
+    Ok(requested.unwrap_or_else(|| {
+        if data_dir.join("store.db").exists() {
+            KeySource::Keychain
+        } else {
+            super::native_source_for(std::env::consts::OS)
+        }
+    }))
 }
 
 /// The entry points share environment handling as well as record parsing.
@@ -238,6 +250,89 @@ mod tests {
     }
 
     #[test]
+    fn native_source_records_round_trip_and_refuse_file_overrides() {
+        let (root, config) = fixture("native-records");
+        let path = root.join("operator.key");
+        for (source, name) in [
+            (KeySource::CredentialManager, "credential-manager"),
+            (KeySource::SecretService, "secret-service"),
+        ] {
+            let dir = config.data_dir.join(name);
+            std::fs::create_dir(&dir).unwrap();
+            record_source(&dir, &source).unwrap();
+            assert_eq!(
+                std::fs::read_to_string(dir.join("key-source")).unwrap(),
+                format!("version:1\n{name}\n")
+            );
+            assert_eq!(key_source_with_overrides(&dir, None, None).unwrap(), source);
+            for (flag, env) in [(Some(path.as_path()), None), (None, Some(path.as_path()))] {
+                let error = key_source_with_overrides(&dir, flag, env).unwrap_err();
+                assert!(matches!(error, MasterKeyError::KeySourceConflict { .. }));
+                assert!(error.to_string().contains(name));
+            }
+        }
+    }
+
+    #[test]
+    fn fresh_native_default_does_not_reinterpret_legacy_database() {
+        let (_root, config) = fixture("native-default");
+        assert_eq!(
+            key_source_with_overrides(&config.data_dir, None, None).unwrap(),
+            super::super::native_source_for(std::env::consts::OS)
+        );
+        std::fs::write(config.data_dir.join("store.db"), []).unwrap();
+        assert_eq!(
+            key_source_with_overrides(&config.data_dir, None, None).unwrap(),
+            KeySource::Keychain
+        );
+    }
+
+    #[test]
+    fn unavailable_native_bootstrap_never_uses_existing_key_file() {
+        struct Unavailable;
+        impl MasterKeyStore for Unavailable {
+            fn load_slot(&self, _: &Path, _: KeySlot) -> Result<Option<MasterKey>, MasterKeyError> {
+                Err(MasterKeyError::NativeStoreUnavailable {
+                    backend: "secret-service",
+                    reason: "no session bus".into(),
+                })
+            }
+            fn store_slot(
+                &self,
+                _: &Path,
+                _: KeySlot,
+                _: &MasterKey,
+            ) -> Result<(), MasterKeyError> {
+                panic!("must not write after native store refusal")
+            }
+            fn clear_slot(&self, _: &Path, _: KeySlot) -> Result<(), MasterKeyError> {
+                panic!("must not clear after native store refusal")
+            }
+        }
+        let (_root, mut config) = fixture("native-no-fallback");
+        let file_key = bootstrap(&config).unwrap();
+        let file_source = config.source.clone();
+        std::fs::remove_file(config.data_dir.join("key-source")).unwrap();
+        config.source = super::super::native_source_for(std::env::consts::OS);
+        let error = super::super::bootstrap_with_backend(&config, &Unavailable).unwrap_err();
+        assert!(matches!(
+            error,
+            MasterKeyError::NativeStoreUnavailable { .. }
+        ));
+        assert!(error.to_string().contains("--key-path"));
+        assert!(!config.data_dir.join("key-source").exists());
+        assert_eq!(
+            file_source
+                .backend()
+                .load_slot(&config.data_dir, KeySlot::Current)
+                .unwrap()
+                .unwrap()
+                .key_id(),
+            file_key.key_id()
+        );
+    }
+
+    #[test]
     fn key_source_override_must_agree_with_record() {
         let (root, config) = fixture("source-conflict");
         bootstrap(&config).unwrap();
@@ -288,7 +383,7 @@ mod tests {
         let (_root, config) = fixture("source-unknown");
         for (raw, expected) in [
             ("version:99\nkeychain\n", "version:99"),
-            ("version:1\nsecret-service\n", "secret-service"),
+            ("version:1\nunknown-native-store\n", "unknown-native-store"),
         ] {
             std::fs::write(config.data_dir.join("key-source"), raw).unwrap();
             let error = key_source_with_overrides(&config.data_dir, None, None)
@@ -408,20 +503,29 @@ mod tests {
         }
     }
 
-    /// Runs on every OS: the platform is passed in, so the non-macOS refusal is
-    /// exercised on macOS too and the test count is the same everywhere.
+    /// Every OS tests every native default and the cross-platform refusal.
     #[test]
     fn fresh_bootstrap_without_path_names_both_override_remedies() {
         use crate::resolver::refuse_unsupported_bootstrap;
-        let error = refuse_unsupported_bootstrap(&KeySource::Keychain, false, false)
+        let error = refuse_unsupported_bootstrap(&KeySource::Keychain, false, "linux")
             .unwrap_err()
             .to_string();
         assert!(
             error.contains("--key-path") && error.contains("CK_MASTER_KEY_PATH"),
             "{error}"
         );
-        assert!(refuse_unsupported_bootstrap(&KeySource::Keychain, false, true).is_ok());
-        assert!(refuse_unsupported_bootstrap(&KeySource::Keychain, true, false).is_ok());
+        for (platform, source) in [
+            ("macos", KeySource::Keychain),
+            ("windows", KeySource::CredentialManager),
+            ("linux", KeySource::SecretService),
+        ] {
+            assert_eq!(super::super::native_source_for(platform), source);
+            assert!(refuse_unsupported_bootstrap(&source, false, platform).is_ok());
+            assert!(refuse_unsupported_bootstrap(&source, false, "unsupported-os").is_err());
+            assert!(refuse_unsupported_bootstrap(&source, true, "unsupported-os").is_ok());
+        }
+        let (_root, config) = fixture("source-file-any-os");
+        assert!(refuse_unsupported_bootstrap(&config.source, false, "unsupported-os").is_ok());
         #[cfg(not(target_os = "macos"))]
         {
             let (_root, mut config) = fixture("source-platform-default");

@@ -194,11 +194,25 @@ The master key encrypts every credential at rest. Provision it once. It is creat
 once and never regenerated; a second bootstrap is refused rather than clobbering
 the existing key (which would brick the vault).
 
-**Keychain (desktop default, macOS):**
+**Native OS store (default for a new vault):**
+
+| OS | Master-key storage | Requirements |
+| --- | --- | --- |
+| macOS | Keychain generic passwords | An accessible login keychain |
+| Windows | Credential Manager per-user generic credentials, protected by DPAPI | Run as the vault owner with access to their credential store |
+| Linux | Secret Service default collection (GNOME Keyring or KWallet) over the D-Bus session bus | A reachable service and an already-unlocked collection |
 
 ```sh
 ck auth bootstrap --data-dir "$DATA_DIR"
 ```
+
+All native stores keep independent current and next slots for crash-safe rotation,
+scoped by the canonical vault directory. They never request an interactive unlock.
+If the Linux keyring is locked, unlock it in your desktop keyring manager before
+starting or retrying the daemon. For an unattended session, arrange an unlocked
+keyring and its D-Bus session bus before launching the daemon; do not expect it to
+open a prompt. A missing bus, absent default collection, or refused Credential
+Manager access is a refusal, not permission to choose another backend.
 
 **Operator-path (headless / server):** the key file **must live outside the data
 directory** (co-locating the key with the ciphertext defeats at-rest encryption);
@@ -208,10 +222,13 @@ the CLI refuses a key path inside `--data-dir`.
 ck auth bootstrap --data-dir "$DATA_DIR" --key-path /etc/cortexkit/master.key
 ```
 
-On Linux and Windows there is no native default backend yet: fresh bootstrap
-requires `--key-path <file>` or `CK_MASTER_KEY_PATH=<file>`. There is no fallback
-from a missing or locked backend. Create the key's parent directory beforehand;
-bootstrap creates the key file. On Unix every load checks that it is a regular
+**Headless Linux without an unlocked Secret Service:** explicitly choose
+`--key-path <file>` or `CK_MASTER_KEY_PATH=<file>` when bootstrapping a new vault.
+Use a directory outside the vault tree that the daemon user owns (for example,
+`~/.config/cortexkit/secrets/master.key`), and give that parent directory mode
+`0700`. There is no automatic fallback from a missing or locked native store.
+Create the key's parent directory beforehand; bootstrap creates the key file.
+On Unix every load checks that it is a regular
 file, not a symlink, owned by the current effective user, with no group or other
 permission bits. Use `chmod 600 <file>` and, if needed, `chown <uid> <file>`.
 Windows currently retains the previous file-loading behavior: owner and ACL
@@ -219,14 +236,15 @@ checks await the shared commons custody primitive; Unix modes do not protect a
 Windows file.
 
 Bootstrap also writes `$DATA_DIR/key-source`, a non-secret, versioned custody
-record. Its two lines are `version:1` and either `keychain` or
-`file:<absolute path>`. Keep it with the vault metadata, not with the secret key.
+record. Its two lines are `version:1` and one of `keychain`, `credential-manager`,
+`secret-service`, or `file:<absolute path>`. Keep it with the vault metadata, not
+with the secret key.
 Both the daemon and `ck auth` read this same choice, so subsequent commands need
 no key-path override. Unknown versions or backend names are refused, not guessed.
 
 Both programs honour **both** `--key-path` and `CK_MASTER_KEY_PATH`. An override
 must agree with the recorded choice; a different file, or a file override for a
-keychain vault, is refused with both choices named. If both override names are
+native-store vault, is refused with both choices named. If both override names are
 set, they must name the same file too. Remove conflicting overrides rather than
 editing the record to redirect a live vault to a different backend.
 
@@ -1202,12 +1220,13 @@ snapshot are included — no checkpoint boundary needed). That capture is comple
 what it covers, and what it covers is the STORE.
 
 **The master key is not in it.** `vault_secrets` holds the audit key SEALED UNDER the
-master key; the master key itself lives in the macOS keychain under the service derived
-from the data directory, or in the operator key file. So a restore is:
+master key; the master key itself lives in the recorded OS store (macOS Keychain,
+Windows Credential Manager, or Linux Secret Service) under the scope derived from
+the data directory, or in the operator key file. So a restore is:
 
 ```
 restored store.db          from the backup generation
-+ the matching master key   from the keychain item, or --key-path
++ the matching master key   from the recorded OS store, or recorded operator key file
 = a vault that opens
 ```
 
@@ -1227,12 +1246,12 @@ ck_key_verify --data-dir "$DATA_DIR"
 ```
 
 A `KeyMismatch` names both fingerprints and means the store is fine and the key is
-wrong. `NoSlotMatchesDb` means no key on this machine matches at all — the keychain item
-is absent or belongs to a different data directory, because the service name is derived
-from the canonical data-dir path.
+wrong. `NoSlotMatchesDb` means no slot in the recorded backend matches at all — a
+native-store item may be absent or scoped to a different canonical data directory,
+or the operator file may hold the wrong key.
 
 **So a machine restoring this vault must carry the key across separately**, and a
-keychain item does not travel in a store backup by design: putting it there would make
+native-store item does not travel in a store backup by design: putting it there would make
 the backup sufficient to decrypt every credential in it.
 
 EXERCISED 2026-09-06, both arms, and the numbers are worth keeping because they are what

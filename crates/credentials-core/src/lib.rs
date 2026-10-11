@@ -109,8 +109,8 @@ pub use refresh_adapters::{
     HttpResponse, HttpTransport, RefreshAdapter, RefreshError, RefreshedTokens, ValidityOutcome,
 };
 pub use resolver::{
-    bootstrap, resolve, KeySource, KeychainCli, MasterKeyError, MasterKeyStore, OperatorPathStore,
-    ResolverConfig,
+    bootstrap, resolve, CredentialManager, KeySource, KeychainCli, MasterKeyError, MasterKeyStore,
+    OperatorPathStore, ResolverConfig, SecretService,
 };
 pub use store::{
     handle_hash, mint_handle, payload_hash, refresh_token_hash, DepositCookieOutcome,

@@ -118,6 +118,14 @@ hpke = { workspace = true }
 # forbids unsafe code.
 rustix = { version = "1.1.4", features = ["process"] }
 
+[target.'cfg(windows)'.dependencies]
+keyring = { version = "3.6.3", default-features = false, features = ["windows-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Raw Secret Service calls let us reject prompt handles without ever invoking Prompt.
+# zbus uses Rust's Unix sockets; no libdbus headers or native crypto are required.
+zbus = { version = "5.12.0", default-features = false, features = ["async-io", "blocking-api"] }
+
 [dev-dependencies]
 cortexkit-test-support = { workspace = true }
 tokio = { workspace = true }

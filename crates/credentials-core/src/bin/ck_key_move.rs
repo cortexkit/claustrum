@@ -1,4 +1,4 @@
-//! One-shot: move the vault master key from the OLD data-dir keychain scope to the NEW one.
+//! One-shot: copy both native master-key slots from the OLD vault scope to the NEW one.
 //!
 //! Runs in-process through the shipped resolver API so both scopes are derived by the same
 //! `keychain_service_for` the daemon uses — a bespoke re-implementation of that hash could
@@ -14,13 +14,9 @@ use std::path::PathBuf;
 
 /// Honour the daemon's key-source setting. An operator-path store has fixed files,
 /// not data-directory-derived scopes, so moving the data directory needs no key move.
-fn key_source_from_env() -> KeySource {
-    match std::env::var_os("CK_MASTER_KEY_PATH") {
-        Some(path) => KeySource::OperatorPath {
-            path: PathBuf::from(path),
-        },
-        None => KeySource::Keychain,
-    }
+fn key_source_from_env(dir: &std::path::Path) -> KeySource {
+    credentials_core::resolver::key_source(dir, None)
+        .unwrap_or_else(|e| panic!("REFUSING: cannot select recorded key store: {e}"))
 }
 
 /// How the key source will be described in output, so a refusal names WHICH store was
@@ -30,6 +26,8 @@ fn key_source_label(source: &KeySource) -> String {
     match source {
         KeySource::OperatorPath { path } => format!("key file {}", path.display()),
         KeySource::Keychain => "the macOS keychain".to_string(),
+        KeySource::CredentialManager => "Windows Credential Manager".to_string(),
+        KeySource::SecretService => "Linux Secret Service".to_string(),
     }
 }
 
@@ -38,7 +36,15 @@ fn main() {
     let old_dir = PathBuf::from(args.next().expect("usage: ck_key_move <OLD_DIR> <NEW_DIR>"));
     let new_dir = PathBuf::from(args.next().expect("usage: ck_key_move <OLD_DIR> <NEW_DIR>"));
 
-    let source = key_source_from_env();
+    let source = key_source_from_env(&old_dir);
+    if let Some(recorded) = credentials_core::resolver::read_key_source(&new_dir)
+        .unwrap_or_else(|e| panic!("REFUSING: cannot read destination custody: {e}"))
+    {
+        assert_eq!(
+            recorded, source,
+            "REFUSING: destination records another key store"
+        );
+    }
     if matches!(source, KeySource::OperatorPath { .. }) {
         eprintln!("REFUSING: the operator-path store has one fixed key file (plus its rotation slot), so there is nothing to move between data-directory scopes");
         std::process::exit(2);

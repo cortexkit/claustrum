@@ -409,10 +409,27 @@ assert_floor_not_lowered() {
 # Raised 1062 -> 1075 with recorded master-key sources and Unix key-file custody.
 # Measured from the workspace test command below on Linux:
 # 25 + 532 + 4 + 2 + 6 + 9 + 110 + 196 + 65 + 104 + 2 + 20.
-run_expect 1075 "workspace unit + integration" \
+# Measured 1083 on Linux with native custody: the two real-store tests are registered
+# here but run against OS services in the separate native-store arm below.
+run_expect 1083 "workspace unit + integration" \
   cargo test --locked --workspace --features credentials-core/test-support
 
 assert_floor_not_lowered "$SCRIPT_PATH"
+
+case "$(uname -s)" in
+  Linux)
+    if command -v dbus-run-session >/dev/null && command -v gnome-keyring-daemon >/dev/null; then
+      run_expect 2 "native master-key store" bash scripts/test-native-store.sh
+    else
+      GATE_UNCHECKED="${GATE_UNCHECKED:-}native store (install dbus and gnome-keyring) "
+      printf '\n=== native master-key store: UNCHECKED (requires dbus and gnome-keyring) ===\n'
+    fi
+    ;;
+  MINGW*|MSYS*|CYGWIN*)
+    run_expect 1 "native master-key store" env CK_NATIVE_STORE_TESTS=1 \
+      cargo test --locked -p credentials-core --test native_store -- --nocapture --test-threads=1
+    ;;
+esac
 
 # THE ONE THING THIS macOS GATE CANNOT OTHERWISE SEE: code that does not COMPILE on Windows.
 #
@@ -525,7 +542,7 @@ run_expect 8 "interactive import picker + real-terminal smoke" \
 # The migration tools are feature-gated, so clippy compiles them but nothing RAN them
 # until this arm existed. Compiling proves they build; the property that matters -- the
 # key-identity diagnostic works while the daemon holds the lease -- is a runtime fact.
-run_expect 1 "migration tools" \
+run_expect 3 "migration tools" \
   cargo test --locked --workspace --features credentials-core/test-support,credentials-core/kill9-test-seam,credentials-core/rotate-test-seam,credentials-core/login-test-seam,credentials-core/migration-tools \
   --test key_verify_takes_nothing
 
@@ -558,7 +575,8 @@ run_expect 1 "release artifact (test seams absent)" \
 # cannot reopen it.
 ci_steps=$(awk '/^  test:/{j=1} /^  [a-z-]+:$/ && !/^  test:/{j=0} j && /^      - name:/{n++} END{print n+0}' \
     .github/workflows/ci.yml)
-gate_arms=$(grep -cE '^run_(check|expect)' "$SCRIPT_PATH")
+# Include conditional OS-specific arms as well as unindented common arms.
+gate_arms=$(grep -cE '^[[:space:]]*run_(check|expect)' "$SCRIPT_PATH")
 # A zero here means the awk stopped matching the job or step shape, not that CI has no
 # steps -- and it would sail under any gap bound. Refuse it: this is the same defect
 # as the test-count check that reported "ran 0 tests" when it could not count them.

@@ -231,9 +231,31 @@ Create the key's parent directory beforehand; bootstrap creates the key file.
 On Unix every load checks that it is a regular
 file, not a symlink, owned by the current effective user, with no group or other
 permission bits. Use `chmod 600 <file>` and, if needed, `chown <uid> <file>`.
-Windows currently retains the previous file-loading behavior: owner and ACL
-checks await the shared commons custody primitive; Unix modes do not protect a
-Windows file.
+On Windows, every key-file load verifies the **opened handle's owner and DACL**.
+Only the current user, SYSTEM and Administrators may own it or hold grants. Null
+DACLs, unknown grant types and grants to other users/groups are refused. Bootstrap
+creates the key with a protected current-user-only DACL from first visibility;
+rotation writes a similarly protected temporary file and renames it. Provision
+the key's parent directory beforehand with an owner-only DACL too.
+
+A loosened key file is refused as `unsafe operator key file: <path> failed
+owner-only Windows ACL verification: ...; restore a regular key file owned by the
+current user, SYSTEM or Administrators, remove inherited and explicit grants to
+all other users/groups, and retry (do not regenerate the key)`. Use the file's
+Security / Advanced settings to disable inheritance and remove broad grants,
+including Everyone or Users; preserve the existing key bytes. Claustrum does not
+repair an untrusted key file while reading it.
+
+The vault data directory is created or tightened to a protected owner-only DACL
+on Windows; foreign owners and reparse points are refused. Existing unprotected
+descendants lose broad inherited grants when the directory is tightened, but
+Windows preserves explicitly protected child DACLs. Claustrum's CLI also creates
+private OpenCode credential and capability-handle files (including atomic-write
+temporaries and lock owner records), verifies loaded handles, and checks publication
+directories. Unix `0600` files / `0700` directories and existing owner checks are
+unchanged. The non-secret `key-source` record uses the protected file writer too.
+See [the filesystem inventory](windows-file-custody.md) for scope and the Windows
+CI-only behaviour and mutation checks.
 
 Bootstrap also writes `$DATA_DIR/key-source`, a non-secret, versioned custody
 record. Its two lines are `version:1` and one of `keychain`, `credential-manager`,

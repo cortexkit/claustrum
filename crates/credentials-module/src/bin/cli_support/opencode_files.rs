@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io::Write,
     path::{Path, PathBuf},
     sync::{
@@ -11,6 +11,9 @@ use std::{
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+
+#[cfg(not(windows))]
+use std::fs::OpenOptions;
 
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
@@ -447,7 +450,11 @@ fn write_handle_file_for_tenant(
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .ok_or_else(|| OpenCodeFilesError::Invalid("file path has no parent".into()))?;
+    #[cfg(not(windows))]
     fs::create_dir_all(parent).map_err(|source| io_error("create parent directory", source))?;
+    #[cfg(windows)]
+    subc_os::windows_acl::create_private_dir(parent)
+        .map_err(|source| io_error("create private parent directory", source))?;
     validate_secure_parent(parent)?;
     set_mode(parent, 0o700)?;
     let before_manifest_rename = options.before_manifest_rename.clone();
@@ -588,8 +595,18 @@ fn io_error(action: &'static str, source: std::io::Error) -> OpenCodeFilesError 
 }
 
 fn read_lock_owner(path: &Path) -> Result<ManifestLockOwner, OpenCodeFilesError> {
+    #[cfg(not(windows))]
     let source =
         fs::read_to_string(path).map_err(|source| io_error("read manifest lock owner", source))?;
+    #[cfg(windows)]
+    let source = {
+        use std::io::Read;
+        let mut source = String::new();
+        open_owner_only_file(path)?
+            .read_to_string(&mut source)
+            .map_err(|source| io_error("read manifest lock owner", source))?;
+        source
+    };
     let owner: ManifestLockOwner = serde_json::from_str(&source)
         .map_err(|_| OpenCodeFilesError::Invalid("manifest lock owner invalid".into()))?;
     let stale_target = format!(".lock.stale-{}-{}", owner.claimed_at_ms, owner.nonce);
@@ -619,7 +636,14 @@ fn write_lock_owner(lock: &Path, owner: &ManifestLockOwner) -> Result<(), OpenCo
                 .open(&temporary)
                 .map_err(|source| io_error("create manifest lock owner", source))?
         };
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        let mut file = {
+            subc_os::windows_acl::verify_private_dir(lock)
+                .map_err(|source| io_error("verify manifest lock directory", source))?;
+            subc_os::windows_acl::create_private_file(&temporary)
+                .map_err(|source| io_error("create manifest lock owner", source))?
+        };
+        #[cfg(not(any(unix, windows)))]
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -632,6 +656,9 @@ fn write_lock_owner(lock: &Path, owner: &ManifestLockOwner) -> Result<(), OpenCo
         file.sync_all()
             .map_err(|source| io_error("sync manifest lock owner", source))?;
         drop(file);
+        #[cfg(windows)]
+        subc_os::windows_acl::verify_private_dir(lock)
+            .map_err(|source| io_error("verify manifest lock directory", source))?;
         fs::rename(&temporary, &owner_path)
             .map_err(|source| io_error("rename manifest lock owner", source))
     })();
@@ -838,6 +865,9 @@ where
     loop {
         match fs::create_dir(&lock) {
             Ok(()) => {
+                // The empty directory is an atomic claim marker, not secret data.
+                // Windows must tighten it before publishing the owner record;
+                // create_private_dir alone cannot claim a lock (it accepts existing paths).
                 set_mode(&lock, 0o700)?;
                 let owner = ManifestLockOwner {
                     tenant: Value::String(tenant.into()),
@@ -1124,10 +1154,14 @@ where
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .ok_or_else(|| OpenCodeFilesError::Invalid("file path has no parent".into()))?;
+    #[cfg(not(windows))]
     fs::create_dir_all(parent).map_err(|source| OpenCodeFilesError::Io {
         action: "create parent directory",
         source,
     })?;
+    #[cfg(windows)]
+    subc_os::windows_acl::create_private_dir(parent)
+        .map_err(|source| io_error("create private parent directory", source))?;
     validate_secure_parent(parent)?;
     if secure_parent {
         set_mode(parent, 0o700)?;
@@ -1155,7 +1189,10 @@ where
                     source,
                 })?
         };
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        let mut file = subc_os::windows_acl::create_private_file(&temp)
+            .map_err(|source| io_error("create temporary file", source))?;
+        #[cfg(not(any(unix, windows)))]
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -1175,6 +1212,9 @@ where
             source,
         })?;
         before_rename()?;
+        #[cfg(windows)]
+        subc_os::windows_acl::verify_private_dir(parent)
+            .map_err(|source| io_error("verify publication directory", source))?;
         fs::rename(&temp, path).map_err(|source| OpenCodeFilesError::Io {
             action: "rename temporary file",
             source,
@@ -1212,10 +1252,36 @@ fn validate_secure_file(path: &Path) -> Result<(), OpenCodeFilesError> {
             ));
         }
     }
+    #[cfg(windows)]
+    open_owner_only_file(path)?;
     Ok(())
 }
 
+#[cfg(windows)]
+fn open_owner_only_file(path: &Path) -> Result<File, OpenCodeFilesError> {
+    let file = File::open(path).map_err(|error| {
+        OpenCodeFilesError::Invalid(format!(
+            "cannot open {}: {error}; restore a regular file with owner-only Windows ACLs and read access for the current user",
+            path.display()
+        ))
+    })?;
+    subc_os::windows_acl::verify_owner_only(&file).map_err(|error| {
+        OpenCodeFilesError::Invalid(format!(
+            "{} failed owner-only Windows ACL verification: {error}; restore a regular file owned by the current user, SYSTEM or Administrators and remove inherited and explicit grants to all other users/groups",
+            path.display()
+        ))
+    })?;
+    Ok(file)
+}
+
 fn read_limited(path: &Path, max_bytes: u64, kind: &str) -> Result<Vec<u8>, OpenCodeFilesError> {
+    #[cfg(windows)]
+    let mut file = open_owner_only_file(path)?;
+    #[cfg(windows)]
+    let metadata = file
+        .metadata()
+        .map_err(|source| io_error("stat opened file", source))?;
+    #[cfg(not(windows))]
     let metadata = fs::metadata(path).map_err(|source| OpenCodeFilesError::Io {
         action: "stat file for read limit",
         source,
@@ -1230,10 +1296,21 @@ fn read_limited(path: &Path, max_bytes: u64, kind: &str) -> Result<Vec<u8>, Open
             "{kind} exceeds {limit}",
         )));
     }
-    fs::read(path).map_err(|source| OpenCodeFilesError::Io {
-        action: "read file",
-        source,
-    })
+    #[cfg(not(windows))]
+    {
+        fs::read(path).map_err(|source| OpenCodeFilesError::Io {
+            action: "read file",
+            source,
+        })
+    }
+    #[cfg(windows)]
+    {
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)
+            .map_err(|source| io_error("read opened file", source))?;
+        Ok(bytes)
+    }
 }
 
 #[cfg(unix)]
@@ -1481,6 +1558,13 @@ fn validate_secure_parent_with_identity(
         // (refuse_writable_ancestor), read at source rather than from their description.
         refuse_writable_ancestor(path, identity)?;
     }
+    #[cfg(windows)]
+    subc_os::windows_acl::verify_private_dir(path).map_err(|error| {
+        OpenCodeFilesError::Invalid(format!(
+            "{} is not an owner-only publication directory: {error}; remove grants to other users/groups and retry",
+            path.display()
+        ))
+    })?;
     Ok(())
 }
 
@@ -1495,7 +1579,18 @@ fn set_mode(path: &Path, mode: u32) -> Result<(), OpenCodeFilesError> {
             }
         })?;
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        if mode == 0o700 {
+            subc_os::windows_acl::create_private_dir(path)
+                .map_err(|source| io_error("tighten private directory", source))?;
+            subc_os::windows_acl::verify_private_dir(path)
+                .map_err(|source| io_error("verify private directory", source))?;
+        } else {
+            open_owner_only_file(path)?;
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (path, mode);
     }
@@ -2702,4 +2797,106 @@ mod private_group_tests {
     case!(ancestor_rule_other_gid, false, gid: 21);
     case!(ancestor_rule_malformed_passwd, false, passwd: "broken\n");
     case!(ancestor_rule_malformed_group, false, group: "broken\n");
+}
+
+#[cfg(all(test, windows))]
+mod windows_acl_tests {
+    use super::*;
+    use subc_os::windows_acl::{
+        self,
+        test_support::{assert_dacl_owner_only, grant_everyone_read},
+    };
+
+    struct Fixture(PathBuf);
+    impl Fixture {
+        fn new() -> Self {
+            let root =
+                std::env::temp_dir().join(format!("claustrum-cli-acl-{}", random_nonce().unwrap()));
+            windows_acl::create_private_dir(&root).unwrap();
+            Self(root)
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    pub fn publications_are_private() {
+        let fixture = Fixture::new();
+        let auth = fixture.0.join("opencode/auth.json");
+        let entry = serde_json::json!({"type": "api", "key": "disposable-test-key"});
+        write_auth_entry(&auth, "openai", entry.clone()).unwrap();
+        write_auth_entry(&auth, "openai", entry).unwrap();
+        assert_dacl_owner_only(auth.parent().unwrap(), true, true);
+        assert_dacl_owner_only(&auth, false, true);
+        let handles = fixture.0.join("cortexkit/opencode-handles.json");
+        let desired = HandleFile {
+            version: 1,
+            providers: Vec::new(),
+        };
+        write_handle_file(&handles, &desired).unwrap();
+        assert_dacl_owner_only(handles.parent().unwrap(), true, true);
+        assert_dacl_owner_only(&handles, false, true);
+        with_manifest_lock_with_options(
+            &handles,
+            OPENCODE_CLAUSTRUM_TENANT,
+            ManifestLockOptions::default(),
+            |_| {
+                let lock = lock_path(&handles);
+                assert_dacl_owner_only(&lock, true, true);
+                assert_dacl_owner_only(&lock.join("owner"), false, true);
+                Ok(())
+            },
+        )
+        .unwrap();
+    }
+
+    pub fn broad_file_grants_are_refused() {
+        let fixture = Fixture::new();
+        let auth = fixture.0.join("auth.json");
+        write_auth_entry(
+            &auth,
+            "openai",
+            serde_json::json!({"type": "api", "key": "disposable-test-key"}),
+        )
+        .unwrap();
+        grant_everyone_read(&auth);
+        let refusal = read_auth_entries(&auth).unwrap_err().to_string();
+        assert!(
+            refusal.contains("owner-only Windows ACL verification"),
+            "{refusal}"
+        );
+        assert!(refusal.contains(&auth.display().to_string()), "{refusal}");
+        let handles = fixture.0.join("handles.json");
+        write_handle_file(
+            &handles,
+            &HandleFile {
+                version: 1,
+                providers: Vec::new(),
+            },
+        )
+        .unwrap();
+        grant_everyone_read(&handles);
+        assert!(read_handle_file(&handles)
+            .unwrap_err()
+            .to_string()
+            .contains("owner-only Windows ACL verification"));
+    }
+}
+
+#[test]
+fn windows_cli_credential_handle_and_lock_publications_have_private_dacls() {
+    #[cfg(windows)]
+    windows_acl_tests::publications_are_private();
+    #[cfg(not(windows))]
+    eprintln!("SKIPPING windows_cli_credential_handle_and_lock_publications_have_private_dacls: requires Windows DACLs");
+}
+
+#[test]
+fn windows_cli_credential_and_handle_loads_refuse_broad_dacls() {
+    #[cfg(windows)]
+    windows_acl_tests::broad_file_grants_are_refused();
+    #[cfg(not(windows))]
+    eprintln!("SKIPPING windows_cli_credential_and_handle_loads_refuse_broad_dacls: requires Windows DACLs");
 }

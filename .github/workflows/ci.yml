@@ -281,6 +281,18 @@ jobs:
       - name: Test
         run: cargo test --locked --workspace --all-targets
 
+      - name: Windows key-file ACL mutation proofs
+        if: runner.os == 'Windows'
+        run: python3 scripts/prove-windows-acl.py
+
+      - name: Upload Windows ACL mutation evidence
+        if: always() && runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-acl-mutations
+          path: claustrum/gate-evidence/windows-acl-mutations.json
+          if-no-files-found: warn
+
       # Run only the seam targets; the workspace suite above already ran everything
       # else. One feature set matches the gate's four core arms and also exercises
       # the migration-tool key-identity diagnostic. The crash cuts are Unix-only.

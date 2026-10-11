@@ -411,7 +411,10 @@ assert_floor_not_lowered() {
 # 25 + 532 + 4 + 2 + 6 + 9 + 110 + 196 + 65 + 104 + 2 + 20.
 # Measured 1083 on Linux with native custody: the two real-store tests are registered
 # here but run against OS services in the separate native-store arm below.
-run_expect 1083 "workspace unit + integration" \
+# Measured 1090 on Linux with Windows ACL wrappers: 25 + 538 + 4 + 2 + 6 + 2 +
+# 9 + 3 + 112 + 196 + 65 + 106 + 2 + 20. CLI file-helper wrappers also run in
+# cli_opencode, which includes that source module; non-Windows bodies report skips.
+run_expect 1090 "workspace unit + integration" \
   cargo test --locked --workspace --features credentials-core/test-support
 
 assert_floor_not_lowered "$SCRIPT_PATH"
@@ -428,6 +431,7 @@ case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*)
     run_expect 2 "native master-key store" env CK_NATIVE_STORE_TESTS=1 \
       cargo test --locked -p credentials-core --test native_store -- --nocapture --test-threads=1
+    run_check "Windows key-file ACL mutation proofs" python3 scripts/prove-windows-acl.py
     ;;
 esac
 

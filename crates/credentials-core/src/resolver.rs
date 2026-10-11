@@ -112,7 +112,7 @@ pub enum MasterKeyError {
     /// The operator key path is structurally unusable (no parent, parent dir
     /// absent). The operator must provision the directory out-of-band.
     KeyPathInvalid(String),
-    /// A Unix key file is not regular, has the wrong owner, or permits group/other access.
+    /// A key file is not regular, has an untrusted owner, or permits other users access.
     KeyPathUnsafe(String),
     /// The recorded backend or format is not supported by this build.
     KeySourceInvalid(String),
@@ -689,10 +689,15 @@ pub fn promote_next(config: &ResolverConfig) -> Result<(), MasterKeyError> {
     Ok(())
 }
 
-/// Create the vault data directory if absent and tighten it to `0700` on unix
-/// (owner-only). On non-unix the directory is created without a mode change.
+/// Create or tighten the vault directory: `0700` on Unix, owner-only DACL on Windows.
 fn ensure_vault_dir(data_dir: &Path) -> Result<(), MasterKeyError> {
+    #[cfg(not(windows))]
     std::fs::create_dir_all(data_dir).map_err(MasterKeyError::Io)?;
+    #[cfg(windows)]
+    {
+        subc_os::windows_acl::create_private_dir(data_dir).map_err(MasterKeyError::Io)?;
+        subc_os::windows_acl::verify_private_dir(data_dir).map_err(MasterKeyError::Io)?;
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -813,11 +818,29 @@ fn open_checked_key_file(path: &Path) -> Result<std::fs::File, MasterKeyError> {
     Ok(file)
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 fn open_checked_key_file(path: &Path) -> Result<std::fs::File, MasterKeyError> {
-    // Windows currently loads without owner or ACL checks. Those checks are deferred
-    // until commons provides a shared filesystem-permissions primitive; it is not
-    // available yet. Unix mode bits cannot establish safe Windows access control.
+    let file = std::fs::File::open(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            MasterKeyError::Io(error)
+        } else {
+            MasterKeyError::KeyPathUnsafe(format!(
+                "cannot safely open {}: {error}; restore a regular key file with owner-only Windows ACLs and read access for the current user, then retry (do not regenerate the key)",
+                path.display()
+            ))
+        }
+    })?;
+    subc_os::windows_acl::verify_owner_only(&file).map_err(|error| {
+        MasterKeyError::KeyPathUnsafe(format!(
+            "{} failed owner-only Windows ACL verification: {error}; restore a regular key file owned by the current user, SYSTEM or Administrators, remove inherited and explicit grants to all other users/groups, and retry (do not regenerate the key)",
+            path.display()
+        ))
+    })?;
+    Ok(file)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_checked_key_file(path: &Path) -> Result<std::fs::File, MasterKeyError> {
     std::fs::File::open(path).map_err(MasterKeyError::Io)
 }
 
@@ -855,7 +878,26 @@ fn write_key_file(path: &Path, bytes: &[u8]) -> Result<(), MasterKeyError> {
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn write_key_file(path: &Path, bytes: &[u8]) -> Result<(), MasterKeyError> {
+    use std::io::Write;
+    if let Some(parent) = path.parent() {
+        subc_os::windows_acl::verify_private_dir(parent).map_err(|e| {
+            MasterKeyError::KeyStoreUnwritable(format!(
+                "{}: {e}; provision an owner-only key parent directory",
+                parent.display()
+            ))
+        })?;
+    }
+    let mut f =
+        subc_os::windows_acl::create_private_file(path).map_err(|e| map_create_new_err(path, e))?;
+    f.write_all(bytes)
+        .map_err(|e| MasterKeyError::KeyStoreUnwritable(e.to_string()))?;
+    f.sync_all().map_err(MasterKeyError::Io)?;
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
 fn write_key_file(path: &Path, bytes: &[u8]) -> Result<(), MasterKeyError> {
     use std::io::Write;
     let mut f = std::fs::OpenOptions::new()
@@ -1078,6 +1120,10 @@ fn replace_at_operator_path(path: &Path, key: &MasterKey) -> Result<(), MasterKe
     // appended to; remove any leftover temp first.
     let _ = std::fs::remove_file(&tmp);
     write_key_file(&tmp, hex.as_bytes())?;
+    #[cfg(windows)]
+    if let Some(parent) = path.parent() {
+        subc_os::windows_acl::verify_private_dir(parent).map_err(MasterKeyError::Io)?;
+    }
     std::fs::rename(&tmp, path).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
         MasterKeyError::KeyStoreUnwritable(e.to_string())

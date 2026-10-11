@@ -183,6 +183,8 @@ pub(super) fn record_source(data_dir: &Path, source: &KeySource) -> Result<(), M
     let record = format!("{VERSION}\n{}\n", name(source)?);
     write_key_file(&tmp, record.as_bytes())?;
     let path = data_dir.join("key-source");
+    #[cfg(windows)]
+    subc_os::windows_acl::verify_private_dir(data_dir).map_err(MasterKeyError::Io)?;
     let published = std::fs::hard_link(&tmp, &path);
     let cleanup = std::fs::remove_file(&tmp);
     match published {

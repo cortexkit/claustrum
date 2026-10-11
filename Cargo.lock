@@ -466,9 +466,9 @@ dependencies = [
 
 [[package]]
 name = "cortexkit-test-support"
-version = "0.1.0"
+version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e62f7642eb194655979868dc48755a2474225c58f229427d99fb64b05d28eddb"
+checksum = "987f96b58d7a73a04dd34ffa7149f64c78914b1570a457e6c00cf0c7291aba1c"
 dependencies = [
  "rustix",
  "sha2",
@@ -520,6 +520,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "subc-os",
  "subtle",
  "tokio",
  "url",
@@ -2160,12 +2161,13 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "subc-os"
-version = "0.1.10"
+version = "0.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "deaa591b1073aed5dcc9af687eb2bf45839bd3296a04b598b29cc2bee1bfe8d9"
+checksum = "73c652957f2e78093fe8c24ff33a5474121bc57131f7a5a5fbc9b9a76371a3f6"
 dependencies = [
  "libc",
  "rustix",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

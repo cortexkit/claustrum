@@ -199,7 +199,7 @@ the existing key (which would brick the vault).
 | OS | Master-key storage | Requirements |
 | --- | --- | --- |
 | macOS | Keychain generic passwords | An accessible login keychain |
-| Windows | Credential Manager per-user generic credentials, protected by DPAPI | Run as the vault owner with access to their credential store |
+| Windows | Credential Manager per-user generic credentials, protected by DPAPI | Run as the vault owner with access to their credential store. The item uses enterprise persistence, so on a domain account with a roaming profile it roams with that profile. Use a key file on such machines if the key must stay on one host |
 | Linux | Secret Service default collection (GNOME Keyring or KWallet) over the D-Bus session bus | A reachable service and an already-unlocked collection |
 
 ```sh

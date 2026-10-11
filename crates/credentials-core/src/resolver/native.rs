@@ -35,6 +35,20 @@ fn write_slot(
     write(&service, &account, &encoded)
 }
 
+/// Secret Service answers `/` when an operation completed and a prompt path when it
+/// needs one. A prompt path is refused, never executed: the vault runs unattended.
+#[cfg(any(target_os = "linux", test))]
+fn refuse_prompt_path(path: &str) -> Result<(), MasterKeyError> {
+    if path == "/" {
+        Ok(())
+    } else {
+        Err(unavailable(
+            "secret-service",
+            "operation requires an interactive prompt; unattended access refused",
+        ))
+    }
+}
+
 #[cfg(any(windows, target_os = "linux", test))]
 fn decode_secret(raw: &[u8]) -> Result<MasterKey, MasterKeyError> {
     let bytes = super::decode_hex_key(raw)?;
@@ -147,6 +161,14 @@ mod tests {
         assert_eq!(items.len(), 2);
         assert_eq!(items.get(account), Some(&current.key_id()));
         assert_eq!(items.get(&format!("{account}-next")), Some(&next.key_id()));
+    }
+
+    #[test]
+    fn secret_service_prompt_handle_is_refused() {
+        assert!(refuse_prompt_path("/").is_ok());
+        let error = refuse_prompt_path("/org/freedesktop/secrets/prompt/1").unwrap_err();
+        assert!(error.to_string().contains("unlock the keyring"));
+        assert!(error.to_string().contains("interactive prompt"));
     }
 
     #[test]

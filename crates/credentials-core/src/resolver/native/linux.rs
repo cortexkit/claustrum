@@ -23,13 +23,7 @@ fn bus_error(e: impl ToString) -> MasterKeyError {
 }
 
 fn no_prompt(path: &OwnedObjectPath) -> Result<(), MasterKeyError> {
-    if path.as_str() == "/" {
-        Ok(())
-    } else {
-        Err(bus_error(
-            "operation requires an interactive prompt; unattended access refused",
-        ))
-    }
+    refuse_prompt_path(path.as_str())
 }
 
 struct Session {
@@ -112,7 +106,13 @@ impl Drop for Session {
 }
 
 fn attributes<'a>(service: &'a str, account: &'a str) -> HashMap<&'a str, &'a str> {
-    HashMap::from([("service", service), ("account", account)])
+    // The schema attribute keeps another application's generic service/account item
+    // from ever matching a vault slot.
+    HashMap::from([
+        ("xdg:schema", "io.cortexkit.claustrum.MasterKey"),
+        ("service", service),
+        ("account", account),
+    ])
 }
 
 impl MasterKeyStore for SecretService {
@@ -183,20 +183,5 @@ impl MasterKeyStore for SecretService {
             no_prompt(&prompt)?;
         }
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn secret_service_prompt_handle_is_refused() {
-        assert!(no_prompt(&OwnedObjectPath::try_from("/").unwrap()).is_ok());
-        let error =
-            no_prompt(&OwnedObjectPath::try_from("/org/freedesktop/secrets/prompt/1").unwrap())
-                .unwrap_err();
-        assert!(error.to_string().contains("unlock the keyring"));
-        assert!(error.to_string().contains("interactive prompt"));
     }
 }

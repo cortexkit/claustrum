@@ -426,7 +426,7 @@ case "$(uname -s)" in
     fi
     ;;
   MINGW*|MSYS*|CYGWIN*)
-    run_expect 1 "native master-key store" env CK_NATIVE_STORE_TESTS=1 \
+    run_expect 2 "native master-key store" env CK_NATIVE_STORE_TESTS=1 \
       cargo test --locked -p credentials-core --test native_store -- --nocapture --test-threads=1
     ;;
 esac

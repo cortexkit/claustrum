@@ -4,8 +4,9 @@
 #![forbid(unsafe_code)]
 
 // The real-store bodies exist only where a native store exists, but each test is
-// registered on every OS, so the workspace test count is the same on macOS, Linux
-// and Windows and the gate's floor means one thing everywhere.
+// registered on every OS. That keeps the workspace test count the same on macOS,
+// Linux and Windows, which scripts/gate.sh compares against one minimum count to
+// catch tests that silently stop running.
 #[cfg(any(target_os = "linux", windows))]
 mod native {
     use credentials_core::{
@@ -137,7 +138,8 @@ mod native {
         if !enabled() {
             return;
         }
-        // Reachability must fail even if lock testing was not explicitly authorized.
+        // First prove the Secret Service is reachable (a load must succeed), so an
+        // unreachable service fails here even when the lock part below is skipped.
         let mut fixture = Fixture::new();
         let backend = fixture.source.backend();
         backend.load_slot(&fixture.dir, KeySlot::Current).unwrap();

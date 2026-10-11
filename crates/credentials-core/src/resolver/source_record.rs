@@ -503,7 +503,9 @@ mod tests {
         }
     }
 
-    /// Every OS tests every native default and the cross-platform refusal.
+    /// Runs on every OS: checks each OS's default store (macOS keychain, Windows
+    /// Credential Manager, Linux Secret Service) and that creating a key in another
+    /// OS's store is refused.
     #[test]
     fn fresh_bootstrap_without_path_names_both_override_remedies() {
         use crate::resolver::refuse_unsupported_bootstrap;

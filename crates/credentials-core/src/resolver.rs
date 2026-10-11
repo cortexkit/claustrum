@@ -595,8 +595,10 @@ pub fn heal_pending_rotation(
     })
 }
 
-/// Native default for a fresh vault. Legacy unrecorded databases retain their
-/// keychain selection; the caller must supply an explicit path for legacy file keys.
+/// The store a fresh vault uses on each OS when no key file is given. A vault created
+/// before the `key-source` record existed is not affected: it has no record, so it
+/// keeps the macOS keychain, or the key file it is started with via `--key-path` or
+/// `CK_MASTER_KEY_PATH`.
 pub(super) fn native_source_for(platform: &str) -> KeySource {
     match platform {
         "windows" => KeySource::CredentialManager,
@@ -605,8 +607,10 @@ pub(super) fn native_source_for(platform: &str) -> KeySource {
     }
 }
 
-/// Refuse provisioning into another OS's native backend, without changing custody.
-/// Actual reachability and lock state are checked by the backend before generating a key.
+/// Refuse to create a new master key in another OS's native store (for example
+/// Credential Manager on Linux), before anything is written or recorded. Whether the
+/// store is reachable and unlocked is checked separately, by the store itself, before
+/// a key is generated.
 fn refuse_unsupported_bootstrap(
     source: &KeySource,
     recorded: bool,
@@ -626,7 +630,8 @@ fn refuse_unsupported_bootstrap(
     Ok(())
 }
 
-/// First-run provisioning, refusing to overwrite a key or fall back from a native store.
+/// Create a fresh vault's master key in the selected store. Refuses if a key already
+/// exists, and never switches to a key file when the native store is unavailable.
 pub fn bootstrap(config: &ResolverConfig) -> Result<MasterKey, MasterKeyError> {
     bootstrap_with_backend(config, config.source.backend().as_ref())
 }

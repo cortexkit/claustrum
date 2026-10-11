@@ -1,5 +1,8 @@
-//! Native custody uses the existing vault service and slot accounts. Secret Service
-//! calls are made below its prompting convenience APIs: prompt handles are refusals.
+//! Master-key storage in Windows Credential Manager and the Linux Secret Service.
+//! Items are named exactly as the macOS keychain names them: a service string derived
+//! from the vault's data directory, and one account per key slot (current and next).
+//! Secret Service is called through its raw D-Bus methods, so a reply asking for an
+//! interactive prompt is refused, never shown or waited on.
 
 #[cfg(any(windows, target_os = "linux", test))]
 use super::KeychainCli;
@@ -19,9 +22,10 @@ fn unavailable(backend: &'static str, reason: impl ToString) -> MasterKeyError {
     }
 }
 
-// Both native implementations use this write path so rotation cannot choose a
-// different item identity from load/delete. Reuse the existing keychain service
-// derivation unchanged so upgrades still address every provisioned macOS vault key.
+// Both native stores write through this function, so a write during rotation names
+// the same service and slot account that load and delete use. The service comes from
+// the keychain's derivation, unchanged: that string is how existing macOS vaults find
+// their keys, so it must never change.
 #[cfg(any(windows, target_os = "linux", test))]
 fn write_slot(
     data_dir: &Path,

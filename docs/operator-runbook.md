@@ -587,6 +587,14 @@ The daemon resolves the handle, refreshes the token if stale (vault-owned OAuth
 refresh, single-flight), and returns the credential payload. An unknown or revoked
 handle is a uniform `not_found` (no enumeration).
 
+On Linux, both `ck-claustrum` and `ck-auth` make themselves non-dumpable before
+processing arguments or loading credentials, and refuse to start if that fails.
+This prevents same-user ptrace attachment, `/proc/<pid>/mem` reads, and core dumps.
+It also makes `/proc/<pid>/exe`, `fd/`, `environ`, and `maps` unreadable to same-user
+processes. The supervisor handles this: `ck module status` reports the running
+image as `not readable (non-dumpable)`, which is expected, not a failed deployment.
+Windows has no equivalent process hardening here yet.
+
 A consumer that observes a 401/403 should call `credential.report_auth_failure
 { handle, provider_status, record_version }` so the vault marks the credential
 `needs_reauth` rather than serving a dead token. **`record_version` is required and

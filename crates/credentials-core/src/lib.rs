@@ -45,6 +45,7 @@ pub mod oauth;
 pub mod oauth_login;
 pub mod plan_detection;
 pub mod plan_tier;
+mod process_hardening;
 pub mod provider_ids;
 pub mod record;
 pub mod refresh_adapters;
@@ -55,6 +56,8 @@ pub mod store;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 pub mod usable;
+
+pub use process_hardening::harden_process;
 
 pub use admin_auth::{
     generate_admin_nonce, vault_id_for_canonical_dir, AdminMacKey, TranscriptParts,

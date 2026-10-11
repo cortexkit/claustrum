@@ -89,6 +89,11 @@ use ring::rand::SystemRandom;
 use ring::signature::Ed25519KeyPair;
 
 fn main() -> ExitCode {
+    if let Err(error) = credentials_core::harden_process() {
+        return finish(Err(CliError::Io(format!(
+            "process hardening failed: {error}"
+        ))));
+    }
     finish(run())
 }
 

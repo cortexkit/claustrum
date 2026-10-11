@@ -124,6 +124,8 @@ pub(crate) fn wrap_result<T: serde::Serialize>(value: T) -> serde_json::Value {
 
 #[tokio::main]
 async fn main() -> Result<(), ModuleError> {
+    credentials_core::harden_process()
+        .map_err(|error| ModuleError::Message(format!("process hardening failed: {error}")))?;
     // Answered BEFORE the --subc gate, so it works on a binary that is not being
     // supervised. Without this the only way to ask a deployed daemon what it is was to
     // start it, which needs a connection file and a live supervisor -- an identity

@@ -116,7 +116,7 @@ pub fn cmd_login(
     )
     .map_err(|error| CliError::Io(format!("building authorize url: {error}")))?;
 
-    let listener = if has_flag(args, "--no-listener") {
+    let listener = if super::paste_only(args) {
         None
     } else {
         super::login_listener::loopback_bind_addr(wire.redirect_uri())

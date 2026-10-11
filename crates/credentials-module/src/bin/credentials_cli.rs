@@ -647,8 +647,9 @@ fn help_verb(verb: &str) -> String {
              \x20 --client-secret-file <path>  gmail only: read your client secret from a file\n\
              \x20 --replace              swap an existing credential (keeps its handle)\n\
              \x20 --no-listener          paste the address-bar URL instead of using the loopback\n\
-             \x20                        listener\n\
+             \x20                        listener (automatic on Linux with no display)\n\
              \x20 --no-browser           only print the browser URL for headless or SSH sessions\n\
+             \x20                        (automatic on Linux with no display)\n\
              \x20 --device               select headless device authorization for openai/xai\n\
              \x20 --payload-file <path>  api-key logins: read the key from a file instead of\n\
              \x20                        prompting\n\
@@ -3027,7 +3028,7 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     // a connection error, so a provider that also registers a code-display redirect
     // is sent to that one instead. Bind-before-browser-open is preserved — the open
     // is still below.
-    let listener = if has_flag(args, "--no-listener") {
+    let listener = if paste_only(args) {
         None
     } else {
         login_listener::loopback_bind_addr(wire.redirect_uri)
@@ -6125,7 +6126,35 @@ fn tokio_block_on<F: std::future::Future>(fut: F) -> F::Output {
 }
 
 fn browser_open_allowed(args: &[String]) -> bool {
-    !has_flag(args, "--no-browser")
+    !has_flag(args, "--no-browser") && !no_local_display()
+}
+
+/// True on Linux when no graphical session is present (neither `DISPLAY` nor
+/// `WAYLAND_DISPLAY` is set), as on a headless server or a plain SSH login. No
+/// browser can open there, and a browser on another device can't reach this
+/// machine's loopback listener, so the login goes straight to the paste prompt
+/// instead of waiting on a callback that can't arrive.
+fn no_local_display() -> bool {
+    no_local_display_from(
+        cfg!(target_os = "linux"),
+        std::env::var_os("DISPLAY"),
+        std::env::var_os("WAYLAND_DISPLAY"),
+    )
+}
+
+fn no_local_display_from(
+    linux: bool,
+    display: Option<std::ffi::OsString>,
+    wayland: Option<std::ffi::OsString>,
+) -> bool {
+    let unset = |v: Option<std::ffi::OsString>| v.is_none_or(|v| v.is_empty());
+    linux && unset(display) && unset(wayland)
+}
+
+/// Use only the paste flow: asked for with `--no-listener`, or forced because this
+/// machine has no display.
+fn paste_only(args: &[String]) -> bool {
+    has_flag(args, "--no-listener") || no_local_display()
 }
 
 /// Best-effort open of a URL in the operator's default browser. A failure is ignored
@@ -6133,6 +6162,9 @@ fn browser_open_allowed(args: &[String]) -> bool {
 /// Headless sessions can refuse the spawn before any platform command is constructed.
 /// Never passes the URL through a shell (no injection surface).
 fn open_in_browser(args: &[String], url: &str) -> std::io::Result<()> {
+    if no_local_display() && !has_flag(args, "--no-browser") {
+        println!("No display found on this machine, so no browser opens here. Open the URL above on any device, then paste the address it lands on.");
+    }
     if !browser_open_allowed(args) {
         return Ok(());
     }
@@ -6417,8 +6449,28 @@ mod tests {
 
     #[test]
     fn no_browser_flag_refuses_the_platform_browser_spawn() {
-        assert!(super::browser_open_allowed(&[]));
+        // Without the flag the answer depends on this machine's display (a headless
+        // Linux CI runner has none); with it, the spawn is always refused.
+        assert_eq!(super::browser_open_allowed(&[]), !super::no_local_display());
         assert!(!super::browser_open_allowed(&["--no-browser".to_string()]));
+    }
+
+    #[test]
+    fn only_linux_without_any_display_counts_as_headless() {
+        use super::no_local_display_from as headless;
+        let set = |v: &str| Some(std::ffi::OsString::from(v));
+        assert!(headless(true, None, None));
+        assert!(headless(true, set(""), set("")));
+        assert!(!headless(true, set(":0"), None));
+        assert!(!headless(true, None, set("wayland-0")));
+        // macOS and Windows always have a way to open a browser for the signed-in user.
+        assert!(!headless(false, None, None));
+    }
+
+    #[test]
+    fn no_listener_flag_forces_the_paste_flow() {
+        assert!(super::paste_only(&["--no-listener".to_string()]));
+        assert_eq!(super::paste_only(&[]), super::no_local_display());
     }
 
     /// A client-side failure must not speak in the module's voice.

@@ -121,7 +121,7 @@ fn run_devin(
     let state = generate_state().map_err(|e| format!("csprng: {e}"))?;
     let authorize_url = devin::authorize_url(devin::LOGIN_REDIRECT_URI, &state, &pkce.challenge)
         .map_err(|e| format!("building Devin login URL: {e}"))?;
-    let listener = if has_flag(args, "--no-listener") {
+    let listener = if super::paste_only(args) {
         None
     } else {
         login_listener::loopback_bind_addr(devin::LOGIN_REDIRECT_URI)
@@ -206,7 +206,7 @@ fn run_snowflake(
     let pkce = generate_pkce().map_err(|e| format!("csprng: {e}"))?;
     let state = generate_state().map_err(|e| format!("csprng: {e}"))?;
     let authorize_url = snowflake::authorize_url(&account, &redirect_uri, &state, &pkce.challenge)?;
-    let listener = if has_flag(args, "--no-listener") {
+    let listener = if super::paste_only(args) {
         // Keep the dynamically selected port in the URL, but intentionally release
         // the socket so this flag has the same paste-only behavior as other providers.
         drop(reserved);
@@ -273,7 +273,7 @@ fn run_digitalocean(
     preflight(&id, has_flag(args, "--replace") || selected_replace)?;
     let state = generate_state().map_err(|e| format!("csprng: {e}"))?;
     let authorize_url = digitalocean::authorize_url(&state);
-    let listener = if has_flag(args, "--no-listener") {
+    let listener = if super::paste_only(args) {
         None
     } else {
         login_listener::loopback_bind_addr(digitalocean::REDIRECT_URI)

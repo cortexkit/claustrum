@@ -1,7 +1,22 @@
 use cortexkit_test_support::{ckdev_binary, dev_command};
 
+#[path = "support/isolated_cli.rs"]
+mod isolated_cli;
+
+fn command() -> std::process::Command {
+    let mut command = dev_command(ckdev_binary(env!("CARGO_BIN_EXE_ck-auth")));
+    isolated_cli::isolate(&mut command);
+    command
+}
+
+/// See `isolated_cli`: a test that omits `--data-dir` must not reach the real vault.
+#[test]
+fn every_cli_command_runs_in_the_isolated_home() {
+    isolated_cli::assert_isolated(&command());
+}
+
 fn login(args: &[&str]) -> std::process::Output {
-    dev_command(ckdev_binary(env!("CARGO_BIN_EXE_ck-auth")))
+    command()
         .arg("login")
         .args(args)
         .stdin(std::process::Stdio::null())

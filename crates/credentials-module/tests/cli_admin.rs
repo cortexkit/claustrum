@@ -33,7 +33,23 @@ use common::tmp_root;
 /// `scripts/release-build.sh` sets this after staging.
 const CLI_BIN_ENV: &str = "CRED_CLI_BIN";
 
+#[path = "support/isolated_cli.rs"]
+mod isolated_cli;
+
 fn cli() -> Command {
+    let mut command = cli_binary();
+    isolated_cli::isolate(&mut command);
+    command
+}
+
+/// Dropping the isolation from `cli()` would let a test that omits `--data-dir` open the
+/// developer's real vault and read its master key.
+#[test]
+fn every_cli_command_runs_in_the_isolated_home() {
+    isolated_cli::assert_isolated(&cli());
+}
+
+fn cli_binary() -> Command {
     // REFUSES a bad override rather than falling back: a typo that silently tested the
     // cargo-built binary would report exactly the green the caller was hoping for.
     match std::env::var_os(CLI_BIN_ENV) {

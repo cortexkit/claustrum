@@ -98,11 +98,22 @@ fn skip_if_seam_is_compiled_out(arm: &str) -> bool {
     false
 }
 
+#[path = "support/isolated_cli.rs"]
+mod isolated_cli;
+
 fn cli() -> Command {
-    match std::env::var_os("CRED_CLI_BIN") {
+    let mut command = match std::env::var_os("CRED_CLI_BIN") {
         Some(path) => dev_command(ckdev_binary(path)),
         None => dev_command(ckdev_binary(env!("CARGO_BIN_EXE_ck-auth"))),
-    }
+    };
+    isolated_cli::isolate(&mut command);
+    command
+}
+
+/// See `isolated_cli`: a test that omits `--data-dir` must not reach the real vault.
+#[test]
+fn every_cli_command_runs_in_the_isolated_home() {
+    isolated_cli::assert_isolated(&cli());
 }
 
 /// The POSIX permission bits of `path`.

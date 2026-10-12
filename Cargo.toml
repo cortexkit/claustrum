@@ -28,7 +28,7 @@ members = ["crates/credentials-core", "crates/credentials-module", "crates/claus
 cortexkit-test-support = "0.1.0"
 subc-protocol = "0.31.0"
 subc-transport = "0.12.0"
-subc-os = "0.1.14"
+subc-os = "0.1.16"
 
 cortexkit-store = "0.2.4"
 cortexkit-lease = "0.1.2"

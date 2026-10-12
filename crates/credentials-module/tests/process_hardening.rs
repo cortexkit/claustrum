@@ -100,11 +100,6 @@ mod linux {
             "unexpected image error {error:?} (procfs: {super_options})",
         );
     }
-
-    pub(super) fn main_body<'a>(source: &'a str, signature: &str) -> &'a str {
-        let (_, body) = source.split_once(signature).expect("main signature exists");
-        body.trim_start()
-    }
 }
 
 #[test]
@@ -115,32 +110,56 @@ fn ck_auth_process_is_non_dumpable() {
     eprintln!("SKIPPING: process dumpability is Linux-only");
 }
 
+/// The text after a `main` signature. Source scans run on every OS: the hardening
+/// call is platform-specific, but the order of statements in `main` is not.
+fn main_body<'a>(source: &'a str, signature: &str) -> &'a str {
+    let (_, body) = source.split_once(signature).expect("main signature exists");
+    body.trim_start()
+}
+
 #[test]
 fn ck_auth_hardens_before_any_other_main_statement() {
-    #[cfg(target_os = "linux")]
     assert!(
-        linux::main_body(
+        main_body(
             include_str!("../src/bin/credentials_cli.rs"),
             "fn main() -> ExitCode {",
         )
         .starts_with("if let Err(error) = credentials_core::harden_process() {"),
         "ck-auth must fail closed on process hardening as main's first statement",
     );
-    #[cfg(not(target_os = "linux"))]
-    eprintln!("SKIPPING: Linux startup hardening source scan");
 }
 
 #[test]
 fn ck_claustrum_hardens_before_any_other_main_statement() {
-    #[cfg(target_os = "linux")]
     assert!(
-        linux::main_body(
+        main_body(
             include_str!("../src/main.rs"),
             "async fn main() -> Result<(), ModuleError> {",
         )
         .starts_with("credentials_core::harden_process()"),
         "ck-claustrum must harden the process as main's first statement",
     );
-    #[cfg(not(target_os = "linux"))]
-    eprintln!("SKIPPING: Linux startup hardening source scan");
+}
+
+/// `harden_process` must apply each platform's protection and propagate its error,
+/// so dropping either line, or swallowing a failure with `.ok()`, fails here.
+#[test]
+fn harden_process_applies_the_linux_and_windows_protections() {
+    let source = include_str!("../../credentials-core/src/process_hardening.rs");
+    let (_, body) = source
+        .split_once("pub fn harden_process() -> std::io::Result<()> {")
+        .expect("harden_process exists");
+    let body = &body[..body.find("\n}\n").expect("harden_process ends")];
+    for (platform, call) in [
+        (
+            "linux",
+            "#[cfg(target_os = \"linux\")]\n    rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable)?;",
+        ),
+        (
+            "windows",
+            "#[cfg(windows)]\n    subc_os::windows_acl::restrict_current_process()?;",
+        ),
+    ] {
+        assert!(body.contains(call), "harden_process must apply the {platform} protection and propagate its error");
+    }
 }

@@ -1,12 +1,24 @@
-/// Prevent same-user ptrace attachment, `/proc/<pid>/mem` reads, and core dumps
-/// on Linux. On other operating systems this is a no-op.
+/// Stop other processes running as the same user from reading or altering the
+/// vault's memory. Called first in `main` of both binaries, before any secret is
+/// read; a failure stops startup, so the vault never runs unprotected by accident.
 ///
-/// Linux also makes `/proc/<pid>/exe`, `fd/`, `environ`, and `maps` unreadable to
-/// same-user processes. This side effect is accepted: the supervisor handles
+/// Linux: the process becomes non-dumpable, which refuses same-user ptrace attach,
+/// `/proc/<pid>/mem` reads and core dumps. It also makes `/proc/<pid>/exe`, `fd/`,
+/// `environ` and `maps` unreadable to same-user processes; the supervisor handles
 /// non-dumpable modules without reading those paths.
+///
+/// Windows: the process replaces its own DACL with one granting the user only
+/// query-limited information, synchronize and terminate, which are the rights the
+/// supervisor uses. Memory read and write, thread creation, handle duplication and
+/// DACL changes are refused, including to the vault's own user. A process with
+/// `SeDebugPrivilege` enabled, such as an elevated administrator, still gets in.
+///
+/// macOS: nothing here; the hardened runtime signature does this job.
 pub fn harden_process() -> std::io::Result<()> {
     #[cfg(target_os = "linux")]
     rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable)?;
+    #[cfg(windows)]
+    subc_os::windows_acl::restrict_current_process()?;
     Ok(())
 }
 

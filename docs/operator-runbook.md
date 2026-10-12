@@ -593,7 +593,13 @@ This prevents same-user ptrace attachment, `/proc/<pid>/mem` reads, and core dum
 It also makes `/proc/<pid>/exe`, `fd/`, `environ`, and `maps` unreadable to same-user
 processes. The supervisor handles this: `ck module status` reports the running
 image as `not readable (non-dumpable)`, which is expected, not a failed deployment.
-Windows has no equivalent process hardening here yet.
+On Windows, both binaries replace their own process DACL at the same point, granting
+the user only query-limited information, synchronize and terminate (the rights the
+supervisor uses), and refuse to start if that fails. Same-user processes are then
+refused memory reads and writes, thread creation, handle duplication and DACL
+changes. A process with `SeDebugPrivilege` enabled, such as an elevated
+administrator, still gets in, so this is defence in depth rather than a boundary.
+On macOS the hardened runtime signature does this job.
 
 A consumer that observes a 401/403 should call `credential.report_auth_failure
 { handle, provider_status, record_version }` so the vault marks the credential

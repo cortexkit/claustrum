@@ -352,7 +352,7 @@ assert_floor_not_lowered() {
 # (platform-specific bodies print a skip line), so the count is the same on macOS,
 # Linux and Windows. `assert_floor_not_lowered` below stops a branch from lowering
 # the floor below its merge target. The history of each raise is in git log.
-run_expect 1103 "workspace unit + integration" \
+run_expect 1104 "workspace unit + integration" \
   cargo test --locked --workspace --features credentials-core/test-support
 
 assert_floor_not_lowered "$SCRIPT_PATH"

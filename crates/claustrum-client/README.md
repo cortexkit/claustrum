@@ -6,7 +6,7 @@ decoders can be tested against the producer's serialized replies.
 
 ```toml
 [dependencies]
-cortexkit-claustrum-client = "0.1.0"
+cortexkit-claustrum-client = "0.2.0"
 ```
 
 Construct `ClaustrumCredentialResolver::new(connection_file_path, project_root,
@@ -18,15 +18,29 @@ client does not acquire grants or enroll a consumer.
 
 `resolve` reads a credential through a capability handle. `get_scoped` and
 `status_scoped` address a credential by its vault ID under the route's
-principal. `sign` and `public_key` use vault-held signing keys, which never
-leave the vault. `list_scoped` lists the credentials the caller's grants cover.
-Handle reads, signing and public-key reads retry transient and transport
-failures a bounded number of times; scoped reads return the first error and
-leave the redial to the caller. `auth_required` and permanent refusals always
-return at once. Listing failures are row-local: callers
-should check `undecodable_credentials` and `undecodable_grants`, because the
-library does not log them. A grant tuple with a missing, empty or non-string
-field is skipped and reported there, never turned into an empty-string grant.
+principal. Use `get_scoped_with_min_ttl(credential_id, min_ttl_ms)` when the
+served token must remain valid for a bounded request duration; ordinary
+`get_scoped` omits `min_ttl_ms` from the wire request. Successful reads expose
+optional `account_id`, `email`, and `org_name` metadata on `ResolvedCredential`
+when the vault has captured those identity fields. These values are non-secret;
+the credential payload remains redacted in `Debug` output.
+
+`report_auth_failure(credential_id, record_version, provider_status)` sends a
+version-fenced report for the credential version that was used. The client
+rejects statuses other than 401 and 403 before sending. Its boolean result is the
+vault's `accepted` answer, not proof that state changed: a stale version is
+accepted and ignored. After reporting, read again; if the version did not move,
+stop rather than looping. For a static API key, a 401 means the key is dead.
+
+`sign` and `public_key` use vault-held signing keys, which never leave the vault.
+`list_scoped` lists the credentials the caller's grants cover. Handle reads,
+signing and public-key reads retry transient and transport failures a bounded
+number of times; scoped reads return the first error and leave the redial to the
+caller. `auth_required` and permanent refusals always return at once. Listing
+failures are row-local: callers should check `undecodable_credentials` and
+`undecodable_grants`, because the library does not log them. A grant tuple with
+a missing, empty or non-string field is skipped and reported there, never turned
+into an empty-string grant.
 
 ## Contract tests
 
@@ -41,11 +55,11 @@ cargo test --locked -p cortexkit-claustrum-client
 
 The fixture holds real `list_scoped`, `credential.get`, `credential.get_scoped`,
 `credential.status`, `credential.sign`, `credential.public_key` and
-`credential.report_auth_failure` replies. The signing and scoped successes run
-through the vault's real read surface and request dispatcher with synthetic test
-material. Rust tests pin the decoded Ed25519 key ID, algorithm and exact signature
-and public-key hex, and verify the signature over the fixture's message with
-`ring`. The Rust client has no auth-failure report decoder; the TypeScript client
-tests that receipt as well as the dedicated scoped-read reply.
+`credential.report_auth_failure` replies. The Rust tests decode producer-generated
+account identity metadata when present, verify absence when omitted, and decode
+the report's `accepted` answer. The signing and scoped successes run through the
+vault's real read surface and request dispatcher with synthetic test material.
+Rust tests pin the decoded Ed25519 key ID, algorithm and exact signature and
+public-key hex, and verify the signature over the fixture's message with `ring`.
 
 License: MIT.

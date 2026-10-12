@@ -261,6 +261,21 @@ async fn producer_get_result_bytes_decode_through_handle_and_scoped_reads() {
             assert_eq!(decoded.expose(), b"fixture-not-a-secret");
             assert_eq!(decoded.record_version, version);
             assert_eq!(decoded.expires_at_ms, expires_at_ms);
+            if version == "42" {
+                assert_eq!(
+                    decoded.account_id.as_deref(),
+                    Some("00000000-0000-4000-8000-000000000000")
+                );
+                assert_eq!(decoded.email.as_deref(), Some("consumer@example.invalid"));
+                assert_eq!(decoded.org_name.as_deref(), Some("Example Org"));
+                let debug = format!("{decoded:?}");
+                assert!(debug.contains("account_id"));
+                assert!(!debug.contains("fixture-not-a-secret"));
+            } else {
+                assert_eq!(decoded.account_id, None);
+                assert_eq!(decoded.email, None);
+                assert_eq!(decoded.org_name, None);
+            }
         }
     }
 }
@@ -352,4 +367,15 @@ async fn producer_read_surface_get_scoped_reply_decodes_served_material() {
     assert_eq!(decoded.expose(), b"fixture-not-a-secret");
     assert_eq!(decoded.record_version, "1");
     assert_eq!(decoded.expires_at_ms, Some(4_102_444_800_000));
+    assert_eq!(decoded.account_id, None);
+    assert_eq!(decoded.email, None);
+    assert_eq!(decoded.org_name, None);
+}
+
+#[test]
+fn producer_report_auth_failure_reply_decodes_the_accepted_answer() {
+    let operation = producer_operation("credential.report_auth_failure");
+    let replies = operation["success"].as_array().unwrap();
+    assert_eq!(replies.len(), 1);
+    assert!(decode_report_auth_failure_reply(producer_reply(&replies[0])).unwrap());
 }

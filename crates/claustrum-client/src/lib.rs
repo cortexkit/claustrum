@@ -23,6 +23,7 @@ use tokio::sync::Mutex as AsyncMutex;
 const CREDENTIAL_MODULE_ID: &str = "claustrum";
 const CREDENTIAL_GET_OP: &str = "credential.get";
 const CREDENTIAL_GET_SCOPED_OP: &str = "credential.get_scoped";
+const CREDENTIAL_REPORT_AUTH_FAILURE_OP: &str = "credential.report_auth_failure";
 const CREDENTIAL_STATUS_OP: &str = "credential.status";
 const CREDENTIAL_SIGN_OP: &str = "credential.sign";
 const CREDENTIAL_PUBLIC_KEY_OP: &str = "credential.public_key";
@@ -136,6 +137,12 @@ pub struct ResolvedCredential {
     payload: Vec<u8>,
     pub record_version: String,
     pub expires_at_ms: Option<i64>,
+    /// Provider account identifier returned by the vault, when known.
+    pub account_id: Option<String>,
+    /// Provider account email returned by the vault, when captured.
+    pub email: Option<String>,
+    /// Provider organization or workspace name returned by the vault, when captured.
+    pub org_name: Option<String>,
 }
 
 /// Plaintext readiness metadata for a scoped credential. This never contains or
@@ -208,10 +215,24 @@ pub struct ListedGrant {
 
 impl ResolvedCredential {
     pub fn new(payload: Vec<u8>, record_version: String, expires_at_ms: Option<i64>) -> Self {
+        Self::new_with_identity(payload, record_version, expires_at_ms, None, None, None)
+    }
+
+    fn new_with_identity(
+        payload: Vec<u8>,
+        record_version: String,
+        expires_at_ms: Option<i64>,
+        account_id: Option<String>,
+        email: Option<String>,
+        org_name: Option<String>,
+    ) -> Self {
         Self {
             payload,
             record_version,
             expires_at_ms,
+            account_id,
+            email,
+            org_name,
         }
     }
 
@@ -227,6 +248,9 @@ impl std::fmt::Debug for ResolvedCredential {
             .field("payload", &"[REDACTED]")
             .field("record_version", &self.record_version)
             .field("expires_at_ms", &self.expires_at_ms)
+            .field("account_id", &self.account_id)
+            .field("email", &self.email)
+            .field("org_name", &self.org_name)
             .finish()
     }
 }
@@ -253,6 +277,32 @@ pub trait CredentialResolver: Send + Sync {
         &'a self,
         credential_id: &'a str,
     ) -> CredentialResolverFuture<'a, Result<ResolvedCredential, CredentialResolverError>>;
+
+    /// Reads a scoped credential only when the served token has at least this much
+    /// remaining lifetime. Implementations that cannot enforce the bound fail closed.
+    fn get_scoped_with_min_ttl<'a>(
+        &'a self,
+        _credential_id: &'a str,
+        _min_ttl_ms: u64,
+    ) -> CredentialResolverFuture<'a, Result<ResolvedCredential, CredentialResolverError>> {
+        Box::pin(async { Err(CredentialResolverError::unavailable()) })
+    }
+
+    /// Reports a provider auth failure for the credential ID and served version.
+    /// The vault accepts only provider status 401 or 403; any other status is
+    /// rejected locally before a request is sent.
+    /// `accepted` means the vault accepted the report, not that it changed state: a
+    /// stale `record_version` is accepted and ignored. Read again after reporting; if
+    /// the version has not moved, stop rather than retrying in a loop. For a static
+    /// API key, a 401 means the key is dead.
+    fn report_auth_failure<'a>(
+        &'a self,
+        _credential_id: &'a str,
+        _record_version: u64,
+        _provider_status: u16,
+    ) -> CredentialResolverFuture<'a, Result<bool, CredentialResolverError>> {
+        Box::pin(async { Err(CredentialResolverError::unavailable()) })
+    }
 
     /// Returns status for a vault ID under the reserved principal without minting.
     fn status_scoped<'a>(
@@ -325,6 +375,33 @@ pub trait CredentialGetTarget: Send + Sync {
             Err(CredentialResolverError::new(
                 CredentialErrorClass::Permanent,
                 "credential scoped reads are unavailable",
+            ))
+        })
+    }
+
+    fn credential_get_scoped_with_min_ttl<'a>(
+        &'a self,
+        _credential_id: &'a str,
+        _min_ttl_ms: u64,
+    ) -> CredentialResolverFuture<'a, Result<Value, CredentialResolverError>> {
+        Box::pin(async {
+            Err(CredentialResolverError::new(
+                CredentialErrorClass::Unavailable,
+                "credential scoped reads with a minimum TTL are unavailable",
+            ))
+        })
+    }
+
+    fn credential_report_auth_failure<'a>(
+        &'a self,
+        _credential_id: &'a str,
+        _record_version: u64,
+        _provider_status: u16,
+    ) -> CredentialResolverFuture<'a, Result<Value, CredentialResolverError>> {
+        Box::pin(async {
+            Err(CredentialResolverError::new(
+                CredentialErrorClass::Unavailable,
+                "credential auth-failure reports are unavailable",
             ))
         })
     }
@@ -481,6 +558,39 @@ impl CredentialResolver for ClaustrumCredentialResolver {
         })
     }
 
+    fn get_scoped_with_min_ttl<'a>(
+        &'a self,
+        credential_id: &'a str,
+        min_ttl_ms: u64,
+    ) -> CredentialResolverFuture<'a, Result<ResolvedCredential, CredentialResolverError>> {
+        Box::pin(async move {
+            self.target
+                .credential_get_scoped_with_min_ttl(credential_id, min_ttl_ms)
+                .await
+                .and_then(decode_credential_reply)
+        })
+    }
+
+    fn report_auth_failure<'a>(
+        &'a self,
+        credential_id: &'a str,
+        record_version: u64,
+        provider_status: u16,
+    ) -> CredentialResolverFuture<'a, Result<bool, CredentialResolverError>> {
+        Box::pin(async move {
+            if !matches!(provider_status, 401 | 403) {
+                return Err(CredentialResolverError::new(
+                    CredentialErrorClass::Permanent,
+                    "provider status must be 401 or 403",
+                ));
+            }
+            self.target
+                .credential_report_auth_failure(credential_id, record_version, provider_status)
+                .await
+                .and_then(decode_report_auth_failure_reply)
+        })
+    }
+
     fn status_scoped<'a>(
         &'a self,
         credential_id: &'a str,
@@ -556,7 +666,22 @@ trait CredentialConsumerConnection: Send {
     fn credential_get_scoped<'a>(
         &'a mut self,
         credential_id: &'a str,
+        min_ttl_ms: Option<u64>,
     ) -> CredentialResolverFuture<'a, Result<Value, CredentialResolverError>>;
+
+    fn credential_report_auth_failure<'a>(
+        &'a mut self,
+        _credential_id: &'a str,
+        _record_version: u64,
+        _provider_status: u16,
+    ) -> CredentialResolverFuture<'a, Result<Value, CredentialResolverError>> {
+        Box::pin(async {
+            Err(CredentialResolverError::new(
+                CredentialErrorClass::Unavailable,
+                "credential auth-failure reports are unavailable",
+            ))
+        })
+    }
 
     fn credential_status<'a>(
         &'a mut self,
@@ -707,10 +832,55 @@ impl CredentialGetTarget for LiveCredentialGetTarget {
                 consumer
                     .as_mut()
                     .expect("credential consumer initialized")
-                    .credential_get_scoped(credential_id),
+                    .credential_get_scoped(credential_id, None),
             )
             .await
             .unwrap_or_else(|_| Err(Self::deadline_error(CREDENTIAL_GET_SCOPED_OP)));
+            Self::clear_failed_transport(&mut consumer, &result);
+            result
+        })
+    }
+
+    fn credential_get_scoped_with_min_ttl<'a>(
+        &'a self,
+        credential_id: &'a str,
+        min_ttl_ms: u64,
+    ) -> CredentialResolverFuture<'a, Result<Value, CredentialResolverError>> {
+        Box::pin(async move {
+            let mut consumer = self.consumer.lock().await;
+            self.connect_if_needed(&mut consumer).await?;
+            let result = tokio::time::timeout(
+                self.call_deadline,
+                consumer
+                    .as_mut()
+                    .expect("credential consumer initialized")
+                    .credential_get_scoped(credential_id, Some(min_ttl_ms)),
+            )
+            .await
+            .unwrap_or_else(|_| Err(Self::deadline_error(CREDENTIAL_GET_SCOPED_OP)));
+            Self::clear_failed_transport(&mut consumer, &result);
+            result
+        })
+    }
+
+    fn credential_report_auth_failure<'a>(
+        &'a self,
+        credential_id: &'a str,
+        record_version: u64,
+        provider_status: u16,
+    ) -> CredentialResolverFuture<'a, Result<Value, CredentialResolverError>> {
+        Box::pin(async move {
+            let mut consumer = self.consumer.lock().await;
+            self.connect_if_needed(&mut consumer).await?;
+            let result = tokio::time::timeout(
+                self.call_deadline,
+                consumer
+                    .as_mut()
+                    .expect("credential consumer initialized")
+                    .credential_report_auth_failure(credential_id, record_version, provider_status),
+            )
+            .await
+            .unwrap_or_else(|_| Err(Self::deadline_error(CREDENTIAL_REPORT_AUTH_FAILURE_OP)));
             Self::clear_failed_transport(&mut consumer, &result);
             result
         })
@@ -920,10 +1090,24 @@ impl ClaustrumConsumer {
     async fn credential_get_scoped(
         &mut self,
         credential_id: &str,
+        min_ttl_ms: Option<u64>,
     ) -> Result<Value, CredentialResolverError> {
         self.credential_request(
-            credential_get_scoped_request(credential_id),
-            "credential.get_scoped",
+            credential_get_scoped_request(credential_id, min_ttl_ms),
+            CREDENTIAL_GET_SCOPED_OP,
+        )
+        .await
+    }
+
+    async fn credential_report_auth_failure(
+        &mut self,
+        credential_id: &str,
+        record_version: u64,
+        provider_status: u16,
+    ) -> Result<Value, CredentialResolverError> {
+        self.credential_request(
+            credential_report_auth_failure_request(credential_id, record_version, provider_status),
+            CREDENTIAL_REPORT_AUTH_FAILURE_OP,
         )
         .await
     }
@@ -1075,10 +1259,26 @@ impl CredentialConsumerConnection for ClaustrumConsumer {
     fn credential_get_scoped<'a>(
         &'a mut self,
         credential_id: &'a str,
+        min_ttl_ms: Option<u64>,
     ) -> CredentialResolverFuture<'a, Result<Value, CredentialResolverError>> {
         Box::pin(ClaustrumConsumer::credential_get_scoped(
             self,
             credential_id,
+            min_ttl_ms,
+        ))
+    }
+
+    fn credential_report_auth_failure<'a>(
+        &'a mut self,
+        credential_id: &'a str,
+        record_version: u64,
+        provider_status: u16,
+    ) -> CredentialResolverFuture<'a, Result<Value, CredentialResolverError>> {
+        Box::pin(ClaustrumConsumer::credential_report_auth_failure(
+            self,
+            credential_id,
+            record_version,
+            provider_status,
         ))
     }
 
@@ -1266,10 +1466,29 @@ fn credential_get_request(raw_handle: &str, min_ttl_ms: Option<u64>, force_refre
     })
 }
 
-fn credential_get_scoped_request(credential_id: &str) -> Value {
+fn credential_get_scoped_request(credential_id: &str, min_ttl_ms: Option<u64>) -> Value {
+    let mut params = json!({ "credential_id": credential_id });
+    if let Some(min_ttl_ms) = min_ttl_ms {
+        params["min_ttl_ms"] = json!(min_ttl_ms);
+    }
     json!({
         "method": CREDENTIAL_GET_SCOPED_OP,
-        "params": { "credential_id": credential_id },
+        "params": params,
+    })
+}
+
+fn credential_report_auth_failure_request(
+    credential_id: &str,
+    record_version: u64,
+    provider_status: u16,
+) -> Value {
+    json!({
+        "method": CREDENTIAL_REPORT_AUTH_FAILURE_OP,
+        "params": {
+            "credential_id": credential_id,
+            "provider_status": provider_status,
+            "record_version": record_version,
+        },
     })
 }
 
@@ -1636,7 +1855,30 @@ fn decode_credential_reply(value: Value) -> Result<ResolvedCredential, Credentia
             )
         })?;
     let expires_at_ms = result.get("expires_at_ms").and_then(Value::as_i64);
-    Ok(ResolvedCredential::new(payload, version, expires_at_ms))
+    Ok(ResolvedCredential::new_with_identity(
+        payload,
+        version,
+        expires_at_ms,
+        optional_string(result, "account_id"),
+        optional_string(result, "email"),
+        optional_string(result, "org_name"),
+    ))
+}
+
+fn decode_report_auth_failure_reply(value: Value) -> Result<bool, CredentialResolverError> {
+    let result = value.get("result").unwrap_or(&value);
+    if result.get("error").is_some() {
+        return Err(classify_error_value(result));
+    }
+    result
+        .get("accepted")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| {
+            CredentialResolverError::new(
+                CredentialErrorClass::InvalidResponse,
+                "auth-failure report reply has no accepted value",
+            )
+        })
 }
 #[cfg(test)]
 mod contract_tests;
@@ -1651,6 +1893,7 @@ mod tests {
     struct FakeCkcredTarget {
         script: Mutex<VecDeque<Result<Value, CredentialResolverError>>>,
         requests: Mutex<Vec<(String, Option<u64>, bool)>>,
+        reports: Mutex<Vec<(String, u64, u16)>>,
     }
 
     impl CredentialGetTarget for FakeCkcredTarget {
@@ -1685,6 +1928,43 @@ mod tests {
                 self.script
                     .lock()
                     .expect("fake CKCRED target poisoned")
+                    .pop_front()
+                    .expect("fake CKCRED target script exhausted")
+            })
+        }
+
+        fn credential_get_scoped_with_min_ttl<'a>(
+            &'a self,
+            credential_id: &'a str,
+            min_ttl_ms: u64,
+        ) -> CredentialResolverFuture<'a, Result<Value, CredentialResolverError>> {
+            Box::pin(async move {
+                self.requests
+                    .lock()
+                    .expect("fake CKCRED target poisoned")
+                    .push((credential_id.to_owned(), Some(min_ttl_ms), false));
+                self.script
+                    .lock()
+                    .expect("fake CKCRED target script exhausted")
+                    .pop_front()
+                    .expect("fake CKCRED target script exhausted")
+            })
+        }
+
+        fn credential_report_auth_failure<'a>(
+            &'a self,
+            credential_id: &'a str,
+            record_version: u64,
+            provider_status: u16,
+        ) -> CredentialResolverFuture<'a, Result<Value, CredentialResolverError>> {
+            Box::pin(async move {
+                self.reports
+                    .lock()
+                    .expect("fake CKCRED target poisoned")
+                    .push((credential_id.to_owned(), record_version, provider_status));
+                self.script
+                    .lock()
+                    .expect("fake CKCRED target script exhausted")
                     .pop_front()
                     .expect("fake CKCRED target script exhausted")
             })
@@ -1728,6 +2008,7 @@ mod tests {
         fn credential_get_scoped<'a>(
             &'a mut self,
             _credential_id: &'a str,
+            _min_ttl_ms: Option<u64>,
         ) -> CredentialResolverFuture<'a, Result<Value, CredentialResolverError>> {
             Box::pin(async move {
                 if self.hangs {
@@ -1823,6 +2104,7 @@ mod tests {
                 })),
             ])),
             requests: Mutex::new(Vec::new()),
+            reports: Mutex::new(Vec::new()),
         });
         let resolver = ClaustrumCredentialResolver::with_target(target.clone(), 2);
 
@@ -1890,10 +2172,31 @@ mod tests {
         );
         let credential_id = "github_app:scoped-agent";
         assert_eq!(
-            credential_get_scoped_request(credential_id),
+            credential_get_scoped_request(credential_id, None),
             json!({
                 "method": "credential.get_scoped",
                 "params": { "credential_id": credential_id },
+            })
+        );
+        assert_eq!(
+            credential_get_scoped_request(credential_id, Some(500)),
+            json!({
+                "method": "credential.get_scoped",
+                "params": {
+                    "credential_id": credential_id,
+                    "min_ttl_ms": 500,
+                },
+            })
+        );
+        assert_eq!(
+            credential_report_auth_failure_request(credential_id, 7, 401),
+            json!({
+                "method": "credential.report_auth_failure",
+                "params": {
+                    "credential_id": credential_id,
+                    "provider_status": 401,
+                    "record_version": 7,
+                },
             })
         );
         assert_eq!(
@@ -2023,6 +2326,7 @@ mod tests {
                 })),
             ])),
             requests: Mutex::new(Vec::new()),
+            reports: Mutex::new(Vec::new()),
         });
         let resolver = ClaustrumCredentialResolver::with_target(target.clone(), 2);
 
@@ -2036,6 +2340,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scoped_get_with_min_ttl_forwards_the_requested_bound() {
+        let credential_id = "oauth:anthropic";
+        let target = Arc::new(FakeCkcredTarget {
+            script: Mutex::new(VecDeque::from([Ok(json!({
+                "payload": "served-token",
+                "record_version": 4,
+                "expires_at_ms": 1_900_000_000_000_i64,
+            }))])),
+            requests: Mutex::new(Vec::new()),
+            reports: Mutex::new(Vec::new()),
+        });
+        let resolver = ClaustrumCredentialResolver::with_target(target.clone(), 0);
+
+        let credential = resolver
+            .get_scoped_with_min_ttl(credential_id, 300_000)
+            .await
+            .unwrap();
+
+        assert_eq!(credential.expose(), b"served-token");
+        assert_eq!(
+            target.requests.lock().unwrap().as_slice(),
+            &[(credential_id.to_owned(), Some(300_000), false)]
+        );
+    }
+
+    #[tokio::test]
+    async fn report_auth_failure_rejects_unsupported_status_before_sending() {
+        let credential_id = "apikey:openrouter";
+        let target = Arc::new(FakeCkcredTarget {
+            script: Mutex::new(VecDeque::from([Ok(json!({
+                "result": { "accepted": true }
+            }))])),
+            requests: Mutex::new(Vec::new()),
+            reports: Mutex::new(Vec::new()),
+        });
+        let resolver = ClaustrumCredentialResolver::with_target(target.clone(), 0);
+
+        let error = resolver
+            .report_auth_failure(credential_id, 12, 429)
+            .await
+            .expect_err("only provider 401 and 403 statuses are sent");
+        assert_eq!(error.class, CredentialErrorClass::Permanent);
+        assert!(target.reports.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn scoped_reads_use_the_credential_id_and_decode_the_record_directly() {
         let credential_id = "github_app:scoped-agent";
         let target = Arc::new(FakeCkcredTarget {
@@ -2044,6 +2394,7 @@ mod tests {
                 "record_version": "7",
             }))])),
             requests: Mutex::new(Vec::new()),
+            reports: Mutex::new(Vec::new()),
         });
         let resolver = ClaustrumCredentialResolver::with_target(target.clone(), 0);
 

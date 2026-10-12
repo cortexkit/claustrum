@@ -141,7 +141,8 @@ pub struct ResolvedCredential {
     pub account_id: Option<String>,
     /// Provider account email returned by the vault, when captured.
     pub email: Option<String>,
-    /// Provider organization or workspace name returned by the vault, when captured.
+    /// Provider organization name returned by the vault, when captured (OAuth logins
+    /// that report one; static API keys carry none).
     pub org_name: Option<String>,
 }
 

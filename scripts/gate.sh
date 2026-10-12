@@ -117,7 +117,7 @@ run_check "clippy" \
   cargo clippy --locked --workspace --all-targets --features credentials-core/test-support -- -D warnings
 run_check "clippy (seam features)" \
   cargo clippy --locked --workspace --all-targets \
-    --features credentials-core/test-support,kill9-test-seam,rotate-test-seam,login-test-seam,migration-tools,import-prompt-seam -- -D warnings
+    --features credentials-core/test-support,kill9-test-seam,rotate-test-seam,login-test-seam,migration-tools,import-prompt-seam,windows-runtime-test-seam -- -D warnings
 
 # Run a cargo invocation and require at least `min` tests to have PASSED, and that
 # no arm announced a skip.
@@ -352,7 +352,7 @@ assert_floor_not_lowered() {
 # (platform-specific bodies print a skip line), so the count is the same on macOS,
 # Linux and Windows. `assert_floor_not_lowered` below stops a branch from lowering
 # the floor below its merge target. The history of each raise is in git log.
-run_expect 1099 "workspace unit + integration" \
+run_expect 1103 "workspace unit + integration" \
   cargo test --locked --workspace --features credentials-core/test-support
 
 assert_floor_not_lowered "$SCRIPT_PATH"
@@ -370,6 +370,9 @@ case "$(uname -s)" in
     run_expect 2 "native master-key store" env CK_NATIVE_STORE_TESTS=1 \
       cargo test --locked -p credentials-core --test native_store -- --nocapture --test-threads=1
     run_check "Windows key-file ACL mutation proofs" python3 scripts/prove-windows-acl.py
+    run_expect 4 "Windows operator filesystem workflows" \
+      cargo test --locked -p credentials-module --features windows-runtime-test-seam \
+      --test windows_runtime -- --nocapture --test-threads=1
     ;;
 esac
 

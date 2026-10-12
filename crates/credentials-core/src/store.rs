@@ -6160,6 +6160,9 @@ pub fn list_meta_read_only_with_schema(
     )
     .map_err(map)?;
     let schema_version = read_schema_version(&conn).map_err(map)?;
+    #[cfg(all(windows, debug_assertions, feature = "test-support"))]
+    crate::test_support::windows_runtime_pause("reader")
+        .map_err(|e| StoreOpError::from(StoreError::Io(e)))?;
     list_meta_from_conn(&conn, schema_version)
         .map(|rows| (rows, schema_version))
         .map_err(map)

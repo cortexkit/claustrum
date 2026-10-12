@@ -3,6 +3,29 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// Park a real Windows CLI with its database handle still open. The parent test
+/// waits for the ready line before starting a competing operation, then releases
+/// the process through stdin. No timing assumption is needed to establish overlap.
+#[cfg(all(windows, debug_assertions))]
+pub fn windows_runtime_pause(point: &str) -> std::io::Result<()> {
+    use std::io::Write;
+
+    if std::env::var("CK_AUTH_WINDOWS_RUNTIME_TEST_PAUSE").as_deref() != Ok(point) {
+        return Ok(());
+    }
+    println!("ck-auth Windows runtime test ready: {point}");
+    std::io::stdout().flush()?;
+    let mut release = String::new();
+    std::io::stdin().read_line(&mut release)?;
+    if release.trim() != "continue" {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "Windows runtime test did not release the CLI",
+        ));
+    }
+    Ok(())
+}
+
 /// A test-owned directory that is removed when its owner leaves scope.
 #[derive(Debug)]
 pub struct TestTempDir {

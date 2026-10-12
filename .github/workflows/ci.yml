@@ -276,10 +276,15 @@ jobs:
       # Without this the gated binaries would rot unnoticed until the next rename, which
       # is the worst moment to discover they no longer compile.
       - name: Clippy (conformance seams)
-        run: cargo clippy --locked --workspace --all-targets --features kill9-test-seam,rotate-test-seam,login-test-seam,migration-tools,import-prompt-seam -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets --features kill9-test-seam,rotate-test-seam,login-test-seam,migration-tools,import-prompt-seam,windows-runtime-test-seam -- -D warnings
 
       - name: Test
         run: cargo test --locked --workspace --all-targets
+
+      - name: Windows operator filesystem workflows
+        if: runner.os == 'Windows'
+        timeout-minutes: 10
+        run: cargo test --locked -p credentials-module --features windows-runtime-test-seam --test windows_runtime -- --nocapture --test-threads=1
 
       - name: Windows key-file ACL mutation proofs
         if: runner.os == 'Windows'

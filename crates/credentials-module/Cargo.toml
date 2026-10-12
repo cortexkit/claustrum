@@ -28,6 +28,9 @@ path = "src/bin/credentials_cli.rs"
 [features]
 default = []
 import-prompt-seam = []
+# Debug-only Windows CLI rendezvous points keep real handles open for the
+# runtime tests. The shipped default-feature release contains none of them.
+windows-runtime-test-seam = ["credentials-core/test-support"]
 
 [dependencies]
 ring = { workspace = true }

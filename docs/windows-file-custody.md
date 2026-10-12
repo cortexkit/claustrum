@@ -63,3 +63,22 @@ Windows behaviour and both red mutation observations are proven only by CI's
 Windows job. On macOS and Linux, the registered tests only print skip lines and
 return successfully without executing their Windows bodies; those passes do not
 demonstrate DACL behaviour.
+
+`credentials-module/tests/windows_runtime.rs` drives the real `ck-auth` in an
+isolated home with explicit data and operator-key paths. The Windows CI and local
+gate arms run it with `--features windows-runtime-test-seam --test windows_runtime
+-- --nocapture --test-threads=1`. Its four tests cover bootstrap/put/list/remove,
+staging and promoting a rotated key file, a live mode=ro CLI reader beside a CLI
+writer, and clean lease refusal of a second CLI writer. Debug-only, feature-gated
+stdin/stdout rendezvous points establish handle overlap without a race or sleep.
+They are absent from the default-feature release binary. The reader rendezvous
+also requires the core's `test-support` feature, enabled by the module seam feature.
+
+Each workflow recursively checks every file and directory under its private test
+parent with the native DACL assertion, including lease files and live SQLite
+WAL/SHM siblings. PowerShell reads only the DACL protection flag: shared SQLite
+siblings may inherit a private DACL when a read-only open creates them. The native
+assertion independently checks all grants; the vault directory, key-source and
+operator key additionally must have protected DACLs. All four tests stay registered
+on other platforms and print explicit skip lines. These skips establish the test
+population, not Windows runtime behaviour; that proof requires the Windows CI arm.

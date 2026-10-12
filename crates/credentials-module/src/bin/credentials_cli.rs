@@ -1505,6 +1505,9 @@ fn commit_admin_with_key(
         }
     }
     let store = open_for_admin_with_key(global, true, preflighted_key.take())?;
+    #[cfg(all(windows, debug_assertions, feature = "windows-runtime-test-seam"))]
+    credentials_core::test_support::windows_runtime_pause("writer")
+        .map_err(|e| CliError::Io(e.to_string()))?;
     credentials_core::admin_ops::apply(&store, op, "offline-cli").map_err(CliError::Store)
 }
 
@@ -4271,6 +4274,9 @@ fn cmd_rotate_master_key(global: &GlobalArgs) -> Result<(), CliError> {
     resolver::heal_pending_rotation(&config, store.key_id()).map_err(CliError::MasterKey)?;
 
     resolver::stage_next(&config, &new_key).map_err(CliError::MasterKey)?;
+    #[cfg(all(windows, debug_assertions, feature = "windows-runtime-test-seam"))]
+    credentials_core::test_support::windows_runtime_pause("rotation-staged")
+        .map_err(|e| CliError::Io(e.to_string()))?;
     let quarantined = store.rotate_master_key(new_key).map_err(CliError::Store)?;
     // Promote copies `next` to `current` and clears `next` within the key store, so
     // it needs no key handle (the new key was consumed by the rewrap above).

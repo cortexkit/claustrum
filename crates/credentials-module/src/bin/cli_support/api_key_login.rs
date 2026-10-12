@@ -132,6 +132,10 @@ pub async fn validate_key(
             let headers = match auth_header {
                 AuthHeaderScheme::Bearer => vec![("Authorization", format!("Bearer {}", key))],
                 AuthHeaderScheme::XGoogApiKey => vec![("x-goog-api-key", key.to_string())],
+                AuthHeaderScheme::AnthropicApiKey => vec![
+                    ("x-api-key", key.to_string()),
+                    ("anthropic-version", "2023-06-01".to_string()),
+                ],
             };
             let headers_ref: Vec<(&str, &str)> =
                 headers.iter().map(|(k, v)| (*k, v.as_str())).collect();
@@ -379,6 +383,35 @@ mod tests {
         ))]);
         let outcome = validate_key(&transport, &validation, "test-key").await;
         assert!(matches!(outcome, ValidationOutcome::Warning(_)));
+    }
+
+    /// The Anthropic API-key row probes GET /v1/models with Anthropic's own headers. A
+    /// bearer header there would get 401 for a good key and refuse the login.
+    #[tokio::test]
+    async fn anthropic_api_key_row_probes_models_with_anthropic_headers() {
+        let row = API_KEY_PROVIDERS
+            .iter()
+            .find(|p| p.default_id == "apikey:anthropic")
+            .expect("an Anthropic API-key row exists");
+        assert_eq!(row.key, "anthropic");
+
+        let transport = FixtureTransport::ok(200, "{}");
+        let outcome = validate_key(&transport, &row.validation, "sk-ant-test").await;
+        assert_eq!(outcome, ValidationOutcome::Valid);
+        let reqs = transport.requests();
+        assert_eq!(reqs.len(), 1);
+        assert_eq!(reqs[0].url, "https://api.anthropic.com/v1/models");
+        assert_eq!(
+            reqs[0].headers,
+            vec![
+                ("x-api-key".to_string(), "sk-ant-test".to_string()),
+                ("anthropic-version".to_string(), "2023-06-01".to_string())
+            ]
+        );
+
+        let transport = FixtureTransport::ok(401, "{}");
+        let outcome = validate_key(&transport, &row.validation, "sk-ant-test").await;
+        assert!(matches!(outcome, ValidationOutcome::Invalid(_)));
     }
 
     #[tokio::test]

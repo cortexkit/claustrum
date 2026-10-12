@@ -6849,6 +6849,8 @@ mod tests {
         assert_eq!(default_login_id("xai"), "oauth:xai");
         assert_eq!(default_login_id("google"), "oauth:google");
         assert_eq!(default_login_id("antigravity"), "antigravity:google");
+        // anthropic has an api-key row too; the bare name stays the subscription login.
+        assert_eq!(default_login_id("anthropic"), "oauth:anthropic");
         // api-key-only providers resolve to their apikey: id.
         assert_eq!(default_login_id("zai"), "apikey:zai");
         assert_eq!(default_login_id("openrouter"), "apikey:openrouter");

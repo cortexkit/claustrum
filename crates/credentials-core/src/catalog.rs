@@ -103,6 +103,8 @@ const NO_CATEGORIES: &[CredentialCategory] = &[];
 pub enum AuthHeaderScheme {
     Bearer,
     XGoogApiKey,
+    /// Anthropic's API: `x-api-key` plus the required `anthropic-version` header.
+    AnthropicApiKey,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -370,6 +372,25 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[Google],
+    },
+    // Anthropic's paid API, as opposed to the `oauth:anthropic` subscription login. A bare
+    // `--provider anthropic` still means the OAuth login; this row is reached with
+    // `--id apikey:anthropic` or from the picker. It joins `llm-provider` only, never
+    // `anthropic-native`, which stays the subscription accounts' family.
+    ApiKeyProvider {
+        key: "anthropic",
+        display_name: "Anthropic (API Key)",
+        default_id: "apikey:anthropic",
+        dashboard_url: "https://console.anthropic.com/settings/keys",
+        placeholder: "sk-ant-api03-...",
+        // GET /v1/models rejects a bad key with 401 and costs no tokens, unlike a
+        // messages probe.
+        validation: KeyValidation::GetEndpoint {
+            url: "https://api.anthropic.com/v1/models",
+            auth_header: AuthHeaderScheme::AnthropicApiKey,
+        },
+        categories: LLM,
+        serves: &[Anthropic],
     },
     // The rows below mirror oh-my-pi's API-key providers. Each `// oh-my-pi auth/<key>.kdl`
     // line names the file (packages/catalog/src/compat/rules/auth/ in that repo) that the
@@ -1516,8 +1537,8 @@ mod tests {
     #[test]
     fn both_catalogs_have_exact_owner_supplied_assignments() {
         // 15 original API-key rows, 37 model providers mirrored from oh-my-pi,
-        // Kiro, and 4 search APIs.
-        assert_eq!(API_KEY_PROVIDERS.len(), 57);
+        // Kiro, the Anthropic API key, and 4 search APIs.
+        assert_eq!(API_KEY_PROVIDERS.len(), 58);
         assert_eq!(LOGIN_PROVIDERS.len(), 12);
         // Which api-key rows are `llm-provider` and which are `web-search` is pinned by
         // the two category tests below, which also require every row to be listed.
@@ -1670,7 +1691,6 @@ mod tests {
         "cloudflare-ai-gateway",
         "kilo",
         "xiaomi",
-        "anthropic",
         "cursor",
         "devin",
         "github-copilot",
@@ -1695,7 +1715,7 @@ mod tests {
         for key in ORIGINAL_LLM_KEYS
             .iter()
             .chain(MIRRORED_LLM_KEYS)
-            .chain([&"kiro"])
+            .chain([&"kiro", &"anthropic"])
         {
             let row = api_key_provider(key).unwrap_or_else(|| panic!("no api-key row {key}"));
             assert_eq!(row.default_id, format!("apikey:{key}"));
@@ -1710,7 +1730,8 @@ mod tests {
                 ORIGINAL_LLM_KEYS.contains(&entry.key)
                     || MIRRORED_LLM_KEYS.contains(&entry.key)
                     || SEARCH_KEYS.contains(&entry.key)
-                    || entry.key == "kiro",
+                    || entry.key == "kiro"
+                    || entry.key == "anthropic",
                 "api-key row {} is in no category list",
                 entry.key
             );
@@ -2094,6 +2115,7 @@ mod source_ownership_tests {
                 ("xai", vec!["xai"]),
                 ("openai", vec!["openai"]),
                 ("google", vec!["google"]),
+                ("anthropic", vec!["anthropic"]),
                 ("abliteration", vec!["zhipu"]),
                 (
                     "aiand",

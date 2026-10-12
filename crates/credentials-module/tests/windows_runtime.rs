@@ -158,6 +158,10 @@ mod native {
             let script = "$ErrorActionPreference='Stop'; $paths = [Console]::In.ReadToEnd() | ConvertFrom-Json; @($paths | ForEach-Object { (Get-Acl -LiteralPath $_).AreAccessRulesProtected }) | ConvertTo-Json -Compress";
             let mut command = Command::new("powershell.exe");
             command.args(["-NoProfile", "-NonInteractive", "-Command", script]);
+            // A PSModulePath inherited from PowerShell 7 (as on GitHub's Windows
+            // runners) points Windows PowerShell 5.1 at modules it can't load, and
+            // Get-Acl then fails to autoload. Without it, 5.1 uses its own default.
+            command.env_remove("PSModulePath");
             let mut probe = Running::spawn(command, None);
             let names: Vec<_> = paths.iter().map(|(path, _)| path).collect();
             probe

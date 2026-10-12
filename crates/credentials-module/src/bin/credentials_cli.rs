@@ -2899,10 +2899,8 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             println!("logged in and stored {id}");
         }
 
-        println!(
-            "To mint a capability handle for this credential, run: ck-auth mint-handle --id {}",
-            id
-        );
+        // No follow-up hint: consumers reach a new key through their category or exact
+        // grant, so pointing at `mint-handle` here steered operators to the legacy path.
         return Ok(());
     }
 

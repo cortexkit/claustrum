@@ -145,7 +145,9 @@ fn ck_claustrum_hardens_before_any_other_main_statement() {
 /// so dropping either line, or swallowing a failure with `.ok()`, fails here.
 #[test]
 fn harden_process_applies_the_linux_and_windows_protections() {
-    let source = include_str!("../../credentials-core/src/process_hardening.rs");
+    // A Windows checkout may have CRLF line endings, so compare on LF.
+    let source =
+        include_str!("../../credentials-core/src/process_hardening.rs").replace("\r\n", "\n");
     let (_, body) = source
         .split_once("pub fn harden_process() -> std::io::Result<()> {")
         .expect("harden_process exists");

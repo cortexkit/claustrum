@@ -61,6 +61,7 @@ async fn main() {
     let mut provider_status: u16 = 401;
     let mut record_version: Option<u64> = None;
     let mut anthropic_headers = false;
+    let mut meta_models: Option<String> = None;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -91,6 +92,10 @@ async fn main() {
             // naming an organization, workspace or project. Used to learn whether Anthropic
             // reveals which workspace an API key belongs to. The key itself is never printed.
             "--anthropic-headers" => anthropic_headers = true,
+            // With the served Meta inference key: `GET https://api.meta.ai/v1/models`, printing
+            // only model ids, then ONE minimal request to the named model, printing its
+            // status and any error message. The key itself is never printed.
+            "--meta-models" => meta_models = args.next(),
             // Refresh if the token has less than this many ms of life left.
             "--min-ttl-ms" => {
                 min_ttl_ms = args.next().and_then(|v| v.parse().ok());
@@ -701,6 +706,12 @@ async fn main() {
     )
     .await;
     report(&body, show_account_id, show_claims, describe);
+    if let Some(model) = meta_models.as_deref() {
+        match served_payload(&body) {
+            Some(key) => print_meta_models(&key, model).await,
+            None => println!("   meta-models: no payload served, nothing sent"),
+        }
+    }
     if anthropic_headers {
         match served_payload(&body) {
             Some(key) => print_anthropic_headers(&key).await,
@@ -1458,6 +1469,64 @@ async fn print_anthropic_headers(key: &[u8]) {
         }
         // A transport error string can carry the URL but never the header value.
         Err(error) => println!("   anthropic-headers: request failed: {error}"),
+    }
+}
+
+async fn print_meta_models(key: &[u8], model: &str) {
+    let Ok(key) = std::str::from_utf8(key) else {
+        println!("   meta-models: payload is not UTF-8, nothing sent");
+        return;
+    };
+    let client = reqwest::Client::new();
+    let auth = format!("Bearer {}", key.trim());
+    match client
+        .get("https://api.meta.ai/v1/models")
+        .header("authorization", &auth)
+        .header("user-agent", "claustrum-vault-read-probe")
+        .send()
+        .await
+    {
+        Ok(response) => {
+            let status = response.status().as_u16();
+            let body: Value = response.json().await.unwrap_or(Value::Null);
+            let mut ids: Vec<&str> = body
+                .get("data")
+                .and_then(Value::as_array)
+                .map(|rows| {
+                    rows.iter()
+                        .filter_map(|row| row.get("id")?.as_str())
+                        .collect()
+                })
+                .unwrap_or_default();
+            ids.sort_unstable();
+            println!(
+                "   meta-models: GET /v1/models status {status}, {} model(s)",
+                ids.len()
+            );
+            for id in ids {
+                println!("     {id}");
+            }
+        }
+        Err(error) => println!("   meta-models: request failed: {error}"),
+    }
+    match client
+        .post("https://api.meta.ai/v1/responses")
+        .header("authorization", &auth)
+        .header("user-agent", "claustrum-vault-read-probe")
+        .json(&serde_json::json!({ "model": model, "input": "Reply with the single word: ok", "max_output_tokens": 16 }))
+        .send()
+        .await
+    {
+        Ok(response) => {
+            let status = response.status().as_u16();
+            let body: Value = response.json().await.unwrap_or(Value::Null);
+            let error = body.get("error").map(|e| e.get("message").unwrap_or(e).to_string());
+            println!(
+                "   meta-models: POST /v1/responses model={model} status {status}{}",
+                error.map(|e| format!(", error: {e}")).unwrap_or_default()
+            );
+        }
+        Err(error) => println!("   meta-models: request failed: {error}"),
     }
 }
 

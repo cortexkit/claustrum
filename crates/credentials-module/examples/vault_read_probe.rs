@@ -60,6 +60,7 @@ async fn main() {
     let mut open_fields: Option<PathBuf> = None;
     let mut provider_status: u16 = 401;
     let mut record_version: Option<u64> = None;
+    let mut anthropic_headers = false;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -85,6 +86,11 @@ async fn main() {
             // empty google access token would come back empty and look like a failure.
             "--force-refresh" => force_refresh = true,
             "--describe" => describe = true,
+            // Sends ONE `GET https://api.anthropic.com/v1/models` with the served key and
+            // prints only the status and response header NAMES, plus the values of headers
+            // naming an organization, workspace or project. Used to learn whether Anthropic
+            // reveals which workspace an API key belongs to. The key itself is never printed.
+            "--anthropic-headers" => anthropic_headers = true,
             // Refresh if the token has less than this many ms of life left.
             "--min-ttl-ms" => {
                 min_ttl_ms = args.next().and_then(|v| v.parse().ok());
@@ -695,6 +701,12 @@ async fn main() {
     )
     .await;
     report(&body, show_account_id, show_claims, describe);
+    if anthropic_headers {
+        match served_payload(&body) {
+            Some(key) => print_anthropic_headers(&key).await,
+            None => println!("   anthropic-headers: no payload served, nothing sent"),
+        }
+    }
 }
 
 /// Send `credential.public_key`.
@@ -1391,6 +1403,64 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 
 /// Print whether the read succeeded WITHOUT exposing the secret: only the payload
 /// length and a one-way fingerprint are shown.
+/// The served payload bytes of a successful read, or None.
+fn served_payload(frame: &Frame) -> Option<Vec<u8>> {
+    if frame.header.ty != FrameType::Response {
+        return None;
+    }
+    let value: Value = serde_json::from_slice(&frame.body).ok()?;
+    let arr = value.get("result")?.get("payload")?.as_array()?;
+    Some(
+        arr.iter()
+            .filter_map(|b| b.as_u64().map(|n| n as u8))
+            .collect(),
+    )
+}
+
+/// Header names whose VALUES are printed. Everything else prints its name only, so a
+/// header that echoed the key could never reach the terminal.
+fn shown_header_value(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    ["organization", "workspace", "project"]
+        .iter()
+        .any(|word| name.contains(word))
+}
+
+async fn print_anthropic_headers(key: &[u8]) {
+    let Ok(key) = std::str::from_utf8(key) else {
+        println!("   anthropic-headers: payload is not UTF-8, nothing sent");
+        return;
+    };
+    let response = reqwest::Client::new()
+        .get("https://api.anthropic.com/v1/models")
+        .header("x-api-key", key.trim())
+        .header("anthropic-version", "2023-06-01")
+        .header("user-agent", "claustrum-vault-read-probe")
+        .send()
+        .await;
+    match response {
+        Ok(response) => {
+            println!(
+                "   anthropic-headers: status {}",
+                response.status().as_u16()
+            );
+            let mut names: Vec<_> = response.headers().keys().map(|k| k.as_str()).collect();
+            names.sort_unstable();
+            names.dedup();
+            for name in names {
+                if shown_header_value(name) {
+                    let value = response.headers().get(name).and_then(|v| v.to_str().ok());
+                    println!("     {name}: {}", value.unwrap_or("<non-text>"));
+                } else {
+                    println!("     {name}");
+                }
+            }
+        }
+        // A transport error string can carry the URL but never the header value.
+        Err(error) => println!("   anthropic-headers: request failed: {error}"),
+    }
+}
+
 fn report(frame: &Frame, show_account_id: bool, show_claims: bool, describe: bool) {
     match frame.header.ty {
         FrameType::Response => {

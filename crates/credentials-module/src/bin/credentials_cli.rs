@@ -2569,6 +2569,16 @@ fn pick_login_interactively(
     }
 }
 
+/// Whether a login runs the device-code flow instead of the browser authorize flow.
+///
+/// A provider with no authorize URL can only log in by device code, so it must take
+/// this path even without `--device`. Listing device-only providers by name let a new
+/// one (Meta) fall through to the browser flow, which then failed building an
+/// authorize URL from the empty string.
+fn uses_device_login(wire: &LoginProvider, requested_device: bool) -> bool {
+    requested_device || (wire.device.is_some() && wire.authorize_url.is_empty())
+}
+
 fn cmd_device_login(
     global: &GlobalArgs,
     args: &[String],
@@ -2997,12 +3007,7 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             "provider '{provider}' has no device login; omit --device"
         )));
     }
-    if requested_device
-        || matches!(
-            wire.device,
-            Some(DeviceKind::GithubCopilot | DeviceKind::Kimi)
-        )
-    {
+    if uses_device_login(wire, requested_device) {
         return cmd_device_login(
             global,
             args,
@@ -6871,6 +6876,29 @@ mod tests {
         assert_eq!(default_login_id("google"), "oauth:google");
         assert_eq!(default_login_id("antigravity"), "antigravity:google");
         assert_eq!(default_login_id("meta"), "oauth:meta");
+    }
+
+    /// A login row with no authorize URL can only log in by device code, so it must
+    /// reach the device flow without `--device`. Meta shipped routed to the browser
+    /// flow, and `ck auth login` died building an authorize URL from "".
+    #[test]
+    fn every_device_only_login_row_routes_to_the_device_flow() {
+        let mut device_only = Vec::new();
+        for row in credentials_core::catalog::LOGIN_PROVIDERS {
+            if row.authorize_url.is_empty() {
+                assert!(
+                    row.device.is_some(),
+                    "{}: no authorize URL and no device login, so it cannot log in",
+                    row.key
+                );
+                assert!(uses_device_login(row, false), "{}", row.key);
+                device_only.push(row.key);
+            } else {
+                assert!(!uses_device_login(row, false), "{}", row.key);
+                assert!(uses_device_login(row, true), "{}", row.key);
+            }
+        }
+        assert_eq!(device_only, ["github-copilot", "kimi", "meta"]);
         assert!(LOGIN_PICKER_ROWS.contains(&("meta", "Meta Muse (coding subscription)")));
         // anthropic has an api-key row too; the bare name stays the subscription login.
         assert_eq!(default_login_id("anthropic"), "oauth:anthropic");

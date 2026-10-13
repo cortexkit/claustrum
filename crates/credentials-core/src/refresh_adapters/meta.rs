@@ -102,7 +102,9 @@ enum AbsoluteExpiry {
 #[derive(Debug, Deserialize)]
 struct KeyResponse {
     api_key: Option<SecretString>,
-    user_id: Option<String>,
+    // Kept as raw JSON: the live login's reply carried no usable string `user_id`, and
+    // the reference client stringifies whatever it finds, so a numeric id must count.
+    user_id: Option<serde_json::Value>,
     user_email: Option<String>,
     is_subs_active: Option<bool>,
     require_payment: Option<bool>,
@@ -238,18 +240,30 @@ async fn mint_key(
             RefreshError::Decode("Meta key response contained no inference key".into())
         })?;
     let expires_at_ms = parsed.expiry(key, now_ms())?;
+    let email = parsed
+        .user_email
+        .as_deref()
+        .map(|email| email.trim().to_lowercase())
+        .filter(|email| !email.is_empty());
+    let user_id = match &parsed.user_id {
+        Some(serde_json::Value::String(id)) => Some(id.trim().to_string()),
+        Some(serde_json::Value::Number(id)) => Some(id.to_string()),
+        _ => None,
+    }
+    .filter(|id| !id.is_empty());
+    // An email-only reply puts the email in BOTH fields (see `RecordIdentity`): the
+    // reference client does `user_id || email` too, and an email-only identity would
+    // otherwise be dropped as unservable.
     let identity = RecordIdentity {
-        account_id: parsed.user_id.clone().filter(|id| !id.trim().is_empty()),
-        email: parsed
-            .user_email
-            .clone()
-            .filter(|email| !email.trim().is_empty()),
+        account_id: user_id.or_else(|| email.clone()),
+        email,
         org_name: None,
     };
     if identity.account_id.is_none() || identity.validate().is_err() {
-        return Err(RefreshError::Decode(
-            "Meta key response contained no valid account identity".into(),
-        ));
+        return Err(RefreshError::Decode(format!(
+            "Meta key response contained no valid account identity (fields present: {})",
+            response_field_names(&response.body)
+        )));
     }
     Ok(MintedKey {
         key: key.clone(),
@@ -257,6 +271,19 @@ async fn mint_key(
         identity,
         expiry_field_present: parsed.expiry_field_present(),
     })
+}
+
+/// Top-level field NAMES of a JSON object reply, never values, for diagnosing an
+/// unexpected shape without exposing the key the same reply carries.
+fn response_field_names(body: &[u8]) -> String {
+    match serde_json::from_slice::<serde_json::Value>(body) {
+        Ok(serde_json::Value::Object(map)) => {
+            let mut names: Vec<&str> = map.keys().map(String::as_str).collect();
+            names.sort_unstable();
+            names.join(", ")
+        }
+        _ => "not a JSON object".into(),
+    }
 }
 
 #[derive(Default)]

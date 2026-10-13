@@ -207,6 +207,54 @@ async fn meta_login_rejects_missing_key_identity_and_invalid_expiry_without_echo
     }
 }
 
+/// The first live login failed with "no valid account identity": Meta's reply had no
+/// string `user_id`. Like the reference client (`user_id || email`), the adapter takes
+/// a numeric id or falls back to the lowercased email, and only when both are missing
+/// does it refuse, naming the fields that were present but never their values.
+#[tokio::test]
+async fn meta_identity_takes_numeric_id_or_email_and_names_fields_on_refusal() {
+    let cases = [
+        (r#"{"api_key":"SECRET","user_id":1234567}"#, "1234567", None),
+        (
+            r#"{"api_key":"SECRET","user_email":" Muse@Example.Invalid "}"#,
+            "muse@example.invalid",
+            Some("muse@example.invalid"),
+        ),
+        (
+            r#"{"api_key":"SECRET","user_id":"meta-account","user_email":"m@x.invalid"}"#,
+            "meta-account",
+            Some("m@x.invalid"),
+        ),
+    ];
+    for (body, account_id, email) in cases {
+        let (record, _) = login_record(device_tokens(false), &FixtureTransport::ok(200, body))
+            .await
+            .unwrap();
+        assert_eq!(
+            record.identity.account_id.as_deref(),
+            Some(account_id),
+            "{body}"
+        );
+        assert_eq!(record.identity.email.as_deref(), email, "{body}");
+    }
+
+    let error = login_record(
+        device_tokens(false),
+        &FixtureTransport::ok(
+            200,
+            r#"{"api_key":"SECRET","team":"SECRET","user_id":null}"#,
+        ),
+    )
+    .await
+    .unwrap_err();
+    let text = format!("{error:?} {error}");
+    assert!(
+        text.contains("fields present: api_key, team, user_id"),
+        "{text}"
+    );
+    assert!(!text.contains("SECRET"), "{text}");
+}
+
 #[test]
 fn meta_catalog_stamps_oauth_labels_with_native_family_and_serves_meta() {
     for id in ["oauth:meta", "oauth:meta:work"] {

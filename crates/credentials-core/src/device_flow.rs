@@ -639,10 +639,22 @@ mod tests {
                 "https://auth.meta.com/oidc/device/authorization/"
             );
             assert_eq!(requests[0].body, b"client_id=1031625952748946");
+            // auth.meta.com redirects a request without a User-Agent to its
+            // unsupported-browser page, so every Meta call must carry these headers.
+            let meta_headers: Vec<(String, String)> = vec![
+                (
+                    "User-Agent".into(),
+                    crate::refresh_adapters::meta::USER_AGENT.into(),
+                ),
+                ("Accept".into(), "application/json".into()),
+                ("x-api-version".into(), "1.0.0".into()),
+            ];
+            for request in &requests {
+                assert_eq!(request.headers, meta_headers);
+            }
             for request in &requests[1..] {
                 assert_eq!(request.url, "https://auth.meta.com/oidc/device/token/");
                 assert_eq!(request.content_type, "application/x-www-form-urlencoded");
-                assert!(request.headers.is_empty());
                 let pairs: std::collections::BTreeMap<_, _> =
                     url::form_urlencoded::parse(&request.body)
                         .into_owned()

@@ -48,12 +48,34 @@ async fn meta_login_mints_key_and_captures_identity_and_presence_without_serving
             requests[0].headers,
             vec![
                 ("Authorization".into(), "Bearer meta-identity-token".into()),
+                ("User-Agent".into(), super::USER_AGENT.into()),
                 ("x-api-version".into(), "1.0.0".into()),
                 ("Accept".into(), "application/json".into())
             ]
         );
         assert_eq!(requests[0].body, br#"{"onboard":true}"#);
     }
+}
+
+/// auth.meta.com redirects any request without a User-Agent to
+/// `facebook.com/unsupportedbrowser` (a 302 our client must not follow), which
+/// broke the first live login before any token existed. Both device-flow calls
+/// carry it through `extra_headers`.
+#[test]
+fn meta_device_flow_sends_a_user_agent_on_both_auth_meta_calls() {
+    let cfg = super::device_config();
+    let has = |name: &str, value: &str| {
+        cfg.extra_headers
+            .iter()
+            .any(|(n, v)| n == name && v == value)
+    };
+    assert!(super::USER_AGENT.starts_with("cortexkit-credentials/"));
+    assert!(
+        has("User-Agent", super::USER_AGENT),
+        "no User-Agent: Meta answers 302"
+    );
+    assert!(has("Accept", "application/json"));
+    assert!(has("x-api-version", super::API_VERSION));
 }
 
 #[test]

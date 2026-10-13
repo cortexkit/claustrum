@@ -18,6 +18,13 @@ pub const DEVICE_CODE_URL: &str = "https://auth.meta.com/oidc/device/authorizati
 pub const DEVICE_TOKEN_URL: &str = "https://auth.meta.com/oidc/device/token/";
 pub const KEY_URL: &str = "https://api.meta.ai/muse-code/key";
 
+/// Sent on every Meta request. auth.meta.com answers a request with no User-Agent
+/// with a 302 to `facebook.com/unsupportedbrowser` (measured on both the device
+/// authorization and token endpoints), and our HTTP client sends none by default.
+pub const USER_AGENT: &str = concat!("cortexkit-credentials/", env!("CARGO_PKG_VERSION"));
+/// The API version header both reference clients send on every Meta request.
+pub const API_VERSION: &str = "1.0.0";
+
 /// Assumed key lifetime, following pi-meta-oauth, only when neither the response
 /// nor the key's JWT supplies expiry. Replace this assumption once a live response
 /// shows the real lifetime; the device identity token's lifetime is unrelated.
@@ -30,12 +37,18 @@ struct MetaSession {
 }
 
 pub fn device_config() -> DeviceFlowConfig {
-    DeviceFlowConfig::new(
+    let mut cfg = DeviceFlowConfig::new(
         DEVICE_CODE_URL,
         DEVICE_TOKEN_URL,
         CLIENT_ID,
         DeviceBodyEncoding::Form,
-    )
+    );
+    cfg.extra_headers = vec![
+        ("User-Agent".into(), USER_AGENT.into()),
+        ("Accept".into(), "application/json".into()),
+        ("x-api-version".into(), API_VERSION.into()),
+    ];
+    cfg
 }
 
 /// Presence diagnostics only: never render the provider's token or expiry values.
@@ -173,7 +186,8 @@ async fn mint_key(
             KEY_URL,
             &[
                 ("Authorization", authorization.expose()),
-                ("x-api-version", "1.0.0"),
+                ("User-Agent", USER_AGENT),
+                ("x-api-version", API_VERSION),
                 ("Accept", "application/json"),
             ],
             "application/json",

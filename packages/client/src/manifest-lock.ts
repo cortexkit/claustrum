@@ -1,8 +1,8 @@
-import { acceptsAncestor } from './ancestor-permissions.js'
-import { constants as fsConstants } from 'node:fs'
-import { chmod, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat, unlink } from 'node:fs/promises'
+import { createPrivateDirectory, createPrivateFile } from '@cortexkit/store'
+import { checkPrivatePath, createPrivateParents, notPrivate, privateCreationCode } from './private-path.js'
+import { lstat, open, readFile, readdir, rename, rm, stat, unlink } from 'node:fs/promises'
 import { randomBytes, randomInt } from 'node:crypto'
-import { basename as pathBasename, dirname, join } from 'node:path'
+import { basename as pathBasename, dirname, join, resolve } from 'node:path'
 import { HANDLE_FILE_CONTRACT, parseHandleFile, type OpenCodeHandleFileV1 } from './handles.js'
 
 export const MANIFEST_LOCK = { ttlMs: 30_000, renewEveryMs: 10_000, ownerKeys: ['tenant', 'pid', 'claimed_at_ms', 'nonce'] as const, staleTargetRe: /^\.lock\.stale-\d+-(?!\.{1,2}$)(?!.*[. ]$)[^/\\\x00-\x1f:*?"<>|]{1,128}$/, errorCodes: ['lock_busy', 'owner_invalid', 'renewal_failed'] as const }
@@ -25,7 +25,7 @@ export function __setManifestLockTestOptions(options?: TestOptions): void { test
 // 16 CSPRNG bytes: a collision needs both the same millisecond and the same nonce. Do not
 // simplify this to a counter, pid+timestamp, or a short token.
 const token = () => randomBytes(16).toString('base64url')
-const code = (error: unknown) => (error as NodeJS.ErrnoException | undefined)?.code
+const code = privateCreationCode
 const sleep = async (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 // A tenant classifying a failure must not string-match our prose: a copy-edit would
 // silently reclassify a retryable busy-lock as an unknown error, with nothing failing
@@ -48,8 +48,9 @@ async function writeOwner(lock: string, owner: Owner): Promise<void> {
   const target = join(lock, 'owner'); const temporary = join(lock, `owner.${process.pid}.${token()}.tmp`)
   let file: Awaited<ReturnType<typeof open>> | undefined
   try {
-    file = await open(temporary, fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY, 0o600)
-    await file.chmod(0o600); await file.writeFile(`${JSON.stringify(owner)}\n`); await file.sync(); await file.close(); file = undefined
+    await createPrivateFile(temporary, `${JSON.stringify(owner)}\n`)
+    file = await open(temporary, 'r+')
+    await file.sync(); await file.close(); file = undefined
     await rename(temporary, target)
   } finally { await file?.close().catch(() => {}); await unlink(temporary).catch(() => {}) }
 }
@@ -89,10 +90,11 @@ export async function withManifestLock<T>(path: string, tenant: string, fn: () =
   return withLockCommit(path, tenant, async () => fn())
 }
 async function withLockCommit<T>(path: string, tenant: string, fn: (commit: () => Promise<void>) => Promise<T> | T): Promise<T> {
+  path = resolve(path)
   const lock = `${path}.lock`, ownerPath = join(lock, 'owner'), ttl = testOptions?.ttlMs ?? MANIFEST_LOCK.ttlMs, renewEvery = testOptions?.renewEveryMs ?? MANIFEST_LOCK.renewEveryMs, retryMin = testOptions?.retryMinMs ?? 25, retryMax = testOptions?.retryMaxMs ?? 75
   const nonce = token(), started = Date.now(), deadline = started + ttl
   while (true) {
-    try { await mkdir(lock, { mode: 0o700 }); await writeOwner(lock, { tenant, pid: process.pid, claimed_at_ms: Date.now(), nonce }); await testOptions?.afterClaim?.(); break } catch (error) {
+    try { await createPrivateDirectory(lock); await writeOwner(lock, { tenant, pid: process.pid, claimed_at_ms: Date.now(), nonce }); await testOptions?.afterClaim?.(); break } catch (error) {
       if (code(error) !== 'EEXIST') { if (code(error) !== 'ENOENT') await rm(lock, { recursive: true, force: true }).catch(() => {}); throw error }
     }
     let observed: Owner | undefined, ownerReadError: unknown
@@ -149,26 +151,16 @@ async function readManifest(path: string): Promise<ManifestHandleFile> {
   let metadata: Awaited<ReturnType<typeof lstat>>
   try { metadata = await lstat(path) } catch (error) { if (code(error) === 'ENOENT') return { version: 1, providers: [] }; throw error }
   if (metadata.isSymbolicLink() || !metadata.isFile()) throw new Error('handle file must be a regular file')
-  if ((metadata.mode & 0o777) !== HANDLE_FILE_CONTRACT.mode) throw new Error('handle file mode must be exactly 0600')
+  if (process.platform !== 'win32' && (metadata.mode & 0o777) !== HANDLE_FILE_CONTRACT.mode) throw new Error('handle file mode must be exactly 0600')
+  const protection = await checkPrivatePath(path)
+  if (!protection.ok) throw new Error(notPrivate('handle file folder', protection))
   const source = await readFile(path); if (source.byteLength > HANDLE_FILE_CONTRACT.maxBytes) throw new Error('handle file exceeds 256 KiB')
   return parseHandleFile(JSON.parse(source.toString('utf8')))
 }
 const foreign = (file: ManifestHandleFile, tenant: string) => file.providers.filter((provider) => provider.serve !== tenant).map((provider) => JSON.stringify(provider))
 async function refuseWritableAncestors(parent: string): Promise<void> {
-  let component: string
-  try { component = await realpath(parent) } catch (error) {
-    if (code(error) !== 'ENOENT') throw error
-    const next = dirname(parent)
-    if (next !== parent) await refuseWritableAncestors(next)
-    return
-  }
-  for (;;) {
-    const metadata = await stat(component)
-    if (!(await acceptsAncestor(metadata))) throw new Error('handle file ancestor is group- or world-writable without sticky bit')
-    const next = dirname(component)
-    if (next === component) return
-    component = next
-  }
+  const protection = await checkPrivatePath(parent)
+  if (!protection.ok) throw new Error(notPrivate('handle file folder', protection))
 }
 async function prepareParent(path: string): Promise<void> {
   const parent = dirname(path)
@@ -176,11 +168,11 @@ async function prepareParent(path: string): Promise<void> {
   if (process.platform !== 'win32') await refuseWritableAncestors(parent)
   const existing = await stat(parent).catch((error: unknown) => { if (code(error) !== 'ENOENT') throw error; return undefined })
   if (existing && typeof process.getuid === 'function' && existing.uid !== process.getuid()) throw new Error('handle file parent is not owned by the current uid')
-  await mkdir(parent, { recursive: true, mode: 0o700 })
+  await createPrivateParents(parent)
   const metadata = await stat(parent)
   if (!metadata.isDirectory()) throw new Error('handle file parent must be a directory')
   if (typeof process.getuid === 'function' && metadata.uid !== process.getuid()) throw new Error('handle file parent is not owned by the current uid')
-  if (process.platform !== 'win32') await refuseWritableAncestors(parent)
+  await refuseWritableAncestors(parent)
 }
 async function writeAtomic(path: string, file: ManifestHandleFile, commit: () => Promise<void>): Promise<void> {
   const bytes = Buffer.from(JSON.stringify(file)); if (bytes.byteLength > HANDLE_FILE_CONTRACT.maxBytes) throw new Error('handle file exceeds 256 KiB')
@@ -191,15 +183,17 @@ async function writeAtomic(path: string, file: ManifestHandleFile, commit: () =>
     // down, not just the reclaim. Covered by the dual-basename test, which a POSIX filesystem
     // test cannot reach.
     const temporary = join(dirname(path), `.${pathBasename(path)}.${process.pid}.${token()}.tmp`); let handle: Awaited<ReturnType<typeof open>> | undefined
-  try { handle = await open(temporary, fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY, 0o600); await handle.chmod(0o600); await handle.writeFile(bytes); await handle.sync(); await handle.close(); handle = undefined; await chmod(temporary, 0o600); await testOptions?.beforeManifestRename?.(`${path}.lock`); await commit(); await rename(temporary, path) } finally { await handle?.close().catch(() => {}); await unlink(temporary).catch(() => {}) }
+  try { await createPrivateFile(temporary, bytes); handle = await open(temporary, 'r+'); await handle.sync(); await handle.close(); handle = undefined; await testOptions?.beforeManifestRename?.(`${path}.lock`); await commit(); await rename(temporary, path) } finally { await handle?.close().catch(() => {}); await unlink(temporary).catch(() => {}) }
 }
 export async function writeHandleFileLocked(path: string, tenant: string, mutate: (file: ManifestHandleFile) => void | ManifestHandleFile | Promise<void | ManifestHandleFile>): Promise<void> {
+  path = resolve(path)
   await prepareParent(path)
   await withLockCommit(path, tenant, async (commit) => {
     const before = await readManifest(path), working = structuredClone(before), result = await mutate(working), next = parseHandleFile(result ?? working), beforeForeign = foreign(before, tenant)
     if (JSON.stringify(foreign(next, tenant)) !== JSON.stringify(beforeForeign)) throw new Error('manifest mutation changed another tenant block')
     await writeAtomic(path, next, commit)
-    if (((await lstat(path)).mode & 0o777) !== HANDLE_FILE_CONTRACT.mode) throw new Error('manifest readback mode is not 0600')
+    if (process.platform !== 'win32' && ((await lstat(path)).mode & 0o777) !== HANDLE_FILE_CONTRACT.mode) throw new Error('manifest readback mode is not 0600')
+    if (!(await checkPrivatePath(path)).ok) throw new Error('manifest readback mode is not 0600')
     const readback = await readManifest(path)
     if (JSON.stringify(readback) !== JSON.stringify(next)) throw new Error('manifest readback differs')
     if (JSON.stringify(foreign(readback, tenant)) !== JSON.stringify(beforeForeign)) throw new Error('manifest readback changed another tenant block')

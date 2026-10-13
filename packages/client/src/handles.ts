@@ -1,10 +1,10 @@
 import { createHash } from 'node:crypto'
 import { constants } from 'node:fs'
-import { lstat as nodeLstat, open as nodeOpen, readFile, realpath, stat as nodeStat } from 'node:fs/promises'
+import { lstat as nodeLstat, open as nodeOpen, readFile, stat as nodeStat } from 'node:fs/promises'
 import { userInfo } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 
-import { acceptsAncestor } from './ancestor-permissions.js'
+import { checkPrivatePath, notPrivate } from './private-path.js'
 
 export const HANDLE_FILE_CONTRACT = {
   maxBytes: 256 * 1024,
@@ -176,7 +176,7 @@ export function defaultHandleFilePath(env: NodeJS.ProcessEnv = process.env): str
 }
 
 function currentUid(): number | undefined {
-  return process.getuid?.() ?? userInfo().uid
+  return process.platform === 'win32' ? undefined : process.getuid?.() ?? userInfo().uid
 }
 
 type HandleFileSnapshot = {
@@ -198,6 +198,7 @@ async function readBounded(descriptor: HandleFileDescriptor, cap: number): Promi
 }
 
 async function readHandleSnapshot(path = defaultHandleFilePath(), io: HandleFileIo = {}): Promise<HandleFileSnapshot> {
+  path = resolve(path)
   const stat = io.stat ?? nodeStat
   const lstat = io.lstat ?? nodeLstat
   const read = io.readFile ?? readFile
@@ -220,7 +221,7 @@ async function readHandleSnapshot(path = defaultHandleFilePath(), io: HandleFile
     if (metadata.isSymbolicLink?.()) invalid('handle file must not be a symlink')
     if (!metadata.isFile()) invalid('handle file must be a regular file')
     if ((metadata.size ?? 0) > HANDLE_FILE_CONTRACT.maxBytes) invalid('handle file exceeds 256 KiB')
-    if ((metadata.mode & 0o777) !== HANDLE_FILE_CONTRACT.mode) invalid('handle file mode must be exactly 0600')
+    if (process.platform !== 'win32' && (metadata.mode & 0o777) !== HANDLE_FILE_CONTRACT.mode) invalid('handle file mode must be exactly 0600')
     const uid = io.currentUid ?? currentUid
     const expectedUid = uid()
     if (expectedUid !== undefined && metadata.uid !== undefined && metadata.uid !== expectedUid) {
@@ -236,54 +237,17 @@ async function readHandleSnapshot(path = defaultHandleFilePath(), io: HandleFile
     if (expectedUid !== undefined && parent.uid !== undefined && parent.uid !== expectedUid) {
       invalid('handle file parent is not owned by the current uid')
     }
-    // Group-write counts as well as world-write: a directory writer can unlink and
-    // replace a mode-0600 file regardless of its file permissions or owner. Owning
-    // the directory does not exclude other group members. Sticky exempts both bits
-    // because a writer may unlink only files they own. Without sticky, group-write
-    // is safe only when local account files prove a user-private effective group;
-    // world-write is never exempt. Keep this rule identical to Rust's accepts_ancestor
-    // and parent check in opencode_files.rs.
-    if (!(await acceptsAncestor(parent))) {
-      invalid('handle file parent is group- or world-writable without sticky bit')
-    }
-    // EVERY ANCESTOR, NOT JUST THIS ONE, OR THE GUARANTEE DOES NOT COMPOSE. The immediate
-    // parent being 0700 protects nothing when a directory above it is group-writable:
-    // anyone who can create and unlink there renames it aside and substitutes their own
-    // tree. Walk to '/' rather than $HOME -- a stopping point read from the environment is
-    // attacker-influenceable and undefined when unset.
-    //
-    // realpath FIRST: an unresolved walk is defeated by a symlink component pointing
-    // somewhere permissive, and every individual stat still passes while the loop is about
-    // a path we never read through.
-    //
-    // Mirrors refuse_writable_ancestor in subc-transport 0.7.0 and in opencode_files.rs;
-    // three implementations of one rule must not drift.
-    let resolved: string | undefined
-    try {
-      resolved = await realpath(dirname(path))
-    } catch {
-      // Unresolvable: the read that follows reports the real errno, and refusing here
-      // would replace a precise failure with a permissions verdict about a path we could
-      // not resolve.
-      resolved = undefined
-    }
-    if (resolved !== undefined) {
-      let component = resolved
-      for (;;) {
-        let ancestor: HandleFileStat | undefined
-        try {
-          ancestor = await stat(component)
-        } catch {
-          ancestor = undefined
-        }
-        if (ancestor && !(await acceptsAncestor(ancestor))) {
-          invalid(`handle file ancestor ${component} is group- or world-writable without sticky bit`)
-        }
-        const next = dirname(component)
-        if (next === component) break
-        component = next
-      }
-    }
+    // HandleFileIo's injected stat supplies ancestor metadata as well as the immediate
+    // parent. Pass that metadata to @cortexkit/store's Unix path check.
+    const fixtureStat = io.stat && (async (candidate: string) => {
+      const value = await io.stat!(candidate)
+      return { ...value, isDirectory: () => value.isDirectory?.() ?? false }
+    })
+    const protection = await checkPrivatePath(process.platform === 'win32' ? path : dirname(path), fixtureStat ? {
+      euid: expectedUid,
+      fs: { stat: fixtureStat, lstat: fixtureStat },
+    } : undefined)
+    if (!protection.ok) invalid(notPrivate('handle file folder', protection))
     let source: string
     try {
       if (descriptor) {

@@ -39,6 +39,29 @@ are exported for tenant plugins consuming the OpenCode handle manifest. The shar
 `HANDLE_FILE_CONTRACT` is pinned to `maxBytes: 262144`, `mode: 0o600`,
 `labelRe: /^[a-z0-9][a-z0-9._-]{0,63}$/`, and `handleRe: /^ckh_[A-Za-z0-9_-]{43}$/`.
 
+### Private files and Windows support
+
+Enrollment tokens, handle manifests, and manifest locks support Windows as well as
+Unix. The client uses `@cortexkit/store` 0.2.1 or newer: exclusive private creation
+protects files before any secret bytes are written, and atomic replacement keeps
+that protection. Unix files use mode 0600 and new directories use 0700. On Windows,
+the store's `@cortexkit/private-files` native module creates owner-only ACLs and the
+async path check verifies real security descriptors, not Node's emulated mode bits
+or an AppData-location heuristic. Existing directories are checked, not silently
+repaired. Unsupported filesystems or unavailable native modules refuse the operation.
+Windows requires supported local, ACL-persisting drives; UNC/network paths and
+reparse points are refused. Windows ACL enforcement can only be qualified in CI,
+not by passing Unix tests locally.
+
+**Changed in 0.9.0:** Unix ancestors must now be owned by the current effective user
+or root. A foreign-owned ancestor is refused even at mode 0755; a non-root-owned
+sticky ancestor is also refused. Put the files under a folder you own. Root-owned
+sticky directories such as `/tmp` remain usable when the immediate child is your
+own non-group/world-writable directory. The Debian user-private-group exception is
+preserved: an owned, non-sticky group-writable directory (including a 0775
+`~/.config` under umask 0002) is accepted only when local `/etc/passwd` and
+`/etc/group` prove the effective group contains no other users.
+
 ## Testing a consumer of this client
 
 Three things on a developer box silently satisfy what a consumer's test is trying to

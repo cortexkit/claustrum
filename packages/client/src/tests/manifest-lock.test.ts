@@ -1,4 +1,6 @@
-import { withSharedAncestorGroup } from './ancestor-fixture.js'
+import { privateFixtureDirectory, withSharedAncestorGroup } from './ancestor-fixture.js'
+import { checkOwnerOnlyPathAsync, createPrivateDirectory, createPrivateFile } from '@cortexkit/store'
+import { readHandleFile } from '../handles.js'
 import { afterEach, describe, expect, test } from 'bun:test'
 import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
 import { spawnSync } from 'node:child_process'
@@ -20,7 +22,7 @@ const sleep = async (ms: number) => new Promise((resolve) => setTimeout(resolve,
 const RECLAIM_MARGIN_MS = 5_000
 
 async function manifestPath(): Promise<string> {
-  const root = await mkdtemp(join(tmpdir(), 'claustrum-manifest-lock-'))
+  const root = await privateFixtureDirectory('claustrum-manifest-lock-')
   roots.push(root)
   return join(root, 'opencode-handles.json')
 }
@@ -61,14 +63,13 @@ function provider(provider: string, tenant: string) {
 
 async function owner(path: string, claimedAtMs: number, tenant = 'other-tenant'): Promise<void> {
   const lockPath = `${path}.lock`
-  await mkdir(lockPath, { mode: 0o700 })
-  await writeFile(join(lockPath, 'owner'), `${JSON.stringify({
+  await createPrivateDirectory(lockPath)
+  await createPrivateFile(join(lockPath, 'owner'), `${JSON.stringify({
     tenant,
     pid: 41,
     claimed_at_ms: claimedAtMs,
     nonce: '0123456789abcdef0123456789abcdef',
-  })}\n`, { mode: 0o600 })
-  await chmod(join(lockPath, 'owner'), 0o600)
+  })}\n`)
 }
 
 async function quarantine(path: string, claimedAtMs: number, nonce: string, modifiedAtMs: number): Promise<string> {
@@ -85,41 +86,40 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
 })
 
-// PER-TEST, NOT PER-FILE, and that distinction was measured rather than reasoned.
-//
-// The Rust half of this feature carries `#![cfg(unix)]` at file scope
-// (crates/credentials-module/tests/cli_opencode.rs), so a file-level gate here looked
-// like the matching shape. It is not: inverting the gate to simulate Windows skipped 30
-// tests against the 14 that actually fail there. The other 16 -- nonce alphabets, the
-// shared constants, the Rust-shaped owner fixture, quarantine age arithmetic -- pass on
-// Windows today and are real coverage of code that runs there.
-//
-// So only the tests whose SUBJECT is a POSIX permission or link primitive are gated: a
-// 0600 publication, a world- or group-writable parent, a symlink, an atomic rename whose
-// mode the reader re-checks. Windows has no such mode, so those assert nothing there.
-//
-// NOT NAMED `posix`: this file already imports `posix` and `win32` from node:path and uses
-// them at the bottom to test quarantine-prefix derivation on both separators. Shadowing
-// that import would quietly redirect those calls.
+// Only Unix permission and link fixtures are gated. Locking and owner-only publication
+// run on Windows too, where the store verifies native security descriptors instead of modes.
+// Keep onPosix distinct from node:path's posix import.
 const onPosix = process.platform !== 'win32'
 
 describe('manifest writer lock', () => {
+  test('lock directory and owner record are owner-only before the callback', async () => {
+    const path = await manifestPath()
+    await withManifestLock(path, 'tenant', async () => {
+      expect(await checkOwnerOnlyPathAsync(`${path}.lock`)).toEqual({ ok: true })
+      expect(await checkOwnerOnlyPathAsync(join(`${path}.lock`, 'owner'))).toEqual({ ok: true })
+      if (onPosix) {
+        expect((await stat(`${path}.lock`)).mode & 0o777).toBe(0o700)
+        expect((await stat(join(`${path}.lock`, 'owner'))).mode & 0o777).toBe(0o600)
+      }
+    })
+  })
   test.skipIf(!onPosix)('writer refuses writable ancestors before creating anything', async () => {
     const path = await cleanAncestorManifestPath()
     const root = join(path, '..')
     await chmod(root, 0o775)
     const target = join(root, 'private', 'manifest.json')
     await withSharedAncestorGroup(root, async () => {
-      await expect(writeHandleFileLocked(target, 'tenant', () => {})).rejects.toThrow('without sticky bit')
+      await expect(writeHandleFileLocked(target, 'tenant', () => {})).rejects.toThrow('is not private: group-writable ancestor')
     })
     expect(await readdir(root)).toEqual([])
   })
 
-  test.skipIf(!onPosix)('writer accepts an owned sticky parent', async () => {
+  // Only a root-owned sticky folder is trusted; this one belongs to the test user, so it
+  // counts as plain world-writable.
+  test.skipIf(!onPosix)('writer refuses a sticky world-writable parent the user owns', async () => {
     const path = await cleanAncestorManifestPath()
     await makeSticky(join(path, '..'))
-    await writeHandleFileLocked(path, 'tenant', () => {})
-    expect(JSON.parse(await readFile(path, 'utf8'))).toEqual({ version: 1, providers: [] })
+    await expect(writeHandleFileLocked(path, 'tenant', () => {})).rejects.toThrow('is not private: world-writable ancestor')
   })
 
   test.skipIf(!onPosix)('writer refuses a parent owned by another uid before writing', async () => {
@@ -163,7 +163,7 @@ describe('manifest writer lock', () => {
     expect(JSON.parse(await readFile(join(`${path}.lock`, 'owner'), 'utf8')).nonce).toBe('other')
   })
 
-  test.skipIf(!onPosix)('two concurrent tenant writers preserve both provider blocks', async () => {
+  test('two concurrent tenant writers preserve both provider blocks', async () => {
     const path = await manifestPath()
     const firstEntered = Promise.withResolvers<void>()
     const releaseFirst = Promise.withResolvers<void>()
@@ -259,10 +259,10 @@ describe('manifest writer lock', () => {
 
   test.skipIf(!onPosix)('reclaim failure does not fail acquisition', async () => {
     const path = await manifestPath()
-    __setManifestLockTestOptions(reclaimOptions())
     const parent = join(path, '..')
     const target = await quarantine(path, 1, 'unreadable_nonce', Date.now() - (100 + RECLAIM_MARGIN_MS + 1))
-    await chmod(parent, 0o300)
+    // Refuse the sweep's readdir only after secure creation has inspected the parent.
+    __setManifestLockTestOptions({ ...reclaimOptions(), afterClaim: () => chmod(parent, 0o300) })
     try {
       await withManifestLock(path, 'claimant', async () => {})
     } finally {
@@ -343,7 +343,7 @@ describe('manifest writer lock', () => {
     expect((await readdir(join(path, '..'))).some((name) => name.startsWith(`${basename(path)}.lock.stale-`))).toBe(true)
   })
 
-  test.skipIf(!onPosix)('renewing owner fails loudly after the bounded retry window', async () => {
+  test('renewing owner fails loudly after the bounded retry window', async () => {
     const path = await manifestPath()
     __setManifestLockTestOptions({ ttlMs: 40, renewEveryMs: 10, retryMinMs: 2, retryMaxMs: 3 })
     // The owner's stamp sits a minute ahead, so it reads as fresh for the whole test no
@@ -391,7 +391,7 @@ describe('manifest writer lock', () => {
     await expect(stat(lockPath)).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
-  test.skipIf(!onPosix)('two stale evictors produce one eviction winner and never overlap holders', async () => {
+  test('two stale evictors produce one eviction winner and never overlap holders', async () => {
     const path = await manifestPath()
     await owner(path, Date.now() - MANIFEST_LOCK.ttlMs - 1)
     let waiting = 0
@@ -425,7 +425,7 @@ describe('manifest writer lock', () => {
     expect(maxActive).toBe(1)
   })
 
-  test.skipIf(!onPosix)('an evictor that observed stale owner cannot rename a replacement lock', async () => {
+  test('an evictor that observed stale owner cannot rename a replacement lock', async () => {
     const path = await manifestPath()
     const now = Date.now()
     await owner(path, now - 501)
@@ -498,7 +498,7 @@ describe('manifest writer lock', () => {
     expect(warnings.some((args) => args.includes('manifest lock lease lost, not releasing'))).toBe(true)
   })
 
-  test.skipIf(!onPosix)('atomic publication remains 0600 under umask 022', async () => {
+  test('atomic publication remains owner-only under umask 022', async () => {
     const path = await manifestPath()
     const previous = process.umask(0o022)
     try {
@@ -508,11 +508,13 @@ describe('manifest writer lock', () => {
     } finally {
       process.umask(previous)
     }
-    expect((await stat(path)).mode & 0o777).toBe(0o600)
+    if (onPosix) expect((await stat(path)).mode & 0o777).toBe(0o600)
+    expect(await checkOwnerOnlyPathAsync(path)).toEqual({ ok: true })
+    expect((await readHandleFile(path)).providers).toHaveLength(1)
   })
 
-  test.skipIf(!onPosix)('creates a missing manifest parent before claiming its colocated lock', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'claustrum-manifest-parent-'))
+  test('creates a missing manifest parent before claiming its colocated lock', async () => {
+    const root = await privateFixtureDirectory('claustrum-manifest-parent-')
     roots.push(root)
     const path = join(root, 'nested', 'opencode-handles.json')
 
@@ -520,7 +522,9 @@ describe('manifest writer lock', () => {
       file.providers.push(provider('anthropic', 'anthropic-auth'))
     })
 
-    expect((await stat(path)).mode & 0o777).toBe(0o600)
+    if (onPosix) expect((await stat(path)).mode & 0o777).toBe(0o600)
+    expect(await checkOwnerOnlyPathAsync(path)).toEqual({ ok: true })
+    expect((await readHandleFile(path)).providers).toHaveLength(1)
   })
 
   test.skipIf(!onPosix)('leaves the mode of a pre-existing benign parent unchanged', async () => {
@@ -542,7 +546,7 @@ describe('manifest writer lock', () => {
     await chmod(parent, 0o770)
 
     await withSharedAncestorGroup(parent, async () => {
-      await expect(writeHandleFileLocked(path, 'anthropic-auth', () => {})).rejects.toThrow('group- or world-writable without sticky bit')
+      await expect(writeHandleFileLocked(path, 'anthropic-auth', () => {})).rejects.toThrow('is not private: group-writable ancestor')
     })
     expect((await stat(parent)).mode & 0o777).toBe(0o770)
   })
@@ -589,7 +593,7 @@ describe('manifest writer lock', () => {
     await expect(stat(target)).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
-  test.skipIf(!onPosix)('aborts before manifest rename when renewal loses the original lock path', async () => {
+  test('aborts before manifest rename when renewal loses the original lock path', async () => {
     const path = await manifestPath()
     await writeHandleFileLocked(path, 'anthropic-auth', (file) => {
       file.providers.push(provider('anthropic', 'anthropic-auth'))

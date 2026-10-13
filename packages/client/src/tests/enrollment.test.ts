@@ -1,4 +1,5 @@
-import { withSharedAncestorGroup } from './ancestor-fixture.js'
+import { privateFixtureDirectory, withSharedAncestorGroup } from './ancestor-fixture.js'
+import { checkOwnerOnlyPathAsync } from '@cortexkit/store'
 import { afterEach, describe, expect, test } from 'bun:test'
 import { chmod, mkdtemp, mkdir, readFile, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -14,8 +15,8 @@ afterEach(async () => {
 const onPosix = process.platform !== 'win32'
 
 describe('enrollment token file', () => {
-  test.skipIf(!onPosix)('writes the token and generation atomically at mode 0600', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'claustrum-enrollment-'))
+  test('writes the token and generation atomically with owner-only protection', async () => {
+    const root = await privateFixtureDirectory('claustrum-enrollment-')
     roots.push(root)
     await chmod(root, 0o700)
     const path = join(root, 'consumer.json')
@@ -23,8 +24,13 @@ describe('enrollment token file', () => {
 
     await writeEnrollmentTokenFile(path, value)
 
-    expect((await stat(path)).mode & 0o777).toBe(0o600)
+    if (onPosix) expect((await stat(path)).mode & 0o777).toBe(0o600)
+    expect(await checkOwnerOnlyPathAsync(path)).toEqual({ ok: true })
     expect(JSON.parse(await readFile(path, 'utf8'))).toEqual(value)
+    const replacement = { ...value, token_generation: 3 }
+    await writeEnrollmentTokenFile(path, replacement)
+    expect(JSON.parse(await readFile(path, 'utf8'))).toEqual(replacement)
+    expect(await checkOwnerOnlyPathAsync(path)).toEqual({ ok: true })
   })
 
   for (const [mode, name] of [
@@ -44,7 +50,7 @@ describe('enrollment token file', () => {
       await withSharedAncestorGroup(unsafe, async () => {
         await expect(
           writeEnrollmentTokenFile(path, { token: 'cd'.repeat(32), token_generation: 1 }),
-        ).rejects.toThrow('group- or world-writable without sticky bit')
+        ).rejects.toThrow(/enrollment token folder .* is not private: (group|world)-writable ancestor/)
       })
       await expect(stat(path)).rejects.toMatchObject({ code: 'ENOENT' })
     })

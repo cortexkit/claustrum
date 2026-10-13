@@ -1,7 +1,8 @@
-import { acceptsAncestor } from './ancestor-permissions.js'
+import { createPrivateFile } from '@cortexkit/store'
+import { checkPrivatePath, createPrivateParents, notPrivate, privateCreationCode } from './private-path.js'
 import { randomBytes } from 'node:crypto'
-import { chmod, mkdir, open, realpath, rename, stat, unlink } from 'node:fs/promises'
-import { basename, dirname, join } from 'node:path'
+import { open, rename, unlink } from 'node:fs/promises'
+import { basename, dirname, join, resolve } from 'node:path'
 
 export type EnrollmentTokenFile = {
   token: string
@@ -18,50 +19,41 @@ function validateTokenFile(value: EnrollmentTokenFile): void {
 }
 
 async function refuseWritableAncestor(parent: string): Promise<void> {
-  let component: string
-  try {
-    component = await realpath(parent)
-  } catch {
-    // The following file operation reports the precise filesystem error. A permissions
-    // verdict about a path that could not be resolved would hide that useful failure.
-    return
-  }
-
-  for (;;) {
-    const metadata = await stat(component).catch(() => undefined)
-    // Canonicalisation already traversed this component. If a later stat races with a
-    // rename, let the create/rename operation below report the concrete failure.
-    if (metadata && !(await acceptsAncestor(metadata))) {
-      throw new Error(`enrollment token ancestor ${component} is group- or world-writable without sticky bit`)
-    }
-    const next = dirname(component)
-    if (next === component) return
-    component = next
-  }
+  const result = await checkPrivatePath(parent)
+  if (!result.ok) throw new Error(notPrivate('enrollment token folder', result))
 }
 
 /**
  * Atomically replace a consumer's enrollment credential.
  *
- * The file is always mode 0600. Writable canonical ancestors require sticky or a
- * proven user-private group. This is the same rule implemented by the
- * shipped `refuse_writable_ancestor` symbol in `opencode_files.rs`.
+ * Creation uses owner-only Unix permissions or native Windows ACLs before writing
+ * any bytes. @cortexkit/store checks that ancestors cannot be replaced by other
+ * users, and on Windows also verifies the completed parent's owner-only ACL.
  */
 export async function writeEnrollmentTokenFile(path: string, value: EnrollmentTokenFile): Promise<void> {
   validateTokenFile(value)
+  path = resolve(path)
   const parent = dirname(path)
-  await mkdir(parent, { recursive: true, mode: 0o700 })
+  // Native Windows creation rejects ancestors that other users can replace. A missing
+  // private parent can be created under a safe but non-private folder; afterwards the
+  // async check also requires the completed parent's protected owner-only ACL.
+  if (process.platform !== 'win32') await refuseWritableAncestor(parent)
+  await createPrivateParents(parent)
   await refuseWritableAncestor(parent)
 
   const temporary = join(parent, `.${basename(path)}.${process.pid}.${randomBytes(12).toString('hex')}.tmp`)
   let created = false
   try {
-    const descriptor = await open(temporary, 'wx', 0o600)
     created = true
     try {
-      await descriptor.writeFile(`${JSON.stringify(value)}\n`, 'utf8')
+      await createPrivateFile(temporary, `${JSON.stringify(value)}\n`)
+    } catch (error) {
+      if (privateCreationCode(error) === 'EEXIST') created = false
+      throw error
+    }
+    const descriptor = await open(temporary, 'r+')
+    try {
       await descriptor.sync()
-      await chmod(temporary, 0o600)
     } finally {
       await descriptor.close()
     }

@@ -1,4 +1,6 @@
-import { withSharedAncestorGroup } from './ancestor-fixture.js'
+import { readerFixtureOptions, withSharedAncestorGroup } from './ancestor-fixture.js'
+import { createPrivateDirectory, createPrivateFile, checkOwnerOnlyPathAsync } from '@cortexkit/store'
+import { privatePathContext } from '../private-path.js'
 import { afterEach, describe, expect, test } from 'bun:test'
 import { chmod, mkdir, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -13,16 +15,8 @@ import {
   type OpenCodeHandleFileV1,
 } from '../handles.js'
 
-// POSIX ONLY, DELIBERATELY. The contract these tests assert -- mode exactly 0600, a
-// non-world-writable parent, no symlink -- is a POSIX permission model. Windows has no
-// such mode: node reports a synthesised value there, so `writeFile(..., {mode: 0o600})`
-// produces a file the reader rejects, and even the VALID case fails.
-//
-// Skipped rather than weakened. Relaxing the reader on Windows would silently drop the
-// custody guarantee on that platform; asserting a different mode there would assert a
-// property of node's emulation rather than of the file. The honest state is that the
-// handle-file contract is unimplemented on Windows -- tracked, not hidden, and the skip
-// is what keeps it visible in the run output rather than passing vacuously.
+// Only Unix chmod/mode and symlink fixtures are skipped on Windows. The valid read
+// test runs on every platform and uses the store's native ACL verification on Windows.
 const posix = process.platform !== 'win32'
 
 // os.tmpdir(), not a hardcoded '/tmp'. Windows has no /tmp, so the literal would create a
@@ -46,10 +40,15 @@ describe('client handle-file contract', () => {
     expect(HANDLE_FILE_CONTRACT.handleRe.test(handle)).toBe(true)
   })
 
-  test.skipIf(!posix)('reads a valid owned 0600 manifest and computes its revision', async () => {
-    await mkdir(root, { recursive: true, mode: 0o700 })
+  // @cortexkit/private-files Windows x64/ARM64 CI proves its TS checker accepts
+  // owner-only files created by the Rust writer, including inherited ACLs:
+  // https://github.com/cortexkit/subconscious/blob/master/.github/workflows/private-files.yml
+  // handle-file content shape across Rust and TS is not covered by this package's tests.
+  test('reads a valid owner-only manifest and computes its revision', async () => {
+    await createPrivateDirectory(root)
     const path = join(root, 'handles.json')
-    await writeFile(path, `${JSON.stringify(validFile())}\n`, { mode: 0o600 })
+    await createPrivateFile(path, `${JSON.stringify(validFile())}\n`)
+    expect(await checkOwnerOnlyPathAsync(path)).toEqual({ ok: true })
     expect(await readHandleFile(path)).toEqual(validFile())
     expect(await handleFileRevision(path)).toMatch(/^\d+(\.\d+)?:\w{64}$/)
   })
@@ -59,7 +58,8 @@ describe('client handle-file contract', () => {
     const path = join(root, 'handles.json')
     await writeFile(path, JSON.stringify(validFile()), { mode: 0o600 })
     await chmod(root, 0o777)
-    await expect(readHandleFile(path)).rejects.toThrow('world-writable without sticky bit')
+    await expect(readHandleFile(path)).rejects.toThrow('handle file folder') 
+    await expect(readHandleFile(path)).rejects.toThrow('is not private: world-writable ancestor')
     await chmod(root, 0o700)
     await chmod(path, 0o640)
     await expect(readHandleFile(path)).rejects.toThrow('exactly 0600')
@@ -81,7 +81,7 @@ describe('client handle-file contract', () => {
     await writeFile(path, JSON.stringify(validFile()), { mode: 0o600 })
     await chmod(root, 0o770)
     await withSharedAncestorGroup(root, async () => {
-      await expect(readHandleFile(path)).rejects.toThrow('group- or world-writable')
+      await expect(readHandleFile(path)).rejects.toThrow('is not private: group-writable ancestor')
     })
     // The same directory without the group bit reads cleanly -- proving the refusal came
     // from that bit and not from something else about the fixture.
@@ -185,7 +185,7 @@ describe('client handle-file contract', () => {
     for (const [fixture, message] of fixtures) expect(() => parseHandleFile(fixture)).toThrow(message)
   })
 
-  test('preserves historical reader validation order and normalized failures', async () => {
+  test('preserves historical reader validation order and normalized failures', () => privatePathContext.run(readerFixtureOptions, async () => {
     const source = JSON.stringify(validFile())
     const regular = { isFile: () => true, mode: 0o100600, uid: 1000, size: source.length }
     const parent = { isFile: () => false, isDirectory: () => true, mode: 0o040755, uid: 1000 }
@@ -201,13 +201,13 @@ describe('client handle-file contract', () => {
       stat: async () => parent,
       readFile: async () => { throw new Error('read denied') },
     })).rejects.toThrow('cannot read handle file: read denied')
-    await expect(readHandleFile('/tmp/handles.json', {
+    if (posix) await expect(readHandleFile('/tmp/handles.json', {
       currentUid: () => 1000,
       lstat: async () => ({ ...regular, mode: 0o100640, uid: 1001 }),
       stat: async () => { throw new Error('must not reach parent') },
       readFile: async () => { throw new Error('must not read') },
     })).rejects.toThrow('handle file mode must be exactly 0600')
-  })
+  }))
 
   test.skipIf(!posix)('preserves the historical symlink and grow-after-fstat fixture outcomes', async () => {
     await mkdir(root, { recursive: true, mode: 0o700 })
@@ -218,7 +218,7 @@ describe('client handle-file contract', () => {
     await expect(readHandleFile(link)).rejects.toThrow('handle file must not be a symlink')
 
     const chunk = Buffer.alloc(HANDLE_FILE_CONTRACT.maxBytes + 2, 0x78)
-    await expect(readHandleFile('/tmp/handles.json', {
+    await privatePathContext.run(readerFixtureOptions, () => expect(readHandleFile('/tmp/handles.json', {
       currentUid: () => 1000,
       stat: async () => ({ isFile: () => false, isDirectory: () => true, mode: 0o040755, uid: 1000 }),
       open: async () => ({
@@ -233,7 +233,7 @@ describe('client handle-file contract', () => {
         },
         close: async () => {},
       }),
-    })).rejects.toThrow('handle file exceeds 256 KiB')
+    })).rejects.toThrow('handle file exceeds 256 KiB'))
   })
 
 })

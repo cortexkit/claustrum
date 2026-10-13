@@ -11,8 +11,9 @@
     },
     "packages/client": {
       "name": "@cortexkit/claustrum-client",
-      "version": "0.8.0",
+      "version": "0.9.0",
       "dependencies": {
+        "@cortexkit/store": "^0.2.1",
         "@cortexkit/subc-client": "^0.16.0",
       },
     },
@@ -32,6 +33,10 @@
     "@cortexkit/claustrum-client": ["@cortexkit/claustrum-client@workspace:packages/client"],
 
     "@cortexkit/opencode-claustrum": ["@cortexkit/opencode-claustrum@workspace:packages/opencode"],
+
+    "@cortexkit/private-files": ["@cortexkit/private-files@0.1.0", "", {}, "sha512-gQ3Ad0UohqGxA92CM64+UWWap8deP+uYA0cW0RV5owLWHG+S9sHci0HHr9ZYEZiyPsgF0wj/zbznqBXz1+GAPQ=="],
+
+    "@cortexkit/store": ["@cortexkit/store@0.2.1", "", { "dependencies": { "@cortexkit/private-files": "^0.1.0" } }, "sha512-QlKHkz8Gl0DlhV+IetBncVbXrirN50L4WJ7WDcPCO6LWNquwy6QScdS/SxbSY7FA3fuJLi7aLG8DVdA1nlY6cQ=="],
 
     "@cortexkit/subc-client": ["@cortexkit/subc-client@0.16.0", "", {}, "sha512-TYixR0E0CwBsZVi9G0gCfvr7bIrlDifVuP7Sy2CGlX29eCEZ3PXcda82S4VdM1paiAGsPBAm7TtQWvIJje4ArQ=="],
 

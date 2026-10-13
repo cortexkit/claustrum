@@ -442,7 +442,7 @@ async function hook(cfg: TestConfig, deps: ConfigHookDependencies = {}) {
     await hook(cfg, { log: (line) => logs.push(line) });
 
     expect(logs.join("\n")).toContain("HandleFileValidationError");
-    await expectRefusal(cfg, "deepseek", /world-writable without sticky bit/);
+    await expectRefusal(cfg, "deepseek", /is not private: world-writable ancestor/);
   });
 
   test("rejects an oversized handle file and never exposes raw handles in its revision", async () => {

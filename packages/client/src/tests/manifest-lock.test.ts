@@ -91,8 +91,18 @@ afterEach(async () => {
 // Keep onPosix distinct from node:path's posix import.
 const onPosix = process.platform !== 'win32'
 
+// The lock refuses on Windows (see the first test), so every test that takes it runs
+// on POSIX only. Pure tests of the shared constants and exports run everywhere.
+const lockTest = onPosix ? test : test.skip
+
 describe('manifest writer lock', () => {
-  test('lock directory and owner record are owner-only before the callback', async () => {
+  test.skipIf(onPosix)('refuses on Windows rather than risk two overlapping writers', async () => {
+    const path = join(await mkdtemp(join(tmpdir(), 'claustrum-win-lock-')), 'opencode-handles.json')
+    await expect(withManifestLock(path, 'tenant', () => 'ran')).rejects.toMatchObject({ code: 'unsupported_platform' })
+    await expect(writeHandleFileLocked(path, 'tenant', () => {})).rejects.toMatchObject({ code: 'unsupported_platform' })
+  })
+
+  lockTest('lock directory and owner record are owner-only before the callback', async () => {
     const path = await manifestPath()
     await withManifestLock(path, 'tenant', async () => {
       expect(await checkOwnerOnlyPathAsync(`${path}.lock`)).toEqual({ ok: true })
@@ -132,7 +142,7 @@ describe('manifest writer lock', () => {
     } finally { process.getuid = getuid }
   })
 
-  test('ownerless lock older than ttl is evicted using directory mtime', async () => {
+  lockTest('ownerless lock older than ttl is evicted using directory mtime', async () => {
     const path = await manifestPath()
     __setManifestLockTestOptions(reclaimOptions())
     await mkdir(`${path}.lock`)
@@ -141,7 +151,7 @@ describe('manifest writer lock', () => {
     await expect(withManifestLock(path, 'tenant', () => 'claimed')).resolves.toBe('claimed')
   })
 
-  test('ownerless lock with recent mtime is retained until ttl', async () => {
+  lockTest('ownerless lock with recent mtime is retained until ttl', async () => {
     const path = await manifestPath()
     __setManifestLockTestOptions(reclaimOptions())
     await mkdir(`${path}.lock`)
@@ -151,7 +161,7 @@ describe('manifest writer lock', () => {
     expect((await readdir(`${path}.lock`))).toEqual([])
   })
 
-  test('owner published during ownerless eviction is not stolen', async () => {
+  lockTest('owner published during ownerless eviction is not stolen', async () => {
     const path = await manifestPath()
     __setManifestLockTestOptions({ ...reclaimOptions(), beforeEvict: async () => {
       await writeFile(join(`${path}.lock`, 'owner'), JSON.stringify({ tenant: 'other', pid: 1, claimed_at_ms: Date.now() + 10_000, nonce: 'other' }))
@@ -163,7 +173,7 @@ describe('manifest writer lock', () => {
     expect(JSON.parse(await readFile(join(`${path}.lock`, 'owner'), 'utf8')).nonce).toBe('other')
   })
 
-  test('two concurrent tenant writers preserve both provider blocks', async () => {
+  lockTest('two concurrent tenant writers preserve both provider blocks', async () => {
     const path = await manifestPath()
     const firstEntered = Promise.withResolvers<void>()
     const releaseFirst = Promise.withResolvers<void>()
@@ -184,7 +194,7 @@ describe('manifest writer lock', () => {
     expect(written.providers.map((entry) => entry.provider).sort()).toEqual(['anthropic', 'openai'])
   })
 
-  test('stale owner is evicted by rename and retained as a quarantine directory', async () => {
+  lockTest('stale owner is evicted by rename and retained as a quarantine directory', async () => {
     const path = await manifestPath()
     await owner(path, Date.now() - MANIFEST_LOCK.ttlMs - 1)
 
@@ -197,7 +207,7 @@ describe('manifest writer lock', () => {
     expect(MANIFEST_LOCK.staleTargetRe.test(suffixes[0]!)).toBe(true)
   })
 
-  test('quarantine younger than reclaim age is retained', async () => {
+  lockTest('quarantine younger than reclaim age is retained', async () => {
     const path = await manifestPath()
     __setManifestLockTestOptions(reclaimOptions())
     const target = await quarantine(path, 1, 'young_nonce', Date.now() - (100 + RECLAIM_MARGIN_MS - 1_000))
@@ -207,7 +217,7 @@ describe('manifest writer lock', () => {
     expect((await stat(target)).isDirectory()).toBe(true)
   })
 
-  test('quarantine older than reclaim age is reclaimed', async () => {
+  lockTest('quarantine older than reclaim age is reclaimed', async () => {
     const path = await manifestPath()
     __setManifestLockTestOptions(reclaimOptions())
     const target = await quarantine(path, 1, 'old_nonce', Date.now() - (100 + RECLAIM_MARGIN_MS + 1))
@@ -217,7 +227,7 @@ describe('manifest writer lock', () => {
     await expect(stat(target)).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
-  test('quarantine past ttl but inside margin is retained', async () => {
+  lockTest('quarantine past ttl but inside margin is retained', async () => {
     const path = await manifestPath()
     __setManifestLockTestOptions(reclaimOptions())
     const target = await quarantine(path, 1, 'margin_nonce', Date.now() - 101)
@@ -227,7 +237,7 @@ describe('manifest writer lock', () => {
     expect((await stat(target)).isDirectory()).toBe(true)
   })
 
-  test('old quarantine name with recent mtime is retained', async () => {
+  lockTest('old quarantine name with recent mtime is retained', async () => {
     const path = await manifestPath()
     __setManifestLockTestOptions(reclaimOptions())
     const target = await quarantine(path, 1, 'recent_mtime_nonce', Date.now())
@@ -237,7 +247,7 @@ describe('manifest writer lock', () => {
     expect((await stat(target)).isDirectory()).toBe(true)
   })
 
-  test('reclaim leaves nonmatching siblings, the live lock, and another manifest quarantine', async () => {
+  lockTest('reclaim leaves nonmatching siblings, the live lock, and another manifest quarantine', async () => {
     const path = await manifestPath()
     __setManifestLockTestOptions(reclaimOptions())
     const parent = join(path, '..')
@@ -272,7 +282,7 @@ describe('manifest writer lock', () => {
     expect((await stat(target)).isDirectory()).toBe(true)
   })
 
-  test('owner that becomes stale during the retry window is evicted', async () => {
+  lockTest('owner that becomes stale during the retry window is evicted', async () => {
     const path = await manifestPath()
     __setManifestLockTestOptions({ ttlMs: 80, renewEveryMs: 1_000, retryMinMs: 2, retryMaxMs: 3 })
     await owner(path, Date.now() - 30)
@@ -283,7 +293,7 @@ describe('manifest writer lock', () => {
     expect(suffixes).toHaveLength(1)
   })
 
-  test('owner nonce containing a path traversal is invalid and never renamed', async () => {
+  lockTest('owner nonce containing a path traversal is invalid and never renamed', async () => {
     for (const nonce of ['../escape', 'a/b', 'a:b', 'a*b', 'a?b', 'a|b']) {
       const path = await manifestPath()
       const lockPath = `${path}.lock`
@@ -300,7 +310,7 @@ describe('manifest writer lock', () => {
     }
   })
 
-  test('path-safe unfamiliar nonce alphabets remain evictable', async () => {
+  lockTest('path-safe unfamiliar nonce alphabets remain evictable', async () => {
     for (const nonce of ['abc.def', 'AAAA====']) {
       const path = await manifestPath()
       const lockPath = `${path}.lock`
@@ -314,7 +324,7 @@ describe('manifest writer lock', () => {
     }
   })
 
-  test('unknown owner keys are busy while fresh and evictable once stale', async () => {
+  lockTest('unknown owner keys are busy while fresh and evictable once stale', async () => {
     const path = await manifestPath()
     const lockPath = `${path}.lock`
     __setManifestLockTestOptions({ ttlMs: 30, renewEveryMs: 10, retryMinMs: 2, retryMaxMs: 3 })
@@ -331,7 +341,7 @@ describe('manifest writer lock', () => {
     expect((await readdir(join(path, '..'))).some((name) => name.startsWith(`${basename(path)}.lock.stale-`))).toBe(true)
   })
 
-  test('malformed diagnostic owner fields do not prevent stale eviction', async () => {
+  lockTest('malformed diagnostic owner fields do not prevent stale eviction', async () => {
     const path = await manifestPath()
     const lockPath = `${path}.lock`
     __setManifestLockTestOptions({ ttlMs: 30, renewEveryMs: 10, retryMinMs: 2, retryMaxMs: 3 })
@@ -343,7 +353,7 @@ describe('manifest writer lock', () => {
     expect((await readdir(join(path, '..'))).some((name) => name.startsWith(`${basename(path)}.lock.stale-`))).toBe(true)
   })
 
-  test('renewing owner fails loudly after the bounded retry window', async () => {
+  lockTest('renewing owner fails loudly after the bounded retry window', async () => {
     const path = await manifestPath()
     __setManifestLockTestOptions({ ttlMs: 40, renewEveryMs: 10, retryMinMs: 2, retryMaxMs: 3 })
     // The owner's stamp sits a minute ahead, so it reads as fresh for the whole test no
@@ -378,7 +388,7 @@ describe('manifest writer lock', () => {
     if (tickError !== undefined) throw tickError
   })
 
-  test('owner file exists while held and disappears with the lock after release', async () => {
+  lockTest('owner file exists while held and disappears with the lock after release', async () => {
     const path = await manifestPath()
     const lockPath = `${path}.lock`
 
@@ -391,7 +401,9 @@ describe('manifest writer lock', () => {
     await expect(stat(lockPath)).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
-  test('two stale evictors produce one eviction winner and never overlap holders', async () => {
+  // POSIX only: stale eviction relies on renaming a lock another process may hold
+  // open, which Windows refuses; the lock refuses on Windows (see the test below).
+  test.skipIf(!onPosix)('two stale evictors produce one eviction winner and never overlap holders', async () => {
     const path = await manifestPath()
     await owner(path, Date.now() - MANIFEST_LOCK.ttlMs - 1)
     let waiting = 0
@@ -425,7 +437,9 @@ describe('manifest writer lock', () => {
     expect(maxActive).toBe(1)
   })
 
-  test('an evictor that observed stale owner cannot rename a replacement lock', async () => {
+  // POSIX only: stale eviction relies on renaming a lock another process may hold
+  // open, which Windows refuses; the lock refuses on Windows (see the test below).
+  test.skipIf(!onPosix)('an evictor that observed stale owner cannot rename a replacement lock', async () => {
     const path = await manifestPath()
     const now = Date.now()
     await owner(path, now - 501)
@@ -476,7 +490,7 @@ describe('manifest writer lock', () => {
     await expect(stat(`${path}.lock`)).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
-  test('an expired holder does not release its directory and logs the lost lease', async () => {
+  lockTest('an expired holder does not release its directory and logs the lost lease', async () => {
     const path = await manifestPath()
     const lockPath = `${path}.lock`
     __setManifestLockTestOptions({ ttlMs: 40, renewEveryMs: 1_000, retryMinMs: 2, retryMaxMs: 3 })
@@ -498,7 +512,7 @@ describe('manifest writer lock', () => {
     expect(warnings.some((args) => args.includes('manifest lock lease lost, not releasing'))).toBe(true)
   })
 
-  test('atomic publication remains owner-only under umask 022', async () => {
+  lockTest('atomic publication remains owner-only under umask 022', async () => {
     const path = await manifestPath()
     const previous = process.umask(0o022)
     try {
@@ -513,7 +527,7 @@ describe('manifest writer lock', () => {
     expect((await readHandleFile(path)).providers).toHaveLength(1)
   })
 
-  test('creates a missing manifest parent before claiming its colocated lock', async () => {
+  lockTest('creates a missing manifest parent before claiming its colocated lock', async () => {
     const root = await privateFixtureDirectory('claustrum-manifest-parent-')
     roots.push(root)
     const path = join(root, 'nested', 'opencode-handles.json')
@@ -573,7 +587,7 @@ describe('manifest writer lock', () => {
     expect(MANIFEST_LOCK.renewEveryMs * 3).toBeLessThanOrEqual(MANIFEST_LOCK.ttlMs)
   })
 
-  test('reads a Rust-shaped owner fixture using the shared field contract', async () => {
+  lockTest('reads a Rust-shaped owner fixture using the shared field contract', async () => {
     const path = await manifestPath()
     __setManifestLockTestOptions({ ttlMs: 30, renewEveryMs: 10, retryMinMs: 2, retryMaxMs: 3 })
     await owner(path, Date.now() + 1_000, 'opencode-claustrum')
@@ -593,7 +607,9 @@ describe('manifest writer lock', () => {
     await expect(stat(target)).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
-  test('aborts before manifest rename when renewal loses the original lock path', async () => {
+  // POSIX only: stale eviction relies on renaming a lock another process may hold
+  // open, which Windows refuses; the lock refuses on Windows (see the test below).
+  test.skipIf(!onPosix)('aborts before manifest rename when renewal loses the original lock path', async () => {
     const path = await manifestPath()
     await writeHandleFileLocked(path, 'anthropic-auth', (file) => {
       file.providers.push(provider('anthropic', 'anthropic-auth'))
@@ -621,7 +637,7 @@ describe('manifest writer lock', () => {
     expect(await readFile(path, 'utf8')).toBe(before)
   })
 
-  test('pins unparseable owner records without eviction', async () => {
+  lockTest('pins unparseable owner records without eviction', async () => {
     const path = await manifestPath()
     const lockPath = `${path}.lock`
     __setManifestLockTestOptions({ ttlMs: 25, renewEveryMs: 8, retryMinMs: 2, retryMaxMs: 3 })
@@ -645,7 +661,7 @@ describe('thrown errors carry a stable code', () => {
   // abandoned" had only the message text to branch on, so any copy-edit here silently
   // reclassified a busy lock as an unknown error. openai-auth asked for this before
   // writing its conformance suite, which is the cheap moment to add it.
-  test('a busy lock throws code lock_busy', async () => {
+  lockTest('a busy lock throws code lock_busy', async () => {
     const path = await manifestPath()
     __setManifestLockTestOptions({ ttlMs: 400, retryMinMs: 5, retryMaxMs: 10 })
     await mkdir(`${path}.lock`, { mode: 0o700 })
@@ -660,7 +676,7 @@ describe('thrown errors carry a stable code', () => {
     expect(classify(Object.assign(new Error('busy'), { code: 'lock_busy' as const }))).toBe('lock_busy')
   })
 
-  test('an unparseable owner is invalid, never evicted, and keeps that code', async () => {
+  lockTest('an unparseable owner is invalid, never evicted, and keeps that code', async () => {
     const path = await manifestPath()
     __setManifestLockTestOptions({ ttlMs: 400, retryMinMs: 5, retryMaxMs: 10 })
     await mkdir(`${path}.lock`, { mode: 0o700 })
@@ -672,7 +688,7 @@ describe('thrown errors carry a stable code', () => {
     expect((await readFile(join(`${path}.lock`, 'owner'), 'utf8')).trim()).toBe('not json at all')
   })
 
-  test('a throwing callback releases the lock and re-raises the original error unwrapped', async () => {
+  lockTest('a throwing callback releases the lock and re-raises the original error unwrapped', async () => {
     const path = await manifestPath()
     class EnrollRefusal extends Error {
       constructor() {
@@ -708,7 +724,7 @@ describe('thrown errors carry a stable code', () => {
     // above rather than as bun's unattributed per-test timeout.
   }, 20_000)
 
-  test('distinct manifest paths do not contend', async () => {
+  lockTest('distinct manifest paths do not contend', async () => {
     const first = await manifestPath()
     const second = await manifestPath()
     let bothInside = false

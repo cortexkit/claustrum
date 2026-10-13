@@ -3,6 +3,7 @@ import { createPrivateDirectory, createPrivateFile, checkOwnerOnlyPathAsync } fr
 import { privatePathContext } from '../private-path.js'
 import { afterEach, describe, expect, test } from 'bun:test'
 import { chmod, mkdir, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -22,7 +23,10 @@ const posix = process.platform !== 'win32'
 // os.tmpdir(), not a hardcoded '/tmp'. Windows has no /tmp, so the literal would create a
 // stray directory at the drive root -- a fourth instance of the same defect this repo has
 // hit in Rust fixtures, in TS fixtures, and in a review worktree.
-const root = join(tmpdir(), 'claustrum-client-handles-tests')
+// Inside a per-run mkdtemp folder (owner-only on POSIX), not directly in tmpdir(): on
+// Linux tmpdir() is the root-owned sticky /tmp, and @cortexkit/store 0.2.1 refuses to
+// create a private directory directly inside it.
+const root = join(mkdtempSync(join(tmpdir(), 'claustrum-client-')), 'handles-tests')
 const handle = `ckh_${'a'.repeat(43)}`
 
 afterEach(() => rm(root, { recursive: true, force: true }))

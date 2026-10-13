@@ -41,8 +41,11 @@ are exported for tenant plugins consuming the OpenCode handle manifest. The shar
 
 ### Private files and Windows support
 
-Enrollment tokens, handle manifests, and manifest locks support Windows as well as
-Unix. The client uses `@cortexkit/store` 0.2.1 or newer: exclusive private creation
+Enrollment tokens support Windows as well as Unix. Reading a handle manifest works on
+Windows; writing one does not: the manifest lock's stale-lock eviction renames a lock
+another process may hold open, which Windows refuses, so `withManifestLock` and
+`writeHandleFileLocked` reject on Windows with code `unsupported_platform` rather than
+risk two writers overlapping. The client uses `@cortexkit/store` 0.2.1 or newer: exclusive private creation
 protects files before any secret bytes are written, and atomic replacement keeps
 that protection. Unix files use mode 0600 and new directories use 0700. On Windows,
 the store's `@cortexkit/private-files` native module creates owner-only ACLs and the

@@ -5,7 +5,7 @@ import { randomBytes, randomInt } from 'node:crypto'
 import { basename as pathBasename, dirname, join, resolve } from 'node:path'
 import { HANDLE_FILE_CONTRACT, parseHandleFile, type OpenCodeHandleFileV1 } from './handles.js'
 
-export const MANIFEST_LOCK = { ttlMs: 30_000, renewEveryMs: 10_000, ownerKeys: ['tenant', 'pid', 'claimed_at_ms', 'nonce'] as const, staleTargetRe: /^\.lock\.stale-\d+-(?!\.{1,2}$)(?!.*[. ]$)[^/\\\x00-\x1f:*?"<>|]{1,128}$/, errorCodes: ['lock_busy', 'owner_invalid', 'renewal_failed'] as const }
+export const MANIFEST_LOCK = { ttlMs: 30_000, renewEveryMs: 10_000, ownerKeys: ['tenant', 'pid', 'claimed_at_ms', 'nonce'] as const, staleTargetRe: /^\.lock\.stale-\d+-(?!\.{1,2}$)(?!.*[. ]$)[^/\\\x00-\x1f:*?"<>|]{1,128}$/, errorCodes: ['lock_busy', 'owner_invalid', 'renewal_failed', 'unsupported_platform'] as const }
 // The claim deadline bounds when the last stale-lock rename is issued, not when it lands:
 // a rename issued at deadline-1ms can complete afterwards, by tens to hundreds of ms on a
 // loaded host. The retry deadline and staleness window both read `ttl` today; if they split,
@@ -31,6 +31,7 @@ const sleep = async (ms: number) => new Promise((resolve) => setTimeout(resolve,
 // silently reclassify a retryable busy-lock as an unknown error, with nothing failing
 // loudly. The code is the contract; the message is free to change.
 const lockError = (code: ManifestLockErrorCode, message: string): ManifestLockError => Object.assign(new Error(message), { code })
+const unsupportedOnWindows = (): ManifestLockError => lockError('unsupported_platform', 'handle-file manifest locking is not supported on Windows')
 
 function parseOwner(source: string): Owner {
   let value: unknown
@@ -90,6 +91,11 @@ export async function withManifestLock<T>(path: string, tenant: string, fn: () =
   return withLockCommit(path, tenant, async () => fn())
 }
 async function withLockCommit<T>(path: string, tenant: string, fn: (commit: () => Promise<void>) => Promise<T> | T): Promise<T> {
+  // Stale-lock eviction renames the lock directory while another process may hold it
+  // open. That is safe under POSIX rename; on Windows CI two evictors both won and a
+  // rename of an open lock failed with EPERM. Until the protocol is proven there,
+  // refuse rather than risk two writers overlapping on the shared handle file.
+  if (process.platform === 'win32') throw unsupportedOnWindows()
   path = resolve(path)
   const lock = `${path}.lock`, ownerPath = join(lock, 'owner'), ttl = testOptions?.ttlMs ?? MANIFEST_LOCK.ttlMs, renewEvery = testOptions?.renewEveryMs ?? MANIFEST_LOCK.renewEveryMs, retryMin = testOptions?.retryMinMs ?? 25, retryMax = testOptions?.retryMaxMs ?? 75
   const nonce = token(), started = Date.now(), deadline = started + ttl
@@ -186,6 +192,9 @@ async function writeAtomic(path: string, file: ManifestHandleFile, commit: () =>
   try { await createPrivateFile(temporary, bytes); handle = await open(temporary, 'r+'); await handle.sync(); await handle.close(); handle = undefined; await testOptions?.beforeManifestRename?.(`${path}.lock`); await commit(); await rename(temporary, path) } finally { await handle?.close().catch(() => {}); await unlink(temporary).catch(() => {}) }
 }
 export async function writeHandleFileLocked(path: string, tenant: string, mutate: (file: ManifestHandleFile) => void | ManifestHandleFile | Promise<void | ManifestHandleFile>): Promise<void> {
+  // Refuse before any path check, so a Windows caller gets the platform reason rather
+  // than a private-path refusal from the parent check that runs next.
+  if (process.platform === 'win32') throw unsupportedOnWindows()
   path = resolve(path)
   await prepareParent(path)
   await withLockCommit(path, tenant, async (commit) => {

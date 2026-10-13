@@ -730,6 +730,7 @@ fn registered_refresh_adapters(kimi_device_id: String) -> Vec<Arc<dyn RefreshAda
         Arc::new(XaiAdapter::new()),
         Arc::new(GithubCopilotAdapter::new()),
         Arc::new(GithubAppAdapter::new()),
+        Arc::new(credentials_core::refresh_adapters::meta::MetaAdapter),
         Arc::new(KimiAdapter::new(kimi_device_id)),
         // Antigravity (Google Code-Assist OAuth) — its own public client, distinct
         // from the gemini-cli client the google adapter uses.
@@ -7907,6 +7908,7 @@ mod tests {
             ("gmail", None),
             ("xai", Some("oauth")),
             ("kimi", Some("oauth")),
+            ("meta", Some("oauth")),
             ("cursor", Some("oauth")),
             ("github-copilot", Some("oauth")),
             ("antigravity", Some("antigravity")),
@@ -7941,7 +7943,7 @@ mod tests {
                 "`{name}` is in the expected map but not registered"
             );
         }
-        assert_eq!(registered.len(), 13);
+        assert_eq!(registered.len(), 14);
     }
 
     /// `list` authorizes list_scoped and nothing else. Every scoped surface that can

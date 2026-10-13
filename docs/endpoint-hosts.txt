@@ -150,6 +150,17 @@ crates/credentials-core/src/refresh_adapters/google.rs TOKEN_URL oauth2.googleap
 crates/credentials-core/src/refresh_adapters/kimi.rs DEVICE_AUTH_URL auth.kimi.com
 crates/credentials-core/src/refresh_adapters/kimi.rs HOST auth.kimi.com
 crates/credentials-core/src/refresh_adapters/kimi.rs TOKEN_URL auth.kimi.com
+crates/credentials-core/src/refresh_adapters/meta.rs DEVICE_CODE_URL auth.meta.com
+crates/credentials-core/src/refresh_adapters/meta.rs DEVICE_TOKEN_URL auth.meta.com
+crates/credentials-core/src/refresh_adapters/meta.rs KEY_URL api.meta.ai
+crates/credentials-core/src/refresh_adapters/meta/fixtures.rs INLINE_001 auth.meta.com
+crates/credentials-core/src/refresh_adapters/meta/fixtures.rs INLINE_002 auth.meta.com
+crates/credentials-core/src/refresh_adapters/meta/fixtures.rs INLINE_003 meta.ai
+crates/credentials-core/src/refresh_adapters/meta/fixtures.rs INLINE_004 meta.ai
+crates/credentials-core/src/refresh_adapters/meta/tests.rs INLINE_001 api.meta.ai
+crates/credentials-core/src/refresh_adapters/meta/tests.rs INLINE_002 api.meta.ai
+crates/credentials-core/src/refresh_adapters/meta/tests.rs INLINE_003 meta.ai
+crates/credentials-core/src/refresh_adapters/meta/tests.rs INLINE_004 auth.meta.com
 crates/credentials-core/src/refresh_adapters/openai.rs AUTHORIZE_URL auth.openai.com
 crates/credentials-core/src/refresh_adapters/openai.rs TOKEN_URL auth.openai.com
 crates/credentials-core/src/refresh_adapters/snowflake.rs TOKEN_URL_BASE {account}.snowflakecomputing.com

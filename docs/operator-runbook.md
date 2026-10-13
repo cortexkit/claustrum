@@ -372,7 +372,7 @@ ck auth login
 ```
 
 The picker covers OAuth (`anthropic`, `openai`, `xai`, `google`, `antigravity`),
-device-flow (`github-copilot`, `kimi`, and `--device` for openai/xai), custom
+device-flow (`github-copilot`, `kimi`, `meta`, and `--device` for openai/xai), custom
 browser flows (`cursor`, `devin`, `snowflake`, `digitalocean`), and API-key
 providers (`zai`, `openrouter`, `kiro`, `deepseek`, `groq`, …), which are validated against
 the provider before being stored. A few API-key providers have no probe that can
@@ -410,12 +410,32 @@ independent refresh chain and its own handles:
 ck auth login --provider anthropic --id oauth:anthropic:work
 ```
 
-Default ids are `oauth:anthropic`, `chatgpt:openai`, `oauth:xai` (note: a bare
+Default ids include `oauth:anthropic`, `chatgpt:openai`, `oauth:xai`, `oauth:meta` (note: a bare
 `--provider openai` means the ChatGPT subscription login, not `apikey:openai`).
 `--replace` swaps the credential on an existing id and **keeps its handles** — the
 usual recovery for a `needs_reauth` credential, and the reason a re-login never
 requires re-distributing handles. Without it, `login` is create-only. A native login
 records a distinct `Login` audit entry (not `Import`).
+
+### Meta Muse subscription login
+
+Run `ck auth login --provider meta` (or add `--id oauth:meta:work` for a labeled
+account). The shared device flow prints a verification URL and code, then the
+vault immediately mints an inference key. Only that key is served; the Meta
+identity token and any optional OAuth refresh token stay sealed in the vault.
+Neither reference client implements a Meta OAuth refresh-token grant, and no live
+exchange has confirmed that grant's endpoint or parameters; the vault does not invent one.
+
+Login prints only whether a refresh token and device/key expiry fields were
+present, never their values. The HTTP fixtures are reconstructed from client
+source, not captured from Meta. Key expiry uses a response expiry, then JWT
+`exp`, and only otherwise an **assumed 24-hour lifetime** pending a live response.
+The rate-limited mint runs on refresh demand, not on every read.
+
+A mint 401/403 requires re-login. An inactive/payment-required subscription also
+latches `needs_reauth`, but its `subscription_required` event means **repair the
+subscription first**; re-login alone cannot fix payment. A 429 or server outage
+is transient and does not invalidate the login.
 
 ### Gmail send login
 

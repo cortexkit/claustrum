@@ -37,6 +37,7 @@ pub mod github_app;
 pub mod github_copilot;
 pub mod google;
 pub mod kimi;
+pub mod meta;
 pub mod openai;
 pub mod snowflake;
 pub mod xai;
@@ -92,6 +93,8 @@ pub enum RefreshError {
     /// without someone taking an action outside this process? If not, it belongs here
     /// whatever the provider called it.
     InvalidGrant(String),
+    /// The Meta Muse subscription requires operator repair, not another login.
+    SubscriptionRequired,
     /// A transport/HTTP error reaching the provider (retryable).
     Transport(String),
     /// The provider returned a success status but an undecodable/again-shaped body
@@ -114,6 +117,7 @@ impl RefreshError {
     pub fn variant_name(&self) -> &'static str {
         match self {
             RefreshError::InvalidGrant(_) => "invalid_grant",
+            RefreshError::SubscriptionRequired => "subscription_required",
             RefreshError::Transport(_) => "transport",
             RefreshError::Decode(_) => "decode",
             RefreshError::Status(_, _) => "status",
@@ -133,6 +137,9 @@ impl std::fmt::Display for RefreshError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             RefreshError::InvalidGrant(m) => write!(f, "refresh rejected (invalid_grant): {m}"),
+            RefreshError::SubscriptionRequired => f.write_str(
+                "Meta Muse subscription is inactive or requires payment; repair the subscription before re-login",
+            ),
             RefreshError::Transport(m) => write!(f, "refresh transport error: {m}"),
             RefreshError::Decode(m) => write!(f, "refresh response decode error: {m}"),
             RefreshError::Status(code, m) => write!(f, "refresh unexpected status {code}: {m}"),

@@ -5,6 +5,9 @@
 //! visible). The REAL kill-9 SIGKILL harness lives in a separate, feature-gated
 //! integration test; this file proves the logic deterministically in-process.
 
+#[path = "refresh_adapters/meta/engine_tests.rs"]
+mod meta_tests;
+
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};

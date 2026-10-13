@@ -998,6 +998,7 @@ pub enum DeviceKind {
     OpenAi,
     GithubCopilot,
     Kimi,
+    Meta,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1136,6 +1137,26 @@ pub const LOGIN_PROVIDERS: &[LoginProvider] = &[
         device: Some(DeviceKind::Kimi),
         categories: LLM,
         serves: &[Moonshot],
+    },
+    LoginProvider {
+        key: "meta",
+        authorize_url: "",
+        token_url: refresh_adapters::meta::DEVICE_TOKEN_URL,
+        client_id: refresh_adapters::meta::CLIENT_ID,
+        redirect_uri: "",
+        scopes: &[],
+        extra_authorize_params: &[],
+        adapter_name: refresh_adapters::meta::ADAPTER_NAME,
+        default_id: "oauth:meta",
+        exchange: ExchangeWire::RfcForm,
+        needs_oidc_nonce: false,
+        exchange_echoes_challenge: false,
+        paste_prompt: "",
+        code_redirect_uri: None,
+        code_paste_prompt: None,
+        device: Some(DeviceKind::Meta),
+        categories: LLM,
+        serves: &[Meta],
     },
     LoginProvider {
         key: "google",
@@ -1539,7 +1560,7 @@ mod tests {
         // 15 original API-key rows, 37 model providers mirrored from oh-my-pi,
         // Kiro, the Anthropic API key, and 4 search APIs.
         assert_eq!(API_KEY_PROVIDERS.len(), 58);
-        assert_eq!(LOGIN_PROVIDERS.len(), 12);
+        assert_eq!(LOGIN_PROVIDERS.len(), 13);
         // Which api-key rows are `llm-provider` and which are `web-search` is pinned by
         // the two category tests below, which also require every row to be listed.
         let login_categories: Vec<_> = LOGIN_PROVIDERS
@@ -1563,6 +1584,7 @@ mod tests {
                 ("oauth:xai", vec!["llm-provider"]),
                 ("copilot:github", vec!["llm-provider"]),
                 ("oauth:kimi", vec!["llm-provider"]),
+                ("oauth:meta", vec!["llm-provider"]),
                 ("oauth:google", vec!["llm-provider"]),
                 ("oauth:gmail", vec![]),
                 ("antigravity:google", vec!["llm-provider"]),
@@ -2311,6 +2333,7 @@ mod source_ownership_tests {
                     vec!["openai", "anthropic", "google", "xai"]
                 ),
                 ("oauth:kimi", vec!["moonshot"]),
+                ("oauth:meta", vec!["meta"]),
                 ("oauth:google", vec!["google"]),
                 ("oauth:gmail", vec![]),
                 ("antigravity:google", vec!["google", "anthropic", "openai"]),

@@ -2729,7 +2729,9 @@ fn map_engine_error(e: &EngineError) -> ReadError {
         // needs-reauth signal — surface it on THIS call, not the next. Returning a
         // transient RefreshFailed here would cost the consumer a wasted retry and
         // mislabel the signal; needs_reauth lets it pause for re-auth immediately.
-        EngineError::RefreshFailed(RefreshError::InvalidGrant(_)) => ReadError::NeedsReauth,
+        EngineError::RefreshFailed(
+            RefreshError::InvalidGrant(_) | RefreshError::SubscriptionRequired,
+        ) => ReadError::NeedsReauth,
         // Every other refresh failure (transport, decode, unexpected status,
         // entitlement) is transient/ambiguous and the record is left active ⇒ retry.
         EngineError::RefreshFailed(_) => ReadError::RefreshFailed,

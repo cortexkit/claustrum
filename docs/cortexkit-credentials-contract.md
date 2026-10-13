@@ -359,10 +359,11 @@ token. We **document this residual** (rare re-login), not claim elimination.
 `refresh_adapter` IS a per-provider dispatch — to keep it from becoming a spaghetti
 sink in the vault: importers parse each source format into a **canonical
 `OAuthCredential`** (token URLs, client_id, grant shape); adapters operate on the
-canonical type, NOT raw provider JSON. There are **12 adapters** (one per provider
+canonical type, NOT raw provider JSON. There are **13 adapters** (one per provider
 CortexKit can log in to), isolated in a `refresh_adapters/` submodule with
-**per-adapter conformance tests** (recorded HTTP fixtures) — every one of the 12
-carries them. Adding an adapter is a contract amendment, and the count above is
+**per-adapter conformance tests** — all 13 carry HTTP fixtures. Meta Muse is the
+explicit provisional exception to captured responses: its fixtures are reconstructed
+from client source until a live exchange is available. Adding an adapter is a contract amendment, and the count above is
 test-pinned (`the_documented_adapter_count_matches_the_tree`) so it cannot go stale
 the way it did when v1's bound of 4 was widened to 11 without either doc moving. This is an explicit, owned
 thin-core *exception for the credential module only*.

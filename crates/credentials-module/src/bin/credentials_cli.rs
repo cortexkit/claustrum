@@ -2387,6 +2387,7 @@ const LOGIN_PICKER_ROWS: &[(&str, &str)] = &[
     ("xai", "xAI (Grok)"),
     ("github-copilot", "GitHub Copilot"),
     ("kimi", "Kimi Code"),
+    ("meta", "Meta Muse (coding subscription)"),
     ("google", "Google Gemini CLI (Code Assist)"),
     ("gmail", "Gmail (send as you)"),
     ("antigravity", "Antigravity (Gemini 3)"),
@@ -2579,7 +2580,7 @@ fn cmd_device_login(
     use credentials_core::device_flow::{
         run_device_flow, run_openai_device_flow, DeviceBodyEncoding, DeviceFlowConfig,
     };
-    use credentials_core::refresh_adapters::{github_copilot, kimi, xai, RefreshAdapter};
+    use credentials_core::refresh_adapters::{github_copilot, kimi, meta, xai, RefreshAdapter};
 
     let preflighted_key = preflight_login(
         global,
@@ -2599,6 +2600,12 @@ fn cmd_device_login(
     };
 
     let tokens = match wire.device {
+        Some(DeviceKind::Meta) => tokio_block_on(run_device_flow(
+            &http,
+            &meta::device_config(),
+            print_device_instructions,
+        ))
+        .map_err(|e| CliError::Io(e.to_string()))?,
         Some(DeviceKind::GithubCopilot) => {
             let mut cfg = DeviceFlowConfig::new(
                 github_copilot::DEVICE_CODE_URL,
@@ -2655,55 +2662,71 @@ fn cmd_device_login(
         }
     };
 
-    let (oauth, payload) = if matches!(wire.device, Some(DeviceKind::GithubCopilot)) {
-        let github_credential = credentials_core::oauth::OAuthCredential {
-            access_token: String::new().into(),
-            refresh_token: tokens.access_token.into(),
-            expires_at_ms: None,
-            token_url: github_copilot::TOKEN_URL.into(),
-            client_id: Some(github_copilot::CLIENT_ID.into()),
-            client_secret: None,
-            scopes: vec!["read:user".into()],
-        };
-        let exchanged = tokio_block_on(
-            github_copilot::GithubCopilotAdapter::new().refresh(&github_credential, &http),
-        )
-        .map_err(|e| CliError::Io(e.to_string()))?;
-        let oauth = credentials_core::oauth::OAuthCredential {
-            access_token: exchanged.access_token.clone(),
-            refresh_token: exchanged.refresh_token,
-            expires_at_ms: exchanged.expires_at_ms,
-            token_url: github_copilot::TOKEN_URL.into(),
-            client_id: Some(github_copilot::CLIENT_ID.into()),
-            client_secret: None,
-            scopes: vec!["read:user".into()],
-        };
-        let payload = credentials_core::secret::SecretBytes::new(
-            oauth.access_token.expose().as_bytes().to_vec(),
+    let record = if matches!(wire.device, Some(DeviceKind::Meta)) {
+        let presence = |present| if present { "present" } else { "absent" };
+        println!(
+            "Meta device-token response: refresh token {}; expiry field {}",
+            presence(tokens.refresh_token.is_some()),
+            presence(tokens.expiry_field_present)
         );
-        (oauth, payload)
+        let (record, fields) = tokio_block_on(meta::login_record(tokens, &http))
+            .map_err(|e| CliError::Io(format!("Meta Muse login failed: {e}")))?;
+        println!(
+            "Meta key response: expiry field {}",
+            presence(fields.key_expiry_field_present)
+        );
+        record
     } else {
-        let refresh_token = tokens.refresh_token.ok_or_else(|| {
-            CliError::Io(format!("{provider} device flow returned no refresh token"))
-        })?;
-        let oauth = credentials_core::oauth::OAuthCredential {
-            access_token: tokens.access_token.clone().into(),
-            refresh_token: refresh_token.into(),
-            expires_at_ms: tokens.expires_at_ms,
-            token_url: wire.token_url.to_string(),
-            client_id: Some(wire.client_id.to_string()),
-            client_secret: None,
-            scopes: wire.scopes.iter().map(|scope| scope.to_string()).collect(),
+        let (oauth, payload) = if matches!(wire.device, Some(DeviceKind::GithubCopilot)) {
+            let github_credential = credentials_core::oauth::OAuthCredential {
+                access_token: String::new().into(),
+                refresh_token: tokens.access_token.into(),
+                expires_at_ms: None,
+                token_url: github_copilot::TOKEN_URL.into(),
+                client_id: Some(github_copilot::CLIENT_ID.into()),
+                client_secret: None,
+                scopes: vec!["read:user".into()],
+            };
+            let exchanged = tokio_block_on(
+                github_copilot::GithubCopilotAdapter::new().refresh(&github_credential, &http),
+            )
+            .map_err(|e| CliError::Io(e.to_string()))?;
+            let oauth = credentials_core::oauth::OAuthCredential {
+                access_token: exchanged.access_token.clone(),
+                refresh_token: exchanged.refresh_token,
+                expires_at_ms: exchanged.expires_at_ms,
+                token_url: github_copilot::TOKEN_URL.into(),
+                client_id: Some(github_copilot::CLIENT_ID.into()),
+                client_secret: None,
+                scopes: vec!["read:user".into()],
+            };
+            let payload = credentials_core::secret::SecretBytes::new(
+                oauth.access_token.expose().as_bytes().to_vec(),
+            );
+            (oauth, payload)
+        } else {
+            let refresh_token = tokens.refresh_token.ok_or_else(|| {
+                CliError::Io(format!("{provider} device flow returned no refresh token"))
+            })?;
+            let oauth = credentials_core::oauth::OAuthCredential {
+                access_token: tokens.access_token.clone().into(),
+                refresh_token: refresh_token.into(),
+                expires_at_ms: tokens.expires_at_ms,
+                token_url: wire.token_url.to_string(),
+                client_id: Some(wire.client_id.to_string()),
+                client_secret: None,
+                scopes: wire.scopes.iter().map(|scope| scope.to_string()).collect(),
+            };
+            let payload = credentials_core::secret::SecretBytes::new(
+                oauth.access_token.expose().as_bytes().to_vec(),
+            );
+            (oauth, payload)
         };
-        let payload = credentials_core::secret::SecretBytes::new(
-            oauth.access_token.expose().as_bytes().to_vec(),
-        );
-        (oauth, payload)
-    };
 
-    // Device-flow providers do not disclose an account identity in the response, so
-    // leave RecordIdentity empty rather than making an extra account lookup.
-    let record = VaultRecord::new_oauth("login", wire.adapter_name, oauth, payload);
+        // Other device-flow providers do not disclose an account identity in the response, so
+        // leave RecordIdentity empty rather than making an extra account lookup.
+        VaultRecord::new_oauth("login", wire.adapter_name, oauth, payload)
+    };
     if replace {
         commit_login_admin(
             global,
@@ -6847,6 +6870,8 @@ mod tests {
         assert_eq!(default_login_id("xai"), "oauth:xai");
         assert_eq!(default_login_id("google"), "oauth:google");
         assert_eq!(default_login_id("antigravity"), "antigravity:google");
+        assert_eq!(default_login_id("meta"), "oauth:meta");
+        assert!(LOGIN_PICKER_ROWS.contains(&("meta", "Meta Muse (coding subscription)")));
         // anthropic has an api-key row too; the bare name stays the subscription login.
         assert_eq!(default_login_id("anthropic"), "oauth:anthropic");
         // api-key-only providers resolve to their apikey: id.

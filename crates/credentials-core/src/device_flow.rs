@@ -72,6 +72,8 @@ pub struct DeviceTokens {
     pub access_token: String,
     pub refresh_token: Option<String>,
     pub expires_at_ms: Option<i64>,
+    /// Whether the token response supplied a non-null expiry field, not a JWT fallback.
+    pub expiry_field_present: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -490,6 +492,7 @@ fn parse_token_response(response: HttpResponse) -> PollDecision {
         access_token,
         refresh_token: parsed.refresh_token,
         expires_at_ms,
+        expiry_field_present: parsed.expires_in.is_some(),
     })
 }
 
@@ -575,6 +578,89 @@ mod tests {
     use super::*;
     use crate::refresh_adapters::fixture::FixtureTransport;
     use std::sync::{Arc, Mutex};
+
+    #[tokio::test]
+    async fn meta_device_pending_slow_down_success_reuses_rfc8628_without_scope() {
+        use crate::refresh_adapters::meta::{device_config, fixtures};
+        for (body, optional) in [
+            (fixtures::DEVICE_TOKEN, false),
+            (fixtures::DEVICE_TOKEN_OPTIONALS, true),
+        ] {
+            let http = FixtureTransport::new(
+                [
+                    (200, fixtures::DEVICE_AUTH),
+                    (400, fixtures::PENDING),
+                    (400, fixtures::SLOW_DOWN),
+                    (200, body),
+                ]
+                .into_iter()
+                .map(|(status, body)| {
+                    Ok(HttpResponse {
+                        status,
+                        body: body.as_bytes().to_vec(),
+                    })
+                })
+                .collect(),
+            );
+            let waits = Arc::new(Mutex::new(Vec::new()));
+            let seen = waits.clone();
+            let tokens = run_device_flow_with_sleeper(
+                &http,
+                &device_config(),
+                &|auth| {
+                    assert_eq!(auth.user_code, "ABCD-EFGH");
+                    assert_eq!(auth.verification_uri, "https://auth.meta.com/device");
+                },
+                move |duration| {
+                    seen.lock().unwrap().push(duration);
+                    async {}
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(tokens.access_token, "meta-identity-token");
+            assert_eq!(
+                tokens.refresh_token.as_deref(),
+                optional.then_some("meta-refresh-token")
+            );
+            assert_eq!(tokens.expiry_field_present, optional);
+            assert_eq!(
+                *waits.lock().unwrap(),
+                [
+                    Duration::from_secs(5),
+                    Duration::from_secs(5),
+                    Duration::from_secs(10)
+                ]
+            );
+            let requests = http.requests();
+            assert_eq!(requests.len(), 4);
+            assert_eq!(
+                requests[0].url,
+                "https://auth.meta.com/oidc/device/authorization/"
+            );
+            assert_eq!(requests[0].body, b"client_id=1031625952748946");
+            for request in &requests[1..] {
+                assert_eq!(request.url, "https://auth.meta.com/oidc/device/token/");
+                assert_eq!(request.content_type, "application/x-www-form-urlencoded");
+                assert!(request.headers.is_empty());
+                let pairs: std::collections::BTreeMap<_, _> =
+                    url::form_urlencoded::parse(&request.body)
+                        .into_owned()
+                        .collect();
+                assert_eq!(
+                    pairs,
+                    std::collections::BTreeMap::from([
+                        ("client_id".to_string(), "1031625952748946".to_string()),
+                        ("device_code".to_string(), "meta-device".to_string()),
+                        (
+                            "grant_type".to_string(),
+                            "urn:ietf:params:oauth:grant-type:device_code".to_string()
+                        ),
+                    ])
+                );
+            }
+        }
+    }
 
     fn config() -> DeviceFlowConfig {
         let mut config = DeviceFlowConfig::new(

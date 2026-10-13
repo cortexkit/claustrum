@@ -53,7 +53,7 @@ impl ListAuthMethod {
 /// | `ApiKey` | `None` or any string | `apikey` |
 /// | `Oauth` | `openai` | `chatgpt` |
 /// | `Oauth` | `antigravity` | `antigravity` |
-/// | `Oauth` | `anthropic`, `google`, `xai`, `kimi`, `cursor`, `github-copilot` | `oauth` |
+/// | `Oauth` | `anthropic`, `google`, `xai`, `kimi`, `meta`, `cursor`, `github-copilot` | `oauth` |
 /// | `Oauth` | `github_app`, `devin`, `digitalocean`, `snowflake`, `None`, any other | omitted |
 /// | `Dsn`, `Cookie`, `Opaque`, `SigningKey`, `KemKey` | anything | omitted |
 pub fn list_auth_method(
@@ -69,6 +69,7 @@ pub fn list_auth_method(
             | google::ADAPTER_NAME
             | xai::ADAPTER_NAME
             | kimi::ADAPTER_NAME
+            | crate::refresh_adapters::meta::ADAPTER_NAME
             | cursor::ADAPTER_NAME
             | github_copilot::ADAPTER_NAME => Some(ListAuthMethod::Oauth),
             // `github_app`, `devin`, `digitalocean`, `snowflake`, and any adapter this
@@ -101,7 +102,8 @@ mod tests {
 
     /// Every adapter name the crate defines, with the value an OAuth record using it
     /// reports. Spelled out literally so a change to the table reddens here.
-    const OAUTH_TABLE: [(&str, Option<&str>); 12] = [
+    const OAUTH_TABLE: [(&str, Option<&str>); 13] = [
+        ("meta", Some("oauth")),
         (anthropic::ADAPTER_NAME, Some("oauth")),
         (openai::ADAPTER_NAME, Some("chatgpt")),
         (google::ADAPTER_NAME, Some("oauth")),
@@ -155,16 +157,16 @@ mod tests {
     }
 
     #[test]
-    fn the_twelve_adapters_yield_eight_values_and_four_omissions() {
+    fn the_thirteen_adapters_yield_nine_values_and_four_omissions() {
         let values = OAUTH_TABLE
             .iter()
             .filter(|(name, _)| wire(CredentialKind::Oauth, Some(name)).is_some())
             .count();
-        assert_eq!(values, 8);
+        assert_eq!(values, 9);
         let mut names: Vec<&str> = OAUTH_TABLE.iter().map(|(name, _)| *name).collect();
         names.sort_unstable();
         names.dedup();
-        assert_eq!(names.len(), 12, "each adapter name is listed once");
+        assert_eq!(names.len(), 13, "each adapter name is listed once");
     }
 
     #[test]

@@ -484,14 +484,14 @@ impl RefreshEngine {
                     Err(other) => Err(EngineError::Store(other)),
                 }
             }
-            // A definitively dead refresh token: mark needs_reauth and clear the
-            // intent (no rotation can recover it). VERSION-GATED on the version this
+            // A dead refresh token or unserviceable subscription: mark needs_reauth
+            // and clear the intent (only a human can repair it). VERSION-GATED on the version this
             // refresh actually observed: if an admin replaced the credential while
             // the provider call was in flight (bumping the version), the invalid_grant
             // verdict is about the OLD record's token, and invalidating the fresh
             // replacement would kill a healthy credential the verdict never saw. The
             // stale invalidation then no-ops silently; the replacement stands.
-            Err(e @ RefreshError::InvalidGrant(_)) => {
+            Err(e @ (RefreshError::InvalidGrant(_) | RefreshError::SubscriptionRequired)) => {
                 self.store.invalidate_if_version_reported(
                     credential_id,
                     record.record_version,

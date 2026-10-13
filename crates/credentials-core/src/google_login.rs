@@ -311,7 +311,7 @@ impl From<RefreshError> for GoogleLoginError {
             RefreshError::Transport(message) => Self::Transport(message),
             RefreshError::Decode(message) => Self::Decode(message),
             RefreshError::Status(status, _) => Self::Status(status),
-            RefreshError::InvalidGrant(_) => Self::Status(400),
+            RefreshError::InvalidGrant(_) | RefreshError::SubscriptionRequired => Self::Status(400),
         }
     }
 }

@@ -93,7 +93,9 @@ pub enum RefreshError {
     /// without someone taking an action outside this process? If not, it belongs here
     /// whatever the provider called it.
     InvalidGrant(String),
-    /// The Meta Muse subscription requires operator repair, not another login.
+    /// The provider reports the subscription as inactive or unpaid. Like
+    /// `InvalidGrant` it latches `needs_reauth`, but logging in again will not fix it;
+    /// the operator must repair the subscription with the provider first.
     SubscriptionRequired,
     /// A transport/HTTP error reaching the provider (retryable).
     Transport(String),
@@ -138,7 +140,7 @@ impl std::fmt::Display for RefreshError {
         match self {
             RefreshError::InvalidGrant(m) => write!(f, "refresh rejected (invalid_grant): {m}"),
             RefreshError::SubscriptionRequired => f.write_str(
-                "Meta Muse subscription is inactive or requires payment; repair the subscription before re-login",
+                "subscription is inactive or requires payment; repair it with the provider, then log in again",
             ),
             RefreshError::Transport(m) => write!(f, "refresh transport error: {m}"),
             RefreshError::Decode(m) => write!(f, "refresh response decode error: {m}"),

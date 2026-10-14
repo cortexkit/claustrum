@@ -354,10 +354,10 @@ mod endpoint_pins {
 mod documented_count_tests {
     /// The adapter count stated in the architecture doc matches the tree.
     ///
-    /// Both documents said "v1 adapters are bounded to the 4 providers llm-runner
-    /// uses" long after the login expansion took it to 11, and the contract adds
-    /// "adding an adapter is a contract amendment" -- so that sentence is an
-    /// AMENDMENT LEDGER, not decoration, and it had silently stopped counting.
+    /// The design contract and build charter this count used to live in both said "v1
+    /// adapters are bounded to the 4 providers llm-runner uses" long after the login
+    /// expansion took it to 11, and "adding an adapter is a contract amendment" -- so that
+    /// sentence is an AMENDMENT LEDGER, not decoration, and it had silently stopped counting.
     ///
     /// A corrected sentence rots again at adapter 12. This checks the number against
     /// the thing it describes, so whoever adds the next one updates the docs rather

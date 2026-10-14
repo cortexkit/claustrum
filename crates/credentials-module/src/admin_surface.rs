@@ -1,6 +1,6 @@
 //! The module-driven admin surface: authenticated write ops on the RUNNING module.
 //!
-//! Design: docs/module-driven-admin-design.md (Oracle-amended). Admin ops ride the
+//! Overview: docs/architecture.md, section 3 ("Writing"). Admin ops ride the
 //! same route plane as reads, dual-gated:
 //!
 //! - Gate 1 (provenance pre-filter): the bind's daemon-stamped principal must be

@@ -7,7 +7,7 @@ temporary files and rename. Readers verify the opened handle before reading byte
 The verifier permits only the current user, SYSTEM and Administrators as owners
 and grant recipients, and fails closed on null DACLs or unknown grant types.
 
-| Rust path / site | File kind | Unix protection today | Windows protection after |
+| Rust path / site | File kind | Unix protection | Windows protection |
 | --- | --- | --- | --- |
 | `credentials-core/src/resolver.rs`, `ensure_vault_dir` | Vault data directory | `create_dir_all`, then `0700` | `create_private_dir` creates or tightens, then `verify_private_dir`; foreign owners / reparse points refused |
 | Same, `open_checked_key_file` | Operator master key, current and `.next` slots | Regular, effective-uid owner, no group/other mode bits; no-follow on Linux/macOS; opened device/inode matches lstat | Open, then `verify_owner_only` on that handle; refusal names the file and ACL remedy, never repairs the file |
@@ -23,26 +23,17 @@ and grant recipients, and fails closed on null DACLs or unknown grant types.
 | `cortexkit-lease`, `cortexkit-store`, `cortexkit-log` consumers | Lease, database and log files | Filesystem policy owned by the named shared crates | Out of scope: shared crates already own their Windows DACL handling |
 
 Paths in the table are relative to `crates/`. TypeScript client and OpenCode plugin
-filesystem helpers are outside this change.
+filesystem helpers are outside this inventory.
 
-## Dependency and launch nonce compatibility
+## Launch nonce delivery on Windows
 
-The workspace requirement moves from `subc-os = "0.1.6"` (lockfile resolved 0.1.10)
-to 0.1.14. `cortexkit-test-support` must also move from 0.1.0 to 0.1.3 because 0.1.0
-pins `subc-os = "=0.1.10"`. No claustrum launch-nonce call signature changes:
-`launch_nonce()` still returns `Result<Option<LaunchNonce>, LaunchNonceError>` and
-`value()` / `source()` remain available; Unix inherited-fd and caching behaviour
-is unchanged.
-
-Compared with 0.1.10, 0.1.14 adds Windows named-pipe handoff, a `Pipe` provenance
-value (`"pipe"`), pipe environment constants and pipe-specific errors. When
-`SUBC_LAUNCH_NONCE_PIPE` names a handoff, errors refuse launch unless
-`SUBC_LAUNCH_NONCE_PIPE_FALLBACK=env` explicitly permits the environment copy.
-An absent pipe still uses the environment. The daemon already maps unknown
-source variants through `from_wire_name(other.as_str())`, so `Pipe` provenance is
-preserved without changing that call site. The Rust client reads only the nonce
-value and still propagates errors. These are launch-key delivery changes, not
-operator master-key file changes.
+The daemon reads its supervisor launch nonce through `subc-os`. On Windows the supervisor
+may hand the nonce over a named pipe: when `SUBC_LAUNCH_NONCE_PIPE` names a handoff, a pipe
+error refuses launch unless `SUBC_LAUNCH_NONCE_PIPE_FALLBACK=env` explicitly permits the
+environment copy. An absent pipe uses the environment. The daemon preserves the nonce's
+provenance (`pipe` or the environment) when it reports it. The Rust client reads only the
+nonce value and propagates errors. These are launch-key delivery rules, unrelated to the
+operator master-key file.
 
 ## Verification boundary
 

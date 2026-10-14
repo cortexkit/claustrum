@@ -39,7 +39,7 @@ The plugin never reads this table: only the CLI that creates tombstones does.
 The handle file comes from `CLAUSTRUM_OPENCODE_HANDLES`, or from `${XDG_CONFIG_HOME:-$HOME/.config}/cortexkit/opencode-handles.json`. It must be a regular file owned by the current user with mode `0600`; symlinks are refused. Provider ids and account labels must match `^[a-z0-9][a-z0-9._-]{0,63}$` and cannot be `__proto__`, `constructor`, or `prototype`. OpenCode auth is read from `OPENCODE_AUTH_CONTENT` when it is set, otherwise from `${XDG_DATA_HOME:-$HOME/.local/share}/opencode/auth.json`.
 
 The canonical handle-manifest credential-id scope contract and its conformance table live in
-`docs/opencode-custody-design.md` under “Handle-manifest credential-id scope”. In short, the
+[the OpenCode plugin doc](../../docs/opencode-plugin.md#handle-manifest-credential-id-scope). In short, the
 second colon-separated segment must equal the block provider; the kind is open and labels are not
 used for validation.
 
@@ -49,7 +49,7 @@ OpenCode's provider API and UI serialize `Provider.Info.key`, so a tombstone can
 
 `OPENCODE_EXPERIMENTAL_NATIVE_LLM` bypasses this plugin's generic fetch seam when set to an enabling or unrecognized value on stock OpenCode 1.18.25. The plugin serves only when it is absent or exactly `false`, `no`, `off`, `0`, or `n`; it otherwise refuses observed custody entries and names the observed value.
 
-Run `ck auth migrate-opencode` to create or repair the tombstones and handle file. `superseded` handles remain in the file for migration history. They are not servable accounts. For xAI, use the [xAI enrolment runbook](../../docs/opencode-xai-enrolment.md) instead; do not use `migrate-opencode` or import.
+Run `ck auth migrate-opencode` to create or repair the tombstones and handle file. `superseded` handles remain in the file for migration history. They are not servable accounts. For xAI, use the [xAI enrolment procedure](../../docs/opencode-plugin.md#5-xai-enrolment) instead; do not use `migrate-opencode` or import.
 
 ## Maintenance
 

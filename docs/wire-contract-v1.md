@@ -1,16 +1,15 @@
 # claustrum wire contract v1 — the consumer's reference
 
-**Status: this describes SHIPPED behaviour.** Every statement here was read off the
-source or measured against the running daemon on 2026-09-04. Where a claim is pinned by
-a test, the test is named — those cannot drift silently. Where it is not, treat it as
-documentation and check the source if it is load-bearing for you.
+This document describes the read surface the `ck-claustrum` daemon serves today. Where a
+claim is pinned by a test, the test is named, and those cannot drift silently. Where it
+is not, treat it as documentation and check the source if it is load-bearing for you.
 
-This exists because consumers in other repositories branch on the values below, and
-until now the only canonical statement of them was Rust source in two files. A consumer
-cannot vendor a `.rs` file.
+Consumers in other repositories branch on the values below, and a consumer cannot vendor
+a `.rs` file, so this is the canonical statement of them.
 
-**What this is not:** the design rationale and threat model live in
-`cortexkit-credentials-contract.md`. This document is the surface, not the argument.
+**What this is not:** the parts and invariants behind this surface are in
+[the architecture](architecture.md), and the threat model is in
+[SECURITY.md](../SECURITY.md). This document is the surface, not the argument.
 
 ---
 
@@ -118,8 +117,8 @@ Three ways to be authorized, and they differ in what they prove.
 there is no principal check. Treat it as a secret: it belongs in a `0600` file, never in
 a log line, an error message, or a shell history. The vault never logs one.
 
-**A supervised module principal** is the supervisor's attestation, stamped at route-bind —
-but it is NOT ambient, and that sentence used to say it was. A supervised module's calls to
+**A supervised module principal** is the supervisor's attestation, stamped at route-bind.
+It is NOT ambient on a connection: a supervised module's calls to
 another module's route surface carry `Principal::Reserved { module_id }` only when its
 `route.open` presents the `consumer_identity` (`SUBC_MODULE_ID`, `SUBC_LAUNCH_NONCE`) that
 the daemon injected at spawn; the daemon verifies the nonce against the live supervisor and
@@ -149,10 +148,6 @@ and never on its scope, so serving such a route would hand a flow whatever the o
 module's grants reach. A scoped route without a `flow_id` binds as before. A `route.bind`
 this build cannot decode at all is refused the same way, code `invalid_control_body`, so it
 fails at once instead of waiting out the daemon's bind timeout.
-
-The earlier wording here said this principal was "ambient on your connection", which is
-true of what the vault SEES and false about what a caller must DO. A consumer read it,
-dialled correctly, and could not understand why every scoped call refused.
 
 **An enrollment token** is the vault's OWN attestation: it minted it, holds only its
 hash, and can revoke it. This is how a host-launched consumer gets a name that grants can
@@ -209,6 +204,13 @@ cannot use those surfaces to learn whether an id exists.
 | `credential.public_key` | yes | yes (`read`) | — |
 | `credential.status` | yes | yes (`read`) | — |
 | `credential.report_auth_failure` | yes | yes (`read`) | — |
+
+A request carries exactly one address. `credential.status` with both a handle and a
+`credential_id` is refused as `invalid_params`
+(`tests::scoped_status_rejects_both_addressing_forms_as_invalid_params`). A report carrying
+both addresses or neither is refused as a malformed request
+(`tests::a_report_supplying_both_addresses_or_neither_is_refused`).
+`credential.status` with neither address is the overall vault-health probe.
 
 ### 2.1 Enrollment, for a consumer with no supervised identity
 
@@ -276,8 +278,14 @@ vault today Anthropic and OpenAI serve UUIDs and Google serves an email address,
 consumer that assumes UUID shape breaks on a REAL value rather than a missing one — which
 presents as a parse error on good data, the least legible failure available.
 
-Reported by a consumer whose ledger holds one email in a column where every other row is a
-UUID.
+**A handle survives repair of the credential it names.** An operator repairing a dead
+credential (`login --replace`, `put --replace`) resets it to `active` and bumps
+`record_version` without touching the handles table, so a handle held across the repair
+keeps resolving and starts serving the new secret. A consumer that paused on
+`needs_reauth` resumes with the handle it already holds. A handle stops working only by
+explicit revocation (`revoke-handle`, `revoke-all-handles`) or when the credential is
+taken out of service (`invalidate`, `logout`), so a handle that stops resolving means
+someone withdrew it, never that the credential behind it was fixed.
 
 Two optional levers, and they are the same lever pointed differently:
 
@@ -287,6 +295,12 @@ Two optional levers, and they are the same lever pointed differently:
 `min_ttl_ms` is evaluated **only when you supply it**. There is no implicit floor, and
 the refusal (`ttl_unsatisfiable`) fires only after a real exchange has proven the demand
 unmeetable — never speculatively.
+
+**Caching.** Do not keep a persistent fallback copy of a served credential. A consumer may
+hold a short-lived in-memory copy of the token it needs for in-flight calls, keyed by
+`record_version`, and must discard it when `record_version` changes or a read answers
+`needs_reauth`. When the vault is unreachable, retry the route and the read a bounded number
+of times, then fail clearly.
 
 ### `credential.list_scoped`
 
@@ -372,7 +386,7 @@ Present null, non-string, empty or unknown `auth_method` also refuses the whole 
 Absent `plan_tier` means unknown and decodes as `undefined`, including against vaults
 without migration 16. Present non-string or syntactically malformed tiers refuse the
 whole reply with `invalid_response`, just like malformed provider metadata. The 0.8.0
-minor bump changes an exported type; do not publish as part of this change.
+minor bump changes an exported type.
 
 The Rust client `cortexkit-claustrum-client` 0.1.0 exposes `provider_ids` and optional
 `auth_method` on `ListedCredential`. It retains the supervised consumer's row-local
@@ -609,17 +623,12 @@ request shape is wrong, and a gate built on that half-observation fails open in 
 the direction above. Over-reporting behind the fence is the correct default until both
 cases have been seen side by side.
 
-*(Contributed by a consumer seat, 2026-09-17, after a real 401 cluster where the vault
-could not name the reporting consumer and the fence was the only thing that held.)*
-
 ### A status outside {401, 403} is REFUSED, not ignored
 
-The vault has only ever acted on `401` and `403`. A report carrying `429`, `402` or a
-`5xx` was accepted and its mark silently did nothing — so a consumer classifying quota
-refusals as credential deaths got back success and no signal, and the defect survived in
-the one place it could not be seen. Those now refuse with
-`report_status_not_credential_death` (`permanent`), so a wrong classification is
-diagnosed on its first report.
+The vault acts only on `401` and `403`. A report carrying any other status, such as
+`429`, `402` or a `5xx`, refuses with `report_status_not_credential_death` (`permanent`),
+so a consumer that misclassifies quota or server refusals as credential deaths learns so
+on its first report instead of receiving a success that changed nothing.
 
 Refusing costs you nothing you can observe: you already hold the credential, and the
 report is advisory. That is why this is a refusal where a refused *fetch* would be an
@@ -627,16 +636,13 @@ outage.
 
 **`403` is still honoured, and deliberately.** It is genuinely ambiguous across
 providers — GitHub uses it for permission refusals on a perfectly live token, and xAI has
-used it for a real credential death (measured: one such report, followed by an operator
-re-login, then clean refreshes ever since). This surface sees only the number. Refusing
+used it for a real credential death. This surface sees only the number. Refusing
 `403` would fail toward a dead credential that looks healthy, which is the worse
 direction, so the judgement stays with you: report only when you believe the credential
 itself is invalid.
 
-*(The refusal was proposed by a consumer seat arguing that a rate bound would convert a
-loud classification defect into a quiet one. That argument is right and is why this is a
-refusal rather than a throttle. Their stronger version — refuse everything but `401` —
-was refuted by the one real `403`.)*
+An out-of-vocabulary status is refused rather than rate-limited because a throttle would
+turn a loud classification defect into a quiet one.
 
 ---
 
@@ -688,20 +694,53 @@ If this document and the source disagree, the source wins and this document is a
 | `auth_events` vocabulary | `credentials-core/src/audit.rs` (`AuthEventKind`), documented in the operator runbook |
 | the class list in §1 | pinned against source by `the_wire_contract_doc_names_every_error_class` |
 
-### `credential.open`
+---
+
+## 9. A daemon restart is silent, so impose a per-call deadline
+
+Every consumer holding a route binding across a restart of this module must impose a
+per-call deadline. Without one it hangs forever, and the hang is invisible to both sides.
+
+The mechanism, because the obligation is not guessable from the wire spec: the supervisor
+protocol validates every nonzero-channel frame against a per-slot binding epoch installed
+at `route.bind`. After this daemon restarts, a consumer reusing its cached binding carries
+a pre-restart epoch, and every frame it sends fails that check and is silently dropped.
+It is never answered with an `Error` frame, because a module-emitted error would land in
+the correlation space of whatever now legitimately holds that channel. The consumer
+receives nothing: not a refusal, not a close, not an error.
+
+A rebind-on-error arm is necessary and not sufficient, because no error arrives. The
+deadline converts silence into an event that arm can act on:
+
+```
+per-call deadline expires  ->  classify as retryable
+                           ->  clear the cached binding
+                           ->  reconnect and re-bind
+                           ->  the restart heals in one call
+```
+
+The vault's diagnostics cannot tell you which happened. Every refusal on the scoped-read
+path writes to `auth_events`, so an empty table proves no scoped read reached a refusal
+point. It does not prove the call was served: a frame dropped at the epoch check never
+reaches the read surface. Empty means arrived-and-succeeded or never-arrived, and only the
+consumer's side can distinguish them.
+
+---
+
+## 10. `credential.open`
 
 `credential.open` accepts `{credential_id, enc_b64, ciphertext_b64, info_b64, aad_b64, enrollment_token?}` with no extra fields (including `handle`). All byte fields use `base64::engine::general_purpose::STANDARD`, the same strict, padded standard-alphabet decoder as `credential.sign`. The reply is `{result:{plaintext_b64,key_id}}`; `key_id` equals the same record's `credential.public_key` reply, derived by `credentials_core::signing::key_id_for_public`. A KEM public-key reply has `algorithm: "x25519"` and `public_key_hex`.
 
 Checks run in order: (1) shape decode (a transport `Error` frame with code `invalid_params` and **no class**, per §1a); (2) combined encoded length at most `ENC_BOUND = ceil(MAX_SIGN_PAYLOAD / 3) * 4 + 12`, then standard base64 decode (malformed byte field: the in-result code `malformed_encoding`, class permanent); (3) combined decoded length at most `MAX_SIGN_PAYLOAD` (1 MiB), otherwise `sign_payload_too_large`, context_overflow; (4) connection-scoped refusal counter gate (`open_rate_limited`, transient, without delay or disconnect); (5) scoped authorization for `open` (`not_found` on unknown or ungranted id); (6) KEM kind fence (`kind_not_openable`, permanent); (7) PKCS#8 parse and fresh RFC 9180 base-mode receiver opening sequence zero (`open_failed`, permanent, identically for invalid encapsulation, wrong recipient, modified ciphertext, wrong aad or wrong info and corrupt stored payload). Each step runs only after its predecessors pass. Refusals at step 5 alone increment the connection counter; it recovers after 60 seconds. Authorized opens do not increment it. `info_b64` and `aad_b64` are uninterpreted associated bytes: the vault does not inspect machine identity or verify a signature inside the plaintext.
 
-## Cookie deposit (`credential.deposit_cookie`)
+## 11. Cookie deposit (`credential.deposit_cookie`)
 
 A supervised module identified by its route-bound `reserved:<module>` principal
 and granted `category browser-session deposit` may write its own cookies, but not
 read them with that grant. It may send:
 
 ```json
-{"method":"credential.deposit_cookie","params":{"id":"cookie:ollama.com:ufuk","cookie":"session=abc","consent_ref":"consent-123","email":"me@example.com"}}
+{"method":"credential.deposit_cookie","params":{"id":"cookie:example.com:work","cookie":"session=abc","consent_ref":"consent-123","email":"me@example.com"}}
 ```
 
 Only `id`, `cookie`, `consent_ref` and optional `email` are accepted. Missing or null
@@ -725,8 +764,8 @@ byte identity with operator put holds for UTF-8 input.
 Success bodies are exactly:
 
 ```json
-{"result":{"id":"cookie:ollama.com:ufuk","outcome":"created","record_version":1}}
-{"result":{"id":"cookie:ollama.com:ufuk","outcome":"replaced","record_version":2}}
+{"result":{"id":"cookie:example.com:work","outcome":"created","record_version":1}}
+{"result":{"id":"cookie:example.com:work","outcome":"replaced","record_version":2}}
 ```
 
 The cookie is never echoed. A creator can replace only its own record; creator is
@@ -764,8 +803,8 @@ UTF8("ck-deposit-cookie/v1") || u32be(len(UTF8(id))) || UTF8(id)
 ```
 
 The inner SHA-256 is 32 raw bytes, not hex. Independent vector: id
-`cookie:ollama.com:ufuk`, consent_ref `consent-123`, cookie `session=abc` yields
-`d523e692e03fc04a7700e325960047a0283a062980239e5ea7ad03b4eac9bcb7`.
+`cookie:example.com:work`, consent_ref `consent-123`, cookie `session=abc` yields
+`4b5a1cb62c56fc15d6dda4e1cd4ded71770ccb9f847e8fe1e254b01ea6837140`.
 The payload_hash commitment can be verified by recomputing the outer SHA-256 over
 the documented id, consent_ref and raw cookie digest layout and comparing the hex
 result. Verifying a replaced cookie requires retaining its digest outside the vault.

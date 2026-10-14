@@ -352,7 +352,7 @@ mod endpoint_pins {
 
 #[cfg(test)]
 mod documented_count_tests {
-    /// The adapter count stated in the contract and the charter matches the tree.
+    /// The adapter count stated in the architecture doc matches the tree.
     ///
     /// Both documents said "v1 adapters are bounded to the 4 providers llm-runner
     /// uses" long after the login expansion took it to 11, and the contract adds
@@ -386,7 +386,7 @@ mod documented_count_tests {
             .parent()
             .and_then(|p| p.parent())
             .expect("workspace root");
-        for doc in ["docs/cortexkit-credentials-contract.md", "docs/charter.md"] {
+        for doc in ["docs/architecture.md"] {
             let text = std::fs::read_to_string(root.join(doc))
                 .unwrap_or_else(|e| panic!("read {doc}: {e}"));
             // The sentence names the count immediately before the word "adapters".

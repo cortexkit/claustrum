@@ -128,7 +128,7 @@ async function readAuth(path: string, reader: (path: string) => Promise<Record<s
 // (2) no hits means no refusals so a never-migrated user with a large auth.json keeps working —
 // both are the same no-hit branch; closing (1) breaks (2). A mis-keyed sentinel refuses the
 // provider it NAMES, not the entry that carries it; tolerable only because the sentinel is
-// non-secret (availability loss, nothing exposed). Rationale: docs/opencode-custody-design.md.
+// non-secret (availability loss, nothing exposed). Rationale: docs/opencode-plugin.md.
 function scanTombstones(source: string, onHit: (provider: string) => void, allowTrailing = false) {
   let index = 0;
   while ((index = source.indexOf(TOMBSTONE_PREFIX, index)) !== -1) {
@@ -365,7 +365,7 @@ export function createOpencodeClaustrumPlugin(dependencies: ConfigHookDependenci
           // Ownership is the seam: any `serve` value other than ours leaves the entry
           // entirely alone. The named owner's plugin is what should see the auth entry;
           // hijacking its provider with our refusing fetch (or its absence of one)
-          // breaks the contract documented in docs/opencode-custody-design.md.
+          // breaks the contract documented in docs/opencode-plugin.md.
           if (owner !== undefined && owner !== OUR_PLUGIN_ID) {
             log.debug({ provider, errorClass: "other_owner", errorCode: owner });
             log.info({ provider, state: "other_owner" });

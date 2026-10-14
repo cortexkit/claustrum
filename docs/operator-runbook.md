@@ -1,168 +1,84 @@
-# Operator runbook — claustrum (the credential vault)
+# Operator runbook
 
-How an operator provisions the credential vault and wires a consumer to it. The
-vault is a subc-supervised daemon plus an admin CLI; this is the end-to-end flow
-from an empty machine to a consumer reading a credential.
+How to install, provision, operate, back up and upgrade the claustrum credential vault.
+The parts and the rules behind each step are in [the architecture](architecture.md); the
+consumer-facing wire surface is in [the wire contract](wire-contract-v1.md).
 
 There are two programs:
 
-- **`ck-claustrum`** — the daemon. subc supervises it; it serves the
-  read surface (`credential.get` / `get_many` / `status` / `report_auth_failure`)
-  over the route channel, and the authenticated admin surface described below.
-  (Built from the `credentials-module` crate; the module id remains
-  `claustrum`.)
-- **`ck-auth`** — the admin tool, invoked as `ck auth <verb>`. The **only** write
-  surface (login, import, invalidate, rotate, mint/revoke handles, audit). Most
-  verbs commit through the **running** daemon with no downtime; a few are
-  offline-only (see "The single-writer rule" below).
+- **`ck-claustrum`**, the daemon. The CortexKit supervisor (`subc`) runs it; it serves the
+  read surface (`credential.get`, `get_many`, `status`, `report_auth_failure` and the
+  scoped operations) over the route channel, and the authenticated admin surface. It is
+  built from the `credentials-module` crate, and its module id is `claustrum`.
+- **`ck-auth`**, the operator CLI, invoked as `ck auth <verb>`. It is the only write
+  surface an operator uses. Most verbs commit through the **running** daemon with no
+  downtime; two are offline-only (see [the single-writer rule](#the-single-writer-rule)).
+  `ck auth help <verb>` prints each verb's flags and semantics.
 
-> On a standard install, admin commands need **no flags at all** — both the vault
-> data directory and the running daemon's connection file are auto-discovered.
-> The flags below matter only for a non-default location (a test vault, a second
-> vault on the same machine, or a key held outside the keychain).
->
-> All admin commands accept `--data-dir <dir>` (the vault's data directory, holding
-> `store.db`) and a key source: `--key-path <file>` for an operator-path key, or
-> nothing for the macOS keychain default.
->
-> **The DAEMON has no such flag — it reads `CK_MASTER_KEY_PATH` from its
-> environment instead**, set in `subc.jsonc`. Same choice, two different
-> mechanisms, and they must agree: if the CLI is given `--key-path` while the
-> daemon has no `CK_MASTER_KEY_PATH`, the daemon looks in the keychain, finds
-> nothing for that vault, and fails closed with `vault_locked` while every CLI
-> command works. On this host neither is set — both halves use the keychain — so
-> the variable matters only for a headless or CI deployment.
->
-> The OTHER environment variables the vault is sensitive to are supplied by the
-> supervisor, not by you: `XDG_DATA_HOME` and `XDG_RUNTIME_DIR` (which move the
-> data directory and the connection file), and `SUBC_MODULE_ID` / `SUBC_LAUNCH_NONCE`
-> (identity, echoed at HELLO). **Moving the data directory does not silently start
-> a fresh vault**: the daemon never bootstraps — only `ck auth bootstrap` creates a
-> key — so a relocated vault finds no key for its new keychain scope and refuses to
-> serve rather than coming up empty. Verified at the boot path, and worth knowing
-> because the opposite behaviour (start fresh, look healthy) is the common one for
-> state directories and is what a sibling module's redemption journal does.
->
-> `CK_GOOGLE_OAUTH_CLIENT_ID` / `_SECRET` and the `CK_ANTIGRAVITY_*` pair override
-> the embedded public OAuth clients. Deliberately left out of the procedures below:
-> a wrong value fails loudly at the provider with a reason, so it needs no runbook
-> entry — recorded here so a later sweep does not re-open the question.
->
-> **`--data-dir` must be `<data_home>/cortexkit/<module_id>`**, where `<module_id>`
-> is the subc.jsonc module key — **`claustrum`**, NOT a shortened
-> `credentials`. The supervised daemon derives its store path from the module id
-> verbatim, so the CLI must use the same full id or it opens a *different*
-> (empty) vault under a different keychain scope. On a default desktop:
->
-> ```sh
-> DATA_DIR=~/.local/share/cortexkit/claustrum
-> ```
+## Locations, flags and environment
 
----
+On a standard install admin commands need **no flags**: the vault data directory and the
+running daemon's connection file are both auto-discovered. The flags matter only for a
+non-default location (a test vault, a second vault on one machine, or a key held outside
+the OS store).
 
-## Deploy artifacts: what to keep, and why the pile is a hazard
+All admin commands accept `--data-dir <dir>` (the directory holding `store.db`),
+`--subc <file>` (the supervisor connection file) and `--key-path <file>` (an operator key
+file instead of the OS store). An explicit `--data-dir` targets that vault and stays
+offline unless a connection file is also given.
 
-Two things accumulate every time a binary is placed, and nothing in the loop
-removed either until 2026-08-15, when 21 rollback copies and 15 staged trees
-(407MB) had built up unnoticed.
-
-**Staged trees** (`target/staged/<rev>/`) are pruned automatically by
-`scripts/release-build.sh`: it keeps the three newest AND, whatever its age, the
-stage matching the currently deployed binary. It learns which that is by running
-`ck-auth --version`, the same ask-the-artifact instrument the acceptance legs
-use. The deployed one is exempt because it is the stage you would diff against
-during an incident, and it ages out exactly when several later revs were staged
-and never deployed — which is the case where you most want it.
-
-**Rollback copies** (`~/.local/share/cortexkit/bin/ck-auth.pre-<rev>-<ts>`) are
-created by hand at placement and are NOT pruned automatically, because deleting
-from the fleet bin path should be a deliberate act. Keep the two most recent;
-delete the rest.
-
-The retention rule is not about disk. A rollback copy is useful only until the
-next deploy is accepted, and every one is reproducible by re-running
-`release-build.sh` at its rev. **The real cost of the pile is that the fleet bin
-path ends up holding twenty similarly-named `ck-auth` binaries, which is a place
-where somebody eventually runs the wrong one.**
-
-One that will not be reproducible from its name: a copy named for an event
-rather than a rev, e.g. `ck-auth.pre-claustrum-*` from the module rename. That
-one also targeted the pre-rename data directory, so running it would have been
-actively wrong rather than merely old — worth deleting on sight rather than
-keeping for sentiment.
-
-### A DAEMON rollback copy stops being a rollback TARGET at the next migration
-
-The rule above is about confusion. This one is about correctness, and it retires
-copies faster than the two-most-recent rule does.
-
-Rolling the daemon back is safe only while the target's migration chain is at least
-as new as the store's. **And the protection is asymmetric: the store-ahead refusal
-(`560073d`) lives in the binary you roll back TO, not in the store.**
-
-```
-target HAS the refusal        refuses to serve, names both versions, touches nothing
-target PREDATES the refusal   migrates-and-serves a schema it cannot reason about
-```
-
-Measured on what was sitting in the bin path on 2026-09-06, store at schema 8:
-
-```
-ck-claustrum.rollback-20260901T082940   a683fb9 — chain_max 7, AND predates the refusal
-ck-claustrum.rollback-20260812T071751Z  predates CK_BUILD_REV (no --version at all)
-```
-
-So the newest daemon rollback copy from before 2026-09-06 would not refuse. It would
-open a schema-8 store, not see migrations 8, and serve — and the first grant write
-would fail on `read_grants.operation` NOT NULL, because migration 6 rebuilt that
-table. Not a reduced-feature vault: one that works until a write of the wrong shape,
-at a moment nobody connects to the rollback.
-
-Check the target against the STORE rather than against the calendar:
+**`--data-dir` must be `<data_home>/cortexkit/<module_id>`**, where `<module_id>` is the
+`subc.jsonc` module key, `claustrum`. The supervised daemon derives its store path from the
+module id verbatim, so a CLI pointed elsewhere opens a *different*, empty vault under a
+different key scope. On a default desktop:
 
 ```sh
-sqlite3 "file:$DATA_DIR/store.db?mode=ro" \
-  "SELECT MAX(version) FROM cortexkit_schema_version WHERE namespace='credentials';"
-git merge-base --is-ancestor <newest-migration-commit> <target-rev> \
-  && echo "target carries that migration" || echo "STALE — not a rollback target"
+DATA_DIR=~/.local/share/cortexkit/claustrum
 ```
 
-A stale target is not a rollback. Restore the store alongside the binary (backups
-capture it), or roll forward instead.
+**The daemon has no `--key-path` flag; it reads `CK_MASTER_KEY_PATH` from its
+environment**, set in `subc.jsonc`. The two must agree. In practice the recorded
+`key-source` (see [section 2](#2-bootstrap-the-master-key)) makes overrides unnecessary.
 
-## The single-writer rule (read this first)
+The supervisor supplies the other environment the vault is sensitive to:
+`XDG_DATA_HOME` and `XDG_RUNTIME_DIR` (which move the data directory and the connection
+file) and `SUBC_MODULE_ID` / `SUBC_LAUNCH_NONCE` (identity, echoed at registration).
+**Moving the data directory does not start a fresh vault**: the daemon never bootstraps,
+so a relocated vault finds no key for its new scope and refuses to serve rather than
+coming up empty.
+
+`CK_GOOGLE_OAUTH_CLIENT_ID` / `CK_GOOGLE_OAUTH_CLIENT_SECRET` and the `CK_ANTIGRAVITY_*`
+pair override the embedded public OAuth clients. A wrong value fails loudly at the
+provider, so no procedure below uses them.
+
+## The single-writer rule
 
 There is exactly one writer at a time, always. What changes is **who** it is.
 
-When the daemon is running it holds the vault's single-writer lease, so the CLI
-cannot open the store directly. Instead the CLI sends the operation **to** the
-daemon over the route plane, and the daemon — the lease holder — performs the
-write, serialized against any in-flight token refresh. This is the normal path and
-it needs no downtime: re-logging in a provider while agents are actively reading
-credentials is safe and expected.
+When the daemon is running it holds the vault's single-writer lease, so the CLI cannot
+open the store directly. Instead the CLI sends the operation **to** the daemon over the
+route plane, and the daemon performs the write, serialized against any in-flight token
+refresh. This needs no downtime: re-logging in a provider while agents are reading
+credentials is safe.
 
-The daemon does not take the operator's word for it. Each op is authenticated by a
-challenge-response MAC over the exact operation bytes, keyed by the **master key** —
-so the caller proves possession of the key that the vault's contents are sealed
-under, per operation, with a single-use nonce. A compromised daemon cannot
-authorize a mutation it was not given, and a caller without the master key cannot
-mutate anything.
+Each operation is authenticated by a challenge-response MAC over the exact operation
+bytes, keyed from the **master key**, with a single-use nonce. A caller without the master
+key cannot mutate anything, and a compromised daemon cannot authorize a mutation it was
+not given.
 
-When the daemon is **not** running, the CLI takes the lease itself and writes
-directly. Same operations, same audit chain, same master-key requirement.
+When the daemon is **not** running, the CLI takes the lease itself and writes directly.
+Same operations, same audit chain, same master-key requirement.
 
-**Offline-only verbs.** Four commands always require the daemon stopped, because
-they operate on the store as a whole rather than on one credential:
+**Offline-only verbs.** Two commands always require the daemon stopped, because they
+operate on the store as a whole:
 
 | verb | why it is offline-only |
 |------|------------------------|
 | `bootstrap` | creates the vault; there is no daemon yet |
 | `rotate-master-key` | re-wraps every record and the sealed audit key in one transaction |
 
-Run these with the daemon stopped. Every other write verb — `login`, `logout`,
-`remove`, `put`, `import`, `invalidate`, `mint-handle`, `revoke-handle`,
-`revoke-all-handles` — commits through the running daemon, and falls back to the
-offline lease path automatically when no daemon is reachable.
+Every other write verb commits through the running daemon, and falls back to the offline
+lease path automatically when no daemon is reachable.
 
 Exit codes:
 
@@ -170,29 +86,49 @@ Exit codes:
 |-----:|---------|------------|
 | 0 | success | — |
 | 3 | the daemon holds the lease and this verb is offline-only | stop the daemon, retry |
-| 4 | master key could not be resolved (locked keychain / absent / wrong) | unlock the keychain, or check `--key-path` |
-| 5 | **indeterminate** — the op reached the daemon but the reply was lost | see below |
-| 1 | usage / IO / other error | read the message |
+| 4 | master key could not be resolved (locked keychain, absent, or wrong) | unlock the keychain, or check `--key-path` |
+| 5 | **indeterminate**: the op reached the daemon but the reply was lost | see below |
+| 1 | usage, IO or other error | read the message |
 
-**Exit code 5 is the one that needs care.** It means the operation was sent to the
-running daemon and the connection dropped before the outcome came back, so it may
-or may not have committed. Do **not** blindly retry — check first with `ck auth
-list` (did the credential's version change?) or `ck auth audit` (is there an entry
-for it?), then act on what you find.
+**Exit code 5 needs care.** The operation was sent to the running daemon and the
+connection dropped before the outcome came back, so it may or may not have committed. Do
+**not** blindly retry: check with `ck auth list` (did the credential's version change?)
+or `ck auth audit` (is there an entry for it?), then act on what you find.
 
-The other two outcomes are unambiguous by construction. A **refusal** from a live
-daemon is terminal and safe — the daemon was alive and said no, so nothing was
-written and the CLI never falls back. **No reachable daemon** means nothing was
-dispatched at all, which is why falling back to the offline path cannot
-double-execute.
+The other outcomes are unambiguous. A **refusal** from a live daemon is terminal and safe:
+nothing was written and the CLI never falls back. **No reachable daemon** means nothing
+was dispatched, which is why falling back to the offline path cannot double-execute.
 
 ---
 
-## 1. Bootstrap the master key (once per machine)
+## 1. Install
 
-The master key encrypts every credential at rest. Provision it once. It is created
-once and never regenerated; a second bootstrap is refused rather than clobbering
-the existing key (which would brick the vault).
+`ck setup claustrum` installs the vault through the CortexKit dispatcher, installing the
+supervisor core first by construction. The binaries live in
+`~/.local/share/cortexkit/bin/`, with `ck-auth` also symlinked into `~/.local/bin/` for the
+`ck` dispatcher.
+
+**Releases from v0.1.3 need subc 0.17.20 or newer.** An older supervisor refuses the
+module's HELLO with `malformed HELLO body: missing field "consumes"` and parks it after
+three restarts. That message names a protocol field rather than a version mismatch, so it
+reads as a broken release when the supervisor predates the field. Upgrade the supervisor
+first. This matters only when installing from the release page by hand.
+
+The supervisor runs the daemon from its `subc.jsonc`, with the vault module marked
+`reserved: true` and a `sqlite` storage section. `reserved: true` means only the process
+the supervisor spawned, echoing its launch nonce, can register as `claustrum`.
+
+Verify the install:
+
+```sh
+ck-auth --version          # prints the build revision
+ck auth status             # after bootstrap: health ladder + inventory
+```
+
+## 2. Bootstrap the master key
+
+The master key encrypts every credential at rest. It is created once and never
+regenerated; a second bootstrap is refused rather than clobbering the existing key.
 
 **Native OS store (default for a new vault):**
 
@@ -207,549 +143,348 @@ ck auth bootstrap --data-dir "$DATA_DIR"
 ```
 
 All native stores keep independent current and next slots for crash-safe rotation,
-scoped by the canonical vault directory. They never request an interactive unlock.
-If the Linux keyring is locked, unlock it in your desktop keyring manager before
-starting or retrying the daemon. For an unattended session, arrange an unlocked
-keyring and its D-Bus session bus before launching the daemon; do not expect it to
-open a prompt. A missing bus, absent default collection, or refused Credential
-Manager access is a refusal, not permission to choose another backend.
+scoped by the canonical vault directory. They never request an interactive unlock. If
+the Linux keyring is locked, unlock it in your desktop keyring manager before starting or
+retrying the daemon. For an unattended session, arrange an unlocked keyring and its D-Bus
+session bus before launching the daemon. A missing bus, absent default collection, or
+refused Credential Manager access is a refusal, not permission to choose another backend.
 
-**Operator-path (headless / server):** the key file **must live outside the data
-directory** (co-locating the key with the ciphertext defeats at-rest encryption);
-the CLI refuses a key path inside `--data-dir`.
+**Operator key file (headless or server):** the key file **must live outside the data
+directory** (co-locating the key with the ciphertext defeats at-rest encryption); the CLI
+refuses a key path inside `--data-dir`.
 
 ```sh
 ck auth bootstrap --data-dir "$DATA_DIR" --key-path /etc/cortexkit/master.key
 ```
 
-**Headless Linux without an unlocked Secret Service:** explicitly choose
-`--key-path <file>` or `CK_MASTER_KEY_PATH=<file>` when bootstrapping a new vault.
-Use a directory outside the vault tree that the daemon user owns (for example,
-`~/.config/cortexkit/secrets/master.key`), and give that parent directory mode
-`0700`. There is no automatic fallback from a missing or locked native store.
-Create the key's parent directory beforehand; bootstrap creates the key file.
-On Unix every load checks that it is a regular
-file, not a symlink, owned by the current effective user, with no group or other
-permission bits. Use `chmod 600 <file>` and, if needed, `chown <uid> <file>`.
-On Windows, every key-file load verifies the **opened handle's owner and DACL**.
-Only the current user, SYSTEM and Administrators may own it or hold grants. Null
-DACLs, unknown grant types and grants to other users/groups are refused. Bootstrap
-creates the key with a protected current-user-only DACL from first visibility;
-rotation writes a similarly protected temporary file and renames it. Provision
-the key's parent directory beforehand with an owner-only DACL too.
+On headless Linux without an unlocked Secret Service, explicitly choose `--key-path <file>`
+or `CK_MASTER_KEY_PATH=<file>` when bootstrapping. Use a directory outside the vault tree
+that the daemon user owns (for example `~/.config/cortexkit/secrets/master.key`), with
+the parent directory at mode `0700`, created beforehand; bootstrap creates the key file.
+There is no automatic fallback from a missing or locked native store.
 
-A loosened key file is refused as `unsafe operator key file: <path> failed
-owner-only Windows ACL verification: ...; restore a regular key file owned by the
-current user, SYSTEM or Administrators, remove inherited and explicit grants to
-all other users/groups, and retry (do not regenerate the key)`. Use the file's
-Security / Advanced settings to disable inheritance and remove broad grants,
-including Everyone or Users; preserve the existing key bytes. Claustrum does not
-repair an untrusted key file while reading it.
+On Unix every load checks that the key file is a regular file, not a symlink, owned by
+the current effective user, with no group or other permission bits. Use `chmod 600 <file>`
+and, if needed, `chown <uid> <file>`. On Windows every load verifies the **opened handle's
+owner and DACL**: only the current user, SYSTEM and Administrators may own it or hold
+grants; null DACLs, unknown grant types and grants to other users or groups are refused.
+Bootstrap creates the key with a protected current-user-only DACL from first visibility,
+and rotation writes a similarly protected temporary file and renames it. Provision the
+key's parent directory with an owner-only DACL too.
 
-The vault data directory is created or tightened to a protected owner-only DACL
-on Windows; foreign owners and reparse points are refused. Existing unprotected
-descendants lose broad inherited grants when the directory is tightened, but
-Windows preserves explicitly protected child DACLs. Claustrum's CLI also creates
-private OpenCode credential and capability-handle files (including atomic-write
-temporaries and lock owner records), verifies loaded handles, and checks publication
-directories. Unix `0600` files / `0700` directories and existing owner checks are
-unchanged. The non-secret `key-source` record uses the protected file writer too.
-See [the filesystem inventory](windows-file-custody.md) for scope and the Windows
-CI-only behaviour and mutation checks.
+A loosened key file is refused as `unsafe operator key file: <path> failed owner-only
+Windows ACL verification: ...; restore a regular key file owned by the current user,
+SYSTEM or Administrators, remove inherited and explicit grants to all other users/groups,
+and retry (do not regenerate the key)`. Use the file's Security / Advanced settings to
+disable inheritance and remove broad grants, including Everyone or Users, and preserve the
+existing key bytes. Claustrum does not repair an untrusted key file while reading it.
 
-Bootstrap also writes `$DATA_DIR/key-source`, a non-secret, versioned custody
-record. Its two lines are `version:1` and one of `keychain`, `credential-manager`,
-`secret-service`, or `file:<absolute path>`. Keep it with the vault metadata, not
-with the secret key.
-Both the daemon and `ck auth` read this same choice, so subsequent commands need
-no key-path override. Unknown versions or backend names are refused, not guessed.
+The vault data directory is created or tightened to a protected owner-only DACL on
+Windows; foreign owners and reparse points are refused. See
+[Windows file custody](windows-file-custody.md) for every file the vault writes.
 
-Both programs honour **both** `--key-path` and `CK_MASTER_KEY_PATH`. An override
-must agree with the recorded choice; a different file, or a file override for a
-native-store vault, is refused with both choices named. If both override names are
-set, they must name the same file too. Remove conflicting overrides rather than
-editing the record to redirect a live vault to a different backend.
+Bootstrap also writes `$DATA_DIR/key-source`, a non-secret, versioned custody record. Its
+two lines are `version:1` and one of `keychain`, `credential-manager`, `secret-service`,
+or `file:<absolute path>`. Keep it with the vault metadata, not with the secret key. Both
+the daemon and `ck auth` read this choice, so later commands need no key-path override.
+Unknown versions or backend names are refused, not guessed.
 
-A pre-existing vault with `store.db` but no `key-source` is migrated on its first
-successful key resolution: an explicit file override records that path;
-otherwise the existing keychain source is recorded. A failed load or fingerprint
-mismatch writes nothing. No key material is moved. Concurrent daemon and CLI
-resolutions cannot overwrite each other's choice.
+Both programs honour `--key-path` and `CK_MASTER_KEY_PATH`. An override must agree with the
+recorded choice; a different file, or a file override for a native-store vault, is refused
+with both choices named. If both override names are set they must name the same file.
+Remove conflicting overrides rather than editing the record to redirect a live vault.
 
-`$DATA_DIR` is the vault's data directory. Under subc supervision the daemon
-resolves it to `<data_home>/cortexkit/claustrum/` — the admin CLI must
-point `--data-dir` at that **same** directory so both operate on one vault.
+A vault with `store.db` but no `key-source` is migrated on its first successful key
+resolution: an explicit file override records that path, otherwise the existing keychain
+source is recorded. A failed load or fingerprint mismatch writes nothing, and no key
+material is moved.
 
 ---
 
-## 2. Import or put a credential
+## 3. Log in, import or put a credential
 
-**Import an existing OAuth login** (e.g. an opencode `auth.json` entry — the shared
-`{ refresh, access, expires }` shape):
+### Credential ids
 
-```sh
-ck auth import \
-  --source opencode \
-  --provider anthropic \
-  --id oauth:anthropic \
-  --json /path/to/auth.json
-```
+**A credential id is `<method>:<provider>[:<label>]`** (for example `oauth:anthropic`,
+`apikey:deepseek`, `antigravity:google`, `oauth:anthropic:work`). The `<method>` selects the
+credential kind and the refresh adapter stored with the record: `oauth` → the
+provider-named adapter, `antigravity` → the `antigravity` adapter, `apikey` → a static key
+with no adapter. `--adapter <name>` overrides the method default. A legacy
+`<provider>[:<label>]` id (first segment not a known method) defaults to the provider's
+OAuth adapter. Ids beginning with `category:` or containing `|` are refused.
 
-`--source` is one of `opencode | pi | gemini-cli | antigravity`. The provider's
-token URL and client id are supplied by the refresh adapter, not the file.
+### Vault-native login: the preferred path
 
-**The credential `--id` is `<method>:<provider>[:<account>]`** (e.g. `oauth:anthropic`,
-`apikey:deepseek`, `antigravity:google`). The `<method>` selects the credential kind
-and the refresh adapter the record stores — `oauth`→the provider-named adapter,
-`antigravity`→the `antigravity` adapter, `apikey`→a static key (no adapter). It is
-NOT derived from the id by position (no positional rule is uniform — `oauth:anthropic`
-wants the provider segment, `antigravity:google` the method segment); pass
-`--adapter <name>` to override the method default. A legacy `<provider>[:<account>]`
-id (first segment not a known method) defaults to the provider's oauth adapter.
-
-Source-specific notes:
-
-- **API keys:** an `apikey:<provider>` id imports a `{ "type": "api", "key": "..." }`
-  entry as a static key. The real `auth.json` is a map keyed by provider, so
-  `--provider <key>` selects the entry (`--source opencode --provider deepseek
-  --id apikey:deepseek`). `credential.get` returns the key bytes verbatim.
-- **OAuth (auth.json):** `--provider <key>` selects one provider's
-  `{ refresh, access, expires }` entry from the map. Without it, `--json` must point
-  at a single provider's object.
-- **Claustrum tombstones are not importable credentials.** After `migrate-opencode`, a
-  tombstoned entry is an ownership marker, not material to re-seal with `import`.
-  Re-run `ck auth migrate-opencode` to converge migration state, or use `ck auth
-  migrate-opencode --restore <provider>` to return the live credential to OpenCode.
-- **Google must be imported from `gemini-cli` or `antigravity`, not opencode.** A
-  Google refresh token only refreshes against the OAuth client that minted it.
-  `--source gemini-cli` reads `~/.gemini/oauth_creds.json` (the gemini-cli Code-Assist
-  login, single credential, no `--provider`). `--source antigravity` reads
-  `~/.config/opencode/antigravity-accounts.json` (the antigravity plugin's accounts
-  array; `--provider` selects an account by email or index, default the active one)
-  and is the source for an `antigravity:google` id. An opencode-minted google token
-  cannot be refreshed by either and fails closed to `needs_reauth`.
-- `--replace` overwrites an existing id unconditionally (re-seal at version+1,
-  reset to active), for fixing a credential imported from the wrong source. Existing
-  handles keep resolving to the id — **no re-mint needed**. Without `--replace`,
-  `import` is create-only and an existing id is refused. `--account-id <id>` attaches
-  non-secret account metadata; `--email` and `--org-name` require it, while
-  `--clear-identity` is mutually exclusive with all three. A token-only
-  `import --replace` preserves the existing identity; explicit identity flags override
-  it and `--clear-identity` drops it. Preservation assumes the replacement token belongs
-  to the same account; after a re-login into a different account, run `ck auth set-identity <id> --account-id <uuid>`.
-  To label a vault-custodied credential without
-  replacing its token family from a source file, use `ck auth set-identity
-  <credential-id> --account-id <id> [--email <email>] [--org-name <name>]` (or
-  `--clear`): it re-seals unchanged material, keeps lifecycle state, and bumps
-  `record_version`.
-
-**Put a static credential** (API key / DSN / opaque). Use `--payload-file <path>`
-for a secret so it never appears in the process list or shell history; `--payload
-<value>` passes the exact bytes inline. A bare key file (e.g. `~/.config/openai.key`)
-is read with trailing whitespace stripped:
-
-```sh
-ck auth put \
-  --id apikey:openai \
-  --payload-file ~/.config/openai.key \
-  --kind api_key
-```
-
-`put` is create-only; an existing id is refused. To rotate a static key in place,
-pass `--replace` (unconditional, keeps existing handles) or `--expected-hash <hex>`
-(a compare-and-set guard, for when you know the current value).
-
-**Vault-native login — the preferred path, and the one to reach for first.** Import
-exists for bootstrapping from another tool's files; `login` mints a NEW, independent
-credential that the vault solely custodies, so there is no dual-custody rotation race
-with a tool that holds the same provider login.
-
-Run it with no flags at all for an interactive picker over every provider, showing
-which already have a credential:
+`login` mints a NEW, independent credential that the vault solely custodies, so there is
+no rotation race with another tool holding the same provider login. Run it with no flags
+for an interactive picker over every provider, showing which already have a credential:
 
 ```sh
 ck auth login
 ```
 
 The picker covers OAuth (`anthropic`, `openai`, `xai`, `google`, `antigravity`),
-device-flow (`github-copilot`, `kimi`, `meta`, and `--device` for openai/xai), custom
-browser flows (`cursor`, `devin`, `snowflake`, `digitalocean`), and API-key
-providers (`zai`, `openrouter`, `kiro`, `deepseek`, `groq`, …), which are validated against
-the provider before being stored. A few API-key providers have no probe that can
-tell a bad key from a good one (for example `opencode-go`, `vercel-ai-gateway`,
-`cline-pass`); for those, login prints a `NOTE:` line saying the key was stored
-without being checked, and why.
+device-flow (`github-copilot`, `kimi`, `meta`, and `--device` for openai and xai), custom
+browser flows (`cursor`, `devin`, `snowflake`, `digitalocean`), and API-key providers
+(`zai`, `openrouter`, `kiro`, `deepseek`, `groq`, …), which are validated against the
+provider before being stored. A few API-key providers have no probe that can tell a bad
+key from a good one (for example `opencode-go`, `vercel-ai-gateway`, `cline-pass`); for
+those, login prints a `NOTE:` line saying the key was stored without being checked.
 
-For Kiro, create a long-lived `ksk_` key at https://app.kiro.dev under
-Account → Settings → API Keys, then run `ck auth login --provider kiro` to
-store it as `apikey:kiro` (or a labeled account). Login checks the key with
-Amazon Q's model catalog using bearer auth and `TokenType: API_KEY`; the
-CodeWhisperer profile-list endpoint accepts invalid keys and is not a key check.
-A successful response verifies the key; the observed 403 auth refusal rejects
-it, while other statuses or network errors produce a warning. No profile ARN
-is stored or served.
-
-API-key credentials are stamped with a category at creation: model providers get
-`llm-provider`, and the web-search keys (`tavily`, `kagi`, `exa`, `parallel`) get
-`web-search` instead, so a grant on `llm-provider` never reaches a search key.
-
-OAuth logins open a browser and complete automatically: a one-shot CLI-local
-listener on the loopback redirect captures the code, so **when the browser shows a
-paste code, ignore it — the CLI has already finished.** If the port is busy, the
-listen fails, or you pass `--no-listener`, the flow falls back to pasting the
-address-bar URL. Pasted values are read from stdin only — never argv, never logged.
+OAuth logins open a browser and complete automatically: a one-shot listener on the
+loopback redirect captures the code, so **when the browser shows a paste code, ignore it;
+the CLI has already finished.** If the port is busy, the listen fails, or you pass
+`--no-listener`, the flow falls back to pasting the address-bar URL. Pasted values are read
+from stdin only, never argv, and never logged.
 
 ```sh
 ck auth login --provider xai --replace
+ck auth login --provider anthropic --id oauth:anthropic:work   # a second, labeled account
 ```
 
-**Multiple accounts per provider** each get their own labeled id, with an
-independent refresh chain and its own handles:
+Default ids include `oauth:anthropic`, `chatgpt:openai`, `oauth:xai` and `oauth:meta`. A
+bare `--provider openai` means the ChatGPT subscription login, not `apikey:openai`. Each
+labeled account has its own refresh chain and its own handles. `--replace` swaps the
+credential on an existing id and **keeps its handles**; it is the usual repair for a
+`needs_reauth` credential. Without it, `login` is create-only. A native login records a
+`login` audit entry, distinct from `import`.
 
-```sh
-ck auth login --provider anthropic --id oauth:anthropic:work
-```
+**Kiro.** Create a long-lived `ksk_` key at https://app.kiro.dev under Account → Settings →
+API Keys, then run `ck auth login --provider kiro` to store it as `apikey:kiro` (or a
+labeled account). Login checks the key against Amazon Q's model catalog using bearer auth
+and `TokenType: API_KEY`; a successful response verifies it, the 403 auth refusal rejects
+it, and other statuses or network errors produce a warning. No profile ARN is stored or
+served.
 
-Default ids include `oauth:anthropic`, `chatgpt:openai`, `oauth:xai`, `oauth:meta` (note: a bare
-`--provider openai` means the ChatGPT subscription login, not `apikey:openai`).
-`--replace` swaps the credential on an existing id and **keeps its handles** — the
-usual recovery for a `needs_reauth` credential, and the reason a re-login never
-requires re-distributing handles. Without it, `login` is create-only. A native login
-records a distinct `Login` audit entry (not `Import`).
+**Meta Muse subscription.** Run `ck auth login --provider meta` (or add
+`--id oauth:meta:work`). The device flow prints a verification URL and code, then the
+vault mints an inference key. Only that key is served; the Meta identity token and any
+optional OAuth refresh token stay sealed in the vault. No live exchange has confirmed a
+Meta refresh-token grant, so the vault does not use one. Login prints only whether a
+refresh token and expiry fields were present, never their values. Key expiry uses a
+response expiry, then the JWT `exp`, and only otherwise an **assumed 24-hour lifetime**.
+The HTTP fixtures for this adapter are reconstructed from client source rather than
+captured from Meta. A mint 401/403 requires re-login. An inactive or payment-required
+subscription also latches `needs_reauth`, but its `subscription_required` event means
+**repair the subscription first**; re-login alone cannot fix payment. A 429 or server
+outage is transient.
 
-### Meta Muse subscription login
-
-Run `ck auth login --provider meta` (or add `--id oauth:meta:work` for a labeled
-account). The shared device flow prints a verification URL and code, then the
-vault immediately mints an inference key. Only that key is served; the Meta
-identity token and any optional OAuth refresh token stay sealed in the vault.
-Neither reference client implements a Meta OAuth refresh-token grant, and no live
-exchange has confirmed that grant's endpoint or parameters; the vault does not invent one.
-
-Login prints only whether a refresh token and device/key expiry fields were
-present, never their values. The HTTP fixtures are reconstructed from client
-source, not captured from Meta. Key expiry uses a response expiry, then JWT
-`exp`, and only otherwise an **assumed 24-hour lifetime** pending a live response.
-The rate-limited mint runs on refresh demand, not on every read.
-
-A mint 401/403 requires re-login. An inactive/payment-required subscription also
-latches `needs_reauth`, but its `subscription_required` event means **repair the
-subscription first**; re-login alone cannot fix payment. A 429 or server outage
-is transient and does not invalidate the login.
-
-### Gmail send login
-
-Gmail uses **your own Google Cloud OAuth client**, not the public Gemini or
-Antigravity clients. Create an OAuth client of type **Desktop app** in your Google
-Cloud project and enable the **Gmail API**. Configure the consent screen for exactly
-these scopes: `https://www.googleapis.com/auth/gmail.send`, `openid`, and `email`.
-Publish the app **In production**. According to
+**Gmail send.** Gmail uses **your own Google Cloud OAuth client**, not the public Gemini or
+Antigravity clients. Create an OAuth client of type **Desktop app** in your Google Cloud
+project and enable the **Gmail API**. Configure the consent screen for exactly these
+scopes: `https://www.googleapis.com/auth/gmail.send`, `openid` and `email`, and publish the
+app **In production**. Per
 [Google's OAuth documentation](https://developers.google.com/identity/protocols/oauth2#expiration),
-an external-user app in **Testing** gets refresh tokens that expire after **7 days**
-unless it requests only basic identity scopes; `gmail.send` is not exempt. Publishing
-may require Google's verification process for the requested scopes.
-
-Keep the client secret in a **0600 file** (not a command argument or shell history):
+an external-user app in **Testing** gets refresh tokens that expire after 7 days unless it
+requests only basic identity scopes, and `gmail.send` is not exempt. Keep the client secret
+in a `0600` file, never a command argument:
 
 ```sh
 chmod 600 /secure/path/gmail-client-secret
 ck auth login --provider gmail --client-id YOUR_DESKTOP_CLIENT_ID --client-secret-file /secure/path/gmail-client-secret
 rm /secure/path/gmail-client-secret
-ck auth grant --principal reserved:plexus --selector-kind exact --selector oauth:gmail --operation read
+ck auth grant --principal reserved:<module> --selector-kind exact --selector oauth:gmail --operation read
 ```
 
-The file contains only the secret value, not the downloaded client JSON; trailing
-whitespace is stripped. Delete it after a successful login. The refresh token and
-client secret are sealed together in the vault. The browser flow requests offline
-access and consent, listens on `http://127.0.0.1:8086/oauth2callback`, and supports
-`--no-browser` / `--no-listener` with the usual full-URL paste fallback.
-Login refuses a missing refresh token or missing userinfo email rather than storing
-an unusable account. `account_id` and `email` both identify the signed-in mailbox.
+The file holds only the secret value (not the downloaded client JSON); trailing whitespace
+is stripped. The refresh token and client secret are sealed together. The flow requests
+offline access and consent, listens on `http://127.0.0.1:8086/oauth2callback`, and supports
+`--no-browser` / `--no-listener` with the full-URL paste fallback. Login refuses a missing
+refresh token or a missing userinfo email. Use `--id oauth:gmail:<label>` for a labeled
+account and grant that **exact** id. A Gmail record carries only the `gmail-native`
+category and no `serves` vendors: never grant a model category to a mailbox consumer or add
+`llm-provider` to a Gmail record. Reads return the short-lived access token only; the
+refresh token and client secret never leave the vault.
 
-Use `--id oauth:gmail:work` for a labeled account and grant that **exact** id instead.
-`--replace` keeps handles when re-authenticating. Gmail gets only the `gmail-native`
-category, no model, search, or browser-session categories, and no `serves` vendors.
-Do not grant a model category to plexus or add `llm-provider` to a Gmail record:
-model consumers must never acquire mailbox authority. Plexus reads the short-lived
-access token by name through `credential.get_scoped`; refresh/client secrets never
-leave the vault on the read surface.
+### Import an existing login
 
-### Anthropic credentials expire about a month after login, and that is not a defect
+`import` bootstraps from another tool's files. Run it with no flags to pick from detected
+accounts, or name the source:
 
-Measured on this vault 2026-09-15, across seven deaths, three accounts, and two
-independent login cycles — every interval is from a `login` audit row to the
-`invalidate` that followed it:
-
-```
-oauth:anthropic:ufuk3   24d 16h
-oauth:anthropic:yiyi    27d 13h      oauth:anthropic:yiyi    27d 15h
-oauth:anthropic:ufuk2   28d 21h      oauth:anthropic         27d  3h
-oauth:anthropic         30d  2h      oauth:anthropic:ufuk2   28d 15h
+```sh
+ck auth import --source opencode --provider anthropic --id oauth:anthropic --json /path/to/auth.json
 ```
 
-The vault discovers it as `invalid_grant` on a refresh, latches `needs_reauth`, and
-the repair is `ck auth login --provider anthropic --id <id> --replace`, which keeps
-the handles. Expect it roughly monthly per account. `ck auth reactivate` will NOT
-fix it — that clears a wrong verdict, and this verdict is right.
+`--source` is one of `opencode | pi | gemini-cli | antigravity`. The provider's token URL and
+client id come from the refresh adapter, not the file.
 
-*** THIS REFUTES THE DUAL-CUSTODY EXPLANATION, which is the tempting one. *** There
-IS a second holder on this machine (OpenCode keeps its own anthropic refresh token in
-`~/.local/share/opencode/auth.json`), and Anthropic does revoke a token family when a
-rotated-away refresh token is presented. So "the other holder killed it" fits the
-symptom. It does not fit the TIMING: another holder's refresh schedule has no reason
-to track the vault's login date, and could not do so across three separate accounts
-in two separate cycles. Deaths that cluster in a 24-30 day band relative to MY login
-are a property of the authorization, not a race.
+- **API keys:** an `apikey:<provider>` id imports a `{ "type": "api", "key": "..." }` entry
+  as a static key; `--provider <key>` selects the entry from the `auth.json` map.
+- **OAuth (`auth.json`):** `--provider <key>` selects one provider's
+  `{ refresh, access, expires }` entry. Without it, `--json` must point at a single
+  provider's object.
+- **Google must be imported from `gemini-cli` or `antigravity`, not opencode.** A Google
+  refresh token only refreshes against the OAuth client that minted it. `--source
+  gemini-cli` reads `~/.gemini/oauth_creds.json`. `--source antigravity` reads
+  `~/.config/opencode/antigravity-accounts.json` (`--provider` selects an account by email
+  or index, default the active one) and is the source for an `antigravity:google` id. An
+  opencode-minted Google token cannot be refreshed by either and fails closed to
+  `needs_reauth`.
+- **Claustrum tombstones are not importable.** After `migrate-opencode`, a tombstoned entry
+  is an ownership marker. Re-run `ck auth migrate-opencode` to converge, or use
+  `ck auth migrate-opencode --restore <provider>` to return the credential to OpenCode
+  (see [the OpenCode plugin](opencode-plugin.md)).
+- `--replace` overwrites an existing id unconditionally (re-seal at version+1, reset to
+  `active`) and keeps its handles. Without it, `import` is create-only.
+- `--account-id <id>` attaches non-secret account metadata; `--email` and `--org-name`
+  require it; `--clear-identity` is exclusive with all three. A token-only
+  `import --replace` keeps the existing identity, which assumes the replacement token
+  belongs to the same account. After a re-login into a different account, run
+  `ck auth set-identity <id> --account-id <id>`.
 
-**What this data CANNOT tell you is whether the ceiling is denominated in days or in
-refreshes**, and the reason is worth stating so nobody reads a number out of it that
-is not there. Every anthropic credential here refreshes at essentially one rate —
-~3/day, set by the 8-hour access token — so age and refresh count are collinear:
+`ck auth set-identity <credential-id> --account-id <id> [--email <email>] [--org-name <name>]`
+(or `--clear`) relabels a credential without replacing its token: it re-seals unchanged
+material, keeps the lifecycle state, and bumps `record_version`.
 
-```
-ufuk3   71 refreshes / 24d 16h   = 2.88/day
-yiyi    82 refreshes / 27d 13h   = 2.98/day
-```
+### Put a static credential
 
-The credential that died earliest also had the fewest refreshes, so both hypotheses
-predict the same ordering. Separating them needs a credential deliberately used at a
-different rate, which no one has had a reason to create.
+For an API key, DSN, opaque secret or session cookie. Use `--payload-file <path>` so the
+secret never appears in the process list or shell history; trailing whitespace is stripped
+(cookie bytes are kept exactly):
 
-**Do not generalize this to other OAuth providers — Codex is the counter-example.**
-Measured the same day, from the same audit chain:
-
-```
-chatgpt:openai        last login 2026-08-11   36d old   still active
-chatgpt:openai:gmail  last login 2026-08-11   36d old   still active
-```
-
-Both are past Anthropic's entire band with no death, so the ceiling is a property of
-the provider's authorization rather than of subscription OAuth. A monthly re-login is
-an Anthropic fact, not a vault fact.
-
-**Nor is DUAL CUSTODY itself fatal — that is an Anthropic fact too, and antigravity
-is the counter-example.** `antigravity:google` is held by BOTH this vault and the
-opencode plugin store, for the same account, and has been for months:
-
-```
-antigravity:google   1720 refresh_commit rows, record_version 1722, state active
-                     invalid_grant events: ZERO
-
-invalid_grant across the whole store:  oauth:anthropic x1  :ufuk2 x2  :yiyi x1
+```sh
+ck auth put --id apikey:openai --payload-file ~/.config/openai.key --kind api_key
 ```
 
-Every family revocation this vault has ever recorded is Anthropic. Antigravity has
-survived 1,720 exchanges under two independent custodians without one.
+`put` is create-only. To rotate a static key in place, pass `--replace` (unconditional,
+keeps handles) or `--expected-hash <hex>` (compare-and-set). A `cookie:<domain>:<label>` id
+always creates a session-cookie record. A `github_app` deposit requires `--client-id`, the
+App JWT issuer.
 
-The mechanism is the provider's rotation behaviour, and the adapter already encodes
-both cases: `antigravity.rs` re-packs `parsed.refresh_token.unwrap_or_else(|| bare_refresh)`
-— an OMITTED refresh token in the response means the old one stays valid. Google's
-installed-app OAuth omits it; Anthropic rotates and revokes the family when a
-rotated-away token is presented. Two holders of a NON-rotating refresh token never
-invalidate each other, because neither one's exchange changes what the other holds.
+### Which providers rotate refresh tokens
 
-So the rule is per-provider, not per-arrangement:
+Whether a second holder of the same login is a hazard depends on the provider, not on the
+arrangement. Read the adapter's refresh-token handling:
 
 ```
 ROTATES  -> one custodian only; a second holder is a live revocation hazard
 OMITS    -> a second holder is redundancy, not a race
 ```
 
-Judge a new provider by reading its adapter's refresh-token handling, not by whether
-two things hold the credential. And note what the antigravity evidence is NOT: 1,720
-clean exchanges is strong evidence of non-rotation, not a guarantee the provider will
-never start. The invalid_grant column is where that change would first appear.
+Anthropic rotates and revokes the whole token family when a rotated-away refresh token is
+presented, so keep one custodian. Google's installed-app OAuth omits the refresh token from
+the response and the old one stays valid (`antigravity.rs` keeps the stored token when the
+response omits one). xAI rotates but does not revoke the predecessor.
 
-*** AND WHEN READING THE CHAIN FOR THIS, SPLIT ON `actor`. *** Filtering `op =
-'invalidate'` alone conflates two opposite events that share a row shape: `actor =
-vault` is the provider refusing a refresh (the credential died underneath you), while
-`actor = route-admin` or `offline-cli` is an operator deliberately stopping it. The
-only Codex "death" in this chain is a 2d22h interval that is an operator logout from
-the July account setup — counted naively it reads as Codex dying five times faster
-than Anthropic, which is the opposite of what the data says.
+Anthropic subscription logins are also revoked by the provider roughly a month after login,
+independent of how often they refresh. The vault discovers this as `invalid_grant`, latches
+`needs_reauth`, and the repair is `ck auth login --provider anthropic --id <id> --replace`.
+`ck auth reactivate` does not fix it: that clears a wrong verdict, and this one is right.
 
 ---
 
-## 3. Mint a handle and give it to the consumer
+## 4. Categories and routing metadata
 
-A consumer never names a credential directly; it presents a **capability handle**.
-Mint one per consumer:
+### Categories
+
+A category is a bare name matching `^[a-z][a-z0-9-]{1,31}$`. Grants can select on a
+category, so a category assignment changes what a grant reaches; assigning one requires the
+master key.
+
+The catalog seeds five categories: `llm-provider`, `data-warehouse`, `cloud-infrastructure`,
+`web-search` and `browser-session`. The set is not closed: an operator can assign any valid
+name. The seeds are what a new credential is stamped with at creation:
+
+- API-key entries are `llm-provider`, except the search APIs Tavily, Kagi, Exa and Parallel,
+  which are `web-search` and never `llm-provider`, so no LLM consumer's grant reaches a
+  search key.
+- Login entries are `llm-provider`, except Snowflake (`data-warehouse`), DigitalOcean
+  (`cloud-infrastructure`), Devin (uncategorized) and Gmail (`gmail-native` only).
+- A credential that speaks a provider's OAuth protocol is also stamped `<adapter>-native`.
+- Every new `cookie:` record is stamped only `browser-session`.
+
+The assignments are literal per-entry catalog fields in `crates/credentials-core/src/catalog.rs`;
+no fallback derives them from the id. `ModelVendor` (`serves`) is a separate, advisory
+vocabulary that never authorizes.
+
+```sh
+ck auth categories                                   # every category, its count, and the grants naming it
+ck auth set-category <id> --add llm-provider         # or --set <csv> / --remove <csv>
+ck auth reclassify --from-registry                   # refill EMPTY sets from the catalog
+ck auth reclassify --from-registry --force           # also replace differing non-empty sets
+```
+
+`reclassify --force` refuses if it would remove a category an active grant selects on. A
+category set an operator deliberately cleared is refilled by a later `reclassify`, so keep it
+empty by not rerunning reclassify, or clear it again afterward. A transition writes one
+`set_category` audit row; a no-op is silent.
+
+### Provider ids and subscription tier
+
+Provider ids are operator-written catalog mappings, not authorization categories. Neither
+provider ids nor plan tiers are inferred from the credential's name:
+
+```sh
+ck auth set-providers --id oauth:anthropic --set anthropic claude-code
+ck auth set-plan --id oauth:anthropic --tier max_20x
+ck auth set-plan --id oauth:anthropic --clear
+ck auth list
+```
+
+`set-plan` needs exactly one of `--tier` or `--clear`. A tier is a lowercase ASCII letter
+followed by lowercase letters, digits or underscores, 1–32 characters. The pricing service
+owns the vocabulary; current tiers include Anthropic `pro`, `max_5x`, `max_20x` and OpenAI
+`plus`, `pro_100`, `pro_200`, `pro_500`. `--tier` always wins over automatic detection;
+`--clear` removes only the override and reveals the detected tier. **An absent tier means
+unknown, not a default plan.** Replacements into a different account and `set-identity`
+clear both the old override and the old detection.
+
+Automatic detection reads ChatGPT's access-token JWT at login and every refresh, and makes
+one bearer profile request for Claude at login and after each successful refresh; unknown
+plan strings give no tier rather than a guess. The exact mapping, timing and staleness
+bounds are in [the wire contract](wire-contract-v1.md#operator-asserted-plan_tier-migration-16).
+Overrides do not update automatically: reassert or clear one after an out-of-band plan change.
+
+**Table layout:** when any row has a tier, `ck auth list` and the inventory in `status` add a
+sixth header word, `PLAN_TIER`, after `PROVIDERS`, and every row has a sixth field (the tier
+or `-`). Detected tiers carry a `*` suffix, e.g. `max_20x*`, explained in a footnote. An
+optional `by=<principal>` follows as a trailing annotation with no header word. With no
+tiers, the five-word `STATE VER CREDENTIAL CATEGORIES PROVIDERS` header is unchanged. Parsers
+must accept both layouts; no field value contains whitespace.
+
+---
+
+## 5. Give a consumer access
+
+There are three ways a consumer reaches a credential. Pick by what the consumer is.
+
+| consumer | mechanism | operator command |
+|---|---|---|
+| anything that can keep a `0600` file | capability handle | `ck auth mint-handle` |
+| a module the supervisor spawns | grant to `reserved:<module>` | `ck auth grant` |
+| a host-launched process with no supervisor identity | enrollment, then grant to `enrolled:<name>` | `ck auth enroll approve`, `ck auth grant` |
+
+### Capability handles
 
 ```sh
 ck auth mint-handle --id oauth:anthropic
 ```
 
-The command prints the raw handle (`ckh_...`) to **stdout exactly once** — only its
-hash is stored, so it cannot be recovered later. Write it into the consumer's
-config (a `0600` file). To rotate a consumer's access, `revoke-handle --handle
-<ckh_...>` (or `revoke-all-handles --id <id>`) and mint a fresh one — no re-login.
-
-Mint a **separate handle per consumer** rather than sharing one. Handles are the
-revocation unit: with one each, cutting off a single consumer is one `revoke-handle`
-and nobody else notices. Handles also survive `login --replace`, so re-authenticating
-a provider never means re-distributing them.
-
----
-
-## 4. Start the daemon; the consumer reads over the route channel
-
-subc supervises the daemon from its `subc.jsonc` (the vault module marked
-`reserved: true`, with a `sqlite` storage section). Once it is up, a consumer reads
-a credential over the route channel:
-
-```
-catalog.list
-  → route.open(ManagementSurface, module_id = "claustrum")
-  → credential.get { handle: "ckh_..." }   // returns the opaque payload
-```
-
-The daemon resolves the handle, refreshes the token if stale (vault-owned OAuth
-refresh, single-flight), and returns the credential payload. An unknown or revoked
-handle is a uniform `not_found` (no enumeration).
-
-On Linux, both `ck-claustrum` and `ck-auth` make themselves non-dumpable before
-processing arguments or loading credentials, and refuse to start if that fails.
-This prevents same-user ptrace attachment, `/proc/<pid>/mem` reads, and core dumps.
-It also makes `/proc/<pid>/exe`, `fd/`, `environ`, and `maps` unreadable to same-user
-processes. The supervisor handles this: `ck module status` reports the running
-image as `not readable (non-dumpable)`, which is expected, not a failed deployment.
-On Windows, both binaries replace their own process DACL at the same point, granting
-the user only query-limited information, synchronize and terminate (the rights the
-supervisor uses), and refuse to start if that fails. Same-user processes are then
-refused memory reads and writes, thread creation, handle duplication and DACL
-changes. A process with `SeDebugPrivilege` enabled, such as an elevated
-administrator, still gets in, so this is defence in depth rather than a boundary.
-On macOS the hardened runtime signature does this job.
-
-A consumer that observes a 401/403 should call `credential.report_auth_failure
-{ handle, provider_status, record_version }` so the vault marks the credential
-`needs_reauth` rather than serving a dead token. **`record_version` is required and
-is the version the consumer was served.** If the vault has since refreshed to a newer
-version, the report is a silent no-op — which is what stops a stale 401 from
-invalidating a credential that has already been repaired.
-
----
-
-## 5. See what the vault holds, and what needs action
+The command prints the raw handle (`ckh_...`) to **stdout exactly once**; only its hash is
+stored. Write it into the consumer's config as a `0600` file. Mint a **separate handle per
+consumer**: handles are the revocation unit, so cutting off one consumer is one
+`revoke-handle` and nobody else notices. Handles survive `login --replace`.
 
 ```sh
-ck auth status   # health ladder + inventory
-ck auth list     # one row per credential: <state> v<version> <credential_id>
-ck auth grants   # one row per principal-scoped grant
+ck auth revoke-handle --handle <ckh_...>      # or --hash <64 hex> when the raw value is gone
+ck auth revoke-all-handles --id <id>          # the record stays refreshable
 ```
 
-None of these commands prints a secret. All read the running daemon when one is up and
-fall back to the store directly when it is not.
+To verify, the consumer's next `credential.get` succeeds; after a revoke it answers
+`not_found` (indistinguishable from an unknown handle, by design).
 
-### Routing metadata: provider ids and subscription tier
-
-Provider ids are operator-written catalog mappings, not authorization categories. Set
-or clear them independently from the sealed credential; no provider id or plan tier is
-inferred from the credential's name:
+### Grants
 
 ```sh
-ck auth set-providers --id oauth:anthropic --set anthropic claude-code
-ck auth set-plan --id oauth:anthropic --tier max_20x
-ck auth set-plan --id chatgpt:openai --tier pro_200
-ck auth set-plan --id oauth:anthropic --clear
-ck auth list
+ck auth grant --principal reserved:<module> --selector-kind exact --selector <credential-id> --operation read
+ck auth grant --principal enrolled:<name>   --selector-kind category --selector <category> --operation read
+ck auth grants          # the complete authority set, read-only
+ck auth revoke-grant --principal reserved:<module> --selector-kind exact --selector <credential-id> --operation read
 ```
 
-`set-plan` needs exactly one of `--tier` or `--clear`. Tier syntax is a lowercase ASCII
-letter followed by lowercase letters, digits or underscores, 1–32 characters total.
-The pricing service owns the override vocabulary. `--tier` always wins over automatic
-detection; `--clear` removes only that override and reveals the detected tier again.
-Current tiers include Anthropic `pro`, `max_5x`, `max_20x` and OpenAI `plus`, `pro_100`,
-`pro_200`, `pro_500`. An absent tier means unknown, not a default plan. Account-changing
-replacements and `set-identity` clear both the old override and old detection atomically; fresh login
-observations belong to the new account. Same-account replacements retain detection when
-profile fetching fails. Repair of unreadable envelopes cannot retain old observations.
-Overrides require the master key and audit only actual changes.
-
-Automatic detection reads ChatGPT's access-token JWT at login and every refresh:
-`pro` maps to `pro_200`, `prolite` to `pro_100`, `plus` to `plus`. No network request is
-added. Claude uses one bearer profile GET at login and after each successful refresh.
-Only exact `organization.rate_limit_tier` values `default_claude_max_20x`,
-`default_claude_max_5x`, and `default_claude_pro` map to `max_20x`, `max_5x`, and `pro`;
-when missing, `organization.organization_type: claude_pro` maps to `pro`.
-Unknown strings, including future plans, give no tier, never a guess. Claude's field
-contract comes from public Claude Code examples; a real response has not been captured.
-
-Claude CLI login allows up to five seconds for the profile before depositing tokens.
-A failure prints a note but cannot fail login. Daemon refresh never waits for a profile:
-tokens commit first, then a five-second-bounded background GET runs. Its result waits in
-memory for the next refresh's existing commit, with no extra write or version bump. A
-restart loses held observations; a failed profile keeps the old detected value.
-
-ChatGPT tokens live about **10 days**, so out-of-band plan changes can take that long to
-appear. Claude tokens live about **8 hours** (roughly three profile requests a day per
-account); holding a result for the next commit adds an interval, so changes normally
-show within about **16 hours**. Idle accounts and repeated failures have no finite
-wall-clock guarantee. Override values do not update automatically: reassert or clear
-one after an out-of-band plan change.
-
-`list_scoped` gives tiers only to callers who can read/list the account, just like
-identity, with `plan_tier_source` equal to `operator` or `detected`. Sign/open-only callers
-see neither field. Migration 16 stores the override in plaintext; detection (raw string,
-mapped tier, and observation timestamp) is sealed beside identity using additive JSON
-fields readable by `4ddc294`. Lease-free inventory opens detection only when the master
-key is available; without it the plaintext inventory and operator tiers still work.
-
-**Table parser change:** when any row has a tier, `ck auth list` and the inventory in
-`status` add a sixth header word, `PLAN_TIER`, after `PROVIDERS`, and every row has a sixth
-field (the tier or `-`). Detected tiers have a `*` suffix, e.g. `max_20x*`, with an
-explanatory footnote after the table; the suffix adds no whitespace field. An optional
-`by=<principal>` follows as field seven, a trailing
-annotation with no header word of its own. With no
-tiers, the five-word `STATE VER CREDENTIAL CATEGORIES PROVIDERS` header and optional
-sixth `by=` field are unchanged. Update parsers, including `cortexkit-account`, to accept
-both layouts; neither tier values nor the unset marker contains whitespace.
-
-The exact wire and audit formats are in [wire contract v1](wire-contract-v1.md#operator-asserted-plan_tier-migration-16).
-
-
-`status` is the one to run when something is wrong. It reports the same health the
-supervisor probes:
-
-| status | meaning | what to do |
-|--------|---------|------------|
-| `ok` | store readable, lease held, every credential active | — |
-| `degraded` | serving, but ≥1 credential is `needs_reauth` or `corrupt` | re-login the named credential |
-| `failing` | the store is unreadable, **or** this daemon lost write authority to a newer instance, **or** its background health refresher has stalled | check disk and lease; a stalled refresher means restart the module |
-
-**A degraded vault is still serving every healthy credential** — it names the broken
-ones rather than failing whole, which is why a single dead credential never takes the
-vault down.
-
-The supervisor logs every non-ok probe, so its log is the history behind that table.
-**Strip the colour escapes before searching it**, or field-name patterns match nothing
-and return a confident zero:
-
-```sh
-sed -E 's/\x1b\[[0-9;]*m//g' ~/.local/share/cortexkit/run/subc.log \
-  | grep 'module reported non-ok health' | grep 'module_id=claustrum'
-```
-
-Without the `sed`, `status=` never appears as literal bytes — on disk it is
-`status\e[0m\e[2m=\e[0m` — so a search for it finds nothing whether or not the
-condition ever occurred. That log is also SHARED and interleaved across every
-supervised module, with lines spliced mid-field, so require both terms on one line
-rather than counting matches anywhere in the file.
-
-Measured 2026-08-11 across the whole log: 906 `Degraded` for this vault and no
-`Failing`, so the stalled-refresher arm of that table has never fired in production.
-The zero is only worth stating because the same predicate finds the one `Failing`
-that does exist fleet-wide — a zero from a pattern that cannot match is not evidence.
-
-To repair a flagged credential, re-login it and keep its handles:
-
-```sh
-ck auth login --provider <name> --replace
-```
-
-`grants` is read-only and lists the complete authority set. Each row contains the
-principal kind and id, selector kind, selector, operation, and creation time. The
-operation is one of four, and none implies another:
+`exact` matches one credential id byte for byte; `category` matches every credential carrying
+that category, and moves as categories are assigned. Each operation is a separate authority
+and none implies another:
 
 | operation | authorizes |
 |---|---|
@@ -757,55 +492,180 @@ operation is one of four, and none implies another:
 | `sign` | `credential.sign` with a signing key |
 | `open` | `credential.open` with a KEM key |
 | `list` | the row in `credential.list_scoped`, with its identity (`account_id`, `email`, `org_name`) and `refresh_adapter`, and nothing else |
+| `deposit` | `credential.deposit_cookie` for `cookie:` records only; requires a reserved principal and the `browser-session` category; grants no read access |
 
-`list` is the account roster without the tokens: grant it to a module that must choose
-between accounts but must never fetch one. A `list`-only principal is refused by every
-other scoped operation with the same `not_found` as a principal with no grant.
+`list` is the account roster without the tokens: grant it to a module that chooses between
+accounts but must never fetch one. A `list`-only principal is refused by every other scoped
+operation with the same `not_found` as a principal with no grant.
 
-The rows are sorted by principal, selector, then operation, so repeated runs are
-stable and a grant differing only by operation remains visible. An empty table prints
-`no grants` rather than silently producing no output.
+`grants` rows contain the principal kind and id, selector kind, selector, operation and
+creation time, sorted by principal, selector, then operation. An empty table prints
+`no grants`. Revocation is exact over all four fields: revoking `list` leaves a `read` grant
+on the same selector in place.
 
-Migration 13 admits `list` in the store. A `ck auth` binary from before it cannot parse
-a `list` row and refuses the whole `grants` listing as invalid; use a current binary
-to read or revoke one.
+To verify a grant took effect, the module's next scoped call succeeds, and `ck auth events`
+shows one `scoped_first_use` row for the (credential, principal, operation) tuple.
 
-Two verbs express intent that `--replace` does not:
+### Enrollments
 
-- **`logout`** — stop serving a credential, reversibly. It marks the credential
-  `needs_reauth` and revokes every handle in one atomic operation, keeping the record
-  and its audit history. A later `login --replace` restores it, though consumers need
-  freshly minted handles since the old ones are gone.
-- **`remove`** — permanently delete the credential, its refresh intent and its
-  handles. Audited, but not undoable.
+A host-launched consumer (for example an editor plugin) has no supervisor launch nonce. It
+proposes a name over the read plane and waits; only the master key can admit it.
+
+```sh
+ck auth enroll list                                       # pending requests and live enrollments
+ck auth enroll approve --request-id <id> [--name <name>]  # admit a NAME; mints no token
+ck auth enroll deny --request-id <id>
+ck auth enroll revoke --name <name>
+ck auth enroll reissue --name <name> > token-file          # prints the new token alone
+```
+
+Approval admits a name and mints nothing: the consumer's own poll mints the token,
+authenticated by a request secret only it holds, so neither an operator nor a squatter can
+collect a token for a name they do not hold. `--name` overrides the proposed spelling, which
+is a stranger's claim rather than a fact. After approval, grant `enrolled:<name>` what it
+needs. In `enroll list`, `awaiting-poll` means admitted but never collected: a stalled
+handover, not a live consumer.
+
+`revoke` stops the token from resolving immediately; a revoked enrollment answers like an
+unknown token. It keeps the consumer's grants, which record what reach existed and block
+re-enrolling the name, so a later consumer cannot inherit that reach. Revoke the grants
+before re-enrolling a name. `reissue` writes a new token; the previous one stops working the
+moment the new one is minted. The consumer-side ceremony is in
+[the wire contract](wire-contract-v1.md#21-enrollment-for-a-consumer-with-no-supervised-identity).
+
+---
+
+## 6. Start the daemon; consumers read over the route channel
+
+The supervisor runs the daemon. Once it is up, a consumer reads a credential:
+
+```
+catalog.list
+  → route.open(ManagementSurface, module_id = "claustrum")
+  → credential.get { handle: "ckh_..." }   // returns the opaque payload
+```
+
+The daemon resolves the handle, refreshes the token if stale, and returns the payload. An
+unknown or revoked handle is a uniform `not_found`.
+
+On Linux, both `ck-claustrum` and `ck-auth` make themselves non-dumpable before processing
+arguments or loading credentials, and refuse to start if that fails. This also makes
+`/proc/<pid>/exe`, `fd/`, `environ` and `maps` unreadable to same-user processes, so
+`ck module status` reports the running image as `not readable (non-dumpable)`; that is
+expected, not a failed deployment. On Windows both binaries replace their process DACL at
+the same point. On macOS the hardened-runtime signature does this job.
+
+A consumer that observes a 401/403 should call `credential.report_auth_failure { handle,
+provider_status, record_version }` with the version it was served. If the vault has since
+refreshed to a newer version, the report is a silent no-op.
+
+---
+
+## 7. See what the vault holds, and what needs action
+
+```sh
+ck auth status       # health ladder + inventory
+ck auth list         # one row per credential: <state> v<version> <credential_id> …
+ck auth grants       # one row per principal-scoped grant
+ck auth categories   # categories, counts, and the grants naming them
+ck auth usable       # which credentials can still serve or refresh
+```
+
+None of these prints a secret. They read the running daemon when one is up and fall back to
+the store directly when it is not.
+
+`status` reports the same health the supervisor probes:
+
+| status | meaning | what to do |
+|--------|---------|------------|
+| `ok` | store readable, lease held, every credential active or retired | — |
+| `degraded` | serving, but ≥1 credential is `needs_reauth` or `corrupt` | repair the named credential ([section 8](#8-repair-or-retire-a-credential)) |
+| `failing` | the store is unreadable, **or** this daemon lost write authority to a newer instance, **or** its background health refresher stalled | check disk and lease; a stalled refresher means restart the module |
+
+**A degraded vault still serves every healthy credential.** Retired credentials are listed
+separately and do not degrade health.
+
+The supervisor logs every non-ok probe. **Strip the colour escapes before searching that
+log**, or field-name patterns match nothing and return a confident zero:
+
+```sh
+sed -E 's/\x1b\[[0-9;]*m//g' ~/.local/share/cortexkit/run/subc.log \
+  | grep 'module reported non-ok health' | grep 'module_id=claustrum'
+```
+
+Without the `sed`, `status=` never appears as literal bytes (on disk it is
+`status\e[0m\e[2m=\e[0m`). The log is shared and interleaved across every supervised module,
+so require both terms on one line.
 
 ### Is anything unrecoverable?
 
-The health probe and `ck auth list` both read metadata only — they never open an
-envelope, so neither can see a record that decrypts to nothing usable. One tool
-answers that, by decrypting every record in memory:
+The health probe and `ck auth list` read metadata only; they never open an envelope. One tool
+answers whether every record can still serve, by decrypting each record in memory:
 
 ```sh
 ck auth usable
 ck auth usable --data-dir /srv/vault --key-path /etc/cortexkit/master.key
 ```
 
-Safe against a running vault: read-only connection, **no lease**, nothing written.
-(`mode=ro`, not `immutable=1` — immutable skips the WAL and answers about a live
-store's past.)
+It is safe against a running vault: a read-only connection, no lease, nothing written. It
+scores **stranded**: a record holding neither a usable access token nor refresh material, so
+no `get` can recover it without a re-login. It deliberately does not score access-token
+expiry, which is the routine state of a healthy credential. It also flags an identity that
+renders a value while resolving nothing (an email with no account id). `stranded: 0` is the
+expected reading.
 
-It scores **stranded** — a record holding neither a usable access token nor refresh
-material, so no `get` can recover it without an operator login. **It deliberately
-does NOT score access-token expiry**: an expired access token beside live refresh
-material is the routine state of a healthy credential, and counting it would report
-normal operation as a fault. It also flags an identity that renders a value while
-resolving nothing (an email with no account id).
+---
 
-`stranded: 0` is the expected reading. A non-zero count is the signal that a
-credential needs a re-login, and it is the one number the health gauge cannot
-produce.
+## 8. Repair or retire a credential
 
-## 6. Verify the audit chain
+| situation | command | effect |
+|---|---|---|
+| a credential is `needs_reauth` and the provider really refused it | `ck auth login --provider <name> [--id <id>] --replace` | new material, same id, **handles kept** |
+| a consumer report latched it but the refresh token may be alive | `ck auth reactivate --id <id>` | clears `needs_reauth`; the secret is untouched |
+| stop serving, reversibly | `ck auth logout --id <id>` | state `retired`, every handle revoked, record and audit history kept |
+| delete permanently | `ck auth remove --id <id>` | the record, its refresh intent and its handles are gone; audited, not undoable |
+| take out of service (lower-level) | `ck auth invalidate --id <id>` | `needs_reauth` and every handle revoked |
+
+A retired credential does not degrade health. `login --replace` or `reactivate` brings it
+back; consumers need freshly minted handles because `logout` revoked theirs.
+
+### A consumer report put a credential in `needs_reauth`: try `reactivate` first
+
+A consumer report is a claim about a served token; it says nothing about the refresh
+material, and the two die independently. The vault also cannot interpret a provider
+status: GitHub returns 403 both for a missing permission and for a rate limit, and other
+providers use 403 for an entitlement lapse. So a report can kill a working credential.
+Check whether the vault's own refreshes were healthy:
+
+```sh
+sqlite3 "file:$DATA_DIR/store.db?mode=ro" \
+  "SELECT datetime(ts_ms/1000,'unixepoch','localtime'), op
+     FROM audit_log WHERE credential_id='<id>' ORDER BY seq DESC LIMIT 8;"
+```
+
+A `refresh_commit` shortly before the report means the refresh token was alive then, and a
+re-login is the expensive repair for a verdict that may be wrong:
+
+```sh
+ck auth reactivate --id <id>     # clears needs_reauth, does NOT touch the secret
+```
+
+This is self-correcting: the vault re-verifies on next use, so a credential that really is
+dead returns to `needs_reauth` on its own and the wrong guess costs one failed request. It is
+refused for `corrupt` records, where the vault checked its own bytes. If `reactivate` is
+followed within minutes by another report at the new version, the credential is genuinely
+dead and `login --replace` is the repair.
+
+A 401 report at the **current** `record_version` against a **refreshable** credential does
+not latch anything: it marks the token stale and the next `get` refreshes it. Only the
+provider's `invalid_grant` latches `needs_reauth`. Static credentials have no recovery path,
+so a report latches them immediately.
+
+---
+
+## 9. Audit and diagnostics
+
+### Verify the audit chain
 
 Every durable mutation is recorded in a tamper-evident, HMAC-keyed audit chain.
 
@@ -814,39 +674,33 @@ ck auth verify-audit    # safe while the daemon runs
 ck auth audit           # safe while the daemon runs
 ```
 
-`verify-audit` reports the chain intact or names the first broken entry. **It takes
-no lease**, so it runs against a live vault. It used to require the daemon stopped,
-which is why the production chain went six weeks unverified: nobody takes the
-credential vault down for an integrity check, and a tamper-evidence mechanism
-nobody can afford to invoke provides evidence of nothing.
-
-Four outcomes, deliberately distinct — the middle two are configuration problems
-and say so rather than implying tampering:
+`verify-audit` takes no lease, so it runs against a live vault. Four outcomes, deliberately
+distinct; the middle two are configuration problems, not tampering:
 
 | outcome | meaning |
 |---------|---------|
 | `audit chain verified: intact` | every MAC chains to its predecessor |
-| `audit chain BROKEN at seq N` | the chain fails at N — inspect from there |
+| `audit chain BROKEN at seq N` | the chain fails at N; inspect from there |
 | `no master key slot holds the key this vault is sealed under` | wrong key or wrong vault, not tampering |
 | `this vault has no audit key` | nothing to verify against; not an empty chain |
 
-Note what the chain does **not** cover: it is tamper-evident against edits,
-reorders and inserts, but not against TRUNCATION. An attacker with write access can
-delete a suffix of recent entries and the remaining prefix still verifies. Detecting
-that needs an external monotonic anchor (periodically recording the tip
-`(last_seq, entry_mac)` off-box), which is out of scope here.
-`audit` lists the entries (seq, op, credential, actor, and any alarm) and is also
-lease-free. A flagged row prints its REASON in brackets, which matters because the
-alarm column is set on every admin write by design: in this vault 169 of 172 flagged
-rows are routine `[admin_write]` mints and revokes, and 3 are `[fetch_rate_anomaly]`
--- the real detection signal. Scan for the reason, not for the flag. An alarm row is
-a durable signal surfaced here on demand, not a live notification.
+The chain is tamper-evident against edits, reorders and inserts, but not against
+TRUNCATION: an attacker with write access can delete a suffix and the prefix still verifies.
+Detecting that needs an external anchor. The running daemon publishes the global tip in its
+health body as `auditSeq` and `auditTipMac`; a witness that records the pair over time
+detects truncation. The check is not "the sequence never decreases": a truncation followed by
+fresh appends returns the sequence to an old value, and only the MAC at that sequence differs.
+The MAC observed at a given sequence must be stable forever.
+
+`audit` lists entries (seq, op, credential, actor, and any alarm), lease-free. A flagged row
+prints its reason in brackets. Every admin write is flagged `[admin_write]` by design, so
+scan for the reason, not the flag: `[fetch_rate_anomaly]` and `[overwrite_without_cas]` are
+the detection signals. An alarm row is a durable record surfaced on demand, not a live
+notification.
 
 ### Why a credential stopped working
 
-The chain says a credential was invalidated. It cannot say why — it records
-mutations, and the reason lives in fields it has no room for. `ck auth events` answers
-that instead:
+The chain records mutations, not reasons. `ck auth events` answers why:
 
 ```sh
 ck auth events              # most recent first, 20 by default
@@ -854,135 +708,36 @@ ck auth events --limit 100
 ```
 
 ```
-WHEN                 CREDENTIAL      KIND             PRINCIPAL DETAIL     VER  APPLIED
-2026-08-11 07:58:09  chatgpt:openai  consumer_report  -         403        v7   applied=yes
-2026-08-11 07:57:50  chatgpt:openai  consumer_report  -         401        v5   applied=no
-2026-08-11 06:12:03  oauth:xai       refresh_failed   -         503 status v2   applied=no
+WHEN                 CREDENTIAL      KIND                   PRINCIPAL DETAIL     VER  APPLIED
+2026-01-01 07:58:09  apikey:openai   consumer_report_latch  -         401        v3   applied=yes
+2026-01-01 07:57:50  chatgpt:openai  consumer_report_stale  -         401        v5   applied=no
+2026-01-01 06:12:03  oauth:xai       refresh_failed         -         503 status v2   applied=no
 ```
 
-Column widths are measured from the rows, so they move with the data; the header is the
-only stable way to read a column. `PRINCIPAL` is `-` on consumer reports because the read
-surface does not record one (issue #42) — that is a gap, not a property of these rows.
+Column widths are measured from the rows, so the header is the only stable way to read a
+column. `PRINCIPAL` is `-` on consumer reports because the read surface does not record one.
 
-- **`consumer_report`** — a consumer spent the token and the provider refused it. The
-  status distinguishes a rejected token (401) from a forbidden request (403), which
-  point at different causes. The reporter is whoever SAW the refusal, not whoever
-  caused it: a report can arrive for a credential that was repaired in between, and
-  that case shows as `applied=no` rather than being hidden.
-- **`refresh_failed`** — the vault called the provider to refresh and the exchange
-  failed. On a transient failure the record is left active and the intent cleared, so
-  without this row nothing would show the attempt happened at all.
-- **`applied`** — whether the event changed the credential. `no` on a report means the
-  version it named had already been replaced, so the report was correctly ignored; a
-  run of those is a consumer working from stale state, which nothing else surfaces.
+- A **consumer report** means a consumer spent the token and the provider refused it. The
+  status distinguishes a rejected token (401) from a forbidden request (403). The reporter is
+  whoever saw the refusal, not whoever caused it.
+- **`refresh_failed`** means the vault's own exchange failed. On a transient failure the
+  record stays active, so without this row nothing would show the attempt happened.
+- **`applied`** says whether the event changed the credential. `no` on a report means the
+  version it named had already been replaced, so the report was correctly ignored; a run of
+  those is a consumer working from stale state.
 
-**Unlike `audit`, this takes no lease and works against a running vault** — which is
-the point, since the moment to ask is right after a credential fails. **And unlike
-`audit`, these rows are not evidence:** they are not tamper-evident, they may be
-pruned, and nothing should depend on them being complete. For what authoritatively
-happened, read the chain.
-
-Two empty results that mean different things, and the command distinguishes them:
-`no authentication events recorded` (nothing has failed) versus `no
-authentication-event table yet` (this store predates the migration, so an incident
-would leave no trace until the daemon restarts).
-
-**Only the most recent events per credential are kept** (64), because nothing refuses
-a report: a consumer stuck in a retry loop would otherwise grow the store without
-bound. The trim is per credential rather than global, so a flood against one cannot
-evict another's history — which matters, since those are the rows being read during
-the incident that caused the flood. A credential showing exactly 64 events has had at
-least that many, not exactly that many.
-
-### A 401 report no longer kills a refreshable credential (since `b977878`)
-
-A consumer reporting a 401 at the **current** `record_version` against a **refreshable**
-credential marks its token stale and leaves the record `active`. The next `get`
-refreshes it. `invalid_grant` still latches `needs_reauth` through the path that
-already existed. **Static credentials are unchanged** — they have no recovery path, so
-a report still latches immediately.
-
-The three sentences below are the measurement, run by the plexus seat against the live
-vault on 2026-08-23 and reproduced verbatim. **They are observations, not predictions:**
-
-> 1. A refreshable credential marked stale by a 401 report recovers inside the next
->    call that resolves it: measured end-to-end 1.5-1.8s per governed dispatch, of
->    which the vault's mark-to-committed-refresh is 1.1-1.3s; the remainder is client
->    overhead and the vendor round trip. The stale state adds no observable penalty to
->    that call versus a normal one.
->
-> 2. On a host with active plexus connections, no attached credential waits for
->    deliberate traffic: the plexus health probe resolves every active connection's
->    credential roughly every 60 seconds, so ambient recovery completes within about
->    one probe cycle of the mark. Observed range 5.5-38.1s across three runs, uniform
->    in probe phase; the three recoveries landed exactly one probe period apart, which
->    is the probe's signature. The range is an observation, not a bound — the mechanism
->    (probe cadence + one refresh) is the bound.
->
-> 3. The pre-revision behavior — a refreshable credential dead until an operator
->    re-ingests it — is no longer reachable from a 401 at current version.
->    `invalid_grant` still latches `needs_reauth` terminally, and the non-refreshable
->    backstop has never fired (0 events, all time).
-
-**What this replaced, so the gain is legible:** `oauth:xai` went dark for **seven
-hours** on 2026-08-21 in exactly this situation — latched by a report 93 minutes after
-the vault had refreshed it successfully, and recovered only when a human re-
-authenticated. The same event now costs about 1.2 seconds on the next call.
-
-**The attribution the audit chain does NOT record.** `refresh_commit` carries
-`actor=vault`, because the vault performs the refresh; nothing records which caller's
-`get` triggered it. Sentence 2's mechanism was established without it — the three
-ambient recoveries landed 60.2s and 61.1s apart while their marks were 76.9s and 77.1s
-apart, so the recovering `get` ticks on a fixed cadence that the marks do not, which is
-the probe's signature and not incidental traffic. **A timing signature can identify a
-caller that a log field does not**, and that is worth reaching for before adding a
-field.
-
-### A consumer report put a credential in `needs_reauth`. Try `reactivate` first.
-
-**Before re-authenticating, check whether the vault's own refreshes were healthy.** A
-consumer report is a claim about a served token; it says nothing about the refresh
-material, and the two die independently.
-
-```sh
-sqlite3 "file:$HOME/.local/share/cortexkit/claustrum/store.db?mode=ro" \
-  "SELECT datetime(ts_ms/1000,'unixepoch','localtime'), op
-     FROM audit_log WHERE credential_id='<id>' ORDER BY seq DESC LIMIT 8;"
-```
-
-**A `refresh_commit` shortly before the report means the refresh token was alive at
-that moment**, so the credential was recoverable and a re-login is the expensive
-repair for a verdict that may simply be wrong:
-
-```sh
-ck auth reactivate --id <id>     # clears needs_reauth, does NOT touch the secret
-```
-
-This is safe to try because **it is self-correcting**: the vault re-verifies on next
-use, so a credential that really is dead returns to `needs_reauth` on its own and the
-wrong guess costs one failed request. It is refused for `corrupt` records, where the
-vault checked its own bytes and an operator assertion cannot make them decrypt.
-
-**Why this matters more than it looks.** The vault cannot interpret a provider status.
-GitHub returns 403 for a missing permission and for a rate limit; xAI uses it for an
-entitlement lapse — same number, opposite meanings, and this surface sees only the
-number. So a consumer reporting any refusal, rather than only the ones it believes
-mean the credential is invalid, can kill a working credential.
-
-Measured twice. On 2026-08-17 a GitHub App credential was killed seconds after being
-minted, by a 403 that meant "this token is valid and lacks one permission". On
-2026-08-21 `oauth:xai` was killed by a 403 **93 minutes after the vault had refreshed
-it successfully**, having refreshed cleanly every ~6h for days; it stayed dark for
-seven hours until a human ran `login`. `reactivate` would have been one command, and
-it did not exist for the first incident.
-
-If `reactivate` is followed within minutes by another report at the new version, the
-credential is genuinely dead and `login --replace` is the repair.
+Unlike `audit`, these rows are not evidence: they are not tamper-evident, and only the newest
+64 events per credential are kept, so a flood against one credential cannot evict another's
+history. A credential showing exactly 64 events has had at least that many. For what
+authoritatively happened, read the chain. Two empty results mean different things:
+`no authentication events recorded` (nothing has failed) versus `no authentication-event table
+yet` (the store predates the migration; the daemon creates it on its next start).
 
 ### The four diagnostic string vocabularies
 
 The vault has four separate string vocabularies that are easy to confuse. They live in
-**different tables and columns**:
+**different tables and columns**. Each list below is checked against the code's enum by the
+tests in `crates/credentials-core/src/audit.rs` (`vocabulary_documentation_tests`).
 
 #### `audit_log.op`
 
@@ -1019,17 +774,18 @@ These values come from the closed `AuditOp` enum and name the mutation or chain 
 | `category.migrate` | Record migration 10's audited category backfill. |
 | `approval` | Record an approver's approval of the exact artifact bytes identified by a hash. |
 
+The `set_category`, `set_providers`, `deposit_cookie_create` and `deposit_cookie_replace` ops
+and their target formats are specified in [the wire contract](wire-contract-v1.md).
+
 #### `audit_log.alarm`
 
 **Table:** `audit_log`
 
 **Column:** `alarm_reason` (TEXT), paired with the `alarm` (INTEGER 0/1) flag
 
-The `op` and `alarm` vocabularies are **different columns**. `op` says what the audit
-entry records; an alarm reason says why that entry was flagged. In the schema, the
-`alarm` column is only the presence flag, so the strings below are stored in
-`alarm_reason` and come from the closed `AlarmReason` enum. Do not combine this list
-with the `op` list when querying the audit log:
+`op` says what the entry records; an alarm reason says why that entry was flagged. The
+`alarm` column is only the presence flag; the strings below are stored in `alarm_reason` and
+come from the closed `AlarmReason` enum. Do not combine this list with the `op` list:
 
 | Value | Meaning |
 | --- | --- |
@@ -1054,30 +810,23 @@ diagnostics table, not the tamper-evident audit chain:
 | `consumer_report_stale` | A consumer report marked a refreshable credential stale for its next read. |
 | `consumer_report_latch` | A consumer report immediately latched a non-refreshable credential. |
 | `scoped_read_refusal` | A principal-scoped read was refused; `detail` names the internal refusal reason. |
-| `scoped_first_use` | The FIRST time a principal successfully exercised a grant over a credential. Written once per (principal, credential, operation) and never again, so it is a fact rather than a log. Its absence answers a question the refusal rows cannot: a grant that is never exercised looks exactly like one in constant use. |
+| `scoped_first_use` | The first time a principal successfully exercised a grant over a credential. Written once per (principal, credential, operation) and never again, so its absence shows a grant that has never been exercised. |
 | `reconcile_needs_reauth` | Startup reconciliation forced a credential to `needs_reauth`. |
 | `github_app_permissions_changed` | A successful GitHub App mint observed changed installation permissions. |
 | `enrollment` | A bounded enrollment proposal, poll, or expiry diagnostic under a fixed `auth.enroll_*` subject. |
 
-**Retired values you will still meet in the data.** The table above documents what the
-CODE WRITES; the table on disk also holds what OLDER binaries wrote, and this table is
-not rewritten:
+**Retired values you may still meet in the data.** The table above lists what the code
+writes; the table on disk also holds what older binaries wrote, and it is never rewritten:
 
 | Retired value | What it was |
 | --- | --- |
-| `consumer_report` | The single kind that preceded the stale/latch split. A consumer report of an auth failure, before the vault distinguished "mark stale so the next read refreshes" from "latch immediately". Superseded by `consumer_report_stale` and `consumer_report_latch`. |
+| `consumer_report` | The single kind that preceded the stale/latch split: a consumer report of an auth failure, before the vault distinguished "mark stale so the next read refreshes" from "latch immediately". Superseded by `consumer_report_stale` and `consumer_report_latch`. |
 
-That one is named rather than left to the general disclaimer because it is not
-hypothetical: this vault holds 24 such rows, last written 2026-08-21. An operator who
-meets a kind in `ck auth events` and cannot find it here has no way to tell a retired
-value from a corrupt one.
+Other unknown kinds may appear (a future retirement, a test-harness fixture). Treat them as
+diagnostics, never as audit operations or alarm reasons.
 
-Other unknown kinds may still appear (a future retirement, a fixture from a test
-harness). Treat them as diagnostics, never as audit-log operations or alarm reasons --
-the vocabularies are separate and a value from one is not a value from another.
-
-**Before you read a MISSING row here as evidence, ask whether the path could have
-completed without writing it.**
+**Before reading a missing row as evidence, ask whether the path could have completed without
+writing it.**
 
 ```
 CAN THE PATH THAT WOULD HAVE WRITTEN THIS ROW COMPLETE WITHOUT WRITING IT?
@@ -1085,23 +834,12 @@ CAN THE PATH THAT WOULD HAVE WRITTEN THIS ROW COMPLETE WITHOUT WRITING IT?
   yes  -> absence is a SILENCE
 ```
 
-The two tables answer that differently and the difference is not visible in either one.
 `auth_events` is written unconditionally on a consumer report, so a missing row there is a
-statement: the report did not arrive. The attributed `audit_log` row is written only when
-the version gate passes, so its absence is a silence -- it is missing for every
-`applied=0` report, which are exactly the reports worth tracing.
-
-This is not theoretical. On 2026-09-17 a cluster of twelve reports landed on the anthropic
-records against one the week before, several on tokens minted seconds earlier. Every one
-was `applied=0`, so none wrote an attributed audit row, and `auth_events.principal_kind`
-is structurally NULL on consumer reports (issue #42). A consumer seat offered the check
-that would have named the sender -- their route open stamps a principal -- and it could
-not be run. The schema carrying the columns is what made the null look like an answer.
-
-General form, worth applying to any store before reading its silence: a write-on-success
-path makes absence meaningful, a write-on-transition path does not, and nothing in a row
-count tells you which you are looking at. *(Framing contributed by a consumer seat,
-2026-09-17.)*
+statement: the report did not arrive. The attributed `audit_log` row is written only when the
+version gate passes, so its absence is a silence: it is missing for every `applied=no`
+report, which are exactly the reports worth tracing. `auth_events.principal_kind` is always
+NULL on consumer reports. A write-on-success path makes absence meaningful; a
+write-on-transition path does not, and no row count tells you which you are looking at.
 
 #### `auth_events.reporter_source`
 
@@ -1109,10 +847,10 @@ count tells you which you are looking at. *(Framing contributed by a consumer se
 
 **Column:** `reporter_source` (TEXT, nullable)
 
-This is a consumer-asserted, unverified claim about where the reported failure was
-observed. It is structurally separate from `detail`, which records what the vault
-observed. The vault accepts only this closed vocabulary; any other wire string becomes
-`unrecognised`, and the original string is never stored:
+A consumer-asserted, unverified claim about where the reported failure was observed. It is
+separate from `detail`, which records what the vault observed. The vault accepts only this
+closed vocabulary; any other wire string becomes `unrecognised`, and the original string is
+never stored:
 
 | Value | Meaning |
 | --- | --- |
@@ -1121,39 +859,20 @@ observed. The vault accepts only this closed vocabulary; any other wire string b
 | `relay_message_parse` | The consumer recovered the status by parsing relay message text. |
 | `unrecognised` | The consumer supplied a source outside the vault's named vocabulary. |
 
-`NULL` means the report predates this column or the consumer omitted the optional field;
-it is normal, not invalid data. This differs from `unrecognised`, which means the consumer
-sent a value that the vault refused to store.
+`NULL` means the report predates this column or the consumer omitted the optional field; it
+is normal, not invalid data, and differs from `unrecognised`.
 
-### Reading the chain directly
+### Reading the store directly
 
-The verbs above need the daemon stopped. To inspect a **running** vault — or to answer
-"did that write actually commit?" from outside — read the store read-only. This takes no
-lease and cannot disturb the daemon:
+To inspect a running vault, or to answer "did that write commit?" from outside, read the
+store read-only. This takes no lease and cannot disturb the daemon:
 
 ```sh
-DB="$HOME/.local/share/cortexkit/claustrum/store.db"
+DB="$DATA_DIR/store.db"
 
-# Recent events. `actor` distinguishes who caused them: `vault` is the refresh engine
-# acting on its own, `route-admin` an operator through the running daemon, `offline-cli`
-# an operator holding the lease directly.
-#
-# `conn-<N>` is NOT a consumer identity. N is the route channel number, assigned to a
-# route binding and reused as bindings come and go: two rows sharing `conn-1` are not
-# evidence of the same reporter, and one reporter across reconnects may appear under
-# several numbers. A capability handle authorizes a read without identifying who
-# presented it, so for a caller on a bare connection there is no identity to record.
-#
-# So for a CONSUMER-REPORTED invalidation (op `report_auth_failure`) this chain gives
-# you the credential and the instant, never the reporter: correlate that timestamp
-# against sources outside it, such as consumer or route-layer logs. Operator and
-# vault-owned actions are attributable as usual.
-#
-# Note this is a property of what the vault RECORDS, not of what the route plane
-# knows: a supervised consumer presents a module identity at bind time and the daemon
-# stamps it -- confirmed with the main consumer, whose client attaches it on every
-# route open, so real reports arrive from a named module. Do not read these rows as
-# proof that the caller was unidentifiable; only that this record does not carry it.
+# Recent events. `actor` distinguishes who caused them: `vault` is the refresh engine,
+# `route-admin` an operator through the running daemon, `offline-cli` an operator holding
+# the lease directly.
 sqlite3 "file:$DB?mode=ro" "SELECT seq, op, credential_id, actor,
   datetime(ts_ms/1000,'unixepoch','localtime') FROM audit_log ORDER BY seq DESC LIMIT 20;"
 
@@ -1163,292 +882,207 @@ sqlite3 "file:$DB?mode=ro" "SELECT credential_id, MAX(datetime(ts_ms/1000,'unixe
 
 # Write authority: the store's fence epoch against the daemon's lease.
 sqlite3 "file:$DB?mode=ro" "SELECT epoch FROM cortexkit_fence WHERE id = 0;"
-cat "$HOME/.local/share/cortexkit/claustrum"/*.lease
+cat "$DATA_DIR"/*.lease
 ```
 
-Three things that make these read wrong:
+`conn-<N>` in the `actor` or `source` columns is a route channel number, reused as bindings
+come and go: it is not a consumer identity. For a consumer-reported invalidation the chain
+gives you the credential and the instant, never the reporter; correlate the timestamp
+against consumer or supervisor logs.
 
-- **Use `mode=ro`, never `immutable=1`.** An immutable open tells SQLite the file cannot
-  change, so it skips the write-ahead log — on a live vault that silently returns a
-  pre-WAL snapshot, answering confidently about the past. `immutable=1` is for a store
-  nobody is writing, such as a copy kept as a rollback target.
+When filtering invalidations, split on `actor`: `actor = vault` is the provider refusing a
+refresh, while `route-admin` or `offline-cli` is an operator stopping the credential on
+purpose. They share a row shape.
 
-  **A `store.db` with no `store.db-wal` beside it is the dangerous case, and the
-  danger is that it usually does NOT announce itself.** A WAL database keeps recent
-  commits in the `-wal`; the main file alone holds only what was checkpointed. What
-  happens when you open one depends entirely on which SQLite you are holding —
-  measured here on one identical file:
+Rules that keep these reads honest:
 
-  ```
-  system sqlite3 (Apple 3.51.0)   Error: unable to open database file (14)
-  the daemon's build (3.46.0)     opens, answers from pre-WAL state, integrity ok
-  ```
+- **Use `mode=ro`, never `immutable=1`.** An immutable open skips the write-ahead log, so on
+  a live vault it returns a pre-WAL snapshot. `immutable=1` is only for a store nobody is
+  writing.
+- **`mode=ro` is also what makes the read inert.** SQLite checkpoints on close when the
+  closing connection is the last one attached, whatever statements it ran. A plain
+  read-write `sqlite3 store.db "SELECT …"` against a **stopped** vault rewrites the main file
+  and deletes the WAL.
+- **`store.db` without its `store.db-wal` is incomplete, and usually silently so.** The main
+  file holds only what was checkpointed. Depending on the SQLite build it either refuses to
+  open or opens and answers from an arbitrary checkpointed prefix, and `PRAGMA
+  integrity_check` still says `ok`. `-wal` is the load-bearing companion; `-shm` is a
+  rebuildable index. Check `ls store.db-wal` before opening a copy.
+- **Copy the directory, never the file. And put the copy outside
+  `~/.local/share/cortexkit`**, for example in `~/.local/state/claustrum-snapshots/` (mode
+  `0700`). A directory copy carries `engram-catalog.json`, the lease file and the
+  signed-payloads tree. The backup module discovers stores by reading
+  `<data_home>/<child>/engram-catalog.json` one level deep and fails closed fleet-wide on a
+  descriptor it cannot match to an enrolled module, so a copy beside the live directory
+  stops every module's backup until it is moved.
+- **The table is `audit_log` and its timestamp column is `ts_ms`.** A wrong column in a
+  `WHERE` clause returns zero rows, indistinguishable from "nothing happened". Check the
+  schema before believing an empty result.
+- **The chain answers "what happened"; the fence epoch answers only "what is true now".** An
+  unchanged fence row is consistent with both a rejected write and a healthy writer that had
+  nothing to claim. To ask whether a write committed, read the chain.
 
-  So the error-14 refusal is a property of the tool, not of the file. **Through the
-  daemon's own build the same store opens without complaint and silently under-reports
-  — in a probe here, a live copy taken with 50 rows committed answered as though the
-  table did not exist.** It is missing data, it says nothing, and `PRAGMA
-  integrity_check` returns `ok`, because the file it has is internally consistent.
+### Reading anomalies
 
-  **`-wal` is the load-bearing companion; `-shm` is a rebuildable index over it.**
-  Measured: `main+wal+shm` and `main+wal` both read correctly; `main+shm` and `main`
-  alone both read stale.
-
-  ```
-  ls store.db-wal          # the check that matters, before opening anything
-  ```
-
-  **What a companion-less main file contains is exactly what had been CHECKPOINTED,
-  and nothing else.** That is the whole rule, and every case follows from it:
-
-  ```
-  closed cleanly          everything was checkpointed      complete
-  copied mid-write        nothing was checkpointed         reads as empty
-  copied mid-write        a checkpoint had partly run      AN ARBITRARY PREFIX
-  ```
-
-  **The third is the dangerous one, because it is the only outcome that looks like a
-  working database.** It opens, it answers, `integrity_check` says `ok`, and it is
-  short by an amount nothing on the file can tell you — a probe here produced one row
-  of fifty. Checkpoint timing leaves no trace in the file, so **completeness is not
-  merely hard to infer from a store, it is absent from it.** The audit chain is not a
-  fallback for answering this: `MAX(seq)` against what the vault should have is the
-  only source that exists.
-
-  **If you are copying a store, copy the directory, never the file.** The main file on
-  its own is a partial artefact whose losses are silent.
-
-  **AND PUT THE COPY OUTSIDE `~/.local/share/cortexkit`.** `~/.local/state/claustrum-snapshots/`
-  (mode 0700) is the place. This is not tidiness — a copy of a module directory placed
-  BESIDE the real one is a live hazard, and on 2026-09-19 one of mine took down every
-  module's fleet backup until it was moved.
-
-  The mechanism, so you can recognise it in a tool nobody has written yet: engram's
-  discovery reads `<data_home>/<child>/engram-catalog.json` one level deep and fails
-  CLOSED on any descriptor it cannot match to an enrolled module. A directory copy carries
-  `engram-catalog.json` — the descriptor is a file in the store directory, so `cp -R`
-  brings it — and its name does not match the module the descriptor claims. That refusal
-  is fleet-wide, not module-local: the whole generation stops, for every seat, and nothing
-  is captured until the directory moves.
-
-  The descriptor is only what noticed. A store copy also carries the LEASE FILE and the
-  signed-payloads tree, so anything that discovers by directory shape can find a second
-  thing claiming to be this vault.
-
-  The instinct that produces this is a good one — keep the rollback copy next to what it
-  can roll back — which is why the fix has to be the default location rather than a rule
-  to remember at the moment you are busy migrating.
-- **`mode=ro` is also what makes the read INERT, and dropping it is not harmless just
-  because the SQL is a `SELECT`.** SQLite checkpoints on close when the closing connection
-  is the last one attached to the database, and that is a property of the CONNECTION, not
-  of the statements run through it. Measured both ways on this platform, same database,
-  same query, only the open mode differing: a read-write last closer truncated the WAL and
-  removed it; a read-only last closer left it byte-for-byte intact. So a plain
-  `sqlite3 store.db "SELECT ..."` against a **stopped** vault rewrites the main database
-  file and deletes the WAL — an operator looking for evidence, modifying the evidence.
-  Nothing is corrupted and nothing warns, which is exactly why it is worth a line here:
-  the next reader sees a store whose file timestamps and WAL state were changed by the
-  investigation. Against a *running* vault the daemon holds a connection, so a stray
-  read-write visitor is not the last closer and this does not fire — meaning the dangerous
-  case is the careful one, where the operator stopped the daemon first.
-- **The table is `audit_log`, and its timestamp column is `ts_ms`.** A misspelled table
-  errors, but a wrong *column* in a `WHERE` clause returns zero rows — indistinguishable
-  from "nothing happened". Check the schema before believing an empty result.
-- **The audit chain answers "what happened"; the fence epoch only answers "what is true
-  now".** The fence row is rewritten only when a writer's epoch *exceeds* it, so an
-  unchanged row is equally consistent with a rejected write and with a healthy writer that
-  had nothing to claim. To ask whether a write committed, read the chain.
-
-One honest limit: the chain is **tamper-evident, not truncation-proof**. No interior
-edit, reorder or insertion survives verification without the audit key — but an
-attacker with write access to the database file can delete a suffix of recent
-entries, and the surviving prefix still verifies. Detecting that needs an external
-monotonic anchor (periodically recording the tip `(last_seq, entry_mac)` off-box),
-which is out of scope for the in-database chain.
+- **A lane's silence is only anomalous against its own fetch rate.** `credential.get` is
+  demand-driven, so token lifetime says when a token expires, not when a consumer asks.
+  Compare a credential's quiet period with its own history of mint intervals, not with the
+  token lifetime or with busier credentials. The direct evidence needs no timing: a provider
+  call that was made and refused writes an `auth_events` row on both failure arms, so zero
+  rows means no call was refused, provided the store was writable in that window.
+- **A refresh rate far above the token lifetime** is the signature of a consumer whose
+  `min_ttl_ms` demand is close to that lifetime. The vault records refreshes but not reads,
+  so the ratio that names this (refreshes per read) is not computable here. Ask the consumer
+  for its per-credential read count rather than adding read recording to the hot path. A
+  tight demand drives the ratio toward 1.0.
 
 ---
 
-## Restoring this vault from a backup needs TWO things, and one is not in the backup
+## 10. Backups and restore
 
-The store is enrolled with engram and captured whole (`backup-api-live`, an online
-backup through a `mode=ro` connection, so committed WAL frames up to the reader's
-snapshot are included — no checkpoint boundary needed). That capture is complete for
-what it covers, and what it covers is the STORE.
+The store is enrolled with engram, the fleet's backup module, and captured whole through an
+online backup over a `mode=ro` connection, so committed WAL frames are included. The daemon
+writes the backup descriptor, `<data_dir>/engram-catalog.json`, at every start from the
+constant `ENGRAM_CATALOG_JSON` in `crates/credentials-module/src/main.rs`; it covers
+`store.db`, `signed-payloads/` and `signed-envelopes/`. A new directory kept in the data
+directory needs an entry there, or it is not backed up and nothing warns.
 
-**The master key is not in it.** `vault_secrets` holds the audit key SEALED UNDER the
-master key; the master key itself lives in the recorded OS store (macOS Keychain,
-Windows Credential Manager, or Linux Secret Service) under the scope derived from
-the data directory, or in the operator key file. So a restore is:
+**Restoring needs TWO things, and one is not in the backup:**
 
 ```
 restored store.db          from the backup generation
-+ the matching master key   from the recorded OS store, or recorded operator key file
++ the matching master key   from the recorded OS store, or the recorded operator key file
 = a vault that opens
 ```
 
-**Restore one without the other and the failure does not say "missing key".** The store
-opens, the migration chain applies, and unsealing the audit key fails — which surfaces
-as an open error on an intact file. An operator reading that during an incident is being
-told the backup is bad, and the backup is fine.
+The backup holds the audit key sealed under the master key, never the master key itself. That
+is deliberate: a backup that carried the key would be enough to decrypt every credential. So
+a machine restoring this vault must carry the key across separately.
 
-The distinguishing read, before concluding anything about the data:
+**Restore one without the other and the failure does not say "missing key".** The store opens,
+the migrations apply, and unsealing the audit key fails, which surfaces as an open error on an
+intact file. Before concluding anything about the data, compare what the store wants with what
+this machine can resolve:
 
 ```sh
-# What key does the store say it wants?
-sqlite3 "file:$DATA_DIR/store.db?mode=ro" \
-  "SELECT key_id FROM vault_secrets LIMIT 1;"
-# What key can this machine resolve? (feature-gated tool, no lease taken)
-ck_key_verify --data-dir "$DATA_DIR"
+sqlite3 "file:$DATA_DIR/store.db?mode=ro" "SELECT key_id FROM vault_secrets LIMIT 1;"
+ck_key_verify --data-dir "$DATA_DIR"     # feature-gated tool, takes no lease
 ```
 
-A `KeyMismatch` names both fingerprints and means the store is fine and the key is
-wrong. `NoSlotMatchesDb` means no slot in the recorded backend matches at all — a
-native-store item may be absent or scoped to a different canonical data directory,
-or the operator file may hold the wrong key.
+`KeyMismatch` names both fingerprints: the store is fine and the key is wrong.
+`NoSlotMatchesDb` means no slot in the recorded backend matches: a native-store item may be
+absent or scoped to a different canonical data directory, or the operator file holds the
+wrong key.
 
-**So a machine restoring this vault must carry the key across separately**, and a
-native-store item does not travel in a store backup by design: putting it there would make
-the backup sufficient to decrypt every credential in it.
+After a restore, verify:
 
-EXERCISED 2026-09-06, both arms, and the numbers are worth keeping because they are what
-a future restore should look like.
-
-```
-local arm    staging -> plaintext   gen 182, 2,822,144 bytes, integrity ok, 52 credentials
-cloud arm    R2 -> plaintext        byte-identical, sha256 6d1cb3f7412b5a2ca0a2f7f6985e3b54…
+```sh
+ck auth verify-audit       # intact
+ck auth status             # every credential serving (N/N), or the expected degraded set
+ck auth usable             # stranded: 0
 ```
 
-Two object sources, one answer. The cloud arm is the one a lost device needs, and it was
-the one still unproven for most of the day.
+A whole-store restore brings back the snapshot's state wholesale: every capability handle
+that was live then (including ones revoked since, because revocation lives in the same
+table), its open refresh intents, and older key versions. Revoke the handles that should stay
+dead rather than deleting rows, and re-check keys other machines remember
+([section 11](#keys-other-machines-see-rotate-with---replace)).
 
-**What the drill proved and what it did not.** It produced a structurally intact store
-carrying the right `key_id`, 52 credentials against 53 live — the missing row is
-`apikey:openai:astro`, deposited after the capture, so the delta is explicable to the row
-rather than merely small. It did NOT decrypt anything: the backup owner holds no key and
-should not. Placing that copy in a scratch data dir and pointing the CLI at it refused by
-name, which is the two-artifact requirement above behaving exactly as described.
-
-**One defect the drill found, in the recovery path itself:** the restore surface built its
-cloud target from the account JWT alone, so on a device-auth deployment it answered `401
-invalid token` and required an interactive login — at precisely the moment someone is
-reaching for a backup because something is already wrong. Fixed upstream before the drill
-re-ran. Worth recording because it is the shape a recovery path fails in: every other
-surface mints its own token on a tick, and restore was the one still on the human
-credential, unnoticed because nobody restores until something is broken.
-
-The evidence copy is retained at `restore-evidence/gen182-claustrum-store.db` (0600) with
-its digest pinned above. It is inert without the master key, and the daemon cannot mistake
-it for a live store: both the daemon and the CLI open an exact `store.db` path rather than
-scanning the directory.
-
-### engram is not the only thing that can restore this store
-
-Everything above treats engram as the backup. On a Mac with Time Machine it is one of
-two, and the second one reads no descriptor. Measured 2026-09-20 on the host that runs
-this vault:
-
-```
-tmutil isexcluded ~/.local/share/cortexkit/claustrum         [Included]   the store
-tmutil isexcluded ~/.config/cortexkit                        [Included]   consumer handle files
-tmutil isexcluded ~/.local/state/cortexkit/anthropic-auth    [Included]   an enrollment token
-```
-
-Two consequences an operator should know before restoring anything:
-
-- **A Time Machine restore of the data directory is a whole-store restore.** It re-arms
-  every capability handle that was live at that snapshot, including ones revoked since,
-  because revocation lives in the same table. It also brings back the snapshot's fence
-  epoch and open refresh intents. Run the same checks as after an engram restore
-  (`restore_resurrection_read_only`, and revoke the handles rather than deleting the rows).
-  The master-key requirement is unchanged: the keychain item is not in the data directory.
-- **Mode 0600 does not keep a bearer file out of a backup.** Handle files and enrollment
-  tokens that consumers write under `~/.config` or `~/.local/state` are copied into every
-  Time Machine snapshot, and those copies outlive a revoke. The revoke still holds on the
-  live vault, so an old copy is refused, until a store restore brings the old handle
-  back with it. Where each consumer keeps its token is that consumer's decision. The
-  check is `tmutil isexcluded <dir>`, not the file mode.
-
-The general test, which came out of designing browser-session capture: the question is
-not whether a backup ENTRY covers a path, but whether any backup TOOL reaches it.
-
-## Keys other machines see: rotate with `--replace`, never remove and re-mint
-
-Some signing keys have their public half announced to other machines, which remember
-it together with the key's `record_version`: the NATS bus's per-machine message key
-`signing:msgsig` (callosum announces it), and later the sealing key. For these, a
-rotation must keep the credential id and move the version forward:
-
-```
-ck auth mint-signing-key --id signing:msgsig --replace
-```
-
-`record_version` only increases within one row's life. `ck auth remove` deletes the row,
-and minting the same id again starts it back at version 1. A whole-store restore also
-brings back an older key at its older version. In both cases the version a peer
-remembers is now higher than what this machine serves. Peers keep the key they hold and
-callosum raises an alarm naming the version to beat ("rotate above N"). The fix is to
-run the `--replace` above until `record_version` (see `ck auth status`) is higher than
-N.
-
-The NATS account key (`signing:ck-bus-account:<generation>`) is not announced this way.
-It rotates to a new generation id, and ck-bus is re-granted on the new id.
-
-## Rotating the master key
-
-`ck auth rotate-master-key` performs a crash-safe two-slot handover: it stages a new
-key, re-wraps every record and the sealed audit key under it in one atomic
-transaction, then promotes the new key. A crash at any point reopens cleanly under
-whichever key matches the database — the vault never bricks, including when a
-previous rotation was itself interrupted (a staged-but-unpromoted rotation is healed
-before a new one is staged). Offline-only: stop the daemon first.
+**Other backup tools reach this data too.** On macOS, Time Machine includes
+`~/.local/share/cortexkit/claustrum` unless excluded, and a Time Machine restore of the data
+directory is the same whole-store restore. Handle files and enrollment tokens that consumers
+write under `~/.config` or `~/.local/state` are also copied into every snapshot whatever their
+mode, and those copies outlive a revoke (the live vault still refuses them, until a store
+restore brings the old handle back). Check with `tmutil isexcluded <dir>`: the question is not
+whether one backup entry covers a path, but whether any backup tool reaches it.
 
 ---
 
-## Deploying a new vault binary
+## 11. Key rotation
 
-The daemon and CLI are installed at `~/.local/share/cortexkit/bin/`, with `ck-auth`
-also symlinked into `~/.local/bin/` for the `ck` dispatcher.
+### The master key
 
-### Before building a release: the full gate
+```sh
+ck auth rotate-master-key     # offline: stop the daemon first
+```
+
+This is a crash-safe two-slot handover: it stages a new key, re-wraps every record and the
+sealed audit key in one transaction, then promotes the new key. A crash at any point reopens
+cleanly under whichever key matches the database, including when a previous rotation was
+itself interrupted (a staged-but-unpromoted rotation is healed before a new one is staged).
+Verify with `ck auth verify-audit` and `ck auth status` after restarting the daemon.
+
+### Signing and KEM keys
+
+```sh
+ck auth mint-signing-key --id signing:<name>[:<generation>]   # prints public key hex and key_id
+ck auth mint-kem-key --id kem:<name>                           # prints public_key_hex and key_id
+```
+
+Both generate the key pair in the CLI process and seal the private half directly into the
+vault; it is never written to a file, argv, environment variable or output. Both are
+create-only by default; normal rotation of a key that verifiers pin by id is a new
+`<generation>` id.
+
+### Keys other machines see: rotate with `--replace`
+
+Some signing keys have their public half announced to other machines, which remember it
+together with the key's `record_version` (for example the per-machine message-signing key
+`signing:msgsig`). For these, a rotation must keep the credential id and move the version
+forward:
+
+```sh
+ck auth mint-signing-key --id signing:msgsig --replace
+```
+
+`record_version` only increases within one row's life. `ck auth remove` deletes the row, and
+minting the same id again starts at version 1; a whole-store restore also brings back an older
+key at its older version. In both cases peers remember a higher version than this machine
+serves, keep the key they hold, and raise an alarm naming the version to beat ("rotate above
+N"). Run the `--replace` above until `record_version` (see `ck auth status`) is higher than N.
+
+A key rotated to a new generation id instead (for example a bus account key
+`signing:<name>:<generation>`) needs its consumers re-granted on the new id.
+
+The `gh` routing-manifest root follows its own ceremony: see
+[manifest signing](gh-manifest-signing.md).
+
+---
+
+## 12. Deploy and roll back
+
+### Build
 
 ```sh
 ./scripts/gate.sh
-```
-
-### Building the release binaries
-
-```sh
 PROBE='<command> should print <X> against the live daemon' ./scripts/release-build.sh
 ```
 
-Stamps the source revision into both binaries, signs each with its **pinned**
-identifier, and prints the revision and sha256 it produced. It refuses on a dirty
-tree: a stamped revision that names a commit whose contents are not what was built
-is worse than no stamp, because the whole point is to be trusted during an
-incident.
+The gate runs every CI arm locally; see [CONTRIBUTING.md](../CONTRIBUTING.md). `release-build.sh`
+refuses on a dirty tree, stamps the source revision into both binaries, signs each with its
+pinned identifier and the hardened runtime, and prints the revision and sha256 it produced. It
+builds with `CARGO_TARGET_DIR=target/stamped` and copies the artifacts to
+`target/staged/<rev>/`, where a later cargo build cannot overwrite them. A stage is safe from
+overwrite but not from `cargo clean`, which removes everything under `target/`; do not run it
+between staging and placement.
 
-Stamped builds use `CARGO_TARGET_DIR=target/stamped`, separate from the unstamped
-gate and acceptance builds in `target/release/`. This prevents switching
-`CK_BUILD_REV` from recompiling core and module at release optimisation.
-Artifacts are then copied to `target/staged/<rev>/`, **not** left in
-`target/stamped/release/`. Cargo owns that build directory and a later stamped
-build can overwrite it. Before staging was separate, an e2e run rebuilt a signed
-daemon on top of itself, so a published hash stopped describing the file within
-one command.
+**Every build carries a reachability probe**: `release-build.sh` refuses without `PROBE`. The
+probe names the behaviour that proves the change is LIVE rather than merely placed; only the
+requester knows it. `none: <reason>` is a valid answer for a build with no observable change.
 
-**A stage is safe from overwrite, NOT from `cargo clean`.** `target/staged` is
-still under `target/`, and clean takes the whole tree — measured 2026-08-16 with
-`cargo clean --dry-run -v`, which names the staged paths in its removal list.
-The two hazards differ in severity and only the first is addressed here:
+Signing uses pinned identifiers:
 
-- **Overwrite** (cargo's release output) is SILENT. The artifact still exists, the
-  published hash no longer describes it, and nothing errors. This is the one
-  the placement fixes.
-- **Deletion** (anywhere under `target/`) is LOUD. The file is gone and the
-  stage is reproducible by re-running the release script at that rev.
+```sh
+codesign --force --sign - --options runtime --identifier ck-claustrum target/staged/<rev>/ck-claustrum
+codesign --force --sign - --options runtime --identifier ck-auth target/staged/<rev>/ck-auth
+```
 
-So do not run `cargo clean` between staging and placement, and if a stage ever
-needs to survive one, it has to leave `target/` entirely.
+macOS's default ad-hoc identifier embeds the binary's link-time UUID, so it changes on every
+build, and macOS binds privacy grants to that identifier; an unpinned release silently revokes
+them. Pinning also makes the published hash equal the placed hash. **Do not re-sign at the
+destination**: one `codesign --force --sign -` there reverts the identifier.
+
+### Place
 
 Place by **rename**, never by a plain `cp` over the destination:
 
@@ -1457,449 +1091,105 @@ cp target/staged/<rev>/ck-claustrum ~/.local/share/cortexkit/bin/.ck-claustrum.i
 mv -f ~/.local/share/cortexkit/bin/.ck-claustrum.incoming ~/.local/share/cortexkit/bin/ck-claustrum
 ```
 
-**Do not re-sign at the destination** — a pinned identifier is not sticky, and one
-`codesign --force --sign -` there reverts it to the derived form.
+`cp` rewrites the destination in place, keeping its inode. Overwriting pages under a mapped,
+code-signed image invalidates the signature: the placed binary is killed with SIGKILL
+(`rc=137`, no output) the next time it executes, while the running daemon keeps serving from
+its old mapping, so a restart in that window takes the vault down. Rename allocates a new inode
+and leaves the running process's mapping intact. It also keeps the inode acceptance leg
+meaningful: after a `cp`, "running inode equals disk inode" passes for the wrong reason.
 
-### Why not `cp`, measured 2026-09-13 on a live daemon
+### Accept
 
-This instruction used to say "copy into place with a plain `cp`", and that is wrong
-for a binary whose process is running. `cp` opens the destination and rewrites it
-IN PLACE, so the inode does not change — and overwriting pages under a mapped,
-code-signed image invalidates the signature:
-
-```
-cp, then run the placed binary     rc=137 (SIGKILL), zero bytes of output
-the same bytes in target/staged/   rc=0, prints its version
-disk inode after cp                UNCHANGED
-```
-
-The daemon carried on serving from its old mapping — `ck auth status` still read
-`ok (58/58)` — while the binary a restart would exec was dead. **A restart in that
-window takes the vault down**, and none of the other acceptance legs can see it:
-they read the staged file, the signature, or the config, and none of them execs
-the placed one.
-
-Rename is atomic, allocates a NEW inode, and leaves the running process's inode
-intact until it exits. After the rename the placed binary ran clean.
-
-**And `cp` breaks the inode leg itself, which is the part worth internalising.**
-Because `cp` leaves the inode unchanged, `running inode == disk inode` reads
-"already restarted" immediately after a cp-placement — the comparison passes for
-the wrong reason. Only after a rename does that pair mean what the table below
-claims: differ = placed-not-restarted, match = the running process execs the file
-on disk.
-
-**Verify by executing the PLACED file and checking `rc`**, not by reading its
-output: `rc=137` with an empty stdout reads exactly like a command that printed
-nothing.
-
-**The test suite cannot verify a staged artifact.** `CARGO_BIN_EXE_*` resolves
-per-profile and cargo rebuilds before running, so even `cargo test --release`
-spawns a binary it just built rather than the one you staged — verified by
-destroying the staged file and watching all 8 e2e arms pass anyway. The suite
-proves the SOURCE is good. The only checks that see the deployed bytes are the
-acceptance legs below, which run after placement.
-
-That is the gate. It runs all five suites with the right flags, asserts a minimum
-count for each, and fails if any arm skipped — the three ways a green run can prove
-nothing. Prefer it over composing the commands by hand, because the hand-composed
-version is what drops a flag.
-
-The individual commands are below for when you want one suite, and the paragraphs
-after them explain what each guard is for.
-
-`cargo test --workspace` is **not** the gate. It silently skips the two suites that
-cover the properties a credential vault exists to guarantee — the real-daemon
-end-to-end tests are `#[ignore]` by default, and the crash-safety proofs sit behind
-feature flags. Run all four:
-
-```sh
-cargo test --workspace
-CRED_REQUIRE_DAEMON=1 cargo test -p credentials-module --test real_daemon_e2e -- --ignored
-cargo test -p credentials-core --features kill9-test-seam  --test kill9_mid_refresh
-cargo test -p credentials-core --features rotate-test-seam --test rotate_crash_cut
-cargo test -p credentials-core --features login-test-seam  --test login_crash_cut
-```
-
-`CRED_REQUIRE_DAEMON=1` is an anti-masking switch: without it, the end-to-end suite
-is allowed to skip when it cannot build or reach the sibling `ck-subc`, which reads
-as a pass. With it, an unreachable daemon is a failure.
-
-**Setting the switch is not the same as knowing it works.** Prove it once, on any
-machine where you are about to trust these runs — point `SUBCONSCIOUS_REL` in
-`tests/real_daemon_e2e.rs` at a path that does not exist and run both ways:
-
-```
-guard on   thread ... panicked: the real-daemon ship-gate test must not be skipped
-guard off  test result: ok. 1 passed; 0 failed                            0.00s
-```
-
-The second line is a test that never ran, reporting success. That is the state the
-switch exists to prevent, and one deliberate break is what separates having a guard
-from having a working one. A peer seat read four consecutive skips as four passes
-with the same switch available but unset, and the guard's *existence* was what made
-the runs feel accounted for.
-
-**Duration is the corroborating tell.** These tests spawn a supervisor and a daemon,
-so a real run takes seconds; a skip returns in milliseconds. Two rigs measured this
-independently — 0.00s versus ~2s here, 0.06s versus 2.58s in the peer rig. If a
-process-boundary suite finishes instantly, it did not spawn anything.
-
-**The three crash-cut suites vanish without their feature flags, and say so only in
-the counts.** Each is gated at file level (`#![cfg(all(unix, feature = "..."))]`), so
-omitting the flag removes the whole file — there is no code left to print a warning,
-and no switch can help:
-
-```
-cargo test -p credentials-core --test kill9_mid_refresh
-running 0 tests
-test result: ok. 0 passed; 0 failed
-```
-
-That is a passing run of nothing. **The `--features` argument in the commands above
-is not optional decoration; it is what makes those lines mean anything.** CI always
-passes them, so this bites a local run only — which is the run with nobody checking.
-Expected counts are listed below; `0 passed` on any of them means the seam was not
-compiled in.
-
-**Read the counts, not the word `ok`.** Each of these lines is a passing run that
-proved nothing:
-
-```
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out
-```
-
-`0 passed` with a non-zero `filtered out` means the filter excluded everything —
-usually a mistyped target name, or `--ignored` applied to tests that are not marked
-ignored (that flag runs **only** ignored tests, so adding it to a normal suite runs
-nothing). Expected counts at the time of writing: 7 end-to-end, 1 kill9, 4 rotate,
-2 login. If a number drops, find out why before shipping; a suite that shrank is
-indistinguishable from one that passed.
-
-**Read the listing, not only the totals** — a test can leave the suite without the
-total falling. A `#[test]` attribute binds to whatever function follows it, so
-inserting a new test between an existing attribute and its function hands the
-attribute to the newcomer and silently unregisters the original. Both counts stay
-plausible (one test replaces another) and nothing fails. Measured here: a run
-reported nine tests with one name printed twice and another absent, all green.
-
-The cheap check is that every name appears exactly once, which the per-test lines
-already show. To verify a whole target, compare the attributes against what the
-runner registers:
-
-```sh
-grep -cE '^#\[(tokio::)?test(\(.*\))?\]' crates/credentials-module/tests/cli_admin.rs
-cargo test -p credentials-module --test cli_admin -- --list | grep -c ': test'
-```
-
-Match the attribute pattern loosely: `#[tokio::test(flavor = "multi_thread")]` is a
-test and an exact-string search for `#[tokio::test]` misses it, which reports a
-mismatch in the file rather than in the search.
-
-**Sign the staged binaries with pinned identifiers before placement:**
-`release-build.sh` does this for both binaries (including the hardened runtime),
-before writing their checksums. Its signing commands are:
-
-```sh
-codesign --force --sign - --options runtime --identifier ck-claustrum target/staged/<rev>/ck-claustrum
-codesign --force --sign - --options runtime --identifier ck-auth target/staged/<rev>/ck-auth
-```
-
-This is not cosmetic. macOS's default ad-hoc identifier embeds the binary's
-link-time UUID, so it **changes on every build** — and because macOS binds privacy
-grants to that identifier and attributes them to the responsible process (the
-supervisor), every unpinned release silently revokes those grants with no prompt and
-no error. Pinning also makes the published hash equal the placed hash, so a plain
-`shasum` comparison is a valid deployment check.
-
-**When to cut a staging request: at the BEHAVIOURAL BOUNDARY, not on a timer.**
-CLI-only commits accumulate freely — they change nothing the placer must act on.
-The moment a commit touches daemon-linked source (`credentials-core/src`, or
-anything under `credentials-module/src` outside `bin/`), that is the cut point and
-the pair ships. Rate stays low without freshness suffering.
-
-The failure this avoids is a rate one: three supersessions in a day trains a
-reader to skip to the latest, and the next genuine *non*-supersession — "the
-staged pair is still correct, do not churn your window" — stops being read.
-A superseding chain only carries information while it is rare.
-
-**Every staging request carries a reachability probe.** `release-build.sh`
-refuses without one. It is the only check that proves a change is LIVE rather
-than merely placed, and it cannot be derived: the placer knows which binaries
-moved, and only the requester knows which behaviour to look for. "none: <reason>"
-is a valid answer for a build with no observable change; silence is not.
-
-**Acceptance, after restarting the module.** Run the ladder rather than retyping it:
+Restart the module, then run the acceptance ladder:
 
 ```sh
 scripts/accept-deploy.sh <rev> target/staged/<rev>
 ```
 
-The legs below are what it runs, and the prose is why each discriminates — but
-**run the script, not the commands.** These guards were all written down before
-the day an inode leg was retyped by hand, took the wrong `lsof` field, and printed
-a pid where an inode belonged: a plausible integer next to a real one. The written
-form already said "second-to-last field", from an identical slip weeks earlier in
-another repo. A script runs the form that was written after the lesson; muscle
-memory runs the form you learned before it.
-
-Each leg must be able to fail:
+Run the script rather than retyping its legs. Each leg is able to fail:
 
 | check | why it discriminates |
 |-------|----------------------|
-| deployed hash equals the **new** build's hash, and differs from the **old** one | publish both values — comparing the system to itself passes trivially |
-| `<dest> --version` reports the revision you built | the only check that asks the BINARY what it is, instead of inferring it from a path, a timestamp, or a hash you have to already hold |
-| running process's image inode equals the deploy path's inode | proves the process is not still executing an unlinked predecessor |
-| the open `store.db` is the one you expect (below) | every other check answers "is it healthy", not "is it the right vault" |
+| deployed hash equals the **new** build's hash and differs from the **old** one | publish both values; comparing the system to itself passes trivially |
+| `<dest> --version` reports the revision you built | the only check that asks the binary what it is |
+| the running process's image inode equals the deploy path's inode | proves the process is not still executing an unlinked predecessor |
+| the open `store.db` is the one you expect | every other check answers "is it healthy", not "is it the right vault" |
 | `ck auth status` reports every credential serving | a daemon whose master key was unavailable at boot is alive and serving nothing |
 | mint a throwaway handle, then revoke it | exercises the fenced write path and its atomic audit append |
 
+The store check asks the kernel rather than the process:
+
 ```sh
 lsof -p "$(pgrep -a -x ck-claustrum)" | awk '$NF ~ /store\.db$/ {print $NF}'
-# /Users/<you>/.local/share/cortexkit/claustrum/store.db
 ```
 
-**Ask the kernel, not the process.** This reads what the daemon actually has open
-rather than what it believes it opened, so it survives a stale config, a
-supervisor passing a different descriptor, and a second vault on the same host —
-all cases where a self-reported path would agree with the wrong answer. The vault
-never announces its store, and does not need to while this is available.
+Use `pgrep -x`, never `pgrep -f`: `-f` matches the whole command line, including any shell
+whose script text contains the name. And by default `pgrep` excludes its own ancestors, so from
+a shell running under the supervisor `pgrep -x ck-subc` returns nothing while the supervisor is
+alive. `pgrep -a` includes ancestors; `ps -axo pid=,comm= | awk '$2 ~ /ck-subc$/'` needs no
+flag. An empty `pgrep` is not evidence a process is down. Do not use `pgrep -v` as an inverse:
+an excluded ancestor lands on the non-matching side.
 
-**`pgrep -x`, never `pgrep -f`, and this is not style.** `-f` matches the whole
-command line, so it also matches any SHELL whose script text contains the name —
-including the script running the check. Measured: inside a `bash -c` block that
-mentions `ck-claustrum`, `-f` returned two pids (the daemon and the script) while
-`-x` returned one. Piping that through `head -1` then hands `lsof` the wrong
-process, which reports no `store.db` at all and reads as "the daemon has no vault
-open". Worse than consistently wrong: it depends on the text of the script around
-it, so it works until someone edits a comment.
+**What the ladder does not cover: whether the behaviour you shipped is reachable.** Every leg
+asks whether the right bytes are in the right place. A CLI change whose logic runs inside the
+daemon is not live until the daemon half is placed and restarted. Exercise the build's probe end
+to end, and if it does not show, check which binary owns the behaviour before assuming the
+deploy failed.
 
-**`pgrep` ALSO FALSE-NEGATIVES ON YOUR OWN ANCESTORS, and that direction is more
-dangerous than the false positive above.** Measured 2026-08-16 on macOS: from an
-agent shell whose ancestry is `bash -> sh -> ck-aft -> ck-subc(41345)`, both
-`pgrep -x ck-subc` and `pgrep -f 'bin/ck-subc$'` returned EMPTY, while
-`ps -o stat=,etime= -p 41345` showed the process alive, state `S`, 22h uptime.
-The sibling `ck-subc-mcp` matched normally in the same call, so the discriminator
-is ancestry rather than the name.
+If a hash comparison fails after someone re-signed the binary, re-sign a **copy** of the known
+build with the known identifier and compare that; `dwarfdump --uuid` (invariant under signing)
+and a signature-stripped `shasum` also settle it. `LC_UUID` identifies a (commit, path,
+toolchain) triple, not a commit: the same commit built in two checkouts gives two UUIDs. To
+name the commit a running binary came from, ask `--version`.
 
-This is safe for `ck-claustrum`, which is a supervised module and never an
-ancestor of an operator shell -- the acceptance script's use is sound. It is NOT
-safe for checking the SUPERVISOR from an agent session, which is the natural
-thing to do during an incident: the check reports the fleet's root process as
-down while it is serving. That happened here, and the wrong conclusion ("the
-supervisor is down, my daemon is orphaned") survived two follow-up commands
-before `ps -p` contradicted it.
+### When to cut a build
 
-So: `pgrep` answers "is a process named X running" only for processes that are
-not your own ancestors. **When the answer is empty and it matters, confirm with
-`ps -p <pid>` against a pid from another source** -- the connection file, `lsof`,
-or the module's own parent -- before concluding anything is down. An empty
-`pgrep` is not evidence of absence.
-
-**A SECOND MEASUREMENT, 2026-09-17, with the control the first one lacked -- and it
-kills a competing explanation.** Another seat hit the same empty result and diagnosed
-it as macOS carrying `argv[0]` as an absolute path in `comm`, so that `pgrep -x`
-fails on the directory prefix. Plausible, and wrong. Both processes carry a
-full-path comm:
-
-```
-pid 2307  comm=/Users/.../bin/ck-subc
-pid 2365  comm=/Users/.../bin/ck-subc-mcp
-
-pgrep -x ck-subc       -> <empty>
-pgrep -x ck-subc-mcp   -> 2365        same path shape, MATCHES
-```
-
-If the absolute path were the cause, neither would match by bare name. The
-predicted workarounds also fail: `pgrep -x` against the exact full comm string
-returns nothing, and `pgrep -lf ck-subc` returns only 2365.
-
-The parent chain from the calling shell settles it:
-
-```
-ancestor 1  pid 91260  sh
-ancestor 2  pid 51168  ck-aft
-ancestor 3  pid 2307   ck-subc      <- the process pgrep cannot see
-```
-
-2307 is an ancestor; 2365 is not. That is the only property that differs.
-
-**WHY THE WRONG REASON WOULD HAVE COST SOMETHING.** "pgrep -x fails on a
-full-path comm" predicts that `-f`, or passing the absolute path, fixes it.
-Neither does, so a reader would try both, watch them fail, and be left without an
-explanation. "pgrep never reports your own ancestors" predicts the real fix --
-`-a`, below -- and generalises to every supervised seat checking the supervisor
-during an incident, which is precisely when the false negative appears.
-
-`ps -axo pid=,comm= | awk '$2 ~ /ck-subc$/'` is the portable form, and it works
-because `ps` has no ancestor exclusion at all, not because it tolerates the path.
-
-**THE BEHAVIOUR IS SPECIFIED AND HAS A FLAG, so "stop using pgrep" was too broad.**
-`man pgrep`:
-
-```
--a    Include process ancestors in the match list.  By default, the current
-      pgrep or pkill process and all of its ancestors are excluded
-      (unless -v is used).
-
-pgrep -x      ck-subc  -> <empty>
-pgrep -a -x   ck-subc  -> 2307
-```
-
-So `pgrep -a -x` is the correct positive read from under the supervisor, and `ps`
-remains the form that needs no flag.
-
-**DO NOT REACH FOR `-v` ON THE STRENGTH OF THAT PARENTHETICAL.** It does not mean
-"-v also includes ancestors". Measured here, with a control:
-
-```
-pgrep -a -x ck-subc                      -> 2307        ancestor, MATCHES
-pgrep -v -x ck-subc | grep -c '^2307$'   -> 1           ...and is listed as a NON-match
-pgrep -v -x ck-subc-mcp | grep -c '2365' -> 0           non-ancestor match, correctly absent
-```
-
-An excluded ancestor is evidently treated as "did not match", and `-v` prints the
-did-not-match set — so a process that matches lands on the WRONG side of the
-partition purely because it is above you. `pgrep -v` is therefore not a safe
-inverse of `pgrep` for any process that might be an ancestor. Use `-a` for the
-positive read and `ps` for the negative.
-
-Relocating the data directory is safe in the sense that matters: **the daemon
-never bootstraps**, so a moved vault finds no key for its new keychain scope and
-refuses to serve rather than coming up empty. That is worth knowing precisely
-because the opposite — start fresh, look healthy — is the usual behaviour for a
-state directory.
-
-The last two are the ones that matter. A restarted daemon can be running, answering,
-and serving nothing — so the acceptance assertion is **"N/N serving"**, never "the
-process is up". And a read-only check cannot prove the vault can still write; the
-mint/revoke pair can.
-
-**What the ladder does NOT cover: whether the behaviour you shipped is reachable.**
-Every leg asks whether the right bytes are in the right place. None asks whether
-the CHANGE is live. Measured: a CLI fix was deployed and accepted on all legs while
-its effect stayed invisible, because the logic ran inside the daemon and the daemon
-half had not been placed — the new message simply did not appear. **A deployed CLI
-is not a deployed behaviour** whenever the logic sits behind the route plane.
-Exercise the specific change end to end, and if it does not show, check which
-binary owns it before assuming the deploy failed.
-
-A related trap when hunting for it: **which binary carries the user-visible string
-is itself a design fact.** In that case the sentence lived in the CLI and the wire
-field in the daemon, so grepping either binary alone for the operator-facing text
-concludes the fix is absent from both.
-
-If a hash comparison fails after someone re-signed the binary, re-sign a **copy** of
-the known build with the known identifier and compare that — a legitimate re-sign and
-a substituted binary are otherwise indistinguishable. `dwarfdump --uuid` (invariant
-under signing) and a signature-stripped `shasum` also settle it.
-
-**LC_UUID compares files; it cannot name a commit.** Measured 2026-08-12: the same
-commit built in the main tree and in a git worktree produced two different UUIDs, so
-it identifies a *(commit, path, toolchain)* triple. That is exactly what a deploy
-needs — both sides are in hand — and useless in an incident, where only the running
-binary is. Rebuilding candidate commits until a UUID matches does not work either,
-for the same reason. Ask `--version` instead.
-
-## A lane's silence is only anomalous against its own fetch rate
-
-The mirror of the section below, and I got it wrong in a live incident before writing it.
-
-`credential.get` is demand-driven, so the vault mints only when a consumer asks. **Token
-lifetime says when a token expires; it says nothing about when a consumer asks.**
-Comparing "minutes since last mint" against the 60-minute installation-token lifetime
-therefore measures nothing — and it reads exactly like a finding.
-
-Measured 2026-09-03 while investigating three App lanes that looked stale:
-
-```
-lane                mints  own mean gap   own max gap   observed gap   verdict
-qta-alfonso            11        955 min      5723 min        167 min   normal
-oaiauth-alfonso        24         11 h          146 h           22 h    normal
-ckdesk-alfonso          1           -              -            7 d     never used
-subc-alfonso          283            -              -              -    hourly
-```
-
-All three were reported to me, or by me, as suspicious. **None is an anomaly.** I had
-told another seat that qta's 167 minutes "brackets the first 401 with no story needed" —
-it is one sixth of that lane's own mean interval.
-
-**The second trap is the comparison population.** "19 of 22 lanes minted in the last 15
-minutes while this one sat at 167" sounds decisive and compares a lane with 11 lifetime
-mints against lanes with 283. Those are different populations; a low-traffic lane is
-silent most of the time by construction.
-
-**What is actually evidence, and it needs no timing at all:** `auth_events` for the lane.
-A provider call that was made and refused writes a row on both failure arms in
-`engine.rs` — `InvalidGrant` through `invalidate_if_version_reported`, everything else
-through `record_auth_event`. So zero rows means no call was refused. Confirm the store
-was writable in the window (sibling lanes committing proves it), because the transient
-arm's diagnostics write is best-effort and can itself be lost.
-
-## A refresh-rate anomaly: ask for the denominator before building one
-
-A credential refreshing far above its own token lifetime is the signature of a caller
-whose `min_ttl_ms` demand is close to that lifetime — satisfiable, so it never trips
-`ttl_unsatisfiable`, while forcing an upstream mint on nearly every get.
-
-**The vault sees half of this and cannot see the other half.** It records refreshes and
-NOT reads, so refreshes-per-read — the ratio that actually names the pathology — is not
-computable here. `refresh_commit` also records `actor=vault`, so nothing names the
-triggering caller.
-
-**Do not respond by adding read recording.** That is a row per read on the hot path, and
-it is the expensive fix that will look necessary in the moment. Ask the consumer
-instead: a consumer that exports anything per admission already keeps the denominator
-durably, for its own reasons, and can answer per-credential in one query.
-
-Worked example, measured 2026-08-26 on the two credentials this vault shares with broca:
-
-```
-oauth:anthropic    3 refreshes/24h    35.1 reads/day    ratio 0.09
-oauth:xai          4 refreshes/24h    55.4 reads/day    ratio 0.07
-```
-
-A tight demand drives that ratio toward 1.0. Both are an order of magnitude below it.
-
-Two caveats that came with the numbers and matter for reading them later:
-
-- **Take the ratio as of today, not the raw rates.** Consumer volume moves with fleet
-  activity, so a stale denominator makes a healthy credential look sick.
-- **This only works for consumers that keep a durable per-admission record.** It holds
-  for broca because billing forces it. A consumer that reads credentials without
-  exporting anything has no denominator to offer, and for those the anomaly stays
-  detectable-but-unattributable.
-## Reviewing a contributor head: what "verified at source" cannot see
-
-**A squashed commit whose tree was built on an older base silently reverts everything
-that landed in between.** No conflict, no warning, and the gate stays green because the
-removed code's tests leave with it. Reading the head "at source" cannot detect it,
-because that reading examines what is PRESENT.
-
-Measured on this repo, 2026-09-02/03: PR #30's head `44d4446` was squashed with parent
-`a31a34b` while its tree was built on `0679dea`, so its diff reverted four upstream
-commits — including `3568159`, the create-time reachability advisory that was staged and
-deployed hours later. That head was reviewed here and reported "verified at source". The
-contributor found it on rebase; the review did not.
-
-**The cheap tell, and it is the one to use:** `git diff --stat <base>..<head>` listing
-files the PR has no business touching. On `44d4446` that was `store.rs` at −21 lines in a
-comment region — a PR about account identity has no reason to delete comment lines from
-the store. Read the file list before reading the diff.
-
-**A mechanical version was built and deleted, and the reason is worth keeping.** The
-obvious sweep is "lines upstream added between the base's recent history and the base,
-that the head removes". It fires correctly on the poisoned head — and it also reported
-~60 findings on two CORRECTLY rebased heads. That is not a tuning problem: after a
-rebase, a PR that legitimately EDITS recently-landed upstream code is indistinguishable,
-by line-set arithmetic, from one that reverts it. A short-line filter cut the noise by
-half and no further.
-
-So the check cannot be a gate. Sixty findings on clean input is the alarm-that-always-
-fires failure, and the first thing anyone does with such an alarm is stop reading it.
-The file-list anomaly is judgement-shaped and stays judgement-shaped.
-
+At the behavioural boundary, not on a timer. CLI-only commits accumulate freely. The moment a
+commit touches daemon-linked source (`credentials-core/src`, or anything under
+`credentials-module/src` outside `bin/`), that is the cut point and the pair ships together.
 
 ### KEM open probe
 
-After deploying the new vault, mint a disposable recipient with `ck auth mint-kem-key --id kem:probe` (save the printed `public_key_hex` and `key_id`). Grant `open` on the exact `kem:probe` selector to the test module with `ck auth grant --principal reserved:<module-id> --selector-kind exact --selector kem:probe --operation open`. Seal a message with `cargo run -p credentials-module --example kem_seal_probe -- <public_key_hex> <plaintext> > /tmp/kem-fields.json`, then run `cargo run -p credentials-module --example vault_read_probe -- --subc <connection-file> --as-module <module-id> --scoped-id kem:probe --open-fields /tmp/kem-fields.json`. The probe opens twice on the same bound connection: verify identical `plaintext_b64` values and a `key_id` matching the minted value. Check for exactly one `scoped_first_use` event for `(kem:probe, <module-id>, open)`, then revoke the grant with `ck auth revoke-grant` using the same selector and operation and remove the disposable key with `ck auth remove --id kem:probe`. The first production open for a real consumer still requires its own deployment verification; the disposable probe does not exercise that principal.
+After deploying a vault that serves `credential.open`, mint a disposable recipient with
+`ck auth mint-kem-key --id kem:probe` (save the printed `public_key_hex` and `key_id`). Grant
+`open` on the exact `kem:probe` selector to a test module with `ck auth grant --principal
+reserved:<module-id> --selector-kind exact --selector kem:probe --operation open`. Seal a
+message with `cargo run -p credentials-module --example kem_seal_probe -- <public_key_hex>
+<plaintext> > /tmp/kem-fields.json`, then run `cargo run -p credentials-module --example
+vault_read_probe -- --subc <connection-file> --as-module <module-id> --scoped-id kem:probe
+--open-fields /tmp/kem-fields.json`. The probe opens twice on the same bound connection: verify
+identical `plaintext_b64` values and a `key_id` matching the minted value. Check for exactly one
+`scoped_first_use` event for `(kem:probe, <module-id>, open)`, then revoke the grant with
+`ck auth revoke-grant` using the same selector and operation, and remove the key with
+`ck auth remove --id kem:probe`. The disposable probe does not exercise a real consumer's
+principal, so a real consumer's first open still needs its own verification.
+
+### Roll back
+
+Keep the two most recent rollback copies of each binary
+(`~/.local/share/cortexkit/bin/ck-auth.pre-<rev>-<ts>`) and delete the rest; every one is
+reproducible by re-running `release-build.sh` at its rev. A bin directory full of
+similarly-named binaries is where somebody eventually runs the wrong one. Delete on sight any
+copy named for an event rather than a rev. `release-build.sh` prunes staged trees itself,
+keeping the three newest and, whatever its age, the stage matching the deployed binary.
+
+**A daemon rollback copy stops being a rollback target at the next migration.** Rolling the
+daemon back is safe only while the target's migration chain is at least as new as the store's.
+A binary refuses to open a store ahead of its chain, naming both versions, but that refusal
+lives in the binary you roll back TO: a target that predates the refusal migrates and serves a
+schema it cannot reason about, and fails at the first write of the wrong shape. Check the
+target against the store:
+
+```sh
+sqlite3 "file:$DATA_DIR/store.db?mode=ro" \
+  "SELECT MAX(version) FROM cortexkit_schema_version WHERE namespace='credentials';"
+git merge-base --is-ancestor <newest-migration-commit> <target-rev> \
+  && echo "target carries that migration" || echo "STALE: not a rollback target"
+```
+
+A stale target is not a rollback. Restore the store alongside the binary from a backup taken
+before the migration (with its master key, [section 10](#10-backups-and-restore)), or roll
+forward.
+
+To roll back a binary: place the rollback copy by rename exactly as above, restart the module,
+and run `scripts/accept-deploy.sh` against the rev you rolled back to.

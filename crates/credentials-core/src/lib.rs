@@ -7,8 +7,8 @@
 //! state machine, and master-key resolution. It is wire-agnostic — it never
 //! speaks the subc protocol; `credentials-module` is the thin binary that does.
 //!
-//! See docs/cortexkit-credentials-contract.md for the security contract and
-//! docs/charter.md for the build plan. Built behind a security-conformance suite
+//! See docs/architecture.md for how the parts fit together and the invariants they
+//! keep, and SECURITY.md for the threat model. Built behind a security-conformance suite
 //! (kill -9 mid-refresh, lease-handover mid-write, fail-closed matrix, envelope
 //! fuzz) that is a ship gate, not a nice-to-have.
 #![forbid(unsafe_code)]

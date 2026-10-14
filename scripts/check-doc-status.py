@@ -7,7 +7,8 @@ followed, and two seats have built against a spec believing it shipped. The head
 is the guard against that.
 
 Then the feature ships, the header does not move, and the guard inverts: an external
-operator read `report-marks-stale-design.md` on 2026-08-24 and concluded the feature
+operator read a design doc (`report-marks-stale-design.md`, since moved out of the
+public docs) on 2026-08-24 and concluded the feature
 was unbuilt A DAY AFTER IT WAS DEPLOYED AND MEASURED IN PRODUCTION. The safeguard
 became the defect, pointing the other way.
 
@@ -199,7 +200,8 @@ def main() -> int:
     #
     # The header check above asks "is this NOT-BUILT claim honest". It cannot ask "does
     # this document answer the same question twice, differently". On 2026-09-19
-    # github-app-credentials-design.md had read `Status: ADAPTER SHIPPED` at the top and
+    # github-app-credentials-design.md (since moved out of the public docs) had read
+    # `Status: ADAPTER SHIPPED` at the top and
     # `## Why this is designed and not built` thirty lines down, for a month, while the
     # adapter carried 12,638 refresh commits. The gate passed the whole time, correctly,
     # because it was answering a narrower question than the one a reader has.

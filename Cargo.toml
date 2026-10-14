@@ -8,8 +8,7 @@ members = ["crates/credentials-core", "crates/credentials-module", "crates/claus
 # scattered per-consumer credential acquisition (llm-runner's auth.json read,
 # ai-provider-quota's bespoke OAuth paths) with one custody home.
 #
-# Spec: docs/cortexkit-credentials-contract.md (the security contract — three
-# review passes: Oracle, Athena council, Oracle confirm). Build plan: docs/charter.md.
+# How the parts fit together: docs/architecture.md. Threat model: SECURITY.md.
 #
 # Two-crate split (the standard module shape, template = ai-provider-quota):
 #   credentials-core   = pure custody logic (typed VaultRecord, canonical

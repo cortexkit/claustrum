@@ -27,6 +27,12 @@ unchecked dependency that appears in a table reads as covered, and this one is n
 
 ## When the check fails
 
+Run it locally against a sibling checkout of the supervisor repository:
+
+```sh
+bash scripts/check-inbound-contracts.sh ../subconscious/docs/specs/push-sealed-payload.md
+```
+
 It reports which side holds which value and refuses to say which is correct. That is
 deliberate: the spec is normative, but a spec edit can itself be the mistake, and a
 check that told you to reconcile toward one side would be right most of the time and

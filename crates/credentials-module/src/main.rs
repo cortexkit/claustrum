@@ -491,7 +491,7 @@ fn init_fleet_log(module_id: &str, data_dir: &std::path::Path) {
 /// fell behind: `signed-envelopes/` was kept for weeks and never backed up.
 ///
 /// `signed-payloads/` and `signed-envelopes/` are written by hand during manifest
-/// signing ceremonies (see `docs/gh-manifest-signing-procedure.md`), not by the daemon,
+/// signing ceremonies (see `docs/gh-manifest-signing.md`), not by the daemon,
 /// so nothing else would notice them missing from a backup. Any new directory the vault
 /// retains in its data dir belongs here, and the test beside this constant names them.
 const ENGRAM_CATALOG_JSON: &str = r#"{

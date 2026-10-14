@@ -386,7 +386,8 @@ mod documented_count_tests {
             .parent()
             .and_then(|p| p.parent())
             .expect("workspace root");
-        for doc in ["docs/architecture.md"] {
+        {
+            let doc = "docs/architecture.md";
             let text = std::fs::read_to_string(root.join(doc))
                 .unwrap_or_else(|e| panic!("read {doc}: {e}"));
             // The sentence names the count immediately before the word "adapters".

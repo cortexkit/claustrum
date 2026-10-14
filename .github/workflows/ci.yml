@@ -171,7 +171,7 @@ jobs:
         # silently stops running the day that leg is renamed or removed, which is
         # the failure mode this script exists to catch in a different form.
         shell: bash
-        run: ./scripts/check-inbound-contracts.sh ../subconscious/docs/specs/push-sealed-payload.md
+        run: ./scripts/check-inbound-contracts.sh ../subconscious/docs/push-sealed-payload.md
 
       # Pins the HOST every provider endpoint constant reaches. A population check
       # rather than a unit test: a per-constant assertion cannot fail when a NEW

@@ -4,7 +4,7 @@
 # WHY THIS EXISTS
 # Three constants in `apns_submit.rs` are not decisions this repo made. They are
 # transcriptions of facts owned elsewhere: the APNs payload key and the sealed
-# envelope's shape are specified in `subconscious/docs/specs/push-sealed-payload.md`,
+# envelope's shape are specified in `subconscious/docs/push-sealed-payload.md`,
 # and the payload key is ALSO declared independently by the iOS client. No compiler
 # spans those copies, and a mismatch is silent in the worst possible place -- the
 # notification is accepted by Apple, delivered to the device, and never opens.
@@ -25,7 +25,7 @@ set -o errexit
 set -o nounset
 set -o pipefail
 
-spec="${1:-../subconscious/docs/specs/push-sealed-payload.md}"
+spec="${1:-../subconscious/docs/push-sealed-payload.md}"
 source_file="crates/credentials-core/src/apns_submit.rs"
 
 if [[ ! -f "$spec" ]]; then

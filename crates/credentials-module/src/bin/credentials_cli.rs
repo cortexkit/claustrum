@@ -4543,7 +4543,7 @@ fn cmd_grant(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     let operation = required(args, "--operation")?
         .parse::<GrantOperation>()
         .map_err(CliError::Usage)?;
-    commit_admin(
+    let result = commit_admin(
         global,
         AdminOpBody::GrantCreateV2 {
             v: ADMIN_OP_SCHEMA_V2,
@@ -4554,8 +4554,13 @@ fn cmd_grant(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             operation,
         },
     )?;
+    let verb = if result.get("already_granted").and_then(|v| v.as_bool()) == Some(true) {
+        "already granted (no change)"
+    } else {
+        "granted"
+    };
     println!(
-        "granted {principal_kind}:{principal_id} {} {}:{selector}",
+        "{verb} {principal_kind}:{principal_id} {} {}:{selector}",
         operation.as_str(),
         selector_kind.as_str()
     );

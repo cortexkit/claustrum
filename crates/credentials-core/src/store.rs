@@ -13600,6 +13600,41 @@ mod migration_10_tests {
         );
     }
 
+    /// A repeated identical grant reports `already_granted` and writes nothing: no audit
+    /// row, no generation bump. That is what lets `ck auth grant` report "no change" and
+    /// exit 0 when a setup script re-runs it.
+    #[test]
+    fn a_repeated_identical_grant_is_reported_and_changes_nothing_durable() {
+        let (root, store) = rig("grant-repeat", 108);
+        let op = || crate::admin_ops::AdminOpBody::GrantCreateV2 {
+            v: crate::admin_ops::ADMIN_OP_SCHEMA_V2,
+            principal_kind: "reserved".into(),
+            principal_id: "agent".into(),
+            selector_kind: SelectorKind::Category,
+            selector: "llm-provider".into(),
+            operation: GrantOperation::Read,
+        };
+        let first = crate::admin_ops::apply(&store, op(), "test").expect("first grant");
+        assert_eq!(first["grant_created"], true);
+        let tip = store.audit_tip().expect("tip");
+        let generation = store.grants_generation().expect("generation");
+
+        let second = crate::admin_ops::apply(&store, op(), "test").expect("repeat grant");
+        assert_eq!(second["grant_created"], false);
+        assert_eq!(second["already_granted"], true);
+        assert_eq!(
+            store.audit_tip().expect("tip"),
+            tip,
+            "a no-op grant must not append to the audit chain"
+        );
+        assert_eq!(
+            store.grants_generation().expect("generation"),
+            generation,
+            "a no-op grant must not bump the grants generation"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn the_first_mutation_after_the_migration_bumps_the_generation_through_the_fenced_path() {
         let (root, store) = rig("generation-bump", 106);

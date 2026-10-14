@@ -841,15 +841,26 @@ pub fn apply(
                 return Err(StoreOpError::InvalidCategoryName);
             }
             let stored_selector = selector;
-            store.create_read_grant_audited(
+            // Re-granting an identical row is a no-op, not a failure: setup scripts re-run
+            // the same grant, and the store's create-only `AlreadyExists` reads as "the
+            // credential already exists" to every caller. The store writes no audit row
+            // and doesn't bump the grants generation when the row is already there, so
+            // reporting success changes nothing durable.
+            match store.create_read_grant_audited(
                 &principal_kind,
                 &principal_id,
                 selector_kind,
                 &stored_selector,
                 operation,
                 AuditCtx::route_admin(AuditOp::GrantCreate, actor),
-            )?;
-            Ok(serde_json::json!({ "grant_created": true }))
+            ) {
+                Ok(()) => Ok(serde_json::json!({ "grant_created": true })),
+                Err(StoreOpError::AlreadyExists) => Ok(serde_json::json!({
+                    "grant_created": false,
+                    "already_granted": true
+                })),
+                Err(e) => Err(e),
+            }
         }
         AdminOpBody::GrantRevokeV2 {
             principal_kind,

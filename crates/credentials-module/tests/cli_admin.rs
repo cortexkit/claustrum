@@ -1335,6 +1335,56 @@ fn grants_list_when_one_principal_holds_both_selector_kinds_and_every_operation(
     assert_eq!(rows, 5, "every grant needs its own row: {stdout}");
 }
 
+/// Running the same `grant` twice is a no-op that succeeds, so setup scripts can re-run.
+/// It used to exit 1 with "credential already exists", which named the wrong object and
+/// forced callers to list grants to tell an existing grant from a real failure.
+#[test]
+fn repeating_an_identical_grant_succeeds_and_leaves_one_row() {
+    let vault = GrantCliVault::new("grants-repeat");
+    vault.bootstrap();
+    let args = [
+        "grant",
+        "--principal",
+        "scratchmod",
+        "--selector-kind",
+        "category",
+        "--selector",
+        "llm-provider",
+        "--operation",
+        "read",
+    ];
+    let first = vault.run(&args);
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&first.stdout).trim(),
+        "granted reserved:scratchmod read category:llm-provider"
+    );
+
+    let second = vault.run(&args);
+    assert!(
+        second.status.success(),
+        "a repeated identical grant must succeed: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&second.stdout).trim(),
+        "already granted (no change) reserved:scratchmod read category:llm-provider"
+    );
+
+    let listed = vault.run(&["grants"]);
+    assert!(listed.status.success());
+    let stdout = String::from_utf8_lossy(&listed.stdout);
+    let rows = stdout
+        .lines()
+        .filter(|line| line.contains("scratchmod"))
+        .count();
+    assert_eq!(rows, 1, "a repeated grant must not add a row: {stdout}");
+}
+
 /// The metadata-only `list` operation goes through the operator's whole grant loop:
 /// created by `grant`, rendered by `grants` under its own name, removed by
 /// `revoke-grant`. A CLI or admin-op parser that still knew only the older operations

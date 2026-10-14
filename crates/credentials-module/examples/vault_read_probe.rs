@@ -62,6 +62,7 @@ async fn main() {
     let mut record_version: Option<u64> = None;
     let mut anthropic_headers = false;
     let mut meta_models: Option<String> = None;
+    let mut meta_cache: Option<String> = None;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -96,6 +97,10 @@ async fn main() {
             // only model ids, then ONE minimal request to the named model, printing its
             // status and any error message. The key itself is never printed.
             "--meta-models" => meta_models = args.next(),
+            // With the served Meta key: sends the same ~5k-token input twice without a
+            // `prompt_cache_key`, then twice with one, printing each call's raw `usage`
+            // block. Tells whether Meta caches prompts and whether it needs the key.
+            "--meta-cache" => meta_cache = args.next(),
             // Refresh if the token has less than this many ms of life left.
             "--min-ttl-ms" => {
                 min_ttl_ms = args.next().and_then(|v| v.parse().ok());
@@ -706,6 +711,12 @@ async fn main() {
     )
     .await;
     report(&body, show_account_id, show_claims, describe);
+    if let Some(model) = meta_cache.as_deref() {
+        match served_payload(&body) {
+            Some(key) => probe_meta_cache(&key, model).await,
+            None => println!("   meta-cache: no payload served, nothing sent"),
+        }
+    }
     if let Some(model) = meta_models.as_deref() {
         match served_payload(&body) {
             Some(key) => print_meta_models(&key, model).await,
@@ -1470,6 +1481,66 @@ async fn print_anthropic_headers(key: &[u8]) {
         // A transport error string can carry the URL but never the header value.
         Err(error) => println!("   anthropic-headers: request failed: {error}"),
     }
+}
+
+async fn probe_meta_cache(key: &[u8], model: &str) {
+    let Ok(key) = std::str::from_utf8(key) else {
+        println!("   meta-cache: payload is not UTF-8, nothing sent");
+        return;
+    };
+    let auth = format!("Bearer {}", key.trim());
+    let client = reqwest::Client::new();
+    // A fixed, deterministic prefix well over 4k tokens; a run nonce keeps it from
+    // matching any earlier probe's cache entry, so a hit can only come from this run.
+    let nonce = std::process::id();
+    let mut input = format!("Cache probe run {nonce}. Reference text follows.\n");
+    for i in 0..600 {
+        input.push_str(&format!(
+            "Line {i}: the vault keeps one refresh holder per rotating credential. "
+        ));
+    }
+    input.push_str("\nReply with the single word: ok");
+    for (label, cache_key) in [("no key", None), ("with key", Some("probe-1"))] {
+        for call in 1..=2 {
+            let mut body = serde_json::json!({
+                "model": model,
+                "input": input,
+                "max_output_tokens": 16,
+            });
+            if let Some(cache_key) = cache_key {
+                body["prompt_cache_key"] = serde_json::json!(cache_key);
+            }
+            match client
+                .post("https://api.meta.ai/v1/responses")
+                .header("authorization", &auth)
+                .header("user-agent", "claustrum-vault-read-probe")
+                .json(&body)
+                .send()
+                .await
+            {
+                Ok(response) => {
+                    let status = response.status().as_u16();
+                    let body: Value = response.json().await.unwrap_or(Value::Null);
+                    let usage = body.get("usage").cloned().unwrap_or(Value::Null);
+                    let error = body.get("error").filter(|e| !e.is_null());
+                    println!(
+                        "   meta-cache: {label} call {call} at {} status {status} usage {usage}{}",
+                        chrono_free_now(),
+                        error.map(|e| format!(" error {e}")).unwrap_or_default()
+                    );
+                }
+                Err(error) => println!("   meta-cache: {label} call {call} failed: {error}"),
+            }
+        }
+    }
+}
+
+/// Unix seconds, so each call's line carries when it ran without a date dependency.
+fn chrono_free_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 async fn print_meta_models(key: &[u8], model: &str) {

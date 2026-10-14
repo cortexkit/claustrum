@@ -9165,6 +9165,329 @@ mod tests {
         assert_eq!(event.detail.as_deref(), Some("no_grant"));
     }
 
+    fn signature_audit_rig(
+        enabled: bool,
+    ) -> (
+        Arc<ReadSurface>,
+        Arc<admin_surface::AdminSurface>,
+        Arc<EncryptedStore>,
+    ) {
+        let (surface, admin, store) = scoped_rig(188);
+        let mut record = VaultRecord::new_static(
+            CredentialKind::SigningKey,
+            "operator",
+            test_ed25519_pem().into_bytes(),
+            None,
+        );
+        record.audit_each_signature = enabled;
+        store
+            .create_audited("signing:publish:1", &record, AuditCtx::admin(AuditOp::Put))
+            .unwrap();
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "entorhinal",
+                SelectorKind::Exact,
+                "signing:publish:1",
+                GrantOperation::Sign,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .unwrap();
+        admin.record_bind(
+            188,
+            subc_protocol::Principal::Reserved {
+                module_id: "entorhinal".into(),
+            },
+        );
+        (surface, admin, store)
+    }
+
+    fn current_signing_public(store: &EncryptedStore) -> credentials_core::signing::PublicKey {
+        let record = store.get("signing:publish:1").unwrap();
+        credentials_core::signing::public_key_ed25519(
+            std::str::from_utf8(record.payload.expose()).unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn assert_signature_matches_public(
+        response: &serde_json::Value,
+        public: &credentials_core::signing::PublicKey,
+        payload: &[u8],
+    ) {
+        use base64::Engine as _;
+        let key: Vec<u8> = (0..public.public_key_hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&public.public_key_hex[i..i + 2], 16).unwrap())
+            .collect();
+        let signature = base64::engine::general_purpose::STANDARD
+            .decode(
+                response["result"]["signature_b64"]
+                    .as_str()
+                    .expect("signature result"),
+            )
+            .unwrap();
+        ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, &key)
+            .verify(payload, &signature)
+            .expect("current public key must verify the signature");
+        let key_digest = ring::digest::digest(&ring::digest::SHA256, &key);
+        let expected_key_id: String = key_digest.as_ref()[..8]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        assert_eq!(response["result"]["key_id"], expected_key_id);
+    }
+
+    #[tokio::test]
+    async fn signature_audit_records_every_payload_under_the_resolved_principal() {
+        use base64::Engine as _;
+        for enrolled in [false, true] {
+            let (surface, admin, store) = signature_audit_rig(true);
+            let token = if enrolled {
+                let secret = "ab".repeat(32);
+                let hash = credentials_core::enrollment::enrollment_secret_hash(&secret).unwrap();
+                let request = store.propose_enrollment("publisher", &hash).unwrap();
+                store
+                    .approve_enrollment(&request.request_id, "publisher", "operator")
+                    .unwrap();
+                store
+                    .create_read_grant_audited(
+                        "enrolled",
+                        "publisher",
+                        SelectorKind::Exact,
+                        "signing:publish:1",
+                        GrantOperation::Sign,
+                        AuditCtx::admin(AuditOp::GrantCreate),
+                    )
+                    .unwrap();
+                match store.poll_enrollment(&request.request_id, &secret).unwrap() {
+                    credentials_core::enrollment::EnrollmentPoll::Approved { token, .. } => {
+                        Some(token)
+                    }
+                    other => panic!("approved enrollment: {other:?}"),
+                }
+            } else {
+                None
+            };
+            let before = store.read_audit(None).unwrap().len();
+            let public = current_signing_public(&store);
+            let payloads: [&[u8]; 3] = [
+                b"first published bytes",
+                b"second\x00\xffpayload",
+                b"first published bytes",
+            ];
+            for payload in payloads {
+                let signed = scoped_route_request(
+                    &surface,
+                    &admin,
+                    188,
+                    OP_SIGN,
+                    json!({
+                        "credential_id": "signing:publish:1",
+                        "payload_b64": base64::engine::general_purpose::STANDARD.encode(payload),
+                        "enrollment_token": token,
+                    }),
+                )
+                .await;
+                assert_signature_matches_public(&signed, &public, payload);
+            }
+            let rows = store.read_audit(None).unwrap();
+            let rows = &rows[before..];
+            assert_eq!(
+                rows.len(),
+                payloads.len(),
+                "one row per signature, even for repeated bytes"
+            );
+            for (row, payload) in rows.iter().zip(payloads) {
+                // Use ring rather than the daemon's sha2 implementation and decoded
+                // bytes rather than the request's base64 representation.
+                let digest = ring::digest::digest(&ring::digest::SHA256, payload);
+                let expected_hash: String = digest
+                    .as_ref()
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect();
+                assert_eq!(row.op, "sign");
+                assert_eq!(row.credential_id.as_deref(), Some("signing:publish:1"));
+                assert_eq!(row.payload_hash.as_deref(), Some(expected_hash.as_str()));
+                assert_eq!(
+                    row.actor,
+                    if enrolled {
+                        "enrolled:publisher"
+                    } else {
+                        "reserved:entorhinal"
+                    }
+                );
+                assert!(!row.alarm);
+            }
+            store
+                .verify_audit_chain()
+                .expect("signatures must preserve chain integrity");
+        }
+    }
+
+    #[tokio::test]
+    async fn signature_audit_disabled_keeps_the_chain_unchanged_and_does_not_attempt_a_write() {
+        use base64::Engine as _;
+        let (surface, admin, store) = signature_audit_rig(false);
+        let before = store.read_audit(None).unwrap();
+        surface.force_sign_audit_write_fault_for_test();
+        for _ in 0..3 {
+            let signed = scoped_sign_request(
+                &surface,
+                &admin,
+                188,
+                "signing:publish:1",
+                &base64::engine::general_purpose::STANDARD.encode(b"unaudited bytes"),
+            )
+            .await;
+            assert_signature_matches_public(
+                &signed,
+                &current_signing_public(&store),
+                b"unaudited bytes",
+            );
+        }
+        assert_eq!(store.read_audit(None).unwrap(), before);
+        let mut record = store.get("signing:publish:1").unwrap();
+        record.audit_each_signature = true;
+        store
+            .overwrite_unconditional_audited(
+                "signing:publish:1",
+                &record,
+                AuditCtx::admin(AuditOp::Overwrite),
+            )
+            .unwrap();
+        let refused = scoped_sign_request(&surface, &admin, 188, "signing:publish:1", "YQ==").await;
+        assert_eq!(
+            refused["result"]["error"]["code"], "store_error",
+            "off-path signatures must not consume the write fault"
+        );
+    }
+
+    #[tokio::test]
+    async fn signature_audit_write_failure_returns_store_error_and_no_signature() {
+        let (surface, admin, store) = signature_audit_rig(true);
+        let before = store.read_audit(None).unwrap();
+        surface.force_sign_audit_write_fault_for_test();
+        let refused = scoped_sign_request(&surface, &admin, 188, "signing:publish:1", "YQ==").await;
+        assert_eq!(
+            refused["result"],
+            json!({ "error": { "code": "store_error", "class": "transient" } })
+        );
+        assert!(refused["result"].get("signature_b64").is_none());
+        assert_eq!(store.read_audit(None).unwrap(), before);
+        let recovered =
+            scoped_sign_request(&surface, &admin, 188, "signing:publish:1", "YQ==").await;
+        assert_signature_matches_public(&recovered, &current_signing_public(&store), b"a");
+        assert_eq!(store.read_audit(None).unwrap().len(), before.len() + 1);
+        store.verify_audit_chain().unwrap();
+    }
+
+    #[tokio::test]
+    async fn signature_audit_oversize_payload_is_refused_before_any_row_is_written() {
+        use base64::Engine as _;
+        let (surface, admin, store) = signature_audit_rig(true);
+        let before = store.read_audit(None).unwrap();
+        let payload = vec![0x61; credentials_core::signing::MAX_SIGN_PAYLOAD + 1];
+        let refused = scoped_sign_request(
+            &surface,
+            &admin,
+            188,
+            "signing:publish:1",
+            &base64::engine::general_purpose::STANDARD.encode(payload),
+        )
+        .await;
+        assert_eq!(refused["result"]["error"]["code"], "sign_payload_too_large");
+        assert!(refused["result"].get("signature_b64").is_none());
+        assert_eq!(
+            store.read_audit(None).unwrap(),
+            before,
+            "a refused payload must not look signed"
+        );
+    }
+
+    #[tokio::test]
+    async fn signature_audit_chain_orders_signatures_around_a_key_replacement() {
+        let (surface, admin, store) = signature_audit_rig(true);
+        let first_public = current_signing_public(&store);
+        let first = scoped_sign_request(&surface, &admin, 188, "signing:publish:1", "YQ==").await;
+        assert_signature_matches_public(&first, &first_public, b"a");
+        let mut replacement = VaultRecord::new_static(
+            CredentialKind::SigningKey,
+            "operator",
+            test_ed25519_pem().into_bytes(),
+            None,
+        );
+        replacement.audit_each_signature = true;
+        store
+            .overwrite_unconditional_audited(
+                "signing:publish:1",
+                &replacement,
+                AuditCtx::admin(AuditOp::Overwrite),
+            )
+            .unwrap();
+        let second_public = current_signing_public(&store);
+        let second = scoped_sign_request(&surface, &admin, 188, "signing:publish:1", "YQ==").await;
+        assert_signature_matches_public(&second, &second_public, b"a");
+        assert_ne!(first["result"]["key_id"], second["result"]["key_id"]);
+        let generations: Vec<_> = store
+            .read_audit(None)
+            .unwrap()
+            .into_iter()
+            .filter(|row| {
+                row.credential_id.as_deref() == Some("signing:publish:1")
+                    && matches!(row.op.as_str(), "put" | "overwrite" | "sign")
+            })
+            .collect();
+        assert_eq!(
+            generations
+                .iter()
+                .map(|row| row.op.as_str())
+                .collect::<Vec<_>>(),
+            ["put", "sign", "overwrite", "sign"]
+        );
+        assert!(generations.windows(2).all(|pair| pair[0].seq < pair[1].seq));
+        store.verify_audit_chain().unwrap();
+    }
+
+    #[test]
+    fn signature_audit_refuses_a_replaced_generation_without_a_row() {
+        let (_surface, _admin, store) = signature_audit_rig(true);
+        let original = store.get("signing:publish:1").unwrap();
+        let mut replacement = original.clone();
+        replacement.payload = test_ed25519_pem().into_bytes().into();
+        store
+            .overwrite_unconditional_audited(
+                "signing:publish:1",
+                &replacement,
+                AuditCtx::admin(AuditOp::Overwrite),
+            )
+            .unwrap();
+        let before = store.read_audit(None).unwrap();
+        let hash = credentials_core::store::payload_hash(b"payload");
+        assert!(matches!(
+            store.append_signature_audit(
+                "signing:publish:1",
+                original.record_version,
+                &hash,
+                "reserved:entorhinal"
+            ),
+            Err(credentials_core::store::StoreOpError::CasMismatch)
+        ));
+        assert_eq!(store.read_audit(None).unwrap(), before);
+        let current = store.get("signing:publish:1").unwrap();
+        store
+            .append_signature_audit(
+                "signing:publish:1",
+                current.record_version,
+                &hash,
+                "reserved:entorhinal",
+            )
+            .unwrap();
+        assert_eq!(store.read_audit(None).unwrap().len(), before.len() + 1);
+        store.verify_audit_chain().unwrap();
+    }
+
     #[tokio::test]
     async fn sign_grant_signs_signing_keys_but_not_other_kinds() {
         use base64::Engine as _;

@@ -22,7 +22,7 @@
 //!   put       --id <id> --payload <bytes> [--kind api_key|dsn|opaque] [--expires-ms N] [--replace]
 //!             cookie:<domain> records are always `CredentialKind::Cookie`, preserve
 //!             `--payload-file` bytes exactly, and do not accept `--expires-ms`.
-//!   mint-signing-key --id signing:<provider>[:<generation>] [--replace]
+//!   mint-signing-key --id signing:<provider>[:<generation>] [--replace] [--audit-each-signature]
 //!   import    --source opencode|pi|antigravity --id <id> --json <file>
 //!   set-identity <id> --account-id <id> [--email <email>] [--org-name <name>] | --clear
 //!   migrate-opencode [--dry-run] [--replace] [--force-shape] [--restore <provider>]
@@ -490,7 +490,8 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
     let bool_flags: &[&str] = match command {
         "set-providers" => &["--set", "--add", "--remove"],
         "put" => &["--replace"],
-        "mint-signing-key" | "mint-kem-key" => &["--replace"],
+        "mint-signing-key" => &["--replace", "--audit-each-signature"],
+        "mint-kem-key" => &["--replace"],
         "import" => &["--replace", "--clear-identity"],
         "set-identity" | "set-plan" => &["--clear"],
         "reclassify" => &["--from-registry", "--force"],
@@ -790,9 +791,11 @@ fn help_verb(verb: &str) -> String {
         }
         "mint-signing-key" => {
             "ck auth mint-signing-key --id signing:<provider>[:<generation>] [--replace]\n\
+              \x20                        [--audit-each-signature]\n\
              \n\
              \x20 --id <id>  signing:<provider>[:<generation>] credential to create\n\
-             \x20 --replace  explicit destructive rotation of an existing id; keeps its handles\n\
+              \x20 --replace  explicit destructive rotation of an existing id; keeps its handles\n\
+              \x20 --audit-each-signature  require a chained payload-hash audit before signing\n\
              \n\
              NOTES\n\
              Generate a fresh Ed25519 key pair in this process and seal its PKCS#8 private\n\
@@ -800,7 +803,10 @@ fn help_verb(verb: &str) -> String {
              environment variable, or command output. Prints the public key hex and its\n\
              derived key_id for handoff to verifiers.\n\
              \n\
-             Create-only by default: use a new generation id for normal rotation."
+              Create-only by default: use a new generation id for normal rotation.\n\
+              Signature auditing is off by default. Opt in for publish keys whose complete\n\
+              signing history must survive compromise; the audit chain cannot be trimmed.\n\
+              A replacement is a fresh key: pass the audit flag again to keep auditing."
         }
         "put" => {
             "ck auth put --id <id> --payload <v> | --payload-file <path>\n\
@@ -1677,12 +1683,13 @@ fn cmd_mint_signing_key(global: &GlobalArgs, args: &[String]) -> Result<(), CliE
     let private_pem = pem_wrap_private_key(pkcs8.as_ref());
     let public = credentials_core::signing::public_key_ed25519(&private_pem)
         .map_err(|_| CliError::Io("generated Ed25519 key was unusable".to_string()))?;
-    let record = VaultRecord::new_static(
+    let mut record = VaultRecord::new_static(
         AuthMethod::Signing.credential_kind(),
         "operator",
         private_pem.into_bytes(),
         None,
     );
+    record.audit_each_signature = has_flag(args, "--audit-each-signature");
 
     let replace = has_flag(args, "--replace");
     let (audit_op, mode, success) = if replace {

@@ -162,6 +162,33 @@ pub fn public_key_ed25519(key_pem: &str) -> Result<PublicKey, SignError> {
 /// The key material exists only for the duration of this call and is dropped on
 /// return; nothing here writes it anywhere or includes it in an error.
 pub fn sign_ed25519(key_pem: &str, payload: &[u8]) -> Result<Signature, SignError> {
+    Ok(prepare_ed25519(key_pem, payload)?.sign())
+}
+
+/// A validated key and bounded payload, ready to sign without a fallible step.
+/// Callers can commit required audit evidence after preparation and before signing.
+pub struct PreparedEd25519Signature<'a> {
+    key: Ed25519KeyPair,
+    payload: &'a [u8],
+    key_id: String,
+}
+
+impl PreparedEd25519Signature<'_> {
+    /// Produce the signature only after any caller-required audit write succeeds.
+    pub fn sign(self) -> Signature {
+        let sig = self.key.sign(self.payload);
+        Signature {
+            signature_b64: base64::engine::general_purpose::STANDARD.encode(sig.as_ref()),
+            key_id: self.key_id,
+        }
+    }
+}
+
+/// Validate the payload size and decode the key before any signature audit is written.
+pub fn prepare_ed25519<'a>(
+    key_pem: &str,
+    payload: &'a [u8],
+) -> Result<PreparedEd25519Signature<'a>, SignError> {
     if payload.len() > MAX_SIGN_PAYLOAD {
         return Err(SignError::TooLarge {
             len: payload.len(),
@@ -169,10 +196,10 @@ pub fn sign_ed25519(key_pem: &str, payload: &[u8]) -> Result<Signature, SignErro
         });
     }
     let kp = parse_pkcs8_pem(key_pem)?;
-    let sig = kp.sign(payload);
     let key_id = key_id_for_public(kp.public_key().as_ref());
-    Ok(Signature {
-        signature_b64: base64::engine::general_purpose::STANDARD.encode(sig.as_ref()),
+    Ok(PreparedEd25519Signature {
+        key: kp,
+        payload,
         key_id,
     })
 }

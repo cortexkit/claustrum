@@ -896,3 +896,23 @@ only = false
 timeout_s = 600
 build_timeout_s = 1800
 
+
+
+[[control]]
+id = "signature-audit-write-fails-closed"
+guards = "opted-in signing refuses to release a signature when its audit append fails"
+file = "crates/credentials-module/src/read_surface.rs"
+old = '            write_audit().map_err(|_| ReadError::StoreError)?;'
+new = '            let _ = write_audit(); // NON-VACUITY BREAK'
+edits = []
+test_file = "crates/credentials-module/src/main.rs"
+runner = "cargo"
+package = "credentials-module"
+target = "--bin ck-claustrum"
+features = ["credentials-core/test-support"]
+select = "expected"
+expect_red = ["tests::signature_audit_write_failure_returns_store_error_and_no_signature"]
+expect_message = '"store_error"'
+only = false
+timeout_s = 600
+build_timeout_s = 3600

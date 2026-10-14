@@ -212,6 +212,23 @@ both addresses or neither is refused as a malformed request
 (`tests::a_report_supplying_both_addresses_or_neither_is_refused`).
 `credential.status` with neither address is the overall vault-health probe.
 
+Signing keys minted with `ck auth mint-signing-key --audit-each-signature` opt
+into a permanent per-signature history. After key and payload validation, but
+before signing, the vault commits one HMAC-chained row with `audit_log.op = sign`,
+the credential id, the SHA-256 of the exact decoded payload, and the resolved
+`reserved:<module>` or `enrolled:<name>` actor. Anonymous handle holders use the
+existing `conn-N` channel attribution. Payload bytes are never recorded. A failed
+audit write (including a lost writer fence) returns `store_error` / `transient`
+and no signature; refused payloads write no signature row. Keys without this
+sealed flag (including existing keys) retain the no-write signing path.
+
+The public key id is derived from the signing key and returned with the signature,
+not stored in an extra audit column. A sign row belongs to the key generation
+installed by the most recent `put`/`overwrite` row for that credential id; the
+chain orders signatures around replacements. Normal rotation uses a new id.
+Older record decoders ignore the additive flag; rollback reads remain compatible,
+but older binaries do not enforce this policy and drop it when rewriting a record.
+
 ### 2.1 Enrollment, for a consumer with no supervised identity
 
 The ceremony is `auth.enroll_propose` → operator approval → `auth.enroll_poll`, with

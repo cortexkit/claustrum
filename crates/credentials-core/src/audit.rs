@@ -71,6 +71,12 @@ pub enum AuditOp {
     /// A read-surface fetch anomaly was detected (an enumeration/rate alarm). Not a
     /// mutation, but recorded durably so the anomaly survives the connection.
     FetchAnomaly,
+    /// A signing key opted into per-signature history. Only the exact payload's
+    /// SHA-256 is recorded, never its bytes. The key id is derived from the public
+    /// key, not stored here: a sign row belongs to the key generation installed by
+    /// the most recent put/overwrite row for its credential id. Chain order places
+    /// signatures on either side of a replacement; normal rotation uses a new id.
+    Sign,
     /// A principal-scoped operation grant was created.
     GrantCreate,
     /// A principal-scoped operation grant was revoked.
@@ -98,9 +104,10 @@ pub enum AuditOp {
     /// EXACT BYTES, before a signing window was opened for it.
     ///
     /// NOT A MUTATION OF ANY CREDENTIAL, and deliberately in the chain anyway. Signing
-    /// itself writes nothing — `credential.sign` is a route operation reachable in a
-    /// loop by any handle holder, and a durable write per call would let one grow the
-    /// untrimmable chain without bound. So the ordering evidence lives here instead:
+    /// writes nothing by default — `credential.sign` is reachable in a loop by any
+    /// handle holder, and a durable write per call grows the untrimmable chain without
+    /// bound. Keys with `audit_each_signature` opt into that cost; other keys retain
+    /// the approval-window evidence instead:
     ///
     ///   approval        payload_hash = SHA-256(artifact bytes), actor = approver
     ///   mint_handle     opens the signing window
@@ -138,6 +145,7 @@ impl AuditOp {
             AuditOp::MintHandle => "mint_handle",
             AuditOp::RevokeHandle => "revoke_handle",
             AuditOp::FetchAnomaly => "fetch_anomaly",
+            AuditOp::Sign => "sign",
             AuditOp::GrantCreate => "grant_create",
             AuditOp::GrantRevoke => "grant_revoke",
             AuditOp::SetCategory => "set_category",
@@ -658,6 +666,7 @@ mod vocabulary_documentation_tests {
                 AuditOp::MintHandle => AuditOp::MintHandle.as_str(),
                 AuditOp::RevokeHandle => AuditOp::RevokeHandle.as_str(),
                 AuditOp::FetchAnomaly => AuditOp::FetchAnomaly.as_str(),
+                AuditOp::Sign => AuditOp::Sign.as_str(),
                 AuditOp::GrantCreate => AuditOp::GrantCreate.as_str(),
                 AuditOp::GrantRevoke => AuditOp::GrantRevoke.as_str(),
                 AuditOp::SetCategory => AuditOp::SetCategory.as_str(),
@@ -688,6 +697,10 @@ mod vocabulary_documentation_tests {
         assert_documented(section, "audit_log.op", value(AuditOp::MintHandle));
         assert_documented(section, "audit_log.op", value(AuditOp::RevokeHandle));
         assert_documented(section, "audit_log.op", value(AuditOp::FetchAnomaly));
+        assert!(
+            WIRE_CONTRACT.contains("`audit_log.op = sign`"),
+            "the opt-in signing audit op must be documented in the wire contract"
+        );
         assert_documented(section, "audit_log.op", value(AuditOp::GrantCreate));
         assert_documented(section, "audit_log.op", value(AuditOp::GrantRevoke));
         assert!(

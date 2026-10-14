@@ -1007,6 +1007,7 @@ fn every_verb_names_on_its_help_page_each_flag_its_parser_accepts() {
     let verbs = [
         "import",
         "put",
+        "mint-signing-key",
         "login",
         "grant",
         "set-identity",
@@ -1697,6 +1698,92 @@ fn mint_signing_key_custodies_a_usable_key_and_prints_its_public_half() {
 
     drop(vault);
     let _ = std::fs::remove_dir_all(&root);
+}
+
+fn assert_minted_signature_audit_policy(enabled: bool) {
+    let root = tmp_root(if enabled {
+        "mint-audit-on"
+    } else {
+        "mint-audit-off"
+    });
+    let data_dir = root.join("vault");
+    let key_path = root.join("master.key");
+    write_operator_master_key(&key_path, &"11".repeat(32));
+    let mut command = cli();
+    command.args([
+        "--data-dir",
+        data_dir.to_str().unwrap(),
+        "--key-path",
+        key_path.to_str().unwrap(),
+        "mint-signing-key",
+        "--id",
+        "signing:publish:1",
+    ]);
+    if enabled {
+        command.arg("--audit-each-signature");
+    }
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "mint: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let descriptor = StorageDescriptor {
+        module_id: "cortexkit-credentials".into(),
+        storage_namespace: "default".into(),
+        isolation: Isolation::Module,
+        backend: StorageBackend::Sqlite {
+            path: data_dir.join("store.db").to_string_lossy().into_owned(),
+        },
+    };
+    let sqlite = open_sqlite(&descriptor).unwrap();
+    let vault = EncryptedStore::open(sqlite, MasterKey::from_bytes([0x11; 32])).unwrap();
+    let record = vault.get("signing:publish:1").unwrap();
+    assert_eq!(
+        record.audit_each_signature, enabled,
+        "mint must seal the chosen audit policy"
+    );
+    assert_eq!(record.kind, CredentialKind::SigningKey);
+    assert_eq!(
+        vault
+            .read_audit(None)
+            .unwrap()
+            .iter()
+            .filter(|row| row.op == "sign")
+            .count(),
+        0,
+        "mint is not a signature"
+    );
+    drop(vault);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn mint_signing_key_with_audit_each_signature_seals_the_opt_in() {
+    assert_minted_signature_audit_policy(true);
+}
+
+#[test]
+fn mint_signing_key_without_audit_each_signature_leaves_auditing_disabled() {
+    assert_minted_signature_audit_policy(false);
+}
+
+#[test]
+fn mint_signing_key_advertises_audit_each_signature_in_help_and_flags_table() {
+    assert!(accepted_help_flags("mint-signing-key").contains(&"--audit-each-signature".to_string()));
+    assert!(!accepted_help_flags("mint-kem-key").contains(&"--audit-each-signature".to_string()));
+    for args in [["help", "mint-signing-key"], ["mint-signing-key", "--help"]] {
+        let output = cli().args(args).output().unwrap();
+        assert!(output.status.success());
+        let page = String::from_utf8(output.stdout).unwrap();
+        let (synopsis, rest) = page.split_once("\n\n").expect("help synopsis");
+        let flags = rest.split_once("\n\n").expect("flag table").0;
+        assert!(synopsis.contains("[--audit-each-signature]"));
+        assert!(flags
+            .lines()
+            .any(|line| line.starts_with("  --audit-each-signature  ")));
+        assert!(page.contains("off by default"));
+    }
 }
 
 #[test]

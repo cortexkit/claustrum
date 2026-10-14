@@ -914,6 +914,8 @@ pub struct ReadSurface {
     deposit_cookie_diagnostic_fault: std::sync::atomic::AtomicBool,
     #[cfg(test)]
     deposit_cookie_first_use_fault: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    sign_audit_write_fault: std::sync::atomic::AtomicBool,
 }
 
 /// If the cached health snapshot has not been refreshed within this window, the probe
@@ -1147,6 +1149,11 @@ enum KeyAddress<'a> {
     Scoped(&'a str),
 }
 
+struct ResolvedKeyAddress {
+    credential_id: String,
+    principal: Option<(&'static str, String)>,
+}
+
 impl<'a> From<SignAuthorization<'a>> for KeyAddress<'a> {
     fn from(value: SignAuthorization<'a>) -> Self {
         match value {
@@ -1183,6 +1190,8 @@ impl ReadSurface {
             deposit_cookie_diagnostic_fault: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             deposit_cookie_first_use_fault: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            sign_audit_write_fault: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -1241,7 +1250,7 @@ impl ReadSurface {
         params: &SignParams,
     ) -> Result<SignResult, ReadError> {
         let authorization = params.authorization().ok_or(ReadError::NotFound)?;
-        let credential_id = self
+        let resolved = self
             .resolve_key_address(
                 connection_id,
                 principal,
@@ -1250,6 +1259,8 @@ impl ReadSurface {
                 GrantOperation::Sign,
             )
             .await?;
+
+        let credential_id = resolved.credential_id;
 
         let record = match self.engine.store().get(&credential_id) {
             Ok(r) => r,
@@ -1270,19 +1281,57 @@ impl ReadSurface {
             .decode(params.payload_b64.as_bytes())
             .map_err(|_| ReadError::MalformedEncoding)?;
         let pem = std::str::from_utf8(record.payload.expose()).map_err(|_| ReadError::Corrupt)?;
-        match credentials_core::signing::sign_ed25519(pem, &payload) {
-            Ok(sig) => Ok(SignResult {
-                signature_b64: sig.signature_b64,
-                key_id: sig.key_id,
-            }),
+        let prepared = match credentials_core::signing::prepare_ed25519(pem, &payload) {
+            Ok(prepared) => prepared,
             Err(credentials_core::signing::SignError::TooLarge { .. }) => {
-                Err(ReadError::SignPayloadTooLarge)
+                return Err(ReadError::SignPayloadTooLarge);
             }
             // An unusable key is OUR bytes failing, not the caller's request: the
             // record holds something that is not a signing key despite being typed as
             // one, which is the same class as a record that will not decrypt.
-            Err(credentials_core::signing::SignError::UnusableKey(_)) => Err(ReadError::Corrupt),
+            Err(credentials_core::signing::SignError::UnusableKey(_)) => {
+                return Err(ReadError::Corrupt)
+            }
+        };
+        if record.audit_each_signature {
+            // Keep the identity that authorized a scoped request, not its ambient
+            // transport principal. Anonymous handle holders retain channel attribution.
+            let actor = resolved
+                .principal
+                .or_else(|| self.scoped_principal(principal, None))
+                .map(|(kind, id)| format!("{kind}:{id}"))
+                .unwrap_or_else(|| format!("conn-{}", connection_id as u16));
+            let write_audit = || {
+                #[cfg(test)]
+                if self
+                    .sign_audit_write_fault
+                    .swap(false, std::sync::atomic::Ordering::SeqCst)
+                {
+                    return Err(StoreOpError::Store("test sign audit write failure".into()));
+                }
+                self.engine.store().append_signature_audit(
+                    &credential_id,
+                    record.record_version,
+                    &credentials_core::store::payload_hash(&payload),
+                    &actor,
+                )
+            };
+            // A signature without its required history defeats compromise forensics.
+            // All fallible key/payload validation happened before this write. The
+            // store checks its writer fence and the key version in the append transaction.
+            write_audit().map_err(|_| ReadError::StoreError)?;
         }
+        let sig = prepared.sign();
+        Ok(SignResult {
+            signature_b64: sig.signature_b64,
+            key_id: sig.key_id,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn force_sign_audit_write_fault_for_test(&self) {
+        self.sign_audit_write_fault
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Open one base-mode HPKE message. Count only refused scoped resolutions, so a
@@ -1344,7 +1393,7 @@ impl ReadSurface {
             )
             .await
         {
-            Ok(id) => id,
+            Ok(resolved) => resolved.credential_id,
             Err(ReadError::NotFound) => {
                 let entry = counters.entry(connection_id).or_insert((Instant::now(), 0));
                 if entry.0.elapsed() >= OPEN_REFUSAL_WINDOW {
@@ -1401,7 +1450,7 @@ impl ReadSurface {
         params: &PublicKeyParams,
     ) -> Result<PublicKeyResult, ReadError> {
         let authorization = params.authorization().ok_or(ReadError::NotFound)?;
-        let credential_id = self
+        let resolved = self
             .resolve_key_address(
                 connection_id,
                 principal,
@@ -1410,6 +1459,8 @@ impl ReadSurface {
                 GrantOperation::Read,
             )
             .await?;
+
+        let credential_id = resolved.credential_id;
 
         let record = match self.engine.store().get(&credential_id) {
             Ok(record) => record,
@@ -1767,19 +1818,30 @@ impl ReadSurface {
         enrollment_token: Option<&str>,
         address: KeyAddress<'_>,
         operation: GrantOperation,
-    ) -> Result<String, ReadError> {
+    ) -> Result<ResolvedKeyAddress, ReadError> {
         match address {
             KeyAddress::Handle(handle) => {
                 self.check_limiter(connection_id, handle).await;
                 match self.engine.store().resolve_handle(handle) {
-                    Ok(id) => Ok(id),
+                    Ok(id) => Ok(ResolvedKeyAddress {
+                        credential_id: id,
+                        principal: None,
+                    }),
                     Err(StoreOpError::NotFound) => Err(ReadError::NotFound),
                     Err(e) => Err(map_store_error(&e)),
                 }
             }
             KeyAddress::Scoped(credential_id) => {
-                self.authorize_scoped_as(principal, enrollment_token, credential_id, operation)?;
-                Ok(credential_id.to_string())
+                let resolved_principal = self.authorize_scoped_as(
+                    principal,
+                    enrollment_token,
+                    credential_id,
+                    operation,
+                )?;
+                Ok(ResolvedKeyAddress {
+                    credential_id: credential_id.to_string(),
+                    principal: Some(resolved_principal),
+                })
             }
         }
     }
@@ -1841,7 +1903,7 @@ impl ReadSurface {
         enrollment_token: Option<&str>,
         credential_id: &str,
         operation: GrantOperation,
-    ) -> Result<(), ReadError> {
+    ) -> Result<(&'static str, String), ReadError> {
         let Some((kind, id)) = self.scoped_principal(principal, enrollment_token) else {
             self.record_scoped_refusal(
                 principal,
@@ -1909,7 +1971,7 @@ impl ReadSurface {
                 operation,
             );
         }
-        Ok(())
+        Ok((kind, id))
     }
 
     /// Enumerate every row covered by the caller's own grants from one store snapshot.

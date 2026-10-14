@@ -5321,6 +5321,45 @@ impl EncryptedStore {
             .map_err(StoreOpError::from)
     }
 
+    /// Record a signature only while the decoded key's generation is still current.
+    /// Checking the version in the append transaction prevents a concurrent key
+    /// replacement from placing an old-key signature after the new key's audit row.
+    pub fn append_signature_audit(
+        &self,
+        credential_id: &str,
+        record_version: u64,
+        signed_payload_hash: &[u8; 32],
+        actor: &str,
+    ) -> Result<AuditEntry, StoreOpError> {
+        let audit_key = self.audit_key.clone();
+        self.fenced_write(|tx| {
+            let current: Option<i64> = tx
+                .query_row(
+                    "SELECT record_version FROM credentials WHERE credential_id = ?1",
+                    [credential_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if current != Some(record_version as i64) {
+                return Ok(None);
+            }
+            append_audit_tx(
+                tx,
+                &audit_key,
+                &AuditRecord {
+                    op: AuditOp::Sign,
+                    credential_id: Some(credential_id.to_string()),
+                    payload_hash: Some(hex32(signed_payload_hash)),
+                    actor: actor.to_string(),
+                    alarm: None,
+                },
+            )
+            .map(Some)
+        })
+        .map_err(StoreOpError::from)?
+        .ok_or(StoreOpError::CasMismatch)
+    }
+
     /// Read the current audit-chain tip without scanning the chain.
     ///
     /// The sequence and entry MAC are returned together because the MAC binds the row at

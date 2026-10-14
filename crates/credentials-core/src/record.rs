@@ -242,6 +242,14 @@ pub struct VaultRecord {
     /// Additive JSON metadata: older decoders ignore this field under schema 1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detected_plan: Option<crate::plan_detection::DetectedPlan>,
+    /// Opt-in signature history for signing keys. Sealed with the key so policy
+    /// cannot be changed independently of the credential; old records default off.
+    #[serde(default, skip_serializing_if = "signature_audit_disabled")]
+    pub audit_each_signature: bool,
+}
+
+fn signature_audit_disabled(enabled: &bool) -> bool {
+    !enabled
 }
 
 /// Redacted `Debug`, because the derived one printed the secret this struct exists to
@@ -282,6 +290,7 @@ impl std::fmt::Debug for VaultRecord {
             // Non-secret by design: email and org name are returned to consumers as
             // display metadata on every `get`.
             .field("identity", &self.identity)
+            .field("audit_each_signature", &self.audit_each_signature)
             .finish()
     }
 }
@@ -311,6 +320,7 @@ impl VaultRecord {
             payload: payload.into(),
             identity: RecordIdentity::default(),
             detected_plan,
+            audit_each_signature: false,
         }
     }
 
@@ -362,6 +372,7 @@ impl VaultRecord {
             payload: payload.into(),
             identity: RecordIdentity::default(),
             detected_plan: None,
+            audit_each_signature: false,
         }
     }
 
@@ -706,5 +717,68 @@ mod plan_rollback_tests {
         let roundtrip = VaultRecord::decode(&serde_json::to_vec(&legacy).unwrap()).unwrap();
         assert_eq!(roundtrip.detected_plan, None);
         assert_eq!(roundtrip.payload, record.payload);
+    }
+}
+
+#[cfg(test)]
+mod signature_audit_rollback_tests {
+    use super::*;
+
+    // The schema-1 decoder before signature auditing, including plan metadata.
+    // Unknown JSON fields must remain readable during a binary rollback.
+    #[derive(Deserialize, Serialize)]
+    struct LegacyRecord {
+        schema_version: u32,
+        kind: CredentialKind,
+        source: String,
+        record_version: u64,
+        expires_at_ms: Option<i64>,
+        refresh_adapter: Option<String>,
+        oauth: Option<OAuthCredential>,
+        payload: SecretBytes,
+        #[serde(default, skip_serializing_if = "RecordIdentity::is_empty")]
+        identity: RecordIdentity,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detected_plan: Option<crate::plan_detection::DetectedPlan>,
+    }
+
+    #[test]
+    fn signature_audit_flag_is_additive_and_readable_by_the_previous_decoder() {
+        let mut record = VaultRecord::new_static(
+            CredentialKind::SigningKey,
+            "operator",
+            b"key bytes".to_vec(),
+            None,
+        );
+        let old_bytes = record.encode().unwrap();
+        assert!(!serde_json::from_slice::<serde_json::Value>(&old_bytes)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .contains_key("audit_each_signature"));
+        assert!(
+            !VaultRecord::decode(&old_bytes)
+                .unwrap()
+                .audit_each_signature
+        );
+
+        record.audit_each_signature = true;
+        let bytes = record.encode().unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["audit_each_signature"],
+            true
+        );
+        assert_eq!(VaultRecord::decode(&bytes).unwrap(), record);
+        let legacy: LegacyRecord =
+            serde_json::from_slice(&bytes).expect("rollback decoder must read the flag");
+        assert_eq!(legacy.schema_version, 1);
+        assert_eq!(legacy.kind, CredentialKind::SigningKey);
+        assert_eq!(legacy.payload, record.payload);
+        let rewritten = VaultRecord::decode(&serde_json::to_vec(&legacy).unwrap()).unwrap();
+        assert!(
+            !rewritten.audit_each_signature,
+            "older rewrites drop the policy"
+        );
+        assert_eq!(rewritten.payload, record.payload);
     }
 }

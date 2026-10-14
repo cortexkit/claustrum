@@ -225,6 +225,51 @@ mod tests {
     use ring::rand::SystemRandom;
     use ring::signature::{UnparsedPublicKey, ED25519};
 
+    mod catalog_vectors {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/ck_catalog_v1/helpers.rs"
+        ));
+    }
+
+    #[test]
+    fn catalog_record_vector_bytes_match_the_pinned_sha256() {
+        use sha2::{Digest, Sha256};
+        assert_eq!(
+            format!("{:x}", Sha256::digest(catalog_vectors::RECORD_JSON)),
+            "279ba8405e45141ccf2edaaee2c615b0405061dc0e564b7d11f1d6d9e82b2c2f",
+            "the producer's vendored bytes must match VENDORED.md"
+        );
+    }
+
+    #[test]
+    fn catalog_record_vectors_are_signed_byte_for_byte_without_a_vault_prefix() {
+        let vectors = catalog_vectors::fixture();
+        assert_eq!(vectors["schema"], "ck-catalog-v1/record");
+        let pem = catalog_vectors::trusted_key_pem(&vectors);
+        let public = public_key_ed25519(&pem).unwrap();
+        assert_eq!(
+            public.public_key_hex,
+            vectors["keys"]["trusted"]["public_key_hex"]
+        );
+        let valid = vectors["valid"].as_array().unwrap();
+        assert_eq!(valid.len(), 2, "exercise the complete published valid set");
+        for vector in valid {
+            let payload = catalog_vectors::bytes(vector["signing_input_hex"].as_str().unwrap());
+            let signature = sign_ed25519(&pem, &payload).unwrap();
+            let signature_bytes = base64::engine::general_purpose::STANDARD
+                .decode(signature.signature_b64)
+                .unwrap();
+            assert_eq!(
+                signature_bytes,
+                catalog_vectors::bytes(vector["signature"].as_str().unwrap()),
+                "published signature for {}",
+                vector["name"]
+            );
+            assert_eq!(signature.key_id, public.key_id);
+        }
+    }
+
     #[test]
     fn existing_ed25519_key_id_is_byte_identical() {
         let public = hex_bytes("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a");

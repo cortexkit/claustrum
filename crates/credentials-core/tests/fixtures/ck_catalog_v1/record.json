@@ -1,0 +1,455 @@
+{
+  "schema": "ck-catalog-v1/record",
+  "signing": {
+    "domain_tag": "ck-record/v1",
+    "signing_input": "ASCII domain tag, one 0x00 byte, then the UTF-8 JCS bytes of the parsed record",
+    "algorithm": "Ed25519 (RFC 8032, pure, deterministic)",
+    "encodings": "digests, public keys and signatures are lowercase hex; key fingerprint is SHA-256 of the 32 raw public key bytes",
+    "verification_order": [
+      "record_invalid (strict parse, including duplicate keys and fraction, exponent or -0 number tokens; exact field set; field formats)",
+      "signature_invalid",
+      "key_unknown",
+      "record_mismatch (manifest_sha256, archive_sha256, archive_bytes)",
+      "archive_invalid (the strict ustar reader of archive.json; field names the rule)",
+      "record_mismatch (ck.json member, name, version, flow_version, flow.json id and version)",
+      "files_mismatch"
+    ]
+  },
+  "keys": {
+    "trusted": {
+      "WARNING": "TEST-ONLY KEY. The seed is published. Never trust anything signed by it outside these vectors.",
+      "label": "TEST-ONLY publisher key 1",
+      "seed_derivation": "SHA-256 of the UTF-8 bytes of seed_text",
+      "seed_text": "ck-catalog-v1 TEST-ONLY key 1. Published on purpose. Never trust anything it signs.",
+      "seed_hex": "8622b406211e97ee01e56ff3ba32e444b4b4de74ea443f4d8051846fe413add1",
+      "public_key_hex": "0e978e688821ea26f678b53d3185fa919db857e369969074f172688027b0c6f4",
+      "fingerprint": "e59aba440dbdcfead40e3951057f266b2319ba945125a5d551c369b8daa2423d"
+    },
+    "untrusted": {
+      "WARNING": "TEST-ONLY KEY. The seed is published. Never trust anything signed by it outside these vectors.",
+      "label": "TEST-ONLY publisher key 2",
+      "seed_derivation": "SHA-256 of the UTF-8 bytes of seed_text",
+      "seed_text": "ck-catalog-v1 TEST-ONLY key 2. Published on purpose. Never trust anything it signs.",
+      "seed_hex": "cfc41c52fa2f3d55cc87491b151ee1665516174d8ec2d234789ad488c3a07393",
+      "public_key_hex": "9dfb817489437ec5ed58311f6ffc4bc4f2cd3d5c47721142209797f7c9a235d9",
+      "fingerprint": "bcad7ac96bb056fdbbc8a150e20f9a56aeb1eae1ae3eb6be1322340ed4930d49"
+    }
+  },
+  "jcs": [
+    {
+      "name": "keys_sort_by_utf16_code_units",
+      "input_json": "{\"\\u20ac\":\"euro\",\"\\r\":\"cr\",\"\\ufb33\":\"hebrew\",\"1\":\"one\",\"\\ud83d\\ude00\":\"smiley\",\"\\u0080\":\"c1\",\"\\u00f6\":\"o-umlaut\"}",
+      "canonical": "{\"\\r\":\"cr\",\"1\":\"one\",\"\":\"c1\",\"ö\":\"o-umlaut\",\"€\":\"euro\",\"😀\":\"smiley\",\"דּ\":\"hebrew\"}",
+      "canonical_utf8_hex": "7b225c72223a226372222c2231223a226f6e65222c22c280223a226331222c22c3b6223a226f2d756d6c617574222c22e282ac223a226575726f222c22f09f9880223a22736d696c6579222c22efacb3223a22686562726577227d",
+      "sha256": "fb7ea2f12208e1f94d50f97fb3a94bc644970d94e65cd7a950ae28f808b3548c"
+    },
+    {
+      "name": "string_escaping",
+      "input_json": "{\"s\":\"tab\\t nl\\n quote\\\" backslash\\\\ ctl\\u001f del\\u007f slash\\/ e\\u00e9\"}",
+      "canonical": "{\"s\":\"tab\\t nl\\n quote\\\" backslash\\\\ ctl\\u001f del slash/ eé\"}",
+      "canonical_utf8_hex": "7b2273223a227461625c74206e6c5c6e2071756f74655c22206261636b736c6173685c5c2063746c5c75303031662064656c7f20736c6173682f2065c3a9227d",
+      "sha256": "5ff0d3e816804699245dfbbc28127c80ce45acf7c5af0aac3a1d9733e20b6ae9"
+    },
+    {
+      "name": "nesting_whitespace_and_literals",
+      "input_json": "{ \"b\": [ ], \"a\": { \"z\": null, \"y\": true, \"x\": false }, \"c\": {} }",
+      "canonical": "{\"a\":{\"x\":false,\"y\":true,\"z\":null},\"b\":[],\"c\":{}}",
+      "canonical_utf8_hex": "7b2261223a7b2278223a66616c73652c2279223a747275652c227a223a6e756c6c7d2c2262223a5b5d2c2263223a7b7d7d",
+      "sha256": "cda066361908eca050de7cf41bb238c77fde121bdf22cb736c67e0b225318df8"
+    },
+    {
+      "name": "arrays_keep_order",
+      "input_json": "[3, 1, 2, {\"b\": 1, \"a\": 2}]",
+      "canonical": "[3,1,2,{\"a\":2,\"b\":1}]",
+      "canonical_utf8_hex": "5b332c312c322c7b2261223a322c2262223a317d5d",
+      "sha256": "5e21d54df1a71703f6f25216ff0c5dbd78bca73255f936a50c0128cb5e801c5b"
+    },
+    {
+      "name": "safe_integer_bounds",
+      "input_json": "{\"max\":9007199254740991,\"min\":-9007199254740991,\"zero\":0}",
+      "canonical": "{\"max\":9007199254740991,\"min\":-9007199254740991,\"zero\":0}",
+      "canonical_utf8_hex": "7b226d6178223a393030373139393235343734303939312c226d696e223a2d393030373139393235343734303939312c227a65726f223a307d",
+      "sha256": "b7b2401ddca2165824e98c61890c0aaec470258d3119dd265d02be9438bf47e6"
+    }
+  ],
+  "packages": {
+    "skill": {
+      "members": [
+        {
+          "path": "ck.json",
+          "content": "{\n  \"schema\": \"ck-package/v1\",\n  \"name\": \"@example/hello-skill\",\n  \"version\": \"1.0.0\",\n  \"kind\": \"skill\",\n  \"summary\": \"Test-vector skill that says hello\",\n  \"license\": \"MIT\",\n  \"source\": \"https://example.invalid/hello-skill\",\n  \"requires\": {\n    \"capabilities\": [\n      \"cap/example.read@1\"\n    ],\n    \"packages\": {}\n  },\n  \"files\": [\n    {\n      \"path\": \"SKILL.md\",\n      \"sha256\": \"315c83a25cf7f8dbb521830e9b759336c50a92e1f3e7af075f5086eb58099273\",\n      \"bytes\": 92\n    },\n    {\n      \"path\": \"scripts/hello.sh\",\n      \"sha256\": \"f590776b449af73e55cb368f45ce28400a19d0c68cdb34485fdfc0602b6c2437\",\n      \"bytes\": 23\n    }\n  ],\n  \"body\": {\n    \"entry\": \"SKILL.md\",\n    \"audience\": \"user\",\n    \"scripts\": [\n      {\n        \"path\": \"scripts/hello.sh\",\n        \"runs_with\": \"bash\"\n      }\n    ]\n  }\n}\n",
+          "sha256": "0e9589220c8da2a19847f8762998ff13edab94b268fc4ee75157b8337ebd91be",
+          "bytes": 800
+        },
+        {
+          "path": "SKILL.md",
+          "content": "# Hello skill\n\nTest-vector skill. Symptom: none. Checks: run `scripts/hello.sh`. Fix: none.\n",
+          "sha256": "315c83a25cf7f8dbb521830e9b759336c50a92e1f3e7af075f5086eb58099273",
+          "bytes": 92
+        },
+        {
+          "path": "scripts/hello.sh",
+          "content": "#!/bin/bash\necho hello\n",
+          "sha256": "f590776b449af73e55cb368f45ce28400a19d0c68cdb34485fdfc0602b6c2437",
+          "bytes": 23
+        }
+      ],
+      "manifest_text": "{\n  \"schema\": \"ck-package/v1\",\n  \"name\": \"@example/hello-skill\",\n  \"version\": \"1.0.0\",\n  \"kind\": \"skill\",\n  \"summary\": \"Test-vector skill that says hello\",\n  \"license\": \"MIT\",\n  \"source\": \"https://example.invalid/hello-skill\",\n  \"requires\": {\n    \"capabilities\": [\n      \"cap/example.read@1\"\n    ],\n    \"packages\": {}\n  },\n  \"files\": [\n    {\n      \"path\": \"SKILL.md\",\n      \"sha256\": \"315c83a25cf7f8dbb521830e9b759336c50a92e1f3e7af075f5086eb58099273\",\n      \"bytes\": 92\n    },\n    {\n      \"path\": \"scripts/hello.sh\",\n      \"sha256\": \"f590776b449af73e55cb368f45ce28400a19d0c68cdb34485fdfc0602b6c2437\",\n      \"bytes\": 23\n    }\n  ],\n  \"body\": {\n    \"entry\": \"SKILL.md\",\n    \"audience\": \"user\",\n    \"scripts\": [\n      {\n        \"path\": \"scripts/hello.sh\",\n        \"runs_with\": \"bash\"\n      }\n    ]\n  }\n}\n",
+      "manifest_sha256": "0e9589220c8da2a19847f8762998ff13edab94b268fc4ee75157b8337ebd91be",
+      "archive_base64": "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MDAwMDAwMAAwMTEwNzIAIDAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAdXN0YXIAMDAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIyEvYmluL2Jhc2gKZWNobyBoZWxsbwoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "archive_sha256": "e238dc41dff661632518c120752f3e4d58168acb393fa0ca8f6881e718e0e398",
+      "archive_bytes": 4608
+    },
+    "flow": {
+      "members": [
+        {
+          "path": "ck.json",
+          "content": "{\n  \"schema\": \"ck-package/v1\",\n  \"name\": \"@example/hello-flow\",\n  \"version\": \"1.0.0\",\n  \"kind\": \"flow\",\n  \"summary\": \"Test-vector flow; only its id and version are exercised\",\n  \"license\": \"MIT\",\n  \"source\": \"https://example.invalid/hello-flow\",\n  \"requires\": {\n    \"capabilities\": [\n      \"cap/example.read@1\"\n    ],\n    \"packages\": {}\n  },\n  \"files\": [\n    {\n      \"path\": \"flow.json\",\n      \"sha256\": \"c0f992df64a0ef9ddbb304220f0d226dcff5aef7c1a6e15a3c61c033c7f02cca\",\n      \"bytes\": 98\n    },\n    {\n      \"path\": \"flow.js\",\n      \"sha256\": \"0f06d3f096af2be7f577b49479db02c912120cc75a3ab728843eec276f6cbc60\",\n      \"bytes\": 27\n    }\n  ],\n  \"body\": {\n    \"manifest\": \"flow.json\",\n    \"script\": \"flow.js\"\n  }\n}\n",
+          "sha256": "ec44fe2e3a506ed0d632a67e1ec6c6a243eb2a180f7d6e321815ca7b4a35042d",
+          "bytes": 712
+        },
+        {
+          "path": "flow.json",
+          "content": "{\n  \"format\": 1,\n  \"id\": \"example--hello-flow\",\n  \"version\": 3,\n  \"purpose\": \"Test-vector flow\"\n}\n",
+          "sha256": "c0f992df64a0ef9ddbb304220f0d226dcff5aef7c1a6e15a3c61c033c7f02cca",
+          "bytes": 98
+        },
+        {
+          "path": "flow.js",
+          "content": "// test-vector flow script\n",
+          "sha256": "0f06d3f096af2be7f577b49479db02c912120cc75a3ab728843eec276f6cbc60",
+          "bytes": 27
+        }
+      ],
+      "manifest_text": "{\n  \"schema\": \"ck-package/v1\",\n  \"name\": \"@example/hello-flow\",\n  \"version\": \"1.0.0\",\n  \"kind\": \"flow\",\n  \"summary\": \"Test-vector flow; only its id and version are exercised\",\n  \"license\": \"MIT\",\n  \"source\": \"https://example.invalid/hello-flow\",\n  \"requires\": {\n    \"capabilities\": [\n      \"cap/example.read@1\"\n    ],\n    \"packages\": {}\n  },\n  \"files\": [\n    {\n      \"path\": \"flow.json\",\n      \"sha256\": \"c0f992df64a0ef9ddbb304220f0d226dcff5aef7c1a6e15a3c61c033c7f02cca\",\n      \"bytes\": 98\n    },\n    {\n      \"path\": \"flow.js\",\n      \"sha256\": \"0f06d3f096af2be7f577b49479db02c912120cc75a3ab728843eec276f6cbc60\",\n      \"bytes\": 27\n    }\n  ],\n  \"body\": {\n    \"manifest\": \"flow.json\",\n    \"script\": \"flow.js\"\n  }\n}\n",
+      "manifest_sha256": "ec44fe2e3a506ed0d632a67e1ec6c6a243eb2a180f7d6e321815ca7b4a35042d",
+      "archive_base64": "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MDAwMDAwMAAwMDcyNDYAIDAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAdXN0YXIAMDAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAALy8gdGVzdC12ZWN0b3IgZmxvdyBzY3JpcHQKAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "archive_sha256": "89d6bee3b0bdffaf7646d000e4d98f60181df12e4894159b7cdba5e3ed6a4639",
+      "archive_bytes": 4608
+    }
+  },
+  "valid": [
+    {
+      "name": "skill_record",
+      "package": "skill",
+      "record": {
+        "schema": "ck-record/v1",
+        "name": "@example/hello-skill",
+        "version": "1.0.0",
+        "manifest_sha256": "0e9589220c8da2a19847f8762998ff13edab94b268fc4ee75157b8337ebd91be",
+        "archive_sha256": "e238dc41dff661632518c120752f3e4d58168acb393fa0ca8f6881e718e0e398",
+        "archive_bytes": 4608,
+        "public_key": "0e978e688821ea26f678b53d3185fa919db857e369969074f172688027b0c6f4",
+        "log_head": null
+      },
+      "canonical": "{\"archive_bytes\":4608,\"archive_sha256\":\"e238dc41dff661632518c120752f3e4d58168acb393fa0ca8f6881e718e0e398\",\"log_head\":null,\"manifest_sha256\":\"0e9589220c8da2a19847f8762998ff13edab94b268fc4ee75157b8337ebd91be\",\"name\":\"@example/hello-skill\",\"public_key\":\"0e978e688821ea26f678b53d3185fa919db857e369969074f172688027b0c6f4\",\"schema\":\"ck-record/v1\",\"version\":\"1.0.0\"}",
+      "canonical_sha256": "b16563420e261b4abaa8908a94833b70120ac861595bca30a88cf787ed4309ce",
+      "signing_input_hex": "636b2d7265636f72642f7631007b22617263686976655f6279746573223a343630382c22617263686976655f736861323536223a2265323338646334316466663636313633323531386331323037353266336534643538313638616362333933666130636138663638383165373138653065333938222c226c6f675f68656164223a6e756c6c2c226d616e69666573745f736861323536223a2230653935383932323063386461326131393834376638373632393938666631336564616239346232363866633465653735313537623833333765626439316265222c226e616d65223a22406578616d706c652f68656c6c6f2d736b696c6c222c227075626c69635f6b6579223a2230653937386536383838323165613236663637386235336433313835666139313964623835376533363939363930373466313732363838303237623063366634222c22736368656d61223a22636b2d7265636f72642f7631222c2276657273696f6e223a22312e302e30227d",
+      "signature": "5d30de600a1c0b317c4235eb6c82fa40bdd168beaad0f1c0d94052e5453778d4bd3514c04f6fe52f69e3fe15927ead2b620b189d0750c4f69cf8fd16f9385904",
+      "key_fingerprint": "e59aba440dbdcfead40e3951057f266b2319ba945125a5d551c369b8daa2423d"
+    },
+    {
+      "name": "flow_record",
+      "package": "flow",
+      "record": {
+        "schema": "ck-record/v1",
+        "name": "@example/hello-flow",
+        "version": "1.0.0",
+        "manifest_sha256": "ec44fe2e3a506ed0d632a67e1ec6c6a243eb2a180f7d6e321815ca7b4a35042d",
+        "archive_sha256": "89d6bee3b0bdffaf7646d000e4d98f60181df12e4894159b7cdba5e3ed6a4639",
+        "archive_bytes": 4608,
+        "public_key": "0e978e688821ea26f678b53d3185fa919db857e369969074f172688027b0c6f4",
+        "log_head": null,
+        "flow_version": 3
+      },
+      "canonical": "{\"archive_bytes\":4608,\"archive_sha256\":\"89d6bee3b0bdffaf7646d000e4d98f60181df12e4894159b7cdba5e3ed6a4639\",\"flow_version\":3,\"log_head\":null,\"manifest_sha256\":\"ec44fe2e3a506ed0d632a67e1ec6c6a243eb2a180f7d6e321815ca7b4a35042d\",\"name\":\"@example/hello-flow\",\"public_key\":\"0e978e688821ea26f678b53d3185fa919db857e369969074f172688027b0c6f4\",\"schema\":\"ck-record/v1\",\"version\":\"1.0.0\"}",
+      "canonical_sha256": "10511b1ec7e5ff7881160b94cf9aec220b53b0b14437e83004ff0fd1ce0853ea",
+      "signing_input_hex": "636b2d7265636f72642f7631007b22617263686976655f6279746573223a343630382c22617263686976655f736861323536223a2238396436626565336230626466666166373634366430303065346439386636303138316466313265343839343135396237636462613565336564366134363339222c22666c6f775f76657273696f6e223a332c226c6f675f68656164223a6e756c6c2c226d616e69666573745f736861323536223a2265633434666532653361353036656430643633326136376531656336633661323433656232613138306637643665333231383135636137623461333530343264222c226e616d65223a22406578616d706c652f68656c6c6f2d666c6f77222c227075626c69635f6b6579223a2230653937386536383838323165613236663637386235336433313835666139313964623835376533363939363930373466313732363838303237623063366634222c22736368656d61223a22636b2d7265636f72642f7631222c2276657273696f6e223a22312e302e30227d",
+      "signature": "5c9c8b8dde3c2c71f3ef1c09db0603cf2ea5a5f30e0c59f2c98ff724b53bff92bd54397d6b102f694616c73b811059f9cd23fe95d7ab890dfdb200d21b80c20a",
+      "key_fingerprint": "e59aba440dbdcfead40e3951057f266b2319ba945125a5d551c369b8daa2423d"
+    }
+  ],
+  "cases": [
+    {
+      "name": "served_with_other_key_order_and_whitespace",
+      "note": "verifiers canonicalize the parsed record; the served text's layout does not matter",
+      "package": "skill",
+      "served_text": "{\n  \"log_head\": null,\n  \"public_key\": \"0e978e688821ea26f678b53d3185fa919db857e369969074f172688027b0c6f4\",\n  \"archive_bytes\": 4608,\n  \"archive_sha256\": \"e238dc41dff661632518c120752f3e4d58168acb393fa0ca8f6881e718e0e398\",\n  \"manifest_sha256\": \"0e9589220c8da2a19847f8762998ff13edab94b268fc4ee75157b8337ebd91be\",\n  \"version\": \"1.0.0\",\n  \"name\": \"@example/hello-skill\",\n  \"schema\": \"ck-record/v1\"\n}",
+      "signature": "5d30de600a1c0b317c4235eb6c82fa40bdd168beaad0f1c0d94052e5453778d4bd3514c04f6fe52f69e3fe15927ead2b620b189d0750c4f69cf8fd16f9385904",
+      "expect": {
+        "ok": true
+      }
+    },
+    {
+      "name": "bad_signature_bit_flip",
+      "note": "first signature byte XOR 0x01",
+      "package": "skill",
+      "served_text": "{\"archive_bytes\":4608,\"archive_sha256\":\"e238dc41dff661632518c120752f3e4d58168acb393fa0ca8f6881e718e0e398\",\"log_head\":null,\"manifest_sha256\":\"0e9589220c8da2a19847f8762998ff13edab94b268fc4ee75157b8337ebd91be\",\"name\":\"@example/hello-skill\",\"public_key\":\"0e978e688821ea26f678b53d3185fa919db857e369969074f172688027b0c6f4\",\"schema\":\"ck-record/v1\",\"version\":\"1.0.0\"}",
+      "signature": "5c30de600a1c0b317c4235eb6c82fa40bdd168beaad0f1c0d94052e5453778d4bd3514c04f6fe52f69e3fe15927ead2b620b189d0750c4f69cf8fd16f9385904",
+      "expect": {
+        "ok": false,
+        "code": "signature_invalid"
+      }
+    },
+    {
+      "name": "wrong_domain_status_tag",
+      "note": "signed over ck-status/v1 0x00 JCS instead of ck-record/v1 0x00 JCS",
+      "package": "skill",
+      "served_text": "{\"archive_bytes\":4608,\"archive_sha256\":\"e238dc41dff661632518c120752f3e4d58168acb393fa0ca8f6881e718e0e398\",\"log_head\":null,\"manifest_sha256\":\"0e9589220c8da2a19847f8762998ff13edab94b268fc4ee75157b8337ebd91be\",\"name\":\"@example/hello-skill\",\"public_key\":\"0e978e688821ea26f678b53d3185fa919db857e369969074f172688027b0c6f4\",\"schema\":\"ck-record/v1\",\"version\":\"1.0.0\"}",
+      "signature": "a71e1a6363e29bcf046b6e345701c06d1bc95a30ff21b8c7df2e17e0d903e9669b5d80092cb40ca4b266f107fcbd73e1ae9fb4d49fe123fc13f99c07ddc84c06",
+      "expect": {
+        "ok": false,
+        "code": "signature_invalid"
+      }
+    },
+    {
+      "name": "wrong_domain_no_tag",
+      "note": "signed over the bare JCS bytes with no domain tag",
+      "package": "skill",
+      "served_text": "{\"archive_bytes\":4608,\"archive_sha256\":\"e238dc41dff661632518c120752f3e4d58168acb393fa0ca8f6881e718e0e398\",\"log_head\":null,\"manifest_sha256\":\"0e9589220c8da2a19847f8762998ff13edab94b268fc4ee75157b8337ebd91be\",\"name\":\"@example/hello-skill\",\"public_key\":\"0e978e688821ea26f678b53d3185fa919db857e369969074f172688027b0c6f4\",\"schema\":\"ck-record/v1\",\"version\":\"1.0.0\"}",
+      "signature": "3413efcf43ee18b5c8ff1f50af55661034c509e90c0a6b410e90d19d0c7a7f45b0f47aa2883db895b2fcb2b117e6a57f4a8067ac8de0a236396ee528427d8200",
+      "expect": {
+        "ok": false,
+        "code": "signature_invalid"
+      }
+    },
+    {
+      "name": "schema_names_another_document",
+      "note": "validly signed record whose schema field is not ck-record/v1",
+      "package": "skill",
+      "served_text": "{\"archive_bytes\":4608,\"archive_sha256\":\"e238dc41dff661632518c120752f3e4d58168acb393fa0ca8f6881e718e0e398\",\"log_head\":null,\"manifest_sha256\":\"0e9589220c8da2a19847f8762998ff13edab94b268fc4ee75157b8337ebd91be\",\"name\":\"@example/hello-skill\",\"public_key\":\"0e978e688821ea26f678b53d3185fa919db857e369969074f172688027b0c6f4\",\"schema\":\"ck-status/v1\",\"version\":\"1.0.0\"}",
+      "signature": "04ce640505fbd49e2274068fdde60b7aaea1e808bd09110c2e9a739ea57b127d8606b09c73929cd51c55094ce6b1bc8c50cb4633ecd6439d528d2bacf8a59e0d",
+      "expect": {
+        "ok": false,
+        "code": "record_invalid",
+        "field": "schema"
+      }
+    },
+    {
+      "name": "unknown_field",
+      "note": "extra field, validly signed",
+      "package": "skill",
+      "served_text": "{\"archive_bytes\":4608,\"archive_sha256\":\"e238dc41dff661632518c120752f3e4d58168acb393fa0ca8f6881e718e0e398\",\"kind\":\"skill\",\"log_head\":null,\"manifest_sha256\":\"0e9589220c8da2a19847f8762998ff13edab94b268fc4ee75157b8337ebd91be\",\"name\":\"@example/hello-skill\",\"public_key\":\"0e978e688821ea26f678b53d3185fa919db857e369969074f172688027b0c6f4\",\"schema\":\"ck-record/v1\",\"version\":\"1.0.0\"}",
+      "signature": "7d02c11face2c4f34486836e7a11d85b63e86ff4b01629fc4827d17ecf6375a19641220efa002052b0b10ff5595ab7ce4e54ee4249334c6c857ec16a8ba2130b",
+      "expect": {
+        "ok": false,
+        "code": "record_invalid",
+        "field": "kind"
+      }
+    },
+    {
+      "name": "log_head_absent",
+      "note": "the reserved field must be present (null in v1)",
+      "package": "skill",
+      "served_text": "{\"archive_bytes\":4608,\"archive_sha256\":\"e238dc41dff661632518c120752f3e4d58168acb393fa0ca8f6881e718e0e398\",\"manifest_sha256\":\"0e9589220c8da2a19847f8762998ff13edab94b268fc4ee75157b8337ebd91be\",\"name\":\"@example/hello-skill\",\"public_key\":\"0e978e688821ea26f678b53d3185fa919db857e369969074f172688027b0c6f4\",\"schema\":\"ck-record/v1\",\"version\":\"1.0.0\"}",
+      "signature": "93ed31f555eed5975ca64f90cffbd5bd5818b9f831be27efa6e1d717db576b4ef7d4a40e906c091787bc32b65768d681cd481ff067fe8840dfd8d1a1f591c40e",
+      "expect": {
+        "ok": false,
+        "code": "record_invalid",
+        "field": "log_head"
+      }
+    },
+    {
+      "name": "uppercase_hex_digest",
+      "note": "hex values are lowercase only",
+      "package": "skill",
+      "served_text": "{\"archive_bytes\":4608,\"archive_sha256\":\"e238dc41dff661632518c120752f3e4d58168acb393fa0ca8f6881e718e0e398\",\"log_head\":null,\"manifest_sha256\":\"0E9589220C8DA2A19847F8762998FF13EDAB94B268FC4EE75157B8337EBD91BE\",\"name\":\"@example/hello-skill\",\"public_key\":\"0e978e688821ea26f678b53d3185fa919db857e369969074f172688027b0c6f4\",\"schema\":\"ck-record/v1\",\"version\":\"1.0.0\"}",
+      "signature": "5936d1df35e52092b88ac37bb4c5051a71511f9f2302103f813a4a7c6639bfd3d6426e6f26029eb993d4b2c8b9ed9e2b7f6119b246b0618d2bef855c8fdbdd00",
+      "expect": {
+        "ok": false,
+        "code": "record_invalid",
+        "field": "manifest_sha256"
+      }
+    },
+    {
+      "name": "duplicate_key",
+      "note": "a lax parser keeps the last 'name' and the signature verifies; a strict parser must refuse",
+      "package": "skill",
+      "served_text": "{\"name\":\"@example/evil\",\"archive_bytes\":4608,\"archive_sha256\":\"e238dc41dff661632518c120752f3e4d58168acb393fa0ca8f6881e718e0e398\",\"log_head\":null,\"manifest_sha256\":\"0e9589220c8da2a19847f8762998ff13edab94b268fc4ee75157b8337ebd91be\",\"name\":\"@example/hello-skill\",\"public_key\":\"0e978e688821ea26f678b53d3185fa919db857e369969074f172688027b0c6f4\",\"schema\":\"ck-record/v1\",\"version\":\"1.0.0\"}",
+      "signature": "5d30de600a1c0b317c4235eb6c82fa40bdd168beaad0f1c0d94052e5453778d4bd3514c04f6fe52f69e3fe15927ead2b620b189d0750c4f69cf8fd16f9385904",
+      "expect": {
+        "ok": false,
+        "code": "record_invalid",
+        "field": "json"
+      }
+    },
+    {
+      "name": "json_number_fraction",
+      "note": "archive_bytes uses 1.0; strict parsing refuses it before checking the unchanged valid record's signature",
+      "package": "skill",
+      "served_text": "{\"archive_bytes\":1.0,\"archive_sha256\":\"e238dc41dff661632518c120752f3e4d58168acb393fa0ca8f6881e718e0e398\",\"log_head\":null,\"manifest_sha256\":\"0e9589220c8da2a19847f8762998ff13edab94b268fc4ee75157b8337ebd91be\",\"name\":\"@example/hello-skill\",\"public_key\":\"0e978e688821ea26f678b53d3185fa919db857e369969074f172688027b0c6f4\",\"schema\":\"ck-record/v1\",\"version\":\"1.0.0\"}",
+      "signature": "5d30de600a1c0b317c4235eb6c82fa40bdd168beaad0f1c0d94052e5453778d4bd3514c04f6fe52f69e3fe15927ead2b620b189d0750c4f69cf8fd16f9385904",
+      "expect": {
+        "ok": false,
+        "code": "record_invalid",
+        "field": "json"
+      }
+    },
+    {
+      "name": "json_number_exponent_lower",
+      "note": "archive_bytes uses 1e2; strict parsing refuses it before checking the unchanged valid record's signature",
+      "package": "skill",
+      "served_text": "{\"archive_bytes\":1e2,\"archive_sha256\":\"e238dc41dff661632518c120752f3e4d58168acb393fa0ca8f6881e718e0e398\",\"log_head\":null,\"manifest_sha256\":\"0e9589220c8da2a19847f8762998ff13edab94b268fc4ee75157b8337ebd91be\",\"name\":\"@example/hello-skill\",\"public_key\":\"0e978e688821ea26f678b53d3185fa919db857e369969074f172688027b0c6f4\",\"schema\":\"ck-record/v1\",\"version\":\"1.0.0\"}",
+      "signature": "5d30de600a1c0b317c4235eb6c82fa40bdd168beaad0f1c0d94052e5453778d4bd3514c04f6fe52f69e3fe15927ead2b620b189d0750c4f69cf8fd16f9385904",
+      "expect": {
+        "ok": false,
+        "code": "record_invalid",
+        "field": "json"
+      }
+    },
+    {
+      "name": "json_number_exponent_upper",
+      "note": "archive_bytes uses 1E0; strict parsing refuses it before checking the unchanged valid record's signature",
+      "package": "skill",
+      "served_text": "{\"archive_bytes\":1E0,\"archive_sha256\":\"e238dc41dff661632518c120752f3e4d58168acb393fa0ca8f6881e718e0e398\",\"log_head\":null,\"manifest_sha256\":\"0e9589220c8da2a19847f8762998ff13edab94b268fc4ee75157b8337ebd91be\",\"name\":\"@example/hello-skill\",\"public_key\":\"0e978e688821ea26f678b53d3185fa919db857e369969074f172688027b0c6f4\",\"schema\":\"ck-record/v1\",\"version\":\"1.0.0\"}",
+      "signature": "5d30de600a1c0b317c4235eb6c82fa40bdd168beaad0f1c0d94052e5453778d4bd3514c04f6fe52f69e3fe15927ead2b620b189d0750c4f69cf8fd16f9385904",
+      "expect": {
+        "ok": false,
+        "code": "record_invalid",
+        "field": "json"
+      }
+    },
+    {
+      "name": "json_number_zero_exponent",
+      "note": "archive_bytes uses 0e0; strict parsing refuses it before checking the unchanged valid record's signature",
+      "package": "skill",
+      "served_text": "{\"archive_bytes\":0e0,\"archive_sha256\":\"e238dc41dff661632518c120752f3e4d58168acb393fa0ca8f6881e718e0e398\",\"log_head\":null,\"manifest_sha256\":\"0e9589220c8da2a19847f8762998ff13edab94b268fc4ee75157b8337ebd91be\",\"name\":\"@example/hello-skill\",\"public_key\":\"0e978e688821ea26f678b53d3185fa919db857e369969074f172688027b0c6f4\",\"schema\":\"ck-record/v1\",\"version\":\"1.0.0\"}",
+      "signature": "5d30de600a1c0b317c4235eb6c82fa40bdd168beaad0f1c0d94052e5453778d4bd3514c04f6fe52f69e3fe15927ead2b620b189d0750c4f69cf8fd16f9385904",
+      "expect": {
+        "ok": false,
+        "code": "record_invalid",
+        "field": "json"
+      }
+    },
+    {
+      "name": "json_number_negative_zero",
+      "note": "archive_bytes uses -0; strict parsing refuses it before checking the unchanged valid record's signature",
+      "package": "skill",
+      "served_text": "{\"archive_bytes\":-0,\"archive_sha256\":\"e238dc41dff661632518c120752f3e4d58168acb393fa0ca8f6881e718e0e398\",\"log_head\":null,\"manifest_sha256\":\"0e9589220c8da2a19847f8762998ff13edab94b268fc4ee75157b8337ebd91be\",\"name\":\"@example/hello-skill\",\"public_key\":\"0e978e688821ea26f678b53d3185fa919db857e369969074f172688027b0c6f4\",\"schema\":\"ck-record/v1\",\"version\":\"1.0.0\"}",
+      "signature": "5d30de600a1c0b317c4235eb6c82fa40bdd168beaad0f1c0d94052e5453778d4bd3514c04f6fe52f69e3fe15927ead2b620b189d0750c4f69cf8fd16f9385904",
+      "expect": {
+        "ok": false,
+        "code": "record_invalid",
+        "field": "json"
+      }
+    },
+    {
+      "name": "embedded_key_swapped",
+      "note": "record names key 2 but was signed by key 1",
+      "package": "skill",
+      "served_text": "{\"archive_bytes\":4608,\"archive_sha256\":\"e238dc41dff661632518c120752f3e4d58168acb393fa0ca8f6881e718e0e398\",\"log_head\":null,\"manifest_sha256\":\"0e9589220c8da2a19847f8762998ff13edab94b268fc4ee75157b8337ebd91be\",\"name\":\"@example/hello-skill\",\"public_key\":\"9dfb817489437ec5ed58311f6ffc4bc4f2cd3d5c47721142209797f7c9a235d9\",\"schema\":\"ck-record/v1\",\"version\":\"1.0.0\"}",
+      "signature": "bae1c2977bee8d38eb91aff7da6aa4b2dd08ac36022d4a1fa2d87927cdc43b4a0f4e8709601b0f174ca11047294fb7c098e9622aef4f0f9fbeb2f8eb71ceca01",
+      "expect": {
+        "ok": false,
+        "code": "signature_invalid"
+      }
+    },
+    {
+      "name": "untrusted_key",
+      "note": "valid signature by key 2, which the verifier does not trust for this scope",
+      "package": "skill",
+      "served_text": "{\"archive_bytes\":4608,\"archive_sha256\":\"e238dc41dff661632518c120752f3e4d58168acb393fa0ca8f6881e718e0e398\",\"log_head\":null,\"manifest_sha256\":\"0e9589220c8da2a19847f8762998ff13edab94b268fc4ee75157b8337ebd91be\",\"name\":\"@example/hello-skill\",\"public_key\":\"9dfb817489437ec5ed58311f6ffc4bc4f2cd3d5c47721142209797f7c9a235d9\",\"schema\":\"ck-record/v1\",\"version\":\"1.0.0\"}",
+      "signature": "452897a727a5e30da37fc352f105e516aff46bc8086df2e2f991901262075d9b042879e32e4eebda8413c0939cd34a996778b44ff6a9a01a68455ba73a801007",
+      "expect": {
+        "ok": false,
+        "code": "key_unknown"
+      }
+    },
+    {
+      "name": "name_mismatch",
+      "note": "signed record names another package",
+      "package": "skill",
+      "served_text": "{\"archive_bytes\":4608,\"archive_sha256\":\"e238dc41dff661632518c120752f3e4d58168acb393fa0ca8f6881e718e0e398\",\"log_head\":null,\"manifest_sha256\":\"0e9589220c8da2a19847f8762998ff13edab94b268fc4ee75157b8337ebd91be\",\"name\":\"@example/other-skill\",\"public_key\":\"0e978e688821ea26f678b53d3185fa919db857e369969074f172688027b0c6f4\",\"schema\":\"ck-record/v1\",\"version\":\"1.0.0\"}",
+      "signature": "026c3c8ec691280512e83472c16d2e5c151a66d8a8cc3eef258fe135f5e4de36e0b77f24c9e1678511f3d06b98b1a2a8b19f87ee543a401d1eb9c8e2b1508007",
+      "expect": {
+        "ok": false,
+        "code": "record_mismatch",
+        "field": "name"
+      }
+    },
+    {
+      "name": "version_mismatch",
+      "note": "signed record names another version",
+      "package": "skill",
+      "served_text": "{\"archive_bytes\":4608,\"archive_sha256\":\"e238dc41dff661632518c120752f3e4d58168acb393fa0ca8f6881e718e0e398\",\"log_head\":null,\"manifest_sha256\":\"0e9589220c8da2a19847f8762998ff13edab94b268fc4ee75157b8337ebd91be\",\"name\":\"@example/hello-skill\",\"public_key\":\"0e978e688821ea26f678b53d3185fa919db857e369969074f172688027b0c6f4\",\"schema\":\"ck-record/v1\",\"version\":\"1.0.1\"}",
+      "signature": "06ccd7baf13c1b2e0100b790ac464ea51e29e45811b362f21b2176d710cb5d9c7879e64782f448350ff566335a0cd978d18932b2d213a74a9f291e3b76698409",
+      "expect": {
+        "ok": false,
+        "code": "record_mismatch",
+        "field": "version"
+      }
+    },
+    {
+      "name": "manifest_digest_mismatch",
+      "note": "manifest_sha256 is not the digest of the served ck.json",
+      "package": "skill",
+      "served_text": "{\"archive_bytes\":4608,\"archive_sha256\":\"e238dc41dff661632518c120752f3e4d58168acb393fa0ca8f6881e718e0e398\",\"log_head\":null,\"manifest_sha256\":\"8932993ae00094eaf592255729083775be05222944630d99537848d81c8b4bfb\",\"name\":\"@example/hello-skill\",\"public_key\":\"0e978e688821ea26f678b53d3185fa919db857e369969074f172688027b0c6f4\",\"schema\":\"ck-record/v1\",\"version\":\"1.0.0\"}",
+      "signature": "011c3b745253f246964d7fdec799439d6b45f67c2e7e59d1029cfe3268c2f3ac902910c062b8dcd408606259010bdb16c5699ae42df20ca607e8d51aec55d40d",
+      "expect": {
+        "ok": false,
+        "code": "record_mismatch",
+        "field": "manifest_sha256"
+      }
+    },
+    {
+      "name": "archive_digest_mismatch",
+      "note": "archive_sha256 is not the digest of the served archive",
+      "package": "skill",
+      "served_text": "{\"archive_bytes\":4608,\"archive_sha256\":\"d8250fce32177cdb504fbe8f4fcf8d2af251c5caec93098b33693066b1462870\",\"log_head\":null,\"manifest_sha256\":\"0e9589220c8da2a19847f8762998ff13edab94b268fc4ee75157b8337ebd91be\",\"name\":\"@example/hello-skill\",\"public_key\":\"0e978e688821ea26f678b53d3185fa919db857e369969074f172688027b0c6f4\",\"schema\":\"ck-record/v1\",\"version\":\"1.0.0\"}",
+      "signature": "16750fe0be6b811883fbaf0c3a4d1fc5878212deadc9c4d6deb5aa4e4ad593daf45fd44626b1f8d3f76867d2ca93dd266d0da3f4a57a9ffd49401cab045e2003",
+      "expect": {
+        "ok": false,
+        "code": "record_mismatch",
+        "field": "archive_sha256"
+      }
+    },
+    {
+      "name": "archive_bytes_mismatch",
+      "note": "archive_bytes is one more than the served archive's length",
+      "package": "skill",
+      "served_text": "{\"archive_bytes\":4609,\"archive_sha256\":\"e238dc41dff661632518c120752f3e4d58168acb393fa0ca8f6881e718e0e398\",\"log_head\":null,\"manifest_sha256\":\"0e9589220c8da2a19847f8762998ff13edab94b268fc4ee75157b8337ebd91be\",\"name\":\"@example/hello-skill\",\"public_key\":\"0e978e688821ea26f678b53d3185fa919db857e369969074f172688027b0c6f4\",\"schema\":\"ck-record/v1\",\"version\":\"1.0.0\"}",
+      "signature": "8346d6b18b9e3f3d8ba90a2bbb45481c61f9df4be41981280f4d39c56a3fc053399cb55ead0ab88e7924aa5cd73ea7ae09c0b64ffe95fd857e83fd7cb372120f",
+      "expect": {
+        "ok": false,
+        "code": "record_mismatch",
+        "field": "archive_bytes"
+      }
+    },
+    {
+      "name": "flow_version_on_skill",
+      "note": "flow_version is present only for kind flow",
+      "package": "skill",
+      "served_text": "{\"archive_bytes\":4608,\"archive_sha256\":\"e238dc41dff661632518c120752f3e4d58168acb393fa0ca8f6881e718e0e398\",\"flow_version\":1,\"log_head\":null,\"manifest_sha256\":\"0e9589220c8da2a19847f8762998ff13edab94b268fc4ee75157b8337ebd91be\",\"name\":\"@example/hello-skill\",\"public_key\":\"0e978e688821ea26f678b53d3185fa919db857e369969074f172688027b0c6f4\",\"schema\":\"ck-record/v1\",\"version\":\"1.0.0\"}",
+      "signature": "43da51e5fa47a66e3ce157234ff299c92e0781485f2ecbd62c8971914cceaf4ba06f0f56d2a5a1a7e378d20508c9c4f75cf4d7c416c16050a3802dfa0755ec04",
+      "expect": {
+        "ok": false,
+        "code": "record_mismatch",
+        "field": "flow_version"
+      }
+    },
+    {
+      "name": "flow_version_missing",
+      "note": "a flow record must carry flow.json's integer version",
+      "package": "flow",
+      "served_text": "{\"archive_bytes\":4608,\"archive_sha256\":\"89d6bee3b0bdffaf7646d000e4d98f60181df12e4894159b7cdba5e3ed6a4639\",\"log_head\":null,\"manifest_sha256\":\"ec44fe2e3a506ed0d632a67e1ec6c6a243eb2a180f7d6e321815ca7b4a35042d\",\"name\":\"@example/hello-flow\",\"public_key\":\"0e978e688821ea26f678b53d3185fa919db857e369969074f172688027b0c6f4\",\"schema\":\"ck-record/v1\",\"version\":\"1.0.0\"}",
+      "signature": "e521624a63fdb8a59bdb3d4a5d7695fca7ff6fecb7460c9add386cc26ec9a05113290abe0f52652ac4bd56e69bbb8d6b0a46d3c685a3e63e4c4af90789413a00",
+      "expect": {
+        "ok": false,
+        "code": "record_mismatch",
+        "field": "flow_version"
+      }
+    },
+    {
+      "name": "flow_version_mismatch",
+      "note": "flow.json says 3, the record says 2",
+      "package": "flow",
+      "served_text": "{\"archive_bytes\":4608,\"archive_sha256\":\"89d6bee3b0bdffaf7646d000e4d98f60181df12e4894159b7cdba5e3ed6a4639\",\"flow_version\":2,\"log_head\":null,\"manifest_sha256\":\"ec44fe2e3a506ed0d632a67e1ec6c6a243eb2a180f7d6e321815ca7b4a35042d\",\"name\":\"@example/hello-flow\",\"public_key\":\"0e978e688821ea26f678b53d3185fa919db857e369969074f172688027b0c6f4\",\"schema\":\"ck-record/v1\",\"version\":\"1.0.0\"}",
+      "signature": "fad21bdfe624a380170b71f927dd310c0b04adf1db35a16838914d35084fcd7f43b1d54305b6efe84ca6c45fb5dccd505cc1a4f511c2091c2a5f522c2a661001",
+      "expect": {
+        "ok": false,
+        "code": "record_mismatch",
+        "field": "flow_version"
+      }
+    }
+  ]
+}

@@ -9202,6 +9202,69 @@ mod tests {
         (surface, admin, store)
     }
 
+    mod catalog_vectors {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../credentials-core/tests/fixtures/ck_catalog_v1/helpers.rs"
+        ));
+    }
+
+    #[tokio::test]
+    async fn catalog_record_vector_route_signs_exact_bytes_and_audits_their_hash() {
+        use base64::Engine as _;
+        let vectors = catalog_vectors::fixture();
+        let pem = catalog_vectors::trusted_key_pem(&vectors);
+        let (surface, admin, store) = signature_audit_rig(true);
+        let mut record =
+            VaultRecord::new_static(CredentialKind::SigningKey, "test", pem.into_bytes(), None);
+        record.audit_each_signature = true;
+        store
+            .overwrite_unconditional_audited(
+                "signing:publish:1",
+                &record,
+                AuditCtx::admin(AuditOp::Overwrite),
+            )
+            .unwrap();
+        let public = current_signing_public(&store);
+        assert_eq!(
+            public.public_key_hex,
+            vectors["keys"]["trusted"]["public_key_hex"]
+        );
+        let vector = &vectors["valid"][0];
+        let payload = catalog_vectors::bytes(vector["signing_input_hex"].as_str().unwrap());
+        let before = store.read_audit(None).unwrap().len();
+        let signed = scoped_sign_request(
+            &surface,
+            &admin,
+            188,
+            "signing:publish:1",
+            &base64::engine::general_purpose::STANDARD.encode(&payload),
+        )
+        .await;
+        let signature_bytes = base64::engine::general_purpose::STANDARD
+            .decode(signed["result"]["signature_b64"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(
+            signature_bytes,
+            catalog_vectors::bytes(vector["signature"].as_str().unwrap())
+        );
+        assert_signature_matches_public(&signed, &public, &payload);
+        let rows = store.read_audit(None).unwrap();
+        assert_eq!(rows.len(), before + 1);
+        let row = &rows[before];
+        let digest = ring::digest::digest(&ring::digest::SHA256, &payload);
+        let expected_hash: String = digest
+            .as_ref()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        assert_eq!(row.payload_hash.as_deref(), Some(expected_hash.as_str()));
+        assert_eq!(row.credential_id.as_deref(), Some("signing:publish:1"));
+        assert_eq!(row.op, "sign");
+        assert_eq!(row.actor, "reserved:entorhinal");
+        store.verify_audit_chain().unwrap();
+    }
+
     fn current_signing_public(store: &EncryptedStore) -> credentials_core::signing::PublicKey {
         let record = store.get("signing:publish:1").unwrap();
         credentials_core::signing::public_key_ed25519(

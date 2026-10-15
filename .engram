@@ -1,0 +1,6 @@
+# Files git doesn't hold that engram backs up nightly (format: one repo-relative path per line).
+.cortexkit/internal-docs/
+.cortexkit/alfonso/drafts/
+.cortexkit/alfonso/prompts/
+.cortexkit/alfonso/specs/
+.cortexkit/alfonso/artifacts/

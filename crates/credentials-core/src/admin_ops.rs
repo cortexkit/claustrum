@@ -12,6 +12,7 @@
 //! these types are only used to BUILD the bytes (caller) and to INTERPRET them
 //! (module) once the MAC has proven possession.
 
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 
 use crate::audit::AuditRecord;
@@ -27,11 +28,22 @@ use crate::store::{
 pub const ADMIN_OP_SCHEMA_V1: u32 = 1;
 pub const ADMIN_OP_SCHEMA_V2: u32 = 2;
 
+/// Operator signing is for short machine-authentication transcripts, not artifacts.
+/// Keep the decoded limit below the unchanged admin-envelope limit online.
+pub const MAX_OPERATOR_SIGN_PAYLOAD: usize = 64 * 1024;
+
 /// One authenticated admin operation. `#[serde(tag = "op")]` so the discriminator
 /// is an `op` string inside the same object the transcript covers.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "op")]
 pub enum AdminOpBody {
+    /// Sign with an explicitly opted-in key, after committing signature history.
+    #[serde(rename = "admin.operator_sign")]
+    OperatorSign {
+        v: u32,
+        id: String,
+        payload_b64: String,
+    },
     #[serde(rename = "admin.store")]
     Store {
         v: u32,
@@ -247,6 +259,12 @@ pub enum AdminOpBody {
 impl std::fmt::Debug for AdminOpBody {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            AdminOpBody::OperatorSign { v, id, .. } => f
+                .debug_struct("OperatorSign")
+                .field("v", v)
+                .field("id", id)
+                .field("payload_b64", &"<redacted>")
+                .finish(),
             AdminOpBody::Store {
                 v,
                 id,
@@ -465,6 +483,7 @@ impl AdminOpBody {
     pub fn schema_version(&self) -> u32 {
         match self {
             AdminOpBody::Store { v, .. }
+            | AdminOpBody::OperatorSign { v, .. }
             | AdminOpBody::StoreWithIdentityPolicy { v, .. }
             | AdminOpBody::SetIdentity { v, .. }
             | AdminOpBody::Invalidate { v, .. }
@@ -507,6 +526,7 @@ impl AdminOpBody {
             | AdminOpBody::EnrollRevoke { .. }
             | AdminOpBody::EnrollReissue { .. } => ADMIN_OP_SCHEMA_V2,
             AdminOpBody::Store { .. }
+            | AdminOpBody::OperatorSign { .. }
             | AdminOpBody::StoreWithIdentityPolicy { .. }
             | AdminOpBody::SetIdentity { .. }
             | AdminOpBody::Invalidate { .. }
@@ -543,6 +563,7 @@ impl AdminOpBody {
                 credential_id: id, ..
             }
             | AdminOpBody::Store { id, .. }
+            | AdminOpBody::OperatorSign { id, .. }
             | AdminOpBody::StoreWithIdentityPolicy { id, .. }
             | AdminOpBody::SetIdentity { id, .. }
             | AdminOpBody::Invalidate { id, .. }
@@ -628,6 +649,53 @@ pub fn apply(
         )));
     }
     match op {
+        AdminOpBody::OperatorSign {
+            id, payload_b64, ..
+        } => {
+            let refusal = || StoreOpError::Encode("key is not marked for operator signing".into());
+            let record = match store.get(&id) {
+                Ok(record) => record,
+                Err(StoreOpError::NotFound) => return Err(refusal()),
+                Err(e) => return Err(e),
+            };
+            if record.kind != CredentialKind::SigningKey || !record.operator_sign {
+                return Err(refusal());
+            }
+            let payload = base64::engine::general_purpose::STANDARD
+                .decode(&payload_b64)
+                .map_err(|_| StoreOpError::Encode("payload is not valid base64".into()))?;
+            if payload.len() > MAX_OPERATOR_SIGN_PAYLOAD {
+                return Err(StoreOpError::Encode(
+                    "payload exceeds the 64 KiB operator signing cap".into(),
+                ));
+            }
+            let corrupt = || StoreOpError::Corrupt("unusable signing key".into());
+            let pem = std::str::from_utf8(record.payload.expose()).map_err(|_| corrupt())?;
+            let prepared = crate::signing::prepare_ed25519(pem, &payload).map_err(|e| match e {
+                crate::signing::SignError::TooLarge { .. } => StoreOpError::Encode(e.to_string()),
+                crate::signing::SignError::UnusableKey(_) => corrupt(),
+            })?;
+            let public = crate::signing::public_key_ed25519(pem).map_err(|_| corrupt())?;
+            // Operator permission always requires durable history, even if a record
+            // was stored without the separate bus-signature audit opt-in.
+            store.append_signature_audit(
+                &id,
+                record.record_version,
+                &crate::store::payload_hash(&payload),
+                actor,
+            )?;
+            let signature = prepared.sign();
+            let signature_bytes = base64::engine::general_purpose::STANDARD
+                .decode(&signature.signature_b64)
+                .expect("signing produces valid base64");
+            let signature_hex: String =
+                signature_bytes.iter().map(|b| format!("{b:02x}")).collect();
+            Ok(serde_json::json!({
+                "key_id": signature.key_id,
+                "public_key_hex": public.public_key_hex,
+                "signature_hex": signature_hex,
+            }))
+        }
         AdminOpBody::EnrollApprove {
             request_id,
             final_name,
@@ -1233,6 +1301,16 @@ mod admin_schema_v2_tests {
         let v2 = ADMIN_OP_SCHEMA_V2;
         let variants: Vec<(&str, AdminOpBody, u32, Option<&str>)> = vec![
             (
+                "OperatorSign",
+                AdminOpBody::OperatorSign {
+                    v: v1,
+                    id: "id".into(),
+                    payload_b64: "".into(),
+                },
+                v1,
+                Some("id"),
+            ),
+            (
                 "Store",
                 AdminOpBody::Store {
                     v: v1,
@@ -1457,5 +1535,249 @@ mod admin_schema_v2_tests {
             force: false
         }
         .has_valid_schema_version());
+    }
+}
+
+#[cfg(test)]
+mod operator_sign_tests {
+    use super::*;
+    use crate::key::MasterKey;
+    use crate::test_support::TestTempDir;
+    use cortexkit_store::{open_sqlite, Isolation, StorageBackend, StorageDescriptor};
+    use ring::signature::{UnparsedPublicKey, ED25519};
+
+    fn vault() -> (TestTempDir, EncryptedStore) {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let root = TestTempDir::new(format!(
+            "operator-sign-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let descriptor = StorageDescriptor {
+            module_id: "cortexkit-credentials".into(),
+            storage_namespace: "default".into(),
+            isolation: Isolation::Module,
+            backend: StorageBackend::Sqlite {
+                path: root.join("store.db").to_string_lossy().into_owned(),
+            },
+        };
+        let sqlite = open_sqlite(&descriptor).unwrap();
+        EncryptedStore::migrate(&sqlite).unwrap();
+        let store = EncryptedStore::open(sqlite, MasterKey::from_bytes([0x61; 32])).unwrap();
+        (root, store)
+    }
+
+    fn record(kind: CredentialKind, enabled: bool) -> VaultRecord {
+        let der = ring::signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
+            .unwrap();
+        let pem = format!(
+            "-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----\n",
+            base64::engine::general_purpose::STANDARD.encode(der.as_ref())
+        );
+        let mut record = VaultRecord::new_static(kind, "operator", pem.into_bytes(), None);
+        record.operator_sign = enabled;
+        // Deliberately leave audit_each_signature false: admin signing must audit
+        // independently of the bus path's optional audit policy.
+        record
+    }
+
+    fn put(store: &EncryptedStore, id: &str, record: &VaultRecord) {
+        store
+            .create_audited(id, record, AuditCtx::route_admin(AuditOp::Put, "test"))
+            .unwrap();
+    }
+
+    fn sign(
+        store: &EncryptedStore,
+        id: &str,
+        payload: &[u8],
+        actor: &str,
+    ) -> Result<serde_json::Value, StoreOpError> {
+        apply(
+            store,
+            AdminOpBody::OperatorSign {
+                v: ADMIN_OP_SCHEMA_V1,
+                id: id.into(),
+                payload_b64: base64::engine::general_purpose::STANDARD.encode(payload),
+            },
+            actor,
+        )
+    }
+
+    fn unhex(value: &str) -> Vec<u8> {
+        assert!(value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
+        (0..value.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&value[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn operator_sign_commits_payload_hash_and_returns_a_verifiable_signature() {
+        let (_root, store) = vault();
+        put(
+            &store,
+            "signing:machine:1",
+            &record(CredentialKind::SigningKey, true),
+        );
+        let payload = b"server challenge\0\xff\n";
+        for actor in ["route-admin", "offline-cli"] {
+            let result = sign(&store, "signing:machine:1", payload, actor).unwrap();
+            assert_eq!(result.as_object().unwrap().len(), 3);
+            let public = result["public_key_hex"].as_str().unwrap();
+            let signature = result["signature_hex"].as_str().unwrap();
+            assert_eq!(public.len(), 64);
+            assert_eq!(signature.len(), 128);
+            let public = unhex(public);
+            UnparsedPublicKey::new(&ED25519, &public)
+                .verify(payload, &unhex(signature))
+                .unwrap();
+            assert_eq!(result["key_id"], crate::signing::key_id_for_public(&public));
+            let rows = store.read_audit(None).unwrap();
+            let row = rows.last().unwrap();
+            assert_eq!(row.op, "sign");
+            assert_eq!(row.credential_id.as_deref(), Some("signing:machine:1"));
+            assert_eq!(row.actor, actor);
+            let hash: String = crate::store::payload_hash(payload)
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            assert_eq!(row.payload_hash.as_deref(), Some(hash.as_str()));
+            assert!(!format!("{row:?}").contains("server challenge"));
+        }
+        assert_eq!(
+            store
+                .read_audit(None)
+                .unwrap()
+                .iter()
+                .filter(|r| r.op == "sign")
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn operator_sign_refuses_unflagged_wrong_kind_and_unknown_identically_without_audit() {
+        let (_root, store) = vault();
+        for id in [
+            "signing:unflagged:1",
+            "signing:cortexkit-root:1",
+            "signing:gh-manifest-root:1",
+        ] {
+            put(&store, id, &record(CredentialKind::SigningKey, false));
+        }
+        put(
+            &store,
+            "apikey:wrong-kind",
+            &record(CredentialKind::ApiKey, true),
+        );
+        let before = store.read_audit(None).unwrap().len();
+        for id in [
+            "signing:unflagged:1",
+            "signing:cortexkit-root:1",
+            "signing:gh-manifest-root:1",
+            "apikey:wrong-kind",
+            "signing:unknown:1",
+        ] {
+            // A malformed payload must not take precedence over the permission fence.
+            let error = apply(
+                &store,
+                AdminOpBody::OperatorSign {
+                    v: 1,
+                    id: id.into(),
+                    payload_b64: "!".into(),
+                },
+                "offline-cli",
+            )
+            .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "record encode failed: key is not marked for operator signing"
+            );
+            let error = sign(&store, id, b"challenge", "offline-cli").unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "record encode failed: key is not marked for operator signing"
+            );
+            assert_eq!(store.read_audit(None).unwrap().len(), before);
+        }
+    }
+
+    #[test]
+    fn operator_sign_accepts_the_cap_and_refuses_one_byte_over_without_audit() {
+        let (_root, store) = vault();
+        put(
+            &store,
+            "signing:machine:1",
+            &record(CredentialKind::SigningKey, true),
+        );
+        let before = store.read_audit(None).unwrap().len();
+        let error = sign(
+            &store,
+            "signing:machine:1",
+            &vec![0; MAX_OPERATOR_SIGN_PAYLOAD + 1],
+            "offline-cli",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("signing cap"));
+        let error = apply(
+            &store,
+            AdminOpBody::OperatorSign {
+                v: 1,
+                id: "signing:machine:1".into(),
+                payload_b64: "!".into(),
+            },
+            "offline-cli",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("not valid base64"));
+        assert_eq!(store.read_audit(None).unwrap().len(), before);
+        let result = sign(
+            &store,
+            "signing:machine:1",
+            &vec![0; MAX_OPERATOR_SIGN_PAYLOAD],
+            "offline-cli",
+        )
+        .unwrap();
+        assert_eq!(result["signature_hex"].as_str().unwrap().len(), 128);
+        assert_eq!(store.read_audit(None).unwrap().len(), before + 1);
+    }
+
+    #[test]
+    fn operator_sign_audit_failure_returns_error_and_no_signature() {
+        let (root, store) = vault();
+        put(
+            &store,
+            "signing:machine:1",
+            &record(CredentialKind::SigningKey, true),
+        );
+        let before = store.read_audit(None).unwrap().len();
+        // Refuse only sign rows in the real append transaction; successful signing
+        // above proves that this fixture's key and payload are otherwise usable.
+        let db = rusqlite::Connection::open(root.join("store.db")).unwrap();
+        db.execute_batch("CREATE TRIGGER refuse_sign_audit BEFORE INSERT ON audit_log WHEN NEW.op = 'sign' BEGIN SELECT RAISE(ABORT, 'injected sign audit failure'); END;").unwrap();
+        let result = sign(&store, "signing:machine:1", b"challenge", "offline-cli");
+        assert!(
+            matches!(result, Err(StoreOpError::Store(ref message)) if message.contains("injected sign audit failure")),
+            "audit failure must return an error and no signature: {result:?}"
+        );
+        assert_eq!(store.read_audit(None).unwrap().len(), before);
+        db.execute_batch("DROP TRIGGER refuse_sign_audit;").unwrap();
+        assert!(sign(&store, "signing:machine:1", b"challenge", "offline-cli").is_ok());
+    }
+
+    #[test]
+    fn operator_sign_debug_redacts_payload() {
+        let op = AdminOpBody::OperatorSign {
+            v: 1,
+            id: "signing:machine:1".into(),
+            payload_b64: "c2VjcmV0".into(),
+        };
+        let rendered = format!("{op:?}");
+        assert!(!rendered.contains("c2VjcmV0"));
+        assert!(rendered.contains("<redacted>"));
     }
 }

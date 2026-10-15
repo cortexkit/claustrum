@@ -525,6 +525,47 @@ parse by splitting off the **last two** `|` delimiters. Automatic account-change
 use the replacement actor and the same audit format. Manual tier edits never open or
 re-seal the envelope, and never change provider ids or authorization categories.
 
+### `admin.operator_sign` and `ck auth sign`
+
+This operator-only signing path uses the existing admin Gate 1 (direct bind) and
+Gate 2 (master-key transcript HMAC), not a capability handle, grant, or enrollment
+token. The offline CLI uses the same applier under the single-writer lease.
+
+```json
+{"op":"admin.operator_sign","v":1,"id":"signing:account-machine:1","payload_b64":"Y2hhbGxlbmdl"}
+```
+
+Only `SigningKey` records with sealed `operator_sign: true` are eligible. Unknown
+ids, other kinds, and unflagged keys all refuse with `key is not marked for
+operator signing`, before payload validation. Payloads use standard padded base64
+and a 64 KiB decoded limit (`MAX_OPERATOR_SIGN_PAYLOAD`), enforced in the shared
+admin applier online and offline. The admin envelope limits are unchanged; bus
+`credential.sign` retains its separate 1 MiB limit. After validation, the vault commits
+a `sign` audit row containing only the payload SHA-256 (never payload bytes), with
+actor `route-admin` online or `offline-cli` offline. The append checks the key's
+record version inside its transaction. Audit failure returns an error and no
+signature; signing happens only after the append succeeds, regardless of the
+record's separate `audit_each_signature` value.
+
+The result has exactly three string fields: `key_id` (the first eight bytes of
+SHA-256 of the public key, lowercase hex), `public_key_hex` (64 lowercase hex
+characters), and `signature_hex` (128 lowercase hex characters, detached Ed25519).
+
+`ck auth mint-signing-key --id signing:account-machine:1 --operator-sign` seals
+both `operator_sign = true` and `audit_each_signature = true`. Both flags are
+additive schema-1 metadata, omitted when false; older records default to false.
+Older decoders can read flagged records but drop `operator_sign` on rewrite,
+revoking operator permission. Replacement keys require the flags again.
+
+`ck auth sign --id signing:account-machine:1 --payload-file <path>` signs the exact
+file bytes (`-` reads stdin). Success prints exactly one JSON line with the three
+fields above. Refusal exits 1 with a diagnostic on stderr and no signature on
+stdout. This is the machine-readable interface for operator-terminal account
+authentication. Root keys `signing:cortexkit-root:1` and
+`signing:gh-manifest-root:1` must never carry `operator_sign` and remain unavailable
+through this path. Bus `credential.sign` authorization and unflagged key behavior
+are unchanged.
+
 ### Category and grant audit targets
 
 Category transitions use audit op `set_category` and target

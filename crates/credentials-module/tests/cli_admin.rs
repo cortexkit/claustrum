@@ -1837,6 +1837,181 @@ fn mint_signing_key_advertises_audit_each_signature_in_help_and_flags_table() {
 }
 
 #[test]
+fn operator_sign_cli_returns_exact_json_and_seals_mandatory_auditing() {
+    use ring::signature::{UnparsedPublicKey, ED25519};
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let vault = GrantCliVault::new("operator-sign-json");
+    write_operator_master_key(&vault.key_path, &"11".repeat(32));
+    vault.bootstrap();
+    let mint = vault.run(&[
+        "mint-signing-key",
+        "--id",
+        "signing:machine:1",
+        "--operator-sign",
+    ]);
+    assert!(
+        mint.status.success(),
+        "{}",
+        String::from_utf8_lossy(&mint.stderr)
+    );
+    let descriptor = StorageDescriptor {
+        module_id: "cortexkit-credentials".into(),
+        storage_namespace: "default".into(),
+        isolation: Isolation::Module,
+        backend: StorageBackend::Sqlite {
+            path: vault
+                .data_dir
+                .join("store.db")
+                .to_string_lossy()
+                .into_owned(),
+        },
+    };
+    let store = EncryptedStore::open(
+        open_sqlite(&descriptor).unwrap(),
+        MasterKey::from_bytes([0x11; 32]),
+    )
+    .unwrap();
+    let record = store.get("signing:machine:1").unwrap();
+    assert!(record.operator_sign);
+    assert!(
+        record.audit_each_signature,
+        "operator signing must imply bus signature auditing"
+    );
+    drop(store);
+
+    let payload = b"challenge\0\xff \n";
+    let path = vault.root.join("challenge.bin");
+    std::fs::write(&path, payload).unwrap();
+    let file_output = vault.run(&[
+        "sign",
+        "--id",
+        "signing:machine:1",
+        "--payload-file",
+        path.to_str().unwrap(),
+    ]);
+    let mut child = cli()
+        .args(["sign", "--id", "signing:machine:1", "--payload-file", "-"])
+        .arg("--data-dir")
+        .arg(&vault.data_dir)
+        .arg("--key-path")
+        .arg(&vault.key_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(payload).unwrap();
+    let stdin_output = child.wait_with_output().unwrap();
+    for output in [&file_output, &stdin_output] {
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let text = std::str::from_utf8(&output.stdout).unwrap();
+        assert_eq!(text.lines().count(), 1, "success is exactly one JSON line");
+        assert!(text.ends_with('\n'));
+        let result: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert_eq!(
+            result
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["key_id", "public_key_hex", "signature_hex"]
+        );
+        let decode = |name: &str, len: usize| {
+            let value = result[name].as_str().unwrap();
+            assert_eq!(value.len(), len);
+            assert!(value
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
+            (0..len)
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&value[i..i + 2], 16).unwrap())
+                .collect::<Vec<u8>>()
+        };
+        let public = decode("public_key_hex", 64);
+        UnparsedPublicKey::new(&ED25519, &public)
+            .verify(payload, &decode("signature_hex", 128))
+            .unwrap();
+        assert_eq!(
+            result["key_id"],
+            credentials_core::signing::key_id_for_public(&public)
+        );
+    }
+    assert_eq!(
+        file_output.stdout, stdin_output.stdout,
+        "stdin preserves exact bytes"
+    );
+    let store = EncryptedStore::open(
+        open_sqlite(&descriptor).unwrap(),
+        MasterKey::from_bytes([0x11; 32]),
+    )
+    .unwrap();
+    let rows = store.read_audit(None).unwrap();
+    let signatures: Vec<_> = rows.iter().filter(|row| row.op == "sign").collect();
+    assert_eq!(signatures.len(), 2);
+    assert!(signatures.iter().all(|row| row.actor == "offline-cli"));
+}
+
+#[test]
+fn operator_sign_cli_refuses_keys_minted_without_the_flag() {
+    let vault = GrantCliVault::new("operator-sign-refused");
+    vault.bootstrap();
+    assert!(vault
+        .run(&["mint-signing-key", "--id", "signing:unflagged:1"])
+        .status
+        .success());
+    let path = vault.root.join("challenge.bin");
+    std::fs::write(&path, b"challenge").unwrap();
+    let output = vault.run(&[
+        "sign",
+        "--id",
+        "signing:unflagged:1",
+        "--payload-file",
+        path.to_str().unwrap(),
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        output.stdout.is_empty(),
+        "a refusal must return no signature"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("key is not marked for operator signing")
+    );
+}
+
+#[test]
+fn operator_sign_cli_help_and_flags_are_discoverable() {
+    assert!(accepted_help_flags("mint-signing-key").contains(&"--operator-sign".to_string()));
+    assert!(!accepted_help_flags("mint-kem-key").contains(&"--operator-sign".to_string()));
+    assert_eq!(accepted_help_flags("sign"), ["--id", "--payload-file"]);
+    for args in [["help", "sign"], ["sign", "--help"]] {
+        let output = cli().args(args).output().unwrap();
+        assert!(output.status.success());
+        let page = String::from_utf8(output.stdout).unwrap();
+        assert!(page.starts_with("ck auth sign --id <id> --payload-file <path>\n"));
+        assert!(page.contains("- reads stdin"));
+        assert!(page.contains("signature_hex"));
+    }
+    let output = cli().args(["help", "mint-signing-key"]).output().unwrap();
+    let page = String::from_utf8(output.stdout).unwrap();
+    assert!(page.contains("[--operator-sign]"));
+    assert!(page
+        .lines()
+        .any(|line| line.starts_with("  --operator-sign  ")));
+    assert!(page.contains("implies --audit-each-signature"));
+    let output = cli().arg("help").output().unwrap();
+    assert!(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .any(|line| line.trim_start().starts_with("sign ")));
+}
+
+#[test]
 fn version_reports_the_built_cli_without_configuration() {
     let out = cli()
         .arg("--version")
@@ -4696,11 +4871,11 @@ fn every_verb_help_uses_a_flags_table_and_notes_layout() {
         .map(|line| line.split_whitespace().next().expect("verb"))
         .collect();
     // This is an anti-narrowing floor for the rendered verb-table scan, not a
-    // budget for verbs. It includes the KEM mint ceremony and the approve verb.
+    // budget for verbs. It includes the operator signing verb.
     assert_eq!(
         verbs.len(),
-        33,
-        "the rendered verb-table scan narrowed; set-plan is a public verb"
+        34,
+        "the rendered verb-table scan narrowed; sign is a public verb"
     );
     assert!(accepted_help_flags("login").contains(&"--no-browser".to_string()));
     assert!(accepted_help_flags("revoke-handle").contains(&"--hash".to_string()));

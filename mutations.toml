@@ -916,3 +916,54 @@ expect_message = '"store_error"'
 only = false
 timeout_s = 600
 build_timeout_s = 3600
+
+
+[[control]]
+id = "operator-sign-requires-sealed-permission"
+guards = "admin signing refuses unflagged keys including root keys before payload validation"
+file = "crates/credentials-core/src/admin_ops.rs"
+old = '            if record.kind != CredentialKind::SigningKey || !record.operator_sign {'
+new = '            if record.kind != CredentialKind::SigningKey { // NON-VACUITY BREAK'
+edits = []
+test_file = "crates/credentials-core/src/admin_ops.rs"
+runner = "cargo"
+package = "credentials-core"
+target = "--lib"
+features = ["test-support"]
+select = "expected"
+expect_red = ["admin_ops::operator_sign_tests::operator_sign_refuses_unflagged_wrong_kind_and_unknown_identically_without_audit"]
+expect_message = "key is not marked for operator signing"
+only = false
+timeout_s = 600
+build_timeout_s = 3600
+
+[[control]]
+id = "operator-sign-audit-before-sign"
+guards = "admin signing cannot return a signature unless its audit append commits"
+file = "crates/credentials-core/src/admin_ops.rs"
+old = """
+            store.append_signature_audit(
+                &id,
+                record.record_version,
+                &crate::store::payload_hash(&payload),
+                actor,
+            )?;"""
+new = """
+            let _ = store.append_signature_audit( // NON-VACUITY BREAK
+                &id,
+                record.record_version,
+                &crate::store::payload_hash(&payload),
+                actor,
+            );"""
+edits = []
+test_file = "crates/credentials-core/src/admin_ops.rs"
+runner = "cargo"
+package = "credentials-core"
+target = "--lib"
+features = ["test-support"]
+select = "expected"
+expect_red = ["admin_ops::operator_sign_tests::operator_sign_audit_failure_returns_error_and_no_signature"]
+expect_message = "audit failure must return an error and no signature"
+only = false
+timeout_s = 600
+build_timeout_s = 3600

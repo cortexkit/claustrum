@@ -18,11 +18,14 @@
 //! mints a CSPRNG master key into the configured store.
 //!
 //! Commands:
+//!
+//! ```text
 //!   bootstrap                                  provision a new master key
 //!   put       --id <id> --payload <bytes> [--kind api_key|dsn|opaque] [--expires-ms N] [--replace]
 //!             cookie:<domain> records are always `CredentialKind::Cookie`, preserve
 //!             `--payload-file` bytes exactly, and do not accept `--expires-ms`.
-//!   mint-signing-key --id signing:<provider>[:<generation>] [--replace] [--audit-each-signature]
+//!   mint-signing-key --id signing:<provider>[:<generation>] [--replace] [--audit-each-signature] [--operator-sign]
+//!   sign --id <id> --payload-file <path|->
 //!   import    --source opencode|pi|antigravity --id <id> --json <file>
 //!   set-identity <id> --account-id <id> [--email <email>] [--org-name <name>] | --clear
 //!   migrate-opencode [--dry-run] [--replace] [--force-shape] [--restore <provider>]
@@ -35,6 +38,7 @@
 //!   revoke-grant --principal <id> --selector-kind <exact|category> --selector <value> --operation <read|sign|open|list|deposit>
 //!   grants
 //!   audit [--limit N] | verify-audit
+//! ```
 //!
 //! Storage location is resolved the same way the daemon resolves it; for the CLI
 //! it is taken from `--data-dir` (the vault directory holding `store.db`).
@@ -341,6 +345,7 @@ fn run_args(mut args: Vec<String>) -> Result<(), CliError> {
         "bootstrap" => cmd_bootstrap(&global),
         "put" => cmd_put(&global, &args),
         "mint-signing-key" => cmd_mint_signing_key(&global, &args),
+        "sign" => cmd_sign(&global, &args),
         "mint-kem-key" => cmd_mint_kem_key(&global, &args),
         "import" => cmd_import(&global, &args),
         "set-identity" => cmd_set_identity(&global, &args),
@@ -427,6 +432,7 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
             "--provider-id",
         ],
         "mint-signing-key" | "mint-kem-key" => &["--id"],
+        "sign" => &["--id", "--payload-file"],
         "import" => &[
             "--source",
             "--provider",
@@ -490,7 +496,7 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
     let bool_flags: &[&str] = match command {
         "set-providers" => &["--set", "--add", "--remove"],
         "put" => &["--replace"],
-        "mint-signing-key" => &["--replace", "--audit-each-signature"],
+        "mint-signing-key" => &["--replace", "--audit-each-signature", "--operator-sign"],
         "mint-kem-key" => &["--replace"],
         "import" => &["--replace", "--clear-identity"],
         "set-identity" | "set-plan" => &["--clear"],
@@ -564,7 +570,8 @@ fn usage_short() -> String {
        categories          which categories exist and what they cover\n\
        approve             record a master-key approval before a signing window\n\
          put                 ingest an api key, session cookie, or opaque secret\n\
-          mint-signing-key    generate and custody a new Ed25519 signing key\n\
+           mint-signing-key    generate and custody a new Ed25519 signing key\n\
+           sign                sign payload bytes with an operator-enabled key\n\
           mint-kem-key        generate and custody a new X25519 recipient key\n\
          import              import from opencode/pi/gemini-cli/antigravity\n\
          set-identity        attach non-secret account metadata to one credential\n\
@@ -791,11 +798,12 @@ fn help_verb(verb: &str) -> String {
         }
         "mint-signing-key" => {
             "ck auth mint-signing-key --id signing:<provider>[:<generation>] [--replace]\n\
-              \x20                        [--audit-each-signature]\n\
+              \x20                        [--audit-each-signature] [--operator-sign]\n\
              \n\
              \x20 --id <id>  signing:<provider>[:<generation>] credential to create\n\
               \x20 --replace  explicit destructive rotation of an existing id; keeps its handles\n\
-              \x20 --audit-each-signature  require a chained payload-hash audit before signing\n\
+               \x20 --audit-each-signature  require a chained payload-hash audit before signing\n\
+               \x20 --operator-sign         allow ck auth sign; implies --audit-each-signature\n\
              \n\
              NOTES\n\
              Generate a fresh Ed25519 key pair in this process and seal its PKCS#8 private\n\
@@ -806,7 +814,21 @@ fn help_verb(verb: &str) -> String {
               Create-only by default: use a new generation id for normal rotation.\n\
               Signature auditing is off by default. Opt in for publish keys whose complete\n\
               signing history must survive compromise; the audit chain cannot be trimmed.\n\
-              A replacement is a fresh key: pass the audit flag again to keep auditing."
+               A replacement is a fresh key: pass the policy flags again to keep them.\n\
+               Operator signing is for machine account keys. Root keys must never carry it."
+        }
+        "sign" => {
+            "ck auth sign --id <id> --payload-file <path>\n\
+             \n\
+             \x20 --id <id>              signing key minted with --operator-sign\n\
+             \x20 --payload-file <path>  exact payload bytes to sign; - reads stdin\n\
+             \n\
+             NOTES\n\
+             Uses authenticated operator admin access, not a capability or grant.\n\
+             Every signature requires a committed payload-SHA-256 audit row first.\n\
+             Payloads are limited to 64 KiB. Prints exactly one JSON line with key_id,\n\
+             public_key_hex and signature_hex (lowercase hex). Root keys must never\n\
+             be enabled for this path."
         }
         "put" => {
             "ck auth put --id <id> --payload <v> | --payload-file <path>\n\
@@ -1689,7 +1711,8 @@ fn cmd_mint_signing_key(global: &GlobalArgs, args: &[String]) -> Result<(), CliE
         private_pem.into_bytes(),
         None,
     );
-    record.audit_each_signature = has_flag(args, "--audit-each-signature");
+    record.operator_sign = has_flag(args, "--operator-sign");
+    record.audit_each_signature = record.operator_sign || has_flag(args, "--audit-each-signature");
 
     let replace = has_flag(args, "--replace");
     let (audit_op, mode, success) = if replace {
@@ -1708,6 +1731,38 @@ fn cmd_mint_signing_key(global: &GlobalArgs, args: &[String]) -> Result<(), CliE
     println!("{success} {id}");
     println!("public_key_hex {}", public.public_key_hex);
     println!("key_id {}", public.key_id);
+    Ok(())
+}
+
+fn cmd_sign(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
+    use std::io::Read;
+
+    let id = required(args, "--id")?;
+    let path = required(args, "--payload-file")?;
+    let input: Box<dyn Read> = if path == "-" {
+        Box::new(std::io::stdin())
+    } else {
+        Box::new(std::fs::File::open(&path).map_err(|e| CliError::Io(e.to_string()))?)
+    };
+    let mut payload = Vec::new();
+    input
+        .take(credentials_core::admin_ops::MAX_OPERATOR_SIGN_PAYLOAD as u64 + 1)
+        .read_to_end(&mut payload)
+        .map_err(|e| CliError::Io(e.to_string()))?;
+    if payload.len() > credentials_core::admin_ops::MAX_OPERATOR_SIGN_PAYLOAD {
+        return Err(CliError::Io(
+            "payload exceeds the 64 KiB signing cap".into(),
+        ));
+    }
+    let result = commit_admin(
+        global,
+        AdminOpBody::OperatorSign {
+            v: ADMIN_OP_SCHEMA_V1,
+            id,
+            payload_b64: base64::engine::general_purpose::STANDARD.encode(&payload),
+        },
+    )?;
+    println!("{}", serde_json::to_string(&result).expect("JSON result"));
     Ok(())
 }
 

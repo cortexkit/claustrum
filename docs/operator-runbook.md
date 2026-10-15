@@ -351,6 +351,37 @@ keeps handles) or `--expected-hash <hex>` (compare-and-set). A `cookie:<domain>:
 always creates a session-cookie record. A `github_app` deposit requires `--client-id`, the
 App JWT issuer.
 
+### Operator-terminal signing keys
+
+For machine account authentication from the operator's own terminal, generate a
+dedicated Ed25519 key inside the vault and opt it into the admin signing path:
+
+```sh
+ck auth mint-signing-key --id signing:account-machine:1 --operator-sign
+ck auth sign --id signing:account-machine:1 --payload-file challenge.bin
+# Or pipe exact challenge bytes to: ck auth sign --id signing:account-machine:1 --payload-file -
+```
+
+The private key never leaves the vault in plaintext. `--operator-sign` seals the
+permission with the key and implies `--audit-each-signature`. Every operator
+signature commits a chained `sign` audit row with the payload SHA-256 before
+signing; an audit failure returns no signature. Only the hash is audited, not the
+challenge bytes. The actor is `route-admin` online and `offline-cli` offline.
+
+`sign` uses the same operator master-key authentication as other `ck auth` admin
+commands, or the offline single-writer lease when the daemon is stopped. It needs
+no capability handle or enrollment token. Success prints one JSON line with
+`key_id`, `public_key_hex` and `signature_hex`; the signature is 128 lowercase hex
+characters. Refusal exits 1 and prints no signature. The 64 KiB decoded payload cap and
+exact-byte signing apply to both files and stdin.
+
+Keys minted without the flag cannot use this path. **Root keys
+`signing:cortexkit-root:1` and `signing:gh-manifest-root:1` must never carry
+`operator_sign`.** Use a separate machine key, not a root key. Replacement is a
+fresh key and requires `--operator-sign` again. Older binaries can read the sealed
+record but drop operator permission if they rewrite it. Consumer bus signing,
+grants and capability handles otherwise retain their existing behavior.
+
 ### Which providers rotate refresh tokens
 
 Whether a second holder of the same login is a hazard depends on the provider, not on the

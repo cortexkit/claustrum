@@ -246,6 +246,10 @@ pub struct VaultRecord {
     /// cannot be changed independently of the credential; old records default off.
     #[serde(default, skip_serializing_if = "signature_audit_disabled")]
     pub audit_each_signature: bool,
+    /// Permit signing through the authenticated operator admin plane. Sealed with
+    /// the key; old records default off. Operator signatures are always audited.
+    #[serde(default, skip_serializing_if = "signature_audit_disabled")]
+    pub operator_sign: bool,
 }
 
 fn signature_audit_disabled(enabled: &bool) -> bool {
@@ -291,6 +295,7 @@ impl std::fmt::Debug for VaultRecord {
             // display metadata on every `get`.
             .field("identity", &self.identity)
             .field("audit_each_signature", &self.audit_each_signature)
+            .field("operator_sign", &self.operator_sign)
             .finish()
     }
 }
@@ -321,6 +326,7 @@ impl VaultRecord {
             identity: RecordIdentity::default(),
             detected_plan,
             audit_each_signature: false,
+            operator_sign: false,
         }
     }
 
@@ -373,6 +379,7 @@ impl VaultRecord {
             identity: RecordIdentity::default(),
             detected_plan: None,
             audit_each_signature: false,
+            operator_sign: false,
         }
     }
 
@@ -779,6 +786,69 @@ mod signature_audit_rollback_tests {
             !rewritten.audit_each_signature,
             "older rewrites drop the policy"
         );
+        assert_eq!(rewritten.payload, record.payload);
+    }
+}
+
+#[cfg(test)]
+mod operator_sign_rollback_tests {
+    use super::*;
+
+    // The schema-1 decoder immediately before operator signing. A rollback can
+    // read a flagged record, but rewriting it must drop operator permission.
+    #[derive(Deserialize, Serialize)]
+    struct LegacyRecord {
+        schema_version: u32,
+        kind: CredentialKind,
+        source: String,
+        record_version: u64,
+        expires_at_ms: Option<i64>,
+        refresh_adapter: Option<String>,
+        oauth: Option<OAuthCredential>,
+        payload: SecretBytes,
+        #[serde(default, skip_serializing_if = "RecordIdentity::is_empty")]
+        identity: RecordIdentity,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detected_plan: Option<crate::plan_detection::DetectedPlan>,
+        #[serde(default, skip_serializing_if = "signature_audit_disabled")]
+        audit_each_signature: bool,
+    }
+
+    #[test]
+    fn operator_sign_flag_is_additive_and_readable_by_the_previous_decoder() {
+        let mut record = VaultRecord::new_static(
+            CredentialKind::SigningKey,
+            "operator",
+            b"key bytes".to_vec(),
+            None,
+        );
+        let old_bytes = record.encode().unwrap();
+        assert!(!serde_json::from_slice::<serde_json::Value>(&old_bytes)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .contains_key("operator_sign"));
+        assert!(!VaultRecord::decode(&old_bytes).unwrap().operator_sign);
+
+        record.operator_sign = true;
+        record.audit_each_signature = true;
+        let bytes = record.encode().unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["operator_sign"],
+            true
+        );
+        assert_eq!(VaultRecord::decode(&bytes).unwrap(), record);
+        assert!(format!("{record:?}").contains("operator_sign: true"));
+        let legacy: LegacyRecord =
+            serde_json::from_slice(&bytes).expect("rollback decoder must read the flag");
+        assert_eq!(legacy.schema_version, 1);
+        assert_eq!(legacy.payload, record.payload);
+        let rewritten = VaultRecord::decode(&serde_json::to_vec(&legacy).unwrap()).unwrap();
+        assert!(
+            !rewritten.operator_sign,
+            "older rewrites drop operator permission"
+        );
+        assert!(rewritten.audit_each_signature);
         assert_eq!(rewritten.payload, record.payload);
     }
 }

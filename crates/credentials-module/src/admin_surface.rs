@@ -497,6 +497,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn operator_sign_uses_both_admin_gates_and_route_admin_audit() {
+        use base64::Engine;
+        let r = rig(0x62);
+        let der = ring::signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
+            .unwrap();
+        let pem = format!(
+            "-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----\n",
+            base64::engine::general_purpose::STANDARD.encode(der.as_ref())
+        );
+        let mut record = VaultRecord::new_static(
+            CredentialKind::SigningKey,
+            "operator",
+            pem.into_bytes(),
+            None,
+        );
+        record.operator_sign = true;
+        r.store
+            .create_audited(
+                "signing:machine:1",
+                &record,
+                AuditCtx::route_admin(AuditOp::Put, "test"),
+            )
+            .unwrap();
+        let body = serde_json::json!({"v": 1, "op": "admin.operator_sign", "id": "signing:machine:1", "payload_b64": "Y2hhbGxlbmdl"}).to_string();
+        r.admin.record_bind(5, Principal::Direct);
+        let (tag, _) = challenge_and_sign(&r, 5, &body);
+        let refused = r.admin.execute_as(5, 0, None, body.as_bytes(), &tag).await;
+        assert!(matches!(refused, AdminOutcome::Refused(_)));
+        let refused = r.admin.execute(5, body.as_bytes(), &"00".repeat(32)).await;
+        assert!(matches!(refused, AdminOutcome::Refused(_)));
+        assert_eq!(
+            r.store
+                .read_audit(None)
+                .unwrap()
+                .iter()
+                .filter(|row| row.op == "sign")
+                .count(),
+            0
+        );
+        let AdminOutcome::Ok(result) = r.admin.execute(5, body.as_bytes(), &tag).await else {
+            panic!("authenticated operator signing must dispatch");
+        };
+        assert_eq!(result["signature_hex"].as_str().unwrap().len(), 128);
+        let rows = r.store.read_audit(None).unwrap();
+        let row = rows.last().unwrap();
+        assert_eq!(row.op, "sign");
+        assert_eq!(row.actor, "route-admin");
+    }
+
+    #[tokio::test]
     async fn direct_bind_full_round_trip_stores_a_credential() {
         let r = rig(1);
         r.admin.record_bind(5, Principal::Direct);

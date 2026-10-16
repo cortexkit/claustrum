@@ -103,3 +103,10 @@ ring = "0.17.14"
 # ChaCha20-Poly1305 AEAD together; ring cannot import a static X25519 recipient
 # through its ephemeral agreement API.
 hpke = "0.13"
+
+# Optimise SHA-256 in debug and test builds. cortexkit-test-support hashes the
+# whole test binary twice on every launch it stages, and unoptimised SHA-256 made
+# that most of each `ck auth` end-to-end test's runtime: one cli_admin test took
+# 13.6 s and drops to about 1 s with this. Release builds are already optimised.
+[profile.dev.package.sha2]
+opt-level = 3

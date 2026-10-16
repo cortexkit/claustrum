@@ -1084,13 +1084,34 @@ The `gh` routing-manifest root follows its own ceremony: see
 
 ### Build
 
+For local daemon/`ck auth` iteration, the order is **fast check → build/sign → place →
+live acceptance → full gate and CI**. A local fix need not wait for integration CI or landing on master.
+Migrations still require the pre-migration snapshot procedure first; the faster build
+path does not change the backup or rollback requirements below.
+
 ```sh
-./scripts/gate.sh
-PROBE='<command> should print <X> against the live daemon' ./scripts/release-build.sh
+# While iterating (includes committed, staged, unstaged and untracked changes):
+./scripts/fast-check.sh
+# Commit the final source before building; --fast reruns the check on that clean commit:
+PROBE='<command> should print <X> against the live daemon' ./scripts/release-build.sh --fast
 ```
 
-The gate runs every CI arm locally; see [CONTRIBUTING.md](../CONTRIBUTING.md). `release-build.sh`
-refuses on a dirty tree, stamps the source revision into both binaries, signs each with its
+`fast-check.sh` compares against `origin/master` (or an explicit `--base <ref>`), checks workspace formatting,
+workspace, and lints/tests changed crates. It always runs consumer wire-contract tests,
+authorization/uniform-refusal/anti-enumeration tests, the no-secret-output and direct-nonce
+source scans, and migration safety tests. It names the exact filters and skipped full-gate
+arms in its output. Release signing is still checked by the builder, not by the fast check.
+
+`release-build.sh --fast` permits a clean, committed local revision even before it reaches
+`origin/master`. It runs the fast check itself and refuses if checks change the source or
+HEAD. It skips `real_daemon_e2e` and `cli_admin` tests against the staged binaries, so live acceptance is mandatory, not an
+optional substitute for a source test. `build-info.txt` records `fast_path`,
+`on_origin_master`, the observed `origin_master` SHA, and whether the fetch succeeded. An
+unresolved remote is recorded as `unknown`, not as an ancestry pass. Without `--fast`, the
+existing branch/ancestry guards, catalogue check and staged-artifact suites remain. Published
+releases still use the guarded release workflow; the fast lane is not a public release path.
+
+Default and fast builds refuse on a dirty tree, stamp the source revision into both binaries, sign each with its
 pinned identifier and the hardened runtime, and prints the revision and sha256 it produced. It
 builds with `CARGO_TARGET_DIR=target/stamped` and copies the artifacts to
 `target/staged/<rev>/`, where a later cargo build cannot overwrite them. A stage is safe from
@@ -1166,6 +1187,16 @@ asks whether the right bytes are in the right place. A CLI change whose logic ru
 daemon is not live until the daemon half is placed and restarted. Exercise the build's probe end
 to end, and if it does not show, check which binary owns the behaviour before assuming the
 deploy failed.
+
+After `accept-deploy.sh` and the live probe pass, run the full checks and fix forward on any failure:
+
+```sh
+./scripts/gate.sh
+# Land through the train so Linux/Windows CI and the full mutation replay run too.
+./scripts/train-push.sh
+```
+
+`scripts/gate.sh` is post-deploy feedback for local iteration, not permission to omit CI.
 
 If a hash comparison fails after someone re-signed the binary, re-sign a **copy** of the known
 build with the known identifier and compare that; `dwarfdump --uuid` (invariant under signing)

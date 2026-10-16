@@ -110,7 +110,7 @@ run_check "format" cargo fmt $FMT_PKGS -- --check
 
 run_check "bun frozen install" "$BUN" install --frozen-lockfile
 run_check "bun typecheck" "$BUN" run typecheck
-run_check "bun build" "$BUN" run build
+# test:hermetic builds both TypeScript packages before importing either one.
 run_check "bun tests (hermetic)" "$BUN" run test:hermetic
 
 run_check "clippy" \
@@ -458,6 +458,11 @@ run_expect 5 "master-key rotation crash cuts" \
   cargo test --locked --workspace --features credentials-core/test-support,credentials-core/kill9-test-seam,credentials-core/rotate-test-seam,credentials-core/login-test-seam,credentials-core/migration-tools --test rotate_crash_cut
 run_expect 2 "login crash cut" \
   cargo test --locked --workspace --features credentials-core/test-support,credentials-core/kill9-test-seam,credentials-core/rotate-test-seam,credentials-core/login-test-seam,credentials-core/migration-tools --test login_crash_cut
+# Keep kill9_mid_refresh, rotate_crash_cut, login_crash_cut and key_verify_takes_nothing
+# adjacent so Cargo can reuse their identical enabled-feature configuration.
+run_expect 3 "migration tools" \
+  cargo test --locked --workspace --features credentials-core/test-support,credentials-core/kill9-test-seam,credentials-core/rotate-test-seam,credentials-core/login-test-seam,credentials-core/migration-tools \
+  --test key_verify_takes_nothing
 # These debug-only seams prove the custody cleanup paths without making an
 # environment-triggered interruption reachable in a release binary.
 # --nocapture IS LOAD-BEARING, NOT TIDINESS. Both arms can now print a SKIPPING notice
@@ -481,15 +486,6 @@ run_check "release ck-auth (default features)" \
 # Picker tests must probe a separately built default-feature artifact. The test refuses
 # when this export is absent so a seam-enabled CARGO_BIN_EXE cannot impersonate shipping.
 export CK_AUTH_IMPORT_SHIPPED_BINARY="$PWD/target/release/ck-auth"
-run_expect 8 "interactive import picker + real-terminal smoke" \
-  cargo test --locked --workspace --features credentials-core/test-support,credentials-module/import-prompt-seam \
-    --test import_picker -- --test-threads=1
-# The migration tools are feature-gated, so clippy compiles them but nothing RAN them
-# until this arm existed. Compiling proves they build; the property that matters -- the
-# key-identity diagnostic works while the daemon holds the lease -- is a runtime fact.
-run_expect 3 "migration tools" \
-  cargo test --locked --workspace --features credentials-core/test-support,credentials-core/kill9-test-seam,credentials-core/rotate-test-seam,credentials-core/login-test-seam,credentials-core/migration-tools \
-  --test key_verify_takes_nothing
 
 # The release-artifact assertion CI runs as its own step: the debug-only
 # test escape hatches must be absent from a --release binary. Ignored by default
@@ -505,6 +501,12 @@ run_expect 1 "released v0.1.2 reads a migration-N store" \
 run_expect 1 "release artifact (test seams absent)" \
   cargo test --locked --workspace --features credentials-core/test-support --test cli_admin \
   test_escape_hatches_are_absent -- --ignored --nocapture
+
+# Run import_picker with import-prompt-seam last. Later default-feature test commands
+# would otherwise relink the CLI after this feature-enabled build.
+run_expect 8 "interactive import picker + real-terminal smoke" \
+  cargo test --locked --workspace --features credentials-core/test-support,credentials-module/import-prompt-seam \
+    --test import_picker -- --test-threads=1
 
 # PROVE the scope claim rather than asserting it. "Every check CI runs" rots the
 # moment CI grows an arm, and that is exactly how it broke: CI gained an inbound

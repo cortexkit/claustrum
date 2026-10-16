@@ -92,6 +92,14 @@ jobs:
         with:
           bun-version: 1.3.14
 
+      # Cache Bun packages on Windows to avoid repeating network fetches.
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        if: runner.os == 'Windows'
+        with:
+          path: ~/.bun/install/cache
+          key: bun-packages-${{ runner.os }}-${{ hashFiles('claustrum/bun.lock') }}
+          restore-keys: bun-packages-${{ runner.os }}-
+
       - name: Bun install
         run: bun install --frozen-lockfile
 
@@ -100,6 +108,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y dbus gnome-keyring
 
       - name: Bun build
+        # test:hermetic already builds on Unix; the Windows subset invokes bun test directly.
+        if: runner.os == 'Windows'
         run: bun run build
 
       - name: Bun typecheck
@@ -142,6 +152,9 @@ jobs:
         with:
           repository: cortexkit/subconscious
           path: subconscious
+          # Windows only reads the contract document; it never runs ck-subc.
+          sparse-checkout: ${{ runner.os == 'Windows' && 'docs/push-sealed-payload.md' || '' }}
+          sparse-checkout-cone-mode: false
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -151,12 +164,13 @@ jobs:
         with:
           workspaces: |
             claustrum -> target
-            subconscious -> target
+            ${{ runner.os == 'Linux' && 'subconscious -> target' || '' }}
 
       # The real-daemon e2e rig spawns the subc daemon (exe `ck-subc`; the PACKAGE
       # is still subc-core) as a subprocess. Build it from the sibling checkout so
       # the rig finds it under ../subconscious/target/debug.
       - name: Build subc binaries (real-daemon e2e)
+        if: runner.os == 'Linux'
         working-directory: subconscious
         run: cargo build --bin ck-subc
 
@@ -234,7 +248,9 @@ jobs:
         if: runner.os == 'Windows'
         env:
           CK_NATIVE_STORE_TESTS: '1'
-        run: cargo test --locked -p credentials-core --test native_store -- --nocapture --test-threads=1
+        # Resolve the workspace like the `cargo test --workspace --all-targets` step,
+        # allowing it to reuse this target's dependency artifacts.
+        run: cargo test --locked --workspace --test native_store -- --nocapture --test-threads=1
 
       - name: Fixture line endings
         # Guards a defect only the Windows job can see: git rewrites LF to CRLF on
@@ -298,18 +314,6 @@ jobs:
           path: claustrum/gate-evidence/windows-acl-mutations.json
           if-no-files-found: warn
 
-      # Run only the seam targets; the workspace suite above already ran everything
-      # else. One feature set matches the gate's four core arms and also exercises
-      # the migration-tool key-identity diagnostic. The crash cuts are Unix-only.
-      - name: Security-conformance suite (crash-safety seams)
-        run: cargo test --locked --workspace --features credentials-core/test-support,credentials-core/kill9-test-seam,credentials-core/rotate-test-seam,credentials-core/login-test-seam,credentials-core/migration-tools --test kill9_mid_refresh --test rotate_crash_cut --test login_crash_cut --test key_verify_takes_nothing
-
-      - name: OpenCode custody crash cuts
-        if: matrix.os == 'ubuntu'
-        run: |
-          cargo test --locked --workspace --features credentials-core/test-support --test cli_opencode the_migrate_opencode_tombstone_reread_failure_keeps_the_old_handle_until_rerun
-          cargo test --locked --workspace --features credentials-core/test-support --test cli_opencode the_opencode_account_add_recovers_a_mint_before_handle_write_with_one_live_handle
-
       # Run the #[ignore]'d real-daemon e2e (incl. the on-the-wire malicious-client
       # harness) under a real supervised subc-core. This is the ONLY layer that
       # catches cross-component contract bugs (e.g. a CLI/daemon lease-namespace
@@ -325,17 +329,6 @@ jobs:
         env:
           CRED_REQUIRE_DAEMON: "1"
         run: cargo test --locked --workspace --features credentials-core/test-support --test real_daemon_e2e -- --ignored --test-threads=1
-
-      # Match the local gate: probe a default-feature release artifact separately
-      # from the seam-enabled binary. CI covers Linux; the pre-train local gate
-      # covers macOS without adding a full CI runner leg.
-      - name: Interactive import picker + real-terminal smoke
-        if: matrix.os == 'ubuntu'
-        shell: bash
-        run: |
-          cargo build --release --locked -p credentials-module --bin ck-auth
-          export CK_AUTH_IMPORT_SHIPPED_BINARY="$PWD/target/release/ck-auth"
-          cargo test --locked --workspace --features credentials-core/test-support,credentials-module/import-prompt-seam --test import_picker -- --test-threads=1
 
       # Assert test-only environment hatches are absent from a REAL release binary. It
       # is #[ignore]'d because it builds the release profile, so without this step it
@@ -354,6 +347,21 @@ jobs:
       - name: Released v0.1.2 reads a migration-N store
         if: matrix.os == 'ubuntu'
         run: cargo test --locked --workspace --features credentials-core/test-support --test v012_release_compat -- --ignored --nocapture
+
+      # Keep feature variants after the default-feature suites to avoid relinking
+      # back to default features. Run these additional test targets rather than
+      # repeating the workspace suite, which already includes cli_opencode's crash cuts.
+      - name: Security-conformance suite (crash-safety seams)
+        run: cargo test --locked --workspace --features credentials-core/test-support,credentials-core/kill9-test-seam,credentials-core/rotate-test-seam,credentials-core/login-test-seam,credentials-core/migration-tools --test kill9_mid_refresh --test rotate_crash_cut --test login_crash_cut --test key_verify_takes_nothing
+
+      # Probe the separately built default-feature artifact, not the seam binary.
+      - name: Interactive import picker + real-terminal smoke
+        if: matrix.os == 'ubuntu'
+        shell: bash
+        run: |
+          cargo build --release --locked -p credentials-module --bin ck-auth
+          export CK_AUTH_IMPORT_SHIPPED_BINARY="$PWD/target/release/ck-auth"
+          cargo test --locked --workspace --features credentials-core/test-support,credentials-module/import-prompt-seam --test import_picker -- --test-threads=1
 
   # Separate checkouts per shard: never replay two mutants in one tree. Include
   # train pushes because train-push.sh waits for this workflow before landing.

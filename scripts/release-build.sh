@@ -24,6 +24,15 @@
 # hours later at deploy time, by which point the binary looks like any other.
 
 set -euo pipefail
+FAST=0
+case "${1:-}" in
+  --fast) FAST=1; shift ;;
+  --help|-h)
+    echo "Usage: PROBE='<live check or none: reason>' $0 [--fast]"
+    echo "--fast: check and build a clean local commit before landing; full gate/CI follow live acceptance."
+    exit 0 ;;
+esac
+[ "$#" -eq 0 ] || { echo "Unknown argument: $1" >&2; exit 1; }
 if [ -z "${PROBE:-}" ]; then
   echo "REFUSING: no reachability probe given; set PROBE to the live check or 'none: <reason>'." >&2
   exit 1
@@ -49,14 +58,14 @@ fi
 # regression, proving a fix before it lands), and that case wants the override
 # LOUD in the operator's scrollback rather than silent.
 BRANCH="$(git symbolic-ref -q --short HEAD || echo '<detached>')"
-if [ "$BRANCH" != "master" ] && [ "${CK_RELEASE_ALLOW_BRANCH:-}" != "1" ]; then
+if [ "$FAST" = 0 ] && [ "$BRANCH" != "master" ] && [ "${CK_RELEASE_ALLOW_BRANCH:-}" != "1" ]; then
   echo "REFUSING: on branch '${BRANCH}', not master." >&2
   echo "  A feature-branch release ships commits that have not landed or passed CI." >&2
   echo "  Deliberate? re-run with CK_RELEASE_ALLOW_BRANCH=1" >&2
   exit 1
 fi
 if [ "$BRANCH" != "master" ]; then
-  echo "*** BUILDING FROM BRANCH '${BRANCH}', NOT master -- override in effect ***" >&2
+  echo "*** BUILDING FROM BRANCH '${BRANCH}', NOT master (fast=$FAST) ***" >&2
 fi
 
 # THIRD GUARD: is this commit one that CI has ever seen?
@@ -76,8 +85,17 @@ fi
 #
 # Placed HERE, above the build, because that takes minutes -- a guard that
 # refuses after the expensive work teaches people to skip the script.
-git fetch --quiet origin master 2>/dev/null || true
-if ! git merge-base --is-ancestor HEAD origin/master 2>/dev/null; then
+ORIGIN_FETCH=ok
+git fetch --quiet origin master 2>/dev/null || ORIGIN_FETCH=failed
+ORIGIN_MASTER="$(git rev-parse --verify origin/master 2>/dev/null || echo unknown)"
+ON_ORIGIN_MASTER=unknown
+if [ "$ORIGIN_MASTER" != unknown ]; then
+  ON_ORIGIN_MASTER=false
+  if git merge-base --is-ancestor HEAD "$ORIGIN_MASTER" 2>/dev/null; then
+    ON_ORIGIN_MASTER=true
+  fi
+fi
+if [ "$ON_ORIGIN_MASTER" != true ] && [ "$FAST" = 0 ]; then
   if [ "${CK_RELEASE_ALLOW_UNLANDED:-}" != "1" ]; then
     echo "REFUSING: HEAD is not an ancestor of origin/master." >&2
     echo "  HEAD           $(git rev-parse --short HEAD)" >&2
@@ -89,10 +107,19 @@ if ! git merge-base --is-ancestor HEAD origin/master 2>/dev/null; then
   echo "*** STAGING A COMMIT CI HAS NOT EVALUATED -- override in effect ***" >&2
 fi
 
-# The ancestor guard above means the full catalogue already replayed in the
-# green master/train CI landing gate. Only check for stale anchors here; repeating
-# every mutant would add minutes without testing a different source revision.
-ckdev-mutate check
+# The fast lane checks this exact committed tree. Published/default builds retain
+# catalogue validation and staged-artifact tests; full replay belongs to landing CI.
+CHECKED_REV="$(git rev-parse HEAD)"
+if [ "$FAST" = 1 ]; then
+  echo "FAST LOCAL BUILD: full gate and CI must follow deployment and live acceptance."
+  bash scripts/fast-check.sh
+else
+  ckdev-mutate check
+fi
+if [ -n "$(git status --porcelain)" ] || [ "$(git rev-parse HEAD)" != "$CHECKED_REV" ]; then
+  echo "REFUSING: source changed during checks; commit it and check again." >&2
+  exit 1
+fi
 
 # FULL 40-HEX, NOT --short. This value is stamped into CK_BUILD_REV and becomes the
 # manifest's build_git_sha, whose canonical form under subc-protocol 0.17 is 40 lowercase
@@ -140,7 +167,8 @@ CK_BUILD_REV="$REV" CARGO_TARGET_DIR=target/stamped cargo build --locked --relea
 # If a stage ever needs to survive a clean, it has to leave target/ entirely.
 STAGE="target/staged/${REV}"
 mkdir -p "$STAGE"
-printf 'claustrum=%s\n' "$REV" > "$STAGE/build-info.txt"
+printf 'claustrum=%s\nfast_path=%s\non_origin_master=%s\norigin_master=%s\norigin_fetch=%s\n' \
+  "$REV" "$FAST" "$ON_ORIGIN_MASTER" "$ORIGIN_MASTER" "$ORIGIN_FETCH" > "$STAGE/build-info.txt"
 
 # PRUNE OLD STAGES. Each is ~16MB of two binaries and they accumulate silently --
 # 15 of them (242MB) had piled up before anyone looked, because nothing in the
@@ -216,6 +244,10 @@ for bin in ck-claustrum ck-auth; do
     *flags=*runtime*) ;;
     *) echo "REFUSING: $bin was signed without the hardened runtime" >&2; exit 1 ;;
   esac
+  if ! printf '%s\n' "$signature" | grep -qx "Identifier=$bin"; then
+    echo "REFUSING: $bin has the wrong signing identifier" >&2
+    exit 1
+  fi
   # WRITE the digest beside the artifact, do not merely print it. A hash that exists
   # only in this script's output is a hash that reaches the placer as a CLAIM IN A
   # MESSAGE -- retyped, quotable, and unverifiable against anything at rest. The placer
@@ -274,23 +306,29 @@ echo "verifying the staged artifacts..."
 # so a broken artifact is discovered while trying to repair something else.
 verify() {
   local label="$1"; shift
+  local log
+  log="$(mktemp "$SMOKE_SCRATCH/verify.XXXXXX")"
   if CRED_REQUIRE_DAEMON=1 \
      CRED_DAEMON_BIN="$PWD/$STAGE/ck-claustrum" \
      CRED_CLI_BIN="$PWD/$STAGE/ck-auth" \
-     "$@" >"/tmp/ck-stage-verify.$$" 2>&1; then
-    grep -E '^test result' "/tmp/ck-stage-verify.$$" | sed "s/^/  ${label}: /"
+     "$@" >"$log" 2>&1; then
+    grep -E '^test result' "$log" | sed "s/^/  ${label}: /"
   else
     echo "STAGED ARTIFACT FAILED VERIFICATION (${label}) -- do not deploy it" >&2
-    tail -30 "/tmp/ck-stage-verify.$$" >&2
-    rm -f "/tmp/ck-stage-verify.$$"
+    tail -30 "$log" >&2
+    rm -f "$log"
     exit 1
   fi
-  rm -f "/tmp/ck-stage-verify.$$"
+  rm -f "$log"
 }
 
-verify "daemon e2e" cargo test --locked -p credentials-module --test real_daemon_e2e \
-  -- --ignored --test-threads=1
-verify "admin cli " cargo test --locked -p credentials-module --test cli_admin
+if [ "$FAST" = 0 ]; then
+  verify "daemon e2e" cargo test --locked -p credentials-module --test real_daemon_e2e \
+    -- --ignored --test-threads=1
+  verify "admin cli " cargo test --locked -p credentials-module --test cli_admin
+else
+  echo "SKIPPED staged daemon/admin suites (--fast): run live acceptance, then the full gate and CI."
+fi
 
 # THE BOUNDARY OF WHAT THE ABOVE PROVES, enforced rather than remembered.
 #
@@ -333,7 +371,11 @@ if [ "$seams" -ne "$KNOWN_DEBUG_SEAMS" ]; then
 fi
 echo "  debug seams: ${seams} (known, and its test arm skips with a printed reason)"
 
-echo "  the STAGED artifacts passed, not merely the source they were built from"
+if [ "$FAST" = 0 ]; then
+  echo "  the STAGED artifacts passed, not merely the source they were built from"
+else
+  echo "  signed local artifacts only; staged daemon/admin verification was NOT run"
+fi
 
 # THE REACHABILITY PROBE, and the script refuses without one.
 #

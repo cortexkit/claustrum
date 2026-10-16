@@ -7364,13 +7364,26 @@ mod deposit_cli_tests {
             "--operation",
             "deposit",
         ];
+        // Match the grant row, never a bare word: the child is this test binary, so its
+        // stdout also carries libtest's own lines. Run single-threaded, libtest prints
+        // `test deposit_cli_tests::cli_child ...` before the child exits, and a check
+        // for "deposit" alone matched that line in both directions.
+        let has_row = |table: &str| {
+            table.lines().any(|line| {
+                line.contains("cerebellum")
+                    && line.contains("browser-session")
+                    && line.contains("deposit")
+            })
+        };
         success(&root, &grant);
         let table = success(&root, &["grants"]);
-        assert!(table.contains("deposit"), "{table}");
+        assert!(has_row(&table), "granted row missing:\n{table}");
         let mut revoke = grant;
         revoke[0] = "revoke-grant";
         success(&root, &revoke);
-        assert!(!success(&root, &["grants"]).contains("deposit"));
+        let after = success(&root, &["grants"]);
+        assert!(!has_row(&after), "row still listed after revoke:\n{after}");
+        assert!(after.contains("no grants"), "{after}");
         for (principal, kind, selector) in [
             ("reserved:cerebellum", "exact", "cookie:example.com:me"),
             ("reserved:cerebellum", "category", "llm-provider"),

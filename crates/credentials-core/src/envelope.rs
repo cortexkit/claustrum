@@ -527,7 +527,7 @@ mod known_answer {
     const KAT_KEY_ID_HEX: &str = "c66e9b725ddcb211";
 
     fn unhex(s: &str) -> Vec<u8> {
-        assert!(s.len() % 2 == 0, "odd-length hex fixture");
+        assert!(s.len().is_multiple_of(2), "odd-length hex fixture");
         s.as_bytes()
             .chunks(2)
             .map(|pair| {

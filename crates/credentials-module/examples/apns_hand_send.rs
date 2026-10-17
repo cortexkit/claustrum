@@ -221,14 +221,17 @@ fn parse_hex(s: &str) -> Result<Vec<u8>, String> {
     if !s.len().is_multiple_of(2) {
         return Err("odd length".into());
     }
-    s.chunks_exact(2)
-        .map(|pair| {
+    // The length check above leaves no remainder, so every byte is in a pair.
+    let (pairs, _remainder) = s.as_chunks::<2>();
+    pairs
+        .iter()
+        .map(|&[hi, lo]| {
             let digit = |b: u8| {
                 (b as char)
                     .to_digit(16)
                     .ok_or_else(|| format!("byte 0x{b:02x} is not a hex digit"))
             };
-            Ok(((digit(pair[0])? << 4) | digit(pair[1])?) as u8)
+            Ok(((digit(hi)? << 4) | digit(lo)?) as u8)
         })
         .collect()
 }

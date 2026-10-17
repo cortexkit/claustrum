@@ -453,3 +453,108 @@ mod tests {
         }
     }
 }
+
+/// Known-answer tests for the stored envelope format.
+///
+/// Every other test in this file seals and opens with the same build, so a change to
+/// `MAGIC`, `CIPHER_VERSION_XCHACHA20POLY1305`, the AAD encoding or the key fingerprint
+/// moves both halves together and stays green -- while every vault written by an
+/// earlier build becomes unreadable. These tests compare against bytes produced by an
+/// earlier build instead. The parameters they pin are listed in
+/// `docs/envelope-format.md`.
+#[cfg(test)]
+mod known_answer {
+    use super::*;
+    use crate::key::MASTER_KEY_LEN;
+
+    /// Master key 0x00, 0x01, ..., 0x1f. A test key only; it guards nothing.
+    fn kat_key() -> MasterKey {
+        let bytes: [u8; MASTER_KEY_LEN] = core::array::from_fn(|i| i as u8);
+        MasterKey::from_bytes(bytes)
+    }
+
+    /// The record version has eight distinct bytes, so a big-endian encoding produces a
+    /// different AAD than the little-endian one and cannot pass by accident.
+    fn kat_binding() -> RecordBinding<'static> {
+        RecordBinding {
+            credential_id: "kat:envelope-v1",
+            record_version: 0x0102_0304_0506_0708,
+        }
+    }
+
+    const KAT_PLAINTEXT: &[u8] = b"claustrum envelope known-answer v1";
+
+    /// A sealed envelope VENDORED from the build that introduced this test: `seal` with
+    /// `kat_key()`, `kat_binding()` and `KAT_PLAINTEXT`, hex-encoded once and pasted
+    /// here. The nonce is random, so a fresh seal never reproduces these bytes; the
+    /// test therefore decrypts this stored blob rather than comparing a new one.
+    ///
+    /// NEVER REGENERATE THIS TO MAKE A FAILING TEST PASS. It stands in for every
+    /// record already on disk. If `open` can no longer read it, the change being
+    /// tested makes existing vaults unreadable; the fix is to undo the change or to
+    /// ship a migrated format bump, not to replace these bytes.
+    const KAT_BLOB_HEX: &str = concat!(
+        "c701",                                             // magic, cipher_version
+        "c66e9b725ddcb211",                                 // key_id
+        "3f894bead8a61dbf4641739a330e292477b403f18ba45efb", // nonce (24 bytes)
+        "ab74954330ee10e6b7aa60a51b6c0fb79da38011c0a7688a845abad5de1e13b8d151",
+        "0ba1651a4b4971c9d8a6192ef8c82f22", // Poly1305 tag
+    );
+
+    /// `build_aad(kat_key().key_id(), kat_binding())`, worked out independently of
+    /// this code as LP(domain) || LP(0x01) || LP(key_id) || LP(credential_id) ||
+    /// LP(record_version as u64 LE), where LP is a u32 little-endian length prefix.
+    const KAT_AAD_HEX: &str = concat!(
+        "25000000",
+        "636f727465786b69742d63726564656e7469616c732f656e76656c6f70652d6161642f7631",
+        "01000000",
+        "01",
+        "08000000",
+        "c66e9b725ddcb211",
+        "0f000000",
+        "6b61743a656e76656c6f70652d7631",
+        "08000000",
+        "0807060504030201",
+    );
+
+    /// SHA-256(`cortexkit-credentials/key-id/v1` || key)[..8] for `kat_key()`, as
+    /// lowercase hex. The same value is persisted in `vault_secrets` and in every
+    /// envelope header.
+    const KAT_KEY_ID_HEX: &str = "c66e9b725ddcb211";
+
+    fn unhex(s: &str) -> Vec<u8> {
+        assert!(s.len() % 2 == 0, "odd-length hex fixture");
+        s.as_bytes()
+            .chunks(2)
+            .map(|pair| {
+                let text = std::str::from_utf8(pair).expect("ascii hex fixture");
+                u8::from_str_radix(text, 16).expect("hex fixture")
+            })
+            .collect()
+    }
+
+    #[test]
+    fn envelope_known_answer_opens_the_vendored_blob() {
+        let blob = unhex(KAT_BLOB_HEX);
+        assert_eq!(blob.len(), HEADER_LEN + KAT_PLAINTEXT.len() + TAG_LEN);
+        let opened = open(&kat_key(), &blob, &kat_binding()).unwrap_or_else(|e| {
+            panic!(
+                "an envelope written by an earlier build no longer opens ({e}). This \
+                 change makes every existing vault unreadable; see \
+                 docs/envelope-format.md before touching the fixture."
+            )
+        });
+        assert_eq!(opened.as_slice(), KAT_PLAINTEXT);
+    }
+
+    #[test]
+    fn envelope_known_answer_aad_bytes() {
+        let aad = build_aad(&kat_key().key_id(), &kat_binding());
+        assert_eq!(aad, unhex(KAT_AAD_HEX));
+    }
+
+    #[test]
+    fn envelope_known_answer_key_id_hex() {
+        assert_eq!(kat_key().key_id().to_hex(), KAT_KEY_ID_HEX);
+    }
+}

@@ -41,6 +41,17 @@ async function expectRefusal(argv: string[], message: string) {
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
 
 describe("enroll argument parsing", () => {
+  test("accepts OC2 targeting flags only in OC2 mode", () => {
+    const base = ["--provider", "xai", "--id", "oauth:xai", "--main", "--min-ttl-ms", "0", "--token-lifetime-ms", "2"];
+    const flags = ["--opencode-bin", "/some path/opencode", "--oc2-server", "http://localhost:4321", "--oc2-method", "device", "--remove-previous"];
+    expect(() => parseEnrollArgs([...base, ...flags])).toThrow("require --oc2");
+    expect(parseEnrollArgs([...base, "--oc2", ...flags])).toMatchObject({ oc2: true, opencodeBin: "/some path/opencode", oc2Server: "http://localhost:4321", oc2Method: "device", removePrevious: true });
+    expect(parseEnrollArgs(["--oc2", "--provider", "deepseek", "--oc2-standalone"])).toMatchObject({ oc2: true, oc2Standalone: true, opencodeBin: "opencode" });
+    expect(() => parseEnrollArgs([...base, "--oc2", "--oc2-server", "http://localhost", "--oc2-standalone"])).toThrow("mutually exclusive");
+    expect(() => parseEnrollArgs([...base, "--oc2", "--oc2", "--oc2-standalone"])).toThrow("duplicate flag");
+    expect(() => parseEnrollArgs([...base, "--oc2", "--remove"])).toThrow("--remove");
+    for (const flag of [["--opencode-bin", "bin"], ["--oc2-standalone"], ["--oc2-server", "url"], ["--oc2-method", "id"], ["--remove-previous"]]) expect(() => parseEnrollArgs([...base, ...flag])).toThrow("require --oc2");
+  });
   test("refuses invalid, incomplete, duplicate, and incompatible action flags", async () => {
     await expectRefusal(["--provider", "xai", "--main"], "missing required --provider or --id");
     await expectRefusal(["--provider", "xai", "--id", "oauth:openai", "--main"], "invalid credential id for provider");

@@ -23,7 +23,7 @@ export function classifyV2Credential(value: unknown, provider: string): V2Creden
   const hasSentinel = Object.values(credential).some((entry) => typeof entry === "string" && entry.startsWith(TOMBSTONE_PREFIX));
   if (credential.type === "key") {
     // A V1 api tombstone migrates to { type: "key", key: sentinel } and classifies as tombstone.
-    if (!allowed(["type", "key"]) || typeof credential.key !== "string") return hasSentinel ? "drift" : "invalid";
+    if (!allowed(["type", "key", "configuration"]) || typeof credential.key !== "string" || (credential.configuration !== undefined && (!credential.configuration || typeof credential.configuration !== "object" || Array.isArray(credential.configuration)))) return hasSentinel ? "drift" : "invalid";
     return credential.key === sentinel(provider) ? "tombstone" : hasSentinel ? "drift" : "real";
   }
   if (credential.type === "oauth") {

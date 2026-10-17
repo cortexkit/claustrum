@@ -25,6 +25,12 @@ describe("V2 credential tombstones", () => {
     expect(V2_TOMBSTONE_EXPIRES).toBeGreaterThan(Date.now() + 5 * 60_000);
     expect(v2OauthTombstone(provider, "m").expires).toBeGreaterThan(Date.now() + 5 * 60_000);
   });
+  test("key configuration accepts objects only and does not loosen OAuth or unknown fields", () => {
+    for (const configuration of [{}, { region: "eu", nested: { enabled: true }, names: ["a"] }]) expect(classifyV2Credential({ ...v2KeyTombstone(provider), configuration }, provider)).toBe("tombstone");
+    for (const configuration of [null, [], "secret", 1, false]) expect(classifyV2Credential({ ...v2KeyTombstone(provider), configuration }, provider)).toBe("drift");
+    expect(classifyV2Credential({ ...v2OauthTombstone(provider, "m"), configuration: {} }, provider)).toBe("drift");
+    expect(classifyV2Credential({ ...v2KeyTombstone(provider), configuration: {}, extra: true }, provider)).toBe("drift");
+  });
   test("review 7: a foreign V1 OAuth sentinel is drift, not migrated custody", () => {
     expect(classifyV2Credential({ type: "oauth", methodID: "m", access: "", refresh: sentinel("other"), expires: 0 }, "xai")).toBe("drift");
   });

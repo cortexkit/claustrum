@@ -183,12 +183,16 @@ test("OAuth requests ask the refreshable client for minimum TTL", async () => {
   expect(requests[0]?.sentinel).toBe(false);
 });
 
-test("split ownership refuses a real local key before upstream", async () => {
+test("split ownership refuses requests without a placeholder before upstream", async () => {
   const host = await install();
   const event = httpEvent("deepseek", "local-looking-key");
   await expect(runHttpHooks(host.registrations, event)).rejects.toBeInstanceOf(CustodySplitError);
+  await expect(runHttpHooks(host.registrations, event)).rejects.toThrow("request for deepseek carries no claustrum placeholder while custody handles remain");
   await expect(runHttpHooks(host.registrations, event)).rejects.toThrow("bun run enroll -- --oc2");
   await expect(runHttpHooks(host.registrations, event)).rejects.toThrow("handle manifest");
+  const noCredential = httpEvent();
+  noCredential.request.headers.delete("authorization");
+  await expect(runHttpHooks(host.registrations, noCredential)).rejects.toThrow("request for deepseek carries no claustrum placeholder");
   expect(requests.length).toBe(0);
 });
 
@@ -222,6 +226,8 @@ test("unreadable manifest installs only the fail-closed orphan guards", async ()
   expect(host.registrations[0]?.options).toBeUndefined();
   await expect(runHttpHooks(host.registrations, httpEvent())).rejects.toBeInstanceOf(CustodyOrphanError);
   await expect(runHttpHooks(host.registrations, httpEvent())).rejects.toThrow("handle file invalid");
+  await expect(runHttpHooks(host.registrations, httpEvent())).rejects.toThrow("handle file unavailable");
+  await expect(runWsHooks(host.registrations, wsEvent())).rejects.toThrow("handle file unavailable: handle file invalid");
   const unmanaged = httpEvent("unowned", "ordinary");
   const original = unmanaged.request;
   await runHttpHooks(host.registrations, unmanaged);
@@ -317,6 +323,7 @@ test.each([false, true])("WS delegates to current exactly once; URL sentinels an
   const split = wsEvent();
   split.headers = { authorization: "ordinary" };
   await expect(runWsHooks(ordered, split)).rejects.toBeInstanceOf(CustodySplitError);
+  await expect(runWsHooks(ordered, { ...wsEvent(), headers: {} })).rejects.toThrow("request for deepseek carries no claustrum placeholder");
   expect(logs.filter((entry) => entry.provider === "deepseek" && entry.state === "served").length).toBe(1);
   expect(requests.length).toBe(0);
 });
@@ -530,5 +537,46 @@ test("WS logs an absent credential binding once with the same fields as V1 serve
     level: "warn", provider: "deepseek", label: "main", boundCredentialId: "apikey:deepseek:main",
     recordVersion: 1, state: "serving", errorCode: "credential_id_absent",
   }]);
+  expect(requests.length).toBe(0);
+});
+
+test.each([false, true])("a stale scoped WS hook leaves another owner's handshake untouched without claiming (reversed=%p)", async (reverse) => {
+  const first = await install();
+  const second = await install(first, { handleReader: async () => handles("api", "other-plugin") });
+  const claim = spyOn(first.endpoint, "claimHandshake");
+  try {
+    const event = wsEvent();
+    const headers = JSON.stringify(event.headers);
+    await runWsHooks(reverse ? [...first.registrations].reverse() : first.registrations, event);
+    expect(JSON.stringify(event.headers) === headers).toBe(true);
+    expect(claim.mock.calls.length).toBe(0);
+    expect(first.client.getCredential.mock.calls.length).toBe(0);
+    expect(second.client.getCredential.mock.calls.length).toBe(0);
+    expect(requests.length).toBe(0);
+  } finally { claim.mockRestore(); }
+});
+
+test("a stale scoped WS hook refuses absent and unknown current ownership as orphaned", async () => {
+  const first = await install();
+  await install(first, { handleReader: async () => ({ version: 1, providers: [] }) });
+  await expect(runWsHooks(first.registrations, wsEvent())).rejects.toBeInstanceOf(CustodyOrphanError);
+  await install(first, { handleReader: async () => { throw new HandleFileValidationError("current handle unavailable"); } });
+  await expect(runWsHooks(first.registrations, wsEvent())).rejects.toBeInstanceOf(CustodyOrphanError);
+  await expect(runWsHooks(first.registrations, wsEvent())).rejects.toThrow("handle file unavailable");
+  expect(first.client.getCredential.mock.calls.length).toBe(0);
+  expect(requests.length).toBe(0);
+});
+
+test("pending HTTP and WS callbacks distinguish no live instance from an unreadable handle file", async () => {
+  const host = await install();
+  const pending = [...host.registrations];
+  await host.cleanup();
+  expect(host.endpoint.current).toBeUndefined();
+  for (const hook of pending) {
+    const event = hook.name === "http.request" ? httpEvent() : wsEvent();
+    const refusal = Promise.resolve().then(() => hook.callback(event as SessionHttpRequest & SessionWebSocketHandshake));
+    await expect(refusal).rejects.toBeInstanceOf(CustodyOrphanError);
+    await expect(refusal).rejects.toThrow("no live claustrum custody instance in this process; reload OpenCode");
+  }
   expect(requests.length).toBe(0);
 });

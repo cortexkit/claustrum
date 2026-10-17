@@ -119,19 +119,21 @@ export function createOpencodeClaustrumPluginV2(dependencies: SetupDependencies 
       const installHooks: Array<() => Promise<void>> = [];
       const announcedProviders = new Set<string>();
       const servingProviders = new Set<string>();
-      const orphan = (provider: string, unknown: boolean) => {
+      const orphan = (provider: string, reason: "absent" | "unknown" | "no_instance") => {
         const remedy = `run bun run enroll -- --oc2 --provider ${provider}`;
-        const error = new CustodyOrphanError(unknown
-          ? `handle file unavailable: ${handleError?.message ?? "custody handle ownership is unknown"}; tombstone ownership cannot be proven; ${remedy}`
-          : `credential is a claustrum tombstone but no handle serves this provider; ${remedy}`);
+        const error = new CustodyOrphanError(reason === "no_instance"
+          ? "no live claustrum custody instance in this process; reload OpenCode"
+          : reason === "unknown"
+            ? `handle file unavailable: ${handleError?.message ?? "custody handle ownership is unknown"}; tombstone ownership cannot be proven; ${remedy}`
+            : `credential is a claustrum tombstone but no handle serves this provider; ${remedy}`);
         logError(error, provider);
         log.info({ provider, state: "orphan" });
         return error;
       };
       const guard = (provider: string, url: string, values: Iterable<string>) => {
-        const verdict = endpoint.current?.ownership(provider) ?? "unknown";
+        const verdict = endpoint.current?.ownership(provider) ?? "no_instance";
         if (verdict === "owned" || verdict === "other") return;
-        if (containsSentinel(url, values, TOMBSTONE_PREFIX)) throw orphan(provider, verdict === "unknown");
+        if (containsSentinel(url, values, TOMBSTONE_PREFIX)) throw orphan(provider, verdict);
       };
       for (const [provider, handle] of owned) {
         const freshness = new FreshnessController({
@@ -169,7 +171,7 @@ export function createOpencodeClaustrumPluginV2(dependencies: SetupDependencies 
           onServed, log,
         }));
         const split = () => {
-          const error = new CustodySplitError(`local credential is real while custody handles remain; re-run bun run enroll -- --oc2 --provider ${provider} to re-tombstone, or remove the provider from the handle manifest to hand it back to OpenCode`);
+          const error = new CustodySplitError(`request for ${provider} carries no claustrum placeholder while custody handles remain; re-run bun run enroll -- --oc2 --provider ${provider} to re-tombstone, or remove the provider from the handle manifest to hand it back to OpenCode`);
           logError(error, provider);
           log.info({ provider, state: "split" });
           return error;
@@ -205,9 +207,9 @@ export function createOpencodeClaustrumPluginV2(dependencies: SetupDependencies 
         installHooks.push(async () => {
           registrations.push(await ctx.session.hook("http.request", (evt) => {
             if (endpoint.isEndpointUrl(evt.request.url)) return;
-            const verdict = endpoint.current?.ownership(provider) ?? "unknown";
+            const verdict = endpoint.current?.ownership(provider) ?? "no_instance";
             if (verdict === "other") return;
-            if (verdict !== "owned") throw orphan(provider, verdict === "unknown");
+            if (verdict !== "owned") throw orphan(provider, verdict);
             if (!containsSentinel(evt.request.url, evt.request.headers.values(), sentinel(provider))) throw split();
             evt.request = endpoint.route(provider, evt.request);
             if (servingProviders.has(provider)) return;
@@ -215,9 +217,12 @@ export function createOpencodeClaustrumPluginV2(dependencies: SetupDependencies 
             log.info({ provider, state: "serving" });
           }, { providerID: provider }));
           registrations.push(await ctx.session.hook("experimental.ws.handshake", async (evt) => {
-            if (!endpoint.claimHandshake(evt)) return;
             const target = endpoint.current;
-            if (!target) throw new CustodyOwnershipError("no current custody instance for WebSocket handshake");
+            if (!target) throw orphan(provider, "no_instance");
+            const verdict = target.ownership(provider);
+            if (verdict === "other") return;
+            if (verdict !== "owned") throw orphan(provider, verdict);
+            if (!endpoint.claimHandshake(evt)) return;
             await target.handshake(provider, evt);
           }, { providerID: provider }));
         });

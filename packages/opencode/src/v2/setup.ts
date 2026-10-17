@@ -8,6 +8,7 @@ import {
   CustodyPlacementError,
   CustodyRequestError,
   CustodySplitError,
+  CustodyWarmTimeoutError,
   HandleFileValidationError,
 } from "../errors";
 import { FreshnessController, PAYMENT_REQUIRED_COOLDOWN_MS } from "../freshness";
@@ -62,10 +63,12 @@ export function createOpencodeClaustrumPluginV2(dependencies: SetupDependencies 
         for (const controller of controllers) controller.dispose();
       }
     })();
-    const logError = (error: Error, provider: string) => log.error({
-      provider, errorClass: error.name, errorCode: (error as NodeJS.ErrnoException).code,
-      errorMessage: `${error.name}: custody operation refused`,
-    });
+    const logError = <T extends Error>(error: T, provider: string): T => {
+      const write = error instanceof CustodyWarmTimeoutError ? log.warn : log.error;
+      write({ provider, errorClass: error.name, errorCode: (error as NodeJS.ErrnoException).code,
+        errorMessage: `${error.name}: custody operation refused` });
+      return error;
+    };
 
     let handles: OpenCodeHandleFileV1 | undefined;
     let handleError: HandleFileValidationError | undefined;
@@ -148,11 +151,11 @@ export function createOpencodeClaustrumPluginV2(dependencies: SetupDependencies 
           try {
             current = await handleReader(defaultHandleFilePath());
           } catch (error) {
-            throw new CustodyOwnershipError(`could not verify custody handle ownership: ${error instanceof Error ? error.name : "unknown error"}`);
+            throw logError(new CustodyOwnershipError(`could not verify custody handle ownership: ${error instanceof Error ? error.name : "unknown error"}`), provider);
           }
           const currentProvider = current.providers.find((candidate) => candidate.provider === provider);
           if (currentProvider?.serve !== OUR_PLUGIN_ID || JSON.stringify(currentProvider) !== JSON.stringify(handle)) {
-            throw new CustodyOwnershipError(`custody handle record changed for provider=${provider}; reload OpenCode after bun run enroll -- --oc2 --provider ${provider}`);
+            throw logError(new CustodyOwnershipError(`custody handle record changed for provider=${provider}; reload OpenCode after bun run enroll -- --oc2 --provider ${provider}`), provider);
           }
         };
         const onServed = (account: ServeAccount, recordVersion: number) => {
@@ -168,8 +171,8 @@ export function createOpencodeClaustrumPluginV2(dependencies: SetupDependencies 
         };
         const select = async () => {
           await verifyOwnership();
-          await registry.ensureRedirectSafe({ ...dependencies.redirectProbe, fetch }, log);
-          if (disposed) throw new CustodyOwnershipError("serving custody instance was disposed; reload OpenCode");
+          await registry.ensureRedirectSafe({ ...dependencies.redirectProbe, fetch }, log, provider);
+          if (disposed) throw logError(new CustodyOwnershipError("serving custody instance was disposed; reload OpenCode"), provider);
           for (const account of handle.accounts) {
             if (freshness.state(account) !== "available") continue;
             const served = await freshness.resolve(account);
@@ -183,16 +186,16 @@ export function createOpencodeClaustrumPluginV2(dependencies: SetupDependencies 
               log.warn({ provider, label: account.label, boundCredentialId: account.credential_id,
                 recordVersion: served.recordVersion, state: "serving", errorCode: "credential_id_absent" });
             }
-            if (disposed) throw new CustodyOwnershipError("serving custody instance was disposed; reload OpenCode");
+            if (disposed) throw logError(new CustodyOwnershipError("serving custody instance was disposed; reload OpenCode"), provider);
             return { account, served };
           }
-          throw exhaustion(provider, handle.accounts.map((account) => ({ account })), freshness);
+          throw logError(exhaustion(provider, handle.accounts.map((account) => ({ account })), freshness), provider);
         };
         requests.set(provider, async (evt) => {
           const marker = sentinel(provider);
-          if (containsSentinel(evt.request.url, [], marker)) throw new CustodyPlacementError("url");
+          if (containsSentinel(evt.request.url, [], marker)) throw logError(new CustodyPlacementError("url"), provider);
           for (const [name, value] of evt.request.headers) {
-            if (name !== "authorization" && value.includes(marker)) throw new CustodyPlacementError(name);
+            if (name !== "authorization" && value.includes(marker)) throw logError(new CustodyPlacementError(name), provider);
           }
           if (!evt.request.headers.get("authorization")?.includes(marker)) throw split();
           // The body is never inspected or substituted: a body placeholder can only reach the wire as a placeholder.
@@ -209,11 +212,15 @@ export function createOpencodeClaustrumPluginV2(dependencies: SetupDependencies 
         });
         handshakes.set(provider, async (evt) => {
           if (containsSentinel(evt.url, [], sentinel(provider))) {
-            throw new CustodyRequestError("custody placeholder in WebSocket URL refused; credentials may only be substituted in handshake headers");
+            throw logError(new CustodyRequestError("custody placeholder in WebSocket URL refused; credentials may only be substituted in Authorization"), provider);
           }
-          if (!Object.values(evt.headers).some((value) => value.includes(sentinel(provider)))) throw split();
+          const authorization = Object.entries(evt.headers).filter(([name]) => name.toLowerCase() === "authorization");
+          for (const [name, value] of Object.entries(evt.headers)) {
+            if (name.toLowerCase() !== "authorization" && value.includes(sentinel(provider))) throw logError(new CustodyPlacementError(name), provider);
+          }
+          if (!authorization.some(([, value]) => value.includes(sentinel(provider)))) throw split();
           const { account, served } = await select();
-          for (const [name, value] of Object.entries(evt.headers)) evt.headers[name] = value.split(sentinel(provider)).join(served.material);
+          for (const [name, value] of authorization) evt.headers[name] = value.split(sentinel(provider)).join(served.material);
           onServed(account, served.recordVersion);
         });
         responses.set(provider, async (served, evt) => {
@@ -236,11 +243,11 @@ export function createOpencodeClaustrumPluginV2(dependencies: SetupDependencies 
         id: instanceId, ownership,
         async request(provider, event) {
           const request = requests.get(provider);
-          if (!request) throw new CustodyOwnershipError("no serving custody handle for provider");
+          if (!request) throw logError(new CustodyOwnershipError("no serving custody handle for provider"), provider);
           await request(event);
         }, async handshake(provider, event) {
           const handshake = handshakes.get(provider);
-          if (!handshake) throw new CustodyOwnershipError("no serving custody handle for WebSocket provider");
+          if (!handshake) throw logError(new CustodyOwnershipError("no serving custody handle for WebSocket provider"), provider);
           await handshake(event);
         },
         async response(served, event) {
@@ -273,7 +280,15 @@ export function createOpencodeClaustrumPluginV2(dependencies: SetupDependencies 
       registrations.push(await ctx.session.hook("experimental.ws.handshake", dispatch));
       registrations.push(await ctx.session.hook("http.response", async (evt) => {
         const served = registry.take(evt.request);
-        if (!served || served.provider !== evt.model.providerID) { debugOnce("unmatched_response"); return; }
+        if (!served) {
+          const provider = evt.model.providerID;
+          if (registry.current?.ownership(provider) === "owned") {
+            if (registry.warnUntrackedResponse(provider)) log.warn({ provider, errorCode: "untracked_response",
+              errorMessage: "a 401 for this provider cannot be reported; another plugin may have replaced the request after custody substitution" });
+          } else debugOnce("unmatched_response");
+          return;
+        }
+        if (served.provider !== evt.model.providerID) { debugOnce("unmatched_response"); return; }
         await served.instance.response(served, evt);
       }));
       return cleanup;

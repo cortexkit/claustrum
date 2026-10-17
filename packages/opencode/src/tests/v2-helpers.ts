@@ -15,3 +15,25 @@ export function deferred() {
   const promise = new Promise<void>((done) => { resolve = done; });
   return { promise, resolve };
 }
+
+export function followingWebSocket() {
+  const state = { forwarded: 0 };
+  class Socket extends EventTarget {
+    constructor(url: string, options: { headers: Record<string, string> }) {
+      super();
+      void (async () => {
+        try {
+          const source = new URL(url); source.protocol = "http:";
+          const response = await fetch(source, { redirect: "manual", headers: { ...options.headers, upgrade: "websocket" } });
+          const target = new URL(response.headers.get("location")!); target.protocol = "http:";
+          await response.body?.cancel();
+          const followed = await fetch(target, { headers: options.headers });
+          await followed.body?.cancel();
+          state.forwarded++;
+        } finally { this.dispatchEvent(new Event("error")); }
+      })().catch(() => {});
+    }
+    close() {}
+  }
+  return { Socket, state };
+}

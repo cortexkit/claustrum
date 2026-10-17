@@ -14,7 +14,8 @@ export type CustodyInstance = {
   response(served: ServedRequest, event: SessionHttpResponse): Promise<void>;
 };
 
-const HOLDER_KEY = Symbol.for("cortexkit.claustrum.custody.inplace.v2/1");
+// Fetch-only cached results cannot establish WebSocket redirect safety after an upgrade.
+const HOLDER_KEY = Symbol.for("cortexkit.claustrum.custody.inplace.v2/2");
 const holders = globalThis as typeof globalThis & { [HOLDER_KEY]?: CustodyRegistry };
 
 export class CustodyRegistry {
@@ -22,6 +23,7 @@ export class CustodyRegistry {
   readonly #claimed = new WeakSet<object>();
   readonly #served = new WeakMap<Request, ServedRequest>();
   readonly #missingCredentialIds = new Set<string>();
+  readonly #untrackedProviders = new Set<string>();
   #probe: Promise<RedirectProbeResult> | undefined;
   #unsafeLogged = false;
 
@@ -55,15 +57,21 @@ export class CustodyRegistry {
     return true;
   }
 
-  async ensureRedirectSafe(dependencies: RedirectProbeDependencies, log: CustodyLogger): Promise<void> {
+  warnUntrackedResponse(provider: string): boolean {
+    if (this.#untrackedProviders.has(provider)) return false;
+    this.#untrackedProviders.add(provider);
+    return true;
+  }
+
+  async ensureRedirectSafe(dependencies: RedirectProbeDependencies, log: CustodyLogger, provider?: string): Promise<void> {
     this.#probe ??= checkRedirectSafety(dependencies);
     const result = await this.#probe;
     if (result.safe) return;
     const error = new CustodyRedirectUnsafeError(result.status);
     if (!this.#unsafeLogged) {
       this.#unsafeLogged = true;
-      log.error({ errorClass: error.name, errorCode: typeof result.status === "number" ? "redirect_unsafe" : result.status,
-        ...(typeof result.status === "number" ? { httpStatus: result.status } : {}), errorMessage: error.message });
+      log.error({ provider, errorClass: error.name, errorCode: typeof result.status === "number" ? "redirect_unsafe" : result.status,
+        ...(typeof result.status === "number" ? { httpStatus: result.status } : {}), errorMessage: `${error.name}: custody operation refused` });
     }
     throw error;
   }

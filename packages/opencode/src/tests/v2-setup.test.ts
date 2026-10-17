@@ -10,7 +10,7 @@ import { sentinel, TOMBSTONE_PREFIX } from "../tombstone";
 import type { Cleanup, ModelHookOptions, PluginContext, SessionHttpRequest, SessionHttpResponse, SessionWebSocketHandshake } from "../v2/host-types";
 import { getCustodyRegistry, resetCustodyRegistryForTests } from "../v2/registry";
 import { createOpencodeClaustrumPluginV2, type SetupDependencies } from "../v2/setup";
-import { deferred, redirectFetch } from "./v2-helpers";
+import { deferred, followingWebSocket, redirectFetch } from "./v2-helpers";
 
 type Event = SessionHttpRequest & SessionHttpResponse & SessionWebSocketHandshake;
 type Hook = { name: "http.request" | "http.response" | "experimental.ws.handshake"; callback: (event: Event) => Promise<void> | void; options?: ModelHookOptions; active: boolean; dispose: Mock<() => Promise<void>> };
@@ -98,6 +98,14 @@ function httpEvent(providerID = "deepseek", key = sentinel(providerID)): Session
 }
 function wsEvent(): SessionWebSocketHandshake { return { ...scope, url: "wss://provider.example/socket", headers: { authorization: `Bearer ${sentinel("deepseek")}`, "x-kept": "untouched" } }; }
 function responseEvent(event: SessionHttpRequest, status: number, headers?: HeadersInit): SessionHttpResponse { return { ...event, response: new Response("host-body", { status, headers }) }; }
+
+function expectRefusalRow(errorClass: string, level: CustodyLogEntry["level"] = "error") {
+  const rows = logs.filter((entry) => entry.errorClass === errorClass);
+  expect(rows.length).toBe(1);
+  expect(rows[0]?.provider).toBe("deepseek");
+  expect(rows[0]?.level).toBe(level);
+  expect(rows[0]?.errorMessage === `${errorClass}: custody operation refused`).toBe(true);
+}
 
 test("V2 entry installs hooks without opening a serving listener", async () => {
   const serve = spyOn(Bun, "serve");
@@ -248,12 +256,31 @@ test("unmatched responses and duplicate response hooks do not report twice", asy
   await run(host, "http.response", responseEvent(httpEvent(), 401));
   await run(host, "http.response", responseEvent(httpEvent(), 401));
   expect(host.vault.reportAuthFailure.mock.calls.length).toBe(0);
-  expect(logs.filter((entry) => entry.errorCode === "unmatched_response").length).toBe(1);
+  expect(logs.filter((entry) => entry.errorCode === "untracked_response").length).toBe(1);
   const event = httpEvent(); await run(host, "http.request", event);
   await run(host, "http.response", responseEvent({ ...event, request: event.request.clone() }, 401));
   expect(host.vault.reportAuthFailure.mock.calls.length).toBe(0);
   const response = responseEvent(event, 401); await run(host, "http.response", response); await run(host, "http.response", response);
   expect(host.vault.reportAuthFailure.mock.calls.length).toBe(1);
+});
+
+test("untracked owned responses warn once per provider across reloads; unmanaged responses stay debug", async () => {
+  const manifest = handles();
+  manifest.providers.push({ provider: "minimax", serve: OUR_PLUGIN_ID, shape: "api", accounts: [{ label: "main", handle: SECOND_HANDLE, credential_id: "apikey:minimax:main" }] });
+  const host = await install(undefined, { handleReader: async () => manifest });
+  await install(host, { handleReader: async () => manifest });
+  for (const provider of ["deepseek", "minimax", "deepseek", "minimax"]) await run(host, "http.response", responseEvent(httpEvent(provider), 401));
+  const rows = logs.filter((entry) => entry.errorCode === "untracked_response");
+  expect(rows.length).toBe(2);
+  for (const provider of ["deepseek", "minimax"]) {
+    const matching = rows.filter((entry) => entry.provider === provider);
+    expect(matching.length).toBe(1); expect(matching[0]?.level).toBe("warn");
+    expect(matching[0]?.errorMessage?.includes("401")).toBe(true);
+    expect(matching[0]?.errorMessage?.includes("replaced")).toBe(true);
+  }
+  await run(host, "http.response", responseEvent(httpEvent("unmanaged", "ordinary"), 401));
+  expect(logs.filter((entry) => entry.errorCode === "untracked_response").length).toBe(2);
+  expect(logs.some((entry) => entry.errorCode === "unmatched_response" && entry.level === "debug")).toBe(true);
 });
 test("binding mismatches skip accounts for both HTTP and WS", async () => {
   const vault = client();
@@ -319,6 +346,100 @@ test("WS preserves header substitution and refuses URL placeholders, splits and 
   const bad = client(); bad.getCredential.mockImplementation(async () => { throw new Error("vault unavailable"); });
   await install(host, { clientFactory: async () => bad as never });
   await expect(run(host, "experimental.ws.handshake", wsEvent())).rejects.toBeInstanceOf(CustodyExhaustionError);
+});
+
+test("WS refuses non-Authorization placeholders without any partial substitution", async () => {
+  const host = await install(); const event = wsEvent();
+  event.headers["X-Api-Key"] = sentinel("deepseek");
+  const original = JSON.stringify(event.headers);
+  await expect(run(host, "experimental.ws.handshake", event)).rejects.toBeInstanceOf(CustodyPlacementError);
+  expect(JSON.stringify(event.headers) === original).toBe(true);
+  expect(host.vault.getCredential.mock.calls.length).toBe(0);
+  expectRefusalRow("CustodyPlacementError");
+});
+
+test("WS substitutes mixed-case Authorization and leaves every other header unchanged", async () => {
+  const host = await install(); const event = wsEvent();
+  event.headers = { Authorization: `Bearer ${sentinel("deepseek")}`, "x-kept": "untouched" };
+  await run(host, "experimental.ws.handshake", event);
+  expect(event.headers.Authorization === `Bearer ${MATERIAL}`).toBe(true);
+  expect(event.headers["x-kept"]).toBe("untouched");
+  expect(Object.keys(event.headers)).toEqual(["Authorization", "x-kept"]);
+});
+
+test.each(["url", "header"])("HTTP placement refusal logs one safe row (%s)", async (kind) => {
+  const host = await install(); const event = httpEvent();
+  if (kind === "url") event.request = new Request(`${upstream.url}?key=${sentinel("deepseek")}`, event.request);
+  else event.request.headers.set("x-api-key", sentinel("deepseek"));
+  await expect(run(host, "http.request", event)).rejects.toBeInstanceOf(CustodyPlacementError);
+  expectRefusalRow("CustodyPlacementError");
+});
+
+test("WS URL refusal logs one safe row", async () => {
+  const host = await install(); const event = wsEvent(); event.url += `?key=${sentinel("deepseek")}`;
+  await expect(run(host, "experimental.ws.handshake", event)).rejects.toBeInstanceOf(CustodyRequestError);
+  expectRefusalRow("CustodyRequestError");
+});
+
+test("exhaustion refusal logs one safe error row", async () => {
+  const vault = client(); vault.getCredential.mockImplementation(async () => { throw new Error(MATERIAL); });
+  const host = await install(undefined, { clientFactory: async () => vault as never });
+  await expect(run(host, "http.request", httpEvent())).rejects.toBeInstanceOf(CustodyExhaustionError);
+  expectRefusalRow("CustodyExhaustionError");
+});
+
+test("warm-timeout refusal logs one safe warning row", async () => {
+  const vault = client(); vault.getCredential.mockImplementation(async () => new Promise<ServedCredential>(() => {}));
+  const host = await install(undefined, { clientFactory: async () => vault as never });
+  await expect(run(host, "http.request", httpEvent())).rejects.toHaveProperty("name", "CustodyWarmTimeoutError");
+  expectRefusalRow("CustodyWarmTimeoutError", "warn");
+});
+
+test.each(["changed", "unreadable"])("ownership verification refusal logs one safe row (%s)", async (kind) => {
+  let manifest = handles(); let unreadable = false;
+  const host = await install(undefined, { handleReader: async () => {
+    if (unreadable) throw new Error(MATERIAL);
+    return manifest;
+  } });
+  if (kind === "changed") manifest = handles("api", "other-plugin");
+  else unreadable = true;
+  await expect(run(host, "http.request", httpEvent())).rejects.toBeInstanceOf(CustodyOwnershipError);
+  expectRefusalRow("CustodyOwnershipError");
+});
+
+test("disposal during material resolution logs one safe refusal without substitution", async () => {
+  const vault = client(); const entered = deferred(); const release = deferred();
+  const credential = vault.getCredential.getMockImplementation()!;
+  vault.getCredential.mockImplementation(async (handle, ttl) => {
+    entered.resolve(); await release.promise;
+    return credential(handle, ttl);
+  });
+  const host = await install(undefined, { clientFactory: async () => vault as never });
+  const event = httpEvent(); const original = event.request;
+  const pending = run(host, "http.request", event);
+  await entered.promise;
+  try { await host.cleanup(); } finally { release.resolve(); }
+  await expect(pending).rejects.toBeInstanceOf(CustodyOwnershipError);
+  expect(event.request === original).toBe(true);
+  expectRefusalRow("CustodyOwnershipError");
+});
+
+test("disposed-instance refusal logs one safe row", async () => {
+  const host = await install(); const serving = host.registry.current!;
+  await host.cleanup();
+  await expect(serving.request("deepseek", httpEvent())).rejects.toBeInstanceOf(CustodyOwnershipError);
+  expectRefusalRow("CustodyOwnershipError");
+});
+
+test("WebSocket redirect leakage fails owned hooks closed and logs once for the process", async () => {
+  const { Socket, state } = followingWebSocket();
+  const host = await install(undefined, { redirectProbe: { WebSocket: Socket } });
+  await expect(run(host, "http.request", httpEvent())).rejects.toBeInstanceOf(CustodyRedirectUnsafeError);
+  await expect(run(host, "experimental.ws.handshake", wsEvent())).rejects.toBeInstanceOf(CustodyRedirectUnsafeError);
+  expect(state.forwarded).toBe(1);
+  expectRefusalRow("CustodyRedirectUnsafeError");
+  expect(logs.find((entry) => entry.errorClass === "CustodyRedirectUnsafeError")?.errorCode).toBe("ws");
+  expect(host.vault.getCredential.mock.calls.length).toBe(0);
 });
 test.each(["forward", "timeout", "bind"])("unsafe redirect probes fail HTTP and WS closed (%s)", async (kind) => {
   const fetch = kind === "forward" ? redirectFetch(true) : Object.assign(async () => new Promise<Response>(() => {}), { preconnect: globalThis.fetch.preconnect });

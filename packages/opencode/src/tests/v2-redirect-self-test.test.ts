@@ -2,9 +2,9 @@ import { afterEach, expect, mock, test } from "bun:test";
 
 import { CustodyRedirectUnsafeError } from "../errors";
 import { createLogger, type CustodyLogEntry } from "../log";
-import { checkRedirectSafety } from "../v2/redirect-self-test";
+import { checkRedirectSafety, type RedirectProbeDependencies } from "../v2/redirect-self-test";
 import { getCustodyRegistry, resetCustodyRegistryForTests } from "../v2/registry";
-import { redirectFetch } from "./v2-helpers";
+import { followingWebSocket, redirectFetch } from "./v2-helpers";
 
 afterEach(() => { resetCustodyRegistryForTests(); });
 
@@ -58,6 +58,47 @@ test("the real Bun fetch strips Authorization for all five cross-origin redirect
   expect(await checkRedirectSafety({ fetch: globalThis.fetch })).toEqual({ safe: true });
 });
 
+test("a WebSocket constructor that follows with Authorization fails the probe", async () => {
+  const { Socket, state } = followingWebSocket();
+  expect(await checkRedirectSafety({ WebSocket: Socket })).toEqual({ safe: false, status: "ws" });
+  expect(state.forwarded).toBe(1);
+});
+
+test("the real Bun WebSocket receives the redirect without forwarding Authorization", async () => {
+  let constructed = 0;
+  const RuntimeSocket = globalThis.WebSocket as unknown as NonNullable<RedirectProbeDependencies["WebSocket"]>;
+  class Socket extends RuntimeSocket {
+    constructor(url: string, options: { headers: Record<string, string> }) { super(url, options); constructed++; }
+  }
+  expect(await checkRedirectSafety({ WebSocket: Socket })).toEqual({ safe: true });
+  expect(constructed).toBe(1);
+});
+
+test("a WebSocket probe that never upgrades the source cannot pass", async () => {
+  class Socket extends EventTarget {
+    constructor(_url: string, _options: { headers: Record<string, string> }) {
+      super(); queueMicrotask(() => this.dispatchEvent(new Event("error")));
+    }
+    close() {}
+  }
+  expect(await checkRedirectSafety({ WebSocket: Socket })).toEqual({ safe: false, status: "ws" });
+});
+
+test("the stronger socket probe does not reuse a legacy fetch-only process cache", async () => {
+  const key = Symbol.for("cortexkit.claustrum.custody.inplace.v2/1");
+  const previous = Reflect.get(globalThis, key);
+  let legacyUsed = false;
+  const legacy = { ensureRedirectSafe: async () => { legacyUsed = true; } };
+  Reflect.set(globalThis, key, legacy);
+  try {
+    await getCustodyRegistry().ensureRedirectSafe({}, createLogger(() => {}));
+    expect(legacyUsed).toBe(false);
+  } finally {
+    if (previous === undefined) Reflect.deleteProperty(globalThis, key);
+    else Reflect.set(globalThis, key, previous);
+  }
+});
+
 test("the process holder caches the self-test across reload module copies", async () => {
   const registry = getCustodyRegistry();
   const fetch = Object.assign(mock(redirectFetch()), { preconnect: globalThis.fetch.preconnect });
@@ -80,5 +121,6 @@ test("a failed self-test stays failed and logs once across reloads", async () =>
   await expect(registry.ensureRedirectSafe({ fetch: redirectFetch(true) }, log)).rejects.toBeInstanceOf(CustodyRedirectUnsafeError);
   await expect(registry.ensureRedirectSafe({ fetch: redirectFetch() }, log)).rejects.toBeInstanceOf(CustodyRedirectUnsafeError);
   expect(entries.length).toBe(1);
-  expect(entries[0]?.errorMessage).toBe("custody redirect safety self-test failed: status=301; Authorization substitution refused");
+  expect(entries[0]?.errorMessage).toBe("CustodyRedirectUnsafeError: custody operation refused");
+  expect(entries[0]?.httpStatus).toBe(301);
 });

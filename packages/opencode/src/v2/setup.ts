@@ -15,7 +15,7 @@ import { createLogger, serializedLogSink } from "../log";
 import type { ConfigHookDependencies } from "../plugin";
 import { createServeFetch, exhaustion, type ServeAccount, type ServeClient } from "../serve";
 import { sentinel, tombstoneFor, TOMBSTONE_PREFIX } from "../tombstone";
-import { getCustodyEndpoint, type BunRequestInit, type CustodyEndpoint } from "./endpoint";
+import { createUpstreamFetch, getCustodyEndpoint, type CustodyEndpoint } from "./endpoint";
 import type { Cleanup, PluginContext, Registration, SessionWebSocketHandshake } from "./host-types";
 
 export type SetupDependencies = Pick<ConfigHookDependencies,
@@ -165,8 +165,8 @@ export function createOpencodeClaustrumPluginV2(dependencies: SetupDependencies 
           verifyOwnership,
           readAuthEntry: async () => tombstoneFor(handle.shape, provider),
           upstreamFetch: (input, init) => {
-            const options: BunRequestInit = { ...init, timeout: false };
-            return fetch(input, options);
+            const signal = init?.signal ?? (input instanceof Request ? input.signal : AbortSignal.any([]));
+            return createUpstreamFetch(signal, fetch)(input, init);
           },
           onServed, log,
         }));
@@ -217,6 +217,7 @@ export function createOpencodeClaustrumPluginV2(dependencies: SetupDependencies 
             log.info({ provider, state: "serving" });
           }, { providerID: provider }));
           registrations.push(await ctx.session.hook("experimental.ws.handshake", async (evt) => {
+            // Stale hooks must leave other owners' events unclaimed for their serving plugin.
             const target = endpoint.current;
             if (!target) throw orphan(provider, "no_instance");
             const verdict = target.ownership(provider);

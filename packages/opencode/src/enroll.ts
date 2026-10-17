@@ -15,14 +15,16 @@ export type EnrollArgs = { provider: string; credentialId?: string; main: boolea
 export type EnrollClient = { getCredential(handle: string, minTtlMs?: number): Promise<ServedCredential>; close(): void; };
 export type EnrollDependencies = { connect(): Promise<EnrollClient>; readHandle(path: string): Promise<string>; writeManifest(path: string, input: XaiEnrollment): Promise<void>; removeManifest(path: string, input: { provider: "xai"; credentialId: "oauth:xai" }): Promise<void>; writeTombstone(path: string, provider: string): Promise<TombstoneResult>; readManifest?(path: string): Promise<OpenCodeHandleFileV1>; oc2?: Oc2Credentials; };
 
+// OpenCode 2.0.32 packages/core/src/plugin/provider/xai.ts:14-15,40-46 fixes the OAuth method id.
 const help = `Usage: bun run enroll -- --provider xai --id oauth:xai --main --min-ttl-ms <ms> --token-lifetime-ms <ms>
        bun run enroll -- --oc2 --provider <provider>
-       bun run enroll -- --oc2 --provider xai --id oauth:xai --main --min-ttl-ms <ms> --token-lifetime-ms <ms>
+       bun run enroll -- --oc2 --provider xai --id oauth:xai --main --min-ttl-ms <ms> --token-lifetime-ms <ms> --oc2-method <id>
 
 v1 supports only --provider xai --id oauth:xai. The manifest records local serving; --remove removes it before /login.
 
 OpenCode 2: --oc2 uses an existing owned handle manifest entry. Only fresh xai accepts the V1 enrollment flags.
-OC2 options: --opencode-bin <path> (default opencode), --oc2-standalone or --oc2-server <url>, --oc2-method <id> (oauth only), --remove-previous.
+OpenCode 2 options: --opencode-bin <path> (default opencode), --oc2-standalone or --oc2-server <url>, --oc2-method <id> (oauth only), --remove-previous.
+OpenCode 2.0.32 uses method id device for xai. Run opencode auth export xai to see the methodID of an existing entry.
 --oc2 rejects --remove; remove the manifest entry separately to hand ownership back to OpenCode.
 
 Options: --handle-file <path>, --manifest-path <path>, --auth-path <path>, --remove, --help`;
@@ -46,6 +48,11 @@ function numberOption(value: unknown): number | undefined {
   if (typeof value !== "string") return undefined;
   if (!/^(0|[1-9][0-9]*)$/.test(value)) return Number.NaN;
   return Number(value);
+}
+
+function validTokenLifetime(minTtlMs: number | undefined, tokenLifetimeMs: number | undefined): boolean {
+  return minTtlMs !== undefined && tokenLifetimeMs !== undefined && Number.isSafeInteger(minTtlMs) &&
+    minTtlMs >= 0 && Number.isSafeInteger(tokenLifetimeMs) && tokenLifetimeMs > 0 && minTtlMs < tokenLifetimeMs;
 }
 
 function normalizeNegativeValues(argv: string[]): string[] {
@@ -81,13 +88,15 @@ export function parseEnrollArgs(argv: string[], env: NodeJS.ProcessEnv = process
   if (!oc2 && ["opencode-bin", "oc2-standalone", "oc2-server", "oc2-method", "remove-previous"].some((key) => values[key] !== undefined)) throw new Error("OpenCode 2 flags require --oc2");
   if (oc2 && values["oc2-standalone"] && values["oc2-server"] !== undefined) throw new Error("--oc2-standalone and --oc2-server are mutually exclusive");
   if (oc2 && remove) throw new Error("--oc2 rejects --remove; remove the manifest separately");
-  if (typeof provider !== "string" || (!oc2 && typeof id !== "string")) throw new Error("missing required --provider or --id");
-  if (!identifierIsValid(provider) || (id !== undefined && !credentialIdMatchesProvider(id, provider))) throw new Error("invalid credential id for provider");
+  if (typeof provider !== "string") throw new Error(oc2 ? "missing required --provider" : "missing required --provider or --id");
+  if (!oc2 && typeof id !== "string") throw new Error("missing required --provider or --id");
+  if (!identifierIsValid(provider)) throw new Error(oc2 ? "invalid provider" : "invalid credential id for provider");
+  if (id !== undefined && !credentialIdMatchesProvider(id, provider)) throw new Error("invalid credential id for provider");
   if (!oc2 && (provider !== "xai" || id !== "oauth:xai")) throw new Error("v1 supports only --provider xai --id oauth:xai");
   if (!oc2 && !main) throw new Error("two-segment main id requires --main");
   const minTtlMs = numberOption(values["min-ttl-ms"]);
   const tokenLifetimeMs = numberOption(values["token-lifetime-ms"]);
-  if (!oc2 && !remove && (minTtlMs === undefined || tokenLifetimeMs === undefined || !Number.isSafeInteger(minTtlMs) || minTtlMs < 0 || !Number.isSafeInteger(tokenLifetimeMs) || tokenLifetimeMs <= 0 || minTtlMs >= tokenLifetimeMs)) throw new Error("minTtlMs must be below measured token lifetime");
+  if (!oc2 && !remove && !validTokenLifetime(minTtlMs, tokenLifetimeMs)) throw new Error("minTtlMs must be below measured token lifetime");
   if (remove && (values["handle-file"] !== undefined || values["min-ttl-ms"] !== undefined || values["token-lifetime-ms"] !== undefined)) throw new Error("--remove rejects handle and TTL flags");
   return {
     provider, credentialId: id, main, remove,
@@ -152,12 +161,15 @@ async function runOc2Enrollment(args: EnrollArgs, deps: EnrollDependencies): Pro
   const existing = manifest.providers.find((entry) => entry.provider === args.provider);
   if (existing && existing.serve !== OUR_PLUGIN_ID) throw new Error(`provider is owned by ${existing.serve}`);
   if (existing && args.oc2EnrollmentFlags) throw new Error("provider already enrolled in the handle manifest");
-  if (!existing && (args.provider !== "xai" || args.credentialId !== "oauth:xai" || !args.main)) throw new Error(`add the provider to the handle manifest first (ck auth migrate-opencode --provider ${args.provider})`);
+  if (!existing && args.provider !== "xai") throw new Error(`add the provider to the handle manifest first (ck auth migrate-opencode --provider ${args.provider})`);
+  if (!existing && args.credentialId === undefined) throw new Error("missing required --id");
+  if (!existing && args.credentialId !== "oauth:xai") throw new Error("fresh xai enrolment requires --id oauth:xai");
+  if (!existing && !args.main) throw new Error("missing required --main");
   const shape = existing?.shape ?? "oauth";
-  // OC2 2.0.32 core/src/voice.ts:50-69 sends stored keys outside request hooks; OAuth is refused there.
+  // OpenCode 2.0.32 packages/core/src/voice.ts:50-69 sends stored keys outside request hooks; OAuth is refused there.
   if (shape === "api" && ["openai", "xai"].includes(args.provider)) throw new Error(`OpenCode 2's ${args.provider} realtime voice reads the stored key outside the request hooks`);
   if (shape === "api" && args.oc2Method !== undefined) throw new Error("--oc2-method is oauth only");
-  if (!existing && (args.minTtlMs === undefined || args.tokenLifetimeMs === undefined || !Number.isSafeInteger(args.minTtlMs) || args.minTtlMs < 0 || !Number.isSafeInteger(args.tokenLifetimeMs) || args.tokenLifetimeMs <= 0 || args.minTtlMs >= args.tokenLifetimeMs)) throw new Error("minTtlMs must be below measured token lifetime");
+  if (!existing && !validTokenLifetime(args.minTtlMs, args.tokenLifetimeMs)) throw new Error("minTtlMs must be below measured token lifetime");
   let handle: string | undefined;
   if (!existing) { try { handle = await deps.readHandle(args.handleFile!); } catch { throw new Error("handle file unreadable"); } }
   const accounts = existing?.accounts ?? [{ handle: handle!, credential_id: "oauth:xai" }];

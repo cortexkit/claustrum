@@ -41,6 +41,11 @@ async function expectRefusal(argv: string[], message: string) {
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
 
 describe("enroll argument parsing", () => {
+  test("OpenCode 2 names missing providers and invalid providers precisely", () => {
+    expect(() => parseEnrollArgs(["--oc2"])).toThrow(/^missing required --provider$/);
+    expect(() => parseEnrollArgs(["--oc2", "--provider", "invalid/provider"])).toThrow(/^invalid provider$/);
+    expect(() => parseEnrollArgs(["--oc2", "--provider", "xai", "--id", "oauth:other"])).toThrow("invalid credential id for provider");
+  });
   test("accepts OC2 targeting flags only in OC2 mode", () => {
     const base = ["--provider", "xai", "--id", "oauth:xai", "--main", "--min-ttl-ms", "0", "--token-lifetime-ms", "2"];
     const flags = ["--opencode-bin", "/some path/opencode", "--oc2-server", "http://localhost:4321", "--oc2-method", "device", "--remove-previous"];
@@ -162,7 +167,8 @@ describe("CLI and bundle boundaries", () => {
     const help = await run(["--help"]);
     expect(help.code).toBe(0); expect(help.stdout).toContain("--id"); expect(help.stdout).toContain("--main"); expect(help.stdout).toContain("--min-ttl-ms"); expect(help.stdout).toContain("--token-lifetime-ms"); expect(help.stdout).toContain("--remove"); expect(help.stdout).toContain("manifest"); expect(help.stdout).toContain("v1 supports only");
     expect(help.stdout).toContain("bun run enroll -- --oc2 --provider <provider>");
-    expect(help.stdout).toContain("bun run enroll -- --oc2 --provider xai --id oauth:xai --main");
+    expect(help.stdout).toContain("bun run enroll -- --oc2 --provider xai --id oauth:xai --main --min-ttl-ms <ms> --token-lifetime-ms <ms> --oc2-method <id>");
+    expect(help.stdout).toContain("OpenCode 2 options:");
     for (const flag of ["--oc2", "--opencode-bin", "--oc2-standalone", "--oc2-server", "--oc2-method", "--remove-previous"]) expect(help.stdout).toContain(flag);
     const refusal = await run(["--provider", "xai", "--id", "oauth:openai", "--main"]);
     expect(refusal.code).not.toBe(0); expect(refusal.stderr).toContain("invalid credential id for provider"); expect(refusal.stderr).not.toMatch(/\n\s+at /); expect(refusal.stderr).not.toContain("Error:");

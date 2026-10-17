@@ -1,7 +1,7 @@
 import { sentinel, TOMBSTONE_PREFIX } from "../tombstone";
 
 // Far-future expiry avoids OC2's five-minute oauth refresh trigger for every provider
-// (OpenCode 2.0.32, packages/core/src/integration.ts:733-739).
+// OpenCode 2.0.32 packages/core/src/integration.ts:733-739.
 export const V2_TOMBSTONE_EXPIRES = 253402300799000;
 
 export function v2KeyTombstone(provider: string) {

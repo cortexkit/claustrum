@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 
 import { createLogger, type CustodyLogEntry } from "../log";
+import * as errors from "../errors";
 import { sentinel } from "../tombstone";
 import {
   createUpstreamFetch,
@@ -104,6 +105,10 @@ afterEach(async () => {
 });
 
 describe("OC2 loopback custody endpoint", () => {
+  test("endpoint errors share the canonical error constructor", () => {
+    expect(errors).toHaveProperty("CustodyEndpointError", CustodyEndpointError);
+    expect(new CustodyEndpointError("no_server").name).toBe("CustodyEndpointError");
+  });
   test("handshake claims follow event identity across instance registrations", () => {
     const holder = endpoint();
     const event = {};

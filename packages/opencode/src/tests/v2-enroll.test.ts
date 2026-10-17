@@ -1,5 +1,8 @@
-import { beforeAll, describe, expect, test } from "bun:test";
-import { mkdir, readFile, writeFile, chmod } from "node:fs/promises";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { mkdtemp, readFile, rm, writeFile, chmod } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import * as errors from "../errors";
 import { parseEnrollArgs, runEnrollment, type EnrollDependencies } from "../enroll";
 import { OUR_PLUGIN_ID, readHandleFile, type OpenCodeHandleFileV1 } from "../handles";
 import { createOc2Credentials, Oc2CredentialError, OC2_CREDENTIAL_CONSUMERS, type Oc2CredentialEntry, type Oc2Credentials } from "../v2/oc2-credentials";
@@ -8,7 +11,8 @@ import { sentinel } from "../tombstone";
 
 const secret = "oc2-export-canary-secret";
 const handle = `ckh_${"a".repeat(43)}`;
-const base = "/tmp/opencode/oc2-d";
+let base: string;
+let script: string;
 const freshArgs = () => parseEnrollArgs(["--oc2", "--provider", "xai", "--id", "oauth:xai", "--main", "--min-ttl-ms", "0", "--token-lifetime-ms", "2", "--oc2-method", "device"]);
 const existingArgs = (provider = "deepseek") => parseEnrollArgs(["--oc2", "--provider", provider]);
 const manifest = (provider = "deepseek", shape: "api" | "oauth" = "api", serve = OUR_PLUGIN_ID): OpenCodeHandleFileV1 => ({ version: 1, providers: [{ provider, shape, serve, accounts: [{ label: "main", handle, credential_id: `${shape === "api" ? "apikey" : "oauth"}:${provider}:main` }] }] });
@@ -41,6 +45,28 @@ function fixture(previous: Oc2CredentialEntry[] = [], handles: OpenCodeHandleFil
 }
 
 describe("OC2 enrol", () => {
+  test("credential runner errors share the canonical error constructor", () => {
+    expect(errors).toHaveProperty("Oc2CredentialError", Oc2CredentialError);
+    expect(new Oc2CredentialError("switch", 17, "failed").name).toBe("Oc2CredentialError");
+  });
+  test("fresh xai names missing enrollment flags before touching the vault", async () => {
+    for (const [flags, message] of [
+      [["--main"], "missing required --id"],
+      [["--id", "oauth:xai"], "missing required --main"],
+      [["--id", "oauth:xai:work", "--main"], "fresh xai enrolment requires --id oauth:xai"],
+    ] as const) {
+      const f = fixture();
+      await expect(runEnrollment(parseEnrollArgs(["--oc2", "--provider", "xai", ...flags]), f.deps)).rejects.toThrow(message);
+      expect(f.events).toEqual([]);
+    }
+  });
+  test("fresh xai enforces the same TTL bounds as V1", async () => {
+    for (const [minTtlMs, tokenLifetimeMs] of [[undefined, 2], [0, undefined], [-1, 2], [0, 0], [2, 2], [3, 2], [0.5, 2], [0, Infinity], [NaN, 2]]) {
+      const f = fixture();
+      await expect(runEnrollment({ ...freshArgs(), minTtlMs, tokenLifetimeMs }, f.deps)).rejects.toThrow("minTtlMs must be below measured token lifetime");
+      expect(f.events).toEqual([]);
+    }
+  });
   test("unsafe providers and voice key shapes refuse before vault or CLI calls", async () => {
     for (const provider of [...OC2_CREDENTIAL_CONSUMERS, "xai", "openai"]) {
       const f = fixture([], manifest(provider));
@@ -56,7 +82,6 @@ describe("OC2 enrol", () => {
     expect(text).toContain("opencode service restart"); expect(text).not.toContain(secret);
   });
   test("existing provider proves every account and leaves real manifest byte-identical", async () => {
-    await mkdir(base, { recursive: true });
     const path = `${base}/existing-handles.json`;
     const handles = manifest(); handles.providers[0]!.accounts.push({ ...handles.providers[0]!.accounts[0]!, label: "work", credential_id: "apikey:deepseek:work" });
     const bytes = JSON.stringify(handles, null, 4) + "\n";
@@ -178,12 +203,14 @@ describe("OC2 enrol", () => {
   });
 });
 
-const script = `${base}/fake-opencode.ts`;
 beforeAll(async () => {
-  await mkdir(base, { recursive: true });
+  base = await mkdtemp(join(tmpdir(), "claustrum-oc2-enroll-"));
+  script = join(base, "fake-opencode.ts");
   await writeFile(script, `#!${process.execPath}\nconst args = process.argv.slice(2);\nconst mode = args[args.indexOf("--server") + 1];\nif (mode === "timeout") { await Bun.sleep(10000); }\nelse if (mode === "cap") { process.stdout.write("x".repeat(4 * 1024 * 1024 + 1)); }\nelse if (mode === "stderr-cap") { process.stderr.write("x".repeat(64 * 1024 + 1)); }\nelse if (mode === "failure") { process.stdout.write("${secret}"); process.stderr.write("${secret}"); process.exit(17); }\nelse if (mode === "bad-json") { process.stdout.write("${secret}"); }\nelse if (args[1] === "import") { await Bun.write("${base}/stdin.json", await Bun.stdin.text()); await Bun.write("${base}/argv.json", JSON.stringify(args)); }\nelse if (args[1] === "export") { process.stdout.write(JSON.stringify([{id:"cred_old", integrationID:args[2],label:"fixture",active:true,value:{type:"key",key:"${secret}"}}])); }\nelse { await Bun.write("${base}/argv.json", JSON.stringify(args)); }\n`);
   await chmod(script, 0o700);
 });
+
+afterAll(async () => { if (base) await rm(base, { recursive: true, force: true }); });
 
 describe("bounded OC2 CLI runner", () => {
   test("uses argv arrays and import stdin, never credentials in argv", async () => {

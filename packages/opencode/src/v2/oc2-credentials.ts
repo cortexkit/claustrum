@@ -1,20 +1,24 @@
+import { Oc2CredentialError } from "../errors";
+
+export { Oc2CredentialError } from "../errors";
+
 export const OC2_CREDENTIAL_CONSUMERS = [
-  "azure", // OC2 2.0.32 core/src/plugin/provider/azure.ts:280-336 — deployment discovery.
-  "digitalocean", // OC2 2.0.32 core/src/plugin/provider/digitalocean.ts:125-178 — router polling.
-  "github-copilot", // OC2 2.0.32 core/src/plugin/provider/github-copilot.ts:175-210,296-315,442 — model/title requests.
-  "gitlab", // OC2 2.0.32 core/src/plugin/provider/gitlab.ts:65-123 — workflow discovery.
-  "modal", // OC2 2.0.32 core/src/plugin/provider/modal.ts:25-73 — model discovery.
-  "opencode", // OC2 2.0.32 core/src/plugin/provider/opencode.ts:210-247,374-429,495 — config/websearch.
-  "snowflake-cortex", // OC2 2.0.32 core/src/plugin/provider/snowflake-cortex.ts:239-249 — refresh on retry.
-  "exa", // OC2 2.0.32 core/src/plugin/websearch/exa.ts — stored-key search requests.
-  "firecrawl", // OC2 2.0.32 core/src/plugin/websearch/firecrawl.ts — stored-key search requests.
-  "parallel", // OC2 2.0.32 core/src/plugin/websearch/parallel.ts — stored-key search requests.
-  "tavily", // OC2 2.0.32 core/src/plugin/websearch/tavily.ts — stored-key search requests.
-  "tinyfish", // OC2 2.0.32 core/src/plugin/websearch/tinyfish.ts — stored-key search requests.
+  "azure", // OpenCode 2.0.32 packages/core/src/plugin/provider/azure.ts:280-336 — deployment discovery.
+  "digitalocean", // OpenCode 2.0.32 packages/core/src/plugin/provider/digitalocean.ts:125-178 — router polling.
+  "github-copilot", // OpenCode 2.0.32 packages/core/src/plugin/provider/github-copilot.ts:175-210,296-315,442 — model/title requests.
+  "gitlab", // OpenCode 2.0.32 packages/core/src/plugin/provider/gitlab.ts:65-123 — workflow discovery.
+  "modal", // OpenCode 2.0.32 packages/core/src/plugin/provider/modal.ts:25-73 — model discovery.
+  "opencode", // OpenCode 2.0.32 packages/core/src/plugin/provider/opencode.ts:210-247,374-429,495 — config/websearch.
+  "snowflake-cortex", // OpenCode 2.0.32 packages/core/src/plugin/provider/snowflake-cortex.ts:239-249 — refresh on retry.
+  "exa", // OpenCode 2.0.32 packages/core/src/plugin/websearch/exa.ts:47-49 — stored-key search requests.
+  "firecrawl", // OpenCode 2.0.32 packages/core/src/plugin/websearch/firecrawl.ts:58-67 — stored-key search requests.
+  "parallel", // OpenCode 2.0.32 packages/core/src/plugin/websearch/parallel.ts:73-85 — stored-key search requests.
+  "tavily", // OpenCode 2.0.32 packages/core/src/plugin/websearch/tavily.ts:49-56 — stored-key search requests.
+  "tinyfish", // OpenCode 2.0.32 packages/core/src/plugin/websearch/tinyfish.ts:71-79 — stored-key search requests.
 ] as const;
 
 export type Oc2CredentialEntry = { id: string; integrationID: string; label: string; active: boolean; value: unknown };
-type Subcommand = "export" | "import" | "switch" | "logout";
+type Subcommand = Oc2CredentialError["subcommand"];
 export type Oc2Credentials = {
   exportCredentials(integration: string): Promise<Oc2CredentialEntry[]>;
   importCredentials(entries: Oc2CredentialEntry[]): Promise<void>;
@@ -27,13 +31,6 @@ export function formatOc2AuthCommand(options: Oc2CredentialOptions, subcommand: 
   const quote = (text: string) => /^[A-Za-z0-9_./:-]+$/.test(text) ? text : `'${text.replaceAll("'", "'\\''")}'`;
   const target = options.oc2Standalone ? " --standalone" : options.oc2Server ? ` --server ${quote(options.oc2Server)}` : "";
   return `${quote(options.opencodeBin ?? "opencode")} auth ${subcommand} ${quote(integration)} ${quote(id)}${target}`;
-}
-
-export class Oc2CredentialError extends Error {
-  constructor(readonly subcommand: Subcommand, readonly exitCode: number | null, reason: "failed" | "timeout" | "output limit" | "invalid export") {
-    super(`OpenCode 2 auth ${subcommand} ${reason} (exit ${exitCode ?? "unknown"})`);
-    this.name = "Oc2CredentialError";
-  }
 }
 
 export function createOc2Credentials(options: Oc2CredentialOptions = {}): Oc2Credentials {

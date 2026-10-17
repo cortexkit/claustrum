@@ -85,3 +85,19 @@ export class ReportedCustodyExhaustionError extends CustodyExhaustionError {
     this.accountStates = accountStates;
   }
 }
+
+export class CustodyEndpointError extends Error {
+  override name = "CustodyEndpointError";
+
+  constructor(readonly code: "no_server" | "entries_full") {
+    super(code);
+  }
+}
+
+export class Oc2CredentialError extends Error {
+  override name = "Oc2CredentialError";
+
+  constructor(readonly subcommand: "export" | "import" | "switch" | "logout", readonly exitCode: number | null, reason: "failed" | "timeout" | "output limit" | "invalid export") {
+    super(`OpenCode 2 auth ${subcommand} ${reason} (exit ${exitCode ?? "unknown"})`);
+  }
+}

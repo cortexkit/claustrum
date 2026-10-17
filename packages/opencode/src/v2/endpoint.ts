@@ -1,8 +1,11 @@
 import { timingSafeEqual } from "node:crypto";
 
+import { CustodyEndpointError } from "../errors";
 import { createLogger, type CustodyLogger } from "../log";
 import { sentinel } from "../tombstone";
 import type { SessionWebSocketHandshake } from "./host-types";
+
+export { CustodyEndpointError } from "../errors";
 
 export type EndpointInstance = {
   readonly id: string;
@@ -21,14 +24,6 @@ export type EndpointDeps = {
   idleTimeoutSeconds?: number;
   log?: CustodyLogger;
 };
-
-export class CustodyEndpointError extends Error {
-  override readonly name = "CustodyEndpointError";
-
-  constructor(readonly code: "no_server" | "entries_full") {
-    super(code);
-  }
-}
 
 type Entry = { provider: string; method: string; url: string; expiresAt: number; consumed: boolean };
 export type BunRequestInit = RequestInit & { timeout: false };
@@ -52,15 +47,15 @@ function outboundHeaders(input: Headers): Headers {
   return headers;
 }
 
-export function createUpstreamFetch(signal: AbortSignal): typeof fetch {
+export function createUpstreamFetch(signal: AbortSignal, upstreamFetch: typeof fetch = fetch): typeof fetch {
   return Object.assign((input: RequestInfo | URL, init?: RequestInit) => {
     const options: BunRequestInit = {
       ...init,
       signal: AbortSignal.any([...(init?.signal ? [init.signal] : []), signal]),
       timeout: false,
     };
-    return fetch(input, options);
-  }, { preconnect: fetch.preconnect });
+    return upstreamFetch(input, options);
+  }, { preconnect: upstreamFetch.preconnect });
 }
 
 // In-process plugins already share manifest/vault access; this is not an isolation boundary.

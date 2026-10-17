@@ -57,17 +57,17 @@ async-trait = "0.1"
 #
 # `http2` is required by ONE caller and enabled for EVERY caller, because this is a
 # workspace dependency and cargo unions features across the graph. APNs speaks HTTP/2
-# only — a client built without it negotiates 1.1 and is refused at the transport
-# before any request is seen — but the daemon links the same client for OAuth token
-# refresh, so its provider requests can now negotiate HTTP/2 where they previously
-# could not.
+# only -- a client built without it negotiates 1.1 and is refused at the transport
+# before any request is seen -- and the daemon links the same reqwest for OAuth token
+# refresh.
 #
-# That is a behaviour change to the credential-serving path arriving as a side effect
-# of an unrelated feature, and it is recorded here rather than assumed benign: the
-# providers are ordinary HTTPS endpoints and reqwest negotiates by ALPN, so a server
-# that does not offer h2 continues to be spoken to over 1.1. If a refresh ever fails
-# in a way that looks like a transport rather than a credential problem, this line is
-# the change to suspect first.
+# Provider refresh does NOT negotiate HTTP/2 as a result: `ReqwestTransport::new`
+# (crates/credentials-core/src/http.rs) builds its client with `.http1_only()`, so
+# every refresh stays on HTTP/1.1 whatever features this line enables. That pin, not
+# this feature list, decides the refresh protocol; the reasoning and how to lift it
+# are in its doc comment. `cargo run -p credentials-core --example
+# negotiated_protocol` measures what each provider token endpoint would negotiate
+# without the pin.
 reqwest = { version = "0.12", default-features = false, features = [
   "rustls-tls",
   "json",

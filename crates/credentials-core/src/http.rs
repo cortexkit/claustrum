@@ -22,8 +22,10 @@ impl ReqwestTransport {
     ///
     /// This workspace enables reqwest's `http2` feature for an unrelated caller, and
     /// cargo unions features across the graph, so without this line the client offers
-    /// h2 here too. Measured against the five provider token endpoints this transport
-    /// posts to: ALL FIVE accept h2, so the next release build would move every
+    /// h2 here too. When the pin was added, every provider token endpoint the probe
+    /// then covered accepted h2 (re-measure with `cargo run -p credentials-core
+    /// --example negotiated_protocol`, which probes each refresh adapter's endpoint),
+    /// so the next release build would have moved every
     /// credential refresh in the vault onto a different transport as a side effect of
     /// a feature added for something else. Nobody would have decided that.
     ///
@@ -140,6 +142,54 @@ mod tests {
             source.contains("impl HttpTransport for ReqwestTransport"),
             "the included source must be this module; if this fails the include path \
              is wrong and the assertion above proves nothing"
+        );
+    }
+
+    /// The HTTP-version probe example reaches every refresh adapter through the
+    /// adapter's own URL constants, never through a typed URL.
+    ///
+    /// The probe is how anyone deciding about the HTTP/1.1 pin above learns what each
+    /// provider would negotiate. Its list was once hand-typed, and it drifted: it
+    /// probed `api.x.ai` while the xai adapter refreshes at `auth.x.ai`, probed
+    /// GitHub's device-login URL for github-copilot, and missed six adapters. Nothing
+    /// failed, because an example is only compiled, never checked against the tree.
+    #[test]
+    fn the_protocol_probe_covers_every_refresh_adapter_through_its_constants() {
+        let example = include_str!("../examples/negotiated_protocol.rs");
+        let code: String = example
+            .lines()
+            .map(|line| line.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !code.contains("\"https:"),
+            "the probe must take its URLs from the adapters' constants, not literals"
+        );
+
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/refresh_adapters");
+        let mut adapters: Vec<String> = std::fs::read_dir(&dir)
+            .expect("read refresh_adapters/")
+            .filter_map(|entry| {
+                let name = entry.ok()?.file_name().to_string_lossy().to_string();
+                name.strip_suffix(".rs").map(str::to_string)
+            })
+            // `mod` and `fixture` are not adapters; `digitalocean` has no refresh
+            // exchange (its tokens are re-login-only), so there is nothing to probe.
+            .filter(|stem| !matches!(stem.as_str(), "mod" | "fixture" | "digitalocean"))
+            .collect();
+        adapters.sort();
+        assert!(
+            adapters.len() >= 12,
+            "the adapter scan must find the adapter modules (found {adapters:?})"
+        );
+        let missing: Vec<&String> = adapters
+            .iter()
+            .filter(|stem| !code.contains(&format!("{stem}::")))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "examples/negotiated_protocol.rs does not probe these refresh adapters \
+             through their URL constants: {missing:?}"
         );
     }
 }

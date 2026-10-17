@@ -19,7 +19,49 @@
 //! Run with: cargo run -p credentials-core --example negotiated_protocol
 
 use credentials_core::http::ReqwestTransport;
-use credentials_core::refresh_adapters::HttpTransport;
+use credentials_core::refresh_adapters::{
+    anthropic, antigravity, cursor, devin, github_app, github_copilot, google, kimi, meta,
+    openai, snowflake, xai, HttpTransport,
+};
+
+/// The URL each refresh adapter's `refresh` sends its request to, taken from the
+/// adapters' own constants so this list cannot point somewhere production does not.
+/// An earlier hand-typed list probed `api.x.ai` while the xai adapter refreshes at
+/// `auth.x.ai`, and probed GitHub's device-login URL for github-copilot.
+///
+/// `digitalocean` is absent because it has no refresh exchange: its tokens are
+/// re-login-only. Two URLs are templates and need a value filled in:
+/// - github_app posts to `<ACCESS_TOKENS_URL_PREFIX><installation id>/access_tokens`;
+///   installation id 0 is used, which the server refuses after negotiating.
+/// - snowflake's host is per tenant. Set `SNOWFLAKE_ACCOUNT` to probe a real tenant;
+///   otherwise a placeholder account is used, which may not resolve.
+///
+/// Copilot refreshes with a GET; this probe POSTs everywhere. The protocol is chosen
+/// during the TLS handshake, before the method is seen, so the answer is the same.
+fn refresh_endpoints() -> Vec<(&'static str, String)> {
+    let snowflake_account =
+        std::env::var("SNOWFLAKE_ACCOUNT").unwrap_or_else(|_| "negotiated-protocol-probe".into());
+    vec![
+        ("anthropic", anthropic::TOKEN_URL.to_string()),
+        ("antigravity", antigravity::TOKEN_URL.to_string()),
+        ("cursor", cursor::TOKEN_URL.to_string()),
+        ("devin", devin::TOKEN_URL.to_string()),
+        (
+            "github_app",
+            format!("{}0/access_tokens", github_app::ACCESS_TOKENS_URL_PREFIX),
+        ),
+        ("github-copilot", github_copilot::TOKEN_URL.to_string()),
+        ("google", google::TOKEN_URL.to_string()),
+        ("kimi", kimi::TOKEN_URL.to_string()),
+        ("meta", meta::KEY_URL.to_string()),
+        ("openai", openai::TOKEN_URL.to_string()),
+        (
+            "snowflake",
+            snowflake::TOKEN_URL_BASE.replace("{account}", &snowflake_account),
+        ),
+        ("xai", xai::TOKEN_URL.to_string()),
+    ]
+}
 
 #[tokio::main]
 async fn main() {
@@ -42,17 +84,7 @@ async fn main() {
         }
     };
 
-    // The token endpoints the refresh adapters actually post to.
-    let endpoints = [
-        ("anthropic", "https://platform.claude.com/v1/oauth/token"),
-        ("google", "https://oauth2.googleapis.com/token"),
-        ("openai", "https://auth.openai.com/oauth/token"),
-        ("xai", "https://api.x.ai/v1/oauth2/token"),
-        (
-            "github-copilot",
-            "https://github.com/login/oauth/access_token",
-        ),
-    ];
+    let endpoints = refresh_endpoints();
 
     println!("negotiated protocol per provider token endpoint");
     println!("(the client offers h2; the server decides)");
@@ -61,8 +93,8 @@ async fn main() {
     let mut h2_count = 0usize;
     let mut h1_count = 0usize;
 
-    for (name, url) in endpoints {
-        match client.post(url).body(Vec::new()).send().await {
+    for (name, url) in &endpoints {
+        match client.post(url.as_str()).body(Vec::new()).send().await {
             Ok(resp) => {
                 let version = format!("{:?}", resp.version());
                 match resp.version() {
@@ -103,8 +135,8 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    for (name, url) in endpoints {
-        match control.post(url).body(Vec::new()).send().await {
+    for (name, url) in &endpoints {
+        match control.post(url.as_str()).body(Vec::new()).send().await {
             Ok(resp) => println!("  {name:<16} {:?}", resp.version()),
             Err(why) => println!("  {name:<16} TRANSPORT ERROR: {why}"),
         }
@@ -134,7 +166,7 @@ async fn main() {
         }
     };
     let mut completed = 0usize;
-    for (name, url) in endpoints {
+    for (name, url) in &endpoints {
         match transport
             .post(url, &[], "application/x-www-form-urlencoded", Vec::new())
             .await

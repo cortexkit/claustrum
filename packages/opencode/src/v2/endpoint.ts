@@ -142,6 +142,7 @@ export class CustodyEndpoint {
     if (!this.#server) return false;
     try {
       const parsed = new URL(url);
+      // not-a-path: a WHATWG URL pathname always uses "/" separators, on every platform.
       const parts = parsed.pathname.split("/");
       return parsed.origin === this.origin() && !parsed.username && !parsed.password && !parsed.search && !parsed.hash &&
         parts.length === 3 && parts[1] === this.#token && /^[A-Za-z0-9_-]{22}$/.test(parts[2]!);
@@ -187,6 +188,7 @@ export class CustodyEndpoint {
     this.prune();
     try {
       if (request.headers.get("host") !== `127.0.0.1:${this.#server?.port}`) return this.reject(404, "not_found");
+      // not-a-path: a WHATWG URL pathname always uses "/" separators, on every platform.
       const parts = new URL(request.url).pathname.split("/");
       if (parts.length !== 3 || !this.tokenMatches(parts[1]!)) return this.reject(404, "not_found");
       const entry = this.#entries.get(parts[2]!);

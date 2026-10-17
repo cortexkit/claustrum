@@ -23,6 +23,12 @@ export type Oc2Credentials = {
 };
 export type Oc2CredentialOptions = { opencodeBin?: string; oc2Standalone?: boolean; oc2Server?: string; timeoutMs?: number };
 
+export function formatOc2AuthCommand(options: Oc2CredentialOptions, subcommand: "switch" | "logout", integration: string, id: string): string {
+  const quote = (text: string) => /^[A-Za-z0-9_./:-]+$/.test(text) ? text : `'${text.replaceAll("'", "'\\''")}'`;
+  const target = options.oc2Standalone ? " --standalone" : options.oc2Server ? ` --server ${quote(options.oc2Server)}` : "";
+  return `${quote(options.opencodeBin ?? "opencode")} auth ${subcommand} ${quote(integration)} ${quote(id)}${target}`;
+}
+
 export class Oc2CredentialError extends Error {
   constructor(readonly subcommand: Subcommand, readonly exitCode: number | null, reason: "failed" | "timeout" | "output limit" | "invalid export") {
     super(`OpenCode 2 auth ${subcommand} ${reason} (exit ${exitCode ?? "unknown"})`);

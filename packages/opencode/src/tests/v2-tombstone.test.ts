@@ -31,7 +31,7 @@ describe("V2 credential tombstones", () => {
     expect(classifyV2Credential({ ...v2OauthTombstone(provider, "m"), configuration: {} }, provider)).toBe("drift");
     expect(classifyV2Credential({ ...v2KeyTombstone(provider), configuration: {}, extra: true }, provider)).toBe("drift");
   });
-  test("review 7: a foreign V1 OAuth sentinel is drift, not migrated custody", () => {
+  test("a foreign V1 OAuth sentinel is drift, not migrated custody", () => {
     expect(classifyV2Credential({ type: "oauth", methodID: "m", access: "", refresh: sentinel("other"), expires: 0 }, "xai")).toBe("drift");
   });
 });

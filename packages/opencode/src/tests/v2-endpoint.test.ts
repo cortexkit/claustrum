@@ -61,7 +61,8 @@ function endpoint(deps: EndpointDeps = {}) {
 }
 
 function instance(id = "A"): EndpointInstance {
-  return { id, serve: (_provider, request, signal) => createUpstreamFetch(signal)(request) };
+  return { id, ownership: () => "owned", handshake: async () => {},
+    serve: (_provider, request, signal) => createUpstreamFetch(signal)(request) };
 }
 
 function route(holder: CustodyEndpoint, url: string | URL, init: RequestInit = {}) {
@@ -103,7 +104,16 @@ afterEach(async () => {
 });
 
 describe("OC2 loopback custody endpoint", () => {
-  test("review 1: holder reflection exposes neither custody token nor route entries", async () => {
+  test("handshake claims follow event identity across instance registrations", () => {
+    const holder = endpoint();
+    const event = {};
+    expect(holder.claimHandshake(event)).toBe(true);
+    holder.register(instance());
+    holder.register(instance("B"));
+    expect(holder.claimHandshake(event)).toBe(false);
+    expect(holder.claimHandshake({})).toBe(true);
+  });
+  test("holder reflection exposes neither custody token nor route entries", async () => {
     const stub = upstream();
     const holder = endpoint();
     holder.register(instance());
@@ -121,7 +131,7 @@ describe("OC2 loopback custody endpoint", () => {
     expect(stub.requests.length).toBe(1);
   });
 
-  test("review 2: rebinding Host is rejected before consuming a valid route", async () => {
+  test("rebinding Host is rejected before consuming a valid route", async () => {
     const stub = upstream();
     const holder = endpoint();
     holder.register(instance());
@@ -138,10 +148,10 @@ describe("OC2 loopback custody endpoint", () => {
     expect(stub.requests.length).toBe(1);
   });
 
-  test("review 3: response hop-by-hop and Connection-named headers are stripped", async () => {
+  test("response hop-by-hop and Connection-named headers are stripped", async () => {
     const stub = upstream();
     const holder = endpoint();
-    holder.register({ id: "response-headers", serve: async (_provider, request, signal) => {
+    holder.register({ ...instance("response-headers"), serve: async (_provider, request, signal) => {
       const response = await createUpstreamFetch(signal)(request);
       const headers = new Headers(response.headers);
       for (const name of ["proxy-authenticate", "proxy-authorization", "te", "trailer", "upgrade", "x-response-private"]) headers.set(name, MATERIAL);
@@ -153,14 +163,13 @@ describe("OC2 loopback custody endpoint", () => {
     for (const name of ["proxy-authenticate", "proxy-authorization", "te", "trailer", "upgrade", "x-response-private"]) {
       expect(response.headers.has(name)).toBe(false);
     }
-    // Bun may add its own transport headers after the relay removes the upstream ones.
     expect(response.headers.get("connection") === "x-response-private").toBe(false);
     expect(response.headers.get("keep-alive") === "timeout=999").toBe(false);
     expect(await response.text()).toBe("round-trip");
     expect(stub.requests.length).toBe(1);
   });
 
-  test("review 3: response cookies and every access-control header are stripped", async () => {
+  test("response cookies and every access-control header are stripped", async () => {
     const stub = upstream(() => new Response("round-trip", { headers: {
       "set-cookie": `session=${MATERIAL}`, "set-cookie2": `session=${MATERIAL}`,
       "access-control-allow-origin": "*", "access-control-allow-credentials": "true",
@@ -176,11 +185,11 @@ describe("OC2 loopback custody endpoint", () => {
     expect(stub.requests.length).toBe(1);
   });
 
-  test("review 3: a served redirect is refused before the client contacts its target", async () => {
+  test("a served redirect is refused before the client contacts its target", async () => {
     const attacker = upstream();
     const stub = upstream(() => new Response(null, { status: 302, headers: { location: attacker.url.href } }));
     const holder = endpoint();
-    holder.register({ id: "refused-redirect", serve: (_provider, request, signal) => createUpstreamFetch(signal)(request, { redirect: "manual" }) });
+    holder.register({ ...instance("refused-redirect"), serve: (_provider, request, signal) => createUpstreamFetch(signal)(request, { redirect: "manual" }) });
     const response = await fetch(route(holder, stub.url));
     expect(response.status).toBe(502);
     expect(await response.json()).toEqual({ error: "redirect_refused" });
@@ -188,7 +197,7 @@ describe("OC2 loopback custody endpoint", () => {
     expect(attacker.requests.length).toBe(0);
   });
 
-  test("review 4: a throwing logger still returns safe internal JSON without a path", async () => {
+  test("a throwing logger still returns safe internal JSON without a path", async () => {
     const stub = upstream();
     const holder = getCustodyEndpoint({ log: {
       ...createLogger((entry) => logs.push(entry)),
@@ -207,7 +216,7 @@ describe("OC2 loopback custody endpoint", () => {
     expect(stub.requests.length).toBe(0);
   });
 
-  test("review 6: default server options pin loopback ephemeral port and zero idle timeout", async () => {
+  test("default server options pin loopback ephemeral port and zero idle timeout", async () => {
     const stub = upstream();
     const holder = endpoint();
     const spy = spyOn(Bun, "serve");
@@ -225,7 +234,7 @@ describe("OC2 loopback custody endpoint", () => {
     }
   });
 
-  test("a: round-trips the recorded destination, streamed body and safe headers", async () => {
+  test("round-trips the recorded destination, streamed body and safe headers", async () => {
     const stub = upstream();
     const holder = endpoint();
     holder.register(instance());
@@ -255,7 +264,7 @@ describe("OC2 loopback custody endpoint", () => {
     expect(recorded.headers.has("proxy-authorization")).toBe(false);
   });
 
-  test("b: consumed ids cannot be replayed", async () => {
+  test("consumed ids cannot be replayed", async () => {
     const stub = upstream();
     const holder = endpoint();
     holder.register(instance());
@@ -266,7 +275,7 @@ describe("OC2 loopback custody endpoint", () => {
     expect(stub.requests.length).toBe(1);
   });
 
-  test("b: unknown ids and wrong tokens are indistinguishable", async () => {
+  test("unknown ids and wrong tokens are indistinguishable", async () => {
     const stub = upstream();
     const holder = endpoint();
     holder.register(instance());
@@ -283,7 +292,7 @@ describe("OC2 loopback custody endpoint", () => {
     expect(stub.requests.length).toBe(0);
   });
 
-  test("c: method mismatch and absent sentinel consume without dispatch", async () => {
+  test("method mismatch and absent sentinel consume without dispatch", async () => {
     const stub = upstream();
     const holder = endpoint();
     holder.register(instance());
@@ -296,7 +305,7 @@ describe("OC2 loopback custody endpoint", () => {
     expect(stub.requests.length).toBe(0);
   });
 
-  test("d: body cap covers content-length and chunked reads", async () => {
+  test("body cap covers content-length and chunked reads", async () => {
     const stub = upstream();
     const holder = endpoint({ maxBodyBytes: 4 });
     holder.register(instance());
@@ -309,7 +318,7 @@ describe("OC2 loopback custody endpoint", () => {
     expect(stub.requests.length).toBe(0);
   });
 
-  test("d: concurrency stays occupied until the response body ends", async () => {
+  test("concurrency stays occupied until the response body ends", async () => {
     const stub = sse();
     const holder = endpoint({ maxInFlight: 1 });
     holder.register(instance());
@@ -325,13 +334,13 @@ describe("OC2 loopback custody endpoint", () => {
     expect(stub.requests.length).toBe(2);
   });
 
-  test("e: reload dispatches an older route through the newest live instance", async () => {
+  test("reload dispatches an older route through the newest live instance", async () => {
     const stub = upstream();
     const holder = endpoint();
     holder.register(instance("A"));
     const request = route(holder, stub.url);
     const registration = holder.register({
-      id: "B",
+      ...instance("B"),
       serve: (_provider, outbound, signal) => {
         outbound.headers.set("x-instance", "B");
         return createUpstreamFetch(signal)(outbound);
@@ -346,7 +355,7 @@ describe("OC2 loopback custody endpoint", () => {
     expect(stub.requests[1]!.headers.has("x-instance")).toBe(false);
   });
 
-  test("f: last dispose preserves an in-flight SSE until completion then grace closes", async () => {
+  test("last dispose preserves an in-flight SSE until completion then grace closes", async () => {
     const stub = sse();
     const holder = endpoint({ graceMs: 30 });
     const registration = holder.register(instance());
@@ -367,7 +376,7 @@ describe("OC2 loopback custody endpoint", () => {
     expect(holder.isEndpointUrl(request.url)).toBe(false);
   });
 
-  test("g: quiet SSE survives eleven seconds without a server idle timeout", async () => {
+  test("quiet SSE survives eleven seconds without a server idle timeout", async () => {
     const stub = sse();
     const holder = endpoint();
     holder.register(instance());
@@ -381,7 +390,7 @@ describe("OC2 loopback custody endpoint", () => {
     expect(stub.requests.length).toBe(1);
   }, 30_000);
 
-  test("h: client abort reaches the upstream request signal within two seconds", async () => {
+  test("client abort reaches the upstream request signal within two seconds", async () => {
     const stub = sse();
     const holder = endpoint();
     holder.register(instance());
@@ -395,14 +404,13 @@ describe("OC2 loopback custody endpoint", () => {
     await reader.cancel().catch(() => {});
   });
 
-  test("g: explicit short idle timeout is a live cut positive control", async () => {
+  test("explicit short idle timeout is a live cut positive control", async () => {
     const stub = sse();
     const holder = endpoint({ idleTimeoutSeconds: 2 });
     holder.register(instance());
     const response = await fetch(route(holder, stub.url));
     const reader = response.body!.getReader();
     await reader.read();
-    // OC2 embeds a different Bun; pair the quiet-stream guard with an actual idle-cut control.
     try {
       const outcome = await Promise.race([
         reader.read().then(() => "data", () => "closed"),
@@ -415,7 +423,7 @@ describe("OC2 loopback custody endpoint", () => {
     }
   }, 10_000);
 
-  test("i: decoded gzip is not advertised as compressed to the loopback client", async () => {
+  test("decoded gzip is not advertised as compressed to the loopback client", async () => {
     const stub = upstream(() => new Response(Bun.gzipSync(new TextEncoder().encode("plain text")), {
       headers: { "content-encoding": "gzip", "content-length": "30" },
     }));
@@ -427,7 +435,7 @@ describe("OC2 loopback custody endpoint", () => {
     expect(stub.requests.length).toBe(1);
   });
 
-  test("M3: attacker-supplied query destination never reaches a second upstream", async () => {
+  test("attacker-supplied query destination never reaches a second upstream", async () => {
     const stub = upstream();
     const attacker = upstream();
     const holder = endpoint();
@@ -441,10 +449,10 @@ describe("OC2 loopback custody endpoint", () => {
     expect(stub.requests[0]!.path).toBe("/pinned");
   });
 
-  test("j: rejection logs contain codes and class names, never request material", async () => {
+  test("rejection logs contain codes and class names, never request material", async () => {
     const stub = upstream();
     const holder = endpoint();
-    holder.register({ id: "throwing", serve: async () => { throw new TypeError(MATERIAL); } });
+    holder.register({ ...instance("throwing"), serve: async () => { throw new TypeError(MATERIAL); } });
     const response = await fetch(route(holder, stub.url, { headers: { "x-material": MATERIAL } }));
     expect(response.status).toBe(502);
     expect(await response.json()).toEqual({ error: "serve_failed" });

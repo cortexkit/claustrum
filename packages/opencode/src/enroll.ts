@@ -8,14 +8,24 @@ import { writeOAuthTombstone, type TombstoneResult } from "./enroll-tombstone";
 import { readBounded } from "./bounded-read";
 import { defaultAuthPath } from "./plugin";
 import { OUR_PLUGIN_ID, readHandleFile, type OpenCodeHandleFileV1 } from "./handles";
-import { createOc2Credentials, OC2_CREDENTIAL_CONSUMERS, type Oc2Credentials, type Oc2CredentialEntry } from "./v2/oc2-credentials";
+import { createOc2Credentials, formatOc2AuthCommand, Oc2CredentialError, OC2_CREDENTIAL_CONSUMERS, type Oc2Credentials, type Oc2CredentialEntry } from "./v2/oc2-credentials";
 import { classifyV2Credential, v2KeyTombstone, v2OauthTombstone } from "./v2/tombstone";
 
 export type EnrollArgs = { provider: string; credentialId?: string; main: boolean; remove: boolean; handleFile?: string; minTtlMs?: number; tokenLifetimeMs?: number; manifestPath: string; authPath: string; oc2?: boolean; opencodeBin?: string; oc2Standalone?: boolean; oc2Server?: string; oc2Method?: string; removePrevious?: boolean; oc2EnrollmentFlags?: boolean; };
 export type EnrollClient = { getCredential(handle: string, minTtlMs?: number): Promise<ServedCredential>; close(): void; };
 export type EnrollDependencies = { connect(): Promise<EnrollClient>; readHandle(path: string): Promise<string>; writeManifest(path: string, input: XaiEnrollment): Promise<void>; removeManifest(path: string, input: { provider: "xai"; credentialId: "oauth:xai" }): Promise<void>; writeTombstone(path: string, provider: string): Promise<TombstoneResult>; readManifest?(path: string): Promise<OpenCodeHandleFileV1>; oc2?: Oc2Credentials; };
 
-const help = `Usage: bun run enroll -- --provider xai --id oauth:xai --main --min-ttl-ms <ms> --token-lifetime-ms <ms>\n\nv1 supports only --provider xai --id oauth:xai. The manifest records local serving; --remove removes it before /login.\n\nOpenCode 2: --oc2 --provider <id> uses an existing owned handle manifest entry. Only fresh xai accepts the V1 enrollment flags.\nOC2 options: --opencode-bin <path> (default opencode), --oc2-standalone or --oc2-server <url>, --oc2-method <id> (oauth only), --remove-previous.\n\nOptions: --handle-file <path>, --manifest-path <path>, --auth-path <path>, --remove, --help`;
+const help = `Usage: bun run enroll -- --provider xai --id oauth:xai --main --min-ttl-ms <ms> --token-lifetime-ms <ms>
+       bun run enroll -- --oc2 --provider <provider>
+       bun run enroll -- --oc2 --provider xai --id oauth:xai --main --min-ttl-ms <ms> --token-lifetime-ms <ms>
+
+v1 supports only --provider xai --id oauth:xai. The manifest records local serving; --remove removes it before /login.
+
+OpenCode 2: --oc2 uses an existing owned handle manifest entry. Only fresh xai accepts the V1 enrollment flags.
+OC2 options: --opencode-bin <path> (default opencode), --oc2-standalone or --oc2-server <url>, --oc2-method <id> (oauth only), --remove-previous.
+--oc2 rejects --remove; remove the manifest entry separately to hand ownership back to OpenCode.
+
+Options: --handle-file <path>, --manifest-path <path>, --auth-path <path>, --remove, --help`;
 
 function rejectDuplicateFlags(argv: string[]): void {
   const seen = new Set<string>();
@@ -173,7 +183,13 @@ async function runOc2Enrollment(args: EnrollArgs, deps: EnrollDependencies): Pro
       const value = shape === "api" ? { ...v2KeyTombstone(args.provider), ...(activeValue?.type === "key" && activeValue.configuration !== undefined ? { configuration: activeValue.configuration } : {}) } : v2OauthTombstone(args.provider, methodID as string);
       target = { id: `cred_claustrum_${randomBytes(8).toString("hex")}`, integrationID: args.provider, label: "claustrum custody", active: true, value };
       await cli.importCredentials([target]);
-      await cli.switchCredential(args.provider, target.id);
+      try {
+        await cli.switchCredential(args.provider, target.id);
+      } catch (error) {
+        const refusal = new Oc2CredentialError("switch", error instanceof Oc2CredentialError ? error.exitCode : null, "failed");
+        refusal.message += `; imported credential ${target.id}; finish with: ${formatOc2AuthCommand(args, "switch", args.provider, target.id)}; undo with: ${formatOc2AuthCommand(args, "logout", args.provider, target.id)}`;
+        throw refusal;
+      }
     }
     const readback = (await cli.exportCredentials(args.provider)).filter((entry) => entry.integrationID === args.provider && entry.active);
     if (readback.length !== 1 || readback[0]!.id !== target.id || classifyV2Credential(readback[0]!.value, args.provider) !== "tombstone") throw new Error("OpenCode 2 readback did not show the tombstone active");
@@ -181,11 +197,9 @@ async function runOc2Enrollment(args: EnrollArgs, deps: EnrollDependencies): Pro
     for (const entry of previous) {
       if (entry.integrationID !== args.provider || entry.id === target.id) continue;
       const classification = classifyV2Credential(entry.value, args.provider);
-      if (classification === "v1-migrated" || classification === "drift" || (entry.active && classification === "real" && args.removePrevious)) await cli.logoutCredential(args.provider, entry.id);
+      if (classification === "v1-migrated" || classification === "drift" || (!entry.active && classification === "tombstone") || (entry.active && classification === "real" && args.removePrevious)) await cli.logoutCredential(args.provider, entry.id);
       else if (entry.active && classification === "real") {
-        const quote = (text: string) => /^[A-Za-z0-9_./:-]+$/.test(text) ? text : `'${text.replaceAll("'", "'\\''")}'`;
-        const targetFlags = args.oc2Standalone ? " --standalone" : args.oc2Server ? ` --server ${quote(args.oc2Server)}` : "";
-        notices.push(`Previous credential ${JSON.stringify(entry.id)} (${JSON.stringify(entry.label)}) retained. Remove it with: ${quote(args.opencodeBin ?? "opencode")} auth logout ${quote(args.provider)} ${quote(entry.id)}${targetFlags}`);
+        notices.push(`Previous credential ${JSON.stringify(entry.id)} (${JSON.stringify(entry.label)}) retained. Remove it with: ${formatOc2AuthCommand(args, "logout", args.provider, entry.id)}`);
       }
     }
     // Unlike V1, fresh OC2 enrollment writes the manifest last so a failed CLI write cannot publish an unusable binding.

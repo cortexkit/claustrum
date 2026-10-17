@@ -18,9 +18,10 @@ type Hook = {
   active: boolean;
 };
 
-function context() {
+function context(beforeRegister?: () => Promise<void>) {
   const registrations: Hook[] = [];
   const ctx: PluginContext = { session: { hook: async (name, callback, options) => {
+    await beforeRegister?.();
     const registration: Hook = {
       name, callback, options, active: true,
       dispose: mock(async () => { registration.active = false; }),
@@ -31,8 +32,7 @@ function context() {
   return { ctx, registrations };
 }
 
-// OC2 2.0.32 hooks.ts:88-95 keeps insertion order, including unscoped callbacks,
-// and passes the same mutable event to every matching callback.
+// OpenCode 2.0.32 packages/core/src/plugin/hooks.ts:88-95.
 async function runHttpHooks(registrations: Hook[], event: SessionHttpRequest) {
   for (const registration of registrations) {
     if (!registration.active || registration.name !== "http.request") continue;
@@ -151,7 +151,7 @@ test("V2 entry installs custody's request guard", async () => {
   expect(requests.length).toBe(0);
 });
 
-test("arm 1 api happy path routes to V1 serve with material and round-trips the body", async () => {
+test("API requests route to V1 serve with material and round-trip the body", async () => {
   const host = await install();
   expect(host.handleReader.mock.calls.length).toBe(1);
   const event = httpEvent();
@@ -168,7 +168,7 @@ test("arm 1 api happy path routes to V1 serve with material and round-trips the 
   expect(logs.filter((entry) => entry.provider === "deepseek" && entry.state === "served").length).toBe(1);
 });
 
-test("arm 2 oauth happy path asks the refreshable client for minimum TTL", async () => {
+test("OAuth requests ask the refreshable client for minimum TTL", async () => {
   const manifest = handles("oauth");
   const client = fakeClient();
   const host = await install(undefined, { handleReader: async () => manifest, clientFactory: async () => client as never, oauthMinTtlMs: 123_000 });
@@ -183,7 +183,7 @@ test("arm 2 oauth happy path asks the refreshable client for minimum TTL", async
   expect(requests[0]?.sentinel).toBe(false);
 });
 
-test("arm 3 split refuses a real local key before upstream", async () => {
+test("split ownership refuses a real local key before upstream", async () => {
   const host = await install();
   const event = httpEvent("deepseek", "local-looking-key");
   await expect(runHttpHooks(host.registrations, event)).rejects.toBeInstanceOf(CustodySplitError);
@@ -192,7 +192,7 @@ test("arm 3 split refuses a real local key before upstream", async () => {
   expect(requests.length).toBe(0);
 });
 
-test("arm 4 orphan guard refuses any sentinel on unowned providers and leaves unmanaged requests alone", async () => {
+test("orphan guard refuses any sentinel on absent providers and leaves unmanaged requests alone", async () => {
   const host = await install();
   await expect(runHttpHooks(host.registrations, httpEvent("unowned"))).rejects.toBeInstanceOf(CustodyOrphanError);
   const urlEvent = httpEvent("unowned", "ordinary");
@@ -205,10 +205,10 @@ test("arm 4 orphan guard refuses any sentinel on unowned providers and leaves un
   expect(requests.length).toBe(0);
 });
 
-test("arm 5 another owner's provider has no scoped hooks and remains untouched", async () => {
+test("another owner's sentinel request passes untouched without scoped hooks", async () => {
   const host = await install(undefined, { handleReader: async () => handles("api", "other-plugin") });
   expect(host.registrations.some((hook) => hook.options?.providerID === "deepseek")).toBe(false);
-  const event = httpEvent("deepseek", "ordinary");
+  const event = httpEvent();
   const original = event.request;
   await runHttpHooks(host.registrations, event);
   expect(event.request === original).toBe(true);
@@ -216,9 +216,9 @@ test("arm 5 another owner's provider has no scoped hooks and remains untouched",
   expect(requests.length).toBe(0);
 });
 
-test("arm 6 unreadable manifest installs only the fail-closed orphan guard", async () => {
+test("unreadable manifest installs only the fail-closed orphan guards", async () => {
   const host = await install(undefined, { handleReader: async () => { throw new HandleFileValidationError("handle file invalid"); } });
-  expect(host.registrations.length).toBe(1);
+  expect(host.registrations.length).toBe(2);
   expect(host.registrations[0]?.options).toBeUndefined();
   await expect(runHttpHooks(host.registrations, httpEvent())).rejects.toBeInstanceOf(CustodyOrphanError);
   await expect(runHttpHooks(host.registrations, httpEvent())).rejects.toThrow("handle file invalid");
@@ -229,18 +229,20 @@ test("arm 6 unreadable manifest installs only the fail-closed orphan guard", asy
   expect(requests.length).toBe(0);
 });
 
-test("arm 7 disable switch installs nothing and warns with the V2 remedies", async () => {
+test("disable switch installs nothing and warns with owned providers and the supported remedy", async () => {
   process.env.CLAUSTRUM_CUSTODY_DISABLE = "1";
   const host = await install();
   expect(host.registrations.length).toBe(0);
   const warning = logs.find((entry) => entry.errorCode === "custody_disabled");
   expect(warning?.level).toBe("warn");
-  expect(warning?.errorMessage?.includes("enroll --remove")).toBe(true);
-  expect(warning?.errorMessage?.includes("unsetting")).toBe(true);
+  expect(warning?.errorMessage?.includes("unset CLAUSTRUM_CUSTODY_DISABLE")).toBe(true);
+  expect(warning?.errorMessage?.includes("Owned providers: deepseek")).toBe(true);
+  expect(warning?.errorMessage?.includes("--remove")).toBe(false);
+  expect(host.handleReader.mock.calls.length).toBe(1);
   expect(requests.length).toBe(0);
 });
 
-test.each([false, true])("arm 8 overlap rewrites once and newest instance serves while old cleanup preserves the stream (reversed=%p)", async (reverse) => {
+test.each([false, true])("overlap rewrites once and newest instance serves while old cleanup preserves the stream (reversed=%p)", async (reverse) => {
   const first = await install();
   const secondClient = fakeClient(NEW_MATERIAL);
   await install(first, { clientFactory: async () => secondClient as never });
@@ -277,7 +279,7 @@ test.each([false, true])("arm 8 overlap rewrites once and newest instance serves
   }
 });
 
-test("arm 8 cleanup between rewrite and connect still dispatches to the newest instance", async () => {
+test("cleanup between rewrite and connect still dispatches to the newest instance", async () => {
   const first = await install();
   const event = httpEvent();
   await runHttpHooks(first.registrations, event);
@@ -291,18 +293,22 @@ test("arm 8 cleanup between rewrite and connect still dispatches to the newest i
   expect(requests[0]?.newestMaterial).toBe(true);
 });
 
-test.each([false, true])("arm 9 WS only current instance substitutes; URL sentinels and split headers refuse (reversed=%p)", async (reverse) => {
+test.each([false, true])("WS delegates to current exactly once; URL sentinels and split headers refuse (reversed=%p)", async (reverse) => {
   const first = await install();
   const newer = fakeClient(NEW_MATERIAL);
   await install(first, { clientFactory: async () => newer as never });
   const oldHook = first.registrations.find((hook) => hook.name === "experimental.ws.handshake")!;
   const oldEvent = wsEvent();
   await oldHook.callback(oldEvent as SessionHttpRequest & SessionWebSocketHandshake);
-  expect(oldEvent.headers.authorization?.includes(sentinel("deepseek"))).toBe(true);
+  expect(oldEvent.headers.authorization === `Bearer ${NEW_MATERIAL}`).toBe(true);
   expect(first.client.getCredential.mock.calls.length).toBe(0);
   const event = wsEvent();
+  const target = first.endpoint.current!;
+  const handshake = spyOn(target, "handshake");
   const ordered = reverse ? [...first.registrations].reverse() : first.registrations;
   await runWsHooks(ordered, event);
+  expect(handshake.mock.calls.length).toBe(1);
+  handshake.mockRestore();
   expect(event.headers.authorization === `Bearer ${NEW_MATERIAL}`).toBe(true);
   expect(event.headers["x-kept"]).toBe("untouched");
   const urlSentinel = wsEvent();
@@ -315,7 +321,7 @@ test.each([false, true])("arm 9 WS only current instance substitutes; URL sentin
   expect(requests.length).toBe(0);
 });
 
-test("arm 9 WS refuses exhausted credentials with V1's exhaustion class", async () => {
+test("WS refuses exhausted credentials with V1's exhaustion class", async () => {
   const client = fakeClient();
   client.getCredential.mockImplementation(async () => { throw new Error("vault unavailable"); });
   const host = await install(undefined, { clientFactory: async () => client as never });
@@ -323,7 +329,7 @@ test("arm 9 WS refuses exhausted credentials with V1's exhaustion class", async 
   expect(requests.length).toBe(0);
 });
 
-test("arm 10 upstream 401 reports auth failure and tries the next account", async () => {
+test("upstream 401 reports auth failure and tries the next account", async () => {
   const manifest = handles();
   manifest.providers[0]!.accounts.push({ label: "second", handle: SECOND_HANDLE, credential_id: "apikey:deepseek:second" });
   const client = fakeClient();
@@ -345,13 +351,13 @@ test("arm 10 upstream 401 reports auth failure and tries the next account", asyn
   expect(report?.reporterSource).toBe("direct");
 });
 
-test("arm 11 cleanup disposes every hook, endpoint registration and controller exactly once", async () => {
+test("cleanup disposes every hook, endpoint registration and controller exactly once", async () => {
   const dispose = spyOn(FreshnessController.prototype, "dispose");
   const clearInterval = mock(() => {});
   const setInterval = mock(() => ({ unref() {} }));
   try {
     const host = await install(undefined, { handleReader: async () => handles("oauth"), setInterval, clearInterval });
-    expect(host.registrations.length).toBe(3);
+    expect(host.registrations.length).toBe(4);
     expect(host.endpoint.current !== undefined).toBe(true);
     await host.cleanup();
     await host.cleanup();
@@ -379,7 +385,7 @@ test("ownership changes refuse HTTP and WS without forwarding material", async (
   expect(requests.length).toBe(0);
 });
 
-test("arm 12 client diagnostics go to the sink, never to the console", async () => {
+test("client diagnostics go to the sink, never to the console", async () => {
   const client = fakeClient();
   const host = await install(undefined, { clientFactory: async (options) => {
     options?.logger?.("unknown_wire_class");
@@ -415,5 +421,114 @@ test("serve forwards the endpoint's cancellation signal and disables Bun's timeo
   abort.abort();
   expect(propagatedSignal?.aborted).toBe(true);
   await expect(host.endpoint.current!.serve("unknown", httpEvent().request, new AbortController().signal)).rejects.toBeInstanceOf(CustodyOwnershipError);
+  expect(requests.length).toBe(0);
+});
+
+test("an earlier guard follows the current instance when its different owned set adopts a provider", async () => {
+  const first = await install(undefined, { handleReader: async () => ({ version: 1, providers: [] }) });
+  const newest = fakeClient(NEW_MATERIAL);
+  await install(first, { clientFactory: async () => newest as never });
+  const event = httpEvent();
+  await runHttpHooks(first.registrations, event);
+  const response = await fetch(event.request);
+  expect(response.status).toBe(200);
+  await response.text();
+  expect(requests.length).toBe(1);
+  expect(requests[0]?.newestMaterial).toBe(true);
+});
+
+test("an older scoped HTTP hook refuses a provider absent from the current manifest", async () => {
+  const first = await install();
+  await install(first, { handleReader: async () => ({ version: 1, providers: [] }) });
+  const route = spyOn(first.endpoint, "route");
+  try {
+    await expect(runHttpHooks(first.registrations, httpEvent())).rejects.toBeInstanceOf(CustodyOrphanError);
+    expect(route.mock.calls.length).toBe(0);
+  } finally { route.mockRestore(); }
+  expect(requests.length).toBe(0);
+});
+
+test("an older scoped HTTP hook leaves the current instance's other owner untouched", async () => {
+  const first = await install();
+  await install(first, { handleReader: async () => handles("api", "other-plugin") });
+  const event = httpEvent();
+  const original = event.request;
+  await runHttpHooks(first.registrations, event);
+  expect(event.request === original).toBe(true);
+  expect(requests.length).toBe(0);
+});
+
+test("an unreadable current manifest supersedes the previous instance's ownership", async () => {
+  const first = await install();
+  await install(first, { handleReader: async () => { throw new HandleFileValidationError("current handle unavailable"); } });
+  const route = spyOn(first.endpoint, "route");
+  try {
+    await expect(runHttpHooks(first.registrations, httpEvent())).rejects.toBeInstanceOf(CustodyOrphanError);
+    await expect(runHttpHooks(first.registrations, httpEvent())).rejects.toThrow("handle file unavailable");
+    expect(route.mock.calls.length).toBe(0);
+  } finally { route.mockRestore(); }
+  expect(requests.length).toBe(0);
+});
+
+test("the old WS hook delegates during the current instance's hook-installation window", async () => {
+  const first = await install();
+  let entered!: () => void;
+  let release!: () => void;
+  const entering = new Promise<void>((resolve) => { entered = resolve; });
+  const barrier = new Promise<void>((resolve) => { release = resolve; });
+  const second = context(async () => { entered(); await barrier; });
+  const newest = fakeClient(NEW_MATERIAL);
+  const installing = install(second, { clientFactory: async () => newest as never });
+  try {
+    await entering;
+    expect(second.registrations.length).toBe(0);
+    const event = wsEvent();
+    await runWsHooks(first.registrations, event);
+    expect(event.headers.authorization === `Bearer ${NEW_MATERIAL}`).toBe(true);
+    expect(first.client.getCredential.mock.calls.length).toBe(0);
+    expect(requests.length).toBe(0);
+  } finally {
+    release();
+    await installing;
+  }
+});
+
+test("WS orphan guard refuses unowned sentinel handshakes and preserves other-owner handshakes", async () => {
+  const host = await install(undefined, { handleReader: async () => handles("api", "other-plugin") });
+  const event = wsEvent();
+  await runWsHooks(host.registrations, event);
+  expect(event.headers.authorization?.includes(sentinel("deepseek"))).toBe(true);
+  const orphan = { ...wsEvent(), model: { ...scope.model, providerID: "absent" } };
+  await expect(runWsHooks(host.registrations, orphan)).rejects.toBeInstanceOf(CustodyOrphanError);
+  const urlOnly = { ...orphan, url: `wss://provider.example/?key=${sentinel("absent")}`, headers: {} };
+  await expect(runWsHooks(host.registrations, urlOnly)).rejects.toBeInstanceOf(CustodyOrphanError);
+  expect(requests.length).toBe(0);
+});
+
+test("setup preserves its original error when registration cleanup also fails", async () => {
+  const setupError = new Error("hook registration failed");
+  let count = 0;
+  const ctx: PluginContext = { session: { hook: async () => {
+    if (count++ > 0) throw setupError;
+    return { dispose: async () => { throw new Error("hook cleanup failed"); } };
+  } } };
+  let caught: unknown;
+  try { await install({ ctx, registrations: [] }); } catch (error) { caught = error; }
+  expect(caught === setupError).toBe(true);
+  expect(getCustodyEndpoint().current).toBeUndefined();
+  expect(requests.length).toBe(0);
+});
+
+test("WS logs an absent credential binding once with the same fields as V1 serve", async () => {
+  const manifest = handles();
+  manifest.providers[0]!.accounts[0]!.handle = `ckh_${"c".repeat(43)}`;
+  const host = await install(undefined, { handleReader: async () => manifest });
+  await runWsHooks(host.registrations, wsEvent());
+  await runWsHooks(host.registrations, wsEvent());
+  const warnings = logs.filter((entry) => entry.errorCode === "credential_id_absent");
+  expect(warnings).toEqual([{
+    level: "warn", provider: "deepseek", label: "main", boundCredentialId: "apikey:deepseek:main",
+    recordVersion: 1, state: "serving", errorCode: "credential_id_absent",
+  }]);
   expect(requests.length).toBe(0);
 });

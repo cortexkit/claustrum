@@ -41,14 +41,14 @@ function fixture(previous: Oc2CredentialEntry[] = [], handles: OpenCodeHandleFil
 }
 
 describe("OC2 enrol", () => {
-  test("D1 unsafe providers and voice key shapes refuse before vault or CLI calls", async () => {
+  test("unsafe providers and voice key shapes refuse before vault or CLI calls", async () => {
     for (const provider of [...OC2_CREDENTIAL_CONSUMERS, "xai", "openai"]) {
       const f = fixture([], manifest(provider));
       await expect(runEnrollment(existingArgs(provider), f.deps)).rejects.toThrow(provider === "xai" || provider === "openai" ? "realtime" : `OpenCode 2's built-in ${provider} plugin reads the stored credential outside the request hooks`);
       expect(f.events).toEqual([]);
     }
   });
-  test("D5 fresh xai imports exactly one entry, activates and reads back before manifest", async () => {
+  test("fresh xai imports exactly one entry, activates and reads back before manifest", async () => {
     const f = fixture();
     const text = await runEnrollment(freshArgs(), f.deps);
     expect(f.events).toEqual(["connect", "get", "export", "import", "switch", "export", "manifest", "close"]);
@@ -84,6 +84,35 @@ describe("OC2 enrol", () => {
     await runEnrollment(freshArgs(), f.deps);
     expect(f.events).toEqual(["connect", "get", "export", "export", "manifest", "close"]);
   });
+  test("removes inactive tombstone leftovers without touching the active target or other integrations", async () => {
+    const f = fixture([
+      entry(v2OauthTombstone("xai", "device"), "xai", true, "cred_active"),
+      entry(v2OauthTombstone("xai", "device"), "xai", false, "cred_leftover"),
+      entry(v2KeyTombstone("deepseek"), "deepseek", false, "cred_other"),
+      entry({ type: "oauth", methodID: "device", access: secret, refresh: secret, expires: 1 }, "xai", false, "cred_real"),
+    ]);
+    await runEnrollment(freshArgs(), f.deps);
+    expect(f.events.filter((event) => event.startsWith("logout:"))).toEqual(["logout:cred_leftover"]);
+    expect(f.events).not.toContain("import");
+  });
+  test("a switch failure after import names the imported id and safe finish or undo commands", async () => {
+    const f = fixture();
+    f.cli.switchCredential = async () => {
+      const error = new Oc2CredentialError("switch", 17, "failed");
+      error.message += secret;
+      throw error;
+    };
+    let caught: unknown;
+    try { await runEnrollment(freshArgs(), f.deps); } catch (error) { caught = error; }
+    const id = f.imported()[0]?.id;
+    expect(typeof id).toBe("string");
+    expect(caught).toBeInstanceOf(Oc2CredentialError);
+    const message = String(caught);
+    expect(message.includes(`opencode auth switch xai ${id}`)).toBe(true);
+    expect(message.includes(`opencode auth logout xai ${id}`)).toBe(true);
+    expect(message.includes(secret)).toBe(false);
+    expect(f.events).not.toContain("manifest");
+  });
   test("replaces migrated OAuth and removes stale tombstones including inactive drift", async () => {
     const f = fixture([entry({ type: "oauth", methodID: "old-method", access: "", refresh: sentinel("xai"), expires: 0 }, "xai"), entry({ type: "key", key: sentinel("other") }, "xai", false, "cred_drift")]);
     await runEnrollment({ ...freshArgs(), oc2Method: undefined }, f.deps);
@@ -104,7 +133,7 @@ describe("OC2 enrol", () => {
     const f = fixture(); await expect(runEnrollment({ ...freshArgs(), oc2Method: undefined }, f.deps)).rejects.toThrow("pass --oc2-method"); expect(f.events).not.toContain("manifest");
     const key = fixture([], manifest()); await expect(runEnrollment({ ...existingArgs(), oc2Method: "device" }, key.deps)).rejects.toThrow("oauth only"); expect(key.events).toEqual([]);
   });
-  test("D2 D3 readback mismatch fails without manifest", async () => {
+  test("readback mismatch fails without manifest", async () => {
     const f = fixture(); f.mismatch();
     await expect(runEnrollment(freshArgs(), f.deps)).rejects.toThrow("OpenCode 2 readback did not show the tombstone active"); expect(f.events).not.toContain("manifest");
   });
@@ -131,7 +160,7 @@ describe("OC2 enrol", () => {
       expect(f.events).toEqual([]);
     }
   });
-  test("D4 every CLI failure is typed and never includes exported secrets or writes manifest", async () => {
+  test("every CLI failure is typed and never includes exported secrets or writes manifest", async () => {
     for (const step of ["export", "import", "switch", "readback", "logout"] as const) {
       const f = fixture([entry({ type: "oauth", methodID: "device", access: secret, refresh: secret, expires: 1 }, "xai")]);
       let exports = 0;
@@ -157,7 +186,7 @@ beforeAll(async () => {
 });
 
 describe("bounded OC2 CLI runner", () => {
-  test("D5 uses argv arrays and import stdin, never credentials in argv", async () => {
+  test("uses argv arrays and import stdin, never credentials in argv", async () => {
     const cli = createOc2Credentials({ opencodeBin: script, oc2Standalone: true });
     const payload = [entry({ type: "key", key: secret })];
     await cli.importCredentials(payload);
@@ -169,7 +198,7 @@ describe("bounded OC2 CLI runner", () => {
     expect(JSON.parse(await readFile(`${base}/argv.json`, "utf8"))).toEqual(["auth", "logout", "deepseek", "cred_old", "--standalone"]);
     expect((await cli.exportCredentials("deepseek"))[0]!.value).toEqual({ type: "key", key: secret });
   });
-  test("D4 nonzero exit and malformed export never disclose stdout or stderr", async () => {
+  test("nonzero exit and malformed export never disclose stdout or stderr", async () => {
     for (const oc2Server of ["failure", "bad-json"]) {
       try { await createOc2Credentials({ opencodeBin: script, oc2Server }).exportCredentials("deepseek"); throw new Error("expected failure"); } catch (error) {
         expect(error).toBeInstanceOf(Oc2CredentialError); expect(String(error)).toContain("export"); expect(String(error)).not.toContain(secret);

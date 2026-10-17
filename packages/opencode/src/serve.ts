@@ -99,7 +99,7 @@ async function discard(response: Response): Promise<void> {
   }
 }
 
-function exhaustion(
+export function exhaustion(
   provider: string,
   accounts: AccountRuntime[],
   freshness: FreshnessController,

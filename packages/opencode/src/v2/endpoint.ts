@@ -2,10 +2,13 @@ import { timingSafeEqual } from "node:crypto";
 
 import { createLogger, type CustodyLogger } from "../log";
 import { sentinel } from "../tombstone";
+import type { SessionWebSocketHandshake } from "./host-types";
 
 export type EndpointInstance = {
   readonly id: string;
   serve(provider: string, request: Request, signal: AbortSignal): Promise<Response>;
+  ownership(provider: string): "owned" | "other" | "absent" | "unknown";
+  handshake(provider: string, event: SessionWebSocketHandshake): Promise<void>;
 };
 
 export type EndpointDeps = {
@@ -28,7 +31,7 @@ export class CustodyEndpointError extends Error {
 }
 
 type Entry = { provider: string; method: string; url: string; expiresAt: number; consumed: boolean };
-type BunRequestInit = RequestInit & { timeout: false };
+export type BunRequestInit = RequestInit & { timeout: false };
 const HOLDER_KEY = Symbol.for("cortexkit.claustrum.custody.v2/1");
 const holders = globalThis as typeof globalThis & { [HOLDER_KEY]?: CustodyEndpoint };
 const HOP_HEADERS = [
@@ -66,6 +69,7 @@ export class CustodyEndpoint {
   readonly #token = randomId(32);
   readonly #entries = new Map<string, Entry>();
   readonly #instances: EndpointInstance[] = [];
+  readonly #handledHandshakes = new WeakSet<object>();
   readonly #now: () => number;
   readonly #ttlMs: number;
   readonly #graceMs: number;
@@ -91,6 +95,12 @@ export class CustodyEndpoint {
 
   get current(): EndpointInstance | undefined {
     return this.#instances.at(-1);
+  }
+
+  claimHandshake(event: object): boolean {
+    if (this.#handledHandshakes.has(event)) return false;
+    this.#handledHandshakes.add(event);
+    return true;
   }
 
   register(instance: EndpointInstance): { dispose(): void } {

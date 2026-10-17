@@ -161,6 +161,9 @@ describe("CLI and bundle boundaries", () => {
     };
     const help = await run(["--help"]);
     expect(help.code).toBe(0); expect(help.stdout).toContain("--id"); expect(help.stdout).toContain("--main"); expect(help.stdout).toContain("--min-ttl-ms"); expect(help.stdout).toContain("--token-lifetime-ms"); expect(help.stdout).toContain("--remove"); expect(help.stdout).toContain("manifest"); expect(help.stdout).toContain("v1 supports only");
+    expect(help.stdout).toContain("bun run enroll -- --oc2 --provider <provider>");
+    expect(help.stdout).toContain("bun run enroll -- --oc2 --provider xai --id oauth:xai --main");
+    for (const flag of ["--oc2", "--opencode-bin", "--oc2-standalone", "--oc2-server", "--oc2-method", "--remove-previous"]) expect(help.stdout).toContain(flag);
     const refusal = await run(["--provider", "xai", "--id", "oauth:openai", "--main"]);
     expect(refusal.code).not.toBe(0); expect(refusal.stderr).toContain("invalid credential id for provider"); expect(refusal.stderr).not.toMatch(/\n\s+at /); expect(refusal.stderr).not.toContain("Error:");
     // run() prepends one separator and bun consumes one before argv reaches the script, so three

@@ -136,15 +136,38 @@ build_timeout_s = 3600
 
 
 [[control]]
+id = "quarantined-row-lists-without-failing"
+guards = "a row stored as corrupt lists sealed and doesn't fail the whole scoped listing"
+file = "crates/credentials-core/src/store.rs"
+old = """
+                    let decoded_record = if state != RecordState::Corrupt
+                        && ("""
+new = """
+                    let decoded_record = if true // NON-VACUITY BREAK
+                        && ("""
+edits = []
+test_file = "crates/credentials-core/src/store.rs"
+runner = "cargo"
+package = "credentials-core"
+target = "--lib"
+features = ["test-support"]
+expect_red = ["store::list_scoped_snapshot_tests::list_scoped_opens_identity_only_for_read_and_fails_the_whole_read_on_bad_material"]
+expect_message = "quarantined row must not fail the listing"
+only = false
+timeout_s = 600
+build_timeout_s = 3600
+
+
+[[control]]
 id = "list-grant-authorizes-inventory"
 guards = "list-only grant discloses identity and adapter in scoped inventory"
 file = "crates/credentials-core/src/store.rs"
 old = """
-                    let decoded_record = if operations.contains(&GrantOperation::Read)
-                        || operations.contains(&GrantOperation::List)"""
+                        && (operations.contains(&GrantOperation::Read)
+                            || operations.contains(&GrantOperation::List))"""
 new = """
-                    let decoded_record = if operations.contains(&GrantOperation::Read)
-                        || false // NON-VACUITY BREAK"""
+                        && (operations.contains(&GrantOperation::Read)
+                            || false) // NON-VACUITY BREAK"""
 edits = []
 test_file = "crates/credentials-module/src/main.rs"
 runner = "cargo"

@@ -203,21 +203,45 @@ fn require(name: &str) -> String {
 }
 
 fn decode_hex(s: &str, what: &str) -> Vec<u8> {
-    let s = s.trim();
-    if !s.len().is_multiple_of(2) {
-        eprintln!("{what} is not valid hex: odd length");
-        std::process::exit(2);
-    }
-    match (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16))
-        .collect::<Result<Vec<u8>, _>>()
-    {
+    match parse_hex(s) {
         Ok(bytes) => bytes,
-        Err(e) => {
-            eprintln!("{what} is not valid hex: {e}");
+        Err(why) => {
+            eprintln!("{what} is not valid hex: {why}");
             std::process::exit(2);
         }
+    }
+}
+
+/// Hex to bytes, working on bytes rather than string slices. Slicing a `&str` at a
+/// byte offset panics when the offset falls inside a multi-byte character, so a
+/// pasted value containing one (a smart quote, a non-breaking space) crashed this
+/// tool instead of being refused with a message.
+fn parse_hex(s: &str) -> Result<Vec<u8>, String> {
+    let s = s.trim().as_bytes();
+    if !s.len().is_multiple_of(2) {
+        return Err("odd length".into());
+    }
+    s.chunks_exact(2)
+        .map(|pair| {
+            let digit = |b: u8| {
+                (b as char)
+                    .to_digit(16)
+                    .ok_or_else(|| format!("byte 0x{b:02x} is not a hex digit"))
+            };
+            Ok(((digit(pair[0])? << 4) | digit(pair[1])?) as u8)
+        })
+        .collect()
+}
+
+/// `--priority`, defaulting to 10 (immediate delivery) only when the flag is absent.
+/// A value that does not parse is refused: silently sending at 10 would make a typo
+/// for 5 (power-conserving delivery) indistinguishable from the default.
+fn parse_priority(raw: Option<&str>) -> Result<u8, String> {
+    match raw {
+        None => Ok(10),
+        Some(text) => text.trim().parse::<u8>().map_err(|e| {
+            format!("--priority must be a number from 0 to 255 (APNs uses 10 or 5): {text:?}: {e}")
+        }),
     }
 }
 
@@ -267,7 +291,13 @@ async fn main() {
         ApnsEnvironment::Production
     };
     let push_type = arg("--push-type").unwrap_or_else(|| "alert".to_string());
-    let priority: u8 = arg("--priority").and_then(|p| p.parse().ok()).unwrap_or(10);
+    let priority = match parse_priority(arg("--priority").as_deref()) {
+        Ok(priority) => priority,
+        Err(why) => {
+            eprintln!("{why}");
+            std::process::exit(2);
+        }
+    };
 
     let p8 = match std::fs::read_to_string(&key_file) {
         Ok(pem) => pem,
@@ -535,5 +565,34 @@ async fn main() {
             eprintln!("  if this mentions a protocol or ALPN error, the client lacks HTTP/2.");
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_hex, parse_priority};
+
+    #[test]
+    fn hex_decodes_and_trims() {
+        assert_eq!(parse_hex(" 00ff7A\n"), Ok(vec![0x00, 0xff, 0x7a]));
+    }
+
+    #[test]
+    fn non_ascii_hex_is_an_error_not_a_panic() {
+        // "é" is two bytes in UTF-8, so the odd-length guard passes and a string
+        // slice at byte 2 would land inside the character.
+        assert!(parse_hex("aé0").is_err());
+        assert!(parse_hex("0é").is_err());
+        assert!(parse_hex("zz").is_err());
+        assert_eq!(parse_hex("abc"), Err("odd length".into()));
+    }
+
+    #[test]
+    fn priority_defaults_only_when_absent() {
+        assert_eq!(parse_priority(None), Ok(10));
+        assert_eq!(parse_priority(Some("5")), Ok(5));
+        assert!(parse_priority(Some("five")).is_err());
+        assert!(parse_priority(Some("")).is_err());
+        assert!(parse_priority(Some("300")).is_err());
     }
 }

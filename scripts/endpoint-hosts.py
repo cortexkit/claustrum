@@ -56,9 +56,15 @@ TEST_ONLY_FILES = {
     "login_cut_helper.rs",
 }
 
-# Byte-string domain separators: `b"cortexkit-credentials/…"`, wherever they appear
-# — as a const, or inline in a `hasher.update(…)` call, which is how three of them
-# are written.
+# Byte-string domain separators: any byte-string literal shaped like a versioned
+# separator, `b"<name>/v<N>…"` (for example `b"cortexkit-credentials/key-id/v1"` or
+# `b"ck-deposit-cookie/v1"`), wherever it appears -- as a const, or inline in a
+# `hasher.update(…)` call, which is how three of them are written.
+#
+# NOT ONLY THE `cortexkit-` PREFIX. The first version matched `b"cortexkit-…"` alone
+# and so never listed `ck-deposit-cookie/v1`, which is hashed into stored deposit
+# cookies exactly like the others. A separator is recognised by its shape, a
+# lowercase name and a `/v<digit>` version segment, not by whose prefix it carries.
 #
 # THESE ARE ON-DISK FORMAT PARAMETERS WEARING THE CLOTHES OF NAMES, and they are a
 # worse hazard than the endpoints: a changed endpoint misroutes a credential, a
@@ -70,7 +76,7 @@ TEST_ONLY_FILES = {
 # `EncryptedStore::open` fails with "cipher envelope failed authenticated
 # decryption". Nothing in 240 unit tests, 8 e2e arms or 4 rotation crash cuts
 # noticed the change.
-DOMAIN_RE = re.compile(r'b"(cortexkit-[a-z-]+/[a-z0-9-]+/v\d[^"]*)"')
+DOMAIN_RE = re.compile(r'b"([a-z][a-z0-9.-]*(?:/[a-z0-9.-]+)*/v\d[^"]*)"')
 DOMAIN_MANIFEST = ROOT / "docs" / "domain-separators.txt"
 
 # `#[cfg(test)]` immediately followed by a module declaration -- the conventional

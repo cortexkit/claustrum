@@ -18,6 +18,7 @@
 crates/credentials-core/src/admin_auth.rs cortexkit-credentials/admin-mac-key/v1 cortexkit-credentials/admin-mac-key/v1
 crates/credentials-core/src/admin_auth.rs cortexkit-credentials/admin-op/v1\0 cortexkit-credentials/admin-op/v1\0
 crates/credentials-core/src/admin_auth.rs cortexkit-credentials/vault-id/v1 cortexkit-credentials/vault-id/v1
+crates/credentials-core/src/deposit_cookie.rs ck-deposit-cookie/v1 ck-deposit-cookie/v1
 crates/credentials-core/src/envelope.rs cortexkit-credentials/envelope-aad/v1 cortexkit-credentials/envelope-aad/v1
 crates/credentials-core/src/key.rs cortexkit-credentials/key-id/v1 cortexkit-credentials/key-id/v1
 crates/credentials-core/src/store.rs cortexkit-credentials/handle/v1 cortexkit-credentials/handle/v1

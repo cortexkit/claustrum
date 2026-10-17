@@ -591,7 +591,13 @@ class ScriptContracts(unittest.TestCase):
         endpoints.DOMAIN_MANIFEST = self.root / 'domains'
         source = self.root / 'adapter.rs'
         source.write_text('const TOKEN_URL: &str = "https://provider.example/token";\n'
-                          'const DOMAIN: &[u8] = b"cortexkit-credentials/control/v1";\n')
+                          'const DOMAIN: &[u8] = b"cortexkit-credentials/control/v1";\n'
+                          'const COOKIE: &[u8] = b"ck-control-cookie/v1";\n'
+                          'const NOT_A_SEPARATOR: &[u8] = b"plain bytes v1";\n')
+        # A separator without the `cortexkit-` prefix must be found too, and an
+        # unrelated byte string must not be.
+        self.assertEqual([value for _, value, _ in endpoints.discover_domains()],
+                         ['ck-control-cookie/v1', 'cortexkit-credentials/control/v1'])
         endpoints.MANIFEST.write_text(endpoints.render(endpoints.discover()))
         endpoints.DOMAIN_MANIFEST.write_text(endpoints.render_domains(endpoints.discover_domains()))
         self.assertEqual(endpoints.main(), 0)
@@ -599,6 +605,10 @@ class ScriptContracts(unittest.TestCase):
         self.assertEqual(endpoints.main(), 1)
         source.write_text(source.read_text().replace('attacker.example', 'provider.example')
                           .replace('cortexkit-credentials/control/v1', 'cortexkit-credentials/control/v2'))
+        self.assertEqual(endpoints.main(), 1)
+        source.write_text(source.read_text()
+                          .replace('cortexkit-credentials/control/v2', 'cortexkit-credentials/control/v1')
+                          .replace('ck-control-cookie/v1', 'ck-control-cookie/v2'))
         self.assertEqual(endpoints.main(), 1)
 
     def test_uncovered_fixture_directory_is_refused(self):

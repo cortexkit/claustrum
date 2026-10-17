@@ -58,6 +58,10 @@ export function createUpstreamFetch(signal: AbortSignal, upstreamFetch: typeof f
   }, { preconnect: upstreamFetch.preconnect });
 }
 
+export function containsSentinel(url: string, values: Iterable<string>, marker: string): boolean {
+  return url.includes(marker) || [...values].some((value) => value.includes(marker));
+}
+
 // In-process plugins already share manifest/vault access; this is not an isolation boundary.
 // Runtime-private state prevents accidental reflection/serialization, not a hostile plugin's vault use.
 export class CustodyEndpoint {
@@ -191,7 +195,7 @@ export class CustodyEndpoint {
       // Every attempt with a live id consumes it, including method/sentinel rejections.
       entry.consumed = true;
       if (request.method !== entry.method) return this.reject(409, "method_mismatch", entry.provider);
-      if (![...request.headers.values()].some((value) => value.includes(sentinel(entry.provider)))) {
+      if (!containsSentinel(entry.url, request.headers.values(), sentinel(entry.provider))) {
         return this.reject(403, "sentinel_absent", entry.provider);
       }
       if (this.#inFlight >= this.#maxInFlight) return this.reject(503, "busy", entry.provider);

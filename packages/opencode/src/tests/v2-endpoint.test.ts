@@ -2,7 +2,8 @@ import { afterEach, describe, expect, spyOn, test } from "bun:test";
 
 import { createLogger, type CustodyLogEntry } from "../log";
 import * as errors from "../errors";
-import { sentinel } from "../tombstone";
+import { createServeFetch } from "../serve";
+import { sentinel, tombstoneFor } from "../tombstone";
 import {
   createUpstreamFetch,
   CustodyEndpointError,
@@ -267,6 +268,52 @@ describe("OC2 loopback custody endpoint", () => {
     expect(recorded.headers.get("host") === original.host).toBe(true);
     expect(recorded.headers.has("x-private")).toBe(false);
     expect(recorded.headers.has("proxy-authorization")).toBe(false);
+  });
+
+  test("serves a placeholder carried only in the recorded destination query", async () => {
+    let materialReceived = false;
+    let sentinelReceived = false;
+    const stub = upstream((request) => {
+      const value = new URL(request.url).searchParams.get("key");
+      materialReceived = value === MATERIAL;
+      sentinelReceived = value?.includes(sentinel(PROVIDER)) ?? false;
+      return new Response("round-trip");
+    });
+    const holder = endpoint();
+    const credentialId = "apikey:deepseek:main";
+    const serve = createServeFetch({
+      provider: PROVIDER,
+      accounts: [{ label: "main", handle: `ckh_${"a".repeat(43)}`, credential_id: credentialId }],
+      client: {
+        getCredential: async () => ({ material: MATERIAL, credentialId, recordVersion: 1, expiresAtMs: null }),
+        reportAuthFailure: async () => {},
+      },
+      readAuthEntry: () => tombstoneFor("api", PROVIDER),
+      upstreamFetch: createUpstreamFetch(AbortSignal.any([])),
+      log: createLogger((entry) => logs.push(entry)),
+    });
+    holder.register({ ...instance("query-placeholder"), serve: (_provider, request, signal) => serve(new Request(request, { signal })) });
+    const destination = new URL(`?key=${sentinel(PROVIDER)}`, stub.url);
+    const request = route(holder, destination, { headers: { authorization: "" } });
+    expect(request.url.includes(sentinel(PROVIDER))).toBe(false);
+    expect([...request.headers.values()].some((value) => value.includes(sentinel(PROVIDER)))).toBe(false);
+    const response = await fetch(request);
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("round-trip");
+    expect(stub.requests.length).toBe(1);
+    expect(materialReceived).toBe(true);
+    expect(sentinelReceived).toBe(false);
+  });
+
+  test("a placeholder injected into the loopback URL does not prove destination ownership", async () => {
+    const stub = upstream();
+    const holder = endpoint();
+    holder.register(instance());
+    const request = route(holder, stub.url);
+    const response = await fetch(`${request.url}?key=${sentinel(PROVIDER)}`);
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({ error: "sentinel_absent" });
+    expect(stub.requests.length).toBe(0);
   });
 
   test("consumed ids cannot be replayed", async () => {

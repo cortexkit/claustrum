@@ -15,7 +15,7 @@ import { createLogger, serializedLogSink } from "../log";
 import type { ConfigHookDependencies } from "../plugin";
 import { createServeFetch, exhaustion, type ServeAccount, type ServeClient } from "../serve";
 import { sentinel, tombstoneFor, TOMBSTONE_PREFIX } from "../tombstone";
-import { createUpstreamFetch, getCustodyEndpoint, type CustodyEndpoint } from "./endpoint";
+import { containsSentinel, createUpstreamFetch, getCustodyEndpoint, type CustodyEndpoint } from "./endpoint";
 import type { Cleanup, PluginContext, Registration, SessionWebSocketHandshake } from "./host-types";
 
 export type SetupDependencies = Pick<ConfigHookDependencies,
@@ -24,10 +24,6 @@ export type SetupDependencies = Pick<ConfigHookDependencies,
 > & { endpoint?: CustodyEndpoint };
 
 const missingCredentialIdWarnings = new Set<string>();
-
-function containsSentinel(url: string, values: Iterable<string>, marker: string): boolean {
-  return url.includes(marker) || [...values].some((value) => value.includes(marker));
-}
 
 export function createOpencodeClaustrumPluginV2(dependencies: SetupDependencies = {}): (ctx: PluginContext) => Promise<Cleanup> {
   const handleReader = dependencies.handleReader ?? readHandleFile;

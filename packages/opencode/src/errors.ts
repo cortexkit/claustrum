@@ -86,11 +86,19 @@ export class ReportedCustodyExhaustionError extends CustodyExhaustionError {
   }
 }
 
-export class CustodyEndpointError extends Error {
-  override name = "CustodyEndpointError";
+export class CustodyPlacementError extends Error {
+  override name = "CustodyPlacementError";
 
-  constructor(readonly code: "no_server" | "entries_full") {
-    super(code);
+  constructor(readonly location: string) {
+    super(`custody placeholder in ${location} refused; HTTP credentials may only be substituted in Authorization`);
+  }
+}
+
+export class CustodyRedirectUnsafeError extends Error {
+  override name = "CustodyRedirectUnsafeError";
+
+  constructor(readonly status: string | number) {
+    super(`custody redirect safety self-test failed: status=${status}; Authorization substitution refused`);
   }
 }
 

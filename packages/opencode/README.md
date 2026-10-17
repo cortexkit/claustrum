@@ -8,6 +8,12 @@ Enrol each owned provider with `bun run enroll -- --oc2 --provider <provider>` a
 
 Known limit: this package cannot be installed in OpenCode 2 by package name. OpenCode 2 resolves `<package>/server` first, but this package's `./server` export is the serve library, not a plugin. Install by directory path.
 
+The OpenCode 2 entry substitutes the vault key into the outgoing request in place. HTTP substitution is allowed only in `Authorization`. A placeholder in the URL or any other header fails with `CustodyPlacementError`, before any material is resolved. Measured OpenCode 2.0.32 redirects strip `Authorization` across origins but forward `x-api-key` and `x-goog-api-key`, so those headers cannot safely carry HTTP custody material. Request bodies are not inspected or substituted.
+
+Before the first substitution, a once-per-process self-test uses two temporary loopback listeners to check all five redirect statuses with the runtime's fetch. It fails closed on leakage, an unreached target, timeout or bind failure. It does not test OpenCode's own transport; each OpenCode version still needs a live redirect check. There is no listener serving provider requests.
+
+Response hooks report 401s and update account state for subsequent requests, including 429 and 402 cooldowns. There is no in-turn retry. WebSocket substitution remains in handshake headers only; WebSocket URLs are refused. The other OpenCode 2 limits are listed in the [guide](../../docs/opencode-plugin.md#opencode-2-limits).
+
 This plugin owns only providers whose live credential path remains OpenCode's generic AI SDK `fetch` seam. It reads the handle file during OpenCode configuration and injects a tombstone API key plus a fetch hook only when the local auth entry is a Claustrum tombstone and the handle file assigns that provider to `opencode-claustrum`. Provider-specific loaders and credential paths need dedicated ownership; the provider allowlist question remains open.
 
 ## Seam boundary

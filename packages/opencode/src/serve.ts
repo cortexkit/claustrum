@@ -67,7 +67,7 @@ type AccountRuntime = {
 const REPORT_BUDGET_MS = 100;
 const missingCredentialIdWarnings = new Set<string>();
 
-async function reportWithinBudget(report: Promise<void>, onFailure: (errorClass: string, errorCode: string) => void): Promise<void> {
+export async function reportWithinBudget(report: Promise<void>, onFailure: (errorClass: string, errorCode: string) => void): Promise<void> {
   let timeout: ReturnType<typeof setTimeout> | undefined;
   const completed = await Promise.race([
     report.then(
@@ -83,7 +83,7 @@ async function reportWithinBudget(report: Promise<void>, onFailure: (errorClass:
   if (!completed) onFailure("ReportTimeout", "timeout");
 }
 
-function cooldownFromRetryAfter(value: string | null, now: number): number {
+export function cooldownFromRetryAfter(value: string | null, now: number): number {
   if (value && /^\d+$/.test(value.trim())) {
     const milliseconds = Number(value.trim()) * 1_000;
     return Number.isFinite(milliseconds) ? milliseconds : DEFAULT_RETRY_AFTER_MS;

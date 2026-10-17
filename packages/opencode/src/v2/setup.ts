@@ -5,25 +5,26 @@ import { ClaustrumClient, detectClaustrumConnection } from "@cortexkit/claustrum
 import {
   CustodyOrphanError,
   CustodyOwnershipError,
+  CustodyPlacementError,
   CustodyRequestError,
   CustodySplitError,
   HandleFileValidationError,
 } from "../errors";
-import { FreshnessController } from "../freshness";
+import { FreshnessController, PAYMENT_REQUIRED_COOLDOWN_MS } from "../freshness";
 import { defaultHandleFilePath, handleFileRevision, OUR_PLUGIN_ID, readHandleFile, type OpenCodeHandleFileV1 } from "../handles";
 import { createLogger, serializedLogSink } from "../log";
 import type { ConfigHookDependencies } from "../plugin";
-import { createServeFetch, exhaustion, type ServeAccount, type ServeClient } from "../serve";
-import { sentinel, tombstoneFor, TOMBSTONE_PREFIX } from "../tombstone";
-import { containsSentinel, createUpstreamFetch, getCustodyEndpoint, type CustodyEndpoint } from "./endpoint";
-import type { Cleanup, PluginContext, Registration, SessionWebSocketHandshake } from "./host-types";
+import { cooldownFromRetryAfter, exhaustion, reportWithinBudget, type ServeAccount, type ServeClient } from "../serve";
+import { sentinel, TOMBSTONE_PREFIX } from "../tombstone";
+import type { Cleanup, PluginContext, Registration, SessionHttpRequest, SessionHttpResponse, SessionWebSocketHandshake } from "./host-types";
+import { getCustodyRegistry, type CustodyInstance, type CustodyRegistry, type ServedRequest } from "./registry";
+import type { RedirectProbeDependencies } from "./redirect-self-test";
+import { containsSentinel } from "./sentinel";
 
 export type SetupDependencies = Pick<ConfigHookDependencies,
   "handleReader" | "handleVersionReader" | "detect" | "clientFactory" | "fetch" | "logSink" | "log" |
   "now" | "setInterval" | "clearInterval" | "oauthMinTtlMs"
-> & { endpoint?: CustodyEndpoint };
-
-const missingCredentialIdWarnings = new Set<string>();
+> & { registry?: CustodyRegistry; redirectProbe?: Omit<RedirectProbeDependencies, "fetch"> };
 
 export function createOpencodeClaustrumPluginV2(dependencies: SetupDependencies = {}): (ctx: PluginContext) => Promise<Cleanup> {
   const handleReader = dependencies.handleReader ?? readHandleFile;
@@ -49,13 +50,15 @@ export function createOpencodeClaustrumPluginV2(dependencies: SetupDependencies 
 
     const registrations: Registration[] = [];
     const controllers: FreshnessController[] = [];
-    let endpointRegistration: { dispose(): void } | undefined;
+    let registryRegistration: { dispose(): void } | undefined;
+    let disposed = false;
     let cleanupPromise: Promise<void> | undefined;
     const cleanup = () => cleanupPromise ??= (async () => {
+      disposed = true;
       try {
         await Promise.all(registrations.map((registration) => registration.dispose()));
       } finally {
-        endpointRegistration?.dispose();
+        registryRegistration?.dispose();
         for (const controller of controllers) controller.dispose();
       }
     })();
@@ -108,28 +111,29 @@ export function createOpencodeClaustrumPluginV2(dependencies: SetupDependencies 
     };
 
     try {
-      const endpoint = dependencies.endpoint ?? getCustodyEndpoint();
+      const registry = dependencies.registry ?? getCustodyRegistry();
       const instanceId = randomUUID();
-      const serves = new Map<string, ReturnType<typeof createServeFetch>>();
+      const requests = new Map<string, (event: SessionHttpRequest) => Promise<void>>();
       const handshakes = new Map<string, (event: SessionWebSocketHandshake) => Promise<void>>();
-      const installHooks: Array<() => Promise<void>> = [];
+      const responses = new Map<string, (served: ServedRequest, event: SessionHttpResponse) => Promise<void>>();
       const announcedProviders = new Set<string>();
       const servingProviders = new Set<string>();
+      const debugged = new Set<string>();
+      const debugOnce = (errorCode: string) => {
+        if (debugged.has(errorCode)) return;
+        debugged.add(errorCode);
+        log.debug({ errorCode });
+      };
       const orphan = (provider: string, reason: "absent" | "unknown" | "no_instance") => {
         const remedy = `run bun run enroll -- --oc2 --provider ${provider}`;
         const error = new CustodyOrphanError(reason === "no_instance"
           ? "no live claustrum custody instance in this process; reload OpenCode"
           : reason === "unknown"
-            ? `handle file unavailable: ${handleError?.message ?? "custody handle ownership is unknown"}; tombstone ownership cannot be proven; ${remedy}`
+            ? `handle file unavailable: ${handleError?.name ?? "custody handle ownership is unknown"}; tombstone ownership cannot be proven; ${remedy}`
             : `credential is a claustrum tombstone but no handle serves this provider; ${remedy}`);
         logError(error, provider);
         log.info({ provider, state: "orphan" });
         return error;
-      };
-      const guard = (provider: string, url: string, values: Iterable<string>) => {
-        const verdict = endpoint.current?.ownership(provider) ?? "no_instance";
-        if (verdict === "owned" || verdict === "other") return;
-        if (containsSentinel(url, values, TOMBSTONE_PREFIX)) throw orphan(provider, verdict);
       };
       for (const [provider, handle] of owned) {
         const freshness = new FreshnessController({
@@ -156,28 +160,16 @@ export function createOpencodeClaustrumPluginV2(dependencies: SetupDependencies 
           announcedProviders.add(provider);
           log.info({ provider, label: account.label, credentialId: account.credential_id, recordVersion, state: "served" });
         };
-        serves.set(provider, createServeFetch({
-          provider, accounts: handle.accounts, client, shape: handle.shape, freshness,
-          verifyOwnership,
-          readAuthEntry: async () => tombstoneFor(handle.shape, provider),
-          upstreamFetch: (input, init) => {
-            const signal = init?.signal ?? (input instanceof Request ? input.signal : AbortSignal.any([]));
-            return createUpstreamFetch(signal, fetch)(input, init);
-          },
-          onServed, log,
-        }));
         const split = () => {
           const error = new CustodySplitError(`request for ${provider} carries no claustrum placeholder while custody handles remain; re-run bun run enroll -- --oc2 --provider ${provider} to re-tombstone, or remove the provider from the handle manifest to hand it back to OpenCode`);
           logError(error, provider);
           log.info({ provider, state: "split" });
           return error;
         };
-        handshakes.set(provider, async (evt) => {
-          if (evt.url.includes(sentinel(provider))) {
-            throw new CustodyRequestError("custody sentinel in WebSocket URL refused; credentials may only be substituted in handshake headers");
-          }
-          if (!Object.values(evt.headers).some((value) => value.includes(sentinel(provider)))) throw split();
+        const select = async () => {
           await verifyOwnership();
+          await registry.ensureRedirectSafe({ ...dependencies.redirectProbe, fetch }, log);
+          if (disposed) throw new CustodyOwnershipError("serving custody instance was disposed; reload OpenCode");
           for (const account of handle.accounts) {
             if (freshness.state(account) !== "available") continue;
             const served = await freshness.resolve(account);
@@ -187,61 +179,102 @@ export function createOpencodeClaustrumPluginV2(dependencies: SetupDependencies 
                 servedCredentialId: served.credentialId, recordVersion: served.recordVersion, state: "refusing", errorCode: "binding_mismatch" });
               continue;
             }
-            if (served.credentialId === undefined && !missingCredentialIdWarnings.has(account.handle)) {
-              missingCredentialIdWarnings.add(account.handle);
+            if (served.credentialId === undefined && registry.warnMissingCredentialId(account.handle)) {
               log.warn({ provider, label: account.label, boundCredentialId: account.credential_id,
                 recordVersion: served.recordVersion, state: "serving", errorCode: "credential_id_absent" });
             }
-            for (const [name, value] of Object.entries(evt.headers)) {
-              evt.headers[name] = value.split(sentinel(provider)).join(served.material);
-            }
-            onServed(account, served.recordVersion);
-            return;
+            if (disposed) throw new CustodyOwnershipError("serving custody instance was disposed; reload OpenCode");
+            return { account, served };
           }
           throw exhaustion(provider, handle.accounts.map((account) => ({ account })), freshness);
-        });
-        installHooks.push(async () => {
-          registrations.push(await ctx.session.hook("http.request", (evt) => {
-            if (endpoint.isEndpointUrl(evt.request.url)) return;
-            const verdict = endpoint.current?.ownership(provider) ?? "no_instance";
-            if (verdict === "other") return;
-            if (verdict !== "owned") throw orphan(provider, verdict);
-            if (!containsSentinel(evt.request.url, evt.request.headers.values(), sentinel(provider))) throw split();
-            evt.request = endpoint.route(provider, evt.request);
-            if (servingProviders.has(provider)) return;
+        };
+        requests.set(provider, async (evt) => {
+          const marker = sentinel(provider);
+          if (containsSentinel(evt.request.url, [], marker)) throw new CustodyPlacementError("url");
+          for (const [name, value] of evt.request.headers) {
+            if (name !== "authorization" && value.includes(marker)) throw new CustodyPlacementError(name);
+          }
+          if (!evt.request.headers.get("authorization")?.includes(marker)) throw split();
+          // The body is never inspected or substituted: a body placeholder can only reach the wire as a placeholder.
+          const { account, served } = await select();
+          const headers = new Headers(evt.request.headers);
+          headers.set("authorization", headers.get("authorization")!.split(marker).join(served.material));
+          evt.request = new Request(evt.request, { headers });
+          registry.track(evt.request, { instance, provider, account, recordVersion: served.recordVersion });
+          onServed(account, served.recordVersion);
+          if (!servingProviders.has(provider)) {
             servingProviders.add(provider);
             log.info({ provider, state: "serving" });
-          }, { providerID: provider }));
-          registrations.push(await ctx.session.hook("experimental.ws.handshake", async (evt) => {
-            // Stale hooks must leave other owners' events unclaimed for their serving plugin.
-            const target = endpoint.current;
-            if (!target) throw orphan(provider, "no_instance");
-            const verdict = target.ownership(provider);
-            if (verdict === "other") return;
-            if (verdict !== "owned") throw orphan(provider, verdict);
-            if (!endpoint.claimHandshake(evt)) return;
-            await target.handshake(provider, evt);
-          }, { providerID: provider }));
+          }
+        });
+        handshakes.set(provider, async (evt) => {
+          if (containsSentinel(evt.url, [], sentinel(provider))) {
+            throw new CustodyRequestError("custody placeholder in WebSocket URL refused; credentials may only be substituted in handshake headers");
+          }
+          if (!Object.values(evt.headers).some((value) => value.includes(sentinel(provider)))) throw split();
+          const { account, served } = await select();
+          for (const [name, value] of Object.entries(evt.headers)) evt.headers[name] = value.split(sentinel(provider)).join(served.material);
+          onServed(account, served.recordVersion);
+        });
+        responses.set(provider, async (served, evt) => {
+          const { account, recordVersion } = served;
+          const status = evt.response.status;
+          if (status === 401) {
+            log.warn({ provider, label: account.label, credentialId: account.credential_id, recordVersion, httpStatus: status });
+            try {
+              await reportWithinBudget(client.reportAuthFailure({ handle: account.handle, providerStatus: 401, recordVersion, reporterSource: "direct" }),
+                (errorClass, errorCode) => log.warn({ provider, label: account.label, credentialId: account.credential_id, errorClass, errorCode }));
+            } finally { freshness.invalidate(account); }
+          } else if (status === 429 || status === 402) {
+            freshness.cooldown(account, status === 402 ? PAYMENT_REQUIRED_COOLDOWN_MS
+              : cooldownFromRetryAfter(evt.response.headers.get("Retry-After"), (dependencies.now ?? Date.now)()));
+            log.warn({ provider, label: account.label, credentialId: account.credential_id, httpStatus: status });
+          }
         });
       }
-      endpointRegistration = endpoint.register({
+      const instance: CustodyInstance = {
         id: instanceId, ownership,
-        async serve(provider, request, signal) {
-          const serve = serves.get(provider);
-          if (!serve) throw new CustodyOwnershipError("no serving custody handle for provider");
-          return serve(new Request(request, { signal }));
+        async request(provider, event) {
+          const request = requests.get(provider);
+          if (!request) throw new CustodyOwnershipError("no serving custody handle for provider");
+          await request(event);
         }, async handshake(provider, event) {
           const handshake = handshakes.get(provider);
           if (!handshake) throw new CustodyOwnershipError("no serving custody handle for WebSocket provider");
           await handshake(event);
         },
-      });
-      for (const install of installHooks) await install();
-      registrations.push(await ctx.session.hook("http.request", (evt) => {
-        guard(evt.model.providerID, evt.request.url, evt.request.headers.values());
-      }));
-      registrations.push(await ctx.session.hook("experimental.ws.handshake", (evt) => {
-        guard(evt.model.providerID, evt.url, Object.values(evt.headers));
+        async response(served, event) {
+          if (disposed) { debugOnce("disposed_response"); return; }
+          await responses.get(served.provider)?.(served, event);
+        },
+      };
+      registryRegistration = registry.register(instance);
+      const dispatch = async (evt: SessionHttpRequest | SessionWebSocketHandshake) => {
+        const provider = evt.model.providerID;
+        const target = registry.current;
+        const verdict = target?.ownership(provider) ?? "no_instance";
+        // Other owners must retain the event claim; every other path claims before inspecting placeholders.
+        if (verdict === "other") return;
+        if (!registry.claim(evt)) return;
+        if (verdict !== "owned") {
+          const url = "request" in evt ? evt.request.url : evt.url;
+          const values = "request" in evt ? evt.request.headers.values() : Object.values(evt.headers);
+          if (containsSentinel(url, values, TOMBSTONE_PREFIX)) throw orphan(provider, verdict);
+          return;
+        }
+        if ("request" in evt) await target!.request(provider, evt);
+        else await target!.handshake(provider, evt);
+      };
+      for (const providerID of owned.keys()) {
+        registrations.push(await ctx.session.hook("http.request", dispatch, { providerID }));
+        registrations.push(await ctx.session.hook("experimental.ws.handshake", dispatch, { providerID }));
+      }
+      registrations.push(await ctx.session.hook("http.request", dispatch));
+      registrations.push(await ctx.session.hook("experimental.ws.handshake", dispatch));
+      registrations.push(await ctx.session.hook("http.response", async (evt) => {
+        const served = registry.take(evt.request);
+        if (!served || served.provider !== evt.model.providerID) { debugOnce("unmatched_response"); return; }
+        await served.instance.response(served, evt);
       }));
       return cleanup;
     } catch (error) {

@@ -52,6 +52,8 @@ THRESHOLD_NAME = re.compile(
 # that silently under-scans is the same defect it was built to catch.
 NAME_RULE_BLIND = {
     "AUTH_EVENTS_PER_CREDENTIAL": "crates/credentials-core/src/store.rs",
+    # A time window, not a size: "COOLDOWN" is not one of the threshold words.
+    "REPORT_REFRESH_COOLDOWN_MS": "crates/credentials-core/src/engine.rs",
 }
 
 NOT_THRESHOLDS = {

@@ -50,6 +50,24 @@ use crate::store::{
 /// expires mid-flight.
 pub const DEFAULT_EXPIRY_SKEW_MS: i64 = 60_000;
 
+/// How long after a credential's current version was written a consumer's stale
+/// report may NOT force a refresh.
+///
+/// A report (`credential.report_auth_failure`) marks the token `stale_pending`, and
+/// the next read would refresh it. A consumer that misreads provider refusals as bad
+/// tokens reports every one, and each report used to cost an upstream exchange:
+/// measured, 43 refreshes of one ChatGPT login in a day, 11 of them in 22 seconds.
+/// OpenAI, Anthropic and antigravity rotate the refresh token on every exchange and
+/// revoke the whole token family on reuse, so a burst endangers the login itself.
+///
+/// Inside the window a stale-marked read serves the current token and makes no
+/// upstream call; the mark is kept, so the first read after the window refreshes
+/// without the consumer reporting again. Only the report path is held back: a token
+/// that is expiring, empty, or shorter than the caller's `min_ttl_ms` refreshes as
+/// before. The window is half-open: a version written exactly this long ago
+/// refreshes.
+pub const REPORT_REFRESH_COOLDOWN_MS: i64 = 60_000;
+
 /// How a dangling intent was resolved by reconciliation. Returned so the caller
 /// (the module) can drive the audit log / alarms; the resolution itself is already
 /// applied to the store.
@@ -154,6 +172,11 @@ pub struct RefreshEngine {
     adapters: HashMap<String, Arc<dyn RefreshAdapter>>,
     http: Arc<dyn HttpTransport>,
     skew_ms: i64,
+    // The wall clock the report cooldown is measured against. Real time in
+    // production; replaceable through `with_clock` so a test can stand at an exact
+    // offset from a record's write time. Only the cooldown reads it: expiry checks
+    // keep the real clock, so a test pinning the cooldown cannot move expiry.
+    clock: Arc<dyn Fn() -> i64 + Send + Sync>,
     // Per-credential single-flight locks, created on demand. The map mutex is held
     // only to look up/insert a lock handle (never across an await); the per-id
     // tokio mutex is the one held across the refresh await.
@@ -195,6 +218,7 @@ impl RefreshEngine {
             adapters,
             http,
             skew_ms: DEFAULT_EXPIRY_SKEW_MS,
+            clock: Arc::new(now_ms),
             inflight: Mutex::new(HashMap::new()),
             detected_plans: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(feature = "kill9-test-seam")]
@@ -215,6 +239,13 @@ impl RefreshEngine {
         self
     }
 
+    /// Replace the clock the report cooldown is measured against (for tests). It
+    /// returns Unix milliseconds, the unit of the store's `updated_at_ms`.
+    pub fn with_clock(mut self, clock: Arc<dyn Fn() -> i64 + Send + Sync>) -> Self {
+        self.clock = clock;
+        self
+    }
+
     /// The underlying store (for the module's read/admin surfaces).
     pub fn store(&self) -> &Arc<EncryptedStore> {
         &self.store
@@ -225,7 +256,10 @@ impl RefreshEngine {
     /// `min_ttl_ms`: if set, a token with less than this remaining is refreshed.
     /// Refresh is single-flight per credential. A non-refreshable record is served
     /// as-is unless it carries a consumer report marker, which must terminally latch
-    /// because no refresh path can recover it. Fails closed on a
+    /// because no refresh path can recover it. A refreshable record carrying that
+    /// marker refreshes unless its current version was written inside
+    /// [`REPORT_REFRESH_COOLDOWN_MS`]; then it is served as-is until the window passes.
+    /// Fails closed on a
     /// `needs_reauth`/quarantined record (the store's typed errors propagate).
     pub async fn get(
         &self,
@@ -248,7 +282,8 @@ impl RefreshEngine {
         min_ttl_ms: Option<i64>,
         force_refresh: bool,
     ) -> Result<GetWithRefreshStatus, EngineError> {
-        let (initial, stale_pending) = self.store.get_with_stale_pending(credential_id)?;
+        let (initial, mark) = self.store.get_with_stale_pending(credential_id)?;
+        let stale_pending = mark.pending;
         if stale_pending && !initial.is_refreshable() {
             // A stale marker means a consumer already refused this exact token. A
             // non-refreshable record cannot replace it, so defer to the existing
@@ -282,6 +317,25 @@ impl RefreshEngine {
             });
         }
 
+        // The report cooldown holds back ONLY a refresh the stale mark alone asks for:
+        // never a forced read, and never a token that is empty, expiring, or short of
+        // the caller's `min_ttl_ms`. The mark stays set, so the first read after the
+        // window refreshes.
+        if stale_pending
+            && !force_refresh
+            && !self.is_stale(&initial, min_ttl_ms)
+            && self.within_report_cooldown(mark.record_written_at_ms)
+        {
+            // Best-effort: a diagnostic write must never fail the read it explains.
+            let _ = self
+                .store
+                .record_stale_refresh_deferred(credential_id, initial.record_version);
+            return Ok(GetWithRefreshStatus {
+                record: initial,
+                refreshed_for_min_ttl: false,
+            });
+        }
+
         // Single-flight: serialize refreshes for this credential.
         let lock = self.inflight_lock(credential_id);
         let _guard = lock.lock().await;
@@ -304,6 +358,17 @@ impl RefreshEngine {
             record: self.store.get(credential_id)?,
             refreshed_for_min_ttl: refresh_requested_by_min_ttl,
         })
+    }
+
+    /// Whether a record written at `written_at_ms` is still inside
+    /// [`REPORT_REFRESH_COOLDOWN_MS`]. Half-open: exactly the cooldown later is outside.
+    ///
+    /// A write time AHEAD of the clock (the clock stepped backwards) counts as outside,
+    /// so the read refreshes as it did before the cooldown existed. Counting it as
+    /// inside would hold every reported token for as long as the clock was wrong.
+    fn within_report_cooldown(&self, written_at_ms: i64) -> bool {
+        let elapsed = (self.clock)().saturating_sub(written_at_ms);
+        (0..REPORT_REFRESH_COOLDOWN_MS).contains(&elapsed)
     }
 
     /// Whether a record's access token is stale: empty, expired (within skew), or

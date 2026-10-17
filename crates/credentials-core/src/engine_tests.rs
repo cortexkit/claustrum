@@ -9,13 +9,15 @@
 mod meta_tests;
 
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
 use crate::audit::{AuditCtx, AuditOp};
-use crate::engine::{EngineError, ReauthReason, Reconciliation, RefreshEngine};
+use crate::engine::{
+    EngineError, ReauthReason, Reconciliation, RefreshEngine, REPORT_REFRESH_COOLDOWN_MS,
+};
 use crate::key::{MasterKey, MASTER_KEY_LEN};
 use crate::oauth::OAuthCredential;
 use crate::record::VaultRecord;
@@ -195,6 +197,63 @@ fn engine(store: EncryptedStore, adapter: StubAdapter) -> (RefreshEngine, Arc<At
     let calls = adapter.calls.clone();
     let eng = RefreshEngine::new(Arc::new(store), vec![Arc::new(adapter)], Arc::new(NoHttp));
     (eng, calls)
+}
+
+/// A cooldown clock that always stands a full report cooldown after real time, so
+/// any record written before the read is already outside the window. For tests
+/// about what a stale report does once the cooldown is no longer in the way.
+fn clock_past_report_cooldown() -> Arc<dyn Fn() -> i64 + Send + Sync> {
+    Arc::new(|| now_ms() + REPORT_REFRESH_COOLDOWN_MS)
+}
+
+/// A cooldown clock the test sets to exact instants.
+fn pinned_clock(at: &Arc<AtomicI64>) -> Arc<dyn Fn() -> i64 + Send + Sync> {
+    let at = at.clone();
+    Arc::new(move || at.load(Ordering::SeqCst))
+}
+
+/// The consumer report `credential.report_auth_failure` applies for `version`.
+fn report_stale(store: &EncryptedStore, id: &str, version: u64) {
+    store
+        .mark_stale_if_version_reported(
+            id,
+            version,
+            AuditCtx::vault(AuditOp::ReportAuthFailure),
+            AuthObservation {
+                kind: "consumer_report_stale",
+                provider_status: Some(401),
+                detail: None,
+                reporter_source: None,
+                principal: None,
+            },
+        )
+        .expect("report against the current version");
+}
+
+/// When the store wrote the credential's current version.
+fn written_at(store: &EncryptedStore, id: &str) -> i64 {
+    store
+        .get_with_stale_pending(id)
+        .expect("read")
+        .1
+        .record_written_at_ms
+}
+
+fn deferral_rows(store: &EncryptedStore, id: &str) -> Vec<crate::store::AuthEvent> {
+    store
+        .recent_auth_events(1_000)
+        .expect("events")
+        .into_iter()
+        .filter(|event| event.credential_id == id && event.kind == "stale_refresh_deferred")
+        .collect()
+}
+
+/// An OAuth record whose token is good for another hour, so only a stale report can
+/// make a read refresh it.
+fn unexpired_oauth_record() -> VaultRecord {
+    let mut record = stale_oauth_record();
+    record.oauth.as_mut().expect("oauth").expires_at_ms = Some(now_ms() + 3_600_000);
+    record
 }
 
 /// A GitHub App fixture that returns queued grants so each forced read is one distinct
@@ -715,6 +774,9 @@ async fn report_stale_then_invalid_grant_latches_needs_reauth() {
     let mut adapter = StubAdapter::new("stub");
     adapter.fail = Some("invalid_grant");
     let (eng, calls) = engine(store, adapter);
+    // The record was created a moment ago; read from past the report cooldown so the
+    // stale mark is what decides, as it is for a credential not just written.
+    let eng = eng.with_clock(clock_past_report_cooldown());
 
     let err = eng.get("id", None, false).await.expect_err("must fail");
     assert!(matches!(
@@ -757,6 +819,8 @@ async fn stale_pending_clears_in_the_refresh_commit() {
         )
         .expect("report marks the current token stale");
     let (eng, calls) = engine(store, StubAdapter::new("stub"));
+    // Past the report cooldown, so the stale mark alone forces this refresh.
+    let eng = eng.with_clock(clock_past_report_cooldown());
 
     let refreshed = eng.get("id", None, false).await.expect("refresh succeeds");
     assert_eq!(refreshed.record_version, 2);
@@ -768,6 +832,202 @@ async fn stale_pending_clears_in_the_refresh_commit() {
         1,
         "the cleared marker must not re-refresh"
     );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A stale report on a credential written longer than the cooldown ago costs exactly
+/// one upstream exchange: the next read refreshes once and the version moves by one.
+#[tokio::test]
+async fn report_then_read_refreshes_once() {
+    let (root, d) = tmp_descriptor();
+    let store = open_store(&d, 85);
+    store
+        .create("id", &unexpired_oauth_record())
+        .expect("create");
+    let clock = Arc::new(AtomicI64::new(
+        written_at(&store, "id") + REPORT_REFRESH_COOLDOWN_MS,
+    ));
+    report_stale(&store, "id", 1);
+    let (eng, calls) = engine(store, StubAdapter::new("stub"));
+    let eng = eng.with_clock(pinned_clock(&clock));
+
+    let served = eng.get("id", None, false).await.expect("refresh succeeds");
+    assert_eq!(
+        served.record_version, 2,
+        "the report must force one refresh"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let again = eng.get("id", None, false).await.expect("plain read");
+    assert_eq!(again.record_version, 2);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "one report must cost exactly one exchange"
+    );
+    assert!(deferral_rows(eng.store(), "id").is_empty());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The burst this cooldown exists for: a consumer reports, gets a freshly refreshed
+/// token, and immediately reports THAT one too. The second read must serve the token
+/// just minted, make no upstream call, keep the mark for later, and say so once.
+#[tokio::test]
+async fn report_inside_the_cooldown_serves_the_current_version_without_an_upstream_call() {
+    let (root, d) = tmp_descriptor();
+    let store = open_store(&d, 86);
+    store
+        .create("id", &unexpired_oauth_record())
+        .expect("create");
+    let clock = Arc::new(AtomicI64::new(
+        written_at(&store, "id") + REPORT_REFRESH_COOLDOWN_MS,
+    ));
+    report_stale(&store, "id", 1);
+    let (eng, calls) = engine(store, StubAdapter::new("stub"));
+    let eng = eng.with_clock(pinned_clock(&clock));
+    let refreshed = eng.get("id", None, false).await.expect("first refresh");
+    assert_eq!(refreshed.record_version, 2);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    report_stale(eng.store(), "id", 2);
+    clock.store(written_at(eng.store(), "id") + 1, Ordering::SeqCst);
+    let served = eng.get("id", None, false).await.expect("deferred read");
+
+    assert_eq!(
+        served.record_version, 2,
+        "inside the window the current version is served"
+    );
+    assert_eq!(served.payload.expose(), b"refreshed-access");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "a report inside the cooldown must not reach the provider"
+    );
+    assert!(
+        eng.store().meta("id").expect("meta").stale_pending,
+        "the mark must survive the deferral so the read after the window refreshes"
+    );
+    let deferrals = deferral_rows(eng.store(), "id");
+    assert_eq!(deferrals.len(), 1, "the deferral must be recorded");
+    assert_eq!(deferrals[0].record_version, Some(2));
+    assert!(!deferrals[0].applied, "a deferral changes nothing");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The window is half-open. One millisecond before the boundary the stale mark is
+/// held back; exactly at the boundary, and past it, the read refreshes.
+#[tokio::test]
+async fn report_cooldown_holds_one_ms_before_the_boundary_and_refreshes_at_and_past_it() {
+    let (root, d) = tmp_descriptor();
+    let store = open_store(&d, 87);
+    store
+        .create("id", &unexpired_oauth_record())
+        .expect("create");
+    let written = written_at(&store, "id");
+    report_stale(&store, "id", 1);
+    let clock = Arc::new(AtomicI64::new(written + REPORT_REFRESH_COOLDOWN_MS - 1));
+    let (eng, calls) = engine(store, StubAdapter::new("stub"));
+    let eng = eng.with_clock(pinned_clock(&clock));
+
+    let before = eng.get("id", None, false).await.expect("held read");
+    assert_eq!(
+        before.record_version, 1,
+        "one ms before the boundary is held"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+    clock.store(written + REPORT_REFRESH_COOLDOWN_MS, Ordering::SeqCst);
+    let at = eng.get("id", None, false).await.expect("boundary read");
+    assert_eq!(at.record_version, 2, "exactly at the boundary refreshes");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    report_stale(eng.store(), "id", 2);
+    clock.store(
+        written_at(eng.store(), "id") + REPORT_REFRESH_COOLDOWN_MS + 1,
+        Ordering::SeqCst,
+    );
+    let past = eng.get("id", None, false).await.expect("past read");
+    assert_eq!(past.record_version, 3, "one ms past the boundary refreshes");
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The cooldown holds back only what the stale mark asks for. A token that cannot
+/// meet the caller's `min_ttl_ms`, or that has expired, refreshes inside the window.
+#[tokio::test]
+async fn a_min_ttl_the_token_cannot_meet_refreshes_inside_the_report_cooldown() {
+    let (root, d) = tmp_descriptor();
+    let store = open_store(&d, 88);
+    store
+        .create("short", &unexpired_oauth_record())
+        .expect("create");
+    store
+        .create("expired", &stale_oauth_record())
+        .expect("create");
+    report_stale(&store, "short", 1);
+    report_stale(&store, "expired", 1);
+    let clock = Arc::new(AtomicI64::new(written_at(&store, "short") + 1));
+    let (eng, calls) = engine(store, StubAdapter::new("stub"));
+    let eng = eng.with_clock(pinned_clock(&clock));
+
+    // The stored token has about an hour left; the caller asks for two.
+    let served = eng
+        .get_with_refresh_status("short", Some(7_200_000), false)
+        .await
+        .expect("min_ttl refresh");
+    assert_eq!(served.record.record_version, 2);
+    assert!(served.refreshed_for_min_ttl);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    clock.store(written_at(eng.store(), "expired") + 1, Ordering::SeqCst);
+    let expired = eng
+        .get("expired", None, false)
+        .await
+        .expect("expiry refresh");
+    assert_eq!(
+        expired.record_version, 2,
+        "an expired token refreshes in the window"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert!(deferral_rows(eng.store(), "short").is_empty());
+    assert!(deferral_rows(eng.store(), "expired").is_empty());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A consumer in a report loop reads in a loop too. However many reports and reads
+/// land inside one window, the deferral is recorded once: the `auth_events` ring is
+/// per credential and bounded, and a row per read would evict the reports themselves.
+#[tokio::test]
+async fn repeated_reports_inside_the_cooldown_record_at_most_one_deferral() {
+    let (root, d) = tmp_descriptor();
+    let store = open_store(&d, 89);
+    store
+        .create("id", &unexpired_oauth_record())
+        .expect("create");
+    let clock = Arc::new(AtomicI64::new(written_at(&store, "id") + 1));
+    let (eng, calls) = engine(store, StubAdapter::new("stub"));
+    let eng = eng.with_clock(pinned_clock(&clock));
+
+    for step in 0..6 {
+        report_stale(eng.store(), "id", 1);
+        let served = eng.get("id", None, false).await.expect("deferred read");
+        assert_eq!(served.record_version, 1);
+        clock.fetch_add(1_000 * step, Ordering::SeqCst);
+    }
+
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        deferral_rows(eng.store(), "id").len(),
+        1,
+        "six deferred reads in one window must leave one deferral row"
+    );
+    let reports = eng
+        .store()
+        .recent_auth_events(1_000)
+        .expect("events")
+        .into_iter()
+        .filter(|event| event.kind == "consumer_report_stale")
+        .count();
+    assert_eq!(reports, 6, "every report is still recorded");
     let _ = std::fs::remove_dir_all(&root);
 }
 

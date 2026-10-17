@@ -844,6 +844,7 @@ diagnostics table, not the tamper-evident audit chain:
 | `scoped_first_use` | The first time a principal successfully exercised a grant over a credential. Written once per (principal, credential, operation) and never again, so its absence shows a grant that has never been exercised. |
 | `reconcile_needs_reauth` | Startup reconciliation forced a credential to `needs_reauth`. |
 | `github_app_permissions_changed` | A successful GitHub App mint observed changed installation permissions. |
+| `stale_refresh_deferred` | A read found a consumer's stale mark but served the current token without refreshing, because that version was written less than `REPORT_REFRESH_COOLDOWN_MS` (60 s) ago. Written at most once per credential version, so one row stands for every held-back read in that window; `record_version` names the version that kept serving. The mark stays set and the first read after the window refreshes. |
 | `enrollment` | A bounded enrollment proposal, poll, or expiry diagnostic under a fixed `auth.enroll_*` subject. |
 
 **Retired values you may still meet in the data.** The table above lists what the code

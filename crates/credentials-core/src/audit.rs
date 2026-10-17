@@ -203,6 +203,10 @@ pub enum AuthEventKind {
     ReconcileNeedsReauth,
     /// A successful GitHub App mint observed changed installation permissions.
     GithubAppPermissionsChanged,
+    /// A read found a consumer's stale mark but served the current token without a
+    /// refresh, because that token was written inside the report cooldown. Written at
+    /// most once per credential version, never once per read.
+    StaleRefreshDeferred,
     /// A bounded consumer-enrollment diagnostic with a fixed, non-secret subject.
     Enrollment,
 }
@@ -252,6 +256,7 @@ impl AuthEventKind {
             AuthEventKind::ScopedFirstUse => "scoped_first_use",
             AuthEventKind::ReconcileNeedsReauth => "reconcile_needs_reauth",
             AuthEventKind::GithubAppPermissionsChanged => "github_app_permissions_changed",
+            AuthEventKind::StaleRefreshDeferred => "stale_refresh_deferred",
             AuthEventKind::Enrollment => "enrollment",
         }
     }
@@ -773,6 +778,7 @@ mod vocabulary_documentation_tests {
                 AuthEventKind::GithubAppPermissionsChanged => {
                     AuthEventKind::GithubAppPermissionsChanged.as_str()
                 }
+                AuthEventKind::StaleRefreshDeferred => AuthEventKind::StaleRefreshDeferred.as_str(),
                 AuthEventKind::Enrollment => AuthEventKind::Enrollment.as_str(),
             }
         }
@@ -816,6 +822,11 @@ mod vocabulary_documentation_tests {
             section,
             "auth_events.kind",
             value(AuthEventKind::GithubAppPermissionsChanged),
+        );
+        assert_documented(
+            section,
+            "auth_events.kind",
+            value(AuthEventKind::StaleRefreshDeferred),
         );
         assert_documented(
             section,

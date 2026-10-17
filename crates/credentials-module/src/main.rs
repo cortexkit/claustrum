@@ -10599,11 +10599,23 @@ mod tests {
         // `refresh_unsupported` without ever reaching a provider.
         let (_unused, store, _db, _root) = tmp_surface_with_store(17);
         let surface = Arc::new(ReadSurface::new(
-            Arc::new(RefreshEngine::new(
-                Arc::clone(&store),
-                vec![Arc::new(InvalidGrantAdapter)],
-                Arc::new(crate::test_support::NoHttp),
-            )),
+            Arc::new(
+                RefreshEngine::new(
+                    Arc::clone(&store),
+                    vec![Arc::new(InvalidGrantAdapter)],
+                    Arc::new(crate::test_support::NoHttp),
+                )
+                // The credential is created just below and reported at once. Read from a
+                // full report cooldown later, so the stale mark is what drives the refresh
+                // in step 2 rather than being held back as a just-written version.
+                .with_clock(Arc::new(|| {
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as i64)
+                        .unwrap_or(0)
+                        + credentials_core::engine::REPORT_REFRESH_COOLDOWN_MS
+                })),
+            ),
             FetchLimiter::new(Caps::default()),
         ));
         store

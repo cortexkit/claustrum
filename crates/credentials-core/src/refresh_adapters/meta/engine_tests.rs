@@ -121,6 +121,10 @@ async fn meta_403_subscription_and_outage_dispositions_reach_the_store() {
 async fn meta_refresh_uses_engine_expiry_min_ttl_and_stale_report_policy() {
     for cause in ["expiry", "min_ttl", "report"] {
         let (_root, engine, http) = setup(200, fixtures::KEY).await;
+        // Read from past the report cooldown: the record was just created, and the
+        // "report" cause is about the stale mark forcing a refresh once the window
+        // no longer holds it back. The cooldown clock does not affect the other causes.
+        let engine = engine.with_clock(clock_past_report_cooldown());
         let mut min_ttl = None;
         match cause {
             "expiry" => {

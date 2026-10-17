@@ -604,7 +604,7 @@ the error code's class determines retry policy. Scoped refusals remain uniform.
 | `ready` | the vault will attempt to serve this record |
 | `credential_id` | resolved operator-chosen label, for verifying an existing binding only |
 | `record_version` | monotone change cursor over the stored MATERIAL |
-| `stale_pending` | whether the next `get` will pay an upstream exchange |
+| `stale_pending` | whether a report marked the token stale, so the next `get` pays an upstream exchange (held back while the version is inside the report cooldown, §5) |
 | `last_error_code` | the most recent refusal, if any |
 
 `credential_id` is absent for overall readiness and unresolved addresses; verify a held
@@ -666,6 +666,21 @@ The effect is **stale-marking, not killing**: a refreshable credential is marked
 the next `get` refreshes it, and only a subsequent `invalid_grant` from the provider
 latches `needs_reauth`. A non-refreshable credential latches immediately, since there is
 no recovery path to attempt.
+
+**A report does not buy a refresh inside the 60 s cooldown.** The report is applied as
+above: the token is marked stale, and once the cooldown has passed the next `get`
+refreshes it without another report. But a credential whose current `record_version` was
+written less than 60 s ago (`REPORT_REFRESH_COOLDOWN_MS`; a refresh writes a new version)
+keeps serving its current token until the window passes, with no upstream call. The
+cooldown exists because OpenAI, Anthropic and antigravity rotate the refresh token on every
+exchange and revoke the whole token family on reuse, so a burst of report-driven refreshes
+puts the login itself at risk. An expiring token, or one that cannot meet your
+`min_ttl_ms`, still refreshes inside the window.
+
+So the protocol after a report is: re-read, and if `record_version` did not change, pause
+before using the credential again. Do not report the same version in a loop. Repeated
+reports change nothing inside the window and each one is a diagnostic row; the vault records
+the held-back refresh once per version as `auth_events.kind = stale_refresh_deferred`.
 
 `reporter_source` is a closed vocabulary — `direct`, `relay_status_field`,
 `relay_message_parse` — recorded for forensics. An unrecognised value is stored as

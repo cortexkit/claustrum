@@ -676,6 +676,18 @@ pub fn migrate_through_for_test(store: &SqliteStore, version: u32) -> Result<(),
 pub const AUDIT_KEY_SECRET_NAME: &str = "__vault_audit_key__";
 const AUDIT_KEY_RECORD_VERSION: u64 = 0;
 
+/// The local refresh instruction read in the same row as a record, for the engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StaleMark {
+    /// A consumer reported the served token as refused (`stale_pending`).
+    pub(crate) pending: bool,
+    /// When the row was last written (`updated_at_ms`). Every write that produces a
+    /// new `record_version` sets it, refresh commits included, so for a live record
+    /// this is when its current token was stored. The engine's report cooldown
+    /// measures from it.
+    pub(crate) record_written_at_ms: i64,
+}
+
 /// The non-secret metadata of a stored record, readable WITHOUT decrypting (the
 /// plaintext columns). Used by rotation scans, status, and CAS pre-checks.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4079,20 +4091,21 @@ impl EncryptedStore {
     pub(crate) fn get_with_stale_pending(
         &self,
         credential_id: &str,
-    ) -> Result<(VaultRecord, bool), StoreOpError> {
+    ) -> Result<(VaultRecord, StaleMark), StoreOpError> {
         let row = self
             .store
             .with_conn(|c| {
                 c.query_row(
-                    "SELECT record_version, state, stale_pending, envelope FROM credentials \
-                     WHERE credential_id = ?1",
+                    "SELECT record_version, state, stale_pending, envelope, updated_at_ms \
+                     FROM credentials WHERE credential_id = ?1",
                     rusqlite::params![credential_id],
                     |r| {
                         let version: i64 = r.get(0)?;
                         let state: String = r.get(1)?;
                         let stale_pending: i64 = r.get(2)?;
                         let blob: Vec<u8> = r.get(3)?;
-                        Ok((version, state, stale_pending, blob))
+                        let updated_at_ms: i64 = r.get(4)?;
+                        Ok((version, state, stale_pending, blob, updated_at_ms))
                     },
                 )
                 .map(Some)
@@ -4103,8 +4116,17 @@ impl EncryptedStore {
             })
             .map_err(StoreOpError::from)?;
 
-        let (version, state, stale_pending, blob) = row.ok_or(StoreOpError::NotFound)?;
-        self.decode_record_row(credential_id, version, &state, stale_pending, &blob)
+        let (version, state, stale_pending, blob, updated_at_ms) =
+            row.ok_or(StoreOpError::NotFound)?;
+        let (record, pending) =
+            self.decode_record_row(credential_id, version, &state, stale_pending, &blob)?;
+        Ok((
+            record,
+            StaleMark {
+                pending,
+                record_written_at_ms: updated_at_ms,
+            },
+        ))
     }
 
     fn decode_record_row(
@@ -4419,6 +4441,49 @@ impl EncryptedStore {
                 )?;
                 trim_auth_events_tx(&tx, credential_id)?;
                 tx.commit()
+            })
+            .map_err(StoreOpError::from)
+    }
+
+    /// Record that a read served a reported-stale token because the credential's
+    /// current version was written inside the engine's report cooldown.
+    ///
+    /// At most ONE row per (credential, record_version), whatever the number of reads.
+    /// A version's cooldown opens when that version is written, so each window maps to
+    /// one version and "once per version" is "once per window". A row per read would
+    /// be wrong twice over: a consumer in a report loop reads in a loop too, and
+    /// `auth_events` keeps only the newest [`AUTH_EVENTS_PER_CREDENTIAL`] rows per
+    /// credential, so deferral rows would evict the refusal rows that explain the loop.
+    ///
+    /// Unfenced and best-effort at the call site, like the other diagnostic writers: an
+    /// explanatory row must never fail the read it describes. Returns whether a row was
+    /// written.
+    pub fn record_stale_refresh_deferred(
+        &self,
+        credential_id: &str,
+        record_version: u64,
+    ) -> Result<bool, StoreOpError> {
+        self.store
+            .with_conn(|c| {
+                let tx = c.unchecked_transaction()?;
+                let written = tx.execute(
+                    "INSERT INTO auth_events \
+                     (ts_ms, credential_id, kind, provider_status, detail, record_version, applied) \
+                     SELECT ?1, ?2, ?3, NULL, NULL, ?4, 0 \
+                     WHERE NOT EXISTS ( \
+                       SELECT 1 FROM auth_events \
+                       WHERE credential_id = ?2 AND kind = ?3 AND record_version = ?4 \
+                     )",
+                    rusqlite::params![
+                        now_ms(),
+                        credential_id,
+                        AuthEventKind::StaleRefreshDeferred.as_str(),
+                        record_version as i64,
+                    ],
+                )?;
+                trim_auth_events_tx(&tx, credential_id)?;
+                tx.commit()?;
+                Ok(written > 0)
             })
             .map_err(StoreOpError::from)
     }

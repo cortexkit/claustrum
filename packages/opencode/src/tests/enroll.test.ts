@@ -41,6 +41,22 @@ async function expectRefusal(argv: string[], message: string) {
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
 
 describe("enroll argument parsing", () => {
+  test("OpenCode 2 names missing providers and invalid providers precisely", () => {
+    expect(() => parseEnrollArgs(["--oc2"])).toThrow(/^missing required --provider$/);
+    expect(() => parseEnrollArgs(["--oc2", "--provider", "invalid/provider"])).toThrow(/^invalid provider$/);
+    expect(() => parseEnrollArgs(["--oc2", "--provider", "xai", "--id", "oauth:other"])).toThrow("invalid credential id for provider");
+  });
+  test("accepts OC2 targeting flags only in OC2 mode", () => {
+    const base = ["--provider", "xai", "--id", "oauth:xai", "--main", "--min-ttl-ms", "0", "--token-lifetime-ms", "2"];
+    const flags = ["--opencode-bin", "/some path/opencode", "--oc2-server", "http://localhost:4321", "--oc2-method", "device", "--remove-previous"];
+    expect(() => parseEnrollArgs([...base, ...flags])).toThrow("require --oc2");
+    expect(parseEnrollArgs([...base, "--oc2", ...flags])).toMatchObject({ oc2: true, opencodeBin: "/some path/opencode", oc2Server: "http://localhost:4321", oc2Method: "device", removePrevious: true });
+    expect(parseEnrollArgs(["--oc2", "--provider", "deepseek", "--oc2-standalone"])).toMatchObject({ oc2: true, oc2Standalone: true, opencodeBin: "opencode" });
+    expect(() => parseEnrollArgs([...base, "--oc2", "--oc2-server", "http://localhost", "--oc2-standalone"])).toThrow("mutually exclusive");
+    expect(() => parseEnrollArgs([...base, "--oc2", "--oc2", "--oc2-standalone"])).toThrow("duplicate flag");
+    expect(() => parseEnrollArgs([...base, "--oc2", "--remove"])).toThrow("--remove");
+    for (const flag of [["--opencode-bin", "bin"], ["--oc2-standalone"], ["--oc2-server", "url"], ["--oc2-method", "id"], ["--remove-previous"]]) expect(() => parseEnrollArgs([...base, ...flag])).toThrow("require --oc2");
+  });
   test("refuses invalid, incomplete, duplicate, and incompatible action flags", async () => {
     await expectRefusal(["--provider", "xai", "--main"], "missing required --provider or --id");
     await expectRefusal(["--provider", "xai", "--id", "oauth:openai", "--main"], "invalid credential id for provider");
@@ -150,6 +166,10 @@ describe("CLI and bundle boundaries", () => {
     };
     const help = await run(["--help"]);
     expect(help.code).toBe(0); expect(help.stdout).toContain("--id"); expect(help.stdout).toContain("--main"); expect(help.stdout).toContain("--min-ttl-ms"); expect(help.stdout).toContain("--token-lifetime-ms"); expect(help.stdout).toContain("--remove"); expect(help.stdout).toContain("manifest"); expect(help.stdout).toContain("v1 supports only");
+    expect(help.stdout).toContain("bun run enroll -- --oc2 --provider <provider>");
+    expect(help.stdout).toContain("bun run enroll -- --oc2 --provider xai --id oauth:xai --main --min-ttl-ms <ms> --token-lifetime-ms <ms> --oc2-method <id>");
+    expect(help.stdout).toContain("OpenCode 2 options:");
+    for (const flag of ["--oc2", "--opencode-bin", "--oc2-standalone", "--oc2-server", "--oc2-method", "--remove-previous"]) expect(help.stdout).toContain(flag);
     const refusal = await run(["--provider", "xai", "--id", "oauth:openai", "--main"]);
     expect(refusal.code).not.toBe(0); expect(refusal.stderr).toContain("invalid credential id for provider"); expect(refusal.stderr).not.toMatch(/\n\s+at /); expect(refusal.stderr).not.toContain("Error:");
     // run() prepends one separator and bun consumes one before argv reaches the script, so three

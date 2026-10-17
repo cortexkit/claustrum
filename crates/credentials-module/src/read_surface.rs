@@ -3278,6 +3278,14 @@ mod error_class_tests {
             .nth(1)
             .and_then(|rest| rest.split("\n\n").next())
             .expect("the doc must say which table codes come from the admin write path");
+        // And the reverse: every store-taxonomy code reaches consumers through the admin
+        // error envelope, so each needs a row in the table too.
+        for code in &store_codes {
+            assert!(
+                table.iter().any(|(c, _)| c == code),
+                "docs/wire-contract-v1.md must list the store-taxonomy code `{code}`"
+            );
+        }
         for (code, _) in &table {
             if READ_ERROR_GOLDEN.iter().any(|&(_, c, _)| c == code) {
                 continue;

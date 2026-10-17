@@ -14,12 +14,6 @@
 //! in `envelope.rs`, not by a separate fuzz target.
 #![forbid(unsafe_code)]
 
-// Implemented so far: the credential vault's at-rest encryption (the `envelope`
-// module) and master-key custody (`key`, `resolver`). Not yet present in this
-// crate: the typed VaultRecord, the canonical OAuthCredential, the bounded
-// refresh adapters, the crash-safe refresh state machine, and the encrypted
-// store.
-
 pub mod admin_auth;
 pub mod admin_ops;
 pub mod apns;

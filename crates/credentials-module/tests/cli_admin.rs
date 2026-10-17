@@ -1359,9 +1359,11 @@ fn repeating_an_identical_grant_succeeds_and_leaves_one_row() {
         "{}",
         String::from_utf8_lossy(&first.stderr)
     );
+    // The confirmation line is followed by the reach line; the scratch vault has no
+    // credentials, so this grant reaches none.
     assert_eq!(
-        String::from_utf8_lossy(&first.stdout).trim(),
-        "granted reserved:scratchmod read category:llm-provider"
+        String::from_utf8_lossy(&first.stdout).trim_end(),
+        "granted reserved:scratchmod read category:llm-provider\n  reaches 0 credentials"
     );
 
     let second = vault.run(&args);
@@ -1371,8 +1373,9 @@ fn repeating_an_identical_grant_succeeds_and_leaves_one_row() {
         String::from_utf8_lossy(&second.stderr)
     );
     assert_eq!(
-        String::from_utf8_lossy(&second.stdout).trim(),
-        "already granted (no change) reserved:scratchmod read category:llm-provider"
+        String::from_utf8_lossy(&second.stdout).trim_end(),
+        "already granted (no change) reserved:scratchmod read category:llm-provider\n  \
+         reaches 0 credentials"
     );
 
     let listed = vault.run(&["grants"]);
@@ -1414,8 +1417,8 @@ fn a_list_grant_round_trips_through_grant_grants_and_revoke_grant() {
         String::from_utf8_lossy(&created.stderr)
     );
     assert_eq!(
-        String::from_utf8_lossy(&created.stdout).trim(),
-        "granted reserved:router list category:llm-provider"
+        String::from_utf8_lossy(&created.stdout).lines().next(),
+        Some("granted reserved:router list category:llm-provider")
     );
 
     let listed = vault.run(&["grants"]);
@@ -5091,6 +5094,228 @@ fn category_cli_lists_mutates_reclassifies_and_renders_category_grants() {
     assert!(stdout.contains("category"));
     assert!(stdout.contains("llm-provider"));
     assert!(!stdout.contains("category:llm-provider"));
+}
+
+/// Run `ck auth grant` for one principal/selector/operation and return (success, stdout,
+/// stderr).
+fn grant_on(
+    vault: &GrantCliVault,
+    principal: &str,
+    selector_kind: &str,
+    selector: &str,
+    operation: &str,
+) -> (bool, String, String) {
+    let out = vault.run(&[
+        "grant",
+        "--principal",
+        principal,
+        "--selector-kind",
+        selector_kind,
+        "--selector",
+        selector,
+        "--operation",
+        operation,
+    ]);
+    (
+        out.status.success(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+fn put_on(vault: &GrantCliVault, id: &str) {
+    let put = vault.run(&["put", "--id", id, "--payload", "secret"]);
+    assert!(
+        put.status.success(),
+        "put {id} failed: {}",
+        String::from_utf8_lossy(&put.stderr)
+    );
+}
+
+// `ck auth grant` USED TO PRINT ONLY `granted ...`, so a grant that reached nothing read
+// exactly like one that worked. A consumer was granted a category none of its credentials
+// carried and could only report an empty vault. The reach line is counted the same way as
+// the REACHES column of `ck auth grants`.
+#[test]
+fn grant_reports_how_many_credentials_a_category_grant_reaches() {
+    let vault = GrantCliVault::new("grant-reach-n");
+    vault.bootstrap();
+    // Both api keys are stamped `llm-provider` from the registry at creation.
+    put_on(&vault, "apikey:zai");
+    put_on(&vault, "apikey:openrouter");
+
+    let (ok, stdout, stderr) = grant_on(&vault, "consumer", "category", "llm-provider", "read");
+    assert!(ok, "grant failed: {stderr}");
+    assert_eq!(
+        stdout.lines().nth(1),
+        Some("  reaches 2 credentials"),
+        "the reach line follows the confirmation:\n{stdout}"
+    );
+    assert!(
+        !stderr.contains("warning"),
+        "a grant that reaches credentials must not warn:\n{stderr}"
+    );
+}
+
+// A grant that reaches nothing is LEGAL (a category can be granted before a credential
+// carries it), so it still exits 0. But it must say so, and show what does exist, so a
+// typo or a missing category assignment is visible at the moment it is made.
+#[test]
+fn a_category_grant_reaching_nothing_succeeds_and_warns_with_the_existing_categories() {
+    let vault = GrantCliVault::new("grant-reach-zero");
+    vault.bootstrap();
+    put_on(&vault, "apikey:zai");
+
+    let (ok, stdout, stderr) = grant_on(&vault, "consumer", "category", "openai-native", "read");
+    assert!(ok, "a grant reaching nothing must still succeed: {stderr}");
+    assert_eq!(stdout.lines().nth(1), Some("  reaches 0 credentials"));
+    assert!(
+        stderr.contains("warning: this grant is valid but reaches no credential now."),
+        "missing the zero-reach warning:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("No credential carries category 'openai-native'."),
+        "{stderr}"
+    );
+    // The existing category, with its count, from the `ck auth categories` table.
+    assert!(
+        stderr.lines().any(|line| {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            fields.first() == Some(&"llm-provider") && fields.get(1) == Some(&"1")
+        }),
+        "the warning must list the categories that exist with their counts:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("ck auth set-category <credential-id> --add openai-native"),
+        "the warning must name the remedy:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("reclassify"),
+        "no credential is uncategorized, so reclassify would change nothing:\n{stderr}"
+    );
+}
+
+#[test]
+fn an_exact_grant_to_a_missing_credential_id_warns_and_succeeds() {
+    let vault = GrantCliVault::new("grant-reach-exact");
+    vault.bootstrap();
+    put_on(&vault, "apikey:zai");
+
+    let (ok, stdout, stderr) = grant_on(&vault, "consumer", "exact", "apikey:nope", "read");
+    assert!(ok, "{stderr}");
+    assert_eq!(stdout.lines().nth(1), Some("  reaches 0 credentials"));
+    assert!(
+        stderr.contains("warning: this grant is valid but reaches no credential now.")
+            && stderr.contains("No credential has the id 'apikey:nope'."),
+        "an exact grant to a missing id must say no credential has that id:\n{stderr}"
+    );
+
+    let (ok, stdout, stderr) = grant_on(&vault, "consumer", "exact", "apikey:zai", "read");
+    assert!(ok, "{stderr}");
+    assert_eq!(stdout.lines().nth(1), Some("  reaches 1 credential"));
+    assert!(!stderr.contains("warning"), "{stderr}");
+}
+
+// `deposit` reach is about cookies the module has not written yet, so zero is its normal
+// starting state and a warning would be noise on every correct deposit grant.
+#[test]
+fn a_deposit_grant_reports_reach_without_warning_on_zero() {
+    let vault = GrantCliVault::new("grant-reach-deposit");
+    vault.bootstrap();
+
+    let (ok, stdout, stderr) = grant_on(
+        &vault,
+        "reserved:cerebellum",
+        "category",
+        "browser-session",
+        "deposit",
+    );
+    assert!(ok, "{stderr}");
+    assert_eq!(stdout.lines().nth(1), Some("  reaches 0 credentials"));
+    assert!(!stderr.contains("warning"), "{stderr}");
+}
+
+// CREDENTIALS FROM BEFORE CATEGORIES CARRY NONE, and nothing backfills them. The vault
+// that prompted this had three ChatGPT logins with empty category sets, so a grant on
+// their native category reached none of them and nothing pointed at the verb that fills
+// empty sets from the registry. The grant names them and that verb. It does NOT fill them
+// itself: an operator may have emptied a set on purpose to keep a credential out of
+// category grants.
+#[test]
+fn a_category_grant_names_uncategorized_credentials_reclassify_would_add() {
+    let vault = GrantCliVault::new("grant-reach-reclassify");
+    vault.bootstrap();
+    put_on(&vault, "apikey:zai");
+    put_on(&vault, "apikey:openrouter");
+    // Stand in for a credential created before categories existed: an empty set whose
+    // registry default includes `llm-provider`.
+    let cleared = vault.run(&["set-category", "apikey:zai", "--set", ""]);
+    assert!(cleared.status.success(), "clearing categories failed");
+
+    let (ok, stdout, stderr) = grant_on(&vault, "consumer", "category", "llm-provider", "read");
+    assert!(ok, "{stderr}");
+    assert_eq!(stdout.lines().nth(1), Some("  reaches 1 credential"));
+    // The reclassify advisory appears even though reach is not zero: one credential that
+    // belongs in the category is still left out.
+    assert!(
+        stderr.contains(
+            "  1 credential would join 'llm-provider' but has no categories yet (created \
+             before categories existed): apikey:zai"
+        ),
+        "the grant must name the uncategorized credential its category would cover:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("  Run: ck auth reclassify --from-registry"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("warning"),
+        "reach is one, so there is no zero-reach warning:\n{stderr}"
+    );
+
+    // Nothing was backfilled by the grant itself.
+    let (_, again, _) = grant_on(&vault, "consumer", "category", "llm-provider", "read");
+    assert_eq!(again.lines().nth(1), Some("  reaches 1 credential"));
+
+    let refill = vault.run(&["reclassify", "--from-registry"]);
+    assert!(
+        refill.status.success(),
+        "reclassify failed: {}",
+        String::from_utf8_lossy(&refill.stderr)
+    );
+    let (ok, stdout, stderr) = grant_on(&vault, "consumer", "category", "llm-provider", "read");
+    assert!(ok, "{stderr}");
+    assert_eq!(
+        stdout.lines().nth(1),
+        Some("  reaches 2 credentials"),
+        "after reclassify the grant reaches the refilled credential:\n{stdout}"
+    );
+    assert!(!stderr.contains("would join"), "{stderr}");
+}
+
+// With reach zero and uncategorized credentials that the category would cover,
+// reclassify is the primary remedy and set-category the fallback.
+#[test]
+fn a_zero_reach_category_grant_points_at_reclassify_before_set_category() {
+    let vault = GrantCliVault::new("grant-reach-reclassify-zero");
+    vault.bootstrap();
+    put_on(&vault, "apikey:zai");
+    let cleared = vault.run(&["set-category", "apikey:zai", "--set", ""]);
+    assert!(cleared.status.success(), "clearing categories failed");
+
+    let (ok, stdout, stderr) = grant_on(&vault, "consumer", "category", "llm-provider", "read");
+    assert!(ok, "{stderr}");
+    assert_eq!(stdout.lines().nth(1), Some("  reaches 0 credentials"));
+    let reclassify = stderr
+        .find("Run: ck auth reclassify --from-registry")
+        .unwrap_or_else(|| panic!("reclassify remedy missing:\n{stderr}"));
+    let by_hand = stderr
+        .find("Or assign one by hand: ck auth set-category")
+        .unwrap_or_else(|| panic!("set-category fallback missing:\n{stderr}"));
+    assert!(
+        reclassify < by_hand,
+        "reclassify must come first:\n{stderr}"
+    );
 }
 
 /// A store one migration behind the binary must still be readable offline.

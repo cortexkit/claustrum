@@ -1044,7 +1044,14 @@ fn help_verb(verb: &str) -> String {
              and nothing else. It never returns a token or exercises a key.\n\
              deposit: cerebellum-style module write access for cookie: records only.\n\
              Requires a reserved principal and category browser-session selector; it\n\
-             grants no read access. A module can replace only rows it created."
+             grants no read access. A module can replace only rows it created.\n\
+             On success a second line says how many credentials the grant reaches\n\
+             now (`reaches N credentials`), counted as `ck auth grants` counts it. A\n\
+             grant that reaches nothing still succeeds, with a warning on stderr\n\
+             listing the categories that exist and the fix (deposit grants are not\n\
+             warned). A category grant also names uncategorized credentials whose\n\
+             registry defaults include it, and points at\n\
+             `ck auth reclassify --from-registry`."
         }
         "revoke-grant" => {
             "ck auth revoke-grant --principal <id|reserved:id>\n\
@@ -4178,15 +4185,7 @@ fn render_grants(result: &serde_json::Value) -> Result<Vec<String>, CliError> {
             .strip_prefix("category:")
             .filter(|_| g.selector_kind == "category")
             .unwrap_or(&g.credential_prefix);
-        match g.selector_kind.as_str() {
-            "category" => inventory
-                .values()
-                .filter(|categories| categories.iter().any(|c| c == selector))
-                .count(),
-            // `exact` is byte equality, deliberately: a grant whose reach can grow when
-            // someone else names a credential is not a grant anyone can reason about.
-            _ => inventory.contains_key(selector) as usize,
-        }
+        grant_reach(&inventory, &g.selector_kind, selector)
     };
 
     let mut lines = vec![format!(
@@ -4210,6 +4209,170 @@ fn render_grants(result: &serde_json::Value) -> Result<Vec<String>, CliError> {
         ));
     }
     Ok(lines)
+}
+
+/// How many credentials a grant reaches NOW, from the credential-id -> categories map
+/// `parse_credential_categories` reads out of `admin.status`.
+///
+/// One function for both places that report reach (the REACHES column of `ck auth grants`
+/// and the line `ck auth grant` prints), so the two can never disagree about the same
+/// grant. `selector` is the bare value: a category name without any `category:` marker.
+fn grant_reach(
+    inventory: &std::collections::BTreeMap<String, Vec<String>>,
+    selector_kind: &str,
+    selector: &str,
+) -> usize {
+    match selector_kind {
+        "category" => inventory
+            .values()
+            .filter(|categories| categories.iter().any(|c| c == selector))
+            .count(),
+        // `exact` is byte equality, deliberately: a grant whose reach can grow when
+        // someone else names a credential is not a grant anyone can reason about.
+        _ => inventory.contains_key(selector) as usize,
+    }
+}
+
+/// Credentials that carry NO category at all but whose registry defaults include
+/// `category`.
+///
+/// These are almost always credentials created before categories existed: defaults are
+/// stamped at creation and no migration backfills old rows. `ck auth reclassify
+/// --from-registry` (without `--force`) fills exactly these empty sets and removes
+/// nothing. Nothing here fills them automatically, because an operator may have emptied a
+/// set on purpose to keep a credential out of every category grant, and silently putting
+/// it back would widen access.
+fn credentials_awaiting_category(
+    inventory: &std::collections::BTreeMap<String, Vec<String>>,
+    category: &str,
+) -> Vec<String> {
+    inventory
+        .iter()
+        .filter(|(id, categories)| {
+            categories.is_empty()
+                && credentials_core::catalog::category_defaults(id)
+                    .iter()
+                    .any(|default| default == category)
+        })
+        .map(|(id, _)| id.clone())
+        .collect()
+}
+
+/// What `ck auth grant` says about a grant's reach, split into the stdout line and the
+/// stderr advisory so a test drives the real wording rather than a copy of it.
+#[derive(Debug, Default)]
+struct GrantReachReport {
+    stdout: Vec<String>,
+    stderr: Vec<String>,
+}
+
+/// At most this many credential ids are named in the reclassify advisory; the rest are
+/// counted. Enough to recognise the family, short enough to read in a terminal.
+const AWAITING_CATEGORY_IDS_SHOWN: usize = 5;
+
+/// Describe what a just-created grant reaches, from the `admin.status` reply read after it.
+///
+/// A grant that reaches nothing is LEGAL (a category can be granted before any credential
+/// carries it), so this never refuses. It warns instead, because the case that prompted
+/// it was a consumer granted a category none of its credentials carried: the grant
+/// printed `granted` and nothing else, and the consumer could only report an empty vault.
+/// `deposit` is exempt from the warning: it is category-only and its reach is about
+/// cookies a module has not written yet, so zero is the normal starting state.
+fn render_grant_reach(
+    result: &serde_json::Value,
+    selector_kind: SelectorKind,
+    selector: &str,
+    operation: GrantOperation,
+) -> GrantReachReport {
+    let inventory = parse_credential_categories(result);
+    let kind = selector_kind.as_str();
+    let reach = grant_reach(&inventory, kind, selector);
+    let plural = |n: usize| if n == 1 { "credential" } else { "credentials" };
+    let mut report = GrantReachReport::default();
+    report
+        .stdout
+        .push(format!("  reaches {reach} {}", plural(reach)));
+
+    let awaiting = if kind == "category" {
+        credentials_awaiting_category(&inventory, selector)
+    } else {
+        Vec::new()
+    };
+    let warn = reach == 0 && operation != GrantOperation::Deposit;
+    if warn {
+        report
+            .stderr
+            .push("warning: this grant is valid but reaches no credential now.".to_owned());
+        if kind == "category" {
+            report
+                .stderr
+                .push(format!("  No credential carries category '{selector}'."));
+        } else {
+            report
+                .stderr
+                .push(format!("  No credential has the id '{selector}'."));
+        }
+    }
+    // Said whether or not reach is zero: a grant can reach some credentials while older
+    // ones that belong in the category are still left out.
+    if !awaiting.is_empty() {
+        let mut named = awaiting
+            .iter()
+            .take(AWAITING_CATEGORY_IDS_SHOWN)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        if awaiting.len() > AWAITING_CATEGORY_IDS_SHOWN {
+            named.push_str(&format!(
+                ", and {} more",
+                awaiting.len() - AWAITING_CATEGORY_IDS_SHOWN
+            ));
+        }
+        report.stderr.push(format!(
+            "  {} {} would join '{selector}' but {} no categories yet (created before \
+             categories existed): {named}",
+            awaiting.len(),
+            plural(awaiting.len()),
+            if awaiting.len() == 1 { "has" } else { "have" },
+        ));
+        report
+            .stderr
+            .push("  Run: ck auth reclassify --from-registry".to_owned());
+    }
+    if warn && kind == "category" {
+        let fix = format!("ck auth set-category <credential-id> --add {selector}");
+        if awaiting.is_empty() {
+            report
+                .stderr
+                .push(format!("  To put a credential in it: {fix}"));
+        } else {
+            report
+                .stderr
+                .push(format!("  Or assign one by hand: {fix}"));
+        }
+        // The same table `ck auth categories` prints, so the operator can see whether the
+        // selector is a typo for a category that does exist.
+        match render_categories(result) {
+            Ok(lines) => {
+                report
+                    .stderr
+                    .push("  Categories in this vault (ck auth categories):".to_owned());
+                report
+                    .stderr
+                    .extend(lines.into_iter().map(|line| format!("    {line}")));
+            }
+            Err(error) => report
+                .stderr
+                .push(format!("  (could not list categories: {error})")),
+        }
+    } else if warn {
+        report.stderr.push(
+            "  It reaches that credential once one with exactly this id exists; \
+             `ck auth list` shows the ids that do."
+                .to_owned(),
+        );
+    }
+    report
 }
 
 /// Print what `render_grants` produced.
@@ -4619,6 +4782,24 @@ fn cmd_grant(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
         operation.as_str(),
         selector_kind.as_str()
     );
+    // The grant is committed by now. Reading reach back is advisory: if the status read
+    // fails, say so in one line and still succeed, because failing here would report a
+    // grant that exists as one that does not.
+    match request_admin_status_with_schema(global) {
+        Ok((status, store_schema)) => {
+            let report = render_grant_reach(&status, selector_kind, &selector, operation);
+            for line in report.stdout {
+                println!("{line}");
+            }
+            for line in report.stderr {
+                eprintln!("{line}");
+            }
+            // A store one migration behind has no categories yet, so its reach reads
+            // zero for a reason the note names.
+            print_store_behind_note(store_schema);
+        }
+        Err(error) => eprintln!("  (reach not checked: could not read vault status: {error})"),
+    }
     Ok(())
 }
 
@@ -7111,6 +7292,30 @@ mod taxonomy_cli_tests {
             "0",
             "exact is byte equality: a prefix of a real id reaches nothing, which is the \
              narrowing the selector vocabulary exists to make visible"
+        );
+    }
+
+    #[test]
+    fn grant_reach_names_at_most_five_uncategorized_ids_and_counts_the_rest() {
+        let credentials: Vec<_> = ["a", "b", "c", "d", "e", "f"]
+            .iter()
+            .map(|s| serde_json::json!({ "id": format!("cookie:{s}"), "state": "active", "categories": [] }))
+            .collect();
+        let reply = serde_json::json!({ "credentials": credentials, "read_grants": [] });
+        let report = render_grant_reach(
+            &reply,
+            SelectorKind::Category,
+            "browser-session",
+            GrantOperation::Read,
+        );
+        assert_eq!(report.stdout, ["  reaches 0 credentials"]);
+        assert!(
+            report.stderr.iter().any(|line| line
+                == "  6 credentials would join 'browser-session' but have no categories yet \
+                    (created before categories existed): cookie:a, cookie:b, cookie:c, \
+                    cookie:d, cookie:e, and 1 more"),
+            "{:#?}",
+            report.stderr
         );
     }
 

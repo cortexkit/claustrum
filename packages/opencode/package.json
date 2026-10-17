@@ -24,7 +24,7 @@
   },
   "scripts": {
     "enroll": "bun ./src/enroll.ts",
-    "build": "rm -rf dist && tsc -p tsconfig.build.json && bun build ./src/opencode-plugin.ts --outfile ./dist/opencode-plugin.js --target=bun && bun build ./src/opencode-plugin-v2.ts --outfile ./dist/opencode2/server.js --target=bun && rm ./dist/opencode-plugin-v2.js",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json && bun build ./src/opencode-plugin.ts --outfile ./dist/opencode-plugin.js --target=bun && bun build ./src/opencode-plugin-v2.ts --outfile ./dist/opencode2/server.js --target=bun && rm -f ./dist/opencode-plugin-v2.js",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {

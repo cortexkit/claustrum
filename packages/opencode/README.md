@@ -1,5 +1,9 @@
 # OpenCode Claustrum plugin
 
+## OpenCode 2
+
+The package also exports an OpenCode 2 plugin at `@cortexkit/opencode-claustrum/opencode-plugin-v2` (built as `dist/opencode-plugin-v2.js`). Add the absolute path to that file as a string in the OpenCode 2 `plugins` array. Then enrol each owned provider with `bun run enroll -- --oc2 --provider <provider>` and restart the OpenCode 2 service with `opencode service restart`. OpenCode 2 keeps credentials in its own SQLite store; the V1 enrolment path, which writes `auth.json`, does not enrol credentials for OpenCode 2. See the [OpenCode plugin guide](../../docs/opencode-plugin.md#opencode-2) for the request path and limits.
+
 This plugin owns only providers whose live credential path remains OpenCode's generic AI SDK `fetch` seam. It reads the handle file during OpenCode configuration and injects a tombstone API key plus a fetch hook only when the local auth entry is a Claustrum tombstone and the handle file assigns that provider to `opencode-claustrum`. Provider-specific loaders and credential paths need dedicated ownership; the provider allowlist question remains open.
 
 ## Seam boundary

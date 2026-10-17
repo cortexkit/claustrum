@@ -5,8 +5,11 @@
 //! typed error, never a panic, never plaintext), overwrite-CAS (create-only rejects
 //! a blind overwrite; a CAS mismatch is rejected; an admin overwrite raises a
 //! durable audit alarm row), invalidate-then-get read-visibility, and concurrent
-//! import+get. The kill-9 mid-refresh, rotate crash-cut, lease-handover, envelope
-//! fuzz, and the on-the-wire malicious-local-client harness live in their own files.
+//! import+get. The kill-9 mid-refresh, rotate crash-cut, lease-handover, and the
+//! on-the-wire malicious-local-client harness live in their own files. Envelope
+//! decoding is not fuzzed by a separate target: the only coverage of malformed
+//! input is the proptest `decoder_never_panics_on_arbitrary_bytes` in
+//! `src/envelope.rs`, which feeds `open` random buffers of 0-511 bytes.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;

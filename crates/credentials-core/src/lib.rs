@@ -9,8 +9,9 @@
 //!
 //! See docs/architecture.md for how the parts fit together and the invariants they
 //! keep, and SECURITY.md for the threat model. Built behind a security-conformance suite
-//! (kill -9 mid-refresh, lease-handover mid-write, fail-closed matrix, envelope
-//! fuzz) that is a ship gate, not a nice-to-have.
+//! (kill -9 mid-refresh, lease-handover mid-write, fail-closed matrix) that is a ship
+//! gate, not a nice-to-have. Envelope decoding is covered by the never-panic proptest
+//! in `envelope.rs`, not by a separate fuzz target.
 #![forbid(unsafe_code)]
 
 // Implemented so far: the credential vault's at-rest encryption (the `envelope`

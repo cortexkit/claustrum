@@ -16,14 +16,15 @@
 //! and key_id are folded into the AEAD's additional authenticated data, so a
 //! downgrade or key-id edit fails the tag check rather than silently mis-routing.
 //!
-//! ## The fuzz invariant (a ship-gate requirement)
+//! ## The never-panic invariant (a ship-gate requirement)
 //!
 //! [`open`] is the ONLY decode path and it bounds-checks every field before
 //! slicing — any malformed, truncated, or garbage buffer returns a typed
-//! [`EnvelopeError`], NEVER a panic and NEVER plaintext. The security-conformance
-//! suite fuzzes this directly. The implementation therefore uses only checked
-//! slicing (explicit length guards, `try_into` on fixed arrays) — no indexing
-//! that could panic on a short buffer.
+//! [`EnvelopeError`], NEVER a panic and NEVER plaintext. The proptest
+//! `decoder_never_panics_on_arbitrary_bytes` in this file's tests checks it by
+//! feeding `open` random buffers of 0-511 bytes; there is no separate fuzz target.
+//! The implementation therefore uses only checked slicing (explicit length guards,
+//! `try_into` on fixed arrays) — no indexing that could panic on a short buffer.
 //!
 //! ## Additional authenticated data (AAD)
 //!
@@ -211,7 +212,8 @@ pub fn seal(
 /// Decode and authenticate-decrypt an envelope BLOB, returning the plaintext in a
 /// self-zeroizing buffer.
 ///
-/// This is the ONLY decode path and the fuzz target: every field is length-checked
+/// This is the ONLY decode path, and the one the never-panic proptest
+/// (`decoder_never_panics_on_arbitrary_bytes`) drives: every field is length-checked
 /// before it is read, so a malformed/truncated/garbage `blob` returns a typed
 /// [`EnvelopeError`] and never panics. The supplied `key` must be the one the
 /// envelope was sealed under (checked via the key_id fingerprint before any
@@ -418,7 +420,8 @@ mod tests {
         }
     }
 
-    // The fuzz invariant: NO byte string, of any length, may panic the decoder.
+    // The never-panic invariant: no byte string may panic the decoder. Lengths
+    // 0-511 cover every header boundary and short ciphertexts.
     proptest::proptest! {
         #[test]
         fn decoder_never_panics_on_arbitrary_bytes(blob in proptest::collection::vec(proptest::num::u8::ANY, 0..512)) {
@@ -426,7 +429,8 @@ mod tests {
             // We only assert it returns (Ok or Err) without panicking. A random
             // blob that happened to authenticate is astronomically unlikely, but
             // even an Ok is acceptable here — the invariant under test is "never
-            // panics", which the ship-gate fuzz target also asserts.
+            // panics". This proptest is the only check of that invariant; there is
+            // no separate fuzz target.
             let _ = open(&k, &blob, &binding());
         }
 

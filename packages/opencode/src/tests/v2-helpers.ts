@@ -16,8 +16,9 @@ export function deferred() {
   return { promise, resolve };
 }
 
-export function followingWebSocket() {
+export function followingWebSocket(afterErrorDelayMs?: number) {
   const state = { forwarded: 0 };
+  const completed = deferred();
   class Socket extends EventTarget {
     constructor(url: string, options: { headers: Record<string, string> }) {
       super();
@@ -27,13 +28,17 @@ export function followingWebSocket() {
           const response = await fetch(source, { redirect: "manual", headers: { ...options.headers, upgrade: "websocket" } });
           const target = new URL(response.headers.get("location")!); target.protocol = "http:";
           await response.body?.cancel();
+          if (afterErrorDelayMs !== undefined) {
+            this.dispatchEvent(new Event("error"));
+            await new Promise<void>((resolve) => setTimeout(resolve, afterErrorDelayMs));
+          }
           const followed = await fetch(target, { headers: options.headers });
           await followed.body?.cancel();
           state.forwarded++;
-        } finally { this.dispatchEvent(new Event("error")); }
+        } finally { this.dispatchEvent(new Event("error")); completed.resolve(); }
       })().catch(() => {});
     }
     close() {}
   }
-  return { Socket, state };
+  return { Socket, state, completed: completed.promise };
 }

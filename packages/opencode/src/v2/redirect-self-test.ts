@@ -20,6 +20,7 @@ export async function checkRedirectSafety(dependencies: RedirectProbeDependencie
   const servers: Array<ReturnType<typeof Bun.serve>> = [];
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let settleTimer: ReturnType<typeof setTimeout> | undefined;
   let status: number | "bind" | "ws" = "bind";
   let socket: ProbeSocket | undefined;
   let sourceUpgraded = false;
@@ -70,6 +71,8 @@ export async function checkRedirectSafety(dependencies: RedirectProbeDependencie
           socket.addEventListener("close", () => resolve(), { once: true });
           socket.addEventListener("error", () => resolve(), { once: true });
         });
+        // Some clients report an error before starting a redirected handshake.
+        await new Promise<void>((resolve) => { settleTimer = setTimeout(resolve, 150); });
         if (!sourceUpgraded || targetAuthorization) return { safe: false, status: "ws" };
         return { safe: true };
       } catch {
@@ -79,6 +82,7 @@ export async function checkRedirectSafety(dependencies: RedirectProbeDependencie
     return await Promise.race([probe, deadline]);
   } finally {
     clearTimeout(timer);
+    clearTimeout(settleTimer);
     controller.abort();
     try { socket?.close(); } catch { /* Closing a failed handshake must not replace the safety verdict. */ }
     await Promise.allSettled(servers.map((server) => server.stop(true)));

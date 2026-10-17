@@ -14,8 +14,8 @@ export type CustodyInstance = {
   response(served: ServedRequest, event: SessionHttpResponse): Promise<void>;
 };
 
-// Fetch-only cached results cannot establish WebSocket redirect safety after an upgrade.
-const HOLDER_KEY = Symbol.for("cortexkit.claustrum.custody.inplace.v2/2");
+// Cached probes without the settle window cannot establish the current redirect-safety invariant.
+const HOLDER_KEY = Symbol.for("cortexkit.claustrum.custody.inplace.v2/3");
 const holders = globalThis as typeof globalThis & { [HOLDER_KEY]?: CustodyRegistry };
 
 export class CustodyRegistry {

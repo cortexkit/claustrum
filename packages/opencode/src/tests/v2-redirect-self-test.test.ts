@@ -64,6 +64,14 @@ test("a WebSocket constructor that follows with Authorization fails the probe", 
   expect(state.forwarded).toBe(1);
 });
 
+test("a WebSocket redirect followed after its error is caught during the settle window", async () => {
+  const { Socket, state, completed } = followingWebSocket(30);
+  try {
+    expect(await checkRedirectSafety({ WebSocket: Socket })).toEqual({ safe: false, status: "ws" });
+    expect(state.forwarded).toBe(1);
+  } finally { await completed; }
+});
+
 test("the real Bun WebSocket receives the redirect without forwarding Authorization", async () => {
   let constructed = 0;
   const RuntimeSocket = globalThis.WebSocket as unknown as NonNullable<RedirectProbeDependencies["WebSocket"]>;
@@ -84,8 +92,8 @@ test("a WebSocket probe that never upgrades the source cannot pass", async () =>
   expect(await checkRedirectSafety({ WebSocket: Socket })).toEqual({ safe: false, status: "ws" });
 });
 
-test("the stronger socket probe does not reuse a legacy fetch-only process cache", async () => {
-  const key = Symbol.for("cortexkit.claustrum.custody.inplace.v2/1");
+test.each(["1", "2"])("the stronger socket probe does not reuse an older safety cache (version %s)", async (version) => {
+  const key = Symbol.for(`cortexkit.claustrum.custody.inplace.v2/${version}`);
   const previous = Reflect.get(globalThis, key);
   let legacyUsed = false;
   const legacy = { ensureRedirectSafe: async () => { legacyUsed = true; } };

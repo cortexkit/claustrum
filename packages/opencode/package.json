@@ -16,11 +16,15 @@
     "./server": {
       "types": "./dist/serve.d.ts",
       "import": "./dist/serve.js"
+    },
+    "./opencode-plugin-v2": {
+      "types": "./dist/opencode-plugin-v2.d.ts",
+      "import": "./dist/opencode-plugin-v2.js"
     }
   },
   "scripts": {
     "enroll": "bun ./src/enroll.ts",
-    "build": "rm -rf dist && tsc -p tsconfig.build.json && bun build ./src/opencode-plugin.ts --outfile ./dist/opencode-plugin.js --target=bun",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json && bun build ./src/opencode-plugin.ts --outfile ./dist/opencode-plugin.js --target=bun && bun build ./src/opencode-plugin-v2.ts --outfile ./dist/opencode-plugin-v2.js --target=bun",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {

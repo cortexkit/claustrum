@@ -60,111 +60,126 @@ export function createUpstreamFetch(signal: AbortSignal): typeof fetch {
   }, { preconnect: fetch.preconnect });
 }
 
+// In-process plugins already share manifest/vault access; this is not an isolation boundary.
+// Runtime-private state prevents accidental reflection/serialization, not a hostile plugin's vault use.
 export class CustodyEndpoint {
-  private readonly token = randomId(32);
-  private readonly entries = new Map<string, Entry>();
-  private readonly instances: EndpointInstance[] = [];
-  private readonly now: () => number;
-  private readonly ttlMs: number;
-  private readonly graceMs: number;
-  private readonly maxBodyBytes: number;
-  private readonly maxInFlight: number;
-  private readonly maxEntries: number;
-  private readonly idleTimeoutSeconds: number;
-  private readonly log: CustodyLogger;
-  private server: ReturnType<typeof Bun.serve> | undefined;
-  private closeTimer: ReturnType<typeof setTimeout> | undefined;
-  private inFlight = 0;
+  readonly #token = randomId(32);
+  readonly #entries = new Map<string, Entry>();
+  readonly #instances: EndpointInstance[] = [];
+  readonly #now: () => number;
+  readonly #ttlMs: number;
+  readonly #graceMs: number;
+  readonly #maxBodyBytes: number;
+  readonly #maxInFlight: number;
+  readonly #maxEntries: number;
+  readonly #idleTimeoutSeconds: number;
+  readonly #log: CustodyLogger;
+  #server: ReturnType<typeof Bun.serve> | undefined;
+  #closeTimer: ReturnType<typeof setTimeout> | undefined;
+  #inFlight = 0;
 
   constructor(deps: EndpointDeps = {}) {
-    this.now = deps.now ?? Date.now;
-    this.ttlMs = deps.ttlMs ?? 30_000;
-    this.graceMs = deps.graceMs ?? 30_000;
-    this.maxBodyBytes = deps.maxBodyBytes ?? 32 * 1024 * 1024;
-    this.maxInFlight = deps.maxInFlight ?? 64;
-    this.maxEntries = deps.maxEntries ?? 4096;
-    this.idleTimeoutSeconds = deps.idleTimeoutSeconds ?? 0;
-    this.log = deps.log ?? createLogger();
+    this.#now = deps.now ?? Date.now;
+    this.#ttlMs = deps.ttlMs ?? 30_000;
+    this.#graceMs = deps.graceMs ?? 30_000;
+    this.#maxBodyBytes = deps.maxBodyBytes ?? 32 * 1024 * 1024;
+    this.#maxInFlight = deps.maxInFlight ?? 64;
+    this.#maxEntries = deps.maxEntries ?? 4096;
+    this.#idleTimeoutSeconds = deps.idleTimeoutSeconds ?? 0;
+    this.#log = deps.log ?? createLogger();
   }
 
   get current(): EndpointInstance | undefined {
-    return this.instances.at(-1);
+    return this.#instances.at(-1);
   }
 
   register(instance: EndpointInstance): { dispose(): void } {
     this.cancelClose();
-    this.server ??= Bun.serve({
+    this.#server ??= Bun.serve({
       hostname: "127.0.0.1",
       port: 0,
       // Provider SSE streams may be silent for longer than Bun's ten-second default.
-      idleTimeout: this.idleTimeoutSeconds,
+      idleTimeout: this.#idleTimeoutSeconds,
       // The handler owns the cap so over-limit responses have the same safe JSON/log shape.
       maxRequestBodySize: Number.MAX_SAFE_INTEGER,
       fetch: (request) => this.handle(request),
     });
-    this.instances.push(instance);
+    this.#instances.push(instance);
     let disposed = false;
     return { dispose: () => {
       if (disposed) return;
       disposed = true;
-      const index = this.instances.lastIndexOf(instance);
-      if (index >= 0) this.instances.splice(index, 1);
+      const index = this.#instances.lastIndexOf(instance);
+      if (index >= 0) this.#instances.splice(index, 1);
       this.scheduleClose();
     } };
   }
 
   route(provider: string, request: Request): Request {
     this.prune(true);
-    if (!this.server) throw new CustodyEndpointError("no_server");
-    if (this.entries.size >= this.maxEntries) throw new CustodyEndpointError("entries_full");
+    if (!this.#server) throw new CustodyEndpointError("no_server");
+    if (this.#entries.size >= this.#maxEntries) throw new CustodyEndpointError("entries_full");
     let id: string;
-    do { id = randomId(16); } while (this.entries.has(id));
-    const routed = new Request(`${this.origin()}/${this.token}/${id}`, request);
-    this.entries.set(id, {
-      provider, method: request.method, url: request.url, expiresAt: this.now() + this.ttlMs, consumed: false,
+    do { id = randomId(16); } while (this.#entries.has(id));
+    const routed = new Request(`${this.origin()}/${this.#token}/${id}`, request);
+    this.#entries.set(id, {
+      provider, method: request.method, url: request.url, expiresAt: this.#now() + this.#ttlMs, consumed: false,
     });
     return routed;
   }
 
   isEndpointUrl(url: string): boolean {
-    if (!this.server) return false;
+    if (!this.#server) return false;
     try {
       const parsed = new URL(url);
-      return parsed.origin === this.origin() && parsed.pathname.startsWith(`/${this.token}/`);
+      const parts = parsed.pathname.split("/");
+      return parsed.origin === this.origin() && !parsed.username && !parsed.password && !parsed.search && !parsed.hash &&
+        parts.length === 3 && parts[1] === this.#token && /^[A-Za-z0-9_-]{22}$/.test(parts[2]!);
     } catch {
       return false;
     }
   }
 
   private origin(): string {
-    return `http://127.0.0.1:${this.server!.port}`;
+    return `http://127.0.0.1:${this.#server!.port}`;
   }
 
   private prune(includeConsumed = false): void {
-    const now = this.now();
-    for (const [id, entry] of this.entries) {
-      if (entry.expiresAt <= now || includeConsumed && entry.consumed) this.entries.delete(id);
+    const now = this.#now();
+    for (const [id, entry] of this.#entries) {
+      if (entry.expiresAt <= now || includeConsumed && entry.consumed) this.#entries.delete(id);
     }
   }
 
   private tokenMatches(candidate: string): boolean {
-    const actual = Buffer.alloc(this.token.length);
+    const actual = Buffer.alloc(this.#token.length);
     actual.write(candidate);
-    return timingSafeEqual(actual, Buffer.from(this.token)) && candidate.length === this.token.length;
+    return timingSafeEqual(actual, Buffer.from(this.#token)) && candidate.length === this.#token.length;
   }
 
   private reject(status: number, errorCode: string, provider?: string, errorClass?: string): Response {
-    this.log.warn({ errorCode, ...(provider ? { provider } : {}), ...(errorClass ? { errorClass } : {}) });
+    this.#log.warn({ errorCode, ...(provider ? { provider } : {}), ...(errorClass ? { errorClass } : {}) });
     return Response.json({ error: errorCode }, { status });
   }
 
   private async handle(request: Request): Promise<Response> {
+    try {
+      return await this.handleRequest(request);
+    } catch {
+      // Even a broken sink must not hand Bun an exception containing the loopback path.
+      try { this.#log.warn({ errorCode: "internal" }); } catch {}
+      return Response.json({ error: "internal" }, { status: 500 });
+    }
+  }
+
+  private async handleRequest(request: Request): Promise<Response> {
     this.cancelClose();
     this.prune();
     try {
+      if (request.headers.get("host") !== `127.0.0.1:${this.#server?.port}`) return this.reject(404, "not_found");
       const parts = new URL(request.url).pathname.split("/");
       if (parts.length !== 3 || !this.tokenMatches(parts[1]!)) return this.reject(404, "not_found");
-      const entry = this.entries.get(parts[2]!);
+      const entry = this.#entries.get(parts[2]!);
       if (!entry || entry.consumed) return this.reject(404, "not_found");
       // Every attempt with a live id consumes it, including method/sentinel rejections.
       entry.consumed = true;
@@ -172,19 +187,19 @@ export class CustodyEndpoint {
       if (![...request.headers.values()].some((value) => value.includes(sentinel(entry.provider)))) {
         return this.reject(403, "sentinel_absent", entry.provider);
       }
-      if (this.inFlight >= this.maxInFlight) return this.reject(503, "busy", entry.provider);
-      this.inFlight++;
+      if (this.#inFlight >= this.#maxInFlight) return this.reject(503, "busy", entry.provider);
+      this.#inFlight++;
       let released = false;
       const finish = () => {
         if (released) return;
         released = true;
-        this.inFlight--;
+        this.#inFlight--;
         this.scheduleClose();
       };
       let streaming = false;
       try {
         const length = request.headers.get("content-length");
-        if (length !== null && Number(length) > this.maxBodyBytes) return this.reject(413, "too_large", entry.provider);
+        if (length !== null && Number(length) > this.#maxBodyBytes) return this.reject(413, "too_large", entry.provider);
         const chunks: Uint8Array[] = [];
         let size = 0;
         if (request.body) {
@@ -194,7 +209,7 @@ export class CustodyEndpoint {
               const chunk = await reader.read();
               if (chunk.done) break;
               size += chunk.value.byteLength;
-              if (size > this.maxBodyBytes) {
+              if (size > this.#maxBodyBytes) {
                 await reader.cancel();
                 return this.reject(413, "too_large", entry.provider);
               }
@@ -213,7 +228,15 @@ export class CustodyEndpoint {
           signal: request.signal,
         });
         const response = await current.serve(entry.provider, rebuilt, request.signal);
-        const headers = new Headers(response.headers);
+        // OC2 follows redirects; only V1 serve may resolve one while credential material is present.
+        if (response.status >= 300 && response.status < 400 && response.headers.has("location")) {
+          try { await response.body?.cancel(); } catch {}
+          return this.reject(502, "redirect_refused", entry.provider);
+        }
+        const headers = outboundHeaders(response.headers);
+        for (const name of [...headers.keys()]) {
+          if (name === "set-cookie" || name === "set-cookie2" || name.startsWith("access-control-")) headers.delete(name);
+        }
         headers.delete("content-encoding");
         headers.delete("content-length");
         if (!response.body) return new Response(null, { status: response.status, statusText: response.statusText, headers });
@@ -247,30 +270,30 @@ export class CustodyEndpoint {
   }
 
   private cancelClose(): void {
-    clearTimeout(this.closeTimer);
-    this.closeTimer = undefined;
+    clearTimeout(this.#closeTimer);
+    this.#closeTimer = undefined;
   }
 
   private scheduleClose(): void {
-    if (this.instances.length || this.inFlight || !this.server || this.closeTimer) return;
-    this.closeTimer = setTimeout(() => {
-      this.closeTimer = undefined;
-      if (this.instances.length || this.inFlight) return;
-      const server = this.server;
-      this.server = undefined;
-      this.entries.clear();
+    if (this.#instances.length || this.#inFlight || !this.#server || this.#closeTimer) return;
+    this.#closeTimer = setTimeout(() => {
+      this.#closeTimer = undefined;
+      if (this.#instances.length || this.#inFlight) return;
+      const server = this.#server;
+      this.#server = undefined;
+      this.#entries.clear();
       void server?.stop();
-    }, this.graceMs);
-    this.closeTimer.unref();
+    }, this.#graceMs);
+    this.#closeTimer.unref();
   }
 
   /** Test-only: force-closes even active streams; production cleanup uses register().dispose(). */
   async resetForTests(): Promise<void> {
     this.cancelClose();
-    this.instances.length = 0;
-    this.entries.clear();
-    const server = this.server;
-    this.server = undefined;
+    this.#instances.length = 0;
+    this.#entries.clear();
+    const server = this.#server;
+    this.#server = undefined;
     await server?.stop(true);
   }
 }

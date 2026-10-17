@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 
 import { createLogger, type CustodyLogEntry } from "../log";
 import { sentinel } from "../tombstone";
@@ -103,6 +103,128 @@ afterEach(async () => {
 });
 
 describe("OC2 loopback custody endpoint", () => {
+  test("review 1: holder reflection exposes neither custody token nor route entries", async () => {
+    const stub = upstream();
+    const holder = endpoint();
+    holder.register(instance());
+    const request = route(holder, stub.url);
+    const [token, id] = new URL(request.url).pathname.split("/").slice(1);
+    const names = Object.getOwnPropertyNames(holder);
+    expect(names.length).toBe(0);
+    expect(Object.keys(holder).length).toBe(0);
+    const serialized = JSON.stringify(holder);
+    for (const value of [JSON.stringify(names), serialized]) {
+      expect(value.includes(token!)).toBe(false);
+      expect(value.includes(id!)).toBe(false);
+    }
+    await (await fetch(request)).text();
+    expect(stub.requests.length).toBe(1);
+  });
+
+  test("review 2: rebinding Host is rejected before consuming a valid route", async () => {
+    const stub = upstream();
+    const holder = endpoint();
+    holder.register(instance());
+    const request = route(holder, stub.url);
+    const hostile = new Headers(request.headers);
+    hostile.set("host", "rebinding.example");
+    const rejected = await fetch(request.url, { headers: hostile });
+    expect(rejected.status).toBe(404);
+    expect(await rejected.json()).toEqual({ error: "not_found" });
+    expect(stub.requests.length).toBe(0);
+    const accepted = await fetch(request);
+    expect(accepted.status).toBe(200);
+    await accepted.text();
+    expect(stub.requests.length).toBe(1);
+  });
+
+  test("review 3: response hop-by-hop and Connection-named headers are stripped", async () => {
+    const stub = upstream();
+    const holder = endpoint();
+    holder.register({ id: "response-headers", serve: async (_provider, request, signal) => {
+      const response = await createUpstreamFetch(signal)(request);
+      const headers = new Headers(response.headers);
+      for (const name of ["proxy-authenticate", "proxy-authorization", "te", "trailer", "upgrade", "x-response-private"]) headers.set(name, MATERIAL);
+      headers.set("connection", "x-response-private");
+      headers.set("keep-alive", "timeout=999");
+      return new Response(response.body, { headers });
+    } });
+    const response = await fetch(route(holder, stub.url));
+    for (const name of ["proxy-authenticate", "proxy-authorization", "te", "trailer", "upgrade", "x-response-private"]) {
+      expect(response.headers.has(name)).toBe(false);
+    }
+    // Bun may add its own transport headers after the relay removes the upstream ones.
+    expect(response.headers.get("connection") === "x-response-private").toBe(false);
+    expect(response.headers.get("keep-alive") === "timeout=999").toBe(false);
+    expect(await response.text()).toBe("round-trip");
+    expect(stub.requests.length).toBe(1);
+  });
+
+  test("review 3: response cookies and every access-control header are stripped", async () => {
+    const stub = upstream(() => new Response("round-trip", { headers: {
+      "set-cookie": `session=${MATERIAL}`, "set-cookie2": `session=${MATERIAL}`,
+      "access-control-allow-origin": "*", "access-control-allow-credentials": "true",
+      "access-control-expose-headers": "x-private", "access-control-custom": MATERIAL,
+    } }));
+    const holder = endpoint();
+    holder.register(instance());
+    const response = await fetch(route(holder, stub.url));
+    expect(response.headers.has("set-cookie")).toBe(false);
+    expect(response.headers.has("set-cookie2")).toBe(false);
+    expect([...response.headers.keys()].some((name) => name.startsWith("access-control-"))).toBe(false);
+    expect(await response.text()).toBe("round-trip");
+    expect(stub.requests.length).toBe(1);
+  });
+
+  test("review 3: a served redirect is refused before the client contacts its target", async () => {
+    const attacker = upstream();
+    const stub = upstream(() => new Response(null, { status: 302, headers: { location: attacker.url.href } }));
+    const holder = endpoint();
+    holder.register({ id: "refused-redirect", serve: (_provider, request, signal) => createUpstreamFetch(signal)(request, { redirect: "manual" }) });
+    const response = await fetch(route(holder, stub.url));
+    expect(response.status).toBe(502);
+    expect(await response.json()).toEqual({ error: "redirect_refused" });
+    expect(stub.requests.length).toBe(1);
+    expect(attacker.requests.length).toBe(0);
+  });
+
+  test("review 4: a throwing logger still returns safe internal JSON without a path", async () => {
+    const stub = upstream();
+    const holder = getCustodyEndpoint({ log: {
+      ...createLogger((entry) => logs.push(entry)),
+      warn() { throw new Error("logger unavailable"); },
+    } });
+    holder.register(instance());
+    const request = route(holder, stub.url);
+    const rejected = new URL(request.url);
+    rejected.pathname += "/invalid";
+    const response = await fetch(rejected);
+    const body = await response.text();
+    expect(response.status).toBe(500);
+    expect(body === JSON.stringify({ error: "internal" })).toBe(true);
+    expect(response.headers.get("content-type")?.startsWith("application/json")).toBe(true);
+    for (const part of new URL(request.url).pathname.split("/").filter(Boolean)) expect(body.includes(part)).toBe(false);
+    expect(stub.requests.length).toBe(0);
+  });
+
+  test("review 6: default server options pin loopback ephemeral port and zero idle timeout", async () => {
+    const stub = upstream();
+    const holder = endpoint();
+    const spy = spyOn(Bun, "serve");
+    try {
+      holder.register(instance());
+      expect(spy).toHaveBeenCalledTimes(1);
+      const options = spy.mock.calls[0]![0];
+      expect(options.idleTimeout).toBe(0);
+      expect(options.hostname).toBe("127.0.0.1");
+      expect(options.port).toBe(0);
+      await (await fetch(route(holder, stub.url))).text();
+      expect(stub.requests.length).toBe(1);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   test("a: round-trips the recorded destination, streamed body and safe headers", async () => {
     const stub = upstream();
     const holder = endpoint();
@@ -111,10 +233,14 @@ describe("OC2 loopback custody endpoint", () => {
     const request = route(holder, original, {
       method: "POST",
       body: new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode("payload")); controller.close(); } }),
-      headers: { connection: "x-private", "x-private": MATERIAL, "proxy-authorization": MATERIAL, host: "untrusted.invalid" },
+      headers: { connection: "x-private", "x-private": MATERIAL, "proxy-authorization": MATERIAL },
     });
     expect(holder.isEndpointUrl(request.url)).toBe(true);
-    expect(holder.isEndpointUrl(`${request.url}extra`)).toBe(true);
+    expect(holder.isEndpointUrl(`${request.url}extra`)).toBe(false);
+    expect(holder.isEndpointUrl(`${request.url.slice(0, -1)}.`)).toBe(false);
+    expect(holder.isEndpointUrl(`${request.url}/extra`)).toBe(false);
+    expect(holder.isEndpointUrl(`${request.url}?extra=1`)).toBe(false);
+    expect(holder.isEndpointUrl(`${request.url}#extra`)).toBe(false);
     expect(holder.isEndpointUrl(`${stub.url}wrong`)).toBe(false);
     const response = await fetch(request);
     expect(await response.text()).toBe("round-trip");

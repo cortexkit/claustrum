@@ -1,6 +1,7 @@
 import { sentinel, TOMBSTONE_PREFIX } from "../tombstone";
 
-// Far-future expiry avoids OC2's five-minute oauth refresh trigger for every provider.
+// Far-future expiry avoids OC2's five-minute oauth refresh trigger for every provider
+// (OpenCode 2.0.32, packages/core/src/integration.ts:733-739).
 export const V2_TOMBSTONE_EXPIRES = 253402300799000;
 
 export function v2KeyTombstone(provider: string) {
@@ -21,6 +22,7 @@ export function classifyV2Credential(value: unknown, provider: string): V2Creden
     (credential.metadata === undefined || (!!credential.metadata && typeof credential.metadata === "object" && !Array.isArray(credential.metadata)));
   const hasSentinel = Object.values(credential).some((entry) => typeof entry === "string" && entry.startsWith(TOMBSTONE_PREFIX));
   if (credential.type === "key") {
+    // A V1 api tombstone migrates to { type: "key", key: sentinel } and classifies as tombstone.
     if (!allowed(["type", "key"]) || typeof credential.key !== "string") return hasSentinel ? "drift" : "invalid";
     return credential.key === sentinel(provider) ? "tombstone" : hasSentinel ? "drift" : "real";
   }

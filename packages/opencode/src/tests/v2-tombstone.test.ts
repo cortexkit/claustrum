@@ -25,4 +25,7 @@ describe("V2 credential tombstones", () => {
     expect(V2_TOMBSTONE_EXPIRES).toBeGreaterThan(Date.now() + 5 * 60_000);
     expect(v2OauthTombstone(provider, "m").expires).toBeGreaterThan(Date.now() + 5 * 60_000);
   });
+  test("review 7: a foreign V1 OAuth sentinel is drift, not migrated custody", () => {
+    expect(classifyV2Credential({ type: "oauth", methodID: "m", access: "", refresh: sentinel("other"), expires: 0 }, "xai")).toBe("drift");
+  });
 });

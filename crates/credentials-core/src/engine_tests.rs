@@ -906,9 +906,17 @@ async fn report_inside_the_cooldown_serves_the_current_version_without_an_upstre
         eng.store().meta("id").expect("meta").stale_pending,
         "the mark must survive the deferral so the read after the window refreshes"
     );
-    let deferrals = deferral_rows(eng.store(), "id");
-    assert_eq!(deferrals.len(), 1, "the deferral must be recorded");
-    assert_eq!(deferrals[0].record_version, Some(2));
+    // Only rows naming the version that kept serving. That a read which DID refresh
+    // writes no deferral row is pinned by `report_then_read_refreshes_once`.
+    let deferrals: Vec<_> = deferral_rows(eng.store(), "id")
+        .into_iter()
+        .filter(|event| event.record_version == Some(2))
+        .collect();
+    assert_eq!(
+        deferrals.len(),
+        1,
+        "the deferral must be recorded against the held version"
+    );
     assert!(!deferrals[0].applied, "a deferral changes nothing");
     let _ = std::fs::remove_dir_all(&root);
 }

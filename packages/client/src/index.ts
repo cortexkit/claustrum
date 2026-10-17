@@ -35,6 +35,7 @@ export {
   type ClaustrumReporterSource,
   type CredentialStatus,
   type EnrollmentPollOutcome,
+  type ScopedGrantTuple,
   type ScopedInventory,
   type ScopedInventoryRow,
   type ServedCredential,

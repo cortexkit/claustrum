@@ -575,11 +575,42 @@ export interface ScopedInventoryRow {
  * and deliberately NOT over `record_version`, so a routine token refresh does not move it.
  * Compare it against the previous call's to decide whether to reconcile at all; it is an
  * opaque string and nothing but equality is defined on it.
+ *
+ * `grants` and `grantTuples` say what this caller is GRANTED, independent of what those
+ * grants currently reach. They are the only way to tell two empty listings apart:
+ *
+ * - `rows: []` with `grants === 0`: the caller holds no grant at all. The remedy is a
+ *   grant (`ck auth grant`).
+ * - `rows: []` with `grants > 0`: the caller holds a grant that currently reaches no
+ *   credential, typically a category no credential carries yet. The remedy is on the
+ *   credential side (`ck auth set-category`, or `ck auth reclassify --from-registry` for
+ *   credentials created before categories existed), not another grant.
+ *
+ * `grantTuples` lists each grant as `{ selectorKind, selector, operation }` (for example
+ * `{ selectorKind: 'category', selector: 'openai-native', operation: 'read' }`), so a
+ * consumer can name the selector that matched nothing. `grants` is its length.
+ *
+ * Both are `undefined` when the vault is too old to send them. That means "unknown",
+ * not "no grant": do not read an absent count as zero.
  */
 export interface ScopedInventory {
   readonly rows: readonly ScopedInventoryRow[]
   readonly view: string
+  readonly grants: number | undefined
+  readonly grantTuples: readonly ScopedGrantTuple[] | undefined
 }
+
+/** One grant the caller holds, as the vault's `list_scoped` reply names it. */
+export interface ScopedGrantTuple {
+  /** `exact` or `category`; decoded as an open string. */
+  readonly selectorKind: string
+  /** A credential id for `exact`, a bare category name for `category`. */
+  readonly selector: string
+  /** The granted operation, e.g. `read` or `list`; decoded as an open string. */
+  readonly operation: string
+}
+
+const GRANT_TUPLE_KEYS = ['operation', 'selector', 'selector_kind'] as const
 
 /**
  * Exported for the golden-reply test only; `index.ts` re-exports by name, so this does not
@@ -682,7 +713,39 @@ export function decodeScopedInventory(
       orgName: row.org_name,
     }
   })
-  return { rows: decoded, view }
+  // ABSENT IS UNKNOWN, PRESENT MUST BE WELL-FORMED. A vault from before these fields
+  // omits both, and refusing that would fail every listing against a still-supported
+  // vault. A present but malformed value is a broken reply, and decoding it leniently
+  // would hand the caller a grant count it cannot trust to tell "no grant" from "a grant
+  // that reaches nothing".
+  const rawGrants = result?.grants
+  let grants: number | undefined
+  if (rawGrants !== undefined) {
+    if (typeof rawGrants !== 'number' || !Number.isSafeInteger(rawGrants) || rawGrants < 0) {
+      throw asCredentialError(response, 'invalid_response', logUnknownClass)
+    }
+    grants = rawGrants
+  }
+  const rawTuples = result?.grant_tuples
+  let grantTuples: ScopedGrantTuple[] | undefined
+  if (rawTuples !== undefined) {
+    if (!Array.isArray(rawTuples)) throw asCredentialError(response, 'invalid_response', logUnknownClass)
+    grantTuples = rawTuples.map((tuple) => {
+      if (
+        !isRecord(tuple) ||
+        Object.keys(tuple).length !== GRANT_TUPLE_KEYS.length ||
+        !GRANT_TUPLE_KEYS.every((key) => typeof tuple[key] === 'string')
+      ) {
+        throw asCredentialError(response, 'invalid_response', logUnknownClass)
+      }
+      return {
+        selectorKind: tuple.selector_kind as string,
+        selector: tuple.selector as string,
+        operation: tuple.operation as string,
+      }
+    })
+  }
+  return { rows: decoded, view, grants, grantTuples }
 }
 
 /** What a poll found. `pending` is not an error: the operator has not decided yet. */

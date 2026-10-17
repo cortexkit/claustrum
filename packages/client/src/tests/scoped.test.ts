@@ -257,3 +257,87 @@ describe('the client speaks the producer-pinned wire', () => {
     expect(Object.keys(fixtureRequest('auth.enroll_poll')).sort()).toEqual(['request_id', 'request_secret'])
   })
 })
+
+/**
+ * THE GRANT COUNT IS WHAT TELLS "NO GRANT" FROM "A GRANT THAT REACHES NOTHING".
+ *
+ * A consumer granted a category no credential carried got `rows: []`, exactly what a
+ * caller with no grant gets, and could only report an empty vault. `grants` and
+ * `grant_tuples` were already on the wire; the decoder dropped them. Every case below
+ * starts from the producer's golden reply, so the field names are the vault's, not ours.
+ */
+describe('list_scoped grant count and tuples', () => {
+  const goldenReply = (key: 'reply' | 'list_only_reply' = 'reply') => {
+    const fixture = JSON.parse(readFileSync(FIXTURE, 'utf8')) as {
+      operations: (FixtureRow & { reply?: string; list_only_reply?: string })[]
+    }
+    const entry = fixture.operations.find((row) => row.op === 'credential.list_scoped')!
+    return JSON.parse(entry[key]!) as { result: Record<string, unknown> }
+  }
+
+  test('present grants and grant_tuples decode from the producer reply', () => {
+    const inventory = decodeScopedInventory(goldenReply(), () => {})
+    expect(inventory.grants).toBe(2)
+    expect(inventory.grantTuples).toEqual([
+      { selectorKind: 'category', selector: 'llm-provider', operation: 'read' },
+      { selectorKind: 'category', selector: 'github-app-native', operation: 'read' },
+    ])
+    const listOnly = decodeScopedInventory(goldenReply('list_only_reply'), () => {})
+    expect(listOnly.grants).toBe(1)
+    expect(listOnly.grantTuples).toEqual([{ selectorKind: 'category', selector: 'llm-provider', operation: 'list' }])
+  })
+
+  test('a grant that reaches nothing is distinguishable from no grant', () => {
+    const reaching = goldenReply()
+    reaching.result.credentials = []
+    const noGrant = goldenReply()
+    noGrant.result.credentials = []
+    noGrant.result.grants = 0
+    noGrant.result.grant_tuples = []
+    const a = decodeScopedInventory(reaching, () => {})
+    const b = decodeScopedInventory(noGrant, () => {})
+    expect(a.rows).toEqual([])
+    expect(b.rows).toEqual([])
+    expect(a.grants).toBe(2)
+    expect(b.grants).toBe(0)
+  })
+
+  test('an older vault without grants or grant_tuples decodes them as undefined', () => {
+    const response = goldenReply()
+    delete response.result.grants
+    delete response.result.grant_tuples
+    const inventory = decodeScopedInventory(response, () => {})
+    expect(inventory.rows.length).toBe(5)
+    expect(inventory.grants).toBeUndefined()
+    expect(inventory.grantTuples).toBeUndefined()
+  })
+
+  for (const [index, invalid] of [-1, '3', 1.5, null, []].entries()) {
+    test(`a malformed grants count is refused, case ${index}`, () => {
+      const response = goldenReply()
+      response.result.grants = invalid
+      expect(() => decodeScopedInventory(response, () => {})).toThrow()
+    })
+  }
+
+  const validTuple = { operation: 'read', selector: 'llm-provider', selector_kind: 'category' }
+  for (const [index, invalid] of [
+    { ...validTuple, selector: 7 },
+    { operation: 'read', selector: 'llm-provider' },
+    { ...validTuple, extra: 'x' },
+    'category:llm-provider',
+    null,
+  ].entries()) {
+    test(`a malformed grant tuple is refused, case ${index}`, () => {
+      const response = goldenReply()
+      response.result.grant_tuples = [validTuple, invalid]
+      expect(() => decodeScopedInventory(response, () => {})).toThrow()
+    })
+  }
+
+  test('a grant_tuples value that is not an array is refused', () => {
+    const response = goldenReply()
+    response.result.grant_tuples = { 0: validTuple }
+    expect(() => decodeScopedInventory(response, () => {})).toThrow()
+  })
+})

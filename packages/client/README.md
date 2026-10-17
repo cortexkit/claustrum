@@ -28,6 +28,15 @@ credential caching, refresh, account scheduling, and retry policy.
   no provider ids are set. Since 0.6.2 a daemon too old to send the field decodes the
   same way, so a newer client still lists against an older daemon. `authMethod` stays
   optional.
+• Since 0.10.0 `listScoped` also returns `grants` (how many grants the caller holds)
+  and `grantTuples` (`{ selectorKind, selector, operation }` per grant). They tell two
+  empty listings apart: `rows: []` with `grants === 0` means the caller has no grant;
+  `rows: []` with `grants > 0` means it holds a grant that currently reaches no
+  credential, usually a category no credential carries yet (the operator's fix is
+  `ck auth set-category`, or `ck auth reclassify --from-registry` for credentials created
+  before categories existed). Both are `undefined` against a vault too old to send
+  them; treat that as unknown, not as zero. A present but malformed value refuses the
+  reply like any other malformed field.
 
 The client sends `consumerIdentity: null` for every managed request so inherited
 `SUBC_MODULE_ID` and `SUBC_LAUNCH_NONCE` cannot impersonate a supervising host.

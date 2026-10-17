@@ -60,7 +60,7 @@ const ROW = {
 
 describe('list_scoped decoding', () => {
   test('a covered row survives the round trip with its adapter intact', async () => {
-    const { client, daemon } = await clientWith([{ result: { credentials: [ROW], grants: [], view: 'v1-digest' } }])
+    const { client, daemon } = await clientWith([{ result: { credentials: [ROW], grants: 1, view: 'v1-digest' } }])
     const { rows, view } = await client.listScoped('t'.repeat(64))
 
     expect(rows).toHaveLength(1)
@@ -75,7 +75,7 @@ describe('list_scoped decoding', () => {
 
   test('a static credential decodes with no adapter rather than an invented one', async () => {
     const { client } = await clientWith([
-      { result: { credentials: [{ ...ROW, id: 'apikey:openrouter', refresh_adapter: undefined }], grants: [], view: 'v1-digest' } },
+      { result: { credentials: [{ ...ROW, id: 'apikey:openrouter', refresh_adapter: undefined }], grants: 1, view: 'v1-digest' } },
     ])
     const { rows } = await client.listScoped()
 
@@ -90,13 +90,13 @@ describe('list_scoped decoding', () => {
    * distinguishable from a shape the decoder failed to understand, which is the next test.
    */
   test('an empty inventory is an answer, not a failure', async () => {
-    const { client } = await clientWith([{ result: { credentials: [], grants: [], view: 'v1-empty' } }])
+    const { client } = await clientWith([{ result: { credentials: [], grants: 0, view: 'v1-empty' } }])
     expect((await client.listScoped('t'.repeat(64))).rows).toEqual([])
   })
 
   test('a row missing its id is refused rather than decoded into a nameless entry', async () => {
     const { id: _dropped, ...withoutId } = ROW
-    const { client } = await clientWith([{ result: { credentials: [withoutId], grants: [], view: 'v1' } }])
+    const { client } = await clientWith([{ result: { credentials: [withoutId], grants: 1, view: 'v1' } }])
     // A nameless row would be routed against by SOMETHING -- whichever field the consumer
     // happened to trust -- so failing closed is the only safe outcome.
     expect(client.listScoped()).rejects.toThrow()
@@ -104,7 +104,7 @@ describe('list_scoped decoding', () => {
 
   test('a non-integer record_version is refused, because it is a comparison cursor', async () => {
     const { client } = await clientWith([
-      { result: { credentials: [{ ...ROW, record_version: 'twelve' }], grants: [], view: 'v1' } },
+      { result: { credentials: [{ ...ROW, record_version: 'twelve' }], grants: 1, view: 'v1' } },
     ])
     // A version that decodes to NaN compares false against everything, so a consumer's
     // "has this changed" check would answer no forever.
@@ -113,7 +113,7 @@ describe('list_scoped decoding', () => {
 
   test('a categories array holding a non-string is refused, not silently coerced', async () => {
     const { client } = await clientWith([
-      { result: { credentials: [{ ...ROW, categories: ['llm-provider', 7] }], grants: [], view: 'v1' } },
+      { result: { credentials: [{ ...ROW, categories: ['llm-provider', 7] }], grants: 1, view: 'v1' } },
     ])
     expect(client.listScoped()).rejects.toThrow()
   })
@@ -128,7 +128,7 @@ describe('the cursor and the rotate fence, both missing from 0.2.0', () => {
    */
   test('listScoped returns the view alongside the rows', async () => {
     const { client } = await clientWith([
-      { result: { credentials: [ROW], grants: [], view: 'digest-abc' } },
+      { result: { credentials: [ROW], grants: 1, view: 'digest-abc' } },
     ])
     const inventory = await client.listScoped('t'.repeat(64))
     expect(inventory.view).toBe('digest-abc')
@@ -136,7 +136,7 @@ describe('the cursor and the rotate fence, both missing from 0.2.0', () => {
   })
 
   test('a reply with no view is refused rather than decoded into an absent cursor', async () => {
-    const { client } = await clientWith([{ result: { credentials: [ROW], grants: [] } }])
+    const { client } = await clientWith([{ result: { credentials: [ROW], grants: 1 } }])
     // An undefined cursor compares unequal to everything, so a consumer would reconcile
     // forever and read it as churn in the vault.
     expect(client.listScoped()).rejects.toThrow()

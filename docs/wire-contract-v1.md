@@ -350,7 +350,10 @@ assigned to this credential. They are not interchangeable.
 It is present only on read/list-covered rows when the table below yields a value; otherwise
 the key is omitted, never null or `""`. Sign/open-only rows remain sealed and omit it,
 including rows with corrupt envelopes; their stored `provider_ids` are still returned.
-An unseal/decode failure on a read/list row still fails the whole snapshot.
+A read/list row already quarantined as `state: "corrupt"` is listed the same way, sealed
+and without identity, so one quarantined credential never hides the rest of the listing.
+An unseal/decode failure on a read/list row still stored as readable fails the whole
+snapshot with `store_error`: that is corruption the vault hasn't recorded yet.
 
 The closed values are `apikey`, `chatgpt`, `antigravity`, and `oauth`. Adding a value is a
 breaking wire change and requires a breaking client bump (minor while the client is 0.x).

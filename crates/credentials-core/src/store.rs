@@ -3029,8 +3029,16 @@ impl EncryptedStore {
                     // `read` and `list` both authorize the row's identity and adapter;
                     // a row reached only by `sign` or `open` stays sealed. Unsealing here
                     // serves metadata only, and no payload leaves this function.
-                    let decoded_record = if operations.contains(&GrantOperation::Read)
-                        || operations.contains(&GrantOperation::List)
+                    //
+                    // A row already quarantined as `corrupt` is listed sealed too, with
+                    // state `corrupt` and no identity. The vault knows it can't be read,
+                    // and unsealing it would fail this whole listing for every row the
+                    // caller reaches. A row still stored as readable whose envelope fails
+                    // to open does fail the snapshot below: that is corruption nothing has
+                    // recorded yet, and it must not be listed as if it were healthy.
+                    let decoded_record = if state != RecordState::Corrupt
+                        && (operations.contains(&GrantOperation::Read)
+                            || operations.contains(&GrantOperation::List))
                     {
                         let plaintext = envelope::open(
                             &self.key,
@@ -12127,8 +12135,52 @@ mod list_scoped_snapshot_tests {
             .unwrap();
         assert!(
             store.list_scoped_snapshot("reserved", "consumer").is_err(),
-            "one unreadable read-covered row fails the whole snapshot"
+            "an unreadable row still stored as active fails the whole snapshot"
         );
+
+        // Once quarantined, the same row lists sealed with state `corrupt`, and the
+        // other rows the caller reaches still list.
+        store
+            .create_audited(
+                "operator:healthy",
+                &api_record(),
+                AuditCtx::admin(AuditOp::Put),
+            )
+            .unwrap();
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "consumer",
+                SelectorKind::Exact,
+                "operator:healthy",
+                GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .unwrap();
+        store
+            .with_raw_conn(|conn| {
+                conn.execute(
+                    "UPDATE credentials SET state = 'corrupt' WHERE credential_id = 'operator:identity'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let listed = store
+            .list_scoped_snapshot("reserved", "consumer")
+            .expect("a quarantined row must not fail the listing");
+        assert_eq!(listed.rows.len(), 2);
+        let quarantined = listed
+            .rows
+            .iter()
+            .find(|row| row.id == "operator:identity")
+            .unwrap();
+        assert_eq!(quarantined.state, RecordState::Corrupt);
+        assert_eq!(quarantined.identity, None);
+        assert!(listed
+            .rows
+            .iter()
+            .any(|row| row.id == "operator:healthy" && row.state == RecordState::Active));
     }
 }
 

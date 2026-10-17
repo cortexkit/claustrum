@@ -20,8 +20,8 @@
 
 use credentials_core::http::ReqwestTransport;
 use credentials_core::refresh_adapters::{
-    anthropic, antigravity, cursor, devin, github_app, github_copilot, google, kimi, meta,
-    openai, snowflake, xai, HttpTransport,
+    anthropic, antigravity, cursor, devin, github_app, github_copilot, google, kimi, meta, openai,
+    snowflake, xai, HttpTransport,
 };
 
 /// The URL each refresh adapter's `refresh` sends its request to, taken from the

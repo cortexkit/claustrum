@@ -3256,8 +3256,9 @@ mod error_class_tests {
             );
         }
 
-        // Codes the doc lists that no ReadError produces must be the store-taxonomy
-        // refusals the doc names as coming from the admin write path.
+        // Codes in the wire contract's table that no ReadError produces must be
+        // store-taxonomy refusals, and docs/wire-contract-v1.md must name each of them
+        // in its "Codes from the admin write path" note under the table.
         let rule = credentials_core::provider_ids::ProviderIdRule::Charset;
         let store_codes: Vec<&str> = [
             StoreOpError::InvalidCredentialId,

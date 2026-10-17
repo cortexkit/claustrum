@@ -171,15 +171,27 @@ mod tests {
     #[test]
     fn map_error_types_every_refusal_code_ck_auth_handles() {
         let cases = [
-            ("auth_required", "needs_reauth", CredentialReadError::NeedsReauth),
+            (
+                "auth_required",
+                "needs_reauth",
+                CredentialReadError::NeedsReauth,
+            ),
             ("permanent", "not_found", CredentialReadError::NotFound),
             (
                 "permanent",
                 "refresh_unsupported",
                 CredentialReadError::RefreshUnsupported,
             ),
-            ("transient", "refresh_failed", CredentialReadError::RefreshFailed),
-            ("transient", "vault_locked", CredentialReadError::VaultLocked),
+            (
+                "transient",
+                "refresh_failed",
+                CredentialReadError::RefreshFailed,
+            ),
+            (
+                "transient",
+                "vault_locked",
+                CredentialReadError::VaultLocked,
+            ),
             ("permanent", "corrupt", CredentialReadError::Corrupt),
             (
                 "context_overflow",
@@ -238,13 +250,21 @@ mod tests {
     #[test]
     fn decode_response_maps_refusal_codes() {
         for (class, code, expected) in [
-            ("auth_required", "needs_reauth", CredentialReadError::NeedsReauth),
+            (
+                "auth_required",
+                "needs_reauth",
+                CredentialReadError::NeedsReauth,
+            ),
             (
                 "permanent",
                 "refresh_unsupported",
                 CredentialReadError::RefreshUnsupported,
             ),
-            ("transient", "vault_locked", CredentialReadError::VaultLocked),
+            (
+                "transient",
+                "vault_locked",
+                CredentialReadError::VaultLocked,
+            ),
             ("permanent", "not_found", CredentialReadError::NotFound),
         ] {
             let err = decode_response(&body(json!({
@@ -263,7 +283,9 @@ mod tests {
             body(json!({ "result": { "record_version": 1 } })),
             body(json!({ "result": { "payload": [256], "record_version": 1 } })),
             body(json!({ "result": { "payload": [1] } })),
-            body(json!({ "result": { "payload": [1], "record_version": 1, "expires_at_ms": "soon" } })),
+            body(
+                json!({ "result": { "payload": [1], "record_version": 1, "expires_at_ms": "soon" } }),
+            ),
         ] {
             match decode_response(&raw) {
                 Err(CredentialReadError::Transport(_)) => {}

@@ -22,6 +22,8 @@ use tokio::{
     time::{timeout, Instant},
 };
 
+pub mod route_daemon;
+
 pub const MODULE_ID: &str = "claustrum";
 pub const SETUP_TIMEOUT: Duration = Duration::from_secs(15);
 pub const READ_TIMEOUT: Duration = Duration::from_secs(15);

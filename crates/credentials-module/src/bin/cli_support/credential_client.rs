@@ -67,8 +67,7 @@ pub fn get_online(
     // libraries copy those into `route.open` as a consumer identity when none is
     // given. `route_client::open_route` builds `route.open` itself and never reads
     // them, so `ck auth` opens its route without a consumer identity regardless of
-    // the environment (pinned by
-    // `an_online_get_presents_no_consumer_identity_from_a_supervised_shell`).
+    // the environment (pinned by tests/route_open_identity.rs).
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

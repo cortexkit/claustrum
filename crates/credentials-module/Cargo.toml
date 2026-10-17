@@ -25,6 +25,13 @@ path = "src/main.rs"
 name = "ck-auth"
 path = "src/bin/credentials_cli.rs"
 
+# Sets the environment a supervised module's shell inherits, so it must own its whole
+# process: no libtest worker threads, no other tests. See the file's header.
+[[test]]
+name = "route_open_identity"
+path = "tests/route_open_identity.rs"
+harness = false
+
 [features]
 default = []
 import-prompt-seam = []

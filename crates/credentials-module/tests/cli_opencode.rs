@@ -23,7 +23,6 @@
 #![cfg(unix)]
 
 use std::io::Write;
-use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::{Arc, Mutex};
@@ -41,32 +40,8 @@ mod route_client;
 use serde_json::{json, Value};
 
 mod common;
+use common::route_daemon::{spawn_route_daemon, TestDaemon};
 use common::tmp_root;
-
-struct TestDaemon {
-    connection: PathBuf,
-    shutdown: Option<tokio::sync::oneshot::Sender<()>>,
-    join: Option<std::thread::JoinHandle<()>>,
-}
-
-impl Deref for TestDaemon {
-    type Target = PathBuf;
-
-    fn deref(&self) -> &Self::Target {
-        &self.connection
-    }
-}
-
-impl Drop for TestDaemon {
-    fn drop(&mut self) {
-        if let Some(shutdown) = self.shutdown.take() {
-            let _ = shutdown.send(());
-        }
-        if let Some(join) = self.join.take() {
-            join.join().expect("fake daemon thread panicked");
-        }
-    }
-}
 
 /// True when this run is pointed at a STAGED RELEASE binary rather than a cargo build.
 ///
@@ -663,98 +638,6 @@ fn an_online_get_maps_needs_reauth_without_returning_material() {
     let _ = std::fs::remove_dir_all(root);
 }
 
-/// Set only on the child process `an_online_get_presents_no_consumer_identity_from_a_supervised_shell`
-/// spawns; it tells `route_open_identity_child` to run instead of returning at once.
-const IDENTITY_CHILD_MARKER: &str = "CK_AUTH_TEST_ROUTE_OPEN_IDENTITY_CHILD";
-const SUPERVISOR_NONCE: &str = "nonce-of-the-supervising-module";
-
-/// `ck auth` run from a supervised module's shell must not present that module's
-/// identity on `route.open`.
-///
-/// Such a shell inherits the supervisor's `SUBC_MODULE_ID`, its one-time launch nonce
-/// and the nonce descriptor variables. subc's own clients (subc-client-rs, and the TS
-/// client unless told `consumerIdentity: null`) fill `route.open`'s
-/// `consumer_identity` from those variables when none is given, which would let the
-/// CLI open its route as the supervised module. `ck auth`'s route client builds the
-/// request itself and never reads them. This proves that with the variables really
-/// set: they are set on a child process rather than in this one, because changing
-/// the environment of a multi-threaded test binary races every other test in it.
-#[test]
-fn an_online_get_presents_no_consumer_identity_from_a_supervised_shell() {
-    let output = Command::new(std::env::current_exe().expect("test binary path"))
-        .args(["--exact", "route_open_identity_child", "--nocapture"])
-        .env(IDENTITY_CHILD_MARKER, "1")
-        .env(subc_protocol::SUBC_MODULE_ID_ENV, "claustrum")
-        .env(subc_protocol::SUBC_LAUNCH_NONCE_ENV, SUPERVISOR_NONCE)
-        .env(subc_os::LAUNCH_NONCE_FD_ENV, "3")
-        .env(subc_os::LAUNCH_NONCE_PIPE_ENV, "1")
-        .output()
-        .expect("run the child test");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success(),
-        "the child test failed:\n{stdout}\n{stderr}"
-    );
-    // Without this the parent would pass when the filter matched no test at all.
-    assert!(
-        stdout.contains("route-open-identity-child: checked"),
-        "the child test did not run its checks:\n{stdout}\n{stderr}"
-    );
-}
-
-/// The body of the test above, run only in the child process it spawns.
-#[test]
-fn route_open_identity_child() {
-    if std::env::var_os(IDENTITY_CHILD_MARKER).is_none() {
-        return;
-    }
-    assert_eq!(
-        std::env::var(subc_protocol::SUBC_LAUNCH_NONCE_ENV).as_deref(),
-        Ok(SUPERVISOR_NONCE),
-        "the parent must have set the supervisor's variables on this process"
-    );
-
-    let root = tmp_root("route-open-identity");
-    let opened = Arc::new(Mutex::new(None));
-    let conn = spawn_route_daemon_recording(
-        &root,
-        Arc::new(Mutex::new(Vec::new())),
-        opened.clone(),
-        json!({ "result": { "payload": [1], "record_version": 1 } }),
-    );
-    credential_client::get_online(&conn, &root, "ckh_owned_capability")
-        .expect("capability read succeeds");
-    drop(conn);
-
-    let open = opened
-        .lock()
-        .expect("opened")
-        .clone()
-        .expect("the fake daemon saw a route.open");
-    let mut keys: Vec<&str> = open
-        .as_object()
-        .expect("route.open body is an object")
-        .keys()
-        .map(String::as_str)
-        .collect();
-    keys.sort_unstable();
-    assert_eq!(
-        keys,
-        ["identity", "op", "target"],
-        "route.open must carry no consumer identity: {open}"
-    );
-    let text = open.to_string();
-    assert!(!text.contains(SUPERVISOR_NONCE), "nonce leaked: {text}");
-    // The call leaves the process environment alone: a library function that edits
-    // it races every other thread reading it.
-    assert_eq!(
-        std::env::var(subc_protocol::SUBC_MODULE_ID_ENV).as_deref(),
-        Ok("claustrum")
-    );
-    println!("route-open-identity-child: checked");
-}
-
 #[test]
 fn the_golden_handle_file_matches_the_rust_contract_byte_for_byte() {
     let bytes = include_str!("../../../packages/opencode/golden/handles.json");
@@ -762,130 +645,6 @@ fn the_golden_handle_file_matches_the_rust_contract_byte_for_byte() {
         serde_json::from_str(bytes).expect("golden handles json");
     let rendered = serde_json::to_string_pretty(&file).expect("render golden handles");
     assert_eq!(rendered, bytes.trim_end());
-}
-
-fn spawn_route_daemon(
-    root: &Path,
-    observed: Arc<Mutex<Vec<String>>>,
-    response: Value,
-) -> TestDaemon {
-    spawn_route_daemon_recording(root, observed, Arc::default(), response)
-}
-
-/// [`spawn_route_daemon`], additionally keeping the full `route.open` body it receives
-/// in `opened`.
-fn spawn_route_daemon_recording(
-    root: &Path,
-    observed: Arc<Mutex<Vec<String>>>,
-    opened: Arc<Mutex<Option<Value>>>,
-    response: Value,
-) -> TestDaemon {
-    use subc_protocol::{Flags, Frame, FrameType, Priority};
-    use subc_transport::{
-        authenticate_server, connection_file, read_frame, write_frame, ConnectionInfo, Endpoint,
-    };
-
-    let listener =
-        std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).expect("listener");
-    listener.set_nonblocking(true).expect("nonblocking");
-    let port = listener.local_addr().expect("addr").port();
-    let key = vec![9; 32];
-    let daemon_id = [4; 16];
-    let conn = root.join("subc-connection.json");
-    connection_file::write_atomic(
-        &conn,
-        &ConnectionInfo {
-            schema: connection_file::SCHEMA_VERSION,
-            wire_version: None,
-            endpoints: vec![Endpoint {
-                host: "127.0.0.1".into(),
-                port,
-            }],
-            key: key.clone(),
-            daemon_id,
-            pid: std::process::id(),
-            daemon_ver: "test".into(),
-        },
-    )
-    .expect("connection file");
-
-    let (shutdown, mut stopped) = tokio::sync::oneshot::channel();
-    let join = std::thread::spawn(move || {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("runtime");
-        runtime.block_on(async move {
-            let listener = tokio::net::TcpListener::from_std(listener).expect("tokio listener");
-            let (mut stream, _) = tokio::select! {
-                _ = &mut stopped => return,
-                accepted = listener.accept() => accepted.expect("accept"),
-            };
-            authenticate_server(
-                &mut stream,
-                &key,
-                &daemon_id,
-                "test",
-                std::time::Duration::from_secs(3),
-            )
-            .await
-            .expect("handshake");
-
-            let open = read_frame(&mut stream)
-                .await
-                .expect("read route open")
-                .expect("route frame");
-            let open_body: Value = serde_json::from_slice(&open.body).expect("route open json");
-            *opened.lock().expect("opened") = Some(open_body.clone());
-            observed
-                .lock()
-                .expect("methods")
-                .push(open_body["op"].as_str().unwrap_or_default().to_string());
-            let route = Frame::build(
-                FrameType::Response,
-                Flags::new(false, Priority::Passive, false),
-                0,
-                0,
-                open.header.corr,
-                serde_json::to_vec(&json!({"route_channel": 7, "route_epoch": 3})).unwrap(),
-            )
-            .unwrap();
-            write_frame(&mut stream, &route)
-                .await
-                .expect("write route open");
-
-            let get = read_frame(&mut stream)
-                .await
-                .expect("read credential get")
-                .expect("get frame");
-            let get_body: Value = serde_json::from_slice(&get.body).expect("credential get json");
-            observed
-                .lock()
-                .expect("methods")
-                .push(get_body["method"].as_str().unwrap_or_default().to_string());
-            assert_eq!(get_body["method"], "credential.get");
-            assert_eq!(get_body["params"]["handle"], "ckh_owned_capability");
-            assert_eq!(get_body["params"]["force_refresh"], false);
-            assert_eq!(get_body["params"]["min_ttl_ms"], 0);
-            let reply = Frame::build(
-                FrameType::Response,
-                Flags::new(false, Priority::Interactive, false),
-                7,
-                3,
-                get.header.corr,
-                serde_json::to_vec(&response).unwrap(),
-            )
-            .unwrap();
-            write_frame(&mut stream, &reply)
-                .await
-                .expect("write get response");
-        });
-    });
-    TestDaemon {
-        connection: conn,
-        shutdown: Some(shutdown),
-        join: Some(join),
-    }
 }
 
 struct MigrationRig {

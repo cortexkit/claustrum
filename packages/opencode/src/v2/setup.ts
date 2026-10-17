@@ -13,7 +13,7 @@ import {
 } from "../errors";
 import { FreshnessController, PAYMENT_REQUIRED_COOLDOWN_MS } from "../freshness";
 import { defaultHandleFilePath, handleFileRevision, OUR_PLUGIN_ID, readHandleFile, type OpenCodeHandleFileV1 } from "../handles";
-import { createLogger, serializedLogSink } from "../log";
+import { createLogger, ERROR_CODE, isAllHexBody, serializedLogSink } from "../log";
 import type { ConfigHookDependencies } from "../plugin";
 import { cooldownFromRetryAfter, exhaustion, reportWithinBudget, type ServeAccount, type ServeClient } from "../serve";
 import { sentinel, TOMBSTONE_PREFIX } from "../tombstone";
@@ -26,6 +26,11 @@ export type SetupDependencies = Pick<ConfigHookDependencies,
   "handleReader" | "handleVersionReader" | "detect" | "clientFactory" | "fetch" | "logSink" | "log" |
   "now" | "setInterval" | "clearInterval" | "oauthMinTtlMs"
 > & { registry?: CustodyRegistry; redirectProbe?: Omit<RedirectProbeDependencies, "fetch"> };
+
+function placementErrorCode(location: string): string {
+  const code = location.toLowerCase().replaceAll("-", "_");
+  return ERROR_CODE.test(code) && !isAllHexBody(code) ? code : "other_header";
+}
 
 export function createOpencodeClaustrumPluginV2(dependencies: SetupDependencies = {}): (ctx: PluginContext) => Promise<Cleanup> {
   const handleReader = dependencies.handleReader ?? readHandleFile;
@@ -65,7 +70,8 @@ export function createOpencodeClaustrumPluginV2(dependencies: SetupDependencies 
     })();
     const logError = <T extends Error>(error: T, provider: string): T => {
       const write = error instanceof CustodyWarmTimeoutError ? log.warn : log.error;
-      write({ provider, errorClass: error.name, errorCode: (error as NodeJS.ErrnoException).code,
+      write({ provider, errorClass: error.name, errorCode: error instanceof CustodyPlacementError
+        ? placementErrorCode(error.location) : (error as NodeJS.ErrnoException).code,
         errorMessage: `${error.name}: custody operation refused` });
       return error;
     };

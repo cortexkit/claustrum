@@ -1,9 +1,9 @@
 import { readerFixtureOptions, withSharedAncestorGroup } from './ancestor-fixture.js'
 import { createPrivateDirectory, createPrivateFile, checkOwnerOnlyPathAsync } from '@cortexkit/store'
 import { privatePathContext } from '../private-path.js'
-import { afterEach, describe, expect, test } from 'bun:test'
+import { afterAll, afterEach, describe, expect, test } from 'bun:test'
 import { chmod, mkdir, rm, symlink, writeFile } from 'node:fs/promises'
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -26,10 +26,14 @@ const posix = process.platform !== 'win32'
 // Inside a per-run mkdtemp folder (owner-only on POSIX), not directly in tmpdir(): on
 // Linux tmpdir() is the root-owned sticky /tmp, and @cortexkit/store 0.2.1 refuses to
 // create a private directory directly inside it.
-const root = join(mkdtempSync(join(tmpdir(), 'claustrum-client-')), 'handles-tests')
+const parent = mkdtempSync(join(tmpdir(), 'claustrum-client-'))
+const root = join(parent, 'handles-tests')
 const handle = `ckh_${'a'.repeat(43)}`
 
+// Each test removes `root`; the mkdtemp parent is removed once at the end, or every
+// run would leave an empty claustrum-client-* folder in the temp directory.
 afterEach(() => rm(root, { recursive: true, force: true }))
+afterAll(() => rmSync(parent, { recursive: true, force: true }))
 
 function validFile(): OpenCodeHandleFileV1 {
   return { version: 1, providers: [{ provider: 'deepseek', shape: 'api', serve: 'opencode-claustrum', accounts: [{ label: 'main', handle, credential_id: 'apikey:deepseek:main' }] }] }

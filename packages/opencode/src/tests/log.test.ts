@@ -143,7 +143,7 @@ describe("custody logger", () => {
     // default path (toward visibility), never be taken as a path named "" and never
     // disable. Sibling env reads in the package (detect.ts, handles.ts, defaultFilePath)
     // already coerce empty to unset; this pins log.ts to the same convention.
-    const root = join(tmpdir(), `claustrum-log-${crypto.randomUUID()}`);
+    const root = tempRoot();
     const state = join(root, ".local", "state");
     const expected = join(state, "cortexkit", "opencode-plugin", "custody.jsonl");
     createLogger(createFileLogSink({ env: { CLAUSTRUM_CUSTODY_LOG: "", XDG_STATE_HOME: state } })).info({ provider: "x" });
@@ -155,7 +155,7 @@ describe("custody logger", () => {
     // Guards the fix against widening: coercing "" to unset must not make "off" (or any
     // listed token) fall through to the default path.
     for (const token of ["off", "0", "false", "no"]) {
-      const root = join(tmpdir(), `claustrum-log-${crypto.randomUUID()}`);
+      const root = tempRoot();
       const state = join(root, ".local", "state");
       createLogger(createFileLogSink({ env: { CLAUSTRUM_CUSTODY_LOG: token, XDG_STATE_HOME: state } })).info({ provider: "x" });
       expect(existsSync(join(state, "cortexkit", "opencode-plugin", "custody.jsonl"))).toBe(false);

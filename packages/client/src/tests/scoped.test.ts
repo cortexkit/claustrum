@@ -261,10 +261,11 @@ describe('the client speaks the producer-pinned wire', () => {
 /**
  * THE GRANT COUNT IS WHAT TELLS "NO GRANT" FROM "A GRANT THAT REACHES NOTHING".
  *
- * A consumer granted a category no credential carried got `rows: []`, exactly what a
- * caller with no grant gets, and could only report an empty vault. `grants` and
- * `grant_tuples` were already on the wire; the decoder dropped them. Every case below
- * starts from the producer's golden reply, so the field names are the vault's, not ours.
+ * A consumer granted a category no credential carries gets `rows: []`, exactly what a
+ * caller with no grant gets, so without the count it can only report an empty vault.
+ * Every case below starts from the `credential.list_scoped` reply in the vault-generated
+ * fixture (`enrollment_wire_contract.json`), so `grants` and `grant_tuples` keep the exact
+ * field names the vault sends.
  */
 describe('list_scoped grant count and tuples', () => {
   const goldenReply = (key: 'reply' | 'list_only_reply' = 'reply') => {

@@ -4313,8 +4313,8 @@ fn render_grant_reach(
                 .push(format!("  No credential has the id '{selector}'."));
         }
     }
-    // Said whether or not reach is zero: a grant can reach some credentials while older
-    // ones that belong in the category are still left out.
+    // Named even when the grant reaches some credentials: older credentials that belong
+    // in the category may still be left out because their category set is empty.
     if !awaiting.is_empty() {
         let mut named = awaiting
             .iter()

@@ -5235,12 +5235,12 @@ fn a_deposit_grant_reports_reach_without_warning_on_zero() {
     assert!(!stderr.contains("warning"), "{stderr}");
 }
 
-// CREDENTIALS FROM BEFORE CATEGORIES CARRY NONE, and nothing backfills them. The vault
-// that prompted this had three ChatGPT logins with empty category sets, so a grant on
-// their native category reached none of them and nothing pointed at the verb that fills
-// empty sets from the registry. The grant names them and that verb. It does NOT fill them
-// itself: an operator may have emptied a set on purpose to keep a credential out of
-// category grants.
+// CREDENTIALS CREATED BEFORE CATEGORIES EXISTED CARRY NONE, and nothing backfills them,
+// so a category grant can't reach them even when the registry says they belong. For
+// example, `chatgpt:openai` logins from then have no `openai-native`. `ck auth grant`
+// names such credentials and points at `ck auth reclassify --from-registry`, which fills
+// empty sets. It does NOT fill them itself: an operator may have emptied a set on purpose
+// to keep a credential out of category grants.
 #[test]
 fn a_category_grant_names_uncategorized_credentials_reclassify_would_add() {
     let vault = GrantCliVault::new("grant-reach-reclassify");

@@ -67,6 +67,13 @@ cannot be met; retrying unchanged buys another one against the provider's mint b
 | `sign_payload_too_large` | context_overflow | a sign payload or the combined `credential.open` fields exceeded 1 MiB (`MAX_SIGN_PAYLOAD`) |
 | `ttl_unsatisfiable` | context_overflow | a freshly minted token still cannot satisfy your `min_ttl_ms` |
 
+**Codes from the admin write path, not the read surface:** `invalid_category_name`,
+`invalid_provider_id`, `invalid_credential_id` and `invalid_principal` are store-taxonomy
+refusals (`StoreOpError::wire_code` in `credentials-core/src/store.rs`). A read never
+produces them. Every other code in the table is a `ReadError` the read surface emits;
+`read_error_wire_codes_are_golden_and_match_the_doc_table` in `read_surface.rs` checks
+both directions.
+
 **On an unknown class:** render a generic degraded state. Do not fall back to the
 nearest known class — each known class carries an actionable remedy, and applying the
 wrong one (prompting a human for a transient network failure) is worse than saying

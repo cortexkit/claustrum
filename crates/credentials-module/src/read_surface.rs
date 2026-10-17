@@ -3149,6 +3149,149 @@ mod error_class_tests {
             "class tag missing: {json}"
         );
     }
+
+    /// One row per `ReadError` variant: the exact wire code and class it serializes to.
+    ///
+    /// The list is written ONCE and expands into both the table and an exhaustive
+    /// `match`, so a new variant does not compile until it has a row here.
+    macro_rules! read_error_golden {
+        ($($variant:ident => $code:literal, $class:literal;)*) => {
+            const READ_ERROR_GOLDEN: &[(ReadError, &str, &str)] =
+                &[$((ReadError::$variant, $code, $class)),*];
+            #[allow(dead_code)]
+            fn every_read_error_has_a_golden_row(error: ReadError) {
+                match error {
+                    $(ReadError::$variant => {})*
+                }
+            }
+        };
+    }
+
+    read_error_golden! {
+        NotFound => "not_found", "permanent";
+        NeedsReauth => "needs_reauth", "auth_required";
+        RefreshUnsupported => "refresh_unsupported", "permanent";
+        RefreshFailed => "refresh_failed", "transient";
+        StoreError => "store_error", "transient";
+        VaultLocked => "vault_locked", "transient";
+        Corrupt => "corrupt", "permanent";
+        TooManyItems => "too_many_items", "context_overflow";
+        ReportStatusNotCredentialDeath => "report_status_not_credential_death", "permanent";
+        TtlUnsatisfiable => "ttl_unsatisfiable", "context_overflow";
+        KindNotGettable => "kind_not_gettable", "permanent";
+        KindNotSignable => "kind_not_signable", "permanent";
+        SignPayloadTooLarge => "sign_payload_too_large", "context_overflow";
+        KindNotOpenable => "kind_not_openable", "permanent";
+        OpenFailed => "open_failed", "permanent";
+        OpenRateLimited => "open_rate_limited", "transient";
+        MalformedEncoding => "malformed_encoding", "permanent";
+    }
+
+    /// `(code, class)` for every row of the "Codes you will see" table in the wire
+    /// contract. Panics if the section or table cannot be found, so a reorganised doc
+    /// fails loudly instead of yielding an empty table that checks nothing.
+    fn doc_error_code_table(doc: &str) -> Vec<(String, String)> {
+        let section = doc
+            .split("### Codes you will see")
+            .nth(1)
+            .expect("wire contract lost its 'Codes you will see' section");
+        let rows: Vec<(String, String)> = section
+            .lines()
+            .skip_while(|line| !line.starts_with('|'))
+            .take_while(|line| line.starts_with('|'))
+            .filter_map(|line| {
+                let cells: Vec<&str> = line.split('|').map(str::trim).collect();
+                let code = cells.get(1)?.strip_prefix('`')?.strip_suffix('`')?;
+                Some((code.to_string(), cells.get(2)?.to_string()))
+            })
+            .collect();
+        assert!(
+            rows.len() >= 10,
+            "the error-code table parsed to {} rows; the parser no longer matches the doc",
+            rows.len()
+        );
+        rows
+    }
+
+    /// Every `ReadError` serializes to its pinned wire code and class, and the wire
+    /// contract's code table agrees in both directions.
+    ///
+    /// The codes come from `serde(rename_all)`, so renaming a variant silently renames
+    /// the wire string -- and consumers branch on that string (`ck auth`'s own
+    /// `credential_client::map_error` matches `refresh_unsupported`, `vault_locked` and
+    /// the rest literally). Renaming `RefreshUnsupported` and `VaultLocked` once left
+    /// the whole suite green. The literals below are the contract; the doc table is
+    /// what consumers read.
+    #[test]
+    fn read_error_wire_codes_are_golden_and_match_the_doc_table() {
+        for &(error, code, class) in READ_ERROR_GOLDEN {
+            assert_eq!(
+                serde_json::to_value(error).expect("serialize code"),
+                serde_json::json!(code),
+                "{error:?} changed its wire code"
+            );
+            let body = ErrorBody {
+                code: error,
+                class: error.class(),
+            };
+            assert_eq!(
+                serde_json::to_value(body).expect("serialize body"),
+                serde_json::json!({ "code": code, "class": class }),
+                "{error:?} changed its wire body"
+            );
+        }
+
+        let doc = include_str!("../../../docs/wire-contract-v1.md");
+        let table = doc_error_code_table(doc);
+        for &(error, code, class) in READ_ERROR_GOLDEN {
+            let rows: Vec<&(String, String)> = table.iter().filter(|(c, _)| c == code).collect();
+            assert_eq!(
+                rows.len(),
+                1,
+                "docs/wire-contract-v1.md must list `{code}` ({error:?}) exactly once"
+            );
+            assert_eq!(
+                rows[0].1, class,
+                "the doc gives `{code}` a different class than the vault produces"
+            );
+        }
+
+        // Codes the doc lists that no ReadError produces must be the store-taxonomy
+        // refusals the doc names as coming from the admin write path.
+        let rule = credentials_core::provider_ids::ProviderIdRule::Charset;
+        let store_codes: Vec<&str> = [
+            StoreOpError::InvalidCredentialId,
+            StoreOpError::InvalidCategoryName,
+            StoreOpError::InvalidPlanTier,
+            StoreOpError::InvalidProviderId {
+                rule,
+                value: String::new(),
+            },
+            StoreOpError::InvalidPrincipal,
+        ]
+        .iter()
+        .filter_map(StoreOpError::wire_code)
+        .collect();
+        let elsewhere_note = doc
+            .split("**Codes from the admin write path, not the read surface:**")
+            .nth(1)
+            .and_then(|rest| rest.split("\n\n").next())
+            .expect("the doc must say which table codes come from the admin write path");
+        for (code, _) in &table {
+            if READ_ERROR_GOLDEN.iter().any(|&(_, c, _)| c == code) {
+                continue;
+            }
+            assert!(
+                store_codes.contains(&code.as_str()),
+                "the doc lists `{code}`, which neither a ReadError nor a store-taxonomy \
+                 refusal produces; a consumer would carry a dead branch"
+            );
+            assert!(
+                elsewhere_note.contains(&format!("`{code}`")),
+                "`{code}` is not a ReadError; the doc must name it as an admin-write code"
+            );
+        }
+    }
 }
 
 #[cfg(test)]

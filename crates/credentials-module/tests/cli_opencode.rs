@@ -663,6 +663,98 @@ fn an_online_get_maps_needs_reauth_without_returning_material() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// Set only on the child process `an_online_get_presents_no_consumer_identity_from_a_supervised_shell`
+/// spawns; it tells `route_open_identity_child` to run instead of returning at once.
+const IDENTITY_CHILD_MARKER: &str = "CK_AUTH_TEST_ROUTE_OPEN_IDENTITY_CHILD";
+const SUPERVISOR_NONCE: &str = "nonce-of-the-supervising-module";
+
+/// `ck auth` run from a supervised module's shell must not present that module's
+/// identity on `route.open`.
+///
+/// Such a shell inherits the supervisor's `SUBC_MODULE_ID`, its one-time launch nonce
+/// and the nonce descriptor variables. subc's own clients (subc-client-rs, and the TS
+/// client unless told `consumerIdentity: null`) fill `route.open`'s
+/// `consumer_identity` from those variables when none is given, which would let the
+/// CLI open its route as the supervised module. `ck auth`'s route client builds the
+/// request itself and never reads them. This proves that with the variables really
+/// set: they are set on a child process rather than in this one, because changing
+/// the environment of a multi-threaded test binary races every other test in it.
+#[test]
+fn an_online_get_presents_no_consumer_identity_from_a_supervised_shell() {
+    let output = Command::new(std::env::current_exe().expect("test binary path"))
+        .args(["--exact", "route_open_identity_child", "--nocapture"])
+        .env(IDENTITY_CHILD_MARKER, "1")
+        .env(subc_protocol::SUBC_MODULE_ID_ENV, "claustrum")
+        .env(subc_protocol::SUBC_LAUNCH_NONCE_ENV, SUPERVISOR_NONCE)
+        .env(subc_os::LAUNCH_NONCE_FD_ENV, "3")
+        .env(subc_os::LAUNCH_NONCE_PIPE_ENV, "1")
+        .output()
+        .expect("run the child test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "the child test failed:\n{stdout}\n{stderr}"
+    );
+    // Without this the parent would pass when the filter matched no test at all.
+    assert!(
+        stdout.contains("route-open-identity-child: checked"),
+        "the child test did not run its checks:\n{stdout}\n{stderr}"
+    );
+}
+
+/// The body of the test above, run only in the child process it spawns.
+#[test]
+fn route_open_identity_child() {
+    if std::env::var_os(IDENTITY_CHILD_MARKER).is_none() {
+        return;
+    }
+    assert_eq!(
+        std::env::var(subc_protocol::SUBC_LAUNCH_NONCE_ENV).as_deref(),
+        Ok(SUPERVISOR_NONCE),
+        "the parent must have set the supervisor's variables on this process"
+    );
+
+    let root = tmp_root("route-open-identity");
+    let opened = Arc::new(Mutex::new(None));
+    let conn = spawn_route_daemon_recording(
+        &root,
+        Arc::new(Mutex::new(Vec::new())),
+        opened.clone(),
+        json!({ "result": { "payload": [1], "record_version": 1 } }),
+    );
+    credential_client::get_online(&conn, &root, "ckh_owned_capability")
+        .expect("capability read succeeds");
+    drop(conn);
+
+    let open = opened
+        .lock()
+        .expect("opened")
+        .clone()
+        .expect("the fake daemon saw a route.open");
+    let mut keys: Vec<&str> = open
+        .as_object()
+        .expect("route.open body is an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        ["identity", "op", "target"],
+        "route.open must carry no consumer identity: {open}"
+    );
+    let text = open.to_string();
+    assert!(!text.contains(SUPERVISOR_NONCE), "nonce leaked: {text}");
+    // The call leaves the process environment alone: a library function that edits
+    // it races every other thread reading it.
+    assert_eq!(
+        std::env::var(subc_protocol::SUBC_MODULE_ID_ENV).as_deref(),
+        Ok("claustrum")
+    );
+    println!("route-open-identity-child: checked");
+}
+
 #[test]
 fn the_golden_handle_file_matches_the_rust_contract_byte_for_byte() {
     let bytes = include_str!("../../../packages/opencode/golden/handles.json");
@@ -675,6 +767,17 @@ fn the_golden_handle_file_matches_the_rust_contract_byte_for_byte() {
 fn spawn_route_daemon(
     root: &Path,
     observed: Arc<Mutex<Vec<String>>>,
+    response: Value,
+) -> TestDaemon {
+    spawn_route_daemon_recording(root, observed, Arc::default(), response)
+}
+
+/// [`spawn_route_daemon`], additionally keeping the full `route.open` body it receives
+/// in `opened`.
+fn spawn_route_daemon_recording(
+    root: &Path,
+    observed: Arc<Mutex<Vec<String>>>,
+    opened: Arc<Mutex<Option<Value>>>,
     response: Value,
 ) -> TestDaemon {
     use subc_protocol::{Flags, Frame, FrameType, Priority};
@@ -733,6 +836,7 @@ fn spawn_route_daemon(
                 .expect("read route open")
                 .expect("route frame");
             let open_body: Value = serde_json::from_slice(&open.body).expect("route open json");
+            *opened.lock().expect("opened") = Some(open_body.clone());
             observed
                 .lock()
                 .expect("methods")

@@ -76,6 +76,10 @@ pub async fn open_route(
     // client-supplied and unattested, per the normative comment on the type. Nothing
     // downstream may authorize on them, and claustrum does not.
     let identity = BindIdentity::new(project_root, harness, session);
+    // Deliberately no `consumer_identity`. The CLI is never a supervised module, and a
+    // shell spawned by one inherits that module's SUBC_MODULE_ID and launch nonce;
+    // copying them here (as subc's client libraries do by default) would open this
+    // route as that module. Nothing on this path reads those variables.
     let frame = control_request(
         2,
         json!({ "op": "route.open", "target": target, "identity": identity }),

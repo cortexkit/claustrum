@@ -62,8 +62,13 @@ pub fn get_online(
     project_root: &Path,
     handle: &str,
 ) -> Result<ServedCredential, CredentialReadError> {
-    std::env::remove_var("SUBC_MODULE_ID");
-    std::env::remove_var("SUBC_LAUNCH_NONCE");
+    // No environment handling is needed here. A shell spawned by a supervised module
+    // inherits that module's SUBC_MODULE_ID and launch nonce, and subc's own client
+    // libraries copy those into `route.open` as a consumer identity when none is
+    // given. `route_client::open_route` builds `route.open` itself and never reads
+    // them, so `ck auth` opens its route without a consumer identity regardless of
+    // the environment (pinned by
+    // `an_online_get_presents_no_consumer_identity_from_a_supervised_shell`).
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -151,5 +156,122 @@ fn map_error(error: &Value) -> CredentialReadError {
         (_, Some("corrupt")) => CredentialReadError::Corrupt,
         (_, Some("ttl_unsatisfiable")) => CredentialReadError::TtlUnsatisfiable,
         _ => CredentialReadError::Refused,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decode_response, map_error, CredentialReadError};
+    use serde_json::json;
+
+    /// The read surface's refusal codes as the vault serializes them (pinned on the
+    /// producer side by `read_error_wire_codes_are_golden_and_match_the_doc_table`).
+    /// A code that stops matching here falls through to the generic `Refused`, which
+    /// would turn a typed operator message into "credential read was refused".
+    #[test]
+    fn map_error_types_every_refusal_code_ck_auth_handles() {
+        let cases = [
+            ("auth_required", "needs_reauth", CredentialReadError::NeedsReauth),
+            ("permanent", "not_found", CredentialReadError::NotFound),
+            (
+                "permanent",
+                "refresh_unsupported",
+                CredentialReadError::RefreshUnsupported,
+            ),
+            ("transient", "refresh_failed", CredentialReadError::RefreshFailed),
+            ("transient", "vault_locked", CredentialReadError::VaultLocked),
+            ("permanent", "corrupt", CredentialReadError::Corrupt),
+            (
+                "context_overflow",
+                "ttl_unsatisfiable",
+                CredentialReadError::TtlUnsatisfiable,
+            ),
+        ];
+        for (class, code, expected) in cases {
+            assert_eq!(
+                map_error(&json!({ "class": class, "code": code })),
+                expected,
+                "{code}/{class}"
+            );
+        }
+    }
+
+    #[test]
+    fn map_error_refuses_what_it_does_not_recognise() {
+        // `needs_reauth` is honoured only with its contract class, so a body that
+        // disagrees with itself is not read as "log in again".
+        assert_eq!(
+            map_error(&json!({ "class": "transient", "code": "needs_reauth" })),
+            CredentialReadError::Refused
+        );
+        for body in [
+            json!({ "class": "permanent", "code": "kind_not_gettable" }),
+            json!({ "class": "permanent", "code": "some_future_code" }),
+            json!({ "class": "permanent" }),
+            json!({}),
+        ] {
+            assert_eq!(map_error(&body), CredentialReadError::Refused, "{body}");
+        }
+    }
+
+    fn body(value: serde_json::Value) -> Vec<u8> {
+        serde_json::to_vec(&value).expect("encode test body")
+    }
+
+    #[test]
+    fn decode_response_returns_the_served_credential() {
+        let served = decode_response(&body(json!({
+            "result": { "payload": [104, 105], "record_version": 4, "expires_at_ms": 77 }
+        })))
+        .expect("served");
+        assert_eq!(served.payload, b"hi");
+        assert_eq!(served.record_version, 4);
+        assert_eq!(served.expires_at_ms, Some(77));
+
+        let no_expiry = decode_response(&body(json!({
+            "result": { "payload": [], "record_version": 1, "expires_at_ms": null }
+        })))
+        .expect("served without expiry");
+        assert_eq!(no_expiry.expires_at_ms, None);
+    }
+
+    #[test]
+    fn decode_response_maps_refusal_codes() {
+        for (class, code, expected) in [
+            ("auth_required", "needs_reauth", CredentialReadError::NeedsReauth),
+            (
+                "permanent",
+                "refresh_unsupported",
+                CredentialReadError::RefreshUnsupported,
+            ),
+            ("transient", "vault_locked", CredentialReadError::VaultLocked),
+            ("permanent", "not_found", CredentialReadError::NotFound),
+        ] {
+            let err = decode_response(&body(json!({
+                "result": { "error": { "class": class, "code": code } }
+            })))
+            .expect_err("a refusal is not a credential");
+            assert_eq!(err, expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn decode_response_rejects_malformed_bodies_as_transport_errors() {
+        for raw in [
+            b"not json".to_vec(),
+            body(json!({ "no_result": true })),
+            body(json!({ "result": { "record_version": 1 } })),
+            body(json!({ "result": { "payload": [256], "record_version": 1 } })),
+            body(json!({ "result": { "payload": [1] } })),
+            body(json!({ "result": { "payload": [1], "record_version": 1, "expires_at_ms": "soon" } })),
+        ] {
+            match decode_response(&raw) {
+                Err(CredentialReadError::Transport(_)) => {}
+                other => panic!(
+                    "{}: expected a transport error, got {other:?}",
+                    String::from_utf8_lossy(&raw)
+                ),
+            }
+        }
     }
 }

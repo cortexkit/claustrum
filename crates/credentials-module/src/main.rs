@@ -5180,8 +5180,8 @@ mod tests {
     /// working while the supervisor still sets the environment copy, and fail the day it
     /// stops. Two other modules shipped exactly that, and only a source scan finds it.
     ///
-    /// Scans every `src/` tree in this workspace. Removing the variable (the CLI scrubs it
-    /// before spawning children) is not a read and is allowed. `examples/` is excluded:
+    /// Scans every `src/` tree in this workspace. Removing the variable is not a read
+    /// and is allowed. `examples/` is excluded:
     /// the operator probe takes a nonce the operator exports by hand.
     #[test]
     fn no_shipped_source_reads_the_launch_nonce_directly() {

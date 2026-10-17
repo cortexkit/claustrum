@@ -494,6 +494,11 @@ fn init_fleet_log(module_id: &str, data_dir: &std::path::Path) {
 /// signing ceremonies (see `docs/gh-manifest-signing.md`), not by the daemon,
 /// so nothing else would notice them missing from a backup. Any new directory the vault
 /// retains in its data dir belongs here, and the test beside this constant names them.
+///
+/// The non-captured entries say what else lives in the data dir and why engram leaves it
+/// alone: `key-source` records where THIS machine keeps the master key, `logs` are this
+/// daemon's diagnostics, and `restore-evidence` holds store copies made while testing a
+/// restore, which must never be captured again as if they were the live store.
 const ENGRAM_CATALOG_JSON: &str = r#"{
   "schema_version": 1,
   "module_id": "claustrum",
@@ -518,6 +523,27 @@ const ENGRAM_CATALOG_JSON: &str = r#"{
       "mechanism": "filetree",
       "path": "signed-envelopes",
       "writer_interaction": "none"
+    },
+    {
+      "entry_id": "claustrum/key-source",
+      "class": "device-local",
+      "mechanism": "filetree",
+      "path": "key-source",
+      "reason": "records where this machine keeps the vault master key; meaningless on another machine"
+    },
+    {
+      "entry_id": "claustrum/logs",
+      "class": "device-local",
+      "mechanism": "filetree",
+      "path": "logs",
+      "reason": "this machine's daemon diagnostics, kept 14 days"
+    },
+    {
+      "entry_id": "claustrum/restore-evidence",
+      "class": "excluded",
+      "mechanism": "filetree",
+      "path": "restore-evidence",
+      "reason": "store copies made while testing a restore; capturing them would back up an old vault as if it were live"
     }
   ]
 }

@@ -47,6 +47,7 @@ async fn main() {
     let mut status_ids: Option<Vec<String>> = None;
     let mut scoped_id: Option<String> = None;
     let mut list_scoped = false;
+    let mut watch_scoped_secs: Option<u64> = None;
     let mut wire = false;
     let mut as_module: Option<String> = None;
     let mut enroll_propose: Option<String> = None;
@@ -184,6 +185,16 @@ async fn main() {
             // absence is how `list_scoped` shipped querying grants under a hardcoded
             // `reserved` kind: nothing an operator could run would have shown it.
             "--list-scoped" => list_scoped = true,
+            // Hold an `auth.watch_scoped` subscription for this many seconds, printing
+            // each notice and how the watch ended. The caller's `list_scoped` view is
+            // printed first, so the seq-1 notice can be compared against it.
+            "--watch-scoped" => {
+                watch_scoped_secs = Some(
+                    args.next()
+                        .and_then(|value| value.parse::<u64>().ok())
+                        .expect("--watch-scoped needs a number of seconds"),
+                );
+            }
             // Print each scoped reply as the exact JSON the daemon served, with the
             // payload bytes replaced. Consumers pin real wire bytes in their fixtures;
             // a description of the reply is not a substitute for its keys and values.
@@ -356,6 +367,18 @@ async fn main() {
 
     let (route_channel, route_epoch) = route_open(&mut stream, &root, as_module.as_deref()).await;
     eprintln!("[probe] route.open -> route_channel={route_channel} route_epoch={route_epoch}");
+
+    if let Some(secs) = watch_scoped_secs {
+        watch_scoped(
+            &mut stream,
+            route_channel,
+            route_epoch,
+            enrollment_token.as_deref(),
+            Duration::from_secs(secs),
+        )
+        .await;
+        return;
+    }
 
     if list_scoped {
         let body = credential_list_scoped(
@@ -1152,6 +1175,69 @@ async fn credential_list_scoped(
             && matches!(frame.header.ty, FrameType::Response | FrameType::Error)
         {
             return frame;
+        }
+    }
+}
+
+/// Print the caller's `list_scoped` view, then hold an `auth.watch_scoped` subscription
+/// for `hold`, printing every notice and how the watch ended. The vault answers the
+/// subscription on its request's correlation with `STREAM_DATA` notices, and ends it
+/// with a refusal `RESPONSE`, `STREAM_END`, or (on an older vault) an `ERROR`.
+async fn watch_scoped(
+    stream: &mut TcpStream,
+    route_channel: u16,
+    route_epoch: u32,
+    enrollment_token: Option<&str>,
+    hold: Duration,
+) {
+    let listed = credential_list_scoped(stream, route_channel, route_epoch, enrollment_token).await;
+    let listed: Value = serde_json::from_slice(&listed.body).unwrap_or(Value::Null);
+    println!(
+        "[probe] list_scoped view={}",
+        listed["result"]["view"].as_str().unwrap_or("-")
+    );
+    let mut params = json!({});
+    if let Some(token) = enrollment_token {
+        params["enrollment_token"] = json!(token);
+    }
+    const CORR: u64 = 9_101;
+    let frame = Frame::build(
+        FrameType::Request,
+        Flags::new(false, Priority::Interactive, false),
+        route_channel,
+        route_epoch,
+        CORR,
+        serde_json::to_vec(&json!({ "method": "auth.watch_scoped", "params": params })).unwrap(),
+    )
+    .expect("build watch_scoped frame");
+    write_frame(stream, &frame).await.unwrap();
+    let started = Instant::now();
+    let deadline = started + hold;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            println!("[probe] watch held {}s, still open", hold.as_secs());
+            return;
+        }
+        let frame = match tokio::time::timeout(remaining, read_frame(stream)).await {
+            Err(_) => continue,
+            Ok(Ok(Some(frame))) => frame,
+            Ok(_) => {
+                println!("[probe] connection closed");
+                return;
+            }
+        };
+        if frame.header.corr != CORR {
+            continue;
+        }
+        let at = started.elapsed().as_secs_f64();
+        let body = String::from_utf8_lossy(&frame.body);
+        match frame.header.ty {
+            FrameType::StreamData => println!("[probe] +{at:.1}s notice {body}"),
+            other => {
+                println!("[probe] +{at:.1}s ended {other:?} {body}");
+                return;
+            }
         }
     }
 }

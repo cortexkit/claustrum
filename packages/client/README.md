@@ -47,6 +47,76 @@ copy. One behaviour reaches callers: while the vault is restarting or refusing r
 opens as retryable, a call now keeps retrying for up to 90 s (paced, with jitter) instead
 of 30 s. Give every vault call on a latency-sensitive path its own timeout.
 
+## Watching for changes
+
+Since 0.12.0, `client.watchScoped(onNotice, { enrollmentToken? })` holds an
+`auth.watch_scoped` request on a dedicated route. It returns `{ stop(), closed }`.
+`stop()` is idempotent and resolves `closed` as `{ kind: 'stopped' }`. Notices have
+exactly `{ kind: 'changed', epoch, seq, view, keys }`; malformed notices reject
+`closed` with `ScopedWatchError` (`code: 'invalid_notice'`). Callback exceptions
+also reject it (`callback_failed`); async callbacks must handle their own rejection.
+Sequence gaps and new epochs are delivered, not silently filtered.
+
+**The caller owns reconnecting and re-subscribing.** Read `listScoped` on connect.
+On every notice, re-read if `view` differs from the last listing actually read,
+`epoch` is new, or `seq` skipped. Notices are sheddable hints, not an event journal.
+`keys` matters only to consumers that announce vault-held public keys: re-read
+those keys when that digest changes, independently of the inventory view.
+
+`@cortexkit/subc-client` 0.22 reports Response (including refusal) and STREAM_END
+frames as the same successful subscription close, without the Response body.
+Every accepted vault watch immediately sends notice seq 1, so the client uses
+whether any notices arrived to interpret that ambiguous close:
+
+| `closed` outcome | Caller action |
+| --- | --- |
+| `ended` (closed after notices) | Re-read and re-subscribe once for this close. A mid-watch revocation may take this extra round trip to discover. |
+| `refused`, with the existing typed credential `error` | Stop. Never reconnect for that refusal. |
+| `not_accepting` | Zero notices, then one successful `listScoped` confirmation. The vault may be draining: wait for reconnect or a caller-chosen delay, not a tight re-subscribe loop. |
+| `transport_lost`, with the original SDK `error` (including `route_closed`) | Reconnect, re-read, then re-watch. |
+| `unsupported` (`unknown_method`) | Fall back to polling `listScoped`. |
+
+A zero-notice close performs exactly one `listScoped` using the same enrollment
+token: its refusal becomes `refused`, its success becomes `not_accepting`. There is
+no automatic retry or reconnection in that confirmation read. Malformed replies
+reject `closed` with `ScopedWatchError('invalid_response')`.
+
+```ts
+let client = await ClaustrumClient.connect(connectionOptions)
+for (;;) {
+  let lastView = (await client.listScoped(token)).view // read on every connect/reopen
+  let epoch: string | undefined
+  let seq = 0
+  let reads = Promise.resolve()
+  let readError: unknown
+  const watch = client.watchScoped((notice) => {
+    const discontinuity = notice.epoch !== epoch || notice.seq !== seq + 1
+    epoch = notice.epoch
+    seq = notice.seq
+    reads = reads.then(async () => {
+      if (discontinuity || notice.view !== lastView) {
+        const listing = await client.listScoped(token)
+        lastView = listing.view // acknowledge the digest actually read, not the hint
+        useInventory(listing)
+      }
+    }).catch((error) => { readError = error; watch.stop() })
+    // Key-announcing callers separately compare notice.keys and re-read held keys.
+  }, { enrollmentToken: token })
+  let outcome
+  try { outcome = await watch.closed; await reads; if (readError) throw readError }
+  catch (error) { watch.stop(); throw error } // malformed notice/read/callback failure
+  if (outcome.kind === 'ended') continue // one new watch per close, never hidden retries
+  if (outcome.kind === 'transport_lost') {
+    client.close()
+    client = await ClaustrumClient.connect(connectionOptions)
+    continue
+  }
+  if (outcome.kind === 'not_accepting') { await callerBackoff(); continue }
+  if (outcome.kind === 'unsupported') await pollScopedInventory(client, token)
+  break // refused or explicitly stopped
+}
+```
+
 ## OpenCode handle-file exports
 
 `defaultHandleFilePath`, `readHandleFile`, `handleFileRevision`, and `parseHandleFile`

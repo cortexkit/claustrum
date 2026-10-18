@@ -403,10 +403,11 @@ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
 name = "cortexkit-claustrum-client"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "base64",
  "ring",
+ "serde",
  "serde_json",
  "sha2",
  "subc-os",

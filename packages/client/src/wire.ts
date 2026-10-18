@@ -10,11 +10,12 @@ import {
   hasCredentialError,
 } from './errors.js'
 import { storeIdentity } from './identity.js'
+import { openScopedWatch, type ScopedWatch, type ScopedWatchNotice, type ScopedWatchOptions } from './watch.js'
 
 const CLAUSTRUM_MODULE_ID = 'claustrum'
 const RECONNECT_BACKOFF_MS = 60_000
 
-type ClaustrumTransport = Pick<SubcClient, 'call' | 'close'>
+type ClaustrumTransport = Pick<SubcClient, 'call' | 'close' | 'routeOpen' | 'subscribe' | 'closeRoute'>
 
 export type ClaustrumConnector = (options: {
   connectionFile: string
@@ -306,6 +307,17 @@ export class ClaustrumClient {
       enrollmentToken === undefined ? {} : { enrollment_token: enrollmentToken },
     )
     return decodeScopedInventory(response, this.#logger)
+  }
+
+  /** One watch on a dedicated route. Reopen/reconnect policy belongs to the caller. */
+  watchScoped(onNotice: (notice: ScopedWatchNotice) => void, options: ScopedWatchOptions = {}): ScopedWatch {
+    const client = this.#client
+    return openScopedWatch(client, this.#identity, onNotice, options, async () => {
+      const response = await client.call('claustrum', 'credential.list_scoped',
+        options.enrollmentToken === undefined ? {} : { enrollment_token: options.enrollmentToken },
+        { identity: this.#identity, consumerIdentity: null })
+      return decodeScopedInventory(response, this.#logger)
+    })
   }
 
   /**

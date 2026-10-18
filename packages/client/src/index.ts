@@ -41,6 +41,13 @@ export {
   type ServedCredential,
 } from './wire.js'
 export {
+  ScopedWatchError,
+  type ScopedWatch,
+  type ScopedWatchNotice,
+  type ScopedWatchOptions,
+  type ScopedWatchOutcome,
+} from './watch.js'
+export {
   HANDLE_FILE_CONTRACT,
   HandleFileValidationError,
   credentialIdMatchesProvider,

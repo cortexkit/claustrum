@@ -20,6 +20,12 @@ use subc_transport::{authenticate_client, connection_file, read_frame, write_fra
 use tokio::net::TcpStream;
 use tokio::sync::Mutex as AsyncMutex;
 
+mod watch;
+pub use watch::{
+    ScopedWatch, ScopedWatchKind, ScopedWatchNotice, ScopedWatchOutcome, WatchAction, WatchNotice,
+    WatchTracker,
+};
+
 const CREDENTIAL_MODULE_ID: &str = "claustrum";
 const CREDENTIAL_GET_OP: &str = "credential.get";
 const CREDENTIAL_GET_SCOPED_OP: &str = "credential.get_scoped";
@@ -336,6 +342,14 @@ pub trait CredentialResolver: Send + Sync {
         Box::pin(async { Err(CredentialResolverError::unavailable()) })
     }
 
+    /// Opens a dedicated scoped watch. The caller owns reconnection and re-reading.
+    fn watch_scoped<'a>(
+        &'a self,
+        _enrollment_token: Option<&'a str>,
+    ) -> CredentialResolverFuture<'a, Result<ScopedWatch, CredentialResolverError>> {
+        Box::pin(async { Err(CredentialResolverError::unavailable()) })
+    }
+
     /// Lists the vault rows covered by this principal's own grants, metadata only.
     fn list_scoped(
         &self,
@@ -452,6 +466,13 @@ pub trait CredentialGetTarget: Send + Sync {
         })
     }
 
+    fn credential_watch_scoped<'a>(
+        &'a self,
+        _enrollment_token: Option<&'a str>,
+    ) -> CredentialResolverFuture<'a, Result<ScopedWatch, CredentialResolverError>> {
+        Box::pin(async { Err(CredentialResolverError::unavailable()) })
+    }
+
     fn credential_list_scoped(
         &self,
     ) -> CredentialResolverFuture<'_, Result<Value, CredentialResolverError>> {
@@ -531,6 +552,13 @@ impl ClaustrumCredentialResolver {
 }
 
 impl CredentialResolver for ClaustrumCredentialResolver {
+    fn watch_scoped<'a>(
+        &'a self,
+        enrollment_token: Option<&'a str>,
+    ) -> CredentialResolverFuture<'a, Result<ScopedWatch, CredentialResolverError>> {
+        self.target.credential_watch_scoped(enrollment_token)
+    }
+
     fn resolve<'a>(
         &'a self,
         raw_handle: &'a str,
@@ -665,6 +693,13 @@ impl CredentialResolver for ClaustrumCredentialResolver {
 }
 
 trait CredentialConsumerConnection: Send {
+    fn into_scoped_watch(
+        self: Box<Self>,
+        _enrollment_token: Option<String>,
+    ) -> CredentialResolverFuture<'static, Result<ScopedWatch, CredentialResolverError>> {
+        Box::pin(async { Err(CredentialResolverError::unavailable()) })
+    }
+
     fn credential_get<'a>(
         &'a mut self,
         raw_handle: &'a str,
@@ -806,6 +841,24 @@ impl LiveCredentialGetTarget {
 }
 
 impl CredentialGetTarget for LiveCredentialGetTarget {
+    fn credential_watch_scoped<'a>(
+        &'a self,
+        enrollment_token: Option<&'a str>,
+    ) -> CredentialResolverFuture<'a, Result<ScopedWatch, CredentialResolverError>> {
+        Box::pin(async move {
+            // A watch owns a separate connection so it cannot hold the unary-call mutex.
+            tokio::time::timeout(self.call_deadline, async {
+                self.connector
+                    .connect()
+                    .await?
+                    .into_scoped_watch(enrollment_token.map(str::to_owned))
+                    .await
+            })
+            .await
+            .unwrap_or_else(|_| Err(Self::deadline_error("auth.watch_scoped")))
+        })
+    }
+
     fn credential_get<'a>(
         &'a self,
         raw_handle: &'a str,
@@ -1251,6 +1304,13 @@ impl ClaustrumConsumer {
 }
 
 impl CredentialConsumerConnection for ClaustrumConsumer {
+    fn into_scoped_watch(
+        self: Box<Self>,
+        enrollment_token: Option<String>,
+    ) -> CredentialResolverFuture<'static, Result<ScopedWatch, CredentialResolverError>> {
+        Box::pin(async move { (*self).start_scoped_watch(enrollment_token).await })
+    }
+
     fn credential_get<'a>(
         &'a mut self,
         raw_handle: &'a str,

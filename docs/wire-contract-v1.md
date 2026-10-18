@@ -936,8 +936,9 @@ route channel and binding epoch. Each notice is sheddable (`ADMISSION=2`):
 An unauthorized open, or an open beyond the cap, gets the same `RESPONSE` body as
 an unauthorized `credential.list_scoped`:
 `{"result":{"error":{"class":"permanent","code":"not_found"}}}`. Revoking the
-watcher's enrollment terminates its correlation with an `ERROR` carrying those same
-body bytes. No account enumeration is disclosed by a refusal.
+watcher's enrollment terminates its correlation with a `RESPONSE` carrying those
+same body bytes, including after notices have been sent. Domain refusals do not use
+the transport `ERROR` lane. No account enumeration is disclosed by a refusal.
 
 There is one watch per route: opening another replaces it and ends the old
 correlation with `STREAM_END`. The daemon-wide cap is **64** open watches. `CANCEL`
@@ -945,6 +946,15 @@ on the watch correlation and a route close stop the watch and free its slot; rou
 close is silent. A channel-0 `PUSH` `module.draining` command ends all watches with
 `STREAM_END` before routes finish draining and refuses new opens. Graceful daemon
 `GOODBYE` also queues `STREAM_END` for every watch before the frame loop exits.
+
+Clients distinguish three endings:
+
+- A `RESPONSE` with a refusal settles the subscription. Decode it with the existing
+  `credential.list_scoped` refusal decoder: stop and do not reconnect for that refusal.
+- `STREAM_END` means the vault ended the watch (for example, drain or shutdown).
+  Re-subscribe and re-read the scoped account list.
+- A subscription rejected with `route_closed` means the route was lost. Reconnect,
+  re-read the scoped account list and re-watch.
 
 Older vaults answer this unknown operation on the `ERROR` lane with code
 `unknown_method`. That unchanged response is the client's fallback signal to poll

@@ -481,7 +481,7 @@ mod scoped_watch {
     }
 
     #[tokio::test]
-    async fn watch_scoped_enrollment_revocation_ends_with_error() {
+    async fn watch_scoped_enrollment_revocation_ends_with_refusal_response() {
         let mut rig = Rig::new();
         let secret = "a1".repeat(32);
         let hash = credentials_core::enrollment::enrollment_secret_hash(&secret).unwrap();
@@ -517,13 +517,13 @@ mod scoped_watch {
             scoped_route_request(&rig.surface, &rig.admin, 1, OP_LIST_SCOPED, params.clone()).await;
         assert_eq!(initial["view"], listing["result"]["view"]);
         rig.store.revoke_enrollment("watcher", "test").unwrap();
-        let error = rig.next().await;
-        assert_eq!(error.header.ty, FrameType::Error);
-        assert_eq!(error.header.corr, 11);
+        let refusal = rig.next().await;
+        assert_eq!(refusal.header.ty, FrameType::Response);
+        assert_eq!(refusal.header.corr, 11);
         rig.dispatch(1, 12, FrameType::Request, OP_LIST_SCOPED, params)
             .await;
-        assert_eq!(error.body, rig.next().await.body);
-        assert_scoped_not_found(&serde_json::from_slice(&error.body).unwrap());
+        assert_eq!(refusal.body, rig.next().await.body);
+        assert_scoped_not_found(&serde_json::from_slice(&refusal.body).unwrap());
         rig.quiet().await;
     }
 

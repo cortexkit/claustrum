@@ -99,6 +99,11 @@ impl WatchHub {
     pub(crate) async fn finish_all(&self) -> Result<(), ModuleError> {
         let entries: Vec<_> = {
             let mut registry = self.entries.lock().expect("watches");
+            // Process-lifetime latch: subc-protocol 0.31.0's
+            // session::ModuleControlCommand::Draining documents that the daemon
+            // kills the module at the drain ceiling regardless of module action.
+            // That command has no resume/cancel counterpart; a new process gets
+            // a new hub rather than reopening this one after drain.
             registry.draining = true;
             registry
                 .entries
@@ -259,7 +264,9 @@ impl Subscription {
                             Ok(true)
                         }
                         Err(code) if seq == 0 || code == ReadError::NotFound => {
-                            refusal(&writer, header, if seq == 0 { FrameType::Response } else { FrameType::Error }, code).await?;
+                            // Domain refusals use Response even after notices: SDKs
+                            // decode Error as subc's transport ErrorBody, not result.error.
+                            refusal(&writer, header, FrameType::Response, code).await?;
                             Ok(false)
                         }
                         // A transient store failure must not masquerade as a smaller

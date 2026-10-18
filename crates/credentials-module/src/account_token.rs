@@ -100,15 +100,26 @@ impl AccountTokens {
         super::now_ms()
     }
     fn path(&self) -> Result<PathBuf, AccountTokenError> {
-        self.machine_path
-            .clone()
-            .or_else(|| {
-                std::env::var_os("HOME").map(|home| {
-                    PathBuf::from(home).join(".local/state/cortexkit/account/machine.json")
-                })
-            })
+        if let Some(path) = &self.machine_path {
+            return Ok(path.clone());
+        }
+        machine_state_path(std::env::var_os("XDG_STATE_HOME"), std::env::var_os("HOME"))
             .ok_or_else(AccountTokenError::login)
     }
+}
+
+/// Where `ck account login` records this Mac's enrollment. It must resolve exactly as
+/// the account CLI's state path does (a non-empty `XDG_STATE_HOME` first, then
+/// `HOME`), or the vault would look in a different place and refuse a machine that
+/// is enrolled.
+fn machine_state_path(
+    xdg_state_home: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> Option<PathBuf> {
+    if let Some(state) = xdg_state_home.filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(state).join("cortexkit/account/machine.json"));
+    }
+    home.map(|home| PathBuf::from(home).join(".local/state/cortexkit/account/machine.json"))
 }
 
 // This is the account CLI's enrollment pointer, not signing authority. Its public

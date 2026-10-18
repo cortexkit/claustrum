@@ -672,3 +672,29 @@ fn account_token_vendored_fixture_checksums() {
         );
     }
 }
+
+/// The vault must find the enrollment where `ck account` wrote it: a non-empty
+/// `XDG_STATE_HOME` wins over `HOME`, and an empty one is ignored, as in the CLI.
+#[test]
+fn machine_state_path_resolves_like_the_account_cli() {
+    let p = |xdg: Option<&str>, home: Option<&str>| {
+        machine_state_path(xdg.map(Into::into), home.map(Into::into))
+    };
+    assert_eq!(
+        p(Some("/state"), Some("/home/u")),
+        Some(PathBuf::from("/state/cortexkit/account/machine.json"))
+    );
+    assert_eq!(
+        p(Some(""), Some("/home/u")),
+        Some(PathBuf::from(
+            "/home/u/.local/state/cortexkit/account/machine.json"
+        ))
+    );
+    assert_eq!(
+        p(None, Some("/home/u")),
+        Some(PathBuf::from(
+            "/home/u/.local/state/cortexkit/account/machine.json"
+        ))
+    );
+    assert_eq!(p(None, None), None);
+}

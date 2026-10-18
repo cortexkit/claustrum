@@ -37,8 +37,10 @@ const TEST_NAME: &str = "ck_auth_route_open_carries_no_consumer_identity_from_a_
 const SUPERVISOR_NONCE: &str = "nonce-of-the-supervising-module";
 
 fn main() {
-    // Behave like a libtest binary for the two things cargo and the gates ask of one:
-    // `--list` names the test, and a name filter that excludes it runs nothing.
+    // Behave like a libtest binary for the things cargo and the gates ask of one:
+    // `--list` names the test, a name filter that excludes it runs nothing, and the
+    // summary line is libtest's exact format. The mutation runner parses that line from
+    // every test binary in the crate, and a shortened one fails each row's baseline.
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|arg| arg == "--list") {
         println!("{TEST_NAME}: test");
@@ -46,10 +48,11 @@ fn main() {
     }
     let filters: Vec<&String> = args.iter().filter(|arg| !arg.starts_with('-')).collect();
     if !filters.is_empty() && !filters.iter().any(|f| TEST_NAME.contains(f.as_str())) {
-        println!("test result: ok. 0 passed; 0 failed; 1 filtered out");
+        println!("test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s");
         return;
     }
 
+    let started = std::time::Instant::now();
     // The variables a supervised module's shell inherits, named by subc's constants.
     std::env::set_var(subc_protocol::SUBC_MODULE_ID_ENV, "claustrum");
     std::env::set_var(subc_protocol::SUBC_LAUNCH_NONCE_ENV, SUPERVISOR_NONCE);
@@ -94,5 +97,8 @@ fn main() {
         Ok("claustrum")
     );
     println!("test {TEST_NAME} ... ok");
-    println!("test result: ok. 1 passed; 0 failed");
+    println!(
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in {:.2}s",
+        started.elapsed().as_secs_f64()
+    );
 }

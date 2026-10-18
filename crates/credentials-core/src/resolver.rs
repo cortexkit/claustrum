@@ -759,6 +759,23 @@ fn load_from_operator_path(path: &Path) -> Result<MasterKey, MasterKeyError> {
     Ok(MasterKey::from_bytes(*key_bytes))
 }
 
+/// Read an owner-only regular file under the same no-follow and ownership rules as
+/// operator key files. The size bound also applies if the file grows after opening.
+pub fn read_owner_only_file(path: &Path, max_bytes: u64) -> Result<Vec<u8>, MasterKeyError> {
+    use std::io::Read;
+    let file = open_checked_key_file(path)?;
+    let mut bytes = Vec::new();
+    file.take(max_bytes + 1)
+        .read_to_end(&mut bytes)
+        .map_err(MasterKeyError::Io)?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(MasterKeyError::KeyPathUnsafe(
+            "owner-only file exceeds size bound".into(),
+        ));
+    }
+    Ok(bytes)
+}
+
 #[cfg(unix)]
 fn open_checked_key_file(path: &Path) -> Result<std::fs::File, MasterKeyError> {
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};

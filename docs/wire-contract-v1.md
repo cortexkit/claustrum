@@ -970,3 +970,79 @@ process; every other byte is what the vault sent. They are pinned by
 coalescing, per-caller visibility, uniform refusals, revocation, immediate snapshots,
 replacement/grant loss, the 64/65 boundary and cancellation/close capacity recovery,
 and termination before drain/shutdown.
+
+## 12. Account worker token (`credential.account_token`)
+
+The vault exchanges this Mac's enrolled account machine key for a short-lived
+worker token. A caller receives a bearer JWT for **one granted audience**, never
+machine signing access. Request (optional fields may be omitted):
+
+```json
+{"method":"credential.account_token","params":{"audience":"cortexkit-runners","enrollment_token":"<consumer token>","min_ttl_ms":60000}}
+```
+
+`audience` is an exact string. The supported account-service audiences are
+`cortexkit-runners`, `cortexkit-account`, and `cortexkit-webhook-relay`. Authorization
+uses the same scoped principal resolver as other scoped operations: an explicitly
+presented enrollment token takes precedence over the route-bound reserved principal;
+a bad token never falls back to ambient authority. Unknown, uncovered, and
+unauthenticated callers receive the identical `not_found`/`permanent` body.
+
+The sole grant form is operation `account_token`, selector kind `audience`, selector
+exactly equal to the requested audience. Category, prefix, and wildcard coverage do
+not apply. A read or sign grant cannot authorize this operation; an account-token
+grant cannot sign arbitrary bytes or retrieve the machine key. Example operator grant:
+
+```sh
+ck auth grant --principal reserved:ck-motor --selector-kind audience --selector cortexkit-runners --operation account_token
+ck auth revoke-grant --principal reserved:ck-motor --selector-kind audience --selector cortexkit-runners --operation account_token
+```
+
+Success, inside the ordinary `result` envelope:
+
+```json
+{"jwt":"<short-lived bearer>","expires_at_ms":1800000900000,"audience":"cortexkit-runners","account":"01K00000000000000000000080"}
+```
+
+The JWT expires 900 seconds after the account service's issuance time; its `exp`
+claim supplies `expires_at_ms`. It is kept only in memory, shared across authorized
+callers for an audience. A cached token is served only when its remaining life is
+strictly greater than `max(min_ttl_ms, 60000)`. Otherwise a single-flight exchange
+mints once; concurrent callers share that result, including a failure. `min_ttl_ms`
+is a cache-bypass threshold, not a promise to extend the service's fixed lifetime.
+Every call is authorized before touching the cache. Re-login/key changes invalidate
+cache identity. JWTs are never persisted or logged.
+
+The enrollment pointer is the owner-only, no-follow regular file
+`~/.local/state/cortexkit/account/machine.json`. Its account/key id must be enrolled,
+and its public key and optional `vault_key_id` must agree with the highest live
+`signing:ck-account-machine:<n>` record. Missing, unsafe, malformed, unenrolled or
+mismatched state refuses `account_login_required`/`auth_required`: run
+`ck account login`. The file cannot grant signing authority or substitute another
+private key.
+
+Refusals use the ordinary `result.error` object with `code`, `class`, and optional
+`retry_after_ms` (milliseconds, not seconds):
+
+| Code | Class / remedy |
+| --- | --- |
+| `not_found` | `permanent`; no information about other grants or audiences |
+| `account_login_required` | `auth_required`; run `ck account login` |
+| `machine_revoked`, `machine_not_found`, `account_not_active` | `auth_required`; re-login |
+| `invalid_request`, `auth_failed`, `signature_invalid`, `account_exchange_invalid` | `permanent`; signer/contract mismatch, fixed-text operator warning |
+| `challenge_expired`, `challenge_spent`, `issuance_expired` | `transient`; a 409 fetches a new challenge and retries once within this call, then refuses |
+| `rate_limited`, `exchange_disabled`, `account_check_unavailable` | `transient`; service `retry_after_s` is converted to `retry_after_ms` |
+| `account_exchange_unavailable` | `transient`; network, unusable upstream response, or already-expired delivery |
+
+The vault sends no bearer to the account service: challenge POST takes exactly
+`{key_id,aud}`, redemption POST exactly `{key_id,aud,challenge,sig_hex}`. Before
+signing, the sealed challenge must bind the expected account, key, `worker_token`
+purpose, and audience. The full sealed string is signed verbatim in the normative
+UTF-8 transcript without a trailing newline. Local vendored vectors and provenance
+are in `crates/credentials-module/tests/fixtures/account-machine/`.
+
+`auth_events` records idempotent `scoped_first_use` for each resolved principal /
+`account_token` / audience. Each failed exchange attempt, including a retried 409,
+records `scoped_read_refusal` with the account-service code and status. These are
+trimmable diagnostics, not HMAC-chain appends: periodic mints never grow the
+untrimmable audit chain. The chain still records operator grant changes.

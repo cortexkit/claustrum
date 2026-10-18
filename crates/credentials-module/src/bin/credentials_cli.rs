@@ -34,8 +34,8 @@
 //!   mint-handle --id <id>                      print a fresh handle (once)
 //!   revoke-handle --handle <ckh_...> | --hash <hex>
 //!   revoke-all-handles --id <id>
-//!   grant --principal <id> --selector-kind <exact|category> --selector <value> --operation <read|sign|open|list|deposit>
-//!   revoke-grant --principal <id> --selector-kind <exact|category> --selector <value> --operation <read|sign|open|list|deposit>
+//!   grant --principal <id> --selector-kind <exact|category|audience> --selector <value> --operation <read|sign|open|list|deposit|account_token>
+//!   revoke-grant --principal <id> --selector-kind <exact|category|audience> --selector <value> --operation <read|sign|open|list|deposit|account_token>
 //!   grants
 //!   audit [--limit N] | verify-audit
 //! ```
@@ -584,7 +584,7 @@ fn usage_short() -> String {
         mint-handle         mint a capability handle for a credential\n\
         revoke-handle       revoke one capability handle\n\
         revoke-all-handles  revoke every handle for a credential\n\
-        grant               grant a reserved module a prefix or category selector\n\
+        grant               grant a principal an exact, category or audience selector\n\
         revoke-grant        revoke a reserved module's prefix or category selector\n\
        invalidate          mark a credential needs-reauth\n\
        reactivate          clear needs-reauth without replacing the secret\n\
@@ -728,8 +728,8 @@ fn help_verb(verb: &str) -> String {
              \n\
              NOTES\n\
              Print every principal-scoped grant as one stable row: principal kind, principal\n\
-             id, selector kind (exact or category), selector, operation, how many credentials\n\
-             it reaches, and creation time. Read-only; it uses the authenticated admin.status\n\
+             id, selector kind (exact, category or audience), selector, operation, reach,\n\
+             and creation time. Read-only; it uses the authenticated admin.status\n\
              path, reading the running daemon when available and the offline lease path\n\
              otherwise. An empty grant table prints `no grants`."
         }
@@ -1023,13 +1023,13 @@ fn help_verb(verb: &str) -> String {
         }
         "grant" => {
             "ck auth grant --principal <id|reserved:id>\n\
-             \x20             --selector-kind <exact|category> --selector <value>\n\
-             \x20             --operation <read|sign|open|list|deposit>\n\
+             \x20             --selector-kind <exact|category|audience> --selector <value>\n\
+             \x20             --operation <read|sign|open|list|deposit|account_token>\n\
              \n\
              \x20 --principal <id|reserved:id>  reserved module principal\n\
-             \x20 --selector-kind <kind>        exact or category (required, no default)\n\
-             \x20 --selector <value>            credential id text or bare category name\n\
-             \x20 --operation <read|sign|open|list|deposit>  grant authority (no `--op` alias)\n\
+             \x20 --selector-kind <kind>        required: exact, category or audience\n\
+             \x20 --selector <value>            credential id, category name or audience string\n\
+             \x20 --operation <operation>        grant authority (no `--op` alias)\n\
              \n\
              NOTES\n\
              exact matches one credential id byte for byte. category matches every\n\
@@ -1045,6 +1045,9 @@ fn help_verb(verb: &str) -> String {
              deposit: cerebellum-style module write access for cookie: records only.\n\
              Requires a reserved principal and category browser-session selector; it\n\
              grants no read access. A module can replace only rows it created.\n\
+             account_token: exchange a machine proof for one audience's worker token.\n\
+             It requires selector-kind audience; audience permits only account_token.\n\
+             Audience grants show token in REACHES, not a credential count.\n\
              On success a second line says how many credentials the grant reaches\n\
              now (`reaches N credentials`), counted as `ck auth grants` counts it. A\n\
              grant that reaches nothing still succeeds, with a warning on stderr\n\
@@ -1055,13 +1058,13 @@ fn help_verb(verb: &str) -> String {
         }
         "revoke-grant" => {
             "ck auth revoke-grant --principal <id|reserved:id>\n\
-             \x20                    --selector-kind <exact|category> --selector <value>\n\
-             \x20                    --operation <read|sign|open|list|deposit>\n\
+             \x20             --selector-kind <exact|category|audience> --selector <value>\n\
+             \x20                    --operation <read|sign|open|list|deposit|account_token>\n\
              \n\
              \x20 --principal <id|reserved:id>  reserved module principal\n\
-             \x20 --selector-kind <kind>        exact or category (required, no default)\n\
-             \x20 --selector <value>            credential id text or bare category name\n\
-             \x20 --operation <read|sign|open|list|deposit>  revoke authority (no `--op` alias)\n\
+             \x20 --selector-kind <kind>        required: exact, category or audience\n\
+             \x20 --selector <value>            credential id, category name or audience string\n\
+             \x20 --operation <operation>        revoke authority (no `--op` alias)\n\
              \n\
              NOTES\n\
              Revocation is exact over principal, selector kind, selector, and operation.\n\
@@ -4050,7 +4053,7 @@ fn parse_grants(result: &serde_json::Value) -> Result<Vec<GrantRow>, CliError> {
             .get("selector_kind")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("exact");
-        if !matches!(selector_kind, "exact" | "category") {
+        if !matches!(selector_kind, "exact" | "category" | "audience") {
             return Err(CliError::StatusReportInvalid(format!(
                 "admin.status returned an invalid selector kind at row {index}"
             )));
@@ -4067,7 +4070,12 @@ fn parse_grants(result: &serde_json::Value) -> Result<Vec<GrantRow>, CliError> {
         let operation = grant
             .get("operation")
             .and_then(serde_json::Value::as_str)
-            .filter(|operation| matches!(*operation, "read" | "sign" | "open" | "list" | "deposit"))
+            .filter(|operation| {
+                matches!(
+                    *operation,
+                    "read" | "sign" | "open" | "list" | "deposit" | "account_token"
+                )
+            })
             .ok_or_else(|| {
                 CliError::StatusReportInvalid(format!(
                     "admin.status returned an invalid grant operation at row {index}"
@@ -4204,7 +4212,11 @@ fn render_grants(result: &serde_json::Value) -> Result<Vec<String>, CliError> {
                 .filter(|_| grant.selector_kind == "category")
                 .unwrap_or(&grant.credential_prefix),
             grant.operation,
-            reach(&grant),
+            if grant.selector_kind == "audience" {
+                "token".to_owned()
+            } else {
+                reach(&grant).to_string()
+            },
             format_ts_ms(grant.created_at_ms)
         ));
     }
@@ -4223,6 +4235,7 @@ fn grant_reach(
     selector: &str,
 ) -> usize {
     match selector_kind {
+        "audience" => 0,
         "category" => inventory
             .values()
             .filter(|categories| categories.iter().any(|c| c == selector))
@@ -4284,6 +4297,12 @@ fn render_grant_reach(
     selector: &str,
     operation: GrantOperation,
 ) -> GrantReachReport {
+    if selector_kind == SelectorKind::Audience {
+        return GrantReachReport {
+            stdout: vec![format!("  exchanges tokens for audience {selector}")],
+            stderr: Vec::new(),
+        };
+    }
     let inventory = parse_credential_categories(result);
     let kind = selector_kind.as_str();
     let reach = grant_reach(&inventory, kind, selector);
@@ -4743,7 +4762,7 @@ fn parse_grant_selector(args: &[String]) -> Result<(SelectorKind, String), CliEr
     let selector_kind = optional(args, "--selector-kind")
         .ok_or_else(|| {
             CliError::Usage(
-                "grant requires --selector-kind exact|category (no default: the kind \
+                "grant requires --selector-kind exact|category|audience (no default: the kind \
                  decides whether this grant's reach can change without you)"
                     .into(),
             )
@@ -4760,6 +4779,9 @@ fn cmd_grant(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     let (selector_kind, selector) = parse_grant_selector(args)?;
     let operation = required(args, "--operation")?
         .parse::<GrantOperation>()
+        .map_err(CliError::Usage)?;
+    selector_kind
+        .validate_operation(operation)
         .map_err(CliError::Usage)?;
     let result = commit_admin(
         global,
@@ -4808,6 +4830,9 @@ fn cmd_revoke_grant(global: &GlobalArgs, args: &[String]) -> Result<(), CliError
     let (selector_kind, selector) = parse_grant_selector(args)?;
     let operation = required(args, "--operation")?
         .parse::<GrantOperation>()
+        .map_err(CliError::Usage)?;
+    selector_kind
+        .validate_operation(operation)
         .map_err(CliError::Usage)?;
     commit_admin(
         global,
@@ -7556,6 +7581,70 @@ mod deposit_cli_tests {
     }
 
     #[test]
+    fn account_token_cli_grant_pairs_and_inventory() {
+        let root = root("account-token-grants");
+        let args = [
+            "grant",
+            "--principal",
+            "reserved:ck-motor",
+            "--selector-kind",
+            "audience",
+            "--selector",
+            "cortexkit-runners",
+            "--operation",
+            "account_token",
+        ];
+        success(&root, &args);
+        let table = success(&root, &["grants"]);
+        assert!(
+            table.lines().any(|row| row.contains("ck-motor")
+                && row.contains("audience")
+                && row.contains("cortexkit-runners")
+                && row.contains("account_token")),
+            "{table}"
+        );
+        for (kind, operation) in [
+            ("exact", "account_token"),
+            ("category", "account_token"),
+            ("audience", "read"),
+            ("audience", "sign"),
+            ("audience", "open"),
+            ("audience", "list"),
+            ("audience", "deposit"),
+        ] {
+            let args: Vec<String> = [
+                "--principal",
+                "reserved:ck-motor",
+                "--selector-kind",
+                kind,
+                "--selector",
+                "cortexkit-runners",
+                "--operation",
+                operation,
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+            assert!(
+                matches!(cmd_grant(&global(&root), &args), Err(CliError::Usage(_))),
+                "{kind}/{operation} grant must refuse before touching the store"
+            );
+            assert!(
+                matches!(
+                    cmd_revoke_grant(&global(&root), &args),
+                    Err(CliError::Usage(_))
+                ),
+                "{kind}/{operation} revoke must refuse before touching the store"
+            );
+        }
+        let mut revoke = args;
+        revoke[0] = "revoke-grant";
+        success(&root, &revoke);
+        assert!(success(&root, &["grants"]).contains("no grants"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn deposit_grant_round_trip_and_invalid_deposit_grant_stderr_are_pinned() {
         let root = root("deposit-grants");
         let grant = [
@@ -7612,7 +7701,7 @@ mod deposit_cli_tests {
             assert_eq!(String::from_utf8(output.stderr).unwrap(), "error: deposit requires a reserved principal and category browser-session selector\n");
         }
         for verb in ["grant", "revoke-grant"] {
-            assert!(help_verb(verb).contains("<read|sign|open|list|deposit>"));
+            assert!(help_verb(verb).contains("<read|sign|open|list|deposit|account_token>"));
         }
         assert!(help_verb("grant")
             .contains("cerebellum-style module write access for cookie: records only"));

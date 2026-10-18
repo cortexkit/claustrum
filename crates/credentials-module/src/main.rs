@@ -101,6 +101,7 @@ const HEALTH_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_s
 
 // Capability-handle read-surface operations plus the separate principal-scoped read.
 const OP_DEPOSIT_COOKIE: &str = "credential.deposit_cookie";
+const OP_ACCOUNT_TOKEN: &str = "credential.account_token";
 const OP_GET: &str = "credential.get";
 const OP_GET_SCOPED: &str = "credential.get_scoped";
 const OP_LIST_SCOPED: &str = "credential.list_scoped";
@@ -1302,6 +1303,25 @@ async fn handle_read_request(
     };
 
     let result = match request.method.as_str() {
+        OP_ACCOUNT_TOKEN => {
+            match serde_json::from_value::<read_surface::AccountTokenParams>(request.params) {
+                Ok(params) => match surface.account_token(principal.as_ref(), &params).await {
+                    Ok(result) => wrap_result(result),
+                    Err(error) => wrap_result(json!({"error": error})),
+                },
+                Err(_) => {
+                    return invalid_params(
+                        writer,
+                        ver,
+                        channel,
+                        epoch,
+                        corr,
+                        "invalid account token parameters",
+                    )
+                    .await
+                }
+            }
+        }
         OP_WATCH_SCOPED => {
             let params = match serde_json::from_value::<ListScopedParams>(request.params) {
                 Ok(params) => params,
@@ -2065,6 +2085,11 @@ fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> 
         concurrency: Concurrency::ModuleManaged,
         operations: vec![
             ManagementOperation {
+                name: OP_ACCOUNT_TOKEN.to_string(),
+                description: Some("Mint a short-lived account worker token for one granted audience without exposing machine signing authority.".to_string()),
+                kind: ManagementOperationKind::Query,
+            },
+            ManagementOperation {
                 name: OP_ADMIN_CHALLENGE.to_string(),
                 description: Some("Issue a single-use challenge to a direct-bound operator.".to_string()),
                 kind: ManagementOperationKind::Mutate,
@@ -2440,7 +2465,7 @@ mod tests {
         (admin, store, root)
     }
 
-    fn tmp_surface_with_store(
+    pub(crate) fn tmp_surface_with_store(
         seed: u8,
     ) -> (
         Arc<ReadSurface>,
@@ -2946,7 +2971,7 @@ mod tests {
         })
     }
 
-    async fn deposit_cookie_frame(
+    pub(crate) async fn deposit_cookie_frame(
         surface: &Arc<ReadSurface>,
         admin: &Arc<admin_surface::AdminSurface>,
         principal: Option<subc_protocol::Principal>,
@@ -12847,12 +12872,14 @@ mod tests {
     ///             route channel number, never the stamp, its flow id, or the principal
     ///   warn!     engram-catalog.json could not be written: fixed text and the io error
     ///             KIND only (never its message, which can carry a path)
+    ///   warn!     permanent account exchange failure: fixed text only, never the JWT,
+    ///             challenge, upstream body or signer material
     ///
     /// The count makes a new site impossible to add without editing this test, which puts
     /// the question in front of whoever does it. The count alone cannot see what an
     /// EXISTING site logs, so the test also reads every site's arguments and refuses any
     /// that call `.expose(`: a `Secret` can be read only through `expose()`, so that is
-    /// the one shape every secret read must take. Covers the five files linked into the
+    /// the one shape every secret read must take. Covers the six files linked into the
     /// daemon binary.
     ///
     /// Patterns are built by concatenation so this test's own text is not counted, and
@@ -12865,6 +12892,7 @@ mod tests {
             include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/admin_surface.rs")),
             include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/limiter.rs")),
             include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/watch_scoped.rs")),
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/account_token.rs")),
         ];
         let count = |shape: &str| -> usize {
             let pattern = format!("{shape}{}", "!(");
@@ -12881,7 +12909,7 @@ mod tests {
         let observed = (println, eprintln, tracing, other);
         assert_eq!(
             observed,
-            (1, 2, 4, 0),
+            (1, 2, 5, 0),
             "the daemon's output sites changed (println, eprintln, tracing, other). Before \
              updating this count, confirm the new site logs no secret and bounds any \
              request field -- then add it to the list in \
@@ -12899,6 +12927,8 @@ mod tests {
         let shapes = [
             "println", "eprintln", "trace", "debug", "info", "warn", "error",
         ];
+        let account_sites = output_site_arguments(sources[5], &shapes);
+        assert_eq!(account_sites, vec![("warn".into(), "\"account worker exchange refused permanently; signer or contract vector may be wrong\"".into())]);
         let mut sites = 0;
         for source in sources {
             for (call, args) in output_site_arguments(source, &shapes) {

@@ -1,0 +1,7 @@
+repository=https://github.com/CortexKit/cortexkit-cloud
+test-vectors/machine-key@e9d98bc51e0a96f7711918c7a3ee5470dec22285 and docs/machine-key-contract.md@e9d98bc51e0a96f7711918c7a3ee5470dec22285
+
+README.md 725ac9bdcf20af7e4016e34f3dba5a5d4edaf4e291da9b0ba65a27b7d0065151
+vectors.json 1018385d6b632d74fe6c6d63ed1ec07554889483bbe628da6e7a1cf27b5380f1
+machine-key-contract.md 1e7fc59c7546db464dc4b60d042f42d4ed129b37a30003377860c8e8fe3e4de8
+refusals.json 98041300fda819e6ffd526460ada9731140541b5c33780538a9e42dd4543c4ce

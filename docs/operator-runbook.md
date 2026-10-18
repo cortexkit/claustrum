@@ -1258,3 +1258,24 @@ forward.
 
 To roll back a binary: place the rollback copy by rename exactly as above, restart the module,
 and run `scripts/accept-deploy.sh` against the rev you rolled back to.
+
+### Account worker-token grants
+
+`ck auth grant` and `revoke-grant` accept `--selector-kind audience --selector
+cortexkit-runners --operation account_token` for reserved or enrolled principals.
+`account_token` is valid only with `audience`; `audience` is valid only with
+`account_token`. Selectors are exact, never wildcard or category coverage. For the
+first consumer:
+
+```sh
+ck auth grant --principal reserved:ck-motor --selector-kind audience --selector cortexkit-runners --operation account_token
+```
+
+`ck auth grants` renders these rows with `token` in REACHES rather than a credential
+count. The grant authorizes `credential.account_token`, not arbitrary signing or
+retrieval of the machine key. The machine must already be enrolled by `ck account
+login`; an `account_login_required` refusal means re-run that command. Service
+`machine_revoked`, `machine_not_found`, and `account_not_active` also require
+operator re-login. Periodic mints are in-memory only; first uses and mint refusals
+are trimmable `auth_events`, not repeated HMAC-chain appends. Full wire and retry
+semantics are in [the account-token wire contract](wire-contract-v1.md#12-account-worker-token-credentialaccount_token).

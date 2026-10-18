@@ -174,3 +174,7 @@ crates/credentials-core/src/refresh_adapters/xai.rs AUTHORIZE_URL auth.x.ai
 crates/credentials-core/src/refresh_adapters/xai.rs DEVICE_CODE_URL auth.x.ai
 crates/credentials-core/src/refresh_adapters/xai.rs DEVICE_TOKEN_URL auth.x.ai
 crates/credentials-core/src/refresh_adapters/xai.rs TOKEN_URL auth.x.ai
+crates/credentials-module/src/account_token.rs CHALLENGE_URL account.cortexkit.io
+crates/credentials-module/src/account_token.rs TOKEN_URL account.cortexkit.io
+crates/credentials-module/src/account_token_tests.rs INLINE_001 account.cortexkit.io
+crates/credentials-module/src/account_token_tests.rs INLINE_002 account.cortexkit.io

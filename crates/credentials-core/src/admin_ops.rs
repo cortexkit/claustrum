@@ -1047,6 +1047,7 @@ pub fn status_result(
             let covered_credential_ids: Vec<&str> = metas
                 .iter()
                 .filter(|(id, meta)| match grant.selector_kind {
+                    SelectorKind::Audience => false,
                     SelectorKind::Exact => id == &grant.selector,
                     SelectorKind::Category => meta
                         .categories

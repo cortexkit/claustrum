@@ -613,6 +613,24 @@ const MIGRATIONS: &[Migration] = &[
                          FOREIGN KEY (credential_id) REFERENCES credentials(credential_id) ON DELETE CASCADE\
                      );",
     },
+    // Audience grants authorize an exchange, never access to a credential row.
+    // Copy all older grants verbatim so migration changes no existing authority.
+    Migration {
+        version: 17,
+        statements: "CREATE TABLE read_grants_v17 (\
+                         principal_kind TEXT NOT NULL CHECK (principal_kind IN ('reserved','enrolled')), \
+                         principal_id TEXT NOT NULL, \
+                         selector_kind TEXT NOT NULL CHECK (selector_kind IN ('exact','category','audience')), \
+                         selector TEXT NOT NULL, \
+                         operation TEXT NOT NULL CHECK (operation IN ('read','sign','open','list','deposit','account_token')), \
+                         created_at_ms INTEGER NOT NULL, \
+                         CHECK ((operation = 'account_token') = (selector_kind = 'audience')), \
+                         PRIMARY KEY (principal_kind, principal_id, selector_kind, selector, operation)\
+                     ); \
+                     INSERT INTO read_grants_v17 SELECT * FROM read_grants; \
+                     DROP TABLE read_grants; \
+                     ALTER TABLE read_grants_v17 RENAME TO read_grants;",
+    },
 ];
 
 /// The newest store migration THIS BINARY knows how to apply.
@@ -733,6 +751,7 @@ pub enum GrantOperation {
     Open,
     List,
     Deposit,
+    AccountToken,
 }
 
 impl GrantOperation {
@@ -743,6 +762,7 @@ impl GrantOperation {
             Self::Open => "open",
             Self::List => "list",
             Self::Deposit => "deposit",
+            Self::AccountToken => "account_token",
         }
     }
 }
@@ -757,8 +777,9 @@ impl std::str::FromStr for GrantOperation {
             "open" => Ok(Self::Open),
             "list" => Ok(Self::List),
             "deposit" => Ok(Self::Deposit),
+            "account_token" => Ok(Self::AccountToken),
             _ => Err(format!(
-                "unknown grant operation '{value}' (expected read, sign, open, list, or deposit)"
+                "unknown grant operation '{value}' (expected read, sign, open, list, deposit, or account_token)"
             )),
         }
     }
@@ -773,13 +794,22 @@ impl std::str::FromStr for GrantOperation {
 pub enum SelectorKind {
     Exact,
     Category,
+    Audience,
 }
 
 impl SelectorKind {
+    pub fn validate_operation(self, operation: GrantOperation) -> Result<(), String> {
+        if (self == Self::Audience) != (operation == GrantOperation::AccountToken) {
+            return Err("account_token requires selector-kind audience, and audience requires operation account_token".into());
+        }
+        Ok(())
+    }
+
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Exact => "exact",
             Self::Category => "category",
+            Self::Audience => "audience",
         }
     }
 }
@@ -791,8 +821,9 @@ impl std::str::FromStr for SelectorKind {
         match value {
             "exact" => Ok(Self::Exact),
             "category" => Ok(Self::Category),
+            "audience" => Ok(Self::Audience),
             _ => Err(format!(
-                "unknown selector kind '{value}' (expected exact or category)"
+                "unknown selector kind '{value}' (expected exact, category, or audience)"
             )),
         }
     }
@@ -2732,6 +2763,9 @@ impl EncryptedStore {
         operation: GrantOperation,
         ctx: AuditCtx<'_>,
     ) -> Result<(), StoreOpError> {
+        selector_kind
+            .validate_operation(operation)
+            .map_err(StoreOpError::Store)?;
         if !matches!(principal_kind, "reserved" | "enrolled")
             || principal_id.is_empty()
             || principal_id.contains('|')
@@ -2805,6 +2839,9 @@ impl EncryptedStore {
         operation: GrantOperation,
         ctx: AuditCtx<'_>,
     ) -> Result<(), StoreOpError> {
+        selector_kind
+            .validate_operation(operation)
+            .map_err(StoreOpError::Store)?;
         // Same closed kind list as creation. If revocation accepted a NARROWER set than
         // creation, a grant could be created and never revocable through this API -- the
         // asymmetry that turns a reach mistake into a permanent one.
@@ -2893,6 +2930,17 @@ impl EncryptedStore {
                 )?;
                 let grants = rows.collect::<rusqlite::Result<Vec<_>>>()?;
                 let caller_active_grants = grants.len() as u32;
+                if operation == GrantOperation::AccountToken {
+                    return Ok(ScopedCoverage {
+                        covered: grants.iter().any(|(kind, selector)| {
+                            kind == SelectorKind::Audience.as_str() && credential_id == selector
+                        }),
+                        caller_active_grants,
+                        holds_category_selector: false,
+                        id_exists: false,
+                        id_category_count: None,
+                    });
+                }
                 if operation == GrantOperation::Deposit {
                     let categories = crate::catalog::category_defaults(credential_id);
                     return Ok(ScopedCoverage {
@@ -3062,6 +3110,7 @@ impl EncryptedStore {
                         .filter(|grant| grant.operation != GrantOperation::Deposit)
                         .filter(|grant| match grant.selector_kind {
                             SelectorKind::Exact => id == grant.selector,
+                            SelectorKind::Audience => false,
                             SelectorKind::Category => categories
                                 .iter()
                                 .any(|category| grant.selector == category.as_str()),
@@ -11338,7 +11387,7 @@ mod tests {
     fn the_newest_migration_version_is_pinned_because_the_manifest_declares_it() {
         assert_eq!(
             newest_migration_version(),
-            16,
+            17,
             "the newest migration changed. This value is DECLARED in the module manifest \
              as store_schema_version, so a supervisor comparing declared-against-actual \
              sees it. Update the literal, and note the manifest consequence."
@@ -13209,6 +13258,55 @@ mod migration_10_tests {
     }
 
     #[test]
+    fn migration_17_conserves_every_grant_and_enforces_audience_pairs() {
+        let (_root, store) = sqlite("migration-17", 173);
+        migrate_through_for_test(&store, 16).unwrap();
+        store
+            .with_conn(|conn| {
+                let mut timestamp = 100;
+                for principal in ["reserved", "enrolled"] {
+                    for selector_kind in ["exact", "category"] {
+                        for operation in ["read", "sign", "open", "list", "deposit"] {
+                            timestamp += 1;
+                            conn.execute(
+                                "INSERT INTO read_grants VALUES (?1,'agent',?2,?3,?4,?5)",
+                                rusqlite::params![
+                                    principal,
+                                    selector_kind,
+                                    format!("selector-{timestamp}"),
+                                    operation,
+                                    timestamp
+                                ],
+                            )?;
+                        }
+                    }
+                }
+                conn.execute("UPDATE grants_generation SET value=57 WHERE id=1", [])?;
+                Ok(())
+            })
+            .unwrap();
+        let rows = |store: &SqliteStore| {
+            store.with_conn(|conn| {
+            let mut stmt = conn.prepare("SELECT principal_kind,principal_id,selector_kind,selector,operation,created_at_ms FROM read_grants ORDER BY 1,2,3,4,5")?;
+            let rows = stmt.query_map([], |r| Ok((r.get::<_,String>(0)?, r.get::<_,String>(1)?, r.get::<_,String>(2)?, r.get::<_,String>(3)?, r.get::<_,String>(4)?, r.get::<_,i64>(5)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        }).unwrap()
+        };
+        let before = rows(&store);
+        assert_eq!(before.len(), 20);
+        migrate_through_for_test(&store, 17).unwrap();
+        assert_eq!(rows(&store), before, "all six columns survive unchanged");
+        assert_eq!(generation_of(&store), 57);
+        store.with_conn(|conn| {
+            conn.execute("INSERT INTO read_grants VALUES ('reserved','ck-motor','audience','cortexkit-runners','account_token',999)",[])?;
+            for (kind, operation) in [("exact","account_token"),("category","account_token"),("audience","read"),("audience","sign"),("audience","open"),("audience","list"),("audience","deposit")] {
+                assert!(conn.execute("INSERT INTO read_grants VALUES ('reserved','bad',?1,'cortexkit-runners',?2,1000)", rusqlite::params![kind,operation]).is_err(),"{kind}/{operation}");
+            }
+            Ok(())
+        }).unwrap();
+    }
+
+    #[test]
     fn migration_13_admits_list_and_copies_every_grant_without_touching_the_generation() {
         let (root, store) = sqlite("migration-13", 124);
         migrate_through_for_test(&store, 12).expect("schema 12");
@@ -13448,7 +13546,7 @@ mod migration_10_tests {
         assert_eq!(
             "other".parse::<GrantOperation>(),
             Err(
-                "unknown grant operation 'other' (expected read, sign, open, list, or deposit)"
+                "unknown grant operation 'other' (expected read, sign, open, list, deposit, or account_token)"
                     .to_string()
             )
         );
@@ -13485,7 +13583,7 @@ mod migration_10_tests {
             .to_string();
         assert!(
             error.contains(
-                "unknown grant operation 'other' (expected read, sign, open, list, or deposit)"
+                "unknown grant operation 'other' (expected read, sign, open, list, deposit, or account_token)"
             ),
             "{error}"
         );

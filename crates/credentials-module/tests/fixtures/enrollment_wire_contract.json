@@ -1,6 +1,16 @@
 {
   "operations": [
     {
+      "op": "credential.account_token",
+      "request": "{\"audience\":\"cortexkit-runners\"}",
+      "success": [
+        "{\"result\":{\"account\":\"01K00000000000000000000080\",\"audience\":\"cortexkit-runners\",\"expires_at_ms\":1800000900000,\"jwt\":\"e30.eyJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJhdWQiOiJjb3J0ZXhraXQtcnVubmVycyIsImRldmljZSI6IjAxTUNDNVJNMDA2TkRLMDFYRDFXVEI3WjFQIiwiZXhwIjoxODAwMDAwOTAwLCJpYXQiOjE4MDAwMDAwMDAsImp0aSI6IjAxTUNDNVJNMDBOSEJZQk5NWEVHMTZBOUNYIn0.fake-signature\"}}"
+      ],
+      "refusals": [
+        "{\"result\":{\"error\":{\"class\":\"permanent\",\"code\":\"not_found\"}}}"
+      ]
+    },
+    {
       "op": "auth.watch_scoped",
       "request": "{}",
       "success_cases": [

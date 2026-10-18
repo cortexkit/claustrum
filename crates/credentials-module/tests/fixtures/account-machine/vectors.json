@@ -1,0 +1,1761 @@
+{
+  "format": "machine-key-v1",
+  "normative_heading": "B.10 Required vectors and races",
+  "generated_from": "account Worker routes with real D1; GitHub network boundary stubbed",
+  "clock_ms": 1800000000000,
+  "machine_private_seed_hex": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+  "machine_public_key_hex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+  "challenge_mac_key_base64url": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI",
+  "observations": [
+    {
+      "name": "complete:invalid-signature",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/complete",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"flow_id\":\"01MCC5RM002GZ7GPRPSSDC05BQ\",\"completion_code\":\"Ei569Y6YhY2ypE_bypHFSw4RkcwI_vRQ39viKRru9eU\",\"challenge\":\"eyJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJjb21wbGV0aW9uX2NvZGVfaGFzaCI6ImU4YjEyMmFlZDAyMGQ0MDU1N2M1Y2VmNzkwYTc3NDE5M2YzMTg4YWNiODUzYjA3OGUzZGEyZTQ3MGQ0ZGRjOTEiLCJleHBpcmVzX2F0X21zIjoxODAwMDAwMzAwMDAwLCJmbG93X2lkIjoiMDFNQ0M1Uk0wMDJHWjdHUFJQU1NEQzA1QlEiLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsImtleV9maW5nZXJwcmludCI6IjIxZmUzMWRmYTE1NGEyNjE2MjZiZjg1NDA0NmZkMjI3MWI3YmVkNGI2YWJlNDVhYTU4ODc3ZWY0N2Y5NzIxYjkiLCJraWQiOiJ2ZWN0b3ItMSIsIm5vbmNlIjoiYkN3TFRwVk5wS2VHcmxOak0tdloyTlJSdExpRWlFUkpheVRUc2ZYMEQ4ZyIsInB1cnBvc2UiOiJtYWNoaW5lX2NvbXBsZXRlIiwidiI6MX0.Hc5GB9KpRweTghU9Jp4BdGi8MyVoSsHjxbLt87lCdZc\",\"sig_hex\":\"00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\"}"
+      },
+      "reply": {
+        "status": 401,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "referrer-policy": "same-origin",
+          "content-security-policy": "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+          "x-frame-options": "DENY"
+        },
+        "body": "{\"error\":\"signature_invalid\"}"
+      }
+    },
+    {
+      "name": "confirm:tuple-substitution",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/enroll/confirm",
+        "headers": {
+          "Content-Type": "application/x-www-form-urlencoded",
+          "Cookie": "__Host-ck-machine-01MCC5RM002GZ7GPRPSSDC05BQ=ST4DdR0P_23N1HszroIv_kEs_JAd3jQslu_eOXvCmQ4",
+          "Origin": "https://account.cortexkit.io"
+        },
+        "body": "flow_id=01MCC5RM002GZ7GPRPSSDC05BQ&csrf=uwbkt8rq7KkV2SS43rBJxEuNqu-NmKtRXWgAfjb1FFo&action=confirm&paste_user_code=FG4H-1T7A&label=other"
+      },
+      "reply": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "referrer-policy": "same-origin",
+          "content-security-policy": "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+          "x-frame-options": "DENY"
+        },
+        "body": "{\"error\":\"invalid_request\"}"
+      }
+    },
+    {
+      "name": "enroll:accepted",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/keys",
+        "headers": {
+          "Content-Type": "application/json",
+          "Authorization": "Bearer eyJhbGciOiJFZERTQSIsImtpZCI6InRlc3Qta2V5LTEiLCJ0eXAiOiJKV1QifQ.eyJhY2NvdW50X2lkIjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJpc3MiOiJodHRwczovL2FjY291bnQuY29ydGV4a2l0LmlvIiwiYXVkIjoiY29ydGV4a2l0LWZlZCIsInN1YiI6IjAxSzAwMDAwMDAwMDAwMDAwMDAwMDAwMDgwIiwiaWF0IjoxODAwMDAwMDAwLCJleHAiOjE4MDAwMDA5MDAsImp0aSI6IjY5OTRlOTZkLTAwMDAtNDAwMC04MDAwLTAwMDAwMDAwMDAwMiJ9.PX5MomoO4nkFbu4hjrk67HecA5d8YirLsTi7zBoVGE16EgCtrvCkl3kZQzVuAGXs6h5Oxhco8JJl8Pao02zzCA"
+        },
+        "body": "{\"attestation\":\"eyJhbGciOiJFZERTQSIsInR5cCI6ImNrLW1hY2hpbmUtZW5yb2xsK2p3dCIsImtpZCI6InRlc3Qta2V5LTEifQ.eyJpc3MiOiJodHRwczovL2FjY291bnQuY29ydGV4a2l0LmlvIiwiYXVkIjoiY29ydGV4a2l0LWFjY291bnQ6bWFjaGluZS1lbnJvbGwiLCJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJwdXJwb3NlIjoibWFjaGluZV9lbnJvbGwiLCJmbG93IjoiMDFNQ0M1Uk0wMDJHWjdHUFJQU1NEQzA1QlEiLCJrZXlfZmluZ2VycHJpbnQiOiIyMWZlMzFkZmExNTRhMjYxNjI2YmY4NTQwNDZmZDIyNzFiN2JlZDRiNmFiZTQ1YWE1ODg3N2VmNDdmOTcyMWI5IiwibGFiZWxfaGFzaCI6IjA5NmQ3MmU4MGIxOGI1NDQwMWZmN2U2OGNlZDZiZTNiNDBmM2I1NjQ3ZjE1NzkwOWQxMTAxNmE0NWRhNDBmZmEiLCJyZXBsYWNlcyI6bnVsbCwiaWF0IjoxODAwMDAwMDAwLCJleHAiOjE4MDAwMDAzMDAsImp0aSI6IjAxTUNDNVJNMDBWRTFEWlpQUzVCODQ4VDdRIn0.6EKzRuhVvpqcf6OIq-A6Joe4owNRNLZ4Mgv8-l342WO4Lx1rJ5e5eFMm8hK0mZL8-n88zfxREsAUF_ZpNdTLAg\",\"ed25519_pubkey_hex\":\"d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a\",\"label\":\"Vector workstation\",\"replaces\":null,\"sig_hex\":\"ed512173b38f4d0d339a67b22aa767d0248920a3a81cba02aca2e1a1b98c0fad2987a197abe9f742de676a7ec4bfe80c3ce7f94c58269ce80acbbd0716903500\"}"
+      },
+      "reply": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "referrer-policy": "no-referrer"
+        },
+        "body": "{\"key_id\":\"01MCC5RM006NDK01XD1WTB7Z1P\",\"created_at_ms\":1800000000000}"
+      }
+    },
+    {
+      "name": "enroll:exact-retry",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/keys",
+        "headers": {
+          "Content-Type": "application/json",
+          "Authorization": "Bearer eyJhbGciOiJFZERTQSIsImtpZCI6InRlc3Qta2V5LTEiLCJ0eXAiOiJKV1QifQ.eyJhY2NvdW50X2lkIjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJpc3MiOiJodHRwczovL2FjY291bnQuY29ydGV4a2l0LmlvIiwiYXVkIjoiY29ydGV4a2l0LWZlZCIsInN1YiI6IjAxSzAwMDAwMDAwMDAwMDAwMDAwMDAwMDgwIiwiaWF0IjoxODAwMDAwMDAwLCJleHAiOjE4MDAwMDA5MDAsImp0aSI6IjY5OTRlOTZkLTAwMDAtNDAwMC04MDAwLTAwMDAwMDAwMDAwMiJ9.PX5MomoO4nkFbu4hjrk67HecA5d8YirLsTi7zBoVGE16EgCtrvCkl3kZQzVuAGXs6h5Oxhco8JJl8Pao02zzCA"
+        },
+        "body": "{\"attestation\":\"eyJhbGciOiJFZERTQSIsInR5cCI6ImNrLW1hY2hpbmUtZW5yb2xsK2p3dCIsImtpZCI6InRlc3Qta2V5LTEifQ.eyJpc3MiOiJodHRwczovL2FjY291bnQuY29ydGV4a2l0LmlvIiwiYXVkIjoiY29ydGV4a2l0LWFjY291bnQ6bWFjaGluZS1lbnJvbGwiLCJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJwdXJwb3NlIjoibWFjaGluZV9lbnJvbGwiLCJmbG93IjoiMDFNQ0M1Uk0wMDJHWjdHUFJQU1NEQzA1QlEiLCJrZXlfZmluZ2VycHJpbnQiOiIyMWZlMzFkZmExNTRhMjYxNjI2YmY4NTQwNDZmZDIyNzFiN2JlZDRiNmFiZTQ1YWE1ODg3N2VmNDdmOTcyMWI5IiwibGFiZWxfaGFzaCI6IjA5NmQ3MmU4MGIxOGI1NDQwMWZmN2U2OGNlZDZiZTNiNDBmM2I1NjQ3ZjE1NzkwOWQxMTAxNmE0NWRhNDBmZmEiLCJyZXBsYWNlcyI6bnVsbCwiaWF0IjoxODAwMDAwMDAwLCJleHAiOjE4MDAwMDAzMDAsImp0aSI6IjAxTUNDNVJNMDBWRTFEWlpQUzVCODQ4VDdRIn0.6EKzRuhVvpqcf6OIq-A6Joe4owNRNLZ4Mgv8-l342WO4Lx1rJ5e5eFMm8hK0mZL8-n88zfxREsAUF_ZpNdTLAg\",\"ed25519_pubkey_hex\":\"d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a\",\"label\":\"Vector workstation\",\"replaces\":null,\"sig_hex\":\"ed512173b38f4d0d339a67b22aa767d0248920a3a81cba02aca2e1a1b98c0fad2987a197abe9f742de676a7ec4bfe80c3ce7f94c58269ce80acbbd0716903500\"}"
+      },
+      "reply": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "referrer-policy": "no-referrer"
+        },
+        "body": "{\"key_id\":\"01MCC5RM006NDK01XD1WTB7Z1P\",\"created_at_ms\":1800000000000}"
+      }
+    },
+    {
+      "name": "enroll:label-substitution",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/keys",
+        "headers": {
+          "Content-Type": "application/json",
+          "Authorization": "Bearer eyJhbGciOiJFZERTQSIsImtpZCI6InRlc3Qta2V5LTEiLCJ0eXAiOiJKV1QifQ.eyJhY2NvdW50X2lkIjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJpc3MiOiJodHRwczovL2FjY291bnQuY29ydGV4a2l0LmlvIiwiYXVkIjoiY29ydGV4a2l0LWZlZCIsInN1YiI6IjAxSzAwMDAwMDAwMDAwMDAwMDAwMDAwMDgwIiwiaWF0IjoxODAwMDAwMDAwLCJleHAiOjE4MDAwMDA5MDAsImp0aSI6IjY5OTRlOTZkLTAwMDAtNDAwMC04MDAwLTAwMDAwMDAwMDAwMiJ9.PX5MomoO4nkFbu4hjrk67HecA5d8YirLsTi7zBoVGE16EgCtrvCkl3kZQzVuAGXs6h5Oxhco8JJl8Pao02zzCA"
+        },
+        "body": "{\"attestation\":\"eyJhbGciOiJFZERTQSIsInR5cCI6ImNrLW1hY2hpbmUtZW5yb2xsK2p3dCIsImtpZCI6InRlc3Qta2V5LTEifQ.eyJpc3MiOiJodHRwczovL2FjY291bnQuY29ydGV4a2l0LmlvIiwiYXVkIjoiY29ydGV4a2l0LWFjY291bnQ6bWFjaGluZS1lbnJvbGwiLCJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJwdXJwb3NlIjoibWFjaGluZV9lbnJvbGwiLCJmbG93IjoiMDFNQ0M1Uk0wMDJHWjdHUFJQU1NEQzA1QlEiLCJrZXlfZmluZ2VycHJpbnQiOiIyMWZlMzFkZmExNTRhMjYxNjI2YmY4NTQwNDZmZDIyNzFiN2JlZDRiNmFiZTQ1YWE1ODg3N2VmNDdmOTcyMWI5IiwibGFiZWxfaGFzaCI6IjA5NmQ3MmU4MGIxOGI1NDQwMWZmN2U2OGNlZDZiZTNiNDBmM2I1NjQ3ZjE1NzkwOWQxMTAxNmE0NWRhNDBmZmEiLCJyZXBsYWNlcyI6bnVsbCwiaWF0IjoxODAwMDAwMDAwLCJleHAiOjE4MDAwMDAzMDAsImp0aSI6IjAxTUNDNVJNMDBWRTFEWlpQUzVCODQ4VDdRIn0.6EKzRuhVvpqcf6OIq-A6Joe4owNRNLZ4Mgv8-l342WO4Lx1rJ5e5eFMm8hK0mZL8-n88zfxREsAUF_ZpNdTLAg\",\"ed25519_pubkey_hex\":\"d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a\",\"label\":\"other\",\"replaces\":null,\"sig_hex\":\"ed512173b38f4d0d339a67b22aa767d0248920a3a81cba02aca2e1a1b98c0fad2987a197abe9f742de676a7ec4bfe80c3ce7f94c58269ce80acbbd0716903500\"}"
+      },
+      "reply": {
+        "status": 409,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "referrer-policy": "no-referrer"
+        },
+        "body": "{\"error\":\"enrollment_conflict\"}"
+      }
+    },
+    {
+      "name": "enrollment:callback",
+      "request": {
+        "method": "GET",
+        "path": "/v1/login/github/callback?state=ck-machine-enroll.v1.01MCC5RM002GZ7GPRPSSDC05BQ.cSCCdm7WFvBLYXRrDcby1XwXeoTVXY5nkdmfxbOQZg0&code=public-vector-code",
+        "headers": {
+          "Cookie": "__Host-ck-machine-01MCC5RM002GZ7GPRPSSDC05BQ=v7z_ZbgSvutTjqJgYb7CS108CQXlqO0oqtTdcToiEoU"
+        },
+        "body": ""
+      },
+      "reply": {
+        "status": 200,
+        "headers": {
+          "content-type": "text/html; charset=utf-8",
+          "cache-control": "no-store",
+          "referrer-policy": "same-origin",
+          "content-security-policy": "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+          "x-frame-options": "DENY",
+          "set-cookie": "__Host-ck-machine-01MCC5RM002GZ7GPRPSSDC05BQ=ST4DdR0P_23N1HszroIv_kEs_JAd3jQslu_eOXvCmQ4; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=900"
+        },
+        "body": "<!doctype html><html><head><meta charset=\"utf-8\"><title>CortexKit machine enrollment</title></head><body><h1>Confirm persistent machine access</h1><p>This machine gets persistent account access until you revoke it. Ordinary commands will not ask you to log in again.</p><p>Account: 01K00000000000000000000080</p>\n    <p>Key: 21fe31dfa154a261626bf854046fd2271b7bed4b6abe45aa58877ef47f9721b9</p><p>Label: Vector workstation</p><p>Replacement: no key replaced</p>\n    <p>Confirm only if this matches your terminal: <strong>01a0-2b39-b718</strong></p>\n    <p>Hand-back mode: paste. Started: 1800000000000</p>\n    <form method=\"post\" action=\"/v1/machine/enroll/confirm\"><input type=\"hidden\" name=\"flow_id\" value=\"01MCC5RM002GZ7GPRPSSDC05BQ\"><input type=\"hidden\" name=\"csrf\" value=\"uwbkt8rq7KkV2SS43rBJxEuNqu-NmKtRXWgAfjb1FFo\">\n    <label>Type the code from the terminal that started enrollment <input name=\"paste_user_code\" required autocomplete=\"off\"></label><p>Paste the completion code only into that terminal. Never send it to another person.</p>\n    <button name=\"action\" value=\"confirm\">Confirm</button><button name=\"action\" value=\"cancel\" formnovalidate>Cancel</button></form></body></html>"
+      }
+    },
+    {
+      "name": "enrollment:challenge",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/complete/challenge",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"flow_id\":\"01MCC5RM002GZ7GPRPSSDC05BQ\",\"completion_code\":\"Ei569Y6YhY2ypE_bypHFSw4RkcwI_vRQ39viKRru9eU\"}"
+      },
+      "reply": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "referrer-policy": "same-origin",
+          "content-security-policy": "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+          "x-frame-options": "DENY"
+        },
+        "body": "{\"challenge\":\"eyJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJjb21wbGV0aW9uX2NvZGVfaGFzaCI6ImU4YjEyMmFlZDAyMGQ0MDU1N2M1Y2VmNzkwYTc3NDE5M2YzMTg4YWNiODUzYjA3OGUzZGEyZTQ3MGQ0ZGRjOTEiLCJleHBpcmVzX2F0X21zIjoxODAwMDAwMzAwMDAwLCJmbG93X2lkIjoiMDFNQ0M1Uk0wMDJHWjdHUFJQU1NEQzA1QlEiLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsImtleV9maW5nZXJwcmludCI6IjIxZmUzMWRmYTE1NGEyNjE2MjZiZjg1NDA0NmZkMjI3MWI3YmVkNGI2YWJlNDVhYTU4ODc3ZWY0N2Y5NzIxYjkiLCJraWQiOiJ2ZWN0b3ItMSIsIm5vbmNlIjoiYkN3TFRwVk5wS2VHcmxOak0tdloyTlJSdExpRWlFUkpheVRUc2ZYMEQ4ZyIsInB1cnBvc2UiOiJtYWNoaW5lX2NvbXBsZXRlIiwidiI6MX0.Hc5GB9KpRweTghU9Jp4BdGi8MyVoSsHjxbLt87lCdZc\",\"expires_at_ms\":1800000300000}"
+      }
+    },
+    {
+      "name": "enrollment:complete",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/complete",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"flow_id\":\"01MCC5RM002GZ7GPRPSSDC05BQ\",\"completion_code\":\"Ei569Y6YhY2ypE_bypHFSw4RkcwI_vRQ39viKRru9eU\",\"challenge\":\"eyJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJjb21wbGV0aW9uX2NvZGVfaGFzaCI6ImU4YjEyMmFlZDAyMGQ0MDU1N2M1Y2VmNzkwYTc3NDE5M2YzMTg4YWNiODUzYjA3OGUzZGEyZTQ3MGQ0ZGRjOTEiLCJleHBpcmVzX2F0X21zIjoxODAwMDAwMzAwMDAwLCJmbG93X2lkIjoiMDFNQ0M1Uk0wMDJHWjdHUFJQU1NEQzA1QlEiLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsImtleV9maW5nZXJwcmludCI6IjIxZmUzMWRmYTE1NGEyNjE2MjZiZjg1NDA0NmZkMjI3MWI3YmVkNGI2YWJlNDVhYTU4ODc3ZWY0N2Y5NzIxYjkiLCJraWQiOiJ2ZWN0b3ItMSIsIm5vbmNlIjoiYkN3TFRwVk5wS2VHcmxOak0tdloyTlJSdExpRWlFUkpheVRUc2ZYMEQ4ZyIsInB1cnBvc2UiOiJtYWNoaW5lX2NvbXBsZXRlIiwidiI6MX0.Hc5GB9KpRweTghU9Jp4BdGi8MyVoSsHjxbLt87lCdZc\",\"sig_hex\":\"23935689ba73891f18066d7228de66f0502ec1cbdba029d00413b2b8533b80107c097918792389f2d83fbca681b0ec202555dafffbc2263907b6c3bd543d8906\"}"
+      },
+      "reply": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "referrer-policy": "same-origin",
+          "content-security-policy": "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+          "x-frame-options": "DENY"
+        },
+        "body": "{\"jwt\":\"eyJhbGciOiJFZERTQSIsImtpZCI6InRlc3Qta2V5LTEiLCJ0eXAiOiJKV1QifQ.eyJhY2NvdW50X2lkIjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJpc3MiOiJodHRwczovL2FjY291bnQuY29ydGV4a2l0LmlvIiwiYXVkIjoiY29ydGV4a2l0LWZlZCIsInN1YiI6IjAxSzAwMDAwMDAwMDAwMDAwMDAwMDAwMDgwIiwiaWF0IjoxODAwMDAwMDAwLCJleHAiOjE4MDAwMDA5MDAsImp0aSI6IjY5OTRlOTZkLTAwMDAtNDAwMC04MDAwLTAwMDAwMDAwMDAwMiJ9.PX5MomoO4nkFbu4hjrk67HecA5d8YirLsTi7zBoVGE16EgCtrvCkl3kZQzVuAGXs6h5Oxhco8JJl8Pao02zzCA\",\"attestation\":\"eyJhbGciOiJFZERTQSIsInR5cCI6ImNrLW1hY2hpbmUtZW5yb2xsK2p3dCIsImtpZCI6InRlc3Qta2V5LTEifQ.eyJpc3MiOiJodHRwczovL2FjY291bnQuY29ydGV4a2l0LmlvIiwiYXVkIjoiY29ydGV4a2l0LWFjY291bnQ6bWFjaGluZS1lbnJvbGwiLCJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJwdXJwb3NlIjoibWFjaGluZV9lbnJvbGwiLCJmbG93IjoiMDFNQ0M1Uk0wMDJHWjdHUFJQU1NEQzA1QlEiLCJrZXlfZmluZ2VycHJpbnQiOiIyMWZlMzFkZmExNTRhMjYxNjI2YmY4NTQwNDZmZDIyNzFiN2JlZDRiNmFiZTQ1YWE1ODg3N2VmNDdmOTcyMWI5IiwibGFiZWxfaGFzaCI6IjA5NmQ3MmU4MGIxOGI1NDQwMWZmN2U2OGNlZDZiZTNiNDBmM2I1NjQ3ZjE1NzkwOWQxMTAxNmE0NWRhNDBmZmEiLCJyZXBsYWNlcyI6bnVsbCwiaWF0IjoxODAwMDAwMDAwLCJleHAiOjE4MDAwMDAzMDAsImp0aSI6IjAxTUNDNVJNMDBWRTFEWlpQUzVCODQ4VDdRIn0.6EKzRuhVvpqcf6OIq-A6Joe4owNRNLZ4Mgv8-l342WO4Lx1rJ5e5eFMm8hK0mZL8-n88zfxREsAUF_ZpNdTLAg\"}"
+      }
+    },
+    {
+      "name": "enrollment:completion-replay",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/complete",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"flow_id\":\"01MCC5RM002GZ7GPRPSSDC05BQ\",\"completion_code\":\"Ei569Y6YhY2ypE_bypHFSw4RkcwI_vRQ39viKRru9eU\",\"challenge\":\"eyJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJjb21wbGV0aW9uX2NvZGVfaGFzaCI6ImU4YjEyMmFlZDAyMGQ0MDU1N2M1Y2VmNzkwYTc3NDE5M2YzMTg4YWNiODUzYjA3OGUzZGEyZTQ3MGQ0ZGRjOTEiLCJleHBpcmVzX2F0X21zIjoxODAwMDAwMzAwMDAwLCJmbG93X2lkIjoiMDFNQ0M1Uk0wMDJHWjdHUFJQU1NEQzA1QlEiLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsImtleV9maW5nZXJwcmludCI6IjIxZmUzMWRmYTE1NGEyNjE2MjZiZjg1NDA0NmZkMjI3MWI3YmVkNGI2YWJlNDVhYTU4ODc3ZWY0N2Y5NzIxYjkiLCJraWQiOiJ2ZWN0b3ItMSIsIm5vbmNlIjoiYkN3TFRwVk5wS2VHcmxOak0tdloyTlJSdExpRWlFUkpheVRUc2ZYMEQ4ZyIsInB1cnBvc2UiOiJtYWNoaW5lX2NvbXBsZXRlIiwidiI6MX0.Hc5GB9KpRweTghU9Jp4BdGi8MyVoSsHjxbLt87lCdZc\",\"sig_hex\":\"23935689ba73891f18066d7228de66f0502ec1cbdba029d00413b2b8533b80107c097918792389f2d83fbca681b0ec202555dafffbc2263907b6c3bd543d8906\"}"
+      },
+      "reply": {
+        "status": 409,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "referrer-policy": "same-origin",
+          "content-security-policy": "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+          "x-frame-options": "DENY"
+        },
+        "body": "{\"error\":\"completion_spent\"}"
+      }
+    },
+    {
+      "name": "enrollment:confirm",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/enroll/confirm",
+        "headers": {
+          "Content-Type": "application/x-www-form-urlencoded",
+          "Cookie": "__Host-ck-machine-01MCC5RM002GZ7GPRPSSDC05BQ=ST4DdR0P_23N1HszroIv_kEs_JAd3jQslu_eOXvCmQ4",
+          "Origin": "https://account.cortexkit.io"
+        },
+        "body": "flow_id=01MCC5RM002GZ7GPRPSSDC05BQ&csrf=uwbkt8rq7KkV2SS43rBJxEuNqu-NmKtRXWgAfjb1FFo&action=confirm&paste_user_code=FG4H-1T7A"
+      },
+      "reply": {
+        "status": 200,
+        "headers": {
+          "content-type": "text/html; charset=utf-8",
+          "cache-control": "no-store",
+          "referrer-policy": "same-origin",
+          "content-security-policy": "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+          "x-frame-options": "DENY"
+        },
+        "body": "<!doctype html><html><head><meta charset=\"utf-8\"><title>CortexKit machine enrollment</title></head><body><h1>Machine enrollment confirmed</h1><p>Paste only into the terminal that started enrollment. Never send this code to another person.</p><code>Ei569Y6YhY2ypE_bypHFSw4RkcwI_vRQ39viKRru9eU</code></body></html>"
+      }
+    },
+    {
+      "name": "enrollment:open",
+      "request": {
+        "method": "GET",
+        "path": "/v1/machine/enroll?flow_id=01MCC5RM002GZ7GPRPSSDC05BQ&open_token=QwJ13Ysi41SP6BBRC5u4vv6uC_mjMIOGFk2Cr5VTtz0",
+        "headers": {},
+        "body": ""
+      },
+      "reply": {
+        "status": 303,
+        "headers": {
+          "cache-control": "no-store",
+          "referrer-policy": "same-origin",
+          "content-security-policy": "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+          "x-frame-options": "DENY",
+          "location": "https://github.com/login/oauth/authorize?client_id=Iv23liYJYQDHNotesltr&redirect_uri=https%3A%2F%2Faccount.cortexkit.io%2Fv1%2Flogin%2Fgithub%2Fcallback&state=ck-machine-enroll.v1.01MCC5RM002GZ7GPRPSSDC05BQ.cSCCdm7WFvBLYXRrDcby1XwXeoTVXY5nkdmfxbOQZg0",
+          "set-cookie": "__Host-ck-machine-01MCC5RM002GZ7GPRPSSDC05BQ=v7z_ZbgSvutTjqJgYb7CS108CQXlqO0oqtTdcToiEoU; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=900"
+        },
+        "body": ""
+      }
+    },
+    {
+      "name": "enrollment:start",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/enroll/start",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"method\":\"github\",\"ed25519_pubkey_hex\":\"d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a\",\"handoff_mode\":\"paste\",\"label\":\"Vector workstation\",\"replaces\":null}"
+      },
+      "reply": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "referrer-policy": "same-origin",
+          "content-security-policy": "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+          "x-frame-options": "DENY"
+        },
+        "body": "{\"flow_id\":\"01MCC5RM002GZ7GPRPSSDC05BQ\",\"open_token\":\"QwJ13Ysi41SP6BBRC5u4vv6uC_mjMIOGFk2Cr5VTtz0\",\"approval_url\":\"https://account.cortexkit.io/v1/machine/enroll?flow_id=01MCC5RM002GZ7GPRPSSDC05BQ&open_token=QwJ13Ysi41SP6BBRC5u4vv6uC_mjMIOGFk2Cr5VTtz0\",\"comparison_phrase\":\"01a0-2b39-b718\",\"paste_user_code\":\"FG4H-1T7A\",\"expires_at_ms\":1800000900000}"
+      }
+    },
+    {
+      "name": "issuer:jwks",
+      "request": {
+        "method": "GET",
+        "path": "/.well-known/jwks.json",
+        "headers": {},
+        "body": ""
+      },
+      "reply": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "public, max-age=300"
+        },
+        "body": "{\"keys\":[{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"x\":\"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo\",\"kid\":\"test-key-1\",\"use\":\"sig\",\"alg\":\"EdDSA\"}]}"
+      }
+    },
+    {
+      "name": "machine_revoke_other:callback",
+      "request": {
+        "method": "GET",
+        "path": "/v1/login/github/callback?state=ck-machine-enroll.v1.01MCC5RM000X84JTKKNPD3VA9B.d6RqU_rd2rZxRPzI0hMSI0LZFGVeaD-2NptLC24URlc&code=public-vector-code",
+        "headers": {
+          "Cookie": "__Host-ck-machine-01MCC5RM000X84JTKKNPD3VA9B=pnYsl79LWjzvRbPhJIaDFM8Jqfl4gKo173g99XLJak4"
+        },
+        "body": ""
+      },
+      "reply": {
+        "status": 200,
+        "headers": {
+          "content-type": "text/html; charset=utf-8",
+          "cache-control": "no-store",
+          "referrer-policy": "same-origin",
+          "content-security-policy": "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+          "x-frame-options": "DENY",
+          "set-cookie": "__Host-ck-machine-01MCC5RM000X84JTKKNPD3VA9B=FDRbKCTx_lrLUlvS4bHsgScGkR9G5KBCm-3F4UbRk2A; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=900"
+        },
+        "body": "<!doctype html><html><head><meta charset=\"utf-8\"><title>CortexKit machine enrollment</title></head><body><h1>Confirm machine_revoke_other</h1><p>Target: {&quot;account&quot;:&quot;01K00000000000000000000080&quot;,&quot;key_id&quot;:&quot;01MCC5RM006NDK01XD1WTB7Z1P&quot;}</p><p>Request hash: 44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a</p>\n      <p>Account: 01K00000000000000000000080</p>\n    <p>Key: 21fe31dfa154a261626bf854046fd2271b7bed4b6abe45aa58877ef47f9721b9</p><p>Label: machine_revoke_other</p><p>Replacement: no key replaced</p>\n    <p>Confirm only if this matches your terminal: <strong>351d-80cd-2e91</strong></p>\n    <p>Hand-back mode: paste. Started: 1800000000000</p>\n    <form method=\"post\" action=\"/v1/machine/enroll/confirm\"><input type=\"hidden\" name=\"flow_id\" value=\"01MCC5RM000X84JTKKNPD3VA9B\"><input type=\"hidden\" name=\"csrf\" value=\"GDc2o0UZoNv6bhT_SC8EJvoYijs6ofmyOyVdQjQq1Ms\">\n    <label>Type the code from the terminal that started enrollment <input name=\"paste_user_code\" required autocomplete=\"off\"></label><p>Paste the completion code only into that terminal. Never send it to another person.</p>\n    <button name=\"action\" value=\"confirm\">Confirm</button><button name=\"action\" value=\"cancel\" formnovalidate>Cancel</button></form></body></html>"
+      }
+    },
+    {
+      "name": "machine_revoke_other:challenge",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/complete/challenge",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"flow_id\":\"01MCC5RM000X84JTKKNPD3VA9B\",\"completion_code\":\"Yi8Z4-ebvL-9hcpkBpHvXHsNTmPH_pi4-e4sDXh7MEw\"}"
+      },
+      "reply": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "referrer-policy": "same-origin",
+          "content-security-policy": "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+          "x-frame-options": "DENY"
+        },
+        "body": "{\"challenge\":\"eyJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJjb21wbGV0aW9uX2NvZGVfaGFzaCI6IjQ4ZjQ0ZWEyNzBjOWM5NTkzMDMyYmVkMjQzMzc4MDVmMDNhYTJlMDNkMmI2N2EzN2U5ODViZDRjNTQ5OTY0ODQiLCJleHBpcmVzX2F0X21zIjoxODAwMDAwMzAwMDAwLCJmbG93X2lkIjoiMDFNQ0M1Uk0wMDBYODRKVEtLTlBEM1ZBOUIiLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsImtleV9maW5nZXJwcmludCI6IjIxZmUzMWRmYTE1NGEyNjE2MjZiZjg1NDA0NmZkMjI3MWI3YmVkNGI2YWJlNDVhYTU4ODc3ZWY0N2Y5NzIxYjkiLCJraWQiOiJ2ZWN0b3ItMSIsIm5vbmNlIjoiRlJVRG5CeHdjMkNZZm9ncUdRN253N0ZXRDliX0RfRFllLVdyTlZSVmMtNCIsInB1cnBvc2UiOiJtYWNoaW5lX2NvbXBsZXRlIiwidiI6MX0.Viq7qQh01wwcjRAU0e_qegZwRhssfXOcH9vG1Fw2a1M\",\"expires_at_ms\":1800000300000}"
+      }
+    },
+    {
+      "name": "machine_revoke_other:complete",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/complete",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"flow_id\":\"01MCC5RM000X84JTKKNPD3VA9B\",\"completion_code\":\"Yi8Z4-ebvL-9hcpkBpHvXHsNTmPH_pi4-e4sDXh7MEw\",\"challenge\":\"eyJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJjb21wbGV0aW9uX2NvZGVfaGFzaCI6IjQ4ZjQ0ZWEyNzBjOWM5NTkzMDMyYmVkMjQzMzc4MDVmMDNhYTJlMDNkMmI2N2EzN2U5ODViZDRjNTQ5OTY0ODQiLCJleHBpcmVzX2F0X21zIjoxODAwMDAwMzAwMDAwLCJmbG93X2lkIjoiMDFNQ0M1Uk0wMDBYODRKVEtLTlBEM1ZBOUIiLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsImtleV9maW5nZXJwcmludCI6IjIxZmUzMWRmYTE1NGEyNjE2MjZiZjg1NDA0NmZkMjI3MWI3YmVkNGI2YWJlNDVhYTU4ODc3ZWY0N2Y5NzIxYjkiLCJraWQiOiJ2ZWN0b3ItMSIsIm5vbmNlIjoiRlJVRG5CeHdjMkNZZm9ncUdRN253N0ZXRDliX0RfRFllLVdyTlZSVmMtNCIsInB1cnBvc2UiOiJtYWNoaW5lX2NvbXBsZXRlIiwidiI6MX0.Viq7qQh01wwcjRAU0e_qegZwRhssfXOcH9vG1Fw2a1M\",\"sig_hex\":\"55a78ffe01fa51134f876048a1b257c0de3158dbf38938370bdca3a412bb56bc39d512786e434ae0cba65c0efb96c461a25faab38ce83bc5ec25658c8bb6cd0d\"}"
+      },
+      "reply": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "referrer-policy": "same-origin",
+          "content-security-policy": "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+          "x-frame-options": "DENY"
+        },
+        "body": "{\"jwt\":\"eyJhbGciOiJFZERTQSIsImtpZCI6InRlc3Qta2V5LTEiLCJ0eXAiOiJKV1QifQ.eyJhY2NvdW50X2lkIjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJpc3MiOiJodHRwczovL2FjY291bnQuY29ydGV4a2l0LmlvIiwiYXVkIjoiY29ydGV4a2l0LWZlZCIsInN1YiI6IjAxSzAwMDAwMDAwMDAwMDAwMDAwMDAwMDgwIiwiaWF0IjoxODAwMDAwMDAwLCJleHAiOjE4MDAwMDA5MDAsImp0aSI6IjI0ZDIzODIwLTAwMDAtNDAwMC04MDAwLTAwMDAwMDAwMDAwMiJ9.WedvMxgb4FXFlqAMthkWmoziPXaUvlNcJ6FfMp85JWhzxCLneJN2jDhi4B4a4uxWcJWwEGpH6v1O3kC793iTBA\",\"attestation\":\"eyJhbGciOiJFZERTQSIsImtpZCI6InRlc3Qta2V5LTEiLCJ0eXAiOiJjay1zdGVwLXVwK2p3dCJ9.eyJpc3MiOiJodHRwczovL2FjY291bnQuY29ydGV4a2l0LmlvIiwiYXVkIjoiY29ydGV4a2l0LWFjY291bnQ6c3RlcC11cDptYWNoaW5lX3Jldm9rZV9vdGhlciIsImFjY291bnQiOiIwMUswMDAwMDAwMDAwMDAwMDAwMDAwMDA4MCIsInB1cnBvc2UiOiJzdGVwX3VwIiwib3BlcmF0aW9uIjoibWFjaGluZV9yZXZva2Vfb3RoZXIiLCJ0YXJnZXQiOnsiYWNjb3VudCI6IjAxSzAwMDAwMDAwMDAwMDAwMDAwMDAwMDgwIiwia2V5X2lkIjoiMDFNQ0M1Uk0wMDZOREswMVhEMVdUQjdaMVAifSwicmVxdWVzdF9oYXNoIjoiNDQxMzZmYTM1NWIzNjc4YTExNDZhZDE2ZjdlODY0OWU5NGZiNGZjMjFmZTc3ZTgzMTBjMDYwZjYxY2FhZmY4YSIsImF1dGhfdGltZSI6MTgwMDAwMDAwMCwiaWF0IjoxODAwMDAwMDAwLCJleHAiOjE4MDAwMDAzMDAsImp0aSI6IjAxTUNDNVJNMDA5UzFHSFE2VFgxOEUyVkFKIn0.zFYud2IsYlPbGYWXr1DsBUkr5tP_wOz5LrVdno9W5wByNZNGNqqgkIDfhj3ZHPS7p60AI2hk4OXVMG3AL7b9Bg\"}"
+      }
+    },
+    {
+      "name": "machine_revoke_other:completion-replay",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/complete",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"flow_id\":\"01MCC5RM000X84JTKKNPD3VA9B\",\"completion_code\":\"Yi8Z4-ebvL-9hcpkBpHvXHsNTmPH_pi4-e4sDXh7MEw\",\"challenge\":\"eyJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJjb21wbGV0aW9uX2NvZGVfaGFzaCI6IjQ4ZjQ0ZWEyNzBjOWM5NTkzMDMyYmVkMjQzMzc4MDVmMDNhYTJlMDNkMmI2N2EzN2U5ODViZDRjNTQ5OTY0ODQiLCJleHBpcmVzX2F0X21zIjoxODAwMDAwMzAwMDAwLCJmbG93X2lkIjoiMDFNQ0M1Uk0wMDBYODRKVEtLTlBEM1ZBOUIiLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsImtleV9maW5nZXJwcmludCI6IjIxZmUzMWRmYTE1NGEyNjE2MjZiZjg1NDA0NmZkMjI3MWI3YmVkNGI2YWJlNDVhYTU4ODc3ZWY0N2Y5NzIxYjkiLCJraWQiOiJ2ZWN0b3ItMSIsIm5vbmNlIjoiRlJVRG5CeHdjMkNZZm9ncUdRN253N0ZXRDliX0RfRFllLVdyTlZSVmMtNCIsInB1cnBvc2UiOiJtYWNoaW5lX2NvbXBsZXRlIiwidiI6MX0.Viq7qQh01wwcjRAU0e_qegZwRhssfXOcH9vG1Fw2a1M\",\"sig_hex\":\"55a78ffe01fa51134f876048a1b257c0de3158dbf38938370bdca3a412bb56bc39d512786e434ae0cba65c0efb96c461a25faab38ce83bc5ec25658c8bb6cd0d\"}"
+      },
+      "reply": {
+        "status": 409,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "referrer-policy": "same-origin",
+          "content-security-policy": "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+          "x-frame-options": "DENY"
+        },
+        "body": "{\"error\":\"completion_spent\"}"
+      }
+    },
+    {
+      "name": "machine_revoke_other:confirm",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/enroll/confirm",
+        "headers": {
+          "Content-Type": "application/x-www-form-urlencoded",
+          "Cookie": "__Host-ck-machine-01MCC5RM000X84JTKKNPD3VA9B=FDRbKCTx_lrLUlvS4bHsgScGkR9G5KBCm-3F4UbRk2A",
+          "Origin": "https://account.cortexkit.io"
+        },
+        "body": "flow_id=01MCC5RM000X84JTKKNPD3VA9B&csrf=GDc2o0UZoNv6bhT_SC8EJvoYijs6ofmyOyVdQjQq1Ms&action=confirm&paste_user_code=C3BA-XWXR"
+      },
+      "reply": {
+        "status": 200,
+        "headers": {
+          "content-type": "text/html; charset=utf-8",
+          "cache-control": "no-store",
+          "referrer-policy": "same-origin",
+          "content-security-policy": "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+          "x-frame-options": "DENY"
+        },
+        "body": "<!doctype html><html><head><meta charset=\"utf-8\"><title>CortexKit machine enrollment</title></head><body><h1>Machine enrollment confirmed</h1><p>Paste only into the terminal that started enrollment. Never send this code to another person.</p><code>Yi8Z4-ebvL-9hcpkBpHvXHsNTmPH_pi4-e4sDXh7MEw</code></body></html>"
+      }
+    },
+    {
+      "name": "machine_revoke_other:open",
+      "request": {
+        "method": "GET",
+        "path": "/v1/machine/enroll?flow_id=01MCC5RM000X84JTKKNPD3VA9B&open_token=F6yJRjrsJVxKEE3-713LDw5NpTDicfKxk3_LWA802rQ",
+        "headers": {},
+        "body": ""
+      },
+      "reply": {
+        "status": 303,
+        "headers": {
+          "cache-control": "no-store",
+          "referrer-policy": "same-origin",
+          "content-security-policy": "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+          "x-frame-options": "DENY",
+          "location": "https://github.com/login/oauth/authorize?client_id=Iv23liYJYQDHNotesltr&redirect_uri=https%3A%2F%2Faccount.cortexkit.io%2Fv1%2Flogin%2Fgithub%2Fcallback&state=ck-machine-enroll.v1.01MCC5RM000X84JTKKNPD3VA9B.d6RqU_rd2rZxRPzI0hMSI0LZFGVeaD-2NptLC24URlc",
+          "set-cookie": "__Host-ck-machine-01MCC5RM000X84JTKKNPD3VA9B=pnYsl79LWjzvRbPhJIaDFM8Jqfl4gKo173g99XLJak4; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=900"
+        },
+        "body": ""
+      }
+    },
+    {
+      "name": "machine_revoke_other:start",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/step-up/start",
+        "headers": {
+          "Content-Type": "application/json",
+          "Authorization": "Bearer eyJhbGciOiJFZERTQSIsImtpZCI6InRlc3Qta2V5LTEiLCJ0eXAiOiJKV1QifQ.eyJhY2NvdW50X2lkIjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJpc3MiOiJodHRwczovL2FjY291bnQuY29ydGV4a2l0LmlvIiwiYXVkIjoiY29ydGV4a2l0LWZlZCIsInN1YiI6IjAxSzAwMDAwMDAwMDAwMDAwMDAwMDAwMDgwIiwiaWF0IjoxODAwMDAwMDAwLCJleHAiOjE4MDAwMDA5MDAsImp0aSI6IjY5OTRlOTZkLTAwMDAtNDAwMC04MDAwLTAwMDAwMDAwMDAwMiJ9.PX5MomoO4nkFbu4hjrk67HecA5d8YirLsTi7zBoVGE16EgCtrvCkl3kZQzVuAGXs6h5Oxhco8JJl8Pao02zzCA"
+        },
+        "body": "{\"method\":\"github\",\"ed25519_pubkey_hex\":\"d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a\",\"handoff_mode\":\"paste\",\"operation\":\"machine_revoke_other\",\"target\":{\"account\":\"01K00000000000000000000080\",\"key_id\":\"01MCC5RM006NDK01XD1WTB7Z1P\"},\"mutation_body\":{}}"
+      },
+      "reply": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "referrer-policy": "same-origin",
+          "content-security-policy": "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+          "x-frame-options": "DENY"
+        },
+        "body": "{\"flow_id\":\"01MCC5RM000X84JTKKNPD3VA9B\",\"open_token\":\"F6yJRjrsJVxKEE3-713LDw5NpTDicfKxk3_LWA802rQ\",\"approval_url\":\"https://account.cortexkit.io/v1/machine/enroll?flow_id=01MCC5RM000X84JTKKNPD3VA9B&open_token=F6yJRjrsJVxKEE3-713LDw5NpTDicfKxk3_LWA802rQ\",\"comparison_phrase\":\"351d-80cd-2e91\",\"paste_user_code\":\"C3BA-XWXR\",\"expires_at_ms\":1800000900000}"
+      }
+    },
+    {
+      "name": "paste:wrong-code",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/enroll/confirm",
+        "headers": {
+          "Content-Type": "application/x-www-form-urlencoded",
+          "Cookie": "__Host-ck-machine-01MCC5RM002GZ7GPRPSSDC05BQ=ST4DdR0P_23N1HszroIv_kEs_JAd3jQslu_eOXvCmQ4",
+          "Origin": "https://account.cortexkit.io"
+        },
+        "body": "flow_id=01MCC5RM002GZ7GPRPSSDC05BQ&csrf=uwbkt8rq7KkV2SS43rBJxEuNqu-NmKtRXWgAfjb1FFo&action=confirm&paste_user_code=WRNG-CODE"
+      },
+      "reply": {
+        "status": 401,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "referrer-policy": "same-origin",
+          "content-security-policy": "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+          "x-frame-options": "DENY"
+        },
+        "body": "{\"error\":\"auth_failed\"}"
+      }
+    },
+    {
+      "name": "permit:authorize",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/relay-credential/authorize",
+        "headers": {
+          "Content-Type": "application/json",
+          "Authorization": "Bearer eyJhbGciOiJFZERTQSIsImtpZCI6InRlc3Qta2V5LTEiLCJ0eXAiOiJjay13b3JrZXIrand0In0.eyJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJkZXZpY2UiOiIwMU1DQzVSTTAwNk5ESzAxWEQxV1RCN1oxUCIsImlhdCI6MTgwMDAwMDAwMCwiZXhwIjoxODAwMDAwOTAwLCJhdWQiOiJjb3J0ZXhraXQtYWNjb3VudCIsImp0aSI6IjAxTUNDNVJNMDBUM0tURFo0N0VKVko5MTJFIn0.acaoJ06w50MDjigjEdBzVKGrWwjXioXa17SfJEUYrvy8sGHaXBmBMlA1iRjemqZOWhoraNUHhab3wfhe7V5ABg"
+        },
+        "body": "{\"key_id\":\"01MCC5RM006NDK01XD1WTB7Z1P\",\"source\":\"github\",\"request_id\":\"01K00000000000000000000081\",\"challenge\":\"eyJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJhY2NvdW50X3NlcSI6MSwiZXhwaXJlc19hdF9tcyI6MTgwMDAwMDMwMDAwMCwiaXNzdWVkX2F0X21zIjoxODAwMDAwMDAwMDAwLCJrZXlfZmluZ2VycHJpbnQiOiIyMWZlMzFkZmExNTRhMjYxNjI2YmY4NTQwNDZmZDIyNzFiN2JlZDRiNmFiZTQ1YWE1ODg3N2VmNDdmOTcyMWI5Iiwia2V5X2lkIjoiMDFNQ0M1Uk0wMDZOREswMVhEMVdUQjdaMVAiLCJrZXlfc2VxIjoxLCJraWQiOiJ2ZWN0b3ItMSIsIm5vbmNlIjoiRTFrUlY1bEtiNmVsV0huSFR2SzZ6eVlraDFhN09GY3FYa1lMdTVBU0FjNCIsInB1cnBvc2UiOiJyZWxheV9jcmVkZW50aWFsX21pbnQiLCJyZXF1ZXN0X2lkIjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODEiLCJzb3VyY2UiOiJnaXRodWIiLCJ2IjoxfQ.VwbGWTC3JcUCQtMfYNKUp5i6DCoDBXCtZMthqp9Nbrc\",\"sig_hex\":\"b6c25157fbac5396bb27d28ce552a61b1cf2f598c00f6851706506e19382603edd8ab3cf6aaf042f3a652119769e8186495748a50bd33cc3a5eea604042f7706\"}"
+      },
+      "reply": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "referrer-policy": "no-referrer"
+        },
+        "body": "{\"permit\":\"eyJhbGciOiJFZERTQSIsImtpZCI6InRlc3Qta2V5LTEiLCJ0eXAiOiJjay1yZWxheS1taW50K2p3dCJ9.eyJpc3MiOiJodHRwczovL2FjY291bnQuY29ydGV4a2l0LmlvIiwiYXVkIjoiY29ydGV4a2l0LXdlYmhvb2stcmVsYXk6Y3JlZGVudGlhbC1taW50IiwiYWNjb3VudCI6IjAxSzAwMDAwMDAwMDAwMDAwMDAwMDAwMDgwIiwiZGV2aWNlIjoiMDFNQ0M1Uk0wMDZOREswMVhEMVdUQjdaMVAiLCJwdXJwb3NlIjoicmVsYXlfY3JlZGVudGlhbF9taW50Iiwic291cmNlIjoiZ2l0aHViIiwicmVxdWVzdF9pZCI6IjAxSzAwMDAwMDAwMDAwMDAwMDAwMDAwMDgxIiwiYWNjb3VudF9zZXEiOjEsImtleV9zZXEiOjEsImlhdCI6MTgwMDAwMDAwMCwiZXhwIjoxODAwMDAwMDYwLCJqdGkiOiIwMU1DQzVSTTAwMUM2SDVKWUE2SlJHOTZZRyJ9.tKMrWi-zqD2gh4YPUImzSJ3Ajn4OaJK3qWuO-SXcNXDfu9EAfJ79JED0QsM2UCex7VBGc6JwR1lf4H6LDOxLCQ\"}"
+      }
+    },
+    {
+      "name": "permit:challenge",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/relay-credential/challenge",
+        "headers": {
+          "Content-Type": "application/json",
+          "Authorization": "Bearer eyJhbGciOiJFZERTQSIsImtpZCI6InRlc3Qta2V5LTEiLCJ0eXAiOiJjay13b3JrZXIrand0In0.eyJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJkZXZpY2UiOiIwMU1DQzVSTTAwNk5ESzAxWEQxV1RCN1oxUCIsImlhdCI6MTgwMDAwMDAwMCwiZXhwIjoxODAwMDAwOTAwLCJhdWQiOiJjb3J0ZXhraXQtYWNjb3VudCIsImp0aSI6IjAxTUNDNVJNMDBUM0tURFo0N0VKVko5MTJFIn0.acaoJ06w50MDjigjEdBzVKGrWwjXioXa17SfJEUYrvy8sGHaXBmBMlA1iRjemqZOWhoraNUHhab3wfhe7V5ABg"
+        },
+        "body": "{\"key_id\":\"01MCC5RM006NDK01XD1WTB7Z1P\",\"source\":\"github\",\"request_id\":\"01K00000000000000000000081\"}"
+      },
+      "reply": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "referrer-policy": "no-referrer"
+        },
+        "body": "{\"challenge\":\"eyJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJhY2NvdW50X3NlcSI6MSwiZXhwaXJlc19hdF9tcyI6MTgwMDAwMDMwMDAwMCwiaXNzdWVkX2F0X21zIjoxODAwMDAwMDAwMDAwLCJrZXlfZmluZ2VycHJpbnQiOiIyMWZlMzFkZmExNTRhMjYxNjI2YmY4NTQwNDZmZDIyNzFiN2JlZDRiNmFiZTQ1YWE1ODg3N2VmNDdmOTcyMWI5Iiwia2V5X2lkIjoiMDFNQ0M1Uk0wMDZOREswMVhEMVdUQjdaMVAiLCJrZXlfc2VxIjoxLCJraWQiOiJ2ZWN0b3ItMSIsIm5vbmNlIjoiRTFrUlY1bEtiNmVsV0huSFR2SzZ6eVlraDFhN09GY3FYa1lMdTVBU0FjNCIsInB1cnBvc2UiOiJyZWxheV9jcmVkZW50aWFsX21pbnQiLCJyZXF1ZXN0X2lkIjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODEiLCJzb3VyY2UiOiJnaXRodWIiLCJ2IjoxfQ.VwbGWTC3JcUCQtMfYNKUp5i6DCoDBXCtZMthqp9Nbrc\",\"expires_at_ms\":1800000300000}"
+      }
+    },
+    {
+      "name": "permit:replay",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/relay-credential/authorize",
+        "headers": {
+          "Content-Type": "application/json",
+          "Authorization": "Bearer eyJhbGciOiJFZERTQSIsImtpZCI6InRlc3Qta2V5LTEiLCJ0eXAiOiJjay13b3JrZXIrand0In0.eyJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJkZXZpY2UiOiIwMU1DQzVSTTAwNk5ESzAxWEQxV1RCN1oxUCIsImlhdCI6MTgwMDAwMDAwMCwiZXhwIjoxODAwMDAwOTAwLCJhdWQiOiJjb3J0ZXhraXQtYWNjb3VudCIsImp0aSI6IjAxTUNDNVJNMDBUM0tURFo0N0VKVko5MTJFIn0.acaoJ06w50MDjigjEdBzVKGrWwjXioXa17SfJEUYrvy8sGHaXBmBMlA1iRjemqZOWhoraNUHhab3wfhe7V5ABg"
+        },
+        "body": "{\"key_id\":\"01MCC5RM006NDK01XD1WTB7Z1P\",\"source\":\"github\",\"request_id\":\"01K00000000000000000000081\",\"challenge\":\"eyJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJhY2NvdW50X3NlcSI6MSwiZXhwaXJlc19hdF9tcyI6MTgwMDAwMDMwMDAwMCwiaXNzdWVkX2F0X21zIjoxODAwMDAwMDAwMDAwLCJrZXlfZmluZ2VycHJpbnQiOiIyMWZlMzFkZmExNTRhMjYxNjI2YmY4NTQwNDZmZDIyNzFiN2JlZDRiNmFiZTQ1YWE1ODg3N2VmNDdmOTcyMWI5Iiwia2V5X2lkIjoiMDFNQ0M1Uk0wMDZOREswMVhEMVdUQjdaMVAiLCJrZXlfc2VxIjoxLCJraWQiOiJ2ZWN0b3ItMSIsIm5vbmNlIjoiRTFrUlY1bEtiNmVsV0huSFR2SzZ6eVlraDFhN09GY3FYa1lMdTVBU0FjNCIsInB1cnBvc2UiOiJyZWxheV9jcmVkZW50aWFsX21pbnQiLCJyZXF1ZXN0X2lkIjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODEiLCJzb3VyY2UiOiJnaXRodWIiLCJ2IjoxfQ.VwbGWTC3JcUCQtMfYNKUp5i6DCoDBXCtZMthqp9Nbrc\",\"sig_hex\":\"b6c25157fbac5396bb27d28ce552a61b1cf2f598c00f6851706506e19382603edd8ab3cf6aaf042f3a652119769e8186495748a50bd33cc3a5eea604042f7706\"}"
+      },
+      "reply": {
+        "status": 409,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "referrer-policy": "no-referrer"
+        },
+        "body": "{\"error\":\"challenge_spent\"}"
+      }
+    },
+    {
+      "name": "permit:request-substitution",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/relay-credential/authorize",
+        "headers": {
+          "Content-Type": "application/json",
+          "Authorization": "Bearer eyJhbGciOiJFZERTQSIsImtpZCI6InRlc3Qta2V5LTEiLCJ0eXAiOiJjay13b3JrZXIrand0In0.eyJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJkZXZpY2UiOiIwMU1DQzVSTTAwNk5ESzAxWEQxV1RCN1oxUCIsImlhdCI6MTgwMDAwMDAwMCwiZXhwIjoxODAwMDAwOTAwLCJhdWQiOiJjb3J0ZXhraXQtYWNjb3VudCIsImp0aSI6IjAxTUNDNVJNMDBUM0tURFo0N0VKVko5MTJFIn0.acaoJ06w50MDjigjEdBzVKGrWwjXioXa17SfJEUYrvy8sGHaXBmBMlA1iRjemqZOWhoraNUHhab3wfhe7V5ABg"
+        },
+        "body": "{\"key_id\":\"01MCC5RM006NDK01XD1WTB7Z1P\",\"source\":\"github\",\"request_id\":\"01K00000000000000000000082\",\"challenge\":\"eyJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJhY2NvdW50X3NlcSI6MSwiZXhwaXJlc19hdF9tcyI6MTgwMDAwMDMwMDAwMCwiaXNzdWVkX2F0X21zIjoxODAwMDAwMDAwMDAwLCJrZXlfZmluZ2VycHJpbnQiOiIyMWZlMzFkZmExNTRhMjYxNjI2YmY4NTQwNDZmZDIyNzFiN2JlZDRiNmFiZTQ1YWE1ODg3N2VmNDdmOTcyMWI5Iiwia2V5X2lkIjoiMDFNQ0M1Uk0wMDZOREswMVhEMVdUQjdaMVAiLCJrZXlfc2VxIjoxLCJraWQiOiJ2ZWN0b3ItMSIsIm5vbmNlIjoiRTFrUlY1bEtiNmVsV0huSFR2SzZ6eVlraDFhN09GY3FYa1lMdTVBU0FjNCIsInB1cnBvc2UiOiJyZWxheV9jcmVkZW50aWFsX21pbnQiLCJyZXF1ZXN0X2lkIjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODEiLCJzb3VyY2UiOiJnaXRodWIiLCJ2IjoxfQ.VwbGWTC3JcUCQtMfYNKUp5i6DCoDBXCtZMthqp9Nbrc\",\"sig_hex\":\"b6c25157fbac5396bb27d28ce552a61b1cf2f598c00f6851706506e19382603edd8ab3cf6aaf042f3a652119769e8186495748a50bd33cc3a5eea604042f7706\"}"
+      },
+      "reply": {
+        "status": 401,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "referrer-policy": "no-referrer"
+        },
+        "body": "{\"error\":\"auth_failed\"}"
+      }
+    },
+    {
+      "name": "principal:forged-headers",
+      "request": {
+        "method": "GET",
+        "path": "/v1/machine/keys",
+        "headers": {
+          "X-Account-Id": "01K00000000000000000000080",
+          "X-Principal-Kind": "human"
+        },
+        "body": ""
+      },
+      "reply": {
+        "status": 401,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "referrer-policy": "same-origin",
+          "content-security-policy": "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+          "x-frame-options": "DENY"
+        },
+        "body": "{\"error\":\"auth_failed\"}"
+      }
+    },
+    {
+      "name": "raw-code:hash:/v1/machine/complete",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/complete",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"flow_id\":\"01MCC5RM002GZ7GPRPSSDC05BQ\",\"completion_code\":\"e8b122aed020d40557c5cef790a774193f3188acb853b078e3da2e470d4ddc91\",\"challenge\":\"eyJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJjb21wbGV0aW9uX2NvZGVfaGFzaCI6ImU4YjEyMmFlZDAyMGQ0MDU1N2M1Y2VmNzkwYTc3NDE5M2YzMTg4YWNiODUzYjA3OGUzZGEyZTQ3MGQ0ZGRjOTEiLCJleHBpcmVzX2F0X21zIjoxODAwMDAwMzAwMDAwLCJmbG93X2lkIjoiMDFNQ0M1Uk0wMDJHWjdHUFJQU1NEQzA1QlEiLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsImtleV9maW5nZXJwcmludCI6IjIxZmUzMWRmYTE1NGEyNjE2MjZiZjg1NDA0NmZkMjI3MWI3YmVkNGI2YWJlNDVhYTU4ODc3ZWY0N2Y5NzIxYjkiLCJraWQiOiJ2ZWN0b3ItMSIsIm5vbmNlIjoiYkN3TFRwVk5wS2VHcmxOak0tdloyTlJSdExpRWlFUkpheVRUc2ZYMEQ4ZyIsInB1cnBvc2UiOiJtYWNoaW5lX2NvbXBsZXRlIiwidiI6MX0.Hc5GB9KpRweTghU9Jp4BdGi8MyVoSsHjxbLt87lCdZc\",\"sig_hex\":\"23935689ba73891f18066d7228de66f0502ec1cbdba029d00413b2b8533b80107c097918792389f2d83fbca681b0ec202555dafffbc2263907b6c3bd543d8906\"}"
+      },
+      "reply": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "referrer-policy": "same-origin",
+          "content-security-policy": "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+          "x-frame-options": "DENY"
+        },
+        "body": "{\"error\":\"invalid_request\"}"
+      }
+    },
+    {
+      "name": "raw-code:hash:/v1/machine/complete/challenge",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/complete/challenge",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"flow_id\":\"01MCC5RM002GZ7GPRPSSDC05BQ\",\"completion_code\":\"e8b122aed020d40557c5cef790a774193f3188acb853b078e3da2e470d4ddc91\"}"
+      },
+      "reply": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "referrer-policy": "same-origin",
+          "content-security-policy": "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+          "x-frame-options": "DENY"
+        },
+        "body": "{\"error\":\"invalid_request\"}"
+      }
+    },
+    {
+      "name": "raw-code:missing:/v1/machine/complete",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/complete",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"flow_id\":\"01MCC5RM002GZ7GPRPSSDC05BQ\",\"challenge\":\"eyJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJjb21wbGV0aW9uX2NvZGVfaGFzaCI6ImU4YjEyMmFlZDAyMGQ0MDU1N2M1Y2VmNzkwYTc3NDE5M2YzMTg4YWNiODUzYjA3OGUzZGEyZTQ3MGQ0ZGRjOTEiLCJleHBpcmVzX2F0X21zIjoxODAwMDAwMzAwMDAwLCJmbG93X2lkIjoiMDFNQ0M1Uk0wMDJHWjdHUFJQU1NEQzA1QlEiLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsImtleV9maW5nZXJwcmludCI6IjIxZmUzMWRmYTE1NGEyNjE2MjZiZjg1NDA0NmZkMjI3MWI3YmVkNGI2YWJlNDVhYTU4ODc3ZWY0N2Y5NzIxYjkiLCJraWQiOiJ2ZWN0b3ItMSIsIm5vbmNlIjoiYkN3TFRwVk5wS2VHcmxOak0tdloyTlJSdExpRWlFUkpheVRUc2ZYMEQ4ZyIsInB1cnBvc2UiOiJtYWNoaW5lX2NvbXBsZXRlIiwidiI6MX0.Hc5GB9KpRweTghU9Jp4BdGi8MyVoSsHjxbLt87lCdZc\",\"sig_hex\":\"23935689ba73891f18066d7228de66f0502ec1cbdba029d00413b2b8533b80107c097918792389f2d83fbca681b0ec202555dafffbc2263907b6c3bd543d8906\"}"
+      },
+      "reply": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "referrer-policy": "same-origin",
+          "content-security-policy": "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+          "x-frame-options": "DENY"
+        },
+        "body": "{\"error\":\"invalid_request\"}"
+      }
+    },
+    {
+      "name": "raw-code:missing:/v1/machine/complete/challenge",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/complete/challenge",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"flow_id\":\"01MCC5RM002GZ7GPRPSSDC05BQ\"}"
+      },
+      "reply": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "referrer-policy": "same-origin",
+          "content-security-policy": "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+          "x-frame-options": "DENY"
+        },
+        "body": "{\"error\":\"invalid_request\"}"
+      }
+    },
+    {
+      "name": "recover:accepted-disabled",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/keys/recover",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"account\":\"01K00000000000000000000080\",\"key_fingerprint\":\"21fe31dfa154a261626bf854046fd2271b7bed4b6abe45aa58877ef47f9721b9\",\"jti\":\"01MCC5RM00VE1DZZPS5B848T7Q\",\"replaces\":null,\"label_hash\":\"096d72e80b18b54401ff7e68ced6be3b40f3b5647f157909d11016a45da40ffa\",\"ed25519_pubkey_hex\":\"d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a\",\"challenge\":\"eyJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJleHBpcmVzX2F0X21zIjoxODAwMDAwMzAwMDAwLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsImp0aSI6IjAxTUNDNVJNMDBWRTFEWlpQUzVCODQ4VDdRIiwia2V5X2ZpbmdlcnByaW50IjoiMjFmZTMxZGZhMTU0YTI2MTYyNmJmODU0MDQ2ZmQyMjcxYjdiZWQ0YjZhYmU0NWFhNTg4NzdlZjQ3Zjk3MjFiOSIsImtpZCI6InZlY3Rvci0xIiwibGFiZWxfaGFzaCI6IjA5NmQ3MmU4MGIxOGI1NDQwMWZmN2U2OGNlZDZiZTNiNDBmM2I1NjQ3ZjE1NzkwOWQxMTAxNmE0NWRhNDBmZmEiLCJub25jZSI6ImlyWmJHSWVSa0FmVi1hdkpmc3hveTBKTnR0TGxJM1ViME9CMkUxRlpWWkUiLCJwdXJwb3NlIjoibWFjaGluZV9yZWNvdmVyIiwicmVwbGFjZXMiOm51bGwsInYiOjF9.dIfg0cqUsFaL3lu0M2QRTh_G9d7LCKfw2UG_xtez5FM\",\"sig_hex\":\"a0f63f1718ebc181b887c3de8f543242037aa352692792f4ec74e78c3847a5cca0d52ae7307617912b4c346a967af208589c3d3a0c422da2d2fd30d90c0e2e07\"}"
+      },
+      "reply": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "referrer-policy": "no-referrer"
+        },
+        "body": "{\"key_id\":\"01MCC5RM006NDK01XD1WTB7Z1P\",\"created_at_ms\":1800000000000}"
+      }
+    },
+    {
+      "name": "recover:challenge-disabled",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/keys/recover/challenge",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"account\":\"01K00000000000000000000080\",\"key_fingerprint\":\"21fe31dfa154a261626bf854046fd2271b7bed4b6abe45aa58877ef47f9721b9\",\"jti\":\"01MCC5RM00VE1DZZPS5B848T7Q\",\"replaces\":null,\"label_hash\":\"096d72e80b18b54401ff7e68ced6be3b40f3b5647f157909d11016a45da40ffa\"}"
+      },
+      "reply": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "referrer-policy": "no-referrer"
+        },
+        "body": "{\"challenge\":\"eyJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJleHBpcmVzX2F0X21zIjoxODAwMDAwMzAwMDAwLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsImp0aSI6IjAxTUNDNVJNMDBWRTFEWlpQUzVCODQ4VDdRIiwia2V5X2ZpbmdlcnByaW50IjoiMjFmZTMxZGZhMTU0YTI2MTYyNmJmODU0MDQ2ZmQyMjcxYjdiZWQ0YjZhYmU0NWFhNTg4NzdlZjQ3Zjk3MjFiOSIsImtpZCI6InZlY3Rvci0xIiwibGFiZWxfaGFzaCI6IjA5NmQ3MmU4MGIxOGI1NDQwMWZmN2U2OGNlZDZiZTNiNDBmM2I1NjQ3ZjE1NzkwOWQxMTAxNmE0NWRhNDBmZmEiLCJub25jZSI6ImlyWmJHSWVSa0FmVi1hdkpmc3hveTBKTnR0TGxJM1ViME9CMkUxRlpWWkUiLCJwdXJwb3NlIjoibWFjaGluZV9yZWNvdmVyIiwicmVwbGFjZXMiOm51bGwsInYiOjF9.dIfg0cqUsFaL3lu0M2QRTh_G9d7LCKfw2UG_xtez5FM\",\"expires_at_ms\":1800000300000}"
+      }
+    },
+    {
+      "name": "recover:invalid-signature",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/keys/recover",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"account\":\"01K00000000000000000000080\",\"key_fingerprint\":\"21fe31dfa154a261626bf854046fd2271b7bed4b6abe45aa58877ef47f9721b9\",\"jti\":\"01MCC5RM00VE1DZZPS5B848T7Q\",\"replaces\":null,\"label_hash\":\"096d72e80b18b54401ff7e68ced6be3b40f3b5647f157909d11016a45da40ffa\",\"ed25519_pubkey_hex\":\"d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a\",\"challenge\":\"eyJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJleHBpcmVzX2F0X21zIjoxODAwMDAwMzAwMDAwLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsImp0aSI6IjAxTUNDNVJNMDBWRTFEWlpQUzVCODQ4VDdRIiwia2V5X2ZpbmdlcnByaW50IjoiMjFmZTMxZGZhMTU0YTI2MTYyNmJmODU0MDQ2ZmQyMjcxYjdiZWQ0YjZhYmU0NWFhNTg4NzdlZjQ3Zjk3MjFiOSIsImtpZCI6InZlY3Rvci0xIiwibGFiZWxfaGFzaCI6IjA5NmQ3MmU4MGIxOGI1NDQwMWZmN2U2OGNlZDZiZTNiNDBmM2I1NjQ3ZjE1NzkwOWQxMTAxNmE0NWRhNDBmZmEiLCJub25jZSI6ImlyWmJHSWVSa0FmVi1hdkpmc3hveTBKTnR0TGxJM1ViME9CMkUxRlpWWkUiLCJwdXJwb3NlIjoibWFjaGluZV9yZWNvdmVyIiwicmVwbGFjZXMiOm51bGwsInYiOjF9.dIfg0cqUsFaL3lu0M2QRTh_G9d7LCKfw2UG_xtez5FM\",\"sig_hex\":\"00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\"}"
+      },
+      "reply": {
+        "status": 401,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "referrer-policy": "no-referrer"
+        },
+        "body": "{\"error\":\"signature_invalid\"}"
+      }
+    },
+    {
+      "name": "recover:replay",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/keys/recover",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"account\":\"01K00000000000000000000080\",\"key_fingerprint\":\"21fe31dfa154a261626bf854046fd2271b7bed4b6abe45aa58877ef47f9721b9\",\"jti\":\"01MCC5RM00VE1DZZPS5B848T7Q\",\"replaces\":null,\"label_hash\":\"096d72e80b18b54401ff7e68ced6be3b40f3b5647f157909d11016a45da40ffa\",\"ed25519_pubkey_hex\":\"d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a\",\"challenge\":\"eyJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJleHBpcmVzX2F0X21zIjoxODAwMDAwMzAwMDAwLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsImp0aSI6IjAxTUNDNVJNMDBWRTFEWlpQUzVCODQ4VDdRIiwia2V5X2ZpbmdlcnByaW50IjoiMjFmZTMxZGZhMTU0YTI2MTYyNmJmODU0MDQ2ZmQyMjcxYjdiZWQ0YjZhYmU0NWFhNTg4NzdlZjQ3Zjk3MjFiOSIsImtpZCI6InZlY3Rvci0xIiwibGFiZWxfaGFzaCI6IjA5NmQ3MmU4MGIxOGI1NDQwMWZmN2U2OGNlZDZiZTNiNDBmM2I1NjQ3ZjE1NzkwOWQxMTAxNmE0NWRhNDBmZmEiLCJub25jZSI6ImlyWmJHSWVSa0FmVi1hdkpmc3hveTBKTnR0TGxJM1ViME9CMkUxRlpWWkUiLCJwdXJwb3NlIjoibWFjaGluZV9yZWNvdmVyIiwicmVwbGFjZXMiOm51bGwsInYiOjF9.dIfg0cqUsFaL3lu0M2QRTh_G9d7LCKfw2UG_xtez5FM\",\"sig_hex\":\"a0f63f1718ebc181b887c3de8f543242037aa352692792f4ec74e78c3847a5cca0d52ae7307617912b4c346a967af208589c3d3a0c422da2d2fd30d90c0e2e07\"}"
+      },
+      "reply": {
+        "status": 409,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "referrer-policy": "no-referrer"
+        },
+        "body": "{\"error\":\"challenge_spent\"}"
+      }
+    },
+    {
+      "name": "relay_credential_revoke_other:callback",
+      "request": {
+        "method": "GET",
+        "path": "/v1/login/github/callback?state=ck-machine-enroll.v1.01MCC5RM00ZF4JCYYVRWK880DK.m5t3bqW_cWN2q2IvEL0FpDyk3wcprJukIsNgArlVNd8&code=public-vector-code",
+        "headers": {
+          "Cookie": "__Host-ck-machine-01MCC5RM00ZF4JCYYVRWK880DK=TUmdKn-1R4gXC9w-ZOI_ip8ySsLamqtG4b6XgXjOawk"
+        },
+        "body": ""
+      },
+      "reply": {
+        "status": 200,
+        "headers": {
+          "content-type": "text/html; charset=utf-8",
+          "cache-control": "no-store",
+          "referrer-policy": "same-origin",
+          "content-security-policy": "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+          "x-frame-options": "DENY",
+          "set-cookie": "__Host-ck-machine-01MCC5RM00ZF4JCYYVRWK880DK=IEOtfHqVXN1atOXzz0ye8JoVByeBKqk9078PkI8_7BU; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=900"
+        },
+        "body": "<!doctype html><html><head><meta charset=\"utf-8\"><title>CortexKit machine enrollment</title></head><body><h1>Confirm relay_credential_revoke_other</h1><p>Target: {&quot;account&quot;:&quot;01K00000000000000000000080&quot;,&quot;credential_id&quot;:&quot;01K00000000000000000000081&quot;,&quot;parent_key_id&quot;:&quot;01MCC5RM006NDK01XD1WTB7Z1P&quot;,&quot;source&quot;:&quot;github&quot;}</p><p>Request hash: 44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a</p>\n      <p>Account: 01K00000000000000000000080</p>\n    <p>Key: 21fe31dfa154a261626bf854046fd2271b7bed4b6abe45aa58877ef47f9721b9</p><p>Label: relay_credential_revoke_other</p><p>Replacement: no key replaced</p>\n    <p>Confirm only if this matches your terminal: <strong>05e4-47e3-1b2a</strong></p>\n    <p>Hand-back mode: paste. Started: 1800000000000</p>\n    <form method=\"post\" action=\"/v1/machine/enroll/confirm\"><input type=\"hidden\" name=\"flow_id\" value=\"01MCC5RM00ZF4JCYYVRWK880DK\"><input type=\"hidden\" name=\"csrf\" value=\"wS2kGxFly6OMgVFFJnpm4YLnV3T1Xezo4MYEssDPfoo\">\n    <label>Type the code from the terminal that started enrollment <input name=\"paste_user_code\" required autocomplete=\"off\"></label><p>Paste the completion code only into that terminal. Never send it to another person.</p>\n    <button name=\"action\" value=\"confirm\">Confirm</button><button name=\"action\" value=\"cancel\" formnovalidate>Cancel</button></form></body></html>"
+      }
+    },
+    {
+      "name": "relay_credential_revoke_other:challenge",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/complete/challenge",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"flow_id\":\"01MCC5RM00ZF4JCYYVRWK880DK\",\"completion_code\":\"q7ejqAETqDeXXPj2nGRgPQH3StQhQp5T9d0CAxiAgG4\"}"
+      },
+      "reply": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "referrer-policy": "same-origin",
+          "content-security-policy": "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+          "x-frame-options": "DENY"
+        },
+        "body": "{\"challenge\":\"eyJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJjb21wbGV0aW9uX2NvZGVfaGFzaCI6ImUzYzk3NjlmODNhYmM5YmM2ODhiZjJkZDRmZThiYzQxMWY3ODUxZjdjNzdiZTczYjdmY2M5MTQyNzE3M2ViYTciLCJleHBpcmVzX2F0X21zIjoxODAwMDAwMzAwMDAwLCJmbG93X2lkIjoiMDFNQ0M1Uk0wMFpGNEpDWVlWUldLODgwREsiLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsImtleV9maW5nZXJwcmludCI6IjIxZmUzMWRmYTE1NGEyNjE2MjZiZjg1NDA0NmZkMjI3MWI3YmVkNGI2YWJlNDVhYTU4ODc3ZWY0N2Y5NzIxYjkiLCJraWQiOiJ2ZWN0b3ItMSIsIm5vbmNlIjoiUzdiWUVXY3lfX0RMaG9fcndGOHdJV2lQUGNBaGh4NzloZ0F3TW1ULUtrWSIsInB1cnBvc2UiOiJtYWNoaW5lX2NvbXBsZXRlIiwidiI6MX0.-0KYcm5e5n6VVfHks6vJWMLAkvRVXdl5lWskviQrGE8\",\"expires_at_ms\":1800000300000}"
+      }
+    },
+    {
+      "name": "relay_credential_revoke_other:complete",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/complete",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"flow_id\":\"01MCC5RM00ZF4JCYYVRWK880DK\",\"completion_code\":\"q7ejqAETqDeXXPj2nGRgPQH3StQhQp5T9d0CAxiAgG4\",\"challenge\":\"eyJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJjb21wbGV0aW9uX2NvZGVfaGFzaCI6ImUzYzk3NjlmODNhYmM5YmM2ODhiZjJkZDRmZThiYzQxMWY3ODUxZjdjNzdiZTczYjdmY2M5MTQyNzE3M2ViYTciLCJleHBpcmVzX2F0X21zIjoxODAwMDAwMzAwMDAwLCJmbG93X2lkIjoiMDFNQ0M1Uk0wMFpGNEpDWVlWUldLODgwREsiLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsImtleV9maW5nZXJwcmludCI6IjIxZmUzMWRmYTE1NGEyNjE2MjZiZjg1NDA0NmZkMjI3MWI3YmVkNGI2YWJlNDVhYTU4ODc3ZWY0N2Y5NzIxYjkiLCJraWQiOiJ2ZWN0b3ItMSIsIm5vbmNlIjoiUzdiWUVXY3lfX0RMaG9fcndGOHdJV2lQUGNBaGh4NzloZ0F3TW1ULUtrWSIsInB1cnBvc2UiOiJtYWNoaW5lX2NvbXBsZXRlIiwidiI6MX0.-0KYcm5e5n6VVfHks6vJWMLAkvRVXdl5lWskviQrGE8\",\"sig_hex\":\"15a73b1e43d65fa95d90e319f15b6a5da639affd6b8eb80c55190174f8b8bbe15a48d5a662987a4985a7f94aec67fd3641b6a3acee0a78fd43e81e85871a5e03\"}"
+      },
+      "reply": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "referrer-policy": "same-origin",
+          "content-security-policy": "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+          "x-frame-options": "DENY"
+        },
+        "body": "{\"jwt\":\"eyJhbGciOiJFZERTQSIsImtpZCI6InRlc3Qta2V5LTEiLCJ0eXAiOiJKV1QifQ.eyJhY2NvdW50X2lkIjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJpc3MiOiJodHRwczovL2FjY291bnQuY29ydGV4a2l0LmlvIiwiYXVkIjoiY29ydGV4a2l0LWZlZCIsInN1YiI6IjAxSzAwMDAwMDAwMDAwMDAwMDAwMDAwMDgwIiwiaWF0IjoxODAwMDAwMDAwLCJleHAiOjE4MDAwMDA5MDAsImp0aSI6IjE3MzQ5MjAwLTAwMDAtNDAwMC04MDAwLTAwMDAwMDAwMDAwMiJ9.NKZz2AXJSvE2gu45l4cyoTLZZPcsk9mq12oTXHjK9ffxIidJ2aoxmwKEYsWRySYV6dsNcH5BPVc-w_aKoJ6cBA\",\"attestation\":\"eyJhbGciOiJFZERTQSIsImtpZCI6InRlc3Qta2V5LTEiLCJ0eXAiOiJjay1zdGVwLXVwK2p3dCJ9.eyJpc3MiOiJodHRwczovL2FjY291bnQuY29ydGV4a2l0LmlvIiwiYXVkIjoiY29ydGV4a2l0LXdlYmhvb2stcmVsYXk6c3RlcC11cDpyZWxheV9jcmVkZW50aWFsX3Jldm9rZV9vdGhlciIsImFjY291bnQiOiIwMUswMDAwMDAwMDAwMDAwMDAwMDAwMDA4MCIsInB1cnBvc2UiOiJzdGVwX3VwIiwib3BlcmF0aW9uIjoicmVsYXlfY3JlZGVudGlhbF9yZXZva2Vfb3RoZXIiLCJ0YXJnZXQiOnsiYWNjb3VudCI6IjAxSzAwMDAwMDAwMDAwMDAwMDAwMDAwMDgwIiwiY3JlZGVudGlhbF9pZCI6IjAxSzAwMDAwMDAwMDAwMDAwMDAwMDAwMDgxIiwicGFyZW50X2tleV9pZCI6IjAxTUNDNVJNMDA2TkRLMDFYRDFXVEI3WjFQIiwic291cmNlIjoiZ2l0aHViIn0sInJlcXVlc3RfaGFzaCI6IjQ0MTM2ZmEzNTViMzY3OGExMTQ2YWQxNmY3ZTg2NDllOTRmYjRmYzIxZmU3N2U4MzEwYzA2MGY2MWNhYWZmOGEiLCJhdXRoX3RpbWUiOjE4MDAwMDAwMDAsImlhdCI6MTgwMDAwMDAwMCwiZXhwIjoxODAwMDAwMzAwLCJqdGkiOiIwMU1DQzVSTTAwWjRZNDM1NjdZMDFXVkFFQSJ9.6tF19mFcbre9NLkTXqBy0Qm6lLxsXEJFsk8si7x-YiQbMivMgnOqZviOZu0sAyDP_KhdsH2cWZToOfkcj4UEBw\"}"
+      }
+    },
+    {
+      "name": "relay_credential_revoke_other:completion-replay",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/complete",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"flow_id\":\"01MCC5RM00ZF4JCYYVRWK880DK\",\"completion_code\":\"q7ejqAETqDeXXPj2nGRgPQH3StQhQp5T9d0CAxiAgG4\",\"challenge\":\"eyJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJjb21wbGV0aW9uX2NvZGVfaGFzaCI6ImUzYzk3NjlmODNhYmM5YmM2ODhiZjJkZDRmZThiYzQxMWY3ODUxZjdjNzdiZTczYjdmY2M5MTQyNzE3M2ViYTciLCJleHBpcmVzX2F0X21zIjoxODAwMDAwMzAwMDAwLCJmbG93X2lkIjoiMDFNQ0M1Uk0wMFpGNEpDWVlWUldLODgwREsiLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsImtleV9maW5nZXJwcmludCI6IjIxZmUzMWRmYTE1NGEyNjE2MjZiZjg1NDA0NmZkMjI3MWI3YmVkNGI2YWJlNDVhYTU4ODc3ZWY0N2Y5NzIxYjkiLCJraWQiOiJ2ZWN0b3ItMSIsIm5vbmNlIjoiUzdiWUVXY3lfX0RMaG9fcndGOHdJV2lQUGNBaGh4NzloZ0F3TW1ULUtrWSIsInB1cnBvc2UiOiJtYWNoaW5lX2NvbXBsZXRlIiwidiI6MX0.-0KYcm5e5n6VVfHks6vJWMLAkvRVXdl5lWskviQrGE8\",\"sig_hex\":\"15a73b1e43d65fa95d90e319f15b6a5da639affd6b8eb80c55190174f8b8bbe15a48d5a662987a4985a7f94aec67fd3641b6a3acee0a78fd43e81e85871a5e03\"}"
+      },
+      "reply": {
+        "status": 409,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "referrer-policy": "same-origin",
+          "content-security-policy": "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+          "x-frame-options": "DENY"
+        },
+        "body": "{\"error\":\"completion_spent\"}"
+      }
+    },
+    {
+      "name": "relay_credential_revoke_other:confirm",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/enroll/confirm",
+        "headers": {
+          "Content-Type": "application/x-www-form-urlencoded",
+          "Cookie": "__Host-ck-machine-01MCC5RM00ZF4JCYYVRWK880DK=IEOtfHqVXN1atOXzz0ye8JoVByeBKqk9078PkI8_7BU",
+          "Origin": "https://account.cortexkit.io"
+        },
+        "body": "flow_id=01MCC5RM00ZF4JCYYVRWK880DK&csrf=wS2kGxFly6OMgVFFJnpm4YLnV3T1Xezo4MYEssDPfoo&action=confirm&paste_user_code=BJSW-9R1B"
+      },
+      "reply": {
+        "status": 200,
+        "headers": {
+          "content-type": "text/html; charset=utf-8",
+          "cache-control": "no-store",
+          "referrer-policy": "same-origin",
+          "content-security-policy": "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+          "x-frame-options": "DENY"
+        },
+        "body": "<!doctype html><html><head><meta charset=\"utf-8\"><title>CortexKit machine enrollment</title></head><body><h1>Machine enrollment confirmed</h1><p>Paste only into the terminal that started enrollment. Never send this code to another person.</p><code>q7ejqAETqDeXXPj2nGRgPQH3StQhQp5T9d0CAxiAgG4</code></body></html>"
+      }
+    },
+    {
+      "name": "relay_credential_revoke_other:open",
+      "request": {
+        "method": "GET",
+        "path": "/v1/machine/enroll?flow_id=01MCC5RM00ZF4JCYYVRWK880DK&open_token=3hYu867WELCR1qB8eP88cDpyyHVLApCDPsuUmgFi5h8",
+        "headers": {},
+        "body": ""
+      },
+      "reply": {
+        "status": 303,
+        "headers": {
+          "cache-control": "no-store",
+          "referrer-policy": "same-origin",
+          "content-security-policy": "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+          "x-frame-options": "DENY",
+          "location": "https://github.com/login/oauth/authorize?client_id=Iv23liYJYQDHNotesltr&redirect_uri=https%3A%2F%2Faccount.cortexkit.io%2Fv1%2Flogin%2Fgithub%2Fcallback&state=ck-machine-enroll.v1.01MCC5RM00ZF4JCYYVRWK880DK.m5t3bqW_cWN2q2IvEL0FpDyk3wcprJukIsNgArlVNd8",
+          "set-cookie": "__Host-ck-machine-01MCC5RM00ZF4JCYYVRWK880DK=TUmdKn-1R4gXC9w-ZOI_ip8ySsLamqtG4b6XgXjOawk; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=900"
+        },
+        "body": ""
+      }
+    },
+    {
+      "name": "relay_credential_revoke_other:start",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/step-up/start",
+        "headers": {
+          "Content-Type": "application/json",
+          "Authorization": "Bearer eyJhbGciOiJFZERTQSIsImtpZCI6InRlc3Qta2V5LTEiLCJ0eXAiOiJKV1QifQ.eyJhY2NvdW50X2lkIjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJpc3MiOiJodHRwczovL2FjY291bnQuY29ydGV4a2l0LmlvIiwiYXVkIjoiY29ydGV4a2l0LWZlZCIsInN1YiI6IjAxSzAwMDAwMDAwMDAwMDAwMDAwMDAwMDgwIiwiaWF0IjoxODAwMDAwMDAwLCJleHAiOjE4MDAwMDA5MDAsImp0aSI6IjY5OTRlOTZkLTAwMDAtNDAwMC04MDAwLTAwMDAwMDAwMDAwMiJ9.PX5MomoO4nkFbu4hjrk67HecA5d8YirLsTi7zBoVGE16EgCtrvCkl3kZQzVuAGXs6h5Oxhco8JJl8Pao02zzCA"
+        },
+        "body": "{\"method\":\"github\",\"ed25519_pubkey_hex\":\"d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a\",\"handoff_mode\":\"paste\",\"operation\":\"relay_credential_revoke_other\",\"target\":{\"account\":\"01K00000000000000000000080\",\"source\":\"github\",\"credential_id\":\"01K00000000000000000000081\",\"parent_key_id\":\"01MCC5RM006NDK01XD1WTB7Z1P\"},\"mutation_body\":{}}"
+      },
+      "reply": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "referrer-policy": "same-origin",
+          "content-security-policy": "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+          "x-frame-options": "DENY"
+        },
+        "body": "{\"flow_id\":\"01MCC5RM00ZF4JCYYVRWK880DK\",\"open_token\":\"3hYu867WELCR1qB8eP88cDpyyHVLApCDPsuUmgFi5h8\",\"approval_url\":\"https://account.cortexkit.io/v1/machine/enroll?flow_id=01MCC5RM00ZF4JCYYVRWK880DK&open_token=3hYu867WELCR1qB8eP88cDpyyHVLApCDPsuUmgFi5h8\",\"comparison_phrase\":\"05e4-47e3-1b2a\",\"paste_user_code\":\"BJSW-9R1B\",\"expires_at_ms\":1800000900000}"
+      }
+    },
+    {
+      "name": "relay_installation_unbind:callback",
+      "request": {
+        "method": "GET",
+        "path": "/v1/login/github/callback?state=ck-machine-enroll.v1.01MCC5RM00F6QBEEQFHYB6RA6V.8vg6i0sjOVY6Gp4bJ8FJV6v4Ox1BCOClQTDfwyEzJTs&code=public-vector-code",
+        "headers": {
+          "Cookie": "__Host-ck-machine-01MCC5RM00F6QBEEQFHYB6RA6V=sW6sYoVXhtdhGN6fu08Rtkzziyw6Vba0UahAh4Pdink"
+        },
+        "body": ""
+      },
+      "reply": {
+        "status": 200,
+        "headers": {
+          "content-type": "text/html; charset=utf-8",
+          "cache-control": "no-store",
+          "referrer-policy": "same-origin",
+          "content-security-policy": "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+          "x-frame-options": "DENY",
+          "set-cookie": "__Host-ck-machine-01MCC5RM00F6QBEEQFHYB6RA6V=gPA8JodiKeOWl1szU2xokIsxpN99edH6gbhuux50ZZQ; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=900"
+        },
+        "body": "<!doctype html><html><head><meta charset=\"utf-8\"><title>CortexKit machine enrollment</title></head><body><h1>Confirm relay_installation_unbind</h1><p>Target: {&quot;account&quot;:&quot;01K00000000000000000000080&quot;,&quot;binding_gen&quot;:3,&quot;installation_id&quot;:42,&quot;source&quot;:&quot;github&quot;}</p><p>Request hash: 44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a</p>\n      <p>Unbound incoming events are dropped, not paused. The seven-day buffer cannot restore them.</p><p>Account: 01K00000000000000000000080</p>\n    <p>Key: 21fe31dfa154a261626bf854046fd2271b7bed4b6abe45aa58877ef47f9721b9</p><p>Label: relay_installation_unbind</p><p>Replacement: no key replaced</p>\n    <p>Confirm only if this matches your terminal: <strong>40d3-0e07-212e</strong></p>\n    <p>Hand-back mode: paste. Started: 1800000000000</p>\n    <form method=\"post\" action=\"/v1/machine/enroll/confirm\"><input type=\"hidden\" name=\"flow_id\" value=\"01MCC5RM00F6QBEEQFHYB6RA6V\"><input type=\"hidden\" name=\"csrf\" value=\"Bi8mxohJY81yhQObbvIDpVpRTO0gV8eKEE8qT8z7UZM\">\n    <label>Type the code from the terminal that started enrollment <input name=\"paste_user_code\" required autocomplete=\"off\"></label><p>Paste the completion code only into that terminal. Never send it to another person.</p>\n    <button name=\"action\" value=\"confirm\">Confirm</button><button name=\"action\" value=\"cancel\" formnovalidate>Cancel</button></form></body></html>"
+      }
+    },
+    {
+      "name": "relay_installation_unbind:challenge",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/complete/challenge",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"flow_id\":\"01MCC5RM00F6QBEEQFHYB6RA6V\",\"completion_code\":\"MsEOTuF-1fhMj6XfbeYT74g-XRacwuPGbrp4M0EXVFs\"}"
+      },
+      "reply": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "referrer-policy": "same-origin",
+          "content-security-policy": "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+          "x-frame-options": "DENY"
+        },
+        "body": "{\"challenge\":\"eyJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJjb21wbGV0aW9uX2NvZGVfaGFzaCI6ImJiNThiMzhkMTA3NmQ1OTVhMzhjMTRhNTljMGI0NGRhNTY0M2QyNmQ4MzJiOTc0ODEzZTc2YTM0Mzk5OWM2NTUiLCJleHBpcmVzX2F0X21zIjoxODAwMDAwMzAwMDAwLCJmbG93X2lkIjoiMDFNQ0M1Uk0wMEY2UUJFRVFGSFlCNlJBNlYiLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsImtleV9maW5nZXJwcmludCI6IjIxZmUzMWRmYTE1NGEyNjE2MjZiZjg1NDA0NmZkMjI3MWI3YmVkNGI2YWJlNDVhYTU4ODc3ZWY0N2Y5NzIxYjkiLCJraWQiOiJ2ZWN0b3ItMSIsIm5vbmNlIjoidHVpei1XZ2RWZHdvRVhoZEJ0SDEyNGtVcEg2dFVDMnRvbkRkNzFZSVBpTSIsInB1cnBvc2UiOiJtYWNoaW5lX2NvbXBsZXRlIiwidiI6MX0.v_v7_O78QU6vWtEqSn7LlsfaLMW6TVzkNf7KUMgXI-o\",\"expires_at_ms\":1800000300000}"
+      }
+    },
+    {
+      "name": "relay_installation_unbind:complete",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/complete",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"flow_id\":\"01MCC5RM00F6QBEEQFHYB6RA6V\",\"completion_code\":\"MsEOTuF-1fhMj6XfbeYT74g-XRacwuPGbrp4M0EXVFs\",\"challenge\":\"eyJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJjb21wbGV0aW9uX2NvZGVfaGFzaCI6ImJiNThiMzhkMTA3NmQ1OTVhMzhjMTRhNTljMGI0NGRhNTY0M2QyNmQ4MzJiOTc0ODEzZTc2YTM0Mzk5OWM2NTUiLCJleHBpcmVzX2F0X21zIjoxODAwMDAwMzAwMDAwLCJmbG93X2lkIjoiMDFNQ0M1Uk0wMEY2UUJFRVFGSFlCNlJBNlYiLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsImtleV9maW5nZXJwcmludCI6IjIxZmUzMWRmYTE1NGEyNjE2MjZiZjg1NDA0NmZkMjI3MWI3YmVkNGI2YWJlNDVhYTU4ODc3ZWY0N2Y5NzIxYjkiLCJraWQiOiJ2ZWN0b3ItMSIsIm5vbmNlIjoidHVpei1XZ2RWZHdvRVhoZEJ0SDEyNGtVcEg2dFVDMnRvbkRkNzFZSVBpTSIsInB1cnBvc2UiOiJtYWNoaW5lX2NvbXBsZXRlIiwidiI6MX0.v_v7_O78QU6vWtEqSn7LlsfaLMW6TVzkNf7KUMgXI-o\",\"sig_hex\":\"dbd8cd04191eb39f0a80690077ef2184ecfb043151c7002b54084aaf89bec73cf0c71d39e711200b1f21420b9091665dd78f7b1044cfc0ef03f9e1978b5f5202\"}"
+      },
+      "reply": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "referrer-policy": "same-origin",
+          "content-security-policy": "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+          "x-frame-options": "DENY"
+        },
+        "body": "{\"jwt\":\"eyJhbGciOiJFZERTQSIsImtpZCI6InRlc3Qta2V5LTEiLCJ0eXAiOiJKV1QifQ.eyJhY2NvdW50X2lkIjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJpc3MiOiJodHRwczovL2FjY291bnQuY29ydGV4a2l0LmlvIiwiYXVkIjoiY29ydGV4a2l0LWZlZCIsInN1YiI6IjAxSzAwMDAwMDAwMDAwMDAwMDAwMDAwMDgwIiwiaWF0IjoxODAwMDAwMDAwLCJleHAiOjE4MDAwMDA5MDAsImp0aSI6ImE5Mjc5YzRjLTAwMDAtNDAwMC04MDAwLTAwMDAwMDAwMDAwMiJ9.e35CMcdIDGWRFnhi8dkl3uB9E-Ew-09iPHq_AzJv49Ngm0YaJPlQQV3qhwnNAoihBZ4BM8tSK369DtmmFVNjAg\",\"attestation\":\"eyJhbGciOiJFZERTQSIsImtpZCI6InRlc3Qta2V5LTEiLCJ0eXAiOiJjay1zdGVwLXVwK2p3dCJ9.eyJpc3MiOiJodHRwczovL2FjY291bnQuY29ydGV4a2l0LmlvIiwiYXVkIjoiY29ydGV4a2l0LXdlYmhvb2stcmVsYXk6c3RlcC11cDpyZWxheV9pbnN0YWxsYXRpb25fdW5iaW5kIiwiYWNjb3VudCI6IjAxSzAwMDAwMDAwMDAwMDAwMDAwMDAwMDgwIiwicHVycG9zZSI6InN0ZXBfdXAiLCJvcGVyYXRpb24iOiJyZWxheV9pbnN0YWxsYXRpb25fdW5iaW5kIiwidGFyZ2V0Ijp7ImFjY291bnQiOiIwMUswMDAwMDAwMDAwMDAwMDAwMDAwMDA4MCIsImJpbmRpbmdfZ2VuIjozLCJpbnN0YWxsYXRpb25faWQiOjQyLCJzb3VyY2UiOiJnaXRodWIifSwicmVxdWVzdF9oYXNoIjoiNDQxMzZmYTM1NWIzNjc4YTExNDZhZDE2ZjdlODY0OWU5NGZiNGZjMjFmZTc3ZTgzMTBjMDYwZjYxY2FhZmY4YSIsImF1dGhfdGltZSI6MTgwMDAwMDAwMCwiaWF0IjoxODAwMDAwMDAwLCJleHAiOjE4MDAwMDAzMDAsImp0aSI6IjAxTUNDNVJNMDBYRDVQOFQzSEdLUDdBRTM5In0.w_Lp8TqTsQunMojsYDWy60KRiEitBQmxfJqCtY_WZCidkS0C2HyFWUVBiN1KbzeO03vPxT87bQF2hliyzGCrCQ\"}"
+      }
+    },
+    {
+      "name": "relay_installation_unbind:completion-replay",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/complete",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"flow_id\":\"01MCC5RM00F6QBEEQFHYB6RA6V\",\"completion_code\":\"MsEOTuF-1fhMj6XfbeYT74g-XRacwuPGbrp4M0EXVFs\",\"challenge\":\"eyJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJjb21wbGV0aW9uX2NvZGVfaGFzaCI6ImJiNThiMzhkMTA3NmQ1OTVhMzhjMTRhNTljMGI0NGRhNTY0M2QyNmQ4MzJiOTc0ODEzZTc2YTM0Mzk5OWM2NTUiLCJleHBpcmVzX2F0X21zIjoxODAwMDAwMzAwMDAwLCJmbG93X2lkIjoiMDFNQ0M1Uk0wMEY2UUJFRVFGSFlCNlJBNlYiLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsImtleV9maW5nZXJwcmludCI6IjIxZmUzMWRmYTE1NGEyNjE2MjZiZjg1NDA0NmZkMjI3MWI3YmVkNGI2YWJlNDVhYTU4ODc3ZWY0N2Y5NzIxYjkiLCJraWQiOiJ2ZWN0b3ItMSIsIm5vbmNlIjoidHVpei1XZ2RWZHdvRVhoZEJ0SDEyNGtVcEg2dFVDMnRvbkRkNzFZSVBpTSIsInB1cnBvc2UiOiJtYWNoaW5lX2NvbXBsZXRlIiwidiI6MX0.v_v7_O78QU6vWtEqSn7LlsfaLMW6TVzkNf7KUMgXI-o\",\"sig_hex\":\"dbd8cd04191eb39f0a80690077ef2184ecfb043151c7002b54084aaf89bec73cf0c71d39e711200b1f21420b9091665dd78f7b1044cfc0ef03f9e1978b5f5202\"}"
+      },
+      "reply": {
+        "status": 409,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "referrer-policy": "same-origin",
+          "content-security-policy": "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+          "x-frame-options": "DENY"
+        },
+        "body": "{\"error\":\"completion_spent\"}"
+      }
+    },
+    {
+      "name": "relay_installation_unbind:confirm",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/enroll/confirm",
+        "headers": {
+          "Content-Type": "application/x-www-form-urlencoded",
+          "Cookie": "__Host-ck-machine-01MCC5RM00F6QBEEQFHYB6RA6V=gPA8JodiKeOWl1szU2xokIsxpN99edH6gbhuux50ZZQ",
+          "Origin": "https://account.cortexkit.io"
+        },
+        "body": "flow_id=01MCC5RM00F6QBEEQFHYB6RA6V&csrf=Bi8mxohJY81yhQObbvIDpVpRTO0gV8eKEE8qT8z7UZM&action=confirm&paste_user_code=S4NT-NCGN"
+      },
+      "reply": {
+        "status": 200,
+        "headers": {
+          "content-type": "text/html; charset=utf-8",
+          "cache-control": "no-store",
+          "referrer-policy": "same-origin",
+          "content-security-policy": "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+          "x-frame-options": "DENY"
+        },
+        "body": "<!doctype html><html><head><meta charset=\"utf-8\"><title>CortexKit machine enrollment</title></head><body><h1>Machine enrollment confirmed</h1><p>Paste only into the terminal that started enrollment. Never send this code to another person.</p><code>MsEOTuF-1fhMj6XfbeYT74g-XRacwuPGbrp4M0EXVFs</code></body></html>"
+      }
+    },
+    {
+      "name": "relay_installation_unbind:open",
+      "request": {
+        "method": "GET",
+        "path": "/v1/machine/enroll?flow_id=01MCC5RM00F6QBEEQFHYB6RA6V&open_token=AtyI5e5NGOcXrcJvKkDoq5NQU9yhao59CKKz5Xoo-OE",
+        "headers": {},
+        "body": ""
+      },
+      "reply": {
+        "status": 303,
+        "headers": {
+          "cache-control": "no-store",
+          "referrer-policy": "same-origin",
+          "content-security-policy": "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+          "x-frame-options": "DENY",
+          "location": "https://github.com/login/oauth/authorize?client_id=Iv23liYJYQDHNotesltr&redirect_uri=https%3A%2F%2Faccount.cortexkit.io%2Fv1%2Flogin%2Fgithub%2Fcallback&state=ck-machine-enroll.v1.01MCC5RM00F6QBEEQFHYB6RA6V.8vg6i0sjOVY6Gp4bJ8FJV6v4Ox1BCOClQTDfwyEzJTs",
+          "set-cookie": "__Host-ck-machine-01MCC5RM00F6QBEEQFHYB6RA6V=sW6sYoVXhtdhGN6fu08Rtkzziyw6Vba0UahAh4Pdink; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=900"
+        },
+        "body": ""
+      }
+    },
+    {
+      "name": "relay_installation_unbind:start",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/step-up/start",
+        "headers": {
+          "Content-Type": "application/json",
+          "Authorization": "Bearer eyJhbGciOiJFZERTQSIsImtpZCI6InRlc3Qta2V5LTEiLCJ0eXAiOiJKV1QifQ.eyJhY2NvdW50X2lkIjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJpc3MiOiJodHRwczovL2FjY291bnQuY29ydGV4a2l0LmlvIiwiYXVkIjoiY29ydGV4a2l0LWZlZCIsInN1YiI6IjAxSzAwMDAwMDAwMDAwMDAwMDAwMDAwMDgwIiwiaWF0IjoxODAwMDAwMDAwLCJleHAiOjE4MDAwMDA5MDAsImp0aSI6IjY5OTRlOTZkLTAwMDAtNDAwMC04MDAwLTAwMDAwMDAwMDAwMiJ9.PX5MomoO4nkFbu4hjrk67HecA5d8YirLsTi7zBoVGE16EgCtrvCkl3kZQzVuAGXs6h5Oxhco8JJl8Pao02zzCA"
+        },
+        "body": "{\"method\":\"github\",\"ed25519_pubkey_hex\":\"d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a\",\"handoff_mode\":\"paste\",\"operation\":\"relay_installation_unbind\",\"target\":{\"account\":\"01K00000000000000000000080\",\"source\":\"github\",\"installation_id\":42,\"binding_gen\":3},\"mutation_body\":{}}"
+      },
+      "reply": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "referrer-policy": "same-origin",
+          "content-security-policy": "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+          "x-frame-options": "DENY"
+        },
+        "body": "{\"flow_id\":\"01MCC5RM00F6QBEEQFHYB6RA6V\",\"open_token\":\"AtyI5e5NGOcXrcJvKkDoq5NQU9yhao59CKKz5Xoo-OE\",\"approval_url\":\"https://account.cortexkit.io/v1/machine/enroll?flow_id=01MCC5RM00F6QBEEQFHYB6RA6V&open_token=AtyI5e5NGOcXrcJvKkDoq5NQU9yhao59CKKz5Xoo-OE\",\"comparison_phrase\":\"40d3-0e07-212e\",\"paste_user_code\":\"S4NT-NCGN\",\"expires_at_ms\":1800000900000}"
+      }
+    },
+    {
+      "name": "roster:machine",
+      "request": {
+        "method": "GET",
+        "path": "/v1/machine/keys",
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJFZERTQSIsImtpZCI6InRlc3Qta2V5LTEiLCJ0eXAiOiJjay13b3JrZXIrand0In0.eyJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJkZXZpY2UiOiIwMU1DQzVSTTAwNk5ESzAxWEQxV1RCN1oxUCIsImlhdCI6MTgwMDAwMDAwMCwiZXhwIjoxODAwMDAwOTAwLCJhdWQiOiJjb3J0ZXhraXQtYWNjb3VudCIsImp0aSI6IjAxTUNDNVJNMDBUM0tURFo0N0VKVko5MTJFIn0.acaoJ06w50MDjigjEdBzVKGrWwjXioXa17SfJEUYrvy8sGHaXBmBMlA1iRjemqZOWhoraNUHhab3wfhe7V5ABg"
+        },
+        "body": ""
+      },
+      "reply": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "referrer-policy": "same-origin",
+          "content-security-policy": "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+          "x-frame-options": "DENY"
+        },
+        "body": "{\"keys\":[{\"key_id\":\"01MCC5RM006NDK01XD1WTB7Z1P\",\"public_key\":\"d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a\",\"fingerprint\":\"21fe31dfa154a261626bf854046fd2271b7bed4b6abe45aa58877ef47f9721b9\",\"label\":\"Vector workstation\",\"created_at_ms\":1800000000000,\"last_used_at_ms\":1800000000000,\"revoked_at_ms\":null}]}"
+      }
+    },
+    {
+      "name": "switch:false",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/token/challenge",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"key_id\":\"01MCC5RM006NDK01XD1WTB7Z1P\",\"aud\":\"cortexkit-account\"}"
+      },
+      "reply": {
+        "status": 503,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "referrer-policy": "no-referrer",
+          "retry-after": "60"
+        },
+        "body": "{\"error\":\"exchange_disabled\",\"retry_after_s\":60}"
+      }
+    },
+    {
+      "name": "switch:missing",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/token/challenge",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"key_id\":\"01MCC5RM006NDK01XD1WTB7Z1P\",\"aud\":\"cortexkit-account\"}"
+      },
+      "reply": {
+        "status": 503,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "referrer-policy": "no-referrer",
+          "retry-after": "60"
+        },
+        "body": "{\"error\":\"exchange_disabled\",\"retry_after_s\":60}"
+      }
+    },
+    {
+      "name": "unsupported:apple",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/enroll/start",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"method\":\"apple\",\"ed25519_pubkey_hex\":\"d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a\",\"label\":\"unsupported\",\"replaces\":null,\"handoff_mode\":\"paste\"}"
+      },
+      "reply": {
+        "status": 403,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "referrer-policy": "same-origin",
+          "content-security-policy": "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+          "x-frame-options": "DENY"
+        },
+        "body": "{\"error\":\"enrollment_method_unsupported\"}"
+      }
+    },
+    {
+      "name": "unsupported:email",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/enroll/start",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"method\":\"email\",\"ed25519_pubkey_hex\":\"d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a\",\"label\":\"unsupported\",\"replaces\":null,\"handoff_mode\":\"paste\"}"
+      },
+      "reply": {
+        "status": 403,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "referrer-policy": "same-origin",
+          "content-security-policy": "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+          "x-frame-options": "DENY"
+        },
+        "body": "{\"error\":\"enrollment_method_unsupported\"}"
+      }
+    },
+    {
+      "name": "unsupported:github_device",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/enroll/start",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"method\":\"github_device\",\"ed25519_pubkey_hex\":\"d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a\",\"label\":\"unsupported\",\"replaces\":null,\"handoff_mode\":\"paste\"}"
+      },
+      "reply": {
+        "status": 403,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "referrer-policy": "same-origin",
+          "content-security-policy": "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+          "x-frame-options": "DENY"
+        },
+        "body": "{\"error\":\"enrollment_method_unsupported\"}"
+      }
+    },
+    {
+      "name": "unsupported:google",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/enroll/start",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"method\":\"google\",\"ed25519_pubkey_hex\":\"d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a\",\"label\":\"unsupported\",\"replaces\":null,\"handoff_mode\":\"paste\"}"
+      },
+      "reply": {
+        "status": 403,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "referrer-policy": "same-origin",
+          "content-security-policy": "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+          "x-frame-options": "DENY"
+        },
+        "body": "{\"error\":\"enrollment_method_unsupported\"}"
+      }
+    },
+    {
+      "name": "unsupported:passkey",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/enroll/start",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"method\":\"passkey\",\"ed25519_pubkey_hex\":\"d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a\",\"label\":\"unsupported\",\"replaces\":null,\"handoff_mode\":\"paste\"}"
+      },
+      "reply": {
+        "status": 403,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "referrer-policy": "same-origin",
+          "content-security-policy": "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+          "x-frame-options": "DENY"
+        },
+        "body": "{\"error\":\"enrollment_method_unsupported\"}"
+      }
+    },
+    {
+      "name": "unsupported:unknown",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/enroll/start",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"method\":\"unknown\",\"ed25519_pubkey_hex\":\"d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a\",\"label\":\"unsupported\",\"replaces\":null,\"handoff_mode\":\"paste\"}"
+      },
+      "reply": {
+        "status": 403,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "referrer-policy": "same-origin",
+          "content-security-policy": "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+          "x-frame-options": "DENY"
+        },
+        "body": "{\"error\":\"enrollment_method_unsupported\"}"
+      }
+    },
+    {
+      "name": "worker:cortexkit-account:accepted",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/token",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"key_id\":\"01MCC5RM006NDK01XD1WTB7Z1P\",\"aud\":\"cortexkit-account\",\"challenge\":\"eyJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJhY2NvdW50X3NlcSI6MSwiYXVkIjoiY29ydGV4a2l0LWFjY291bnQiLCJleHBpcmVzX2F0X21zIjoxODAwMDAwMzAwMDAwLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsImtleV9maW5nZXJwcmludCI6IjIxZmUzMWRmYTE1NGEyNjE2MjZiZjg1NDA0NmZkMjI3MWI3YmVkNGI2YWJlNDVhYTU4ODc3ZWY0N2Y5NzIxYjkiLCJrZXlfaWQiOiIwMU1DQzVSTTAwNk5ESzAxWEQxV1RCN1oxUCIsImtleV9zZXEiOjEsImtpZCI6InZlY3Rvci0xIiwibm9uY2UiOiJCTHBaZ0tRREJQNzJvSEZzX3dwQmtuYkF6Tm1QeXk4bjBwWVR2ZVdudTc4IiwicHVycG9zZSI6Indvcmtlcl90b2tlbiIsInYiOjF9.ztZRjM5-oKkjddS7YzANkLb8PSBUPL_ML-k3_6nzmMQ\",\"sig_hex\":\"de1e140e55afd1e4b6b30d0ee849a9c9c29937036f0bc61f6fb87436b01cacdf065da10bc186163bde9b986eee484279db376fa9e84470340ab79c6607b3b907\"}"
+      },
+      "reply": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "referrer-policy": "no-referrer"
+        },
+        "body": "{\"jwt\":\"eyJhbGciOiJFZERTQSIsImtpZCI6InRlc3Qta2V5LTEiLCJ0eXAiOiJjay13b3JrZXIrand0In0.eyJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJkZXZpY2UiOiIwMU1DQzVSTTAwNk5ESzAxWEQxV1RCN1oxUCIsImlhdCI6MTgwMDAwMDAwMCwiZXhwIjoxODAwMDAwOTAwLCJhdWQiOiJjb3J0ZXhraXQtYWNjb3VudCIsImp0aSI6IjAxTUNDNVJNMDBUM0tURFo0N0VKVko5MTJFIn0.acaoJ06w50MDjigjEdBzVKGrWwjXioXa17SfJEUYrvy8sGHaXBmBMlA1iRjemqZOWhoraNUHhab3wfhe7V5ABg\"}"
+      }
+    },
+    {
+      "name": "worker:cortexkit-account:challenge",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/token/challenge",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"key_id\":\"01MCC5RM006NDK01XD1WTB7Z1P\",\"aud\":\"cortexkit-account\"}"
+      },
+      "reply": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "referrer-policy": "no-referrer"
+        },
+        "body": "{\"challenge\":\"eyJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJhY2NvdW50X3NlcSI6MSwiYXVkIjoiY29ydGV4a2l0LWFjY291bnQiLCJleHBpcmVzX2F0X21zIjoxODAwMDAwMzAwMDAwLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsImtleV9maW5nZXJwcmludCI6IjIxZmUzMWRmYTE1NGEyNjE2MjZiZjg1NDA0NmZkMjI3MWI3YmVkNGI2YWJlNDVhYTU4ODc3ZWY0N2Y5NzIxYjkiLCJrZXlfaWQiOiIwMU1DQzVSTTAwNk5ESzAxWEQxV1RCN1oxUCIsImtleV9zZXEiOjEsImtpZCI6InZlY3Rvci0xIiwibm9uY2UiOiJCTHBaZ0tRREJQNzJvSEZzX3dwQmtuYkF6Tm1QeXk4bjBwWVR2ZVdudTc4IiwicHVycG9zZSI6Indvcmtlcl90b2tlbiIsInYiOjF9.ztZRjM5-oKkjddS7YzANkLb8PSBUPL_ML-k3_6nzmMQ\",\"expires_at_ms\":1800000300000}"
+      }
+    },
+    {
+      "name": "worker:cortexkit-account:invalid-signature",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/token",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"key_id\":\"01MCC5RM006NDK01XD1WTB7Z1P\",\"aud\":\"cortexkit-account\",\"challenge\":\"eyJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJhY2NvdW50X3NlcSI6MSwiYXVkIjoiY29ydGV4a2l0LWFjY291bnQiLCJleHBpcmVzX2F0X21zIjoxODAwMDAwMzAwMDAwLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsImtleV9maW5nZXJwcmludCI6IjIxZmUzMWRmYTE1NGEyNjE2MjZiZjg1NDA0NmZkMjI3MWI3YmVkNGI2YWJlNDVhYTU4ODc3ZWY0N2Y5NzIxYjkiLCJrZXlfaWQiOiIwMU1DQzVSTTAwNk5ESzAxWEQxV1RCN1oxUCIsImtleV9zZXEiOjEsImtpZCI6InZlY3Rvci0xIiwibm9uY2UiOiJCTHBaZ0tRREJQNzJvSEZzX3dwQmtuYkF6Tm1QeXk4bjBwWVR2ZVdudTc4IiwicHVycG9zZSI6Indvcmtlcl90b2tlbiIsInYiOjF9.ztZRjM5-oKkjddS7YzANkLb8PSBUPL_ML-k3_6nzmMQ\",\"sig_hex\":\"00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\"}"
+      },
+      "reply": {
+        "status": 401,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "referrer-policy": "no-referrer"
+        },
+        "body": "{\"error\":\"signature_invalid\"}"
+      }
+    },
+    {
+      "name": "worker:cortexkit-account:replay",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/token",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"key_id\":\"01MCC5RM006NDK01XD1WTB7Z1P\",\"aud\":\"cortexkit-account\",\"challenge\":\"eyJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJhY2NvdW50X3NlcSI6MSwiYXVkIjoiY29ydGV4a2l0LWFjY291bnQiLCJleHBpcmVzX2F0X21zIjoxODAwMDAwMzAwMDAwLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsImtleV9maW5nZXJwcmludCI6IjIxZmUzMWRmYTE1NGEyNjE2MjZiZjg1NDA0NmZkMjI3MWI3YmVkNGI2YWJlNDVhYTU4ODc3ZWY0N2Y5NzIxYjkiLCJrZXlfaWQiOiIwMU1DQzVSTTAwNk5ESzAxWEQxV1RCN1oxUCIsImtleV9zZXEiOjEsImtpZCI6InZlY3Rvci0xIiwibm9uY2UiOiJCTHBaZ0tRREJQNzJvSEZzX3dwQmtuYkF6Tm1QeXk4bjBwWVR2ZVdudTc4IiwicHVycG9zZSI6Indvcmtlcl90b2tlbiIsInYiOjF9.ztZRjM5-oKkjddS7YzANkLb8PSBUPL_ML-k3_6nzmMQ\",\"sig_hex\":\"de1e140e55afd1e4b6b30d0ee849a9c9c29937036f0bc61f6fb87436b01cacdf065da10bc186163bde9b986eee484279db376fa9e84470340ab79c6607b3b907\"}"
+      },
+      "reply": {
+        "status": 409,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "referrer-policy": "no-referrer"
+        },
+        "body": "{\"error\":\"challenge_spent\"}"
+      }
+    },
+    {
+      "name": "worker:cortexkit-runners:accepted",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/token",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"key_id\":\"01MCC5RM006NDK01XD1WTB7Z1P\",\"aud\":\"cortexkit-runners\",\"challenge\":\"eyJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJhY2NvdW50X3NlcSI6MSwiYXVkIjoiY29ydGV4a2l0LXJ1bm5lcnMiLCJleHBpcmVzX2F0X21zIjoxODAwMDAwMzAwMDAwLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsImtleV9maW5nZXJwcmludCI6IjIxZmUzMWRmYTE1NGEyNjE2MjZiZjg1NDA0NmZkMjI3MWI3YmVkNGI2YWJlNDVhYTU4ODc3ZWY0N2Y5NzIxYjkiLCJrZXlfaWQiOiIwMU1DQzVSTTAwNk5ESzAxWEQxV1RCN1oxUCIsImtleV9zZXEiOjEsImtpZCI6InZlY3Rvci0xIiwibm9uY2UiOiJEck50Y0hiZFlvemJEck5pbG45ZWNPV1JhOXkwMDh5cmk3cDZTMWgxQzhFIiwicHVycG9zZSI6Indvcmtlcl90b2tlbiIsInYiOjF9.P4SGM116Ghov5p2tmkSlpd68Ad-sA1PGj-oLcklImFo\",\"sig_hex\":\"f673c4f33a833d29946c8aa49f810904c3329eb1b3fa636a6a7c7bc77cc25873e4ae15de52d5c275af67473c4c110e601501b8c23d56b6f19c2ccaf9b8ecdc07\"}"
+      },
+      "reply": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "referrer-policy": "no-referrer"
+        },
+        "body": "{\"jwt\":\"eyJhbGciOiJFZERTQSIsImtpZCI6InRlc3Qta2V5LTEiLCJ0eXAiOiJjay13b3JrZXIrand0In0.eyJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJkZXZpY2UiOiIwMU1DQzVSTTAwNk5ESzAxWEQxV1RCN1oxUCIsImlhdCI6MTgwMDAwMDAwMCwiZXhwIjoxODAwMDAwOTAwLCJhdWQiOiJjb3J0ZXhraXQtcnVubmVycyIsImp0aSI6IjAxTUNDNVJNMDBOSEJZQk5NWEVHMTZBOUNYIn0.4KvB90AOk95CBKaqKnbeJdOhiT2awILMfeEZ687HzjWu-cIdjhIzMQQqpiNmZKVcSPsW8UULq9TQ87PMzzQcBg\"}"
+      }
+    },
+    {
+      "name": "worker:cortexkit-runners:challenge",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/token/challenge",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"key_id\":\"01MCC5RM006NDK01XD1WTB7Z1P\",\"aud\":\"cortexkit-runners\"}"
+      },
+      "reply": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "referrer-policy": "no-referrer"
+        },
+        "body": "{\"challenge\":\"eyJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJhY2NvdW50X3NlcSI6MSwiYXVkIjoiY29ydGV4a2l0LXJ1bm5lcnMiLCJleHBpcmVzX2F0X21zIjoxODAwMDAwMzAwMDAwLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsImtleV9maW5nZXJwcmludCI6IjIxZmUzMWRmYTE1NGEyNjE2MjZiZjg1NDA0NmZkMjI3MWI3YmVkNGI2YWJlNDVhYTU4ODc3ZWY0N2Y5NzIxYjkiLCJrZXlfaWQiOiIwMU1DQzVSTTAwNk5ESzAxWEQxV1RCN1oxUCIsImtleV9zZXEiOjEsImtpZCI6InZlY3Rvci0xIiwibm9uY2UiOiJEck50Y0hiZFlvemJEck5pbG45ZWNPV1JhOXkwMDh5cmk3cDZTMWgxQzhFIiwicHVycG9zZSI6Indvcmtlcl90b2tlbiIsInYiOjF9.P4SGM116Ghov5p2tmkSlpd68Ad-sA1PGj-oLcklImFo\",\"expires_at_ms\":1800000300000}"
+      }
+    },
+    {
+      "name": "worker:cortexkit-runners:invalid-signature",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/token",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"key_id\":\"01MCC5RM006NDK01XD1WTB7Z1P\",\"aud\":\"cortexkit-runners\",\"challenge\":\"eyJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJhY2NvdW50X3NlcSI6MSwiYXVkIjoiY29ydGV4a2l0LXJ1bm5lcnMiLCJleHBpcmVzX2F0X21zIjoxODAwMDAwMzAwMDAwLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsImtleV9maW5nZXJwcmludCI6IjIxZmUzMWRmYTE1NGEyNjE2MjZiZjg1NDA0NmZkMjI3MWI3YmVkNGI2YWJlNDVhYTU4ODc3ZWY0N2Y5NzIxYjkiLCJrZXlfaWQiOiIwMU1DQzVSTTAwNk5ESzAxWEQxV1RCN1oxUCIsImtleV9zZXEiOjEsImtpZCI6InZlY3Rvci0xIiwibm9uY2UiOiJEck50Y0hiZFlvemJEck5pbG45ZWNPV1JhOXkwMDh5cmk3cDZTMWgxQzhFIiwicHVycG9zZSI6Indvcmtlcl90b2tlbiIsInYiOjF9.P4SGM116Ghov5p2tmkSlpd68Ad-sA1PGj-oLcklImFo\",\"sig_hex\":\"00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\"}"
+      },
+      "reply": {
+        "status": 401,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "referrer-policy": "no-referrer"
+        },
+        "body": "{\"error\":\"signature_invalid\"}"
+      }
+    },
+    {
+      "name": "worker:cortexkit-runners:replay",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/token",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"key_id\":\"01MCC5RM006NDK01XD1WTB7Z1P\",\"aud\":\"cortexkit-runners\",\"challenge\":\"eyJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJhY2NvdW50X3NlcSI6MSwiYXVkIjoiY29ydGV4a2l0LXJ1bm5lcnMiLCJleHBpcmVzX2F0X21zIjoxODAwMDAwMzAwMDAwLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsImtleV9maW5nZXJwcmludCI6IjIxZmUzMWRmYTE1NGEyNjE2MjZiZjg1NDA0NmZkMjI3MWI3YmVkNGI2YWJlNDVhYTU4ODc3ZWY0N2Y5NzIxYjkiLCJrZXlfaWQiOiIwMU1DQzVSTTAwNk5ESzAxWEQxV1RCN1oxUCIsImtleV9zZXEiOjEsImtpZCI6InZlY3Rvci0xIiwibm9uY2UiOiJEck50Y0hiZFlvemJEck5pbG45ZWNPV1JhOXkwMDh5cmk3cDZTMWgxQzhFIiwicHVycG9zZSI6Indvcmtlcl90b2tlbiIsInYiOjF9.P4SGM116Ghov5p2tmkSlpd68Ad-sA1PGj-oLcklImFo\",\"sig_hex\":\"f673c4f33a833d29946c8aa49f810904c3329eb1b3fa636a6a7c7bc77cc25873e4ae15de52d5c275af67473c4c110e601501b8c23d56b6f19c2ccaf9b8ecdc07\"}"
+      },
+      "reply": {
+        "status": 409,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "referrer-policy": "no-referrer"
+        },
+        "body": "{\"error\":\"challenge_spent\"}"
+      }
+    },
+    {
+      "name": "worker:cortexkit-webhook-relay:accepted",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/token",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"key_id\":\"01MCC5RM006NDK01XD1WTB7Z1P\",\"aud\":\"cortexkit-webhook-relay\",\"challenge\":\"eyJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJhY2NvdW50X3NlcSI6MSwiYXVkIjoiY29ydGV4a2l0LXdlYmhvb2stcmVsYXkiLCJleHBpcmVzX2F0X21zIjoxODAwMDAwMzAwMDAwLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsImtleV9maW5nZXJwcmludCI6IjIxZmUzMWRmYTE1NGEyNjE2MjZiZjg1NDA0NmZkMjI3MWI3YmVkNGI2YWJlNDVhYTU4ODc3ZWY0N2Y5NzIxYjkiLCJrZXlfaWQiOiIwMU1DQzVSTTAwNk5ESzAxWEQxV1RCN1oxUCIsImtleV9zZXEiOjEsImtpZCI6InZlY3Rvci0xIiwibm9uY2UiOiJ2T2taUzlGYzN5VkhVMnZNUTdGUGtGVlZIRE5SVUVEc0YzbUVNc1luVjBFIiwicHVycG9zZSI6Indvcmtlcl90b2tlbiIsInYiOjF9.aEKFSbqRt11j_xxzm8T122Xrfm8kq-le2K-2w4VByPo\",\"sig_hex\":\"4420ab2117c3c29be7624bf19036b47927f484e940e676db0085bfa75e57c89cbcd0b78e40468db9d153c9d9cffcff98e9f0f6004a3e886812536fcc84e7ff0c\"}"
+      },
+      "reply": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "referrer-policy": "no-referrer"
+        },
+        "body": "{\"jwt\":\"eyJhbGciOiJFZERTQSIsImtpZCI6InRlc3Qta2V5LTEiLCJ0eXAiOiJjay13b3JrZXIrand0In0.eyJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJkZXZpY2UiOiIwMU1DQzVSTTAwNk5ESzAxWEQxV1RCN1oxUCIsImlhdCI6MTgwMDAwMDAwMCwiZXhwIjoxODAwMDAwOTAwLCJhdWQiOiJjb3J0ZXhraXQtd2ViaG9vay1yZWxheSIsImp0aSI6IjAxTUNDNVJNMDAwUEpYWjRUNFkzSDRBN1gzIn0.tWInM8AD3uEsd3mTNaHjde_luPioe_AH1redviyQ3hKMW2OfWY7pDuNXfcLQ1ONV4oQo17K3MTqoe5TlBVAEAA\"}"
+      }
+    },
+    {
+      "name": "worker:cortexkit-webhook-relay:challenge",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/token/challenge",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"key_id\":\"01MCC5RM006NDK01XD1WTB7Z1P\",\"aud\":\"cortexkit-webhook-relay\"}"
+      },
+      "reply": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "referrer-policy": "no-referrer"
+        },
+        "body": "{\"challenge\":\"eyJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJhY2NvdW50X3NlcSI6MSwiYXVkIjoiY29ydGV4a2l0LXdlYmhvb2stcmVsYXkiLCJleHBpcmVzX2F0X21zIjoxODAwMDAwMzAwMDAwLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsImtleV9maW5nZXJwcmludCI6IjIxZmUzMWRmYTE1NGEyNjE2MjZiZjg1NDA0NmZkMjI3MWI3YmVkNGI2YWJlNDVhYTU4ODc3ZWY0N2Y5NzIxYjkiLCJrZXlfaWQiOiIwMU1DQzVSTTAwNk5ESzAxWEQxV1RCN1oxUCIsImtleV9zZXEiOjEsImtpZCI6InZlY3Rvci0xIiwibm9uY2UiOiJ2T2taUzlGYzN5VkhVMnZNUTdGUGtGVlZIRE5SVUVEc0YzbUVNc1luVjBFIiwicHVycG9zZSI6Indvcmtlcl90b2tlbiIsInYiOjF9.aEKFSbqRt11j_xxzm8T122Xrfm8kq-le2K-2w4VByPo\",\"expires_at_ms\":1800000300000}"
+      }
+    },
+    {
+      "name": "worker:cortexkit-webhook-relay:invalid-signature",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/token",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"key_id\":\"01MCC5RM006NDK01XD1WTB7Z1P\",\"aud\":\"cortexkit-webhook-relay\",\"challenge\":\"eyJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJhY2NvdW50X3NlcSI6MSwiYXVkIjoiY29ydGV4a2l0LXdlYmhvb2stcmVsYXkiLCJleHBpcmVzX2F0X21zIjoxODAwMDAwMzAwMDAwLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsImtleV9maW5nZXJwcmludCI6IjIxZmUzMWRmYTE1NGEyNjE2MjZiZjg1NDA0NmZkMjI3MWI3YmVkNGI2YWJlNDVhYTU4ODc3ZWY0N2Y5NzIxYjkiLCJrZXlfaWQiOiIwMU1DQzVSTTAwNk5ESzAxWEQxV1RCN1oxUCIsImtleV9zZXEiOjEsImtpZCI6InZlY3Rvci0xIiwibm9uY2UiOiJ2T2taUzlGYzN5VkhVMnZNUTdGUGtGVlZIRE5SVUVEc0YzbUVNc1luVjBFIiwicHVycG9zZSI6Indvcmtlcl90b2tlbiIsInYiOjF9.aEKFSbqRt11j_xxzm8T122Xrfm8kq-le2K-2w4VByPo\",\"sig_hex\":\"00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\"}"
+      },
+      "reply": {
+        "status": 401,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "referrer-policy": "no-referrer"
+        },
+        "body": "{\"error\":\"signature_invalid\"}"
+      }
+    },
+    {
+      "name": "worker:cortexkit-webhook-relay:replay",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/token",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"key_id\":\"01MCC5RM006NDK01XD1WTB7Z1P\",\"aud\":\"cortexkit-webhook-relay\",\"challenge\":\"eyJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJhY2NvdW50X3NlcSI6MSwiYXVkIjoiY29ydGV4a2l0LXdlYmhvb2stcmVsYXkiLCJleHBpcmVzX2F0X21zIjoxODAwMDAwMzAwMDAwLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsImtleV9maW5nZXJwcmludCI6IjIxZmUzMWRmYTE1NGEyNjE2MjZiZjg1NDA0NmZkMjI3MWI3YmVkNGI2YWJlNDVhYTU4ODc3ZWY0N2Y5NzIxYjkiLCJrZXlfaWQiOiIwMU1DQzVSTTAwNk5ESzAxWEQxV1RCN1oxUCIsImtleV9zZXEiOjEsImtpZCI6InZlY3Rvci0xIiwibm9uY2UiOiJ2T2taUzlGYzN5VkhVMnZNUTdGUGtGVlZIRE5SVUVEc0YzbUVNc1luVjBFIiwicHVycG9zZSI6Indvcmtlcl90b2tlbiIsInYiOjF9.aEKFSbqRt11j_xxzm8T122Xrfm8kq-le2K-2w4VByPo\",\"sig_hex\":\"4420ab2117c3c29be7624bf19036b47927f484e940e676db0085bfa75e57c89cbcd0b78e40468db9d153c9d9cffcff98e9f0f6004a3e886812536fcc84e7ff0c\"}"
+      },
+      "reply": {
+        "status": 409,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "referrer-policy": "no-referrer"
+        },
+        "body": "{\"error\":\"challenge_spent\"}"
+      }
+    },
+    {
+      "name": "worker:human-only-refusal",
+      "request": {
+        "method": "POST",
+        "path": "/v1/machine/step-up/start",
+        "headers": {
+          "Content-Type": "application/json",
+          "Authorization": "Bearer eyJhbGciOiJFZERTQSIsImtpZCI6InRlc3Qta2V5LTEiLCJ0eXAiOiJjay13b3JrZXIrand0In0.eyJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJkZXZpY2UiOiIwMU1DQzVSTTAwNk5ESzAxWEQxV1RCN1oxUCIsImlhdCI6MTgwMDAwMDAwMCwiZXhwIjoxODAwMDAwOTAwLCJhdWQiOiJjb3J0ZXhraXQtYWNjb3VudCIsImp0aSI6IjAxTUNDNVJNMDBUM0tURFo0N0VKVko5MTJFIn0.acaoJ06w50MDjigjEdBzVKGrWwjXioXa17SfJEUYrvy8sGHaXBmBMlA1iRjemqZOWhoraNUHhab3wfhe7V5ABg"
+        },
+        "body": "{}"
+      },
+      "reply": {
+        "status": 401,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "referrer-policy": "same-origin",
+          "content-security-policy": "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+          "x-frame-options": "DENY"
+        },
+        "body": "{\"error\":\"auth_failed\"}"
+      }
+    }
+  ],
+  "proofs": [
+    {
+      "name": "enrollment:complete",
+      "transcript": "cortexkit-machine-complete|v1|account.cortexkit.io|01K00000000000000000000080|01MCC5RM002GZ7GPRPSSDC05BQ|21fe31dfa154a261626bf854046fd2271b7bed4b6abe45aa58877ef47f9721b9|e8b122aed020d40557c5cef790a774193f3188acb853b078e3da2e470d4ddc91|eyJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJjb21wbGV0aW9uX2NvZGVfaGFzaCI6ImU4YjEyMmFlZDAyMGQ0MDU1N2M1Y2VmNzkwYTc3NDE5M2YzMTg4YWNiODUzYjA3OGUzZGEyZTQ3MGQ0ZGRjOTEiLCJleHBpcmVzX2F0X21zIjoxODAwMDAwMzAwMDAwLCJmbG93X2lkIjoiMDFNQ0M1Uk0wMDJHWjdHUFJQU1NEQzA1QlEiLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsImtleV9maW5nZXJwcmludCI6IjIxZmUzMWRmYTE1NGEyNjE2MjZiZjg1NDA0NmZkMjI3MWI3YmVkNGI2YWJlNDVhYTU4ODc3ZWY0N2Y5NzIxYjkiLCJraWQiOiJ2ZWN0b3ItMSIsIm5vbmNlIjoiYkN3TFRwVk5wS2VHcmxOak0tdloyTlJSdExpRWlFUkpheVRUc2ZYMEQ4ZyIsInB1cnBvc2UiOiJtYWNoaW5lX2NvbXBsZXRlIiwidiI6MX0.Hc5GB9KpRweTghU9Jp4BdGi8MyVoSsHjxbLt87lCdZc",
+      "transcript_utf8_hex": "636f727465786b69742d6d616368696e652d636f6d706c6574657c76317c6163636f756e742e636f727465786b69742e696f7c30314b30303030303030303030303030303030303030303038307c30314d434335524d303032475a374750525053534443303542517c323166653331646661313534613236313632366266383534303436666432323731623762656434623661626534356161353838373765663437663937323162397c653862313232616564303230643430353537633563656637393061373734313933663331383861636238353362303738653364613265343730643464646339317c65794a6859324e7664573530496a6f694d44464c4d4441774d4441774d4441774d4441774d4441774d4441774d4441774f4441694c434a6a62323177624756306157397558324e765a4756666147467a61434936496d5534596a45794d6d466c5a4441794d4751304d4455314e324d315932566d4e7a6b77595463334e4445354d32597a4d54673459574e694f44557a596a41334f47557a5a4745795a5451334d4751305a47526a4f5445694c434a6c65484270636d567a583246305832317a496a6f784f4441774d4441774d7a41774d4441774c434a6d6247393358326c6b496a6f694d44464e51304d31556b30774d444a48576a644855464a5155314e45517a4131516c45694c434a7063334e315a5752665958526662584d694f6a45344d4441774d4441774d4441774d444173496d746c6556396d6157356e5a584a77636d6c7564434936496a49785a6d557a4d57526d595445314e4745794e6a45324d6a5a695a6a67314e4441304e6d5a6b4d6a49334d574933596d566b4e47493259574a6c4e445668595455344f4463335a5759304e3259354e7a4978596a6b694c434a72615751694f694a325a574e30623349744d534973496d3576626d4e6c496a6f69596b4e3354465277566b357753325648636d784f616b3074646c6f79546c4a536445787052576c46556b70686556525563325a594d4551345a794973496e4231636e4276633255694f694a7459574e6f6157356c58324e76625842735a58526c49697769646949364d58302e4863354742394b7052776554676855394a703442644769384d79566f5373486a78624c7438376c43645a63",
+      "sig_hex": "23935689ba73891f18066d7228de66f0502ec1cbdba029d00413b2b8533b80107c097918792389f2d83fbca681b0ec202555dafffbc2263907b6c3bd543d8906"
+    },
+    {
+      "name": "enroll",
+      "transcript": "cortexkit-machine-enroll|v1|account.cortexkit.io|01K00000000000000000000080|d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a|01MCC5RM00VE1DZZPS5B848T7Q|-|096d72e80b18b54401ff7e68ced6be3b40f3b5647f157909d11016a45da40ffa",
+      "transcript_utf8_hex": "636f727465786b69742d6d616368696e652d656e726f6c6c7c76317c6163636f756e742e636f727465786b69742e696f7c30314b30303030303030303030303030303030303030303038307c643735613938303138326231306162376435346266656433633936343037336130656531373266336461613632333235616630323161363866373037353131617c30314d434335524d3030564531445a5a505335423834385437517c2d7c30393664373265383062313862353434303166663765363863656436626533623430663362353634376631353739303964313130313661343564613430666661",
+      "sig_hex": "ed512173b38f4d0d339a67b22aa767d0248920a3a81cba02aca2e1a1b98c0fad2987a197abe9f742de676a7ec4bfe80c3ce7f94c58269ce80acbbd0716903500"
+    },
+    {
+      "name": "recover",
+      "transcript": "cortexkit-machine-recover|v1|account.cortexkit.io|01K00000000000000000000080|21fe31dfa154a261626bf854046fd2271b7bed4b6abe45aa58877ef47f9721b9|01MCC5RM00VE1DZZPS5B848T7Q|-|096d72e80b18b54401ff7e68ced6be3b40f3b5647f157909d11016a45da40ffa|eyJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJleHBpcmVzX2F0X21zIjoxODAwMDAwMzAwMDAwLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsImp0aSI6IjAxTUNDNVJNMDBWRTFEWlpQUzVCODQ4VDdRIiwia2V5X2ZpbmdlcnByaW50IjoiMjFmZTMxZGZhMTU0YTI2MTYyNmJmODU0MDQ2ZmQyMjcxYjdiZWQ0YjZhYmU0NWFhNTg4NzdlZjQ3Zjk3MjFiOSIsImtpZCI6InZlY3Rvci0xIiwibGFiZWxfaGFzaCI6IjA5NmQ3MmU4MGIxOGI1NDQwMWZmN2U2OGNlZDZiZTNiNDBmM2I1NjQ3ZjE1NzkwOWQxMTAxNmE0NWRhNDBmZmEiLCJub25jZSI6ImlyWmJHSWVSa0FmVi1hdkpmc3hveTBKTnR0TGxJM1ViME9CMkUxRlpWWkUiLCJwdXJwb3NlIjoibWFjaGluZV9yZWNvdmVyIiwicmVwbGFjZXMiOm51bGwsInYiOjF9.dIfg0cqUsFaL3lu0M2QRTh_G9d7LCKfw2UG_xtez5FM",
+      "transcript_utf8_hex": "636f727465786b69742d6d616368696e652d7265636f7665727c76317c6163636f756e742e636f727465786b69742e696f7c30314b30303030303030303030303030303030303030303038307c323166653331646661313534613236313632366266383534303436666432323731623762656434623661626534356161353838373765663437663937323162397c30314d434335524d3030564531445a5a505335423834385437517c2d7c303936643732653830623138623534343031666637653638636564366265336234306633623536343766313537393039643131303136613435646134306666617c65794a6859324e7664573530496a6f694d44464c4d4441774d4441774d4441774d4441774d4441774d4441774d4441774f4441694c434a6c65484270636d567a583246305832317a496a6f784f4441774d4441774d7a41774d4441774c434a7063334e315a5752665958526662584d694f6a45344d4441774d4441774d4441774d444173496d703061534936496a417854554e444e564a4e4d44425752544645576c7051557a56434f44513456446452496977696132563558325a70626d646c636e427961573530496a6f694d6a466d5a544d785a475a684d545530595449324d5459794e6d4a6d4f4455304d4451325a6d51794d6a6378596a64695a575130596a5a68596d55304e5746684e5467344e7a646c5a6a51335a6a6b334d6a46694f534973496d74705a434936496e5a6c593352766369307849697769624746695a5778666147467a61434936496a41354e6d51334d6d55344d4749784f4749314e4451774d575a6d4e3255324f474e6c5a445a695a544e694e44426d4d3249314e6a51335a6a45314e7a6b774f5751784d5441784e6d45304e5752684e44426d5a6d45694c434a756232356a5a534936496d6c79576d4a48535756536130466d56693168646b706d633368766554424b546e52305447784a4d3156694d4539434d6b5578526c7057576b55694c434a7764584a7762334e6c496a6f696257466a61476c755a5639795a574e76646d567949697769636d56776247466a5a584d694f6d353162477773496e59694f6a46392e64496667306371557346614c336c75304d32515254685f473964374c434b66773255475f7874657a35464d",
+      "sig_hex": "a0f63f1718ebc181b887c3de8f543242037aa352692792f4ec74e78c3847a5cca0d52ae7307617912b4c346a967af208589c3d3a0c422da2d2fd30d90c0e2e07"
+    },
+    {
+      "name": "worker:cortexkit-account",
+      "transcript": "cortexkit-device-auth|v1|account.cortexkit.io|01K00000000000000000000080|01MCC5RM006NDK01XD1WTB7Z1P|eyJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJhY2NvdW50X3NlcSI6MSwiYXVkIjoiY29ydGV4a2l0LWFjY291bnQiLCJleHBpcmVzX2F0X21zIjoxODAwMDAwMzAwMDAwLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsImtleV9maW5nZXJwcmludCI6IjIxZmUzMWRmYTE1NGEyNjE2MjZiZjg1NDA0NmZkMjI3MWI3YmVkNGI2YWJlNDVhYTU4ODc3ZWY0N2Y5NzIxYjkiLCJrZXlfaWQiOiIwMU1DQzVSTTAwNk5ESzAxWEQxV1RCN1oxUCIsImtleV9zZXEiOjEsImtpZCI6InZlY3Rvci0xIiwibm9uY2UiOiJCTHBaZ0tRREJQNzJvSEZzX3dwQmtuYkF6Tm1QeXk4bjBwWVR2ZVdudTc4IiwicHVycG9zZSI6Indvcmtlcl90b2tlbiIsInYiOjF9.ztZRjM5-oKkjddS7YzANkLb8PSBUPL_ML-k3_6nzmMQ|cortexkit-account",
+      "transcript_utf8_hex": "636f727465786b69742d6465766963652d617574687c76317c6163636f756e742e636f727465786b69742e696f7c30314b30303030303030303030303030303030303030303038307c30314d434335524d3030364e444b3031584431575442375a31507c65794a6859324e7664573530496a6f694d44464c4d4441774d4441774d4441774d4441774d4441774d4441774d4441774f4441694c434a6859324e766457353058334e6c635349364d5377695958566b496a6f69593239796447563461326c304c57466a59323931626e51694c434a6c65484270636d567a583246305832317a496a6f784f4441774d4441774d7a41774d4441774c434a7063334e315a5752665958526662584d694f6a45344d4441774d4441774d4441774d444173496d746c6556396d6157356e5a584a77636d6c7564434936496a49785a6d557a4d57526d595445314e4745794e6a45324d6a5a695a6a67314e4441304e6d5a6b4d6a49334d574933596d566b4e47493259574a6c4e445668595455344f4463335a5759304e3259354e7a4978596a6b694c434a725a586c66615751694f6949774d553144517a5653545441774e6b3545537a417857455178563152434e316f7855434973496d746c6556397a5a5845694f6a4573496d74705a434936496e5a6c593352766369307849697769626d3975593255694f694a43544842615a30745252454a514e7a4a7653455a7a58336477516d7475596b4636546d315165586b34626a4277575652325a5664756454633449697769634856796347397a5a534936496e6476636d746c636c39306232746c62694973496e59694f6a46392e7a745a526a4d352d6f4b6b6a64645337597a414e6b4c623850534255504c5f4d4c2d6b335f366e7a6d4d517c636f727465786b69742d6163636f756e74",
+      "sig_hex": "de1e140e55afd1e4b6b30d0ee849a9c9c29937036f0bc61f6fb87436b01cacdf065da10bc186163bde9b986eee484279db376fa9e84470340ab79c6607b3b907"
+    },
+    {
+      "name": "worker:cortexkit-webhook-relay",
+      "transcript": "cortexkit-device-auth|v1|account.cortexkit.io|01K00000000000000000000080|01MCC5RM006NDK01XD1WTB7Z1P|eyJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJhY2NvdW50X3NlcSI6MSwiYXVkIjoiY29ydGV4a2l0LXdlYmhvb2stcmVsYXkiLCJleHBpcmVzX2F0X21zIjoxODAwMDAwMzAwMDAwLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsImtleV9maW5nZXJwcmludCI6IjIxZmUzMWRmYTE1NGEyNjE2MjZiZjg1NDA0NmZkMjI3MWI3YmVkNGI2YWJlNDVhYTU4ODc3ZWY0N2Y5NzIxYjkiLCJrZXlfaWQiOiIwMU1DQzVSTTAwNk5ESzAxWEQxV1RCN1oxUCIsImtleV9zZXEiOjEsImtpZCI6InZlY3Rvci0xIiwibm9uY2UiOiJ2T2taUzlGYzN5VkhVMnZNUTdGUGtGVlZIRE5SVUVEc0YzbUVNc1luVjBFIiwicHVycG9zZSI6Indvcmtlcl90b2tlbiIsInYiOjF9.aEKFSbqRt11j_xxzm8T122Xrfm8kq-le2K-2w4VByPo|cortexkit-webhook-relay",
+      "transcript_utf8_hex": "636f727465786b69742d6465766963652d617574687c76317c6163636f756e742e636f727465786b69742e696f7c30314b30303030303030303030303030303030303030303038307c30314d434335524d3030364e444b3031584431575442375a31507c65794a6859324e7664573530496a6f694d44464c4d4441774d4441774d4441774d4441774d4441774d4441774d4441774f4441694c434a6859324e766457353058334e6c635349364d5377695958566b496a6f69593239796447563461326c304c58646c596d687662327374636d567359586b694c434a6c65484270636d567a583246305832317a496a6f784f4441774d4441774d7a41774d4441774c434a7063334e315a5752665958526662584d694f6a45344d4441774d4441774d4441774d444173496d746c6556396d6157356e5a584a77636d6c7564434936496a49785a6d557a4d57526d595445314e4745794e6a45324d6a5a695a6a67314e4441304e6d5a6b4d6a49334d574933596d566b4e47493259574a6c4e445668595455344f4463335a5759304e3259354e7a4978596a6b694c434a725a586c66615751694f6949774d553144517a5653545441774e6b3545537a417857455178563152434e316f7855434973496d746c6556397a5a5845694f6a4573496d74705a434936496e5a6c593352766369307849697769626d3975593255694f694a3254327461557a6c47597a4e35566b68564d6e5a4e5554644755477447566c5a4952453553565556456330597a6255564e63316c75566a424649697769634856796347397a5a534936496e6476636d746c636c39306232746c62694973496e59694f6a46392e61454b46536271527431316a5f78787a6d38543132325872666d386b712d6c65324b2d327734564279506f7c636f727465786b69742d776562686f6f6b2d72656c6179",
+      "sig_hex": "4420ab2117c3c29be7624bf19036b47927f484e940e676db0085bfa75e57c89cbcd0b78e40468db9d153c9d9cffcff98e9f0f6004a3e886812536fcc84e7ff0c"
+    },
+    {
+      "name": "worker:cortexkit-runners",
+      "transcript": "cortexkit-device-auth|v1|account.cortexkit.io|01K00000000000000000000080|01MCC5RM006NDK01XD1WTB7Z1P|eyJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJhY2NvdW50X3NlcSI6MSwiYXVkIjoiY29ydGV4a2l0LXJ1bm5lcnMiLCJleHBpcmVzX2F0X21zIjoxODAwMDAwMzAwMDAwLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsImtleV9maW5nZXJwcmludCI6IjIxZmUzMWRmYTE1NGEyNjE2MjZiZjg1NDA0NmZkMjI3MWI3YmVkNGI2YWJlNDVhYTU4ODc3ZWY0N2Y5NzIxYjkiLCJrZXlfaWQiOiIwMU1DQzVSTTAwNk5ESzAxWEQxV1RCN1oxUCIsImtleV9zZXEiOjEsImtpZCI6InZlY3Rvci0xIiwibm9uY2UiOiJEck50Y0hiZFlvemJEck5pbG45ZWNPV1JhOXkwMDh5cmk3cDZTMWgxQzhFIiwicHVycG9zZSI6Indvcmtlcl90b2tlbiIsInYiOjF9.P4SGM116Ghov5p2tmkSlpd68Ad-sA1PGj-oLcklImFo|cortexkit-runners",
+      "transcript_utf8_hex": "636f727465786b69742d6465766963652d617574687c76317c6163636f756e742e636f727465786b69742e696f7c30314b30303030303030303030303030303030303030303038307c30314d434335524d3030364e444b3031584431575442375a31507c65794a6859324e7664573530496a6f694d44464c4d4441774d4441774d4441774d4441774d4441774d4441774d4441774f4441694c434a6859324e766457353058334e6c635349364d5377695958566b496a6f69593239796447563461326c304c584a31626d356c636e4d694c434a6c65484270636d567a583246305832317a496a6f784f4441774d4441774d7a41774d4441774c434a7063334e315a5752665958526662584d694f6a45344d4441774d4441774d4441774d444173496d746c6556396d6157356e5a584a77636d6c7564434936496a49785a6d557a4d57526d595445314e4745794e6a45324d6a5a695a6a67314e4441304e6d5a6b4d6a49334d574933596d566b4e47493259574a6c4e445668595455344f4463335a5759304e3259354e7a4978596a6b694c434a725a586c66615751694f6949774d553144517a5653545441774e6b3545537a417857455178563152434e316f7855434973496d746c6556397a5a5845694f6a4573496d74705a434936496e5a6c593352766369307849697769626d3975593255694f694a45636b3530593068695a466c76656d4a45636b3570624734355a574e5056314a684f586b774d446835636d6b3363445a544d576778517a684649697769634856796347397a5a534936496e6476636d746c636c39306232746c62694973496e59694f6a46392e503453474d31313647686f76357032746d6b536c7064363841642d73413150476a2d6f4c636b6c496d466f7c636f727465786b69742d72756e6e657273",
+      "sig_hex": "f673c4f33a833d29946c8aa49f810904c3329eb1b3fa636a6a7c7bc77cc25873e4ae15de52d5c275af67473c4c110e601501b8c23d56b6f19c2ccaf9b8ecdc07"
+    },
+    {
+      "name": "relay-permit",
+      "transcript": "cortexkit-relay-credential-mint|v1|account.cortexkit.io|01K00000000000000000000080|01MCC5RM006NDK01XD1WTB7Z1P|github|01K00000000000000000000081|eyJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJhY2NvdW50X3NlcSI6MSwiZXhwaXJlc19hdF9tcyI6MTgwMDAwMDMwMDAwMCwiaXNzdWVkX2F0X21zIjoxODAwMDAwMDAwMDAwLCJrZXlfZmluZ2VycHJpbnQiOiIyMWZlMzFkZmExNTRhMjYxNjI2YmY4NTQwNDZmZDIyNzFiN2JlZDRiNmFiZTQ1YWE1ODg3N2VmNDdmOTcyMWI5Iiwia2V5X2lkIjoiMDFNQ0M1Uk0wMDZOREswMVhEMVdUQjdaMVAiLCJrZXlfc2VxIjoxLCJraWQiOiJ2ZWN0b3ItMSIsIm5vbmNlIjoiRTFrUlY1bEtiNmVsV0huSFR2SzZ6eVlraDFhN09GY3FYa1lMdTVBU0FjNCIsInB1cnBvc2UiOiJyZWxheV9jcmVkZW50aWFsX21pbnQiLCJyZXF1ZXN0X2lkIjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODEiLCJzb3VyY2UiOiJnaXRodWIiLCJ2IjoxfQ.VwbGWTC3JcUCQtMfYNKUp5i6DCoDBXCtZMthqp9Nbrc",
+      "transcript_utf8_hex": "636f727465786b69742d72656c61792d63726564656e7469616c2d6d696e747c76317c6163636f756e742e636f727465786b69742e696f7c30314b30303030303030303030303030303030303030303038307c30314d434335524d3030364e444b3031584431575442375a31507c6769746875627c30314b30303030303030303030303030303030303030303038317c65794a6859324e7664573530496a6f694d44464c4d4441774d4441774d4441774d4441774d4441774d4441774d4441774f4441694c434a6859324e766457353058334e6c635349364d5377695a58687761584a6c6331396864463974637949364d5467774d4441774d444d774d4441774d43776961584e7a6457566b583246305832317a496a6f784f4441774d4441774d4441774d4441774c434a725a586c665a6d6c755a32567963484a70626e51694f6949794d575a6c4d7a466b5a6d45784e5452684d6a59784e6a4932596d59344e5451774e445a6d5a4449794e7a46694e324a6c5a4452694e6d46695a545131595745314f4467334e32566d4e44646d4f5463794d574935496977696132563558326c6b496a6f694d44464e51304d31556b30774d445a4f524573774d5668454d566455516a64614d5641694c434a725a586c6663325678496a6f784c434a72615751694f694a325a574e30623349744d534973496d3576626d4e6c496a6f6952544672556c5931624574694e6d56735630687553465232537a5a3665566c72614446684e3039475933465961316c4d645456425530466a4e434973496e4231636e4276633255694f694a795a5778686556396a636d566b5a5735306157467358323170626e51694c434a795a5846315a584e3058326c6b496a6f694d44464c4d4441774d4441774d4441774d4441774d4441774d4441774d4441774f4445694c434a7a62335679593255694f694a6e6158526f645749694c434a32496a6f7866512e56776247575443334a63554351744d66594e4b557035693644436f44425843745a4d74687170394e627263",
+      "sig_hex": "b6c25157fbac5396bb27d28ce552a61b1cf2f598c00f6851706506e19382603edd8ab3cf6aaf042f3a652119769e8186495748a50bd33cc3a5eea604042f7706"
+    },
+    {
+      "name": "machine_revoke_other:complete",
+      "transcript": "cortexkit-machine-complete|v1|account.cortexkit.io|01K00000000000000000000080|01MCC5RM000X84JTKKNPD3VA9B|21fe31dfa154a261626bf854046fd2271b7bed4b6abe45aa58877ef47f9721b9|48f44ea270c9c9593032bed24337805f03aa2e03d2b67a37e985bd4c54996484|eyJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJjb21wbGV0aW9uX2NvZGVfaGFzaCI6IjQ4ZjQ0ZWEyNzBjOWM5NTkzMDMyYmVkMjQzMzc4MDVmMDNhYTJlMDNkMmI2N2EzN2U5ODViZDRjNTQ5OTY0ODQiLCJleHBpcmVzX2F0X21zIjoxODAwMDAwMzAwMDAwLCJmbG93X2lkIjoiMDFNQ0M1Uk0wMDBYODRKVEtLTlBEM1ZBOUIiLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsImtleV9maW5nZXJwcmludCI6IjIxZmUzMWRmYTE1NGEyNjE2MjZiZjg1NDA0NmZkMjI3MWI3YmVkNGI2YWJlNDVhYTU4ODc3ZWY0N2Y5NzIxYjkiLCJraWQiOiJ2ZWN0b3ItMSIsIm5vbmNlIjoiRlJVRG5CeHdjMkNZZm9ncUdRN253N0ZXRDliX0RfRFllLVdyTlZSVmMtNCIsInB1cnBvc2UiOiJtYWNoaW5lX2NvbXBsZXRlIiwidiI6MX0.Viq7qQh01wwcjRAU0e_qegZwRhssfXOcH9vG1Fw2a1M",
+      "transcript_utf8_hex": "636f727465786b69742d6d616368696e652d636f6d706c6574657c76317c6163636f756e742e636f727465786b69742e696f7c30314b30303030303030303030303030303030303030303038307c30314d434335524d3030305838344a544b4b4e504433564139427c323166653331646661313534613236313632366266383534303436666432323731623762656434623661626534356161353838373765663437663937323162397c343866343465613237306339633935393330333262656432343333373830356630336161326530336432623637613337653938356264346335343939363438347c65794a6859324e7664573530496a6f694d44464c4d4441774d4441774d4441774d4441774d4441774d4441774d4441774f4441694c434a6a62323177624756306157397558324e765a4756666147467a61434936496a51345a6a51305a5745794e7a426a4f574d354e546b7a4d444d79596d566b4d6a517a4d7a63344d44566d4d444e6859544a6c4d444e6b4d6d49324e32457a4e3255354f4456695a44526a4e5451354f5459304f4451694c434a6c65484270636d567a583246305832317a496a6f784f4441774d4441774d7a41774d4441774c434a6d6247393358326c6b496a6f694d44464e51304d31556b30774d4442594f44524b5645744c546c42454d315a424f5549694c434a7063334e315a5752665958526662584d694f6a45344d4441774d4441774d4441774d444173496d746c6556396d6157356e5a584a77636d6c7564434936496a49785a6d557a4d57526d595445314e4745794e6a45324d6a5a695a6a67314e4441304e6d5a6b4d6a49334d574933596d566b4e47493259574a6c4e445668595455344f4463335a5759304e3259354e7a4978596a6b694c434a72615751694f694a325a574e30623349744d534973496d3576626d4e6c496a6f69526c4a56524735436548646a4d6b4e5a5a6d396e635564524e3235334e305a5852446c695830526652466c6c4c566479546c5a53566d4d744e434973496e4231636e4276633255694f694a7459574e6f6157356c58324e76625842735a58526c49697769646949364d58302e5669713771516830317777636a52415530655f7165675a775268737366584f63483976473146773261314d",
+      "sig_hex": "55a78ffe01fa51134f876048a1b257c0de3158dbf38938370bdca3a412bb56bc39d512786e434ae0cba65c0efb96c461a25faab38ce83bc5ec25658c8bb6cd0d"
+    },
+    {
+      "name": "relay_credential_revoke_other:complete",
+      "transcript": "cortexkit-machine-complete|v1|account.cortexkit.io|01K00000000000000000000080|01MCC5RM00ZF4JCYYVRWK880DK|21fe31dfa154a261626bf854046fd2271b7bed4b6abe45aa58877ef47f9721b9|e3c9769f83abc9bc688bf2dd4fe8bc411f7851f7c77be73b7fcc91427173eba7|eyJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJjb21wbGV0aW9uX2NvZGVfaGFzaCI6ImUzYzk3NjlmODNhYmM5YmM2ODhiZjJkZDRmZThiYzQxMWY3ODUxZjdjNzdiZTczYjdmY2M5MTQyNzE3M2ViYTciLCJleHBpcmVzX2F0X21zIjoxODAwMDAwMzAwMDAwLCJmbG93X2lkIjoiMDFNQ0M1Uk0wMFpGNEpDWVlWUldLODgwREsiLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsImtleV9maW5nZXJwcmludCI6IjIxZmUzMWRmYTE1NGEyNjE2MjZiZjg1NDA0NmZkMjI3MWI3YmVkNGI2YWJlNDVhYTU4ODc3ZWY0N2Y5NzIxYjkiLCJraWQiOiJ2ZWN0b3ItMSIsIm5vbmNlIjoiUzdiWUVXY3lfX0RMaG9fcndGOHdJV2lQUGNBaGh4NzloZ0F3TW1ULUtrWSIsInB1cnBvc2UiOiJtYWNoaW5lX2NvbXBsZXRlIiwidiI6MX0.-0KYcm5e5n6VVfHks6vJWMLAkvRVXdl5lWskviQrGE8",
+      "transcript_utf8_hex": "636f727465786b69742d6d616368696e652d636f6d706c6574657c76317c6163636f756e742e636f727465786b69742e696f7c30314b30303030303030303030303030303030303030303038307c30314d434335524d30305a46344a4359595652574b383830444b7c323166653331646661313534613236313632366266383534303436666432323731623762656434623661626534356161353838373765663437663937323162397c653363393736396638336162633962633638386266326464346665386263343131663738353166376337376265373362376663633931343237313733656261377c65794a6859324e7664573530496a6f694d44464c4d4441774d4441774d4441774d4441774d4441774d4441774d4441774f4441694c434a6a62323177624756306157397558324e765a4756666147467a61434936496d557a597a6b334e6a6c6d4f444e68596d4d35596d4d324f4468695a6a4a6b5a44526d5a546869597a51784d5759334f4455785a6a646a4e7a64695a54637a596a646d59324d354d5451794e7a45334d325669595463694c434a6c65484270636d567a583246305832317a496a6f784f4441774d4441774d7a41774d4441774c434a6d6247393358326c6b496a6f694d44464e51304d31556b30774d4670474e45704457566c57556c644c4f446777524573694c434a7063334e315a5752665958526662584d694f6a45344d4441774d4441774d4441774d444173496d746c6556396d6157356e5a584a77636d6c7564434936496a49785a6d557a4d57526d595445314e4745794e6a45324d6a5a695a6a67314e4441304e6d5a6b4d6a49334d574933596d566b4e47493259574a6c4e445668595455344f4463335a5759304e3259354e7a4978596a6b694c434a72615751694f694a325a574e30623349744d534973496d3576626d4e6c496a6f69557a64695755565859336c665830524d61473966636e64474f48644a56326c5155474e42614768344e7a6c6f5a304633545731554c55747257534973496e4231636e4276633255694f694a7459574e6f6157356c58324e76625842735a58526c49697769646949364d58302e2d304b59636d3565356e36565666486b7336764a574d4c416b76525658646c356c57736b76695172474538",
+      "sig_hex": "15a73b1e43d65fa95d90e319f15b6a5da639affd6b8eb80c55190174f8b8bbe15a48d5a662987a4985a7f94aec67fd3641b6a3acee0a78fd43e81e85871a5e03"
+    },
+    {
+      "name": "relay_installation_unbind:complete",
+      "transcript": "cortexkit-machine-complete|v1|account.cortexkit.io|01K00000000000000000000080|01MCC5RM00F6QBEEQFHYB6RA6V|21fe31dfa154a261626bf854046fd2271b7bed4b6abe45aa58877ef47f9721b9|bb58b38d1076d595a38c14a59c0b44da5643d26d832b974813e76a343999c655|eyJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJjb21wbGV0aW9uX2NvZGVfaGFzaCI6ImJiNThiMzhkMTA3NmQ1OTVhMzhjMTRhNTljMGI0NGRhNTY0M2QyNmQ4MzJiOTc0ODEzZTc2YTM0Mzk5OWM2NTUiLCJleHBpcmVzX2F0X21zIjoxODAwMDAwMzAwMDAwLCJmbG93X2lkIjoiMDFNQ0M1Uk0wMEY2UUJFRVFGSFlCNlJBNlYiLCJpc3N1ZWRfYXRfbXMiOjE4MDAwMDAwMDAwMDAsImtleV9maW5nZXJwcmludCI6IjIxZmUzMWRmYTE1NGEyNjE2MjZiZjg1NDA0NmZkMjI3MWI3YmVkNGI2YWJlNDVhYTU4ODc3ZWY0N2Y5NzIxYjkiLCJraWQiOiJ2ZWN0b3ItMSIsIm5vbmNlIjoidHVpei1XZ2RWZHdvRVhoZEJ0SDEyNGtVcEg2dFVDMnRvbkRkNzFZSVBpTSIsInB1cnBvc2UiOiJtYWNoaW5lX2NvbXBsZXRlIiwidiI6MX0.v_v7_O78QU6vWtEqSn7LlsfaLMW6TVzkNf7KUMgXI-o",
+      "transcript_utf8_hex": "636f727465786b69742d6d616368696e652d636f6d706c6574657c76317c6163636f756e742e636f727465786b69742e696f7c30314b30303030303030303030303030303030303030303038307c30314d434335524d3030463651424545514648594236524136567c323166653331646661313534613236313632366266383534303436666432323731623762656434623661626534356161353838373765663437663937323162397c626235386233386431303736643539356133386331346135396330623434646135363433643236643833326239373438313365373661333433393939633635357c65794a6859324e7664573530496a6f694d44464c4d4441774d4441774d4441774d4441774d4441774d4441774d4441774f4441694c434a6a62323177624756306157397558324e765a4756666147467a61434936496d4a694e5468694d7a686b4d5441334e6d51314f5456684d7a686a4d5452684e546c6a4d4749304e4752684e5459304d3251794e6d51344d7a4a694f5463304f44457a5a54633259544d304d7a6b354f574d324e5455694c434a6c65484270636d567a583246305832317a496a6f784f4441774d4441774d7a41774d4441774c434a6d6247393358326c6b496a6f694d44464e51304d31556b30774d45593255554a465256464753466c434e6c4a424e6c59694c434a7063334e315a5752665958526662584d694f6a45344d4441774d4441774d4441774d444173496d746c6556396d6157356e5a584a77636d6c7564434936496a49785a6d557a4d57526d595445314e4745794e6a45324d6a5a695a6a67314e4441304e6d5a6b4d6a49334d574933596d566b4e47493259574a6c4e445668595455344f4463335a5759304e3259354e7a4978596a6b694c434a72615751694f694a325a574e30623349744d534973496d3576626d4e6c496a6f6964485670656931585a3252575a4864765256686f5a454a30534445794e47745663456732644656444d6e5276626b526b4e7a465a5356427054534973496e4231636e4276633255694f694a7459574e6f6157356c58324e76625842735a58526c49697769646949364d58302e765f76375f4f37385155367657744571536e374c6c7366614c4d573654567a6b4e66374b554d6758492d6f",
+      "sig_hex": "dbd8cd04191eb39f0a80690077ef2184ecfb043151c7002b54084aaf89bec73cf0c71d39e711200b1f21420b9091665dd78f7b1044cfc0ef03f9e1978b5f5202"
+    }
+  ],
+  "artifacts": [
+    {
+      "name": "enrollment:attestation",
+      "compact": "eyJhbGciOiJFZERTQSIsInR5cCI6ImNrLW1hY2hpbmUtZW5yb2xsK2p3dCIsImtpZCI6InRlc3Qta2V5LTEifQ.eyJpc3MiOiJodHRwczovL2FjY291bnQuY29ydGV4a2l0LmlvIiwiYXVkIjoiY29ydGV4a2l0LWFjY291bnQ6bWFjaGluZS1lbnJvbGwiLCJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJwdXJwb3NlIjoibWFjaGluZV9lbnJvbGwiLCJmbG93IjoiMDFNQ0M1Uk0wMDJHWjdHUFJQU1NEQzA1QlEiLCJrZXlfZmluZ2VycHJpbnQiOiIyMWZlMzFkZmExNTRhMjYxNjI2YmY4NTQwNDZmZDIyNzFiN2JlZDRiNmFiZTQ1YWE1ODg3N2VmNDdmOTcyMWI5IiwibGFiZWxfaGFzaCI6IjA5NmQ3MmU4MGIxOGI1NDQwMWZmN2U2OGNlZDZiZTNiNDBmM2I1NjQ3ZjE1NzkwOWQxMTAxNmE0NWRhNDBmZmEiLCJyZXBsYWNlcyI6bnVsbCwiaWF0IjoxODAwMDAwMDAwLCJleHAiOjE4MDAwMDAzMDAsImp0aSI6IjAxTUNDNVJNMDBWRTFEWlpQUzVCODQ4VDdRIn0.6EKzRuhVvpqcf6OIq-A6Joe4owNRNLZ4Mgv8-l342WO4Lx1rJ5e5eFMm8hK0mZL8-n88zfxREsAUF_ZpNdTLAg",
+      "header": {
+        "alg": "EdDSA",
+        "typ": "ck-machine-enroll+jwt",
+        "kid": "test-key-1"
+      },
+      "claims": {
+        "iss": "https://account.cortexkit.io",
+        "aud": "cortexkit-account:machine-enroll",
+        "account": "01K00000000000000000000080",
+        "purpose": "machine_enroll",
+        "flow": "01MCC5RM002GZ7GPRPSSDC05BQ",
+        "key_fingerprint": "21fe31dfa154a261626bf854046fd2271b7bed4b6abe45aa58877ef47f9721b9",
+        "label_hash": "096d72e80b18b54401ff7e68ced6be3b40f3b5647f157909d11016a45da40ffa",
+        "replaces": null,
+        "iat": 1800000000,
+        "exp": 1800000300,
+        "jti": "01MCC5RM00VE1DZZPS5B848T7Q"
+      }
+    },
+    {
+      "name": "worker:cortexkit-account",
+      "compact": "eyJhbGciOiJFZERTQSIsImtpZCI6InRlc3Qta2V5LTEiLCJ0eXAiOiJjay13b3JrZXIrand0In0.eyJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJkZXZpY2UiOiIwMU1DQzVSTTAwNk5ESzAxWEQxV1RCN1oxUCIsImlhdCI6MTgwMDAwMDAwMCwiZXhwIjoxODAwMDAwOTAwLCJhdWQiOiJjb3J0ZXhraXQtYWNjb3VudCIsImp0aSI6IjAxTUNDNVJNMDBUM0tURFo0N0VKVko5MTJFIn0.acaoJ06w50MDjigjEdBzVKGrWwjXioXa17SfJEUYrvy8sGHaXBmBMlA1iRjemqZOWhoraNUHhab3wfhe7V5ABg",
+      "header": {
+        "alg": "EdDSA",
+        "kid": "test-key-1",
+        "typ": "ck-worker+jwt"
+      },
+      "claims": {
+        "account": "01K00000000000000000000080",
+        "device": "01MCC5RM006NDK01XD1WTB7Z1P",
+        "iat": 1800000000,
+        "exp": 1800000900,
+        "aud": "cortexkit-account",
+        "jti": "01MCC5RM00T3KTDZ47EJVJ912E"
+      }
+    },
+    {
+      "name": "worker:cortexkit-webhook-relay",
+      "compact": "eyJhbGciOiJFZERTQSIsImtpZCI6InRlc3Qta2V5LTEiLCJ0eXAiOiJjay13b3JrZXIrand0In0.eyJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJkZXZpY2UiOiIwMU1DQzVSTTAwNk5ESzAxWEQxV1RCN1oxUCIsImlhdCI6MTgwMDAwMDAwMCwiZXhwIjoxODAwMDAwOTAwLCJhdWQiOiJjb3J0ZXhraXQtd2ViaG9vay1yZWxheSIsImp0aSI6IjAxTUNDNVJNMDAwUEpYWjRUNFkzSDRBN1gzIn0.tWInM8AD3uEsd3mTNaHjde_luPioe_AH1redviyQ3hKMW2OfWY7pDuNXfcLQ1ONV4oQo17K3MTqoe5TlBVAEAA",
+      "header": {
+        "alg": "EdDSA",
+        "kid": "test-key-1",
+        "typ": "ck-worker+jwt"
+      },
+      "claims": {
+        "account": "01K00000000000000000000080",
+        "device": "01MCC5RM006NDK01XD1WTB7Z1P",
+        "iat": 1800000000,
+        "exp": 1800000900,
+        "aud": "cortexkit-webhook-relay",
+        "jti": "01MCC5RM000PJXZ4T4Y3H4A7X3"
+      }
+    },
+    {
+      "name": "worker:cortexkit-runners",
+      "compact": "eyJhbGciOiJFZERTQSIsImtpZCI6InRlc3Qta2V5LTEiLCJ0eXAiOiJjay13b3JrZXIrand0In0.eyJhY2NvdW50IjoiMDFLMDAwMDAwMDAwMDAwMDAwMDAwMDAwODAiLCJkZXZpY2UiOiIwMU1DQzVSTTAwNk5ESzAxWEQxV1RCN1oxUCIsImlhdCI6MTgwMDAwMDAwMCwiZXhwIjoxODAwMDAwOTAwLCJhdWQiOiJjb3J0ZXhraXQtcnVubmVycyIsImp0aSI6IjAxTUNDNVJNMDBOSEJZQk5NWEVHMTZBOUNYIn0.4KvB90AOk95CBKaqKnbeJdOhiT2awILMfeEZ687HzjWu-cIdjhIzMQQqpiNmZKVcSPsW8UULq9TQ87PMzzQcBg",
+      "header": {
+        "alg": "EdDSA",
+        "kid": "test-key-1",
+        "typ": "ck-worker+jwt"
+      },
+      "claims": {
+        "account": "01K00000000000000000000080",
+        "device": "01MCC5RM006NDK01XD1WTB7Z1P",
+        "iat": 1800000000,
+        "exp": 1800000900,
+        "aud": "cortexkit-runners",
+        "jti": "01MCC5RM00NHBYBNMXEG16A9CX"
+      }
+    },
+    {
+      "name": "relay-permit",
+      "compact": "eyJhbGciOiJFZERTQSIsImtpZCI6InRlc3Qta2V5LTEiLCJ0eXAiOiJjay1yZWxheS1taW50K2p3dCJ9.eyJpc3MiOiJodHRwczovL2FjY291bnQuY29ydGV4a2l0LmlvIiwiYXVkIjoiY29ydGV4a2l0LXdlYmhvb2stcmVsYXk6Y3JlZGVudGlhbC1taW50IiwiYWNjb3VudCI6IjAxSzAwMDAwMDAwMDAwMDAwMDAwMDAwMDgwIiwiZGV2aWNlIjoiMDFNQ0M1Uk0wMDZOREswMVhEMVdUQjdaMVAiLCJwdXJwb3NlIjoicmVsYXlfY3JlZGVudGlhbF9taW50Iiwic291cmNlIjoiZ2l0aHViIiwicmVxdWVzdF9pZCI6IjAxSzAwMDAwMDAwMDAwMDAwMDAwMDAwMDgxIiwiYWNjb3VudF9zZXEiOjEsImtleV9zZXEiOjEsImlhdCI6MTgwMDAwMDAwMCwiZXhwIjoxODAwMDAwMDYwLCJqdGkiOiIwMU1DQzVSTTAwMUM2SDVKWUE2SlJHOTZZRyJ9.tKMrWi-zqD2gh4YPUImzSJ3Ajn4OaJK3qWuO-SXcNXDfu9EAfJ79JED0QsM2UCex7VBGc6JwR1lf4H6LDOxLCQ",
+      "header": {
+        "alg": "EdDSA",
+        "kid": "test-key-1",
+        "typ": "ck-relay-mint+jwt"
+      },
+      "claims": {
+        "iss": "https://account.cortexkit.io",
+        "aud": "cortexkit-webhook-relay:credential-mint",
+        "account": "01K00000000000000000000080",
+        "device": "01MCC5RM006NDK01XD1WTB7Z1P",
+        "purpose": "relay_credential_mint",
+        "source": "github",
+        "request_id": "01K00000000000000000000081",
+        "account_seq": 1,
+        "key_seq": 1,
+        "iat": 1800000000,
+        "exp": 1800000060,
+        "jti": "01MCC5RM001C6H5JYA6JRG96YG"
+      }
+    },
+    {
+      "name": "machine_revoke_other:attestation",
+      "compact": "eyJhbGciOiJFZERTQSIsImtpZCI6InRlc3Qta2V5LTEiLCJ0eXAiOiJjay1zdGVwLXVwK2p3dCJ9.eyJpc3MiOiJodHRwczovL2FjY291bnQuY29ydGV4a2l0LmlvIiwiYXVkIjoiY29ydGV4a2l0LWFjY291bnQ6c3RlcC11cDptYWNoaW5lX3Jldm9rZV9vdGhlciIsImFjY291bnQiOiIwMUswMDAwMDAwMDAwMDAwMDAwMDAwMDA4MCIsInB1cnBvc2UiOiJzdGVwX3VwIiwib3BlcmF0aW9uIjoibWFjaGluZV9yZXZva2Vfb3RoZXIiLCJ0YXJnZXQiOnsiYWNjb3VudCI6IjAxSzAwMDAwMDAwMDAwMDAwMDAwMDAwMDgwIiwia2V5X2lkIjoiMDFNQ0M1Uk0wMDZOREswMVhEMVdUQjdaMVAifSwicmVxdWVzdF9oYXNoIjoiNDQxMzZmYTM1NWIzNjc4YTExNDZhZDE2ZjdlODY0OWU5NGZiNGZjMjFmZTc3ZTgzMTBjMDYwZjYxY2FhZmY4YSIsImF1dGhfdGltZSI6MTgwMDAwMDAwMCwiaWF0IjoxODAwMDAwMDAwLCJleHAiOjE4MDAwMDAzMDAsImp0aSI6IjAxTUNDNVJNMDA5UzFHSFE2VFgxOEUyVkFKIn0.zFYud2IsYlPbGYWXr1DsBUkr5tP_wOz5LrVdno9W5wByNZNGNqqgkIDfhj3ZHPS7p60AI2hk4OXVMG3AL7b9Bg",
+      "header": {
+        "alg": "EdDSA",
+        "kid": "test-key-1",
+        "typ": "ck-step-up+jwt"
+      },
+      "claims": {
+        "iss": "https://account.cortexkit.io",
+        "aud": "cortexkit-account:step-up:machine_revoke_other",
+        "account": "01K00000000000000000000080",
+        "purpose": "step_up",
+        "operation": "machine_revoke_other",
+        "target": {
+          "account": "01K00000000000000000000080",
+          "key_id": "01MCC5RM006NDK01XD1WTB7Z1P"
+        },
+        "request_hash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "auth_time": 1800000000,
+        "iat": 1800000000,
+        "exp": 1800000300,
+        "jti": "01MCC5RM009S1GHQ6TX18E2VAJ"
+      }
+    },
+    {
+      "name": "relay_credential_revoke_other:attestation",
+      "compact": "eyJhbGciOiJFZERTQSIsImtpZCI6InRlc3Qta2V5LTEiLCJ0eXAiOiJjay1zdGVwLXVwK2p3dCJ9.eyJpc3MiOiJodHRwczovL2FjY291bnQuY29ydGV4a2l0LmlvIiwiYXVkIjoiY29ydGV4a2l0LXdlYmhvb2stcmVsYXk6c3RlcC11cDpyZWxheV9jcmVkZW50aWFsX3Jldm9rZV9vdGhlciIsImFjY291bnQiOiIwMUswMDAwMDAwMDAwMDAwMDAwMDAwMDA4MCIsInB1cnBvc2UiOiJzdGVwX3VwIiwib3BlcmF0aW9uIjoicmVsYXlfY3JlZGVudGlhbF9yZXZva2Vfb3RoZXIiLCJ0YXJnZXQiOnsiYWNjb3VudCI6IjAxSzAwMDAwMDAwMDAwMDAwMDAwMDAwMDgwIiwiY3JlZGVudGlhbF9pZCI6IjAxSzAwMDAwMDAwMDAwMDAwMDAwMDAwMDgxIiwicGFyZW50X2tleV9pZCI6IjAxTUNDNVJNMDA2TkRLMDFYRDFXVEI3WjFQIiwic291cmNlIjoiZ2l0aHViIn0sInJlcXVlc3RfaGFzaCI6IjQ0MTM2ZmEzNTViMzY3OGExMTQ2YWQxNmY3ZTg2NDllOTRmYjRmYzIxZmU3N2U4MzEwYzA2MGY2MWNhYWZmOGEiLCJhdXRoX3RpbWUiOjE4MDAwMDAwMDAsImlhdCI6MTgwMDAwMDAwMCwiZXhwIjoxODAwMDAwMzAwLCJqdGkiOiIwMU1DQzVSTTAwWjRZNDM1NjdZMDFXVkFFQSJ9.6tF19mFcbre9NLkTXqBy0Qm6lLxsXEJFsk8si7x-YiQbMivMgnOqZviOZu0sAyDP_KhdsH2cWZToOfkcj4UEBw",
+      "header": {
+        "alg": "EdDSA",
+        "kid": "test-key-1",
+        "typ": "ck-step-up+jwt"
+      },
+      "claims": {
+        "iss": "https://account.cortexkit.io",
+        "aud": "cortexkit-webhook-relay:step-up:relay_credential_revoke_other",
+        "account": "01K00000000000000000000080",
+        "purpose": "step_up",
+        "operation": "relay_credential_revoke_other",
+        "target": {
+          "account": "01K00000000000000000000080",
+          "credential_id": "01K00000000000000000000081",
+          "parent_key_id": "01MCC5RM006NDK01XD1WTB7Z1P",
+          "source": "github"
+        },
+        "request_hash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "auth_time": 1800000000,
+        "iat": 1800000000,
+        "exp": 1800000300,
+        "jti": "01MCC5RM00Z4Y43567Y01WVAEA"
+      }
+    },
+    {
+      "name": "relay_installation_unbind:attestation",
+      "compact": "eyJhbGciOiJFZERTQSIsImtpZCI6InRlc3Qta2V5LTEiLCJ0eXAiOiJjay1zdGVwLXVwK2p3dCJ9.eyJpc3MiOiJodHRwczovL2FjY291bnQuY29ydGV4a2l0LmlvIiwiYXVkIjoiY29ydGV4a2l0LXdlYmhvb2stcmVsYXk6c3RlcC11cDpyZWxheV9pbnN0YWxsYXRpb25fdW5iaW5kIiwiYWNjb3VudCI6IjAxSzAwMDAwMDAwMDAwMDAwMDAwMDAwMDgwIiwicHVycG9zZSI6InN0ZXBfdXAiLCJvcGVyYXRpb24iOiJyZWxheV9pbnN0YWxsYXRpb25fdW5iaW5kIiwidGFyZ2V0Ijp7ImFjY291bnQiOiIwMUswMDAwMDAwMDAwMDAwMDAwMDAwMDA4MCIsImJpbmRpbmdfZ2VuIjozLCJpbnN0YWxsYXRpb25faWQiOjQyLCJzb3VyY2UiOiJnaXRodWIifSwicmVxdWVzdF9oYXNoIjoiNDQxMzZmYTM1NWIzNjc4YTExNDZhZDE2ZjdlODY0OWU5NGZiNGZjMjFmZTc3ZTgzMTBjMDYwZjYxY2FhZmY4YSIsImF1dGhfdGltZSI6MTgwMDAwMDAwMCwiaWF0IjoxODAwMDAwMDAwLCJleHAiOjE4MDAwMDAzMDAsImp0aSI6IjAxTUNDNVJNMDBYRDVQOFQzSEdLUDdBRTM5In0.w_Lp8TqTsQunMojsYDWy60KRiEitBQmxfJqCtY_WZCidkS0C2HyFWUVBiN1KbzeO03vPxT87bQF2hliyzGCrCQ",
+      "header": {
+        "alg": "EdDSA",
+        "kid": "test-key-1",
+        "typ": "ck-step-up+jwt"
+      },
+      "claims": {
+        "iss": "https://account.cortexkit.io",
+        "aud": "cortexkit-webhook-relay:step-up:relay_installation_unbind",
+        "account": "01K00000000000000000000080",
+        "purpose": "step_up",
+        "operation": "relay_installation_unbind",
+        "target": {
+          "account": "01K00000000000000000000080",
+          "binding_gen": 3,
+          "installation_id": 42,
+          "source": "github"
+        },
+        "request_hash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "auth_time": 1800000000,
+        "iat": 1800000000,
+        "exp": 1800000300,
+        "jti": "01MCC5RM00XD5P8T3HGKP7AE39"
+      }
+    }
+  ]
+}

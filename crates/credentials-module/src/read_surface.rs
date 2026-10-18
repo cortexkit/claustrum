@@ -63,6 +63,10 @@ use subc_protocol::Principal;
 
 use crate::limiter::{Admission, FetchLimiter, GET_MANY_MAX};
 
+#[path = "account_token.rs"]
+mod account_token;
+pub use account_token::AccountTokenParams;
+
 /// Cookie-only write parameters. The route-bound module's deposit grant authorizes
 /// creation and replacement of its own cookies, but never reading them.
 #[derive(Debug, Deserialize, Serialize)]
@@ -887,6 +891,7 @@ const OPEN_REFUSAL_THRESHOLD: usize = 16;
 /// report_auth_failure go in the same chain as admin writes).
 pub struct ReadSurface {
     engine: Arc<RefreshEngine>,
+    account_tokens: account_token::AccountTokens,
     pub(crate) watches: crate::watch_scoped::WatchHub,
     limiter: Mutex<FetchLimiter>,
     open_refusals: Mutex<HashMap<u64, (Instant, usize)>>,
@@ -1181,6 +1186,7 @@ impl ReadSurface {
         let initial = Self::compute_health(&engine);
         ReadSurface {
             engine,
+            account_tokens: account_token::AccountTokens::new(),
             watches: crate::watch_scoped::WatchHub::default(),
             limiter: Mutex::new(limiter),
             open_refusals: Mutex::new(HashMap::new()),

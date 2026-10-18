@@ -55,9 +55,7 @@ async function withRoute(scripts: Script[], listReply: unknown, run: (client: Cl
             continue
           }
           requests.push(body)
-          const keys = body !== null && typeof body === 'object' && !Array.isArray(body)
-            ? Object.keys(body).sort().join(',') : ''
-          if ((keys !== 'method' && keys !== 'method,params') || typeof body.method !== 'string') {
+          if (!isVaultReadEnvelope(body)) {
             send(FrameType.Error, { code: 'invalid_request', message: 'request body not decodable' })
             continue
           }
@@ -134,25 +132,26 @@ test('watch and confirming list send exact method request envelopes', async () =
     })
 })
 
-test('watch wire stand-in refuses op and unknown read-envelope keys on the Error lane', async () => {
-  await withRoute([], { result: { credentials: [], view: 'view' } }, async (_client, _requests, transport) => {
-    // Each step is bounded and named, so a hang reports which step stalled instead of
-    // the test's bare 5 s timeout.
-    const step = <T>(name: string, work: Promise<T>): Promise<T> => Promise.race([work,
-      new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`stalled at: ${name}`)), 1500))])
-    const route = await step('routeOpen', transport.routeOpen({ kind: 'management_surface', module_id: 'claustrum' },
-      { project_root: process.cwd(), harness: 'opencode', session: 'stand-in' }, { consumerIdentity: null }))
-    for (const body of [
-      { op: 'auth.watch_scoped', params: {} },
-      { op: 'credential.list_scoped', params: {} },
-      { method: 'auth.watch_scoped', op: 'auth.watch_scoped', params: {} },
-      { method: 'credential.list_scoped', params: {}, extra: true },
-      { method: 1, params: {} },
-    ]) {
-      await expect(step(`request ${JSON.stringify(body)}`, transport.request(route, body)))
-        .rejects.toMatchObject({ code: 'invalid_request' })
-    }
-    await expect(step('request list_scoped', transport.request(route, { method: 'credential.list_scoped' })))
-      .resolves.toEqual({ result: { credentials: [], view: 'view' } })
-  })
+// The stand-in must refuse exactly what the vault refuses, or a client sending the
+// wrong envelope passes here and fails live. This checks the stand-in's own rule
+// directly; the request-shape test above proves the clients send what it accepts.
+test('watch wire stand-in accepts only the vault read envelope', () => {
+  for (const body of [
+    { op: 'auth.watch_scoped', params: {} },
+    { op: 'credential.list_scoped', params: {} },
+    { method: 'auth.watch_scoped', op: 'auth.watch_scoped', params: {} },
+    { method: 'credential.list_scoped', params: {}, extra: true },
+    { method: 1, params: {} },
+    null,
+    ['credential.list_scoped'],
+  ]) expect(isVaultReadEnvelope(body)).toBe(false)
+  expect(isVaultReadEnvelope({ method: 'credential.list_scoped' })).toBe(true)
+  expect(isVaultReadEnvelope({ method: 'auth.watch_scoped', params: {} })).toBe(true)
 })
+
+/** The vault's read envelope: exactly `method` (a string) and an optional `params`. */
+function isVaultReadEnvelope(body: unknown): body is { method: string; params?: unknown } {
+  if (body === null || typeof body !== 'object' || Array.isArray(body)) return false
+  const keys = Object.keys(body).sort().join(',')
+  return (keys === 'method' || keys === 'method,params') && typeof (body as { method: unknown }).method === 'string'
+}

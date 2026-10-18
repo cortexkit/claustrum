@@ -4,3 +4,8 @@
 .cortexkit/alfonso/prompts/
 .cortexkit/alfonso/specs/
 .cortexkit/alfonso/artifacts/
+# The same folders after the alfonso to prefrontal rename; drop the alfonso lines once it has run.
+.cortexkit/prefrontal/drafts/
+.cortexkit/prefrontal/prompts/
+.cortexkit/prefrontal/specs/
+.cortexkit/prefrontal/artifacts/

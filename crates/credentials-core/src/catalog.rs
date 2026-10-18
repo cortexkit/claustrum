@@ -10,9 +10,10 @@ pub enum CredentialCategory {
     LlmProvider,
     DataWarehouse,
     CloudInfrastructure,
-    /// Keys for web search APIs (Tavily, Kagi, Exa, Parallel). Kept apart from
-    /// `llm-provider` on purpose: every model consumer is granted `llm-provider`, and a
-    /// search key filed there would reach all of them.
+    /// Keys for web search APIs (Tavily, Kagi, Exa, Parallel, Brave, Firecrawl, Jina,
+    /// TinyFish). Kept apart from `llm-provider` for search-only providers: every model
+    /// consumer is granted `llm-provider`, and a search key filed there would reach all
+    /// of them.
     WebSearch,
 }
 
@@ -94,6 +95,10 @@ impl ModelVendor {
 }
 
 const LLM: &[CredentialCategory] = &[CredentialCategory::LlmProvider];
+const LLM_AND_WEB_SEARCH: &[CredentialCategory] = &[
+    CredentialCategory::LlmProvider,
+    CredentialCategory::WebSearch,
+];
 const DATA_WAREHOUSE: &[CredentialCategory] = &[CredentialCategory::DataWarehouse];
 const CLOUD_INFRASTRUCTURE: &[CredentialCategory] = &[CredentialCategory::CloudInfrastructure];
 const WEB_SEARCH: &[CredentialCategory] = &[CredentialCategory::WebSearch];
@@ -103,6 +108,8 @@ const NO_CATEGORIES: &[CredentialCategory] = &[];
 pub enum AuthHeaderScheme {
     Bearer,
     XGoogApiKey,
+    /// Brave Search: `X-Subscription-Token`.
+    BraveSubscriptionToken,
     /// Anthropic's API: `x-api-key` plus the required `anthropic-version` header.
     AnthropicApiKey,
 }
@@ -123,6 +130,10 @@ pub enum KeyValidation {
     /// in the request is invalid."). CodeWhisperer ListAvailableProfiles instead
     /// returned 200 with empty profiles for an invalid key, so it cannot verify keys.
     AwsApiKeyGet { url: &'static str },
+    /// Firecrawl's credit-usage read returns a documented, exact invalid-token error.
+    FirecrawlCreditUsage { url: &'static str },
+    /// TinyFish's wallet read returns a documented `INVALID_API_KEY` error code.
+    TinyFishWallet { url: &'static str },
     GetEndpoint {
         url: &'static str,
         auth_header: AuthHeaderScheme,
@@ -179,7 +190,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
             base_url: "https://api.z.ai/api/coding/paas/v4",
             model: "glm-5.2",
         },
-        categories: LLM,
+        categories: LLM_AND_WEB_SEARCH,
         serves: &[Zhipu],
     },
     ApiKeyProvider {
@@ -205,7 +216,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
             base_url: "https://api.deepseek.com",
             model: "deepseek-chat",
         },
-        categories: LLM,
+        categories: LLM_AND_WEB_SEARCH,
         serves: &[DeepSeek],
     },
     ApiKeyProvider {
@@ -292,7 +303,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
             base_url: "https://api.perplexity.ai",
             model: "sonar",
         },
-        categories: LLM,
+        categories: LLM_AND_WEB_SEARCH,
         serves: &[Perplexity],
     },
     ApiKeyProvider {
@@ -616,7 +627,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         validation: KeyValidation::Unvalidated {
             reason: "oh-my-pi declares no validation probe for Ollama Cloud",
         },
-        categories: LLM,
+        categories: LLM_AND_WEB_SEARCH,
         serves: &[OpenAI, Google, DeepSeek, Mistral, Moonshot, Zhipu, Qwen, Nvidia, MiniMax],
     },
     // oh-my-pi auth/opencode-go.kdl; serves from its models.json rows.
@@ -781,7 +792,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
             url: "https://api.synthetic.new/openai/v1/models",
             auth_header: AuthHeaderScheme::Bearer,
         },
-        categories: LLM,
+        categories: LLM_AND_WEB_SEARCH,
         serves: &[OpenAI, DeepSeek, Moonshot, Zhipu, Qwen, Nvidia],
     },
     // oh-my-pi auth/typesafe.kdl.
@@ -986,6 +997,69 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         placeholder: "sk_...",
         validation: KeyValidation::Unvalidated {
             reason: "oh-my-pi declares no validation probe for Parallel",
+        },
+        categories: WEB_SEARCH,
+        serves: &[],
+    },
+    // Brave documents this header and endpoint, but not a distinct bad-key response; keep
+    // the credential unchecked instead of treating every authorization refusal as a bad key.
+    // https://api-dashboard.search.brave.com/documentation/guides/authentication
+    // https://api-dashboard.search.brave.com/api-reference/web/search/get
+    ApiKeyProvider {
+        key: "brave",
+        display_name: "Brave Search",
+        default_id: "apikey:brave",
+        dashboard_url: "https://api-dashboard.search.brave.com/app/keys",
+        placeholder: "API key",
+        validation: KeyValidation::Unvalidated {
+            reason: "Brave documents no distinct invalid-key response for its Search API",
+        },
+        categories: WEB_SEARCH,
+        serves: &[],
+    },
+    // Firecrawl documents the exact invalid-token message on its read-only credit-usage route.
+    // https://docs.firecrawl.dev/api-reference/introduction
+    // https://docs.firecrawl.dev/api-reference/endpoint/credit-usage
+    // https://docs.firecrawl.dev/api-reference/errors
+    ApiKeyProvider {
+        key: "firecrawl",
+        display_name: "Firecrawl",
+        default_id: "apikey:firecrawl",
+        dashboard_url: "https://www.firecrawl.dev/app/api-keys",
+        placeholder: "fc-...",
+        validation: KeyValidation::FirecrawlCreditUsage {
+            url: "https://api.firecrawl.dev/v2/team/credit-usage",
+        },
+        categories: WEB_SEARCH,
+        serves: &[],
+    },
+    // Jina documents bearer auth but no unique invalid-key response, so do not use a
+    // metered embedding request as a login probe.
+    // https://docs.jina.ai/embedding-api
+    ApiKeyProvider {
+        key: "jina",
+        display_name: "Jina AI",
+        default_id: "apikey:jina",
+        dashboard_url: "https://jina.ai/?sui=apikey",
+        placeholder: "jina_...",
+        validation: KeyValidation::Unvalidated {
+            reason: "Jina's public API docs do not specify a distinct invalid-key response",
+        },
+        categories: WEB_SEARCH,
+        serves: &[],
+    },
+    // TinyFish's wallet read is authenticated with X-API-Key and documents
+    // INVALID_API_KEY separately from the missing-key response.
+    // https://docs.tinyfish.ai/authentication
+    // https://docs.tinyfish.ai/error-codes
+    ApiKeyProvider {
+        key: "tinyfish",
+        display_name: "TinyFish",
+        default_id: "apikey:tinyfish",
+        dashboard_url: "https://agent.tinyfish.ai/api-keys",
+        placeholder: "API key",
+        validation: KeyValidation::TinyFishWallet {
+            url: "https://api.tinyfish.ai/v1/wallet",
         },
         categories: WEB_SEARCH,
         serves: &[],
@@ -1469,7 +1543,7 @@ mod tests {
     #[test]
     fn catalog_entry_expectations_are_separate_from_no_match_expectations() {
         let entry_rows = [
-            ("apikey:zai", vec!["llm-provider"]),
+            ("apikey:zai", vec!["llm-provider", "web-search"]),
             ("apikey:openrouter", vec!["llm-provider"]),
             ("oauth:anthropic", vec!["llm-provider", "anthropic-native"]),
             (
@@ -1558,8 +1632,8 @@ mod tests {
     #[test]
     fn both_catalogs_have_exact_owner_supplied_assignments() {
         // 15 original API-key rows, 37 model providers mirrored from oh-my-pi,
-        // Kiro, the Anthropic API key, and 4 search APIs.
-        assert_eq!(API_KEY_PROVIDERS.len(), 58);
+        // Kiro, the Anthropic API key, and 8 search APIs.
+        assert_eq!(API_KEY_PROVIDERS.len(), 62);
         assert_eq!(LOGIN_PROVIDERS.len(), 13);
         // Which api-key rows are `llm-provider` and which are `web-search` is pinned by
         // the two category tests below, which also require every row to be listed.
@@ -1633,15 +1707,12 @@ mod tests {
 
     /// The api-key model providers this table held before oh-my-pi's were mirrored.
     const ORIGINAL_LLM_KEYS: &[&str] = &[
-        "zai",
         "openrouter",
-        "deepseek",
         "cerebras",
         "fireworks-ai",
         "groq",
         "mistral",
         "together",
-        "perplexity",
         "moonshot",
         "huggingface",
         "nvidia",
@@ -1668,7 +1739,6 @@ mod tests {
         "minimax-code-cn",
         "nanogpt",
         "novita",
-        "ollama-cloud",
         "opencode-go",
         "opencode-zen",
         "qianfan",
@@ -1679,7 +1749,6 @@ mod tests {
         "singularityapi-dev",
         "singularityapi-tech",
         "stepfun",
-        "synthetic",
         "typesafe",
         "umans",
         "venice",
@@ -1693,8 +1762,21 @@ mod tests {
         "zhipu-coding-plan",
     ];
 
-    /// Web search APIs. Their keys are not model credentials.
-    const SEARCH_KEYS: &[&str] = &["tavily", "kagi", "exa", "parallel"];
+    /// Search-only APIs. Their keys are not model credentials.
+    const SEARCH_KEYS: &[&str] = &[
+        "tavily",
+        "kagi",
+        "exa",
+        "parallel",
+        "brave",
+        "firecrawl",
+        "jina",
+        "tinyfish",
+    ];
+
+    /// Catalogued keys used by both model and web-search consumers.
+    /// `kimi-for-coding` is a separately managed vault id with no catalog row.
+    const DUAL_USE_KEYS: &[&str] = &["deepseek", "ollama-cloud", "perplexity", "synthetic", "zai"];
 
     /// oh-my-pi providers deliberately NOT in this table:
     /// - local servers whose "key" is a localhost placeholder, so there is no secret;
@@ -1751,6 +1833,7 @@ mod tests {
             assert!(
                 ORIGINAL_LLM_KEYS.contains(&entry.key)
                     || MIRRORED_LLM_KEYS.contains(&entry.key)
+                    || DUAL_USE_KEYS.contains(&entry.key)
                     || SEARCH_KEYS.contains(&entry.key)
                     || entry.key == "kiro"
                     || entry.key == "anthropic",
@@ -1760,24 +1843,40 @@ mod tests {
         }
     }
 
-    /// Every LLM consumer is granted `llm-provider`, so a search key filed there would be
-    /// readable by all of them. Search keys get `web-search` and nothing else, and the
-    /// search rows are the ONLY api-key rows outside `llm-provider`.
+    /// Every LLM consumer is granted `llm-provider`, so search-only keys must not be filed
+    /// there. The search-only rows receive `web-search`; dual-use rows receive both categories.
     #[test]
     fn search_keys_are_web_search_and_never_llm_provider() {
         for key in SEARCH_KEYS {
             let row = api_key_provider(key).unwrap_or_else(|| panic!("no api-key row {key}"));
+            assert_eq!(row.default_id, format!("apikey:{key}"));
             assert!(row.serves.is_empty(), "{key} serves no model vendor");
             for id in [format!("apikey:{key}"), format!("apikey:{key}:work")] {
                 assert_eq!(category_defaults(&id), ["web-search"], "{id}");
             }
         }
-        let outside_llm: Vec<_> = API_KEY_PROVIDERS
+        let without_llm: Vec<_> = API_KEY_PROVIDERS
             .iter()
-            .filter(|entry| entry.categories != LLM)
+            .filter(|entry| !entry.categories.contains(&CredentialCategory::LlmProvider))
             .map(|entry| entry.key)
             .collect();
-        assert_eq!(outside_llm, SEARCH_KEYS);
+        assert_eq!(without_llm, SEARCH_KEYS);
+    }
+
+    #[test]
+    fn dual_use_api_key_rows_carry_both_llm_provider_and_web_search_categories() {
+        for key in DUAL_USE_KEYS {
+            let row = api_key_provider(key).unwrap_or_else(|| panic!("no api-key row {key}"));
+            assert_eq!(row.default_id, format!("apikey:{key}"));
+            assert_eq!(row.categories, LLM_AND_WEB_SEARCH, "{key}");
+            for id in [format!("apikey:{key}"), format!("apikey:{key}:work")] {
+                assert_eq!(
+                    category_defaults(&id),
+                    ["llm-provider", "web-search"],
+                    "{id}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1823,6 +1922,8 @@ mod tests {
                 "kagi",
                 "exa",
                 "parallel",
+                "brave",
+                "jina",
             ]
         );
     }
@@ -2307,6 +2408,10 @@ mod source_ownership_tests {
                 ("kagi", vec![]),
                 ("exa", vec![]),
                 ("parallel", vec![]),
+                ("brave", vec![]),
+                ("firecrawl", vec![]),
+                ("jina", vec![]),
+                ("tinyfish", vec![]),
             ]
         );
         let login: Vec<_> = LOGIN_PROVIDERS

@@ -128,10 +128,63 @@ pub async fn validate_key(
                 Err(e) => ValidationOutcome::Warning(format!("transport error: {}", e)),
             }
         }
+        KeyValidation::FirecrawlCreditUsage { url } => {
+            let auth = format!("Bearer {}", key);
+            let headers = [("Authorization", auth.as_str())];
+            match transport.get(url, &headers).await {
+                Ok(resp) if (200..=299).contains(&resp.status) => ValidationOutcome::Valid,
+                Ok(resp)
+                    if resp.status == 401
+                        && serde_json::from_slice::<serde_json::Value>(&resp.body)
+                            .ok()
+                            .and_then(|body| {
+                                body.get("error")
+                                    .and_then(serde_json::Value::as_str)
+                                    .map(str::to_owned)
+                            })
+                            .as_deref()
+                            == Some("Unauthorized: Invalid token") =>
+                {
+                    ValidationOutcome::Invalid("unauthorized (status 401)".to_string())
+                }
+                Ok(resp) => {
+                    ValidationOutcome::Warning(format!("unexpected status {}", resp.status))
+                }
+                Err(e) => ValidationOutcome::Warning(format!("transport error: {}", e)),
+            }
+        }
+        KeyValidation::TinyFishWallet { url } => {
+            let headers = [("X-API-Key", key)];
+            match transport.get(url, &headers).await {
+                Ok(resp) if (200..=299).contains(&resp.status) => ValidationOutcome::Valid,
+                Ok(resp)
+                    if resp.status == 401
+                        && serde_json::from_slice::<serde_json::Value>(&resp.body)
+                            .ok()
+                            .and_then(|body| {
+                                body.get("error")
+                                    .and_then(|error| error.get("code"))
+                                    .and_then(serde_json::Value::as_str)
+                                    .map(str::to_owned)
+                            })
+                            .as_deref()
+                            == Some("INVALID_API_KEY") =>
+                {
+                    ValidationOutcome::Invalid("unauthorized (status 401)".to_string())
+                }
+                Ok(resp) => {
+                    ValidationOutcome::Warning(format!("unexpected status {}", resp.status))
+                }
+                Err(e) => ValidationOutcome::Warning(format!("transport error: {}", e)),
+            }
+        }
         KeyValidation::GetEndpoint { url, auth_header } => {
             let headers = match auth_header {
                 AuthHeaderScheme::Bearer => vec![("Authorization", format!("Bearer {}", key))],
                 AuthHeaderScheme::XGoogApiKey => vec![("x-goog-api-key", key.to_string())],
+                AuthHeaderScheme::BraveSubscriptionToken => {
+                    vec![("X-Subscription-Token", key.to_string())]
+                }
                 AuthHeaderScheme::AnthropicApiKey => vec![
                     ("x-api-key", key.to_string()),
                     ("anthropic-version", "2023-06-01".to_string()),
@@ -262,6 +315,97 @@ mod tests {
             assert!(
                 !provider.placeholder.is_empty(),
                 "placeholder must not be empty"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn firecrawl_credit_usage_classifies_only_the_documented_invalid_token() {
+        let provider = API_KEY_PROVIDERS
+            .iter()
+            .find(|provider| provider.key == "firecrawl")
+            .unwrap();
+        let transport =
+            FixtureTransport::ok(200, r#"{"success":true,"data":{"remainingCredits":1}}"#);
+        assert_eq!(
+            validate_key(&transport, &provider.validation, "fc_fixture").await,
+            ValidationOutcome::Valid
+        );
+        assert_eq!(
+            transport.requests()[0].url,
+            "https://api.firecrawl.dev/v2/team/credit-usage"
+        );
+        assert_eq!(
+            transport.requests()[0].headers,
+            vec![("Authorization".to_string(), "Bearer fc_fixture".to_string())]
+        );
+
+        for (status, body, expected) in [
+            (
+                401,
+                r#"{"success":false,"error":"Unauthorized: Invalid token"}"#,
+                ValidationOutcome::Invalid("unauthorized (status 401)".to_string()),
+            ),
+            (
+                401,
+                r#"{"success":false,"error":"Unauthorized"}"#,
+                ValidationOutcome::Warning("unexpected status 401".to_string()),
+            ),
+            (
+                403,
+                r#"{"success":false,"error":"Unauthorized: Invalid token"}"#,
+                ValidationOutcome::Warning("unexpected status 403".to_string()),
+            ),
+        ] {
+            let transport = FixtureTransport::ok(status, body);
+            assert_eq!(
+                validate_key(&transport, &provider.validation, "fc_fixture").await,
+                expected
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn tinyfish_wallet_classifies_only_the_documented_invalid_api_key() {
+        let provider = API_KEY_PROVIDERS
+            .iter()
+            .find(|provider| provider.key == "tinyfish")
+            .unwrap();
+        let transport = FixtureTransport::ok(200, r#"{"balance":0}"#);
+        assert_eq!(
+            validate_key(&transport, &provider.validation, "tf_fixture").await,
+            ValidationOutcome::Valid
+        );
+        assert_eq!(
+            transport.requests()[0].url,
+            "https://api.tinyfish.ai/v1/wallet"
+        );
+        assert_eq!(
+            transport.requests()[0].headers,
+            vec![("X-API-Key".to_string(), "tf_fixture".to_string())]
+        );
+
+        for (status, body, expected) in [
+            (
+                401,
+                r#"{"error":{"code":"INVALID_API_KEY","message":"Invalid or expired API key"}}"#,
+                ValidationOutcome::Invalid("unauthorized (status 401)".to_string()),
+            ),
+            (
+                401,
+                r#"{"error":{"code":"MISSING_API_KEY","message":"Missing API key"}}"#,
+                ValidationOutcome::Warning("unexpected status 401".to_string()),
+            ),
+            (
+                403,
+                r#"{"error":{"code":"INVALID_API_KEY"}}"#,
+                ValidationOutcome::Warning("unexpected status 403".to_string()),
+            ),
+        ] {
+            let transport = FixtureTransport::ok(status, body);
+            assert_eq!(
+                validate_key(&transport, &provider.validation, "tf_fixture").await,
+                expected
             );
         }
     }
@@ -500,6 +644,20 @@ mod tests {
         assert_eq!(
             reqs[0].headers,
             vec![("x-goog-api-key".to_string(), "test-key".to_string())]
+        );
+
+        let validation_brave = KeyValidation::GetEndpoint {
+            url: "https://api.example.com/user",
+            auth_header: AuthHeaderScheme::BraveSubscriptionToken,
+        };
+        let transport = FixtureTransport::ok(200, "{}");
+        assert_eq!(
+            validate_key(&transport, &validation_brave, "test-key").await,
+            ValidationOutcome::Valid
+        );
+        assert_eq!(
+            transport.requests()[0].headers,
+            vec![("X-Subscription-Token".to_string(), "test-key".to_string())]
         );
 
         // 3. Invalid response (401)

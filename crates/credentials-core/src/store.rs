@@ -11511,7 +11511,7 @@ mod taxonomy_tests {
         assert!(meta_schema >= CATEGORY_SCHEMA_VERSION);
         assert_eq!(
             metas[0].1.categories,
-            ["llm-provider"],
+            ["llm-provider", "web-search"],
             "the migrated arm must read REAL categories, or the empty list above proves nothing"
         );
 
@@ -11532,7 +11532,10 @@ mod taxonomy_tests {
         store
             .create_audited("apikey:zai", &api_record(), AuditCtx::admin(AuditOp::Put))
             .expect("create classified credential");
-        assert_eq!(store.categories("apikey:zai").unwrap(), ["llm-provider"]);
+        assert_eq!(
+            store.categories("apikey:zai").unwrap(),
+            ["llm-provider", "web-search"]
+        );
         let audit = store.read_audit(None).unwrap();
         assert_eq!(audit.len(), 1, "creation has exactly its deposit audit row");
         assert!(audit.iter().all(|entry| entry.op != "set_category"));
@@ -11989,7 +11992,10 @@ mod admin_apply_taxonomy_tests {
             "test",
         )
         .unwrap();
-        assert_eq!(store.categories("apikey:zai").unwrap(), ["llm-provider"]);
+        assert_eq!(
+            store.categories("apikey:zai").unwrap(),
+            ["llm-provider", "web-search"]
+        );
         store
             .set_categories_audited(
                 "apikey:zai",
@@ -12118,7 +12124,7 @@ mod list_scoped_snapshot_tests {
             1,
             "the category grant saw the old category set"
         );
-        assert_eq!(snapshot.rows[0].categories, ["llm-provider"]);
+        assert_eq!(snapshot.rows[0].categories, ["llm-provider", "web-search"]);
         assert_eq!(store.categories("apikey:zai").unwrap(), ["monitoring"]);
     }
 

@@ -4286,7 +4286,7 @@ mod tests {
             .find(|row| row["id"] == "apikey:zai")
             .expect("classified row");
         assert_eq!(row["id"], "apikey:zai");
-        assert_eq!(row["categories"], json!(["llm-provider"]));
+        assert_eq!(row["categories"], json!(["llm-provider", "web-search"]));
         assert_eq!(row["operations"], json!(["read", "sign"]));
         assert!(listed["result"]["view"]
             .as_str()

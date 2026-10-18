@@ -5955,7 +5955,12 @@ fn plan_cli_sets_clears_and_renders_a_conditional_parseable_column() {
         assert_eq!(row.len(), 6);
         assert_eq!(
             &row[2..],
-            &["apikey:zai", "llm-provider", "zai-coding-plan", "pro_200"]
+            &[
+                "apikey:zai",
+                "llm-provider,web-search",
+                "zai-coding-plan",
+                "pro_200"
+            ]
         );
         let unset = list
             .lines()

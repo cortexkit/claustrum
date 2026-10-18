@@ -416,9 +416,11 @@ The catalog seeds five categories: `llm-provider`, `data-warehouse`, `cloud-infr
 `web-search` and `browser-session`. The set is not closed: an operator can assign any valid
 name. The seeds are what a new credential is stamped with at creation:
 
-- API-key entries are `llm-provider`, except the search APIs Tavily, Kagi, Exa and Parallel,
-  which are `web-search` and never `llm-provider`, so no LLM consumer's grant reaches a
-  search key.
+- Search-only API-key entries are Tavily, Kagi, Exa, Parallel, Brave, Firecrawl, Jina and TinyFish;
+  they are `web-search` and never `llm-provider`. DeepSeek, Ollama Cloud, Perplexity, Synthetic
+  and Z.AI are dual-use API keys, so new records receive both `llm-provider` and `web-search`.
+  Kimi for Coding (`apikey:kimi-for-coding`) is a separately managed live credential with no
+  catalog row; its categories must be assigned explicitly rather than inferred from the catalog.
 - Login entries are `llm-provider`, except Snowflake (`data-warehouse`), DigitalOcean
   (`cloud-infrastructure`), Devin (uncategorized) and Gmail (`gmail-native` only).
 - A credential that speaks a provider's OAuth protocol is also stamped `<adapter>-native`.

@@ -7909,7 +7909,7 @@ mod provider_cli_tests {
     #[test]
     fn missing_provider_advisory_requires_explicit_llm_category_and_empty_ids() {
         let status = serde_json::json!({"credentials": [
-            {"id":"apikey:zai", "categories":["llm-provider"], "provider_ids":[]},
+            {"id":"apikey:zai", "categories":["llm-provider", "web-search"], "provider_ids":[]},
             {"id":"apikey:kimi-code", "categories":["coding-agent"], "provider_ids":[]},
             {"id":"apikey:bound", "categories":["llm-provider"], "provider_ids":["aa"]},
             {"id":"apikey:old", "categories":["llm-provider"]},

@@ -73,7 +73,7 @@ export function openScopedWatch(
       )
       if (settled) { await client.closeRoute(route); return }
       subscription = client.subscribe(route, {
-        op: 'auth.watch_scoped',
+        method: 'auth.watch_scoped',
         params: options.enrollmentToken === undefined ? {} : { enrollment_token: options.enrollmentToken },
       }, (bytes) => {
         if (settled) return

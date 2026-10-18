@@ -210,7 +210,7 @@ impl ClaustrumConsumer {
             self.route_epoch,
             corr,
             Priority::Interactive,
-            json!({"op":"auth.watch_scoped", "params":params(enrollment_token.as_deref())}),
+            json!({"method":"auth.watch_scoped", "params":params(enrollment_token.as_deref())}),
         )
         .await?;
         let (events, receiver) = mpsc::channel(32);
@@ -305,7 +305,7 @@ impl ClaustrumConsumer {
                     if tracker.closed() == WatchAction::ResubscribeAndReread {
                         return ScopedWatchOutcome::Ended;
                     }
-                    let response = self.credential_request(json!({"op":CREDENTIAL_LIST_SCOPED_OP, "params":params(enrollment_token)}), CREDENTIAL_LIST_SCOPED_OP).await;
+                    let response = self.credential_request(json!({"method":CREDENTIAL_LIST_SCOPED_OP, "params":params(enrollment_token)}), CREDENTIAL_LIST_SCOPED_OP).await;
                     return match response {
                         Ok(value) => {
                             let refused =

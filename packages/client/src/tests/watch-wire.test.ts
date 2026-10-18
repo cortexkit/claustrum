@@ -3,17 +3,17 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { createServer, type Socket } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { buildFlags, buildFrame, computeProof, decodeHeader, encodeFrame, FrameType, HEADER_LEN, Priority, SERVER_PROOF_DOMAIN } from '@cortexkit/subc-client'
+import { buildFlags, buildFrame, computeProof, decodeHeader, encodeFrame, FrameType, HEADER_LEN, Priority, SERVER_PROOF_DOMAIN, SubcClient } from '@cortexkit/subc-client'
 import { ClaustrumClient } from '../index'
 
 const refused = { result: { error: { class: 'permanent', code: 'not_found' } } }
 const first = { kind: 'changed', epoch: 'epoch', seq: 1, view: 'view', keys: 'keys' }
 type Script = { notices: unknown[]; terminal: FrameType; body?: unknown }
 
-async function withRoute(scripts: Script[], listReply: unknown, run: (client: ClaustrumClient, requests: string[]) => Promise<void>) {
+async function withRoute(scripts: Script[], listReply: unknown, run: (client: ClaustrumClient, requests: Record<string, unknown>[], transport: SubcClient) => Promise<void>) {
   const key = new Uint8Array(32).fill(7), daemonId = new Uint8Array(16).fill(9)
   const sockets = new Set<Socket>()
-  const requests: string[] = []
+  const requests: Record<string, unknown>[] = []
   let failure: unknown
   let channel = 0
   const server = createServer((socket) => {
@@ -45,15 +45,25 @@ async function withRoute(scripts: Script[], listReply: unknown, run: (client: Cl
           buffer = buffer.subarray(HEADER_LEN + header.len)
           if (header.ty !== FrameType.Request) continue
           const body = JSON.parse(bytes.toString())
-          const op = body.op ?? body.method
-          requests.push(op)
           const send = (ty: FrameType, value?: unknown) => socket.write(encodeFrame(buildFrame(ty,
             buildFlags(false, Priority.Interactive, false), header.channel, header.epoch, header.corr,
             value === undefined ? new Uint8Array() : new TextEncoder().encode(JSON.stringify(value)))))
-          if (op === 'route.open') send(FrameType.Response, { route_channel: ++channel, route_epoch: 1 })
-          else if (op === 'credential.list_scoped') send(FrameType.Response, listReply)
+          // Channel zero uses subc's control envelope, not the vault's read envelope.
+          if (header.channel === 0) {
+            expect(body.op).toBe('route.open')
+            send(FrameType.Response, { route_channel: ++channel, route_epoch: 1 })
+            continue
+          }
+          requests.push(body)
+          const keys = body !== null && typeof body === 'object' && !Array.isArray(body)
+            ? Object.keys(body).sort().join(',') : ''
+          if ((keys !== 'method' && keys !== 'method,params') || typeof body.method !== 'string') {
+            send(FrameType.Error, { code: 'invalid_request', message: 'request body not decodable' })
+            continue
+          }
+          if (body.method === 'credential.list_scoped') send(FrameType.Response, listReply)
           else {
-            expect(op).toBe('auth.watch_scoped')
+            expect(body.method).toBe('auth.watch_scoped')
             expect(body.params).toEqual({ enrollment_token: 'token' })
             const script = scripts.shift()!
             for (const notice of script.notices) send(FrameType.StreamData, notice)
@@ -71,8 +81,10 @@ async function withRoute(scripts: Script[], listReply: unknown, run: (client: Cl
     const path = join(dir, 'connection.json')
     await writeFile(path, JSON.stringify({ schema: 1, endpoints: [{ host: '127.0.0.1', port: address.port }],
       key: [...key], daemon_id: [...daemonId], pid: process.pid }), { mode: 0o600 })
-    client = await ClaustrumClient.connect({ connectionFile: path, logger: () => {} })
-    try { await run(client, requests) }
+    let transport!: SubcClient
+    client = await ClaustrumClient.connect({ connectionFile: path, logger: () => {},
+      connector: async (options) => { transport = await SubcClient.connect(options); return transport } })
+    try { await run(client, requests, transport) }
     catch (error) { throw failure ?? error }
     if (failure) throw failure
     expect(scripts).toHaveLength(0)
@@ -99,13 +111,43 @@ test('watch real SDK route distinguishes all endings including revocation and dr
   })
   await withRoute([{ notices: [], terminal: FrameType.StreamEnd }], { result: { credentials: [], view: 'view' } }, async (client, requests) => {
     expect(await client.watchScoped(() => {}, options).closed).toEqual({ kind: 'not_accepting' })
-    expect(requests.filter((op) => op === 'credential.list_scoped')).toHaveLength(1)
+    expect(requests.filter((body) => body.method === 'credential.list_scoped')).toHaveLength(1)
   })
   await withRoute([{ notices: [first], terminal: FrameType.Response, body: refused },
     { notices: [], terminal: FrameType.Response, body: refused }], refused, async (client, requests) => {
     expect(await client.watchScoped(() => {}, options).closed).toEqual({ kind: 'ended' })
     expect(await client.watchScoped(() => {}, options).closed).toMatchObject({ kind: 'refused', error: { code: 'not_found' } })
-    expect(requests.filter((op) => op === 'auth.watch_scoped')).toHaveLength(2)
-    expect(requests.filter((op) => op === 'credential.list_scoped')).toHaveLength(1)
+    expect(requests.filter((body) => body.method === 'auth.watch_scoped')).toHaveLength(2)
+    expect(requests.filter((body) => body.method === 'credential.list_scoped')).toHaveLength(1)
+  })
+})
+
+test('watch and confirming list send exact method request envelopes', async () => {
+  await withRoute([{ notices: [], terminal: FrameType.StreamEnd }],
+    { result: { credentials: [], view: 'view' } }, async (client, requests) => {
+      expect(await client.watchScoped(() => {}, { enrollmentToken: 'token' }).closed)
+        .toEqual({ kind: 'not_accepting' })
+      expect(requests).toEqual([
+        { method: 'auth.watch_scoped', params: { enrollment_token: 'token' } },
+        { method: 'credential.list_scoped', params: { enrollment_token: 'token' } },
+      ])
+    })
+})
+
+test('watch wire stand-in refuses op and unknown read-envelope keys on the Error lane', async () => {
+  await withRoute([], { result: { credentials: [], view: 'view' } }, async (_client, _requests, transport) => {
+    const route = await transport.routeOpen({ kind: 'management_surface', module_id: 'claustrum' },
+      { project_root: '/project' } as never, { consumerIdentity: null })
+    for (const body of [
+      { op: 'auth.watch_scoped', params: {} },
+      { op: 'credential.list_scoped', params: {} },
+      { method: 'auth.watch_scoped', op: 'auth.watch_scoped', params: {} },
+      { method: 'credential.list_scoped', params: {}, extra: true },
+      { method: 1, params: {} },
+    ]) {
+      await expect(transport.request(route, body)).rejects.toMatchObject({ code: 'invalid_request' })
+    }
+    await expect(transport.request(route, { method: 'credential.list_scoped' }))
+      .resolves.toEqual({ result: { credentials: [], view: 'view' } })
   })
 })

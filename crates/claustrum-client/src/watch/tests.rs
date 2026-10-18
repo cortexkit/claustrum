@@ -5,6 +5,7 @@ fn samples() -> Vec<String> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../credentials-module/tests/fixtures/enrollment_wire_contract.json");
     let fixture: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    // `op` labels fixture sections, not route requests, whose operation key is `method`.
     fixture["operations"]
         .as_array()
         .unwrap()
@@ -26,6 +27,33 @@ fn refusal() -> Value {
     json!({"result":{"error":{"class":"permanent", "code":"not_found"}}})
 }
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StandInReadRequest {
+    method: String,
+    #[serde(default, rename = "params")]
+    _params: Value,
+}
+
+async fn accept_request(server: &mut TcpStream, frame: &Frame, method: &str) -> bool {
+    let code = match serde_json::from_slice::<StandInReadRequest>(&frame.body) {
+        Ok(request) if request.method == method => return true,
+        Ok(_) => "unknown_method",
+        Err(_) => "invalid_request",
+    };
+    let reply = Frame::build(
+        FrameType::Error,
+        Flags::new(false, Priority::Interactive, false),
+        frame.header.channel,
+        frame.header.epoch,
+        frame.header.corr,
+        serde_json::to_vec(&json!({"code":code, "message":"request body not decodable"})).unwrap(),
+    )
+    .unwrap();
+    write_frame(server, &reply).await.unwrap();
+    false
+}
+
 async fn stand_in(
     frames: Vec<(FrameType, Value)>,
     list_reply: Value,
@@ -37,22 +65,24 @@ async fn stand_in(
     let task = tokio::spawn(async move {
         let request = read_frame(&mut server).await.unwrap().unwrap();
         let mut requests = vec![serde_json::from_slice::<Value>(&request.body).unwrap()];
-        for (ty, body) in frames {
-            let bytes = if ty == FrameType::StreamEnd {
-                vec![]
-            } else {
-                serde_json::to_vec(&body).unwrap()
-            };
-            let frame = Frame::build(
-                ty,
-                Flags::new(false, Priority::Interactive, false),
-                7,
-                9,
-                request.header.corr,
-                bytes,
-            )
-            .unwrap();
-            write_frame(&mut server, &frame).await.unwrap();
+        if accept_request(&mut server, &request, "auth.watch_scoped").await {
+            for (ty, body) in frames {
+                let bytes = if ty == FrameType::StreamEnd {
+                    vec![]
+                } else {
+                    serde_json::to_vec(&body).unwrap()
+                };
+                let frame = Frame::build(
+                    ty,
+                    Flags::new(false, Priority::Interactive, false),
+                    7,
+                    9,
+                    request.header.corr,
+                    bytes,
+                )
+                .unwrap();
+                write_frame(&mut server, &frame).await.unwrap();
+            }
         }
         loop {
             let frame = tokio::time::timeout(Duration::from_secs(2), read_frame(&mut server))
@@ -65,6 +95,9 @@ async fn stand_in(
             }
             assert_eq!(frame.header.ty, FrameType::Request);
             requests.push(serde_json::from_slice(&frame.body).unwrap());
+            if !accept_request(&mut server, &frame, CREDENTIAL_LIST_SCOPED_OP).await {
+                continue;
+            }
             let reply = Frame::build(
                 FrameType::Response,
                 Flags::new(false, Priority::Interactive, false),
@@ -181,7 +214,7 @@ async fn stream_end_preserves_sequence_epoch_and_params() {
     ));
     assert_eq!(
         server.await.unwrap(),
-        vec![json!({"op":"auth.watch_scoped", "params":{"enrollment_token":"token"}})]
+        vec![json!({"method":"auth.watch_scoped", "params":{"enrollment_token":"token"}})]
     );
 }
 
@@ -254,11 +287,47 @@ async fn zero_notice_close_confirms_list_once() {
         assert_eq!(
             server.await.unwrap(),
             vec![
-                json!({"op":"auth.watch_scoped", "params":{"enrollment_token":"token"}}),
-                json!({"op":"credential.list_scoped", "params":{"enrollment_token":"token"}})
+                json!({"method":"auth.watch_scoped", "params":{"enrollment_token":"token"}}),
+                json!({"method":"credential.list_scoped", "params":{"enrollment_token":"token"}})
             ]
         );
     }
+}
+
+#[tokio::test]
+async fn watch_and_confirming_list_send_exact_method_request_envelopes() {
+    let (mut watch, server) = stand_in(
+        vec![(FrameType::StreamEnd, Value::Null)],
+        json!({"result":{"credentials":[], "view":"view"}}),
+    )
+    .await;
+    assert!(matches!(
+        closed(&mut watch).await,
+        ScopedWatchOutcome::NotAccepting
+    ));
+    assert_eq!(
+        server.await.unwrap(),
+        vec![
+            json!({"method":"auth.watch_scoped", "params":{"enrollment_token":"token"}}),
+            json!({"method":"credential.list_scoped", "params":{"enrollment_token":"token"}}),
+        ]
+    );
+}
+
+#[test]
+fn stand_in_rejects_op_and_extra_read_envelope_keys() {
+    for body in [
+        json!({"op":"auth.watch_scoped", "params":{}}),
+        json!({"method":"auth.watch_scoped", "op":"auth.watch_scoped", "params":{}}),
+        json!({"method":"credential.list_scoped", "params":{}, "extra":true}),
+        json!({"method":1, "params":{}}),
+    ] {
+        assert!(serde_json::from_value::<StandInReadRequest>(body).is_err());
+    }
+    assert!(serde_json::from_value::<StandInReadRequest>(
+        json!({"method":"credential.list_scoped"})
+    )
+    .is_ok());
 }
 
 #[tokio::test]

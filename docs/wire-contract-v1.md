@@ -961,8 +961,10 @@ Older vaults answer this unknown operation on the `ERROR` lane with code
 `credential.list_scoped` instead. Sheddable notices are not an event journal: on a
 route reconnect, reopen for a fresh seq-1 snapshot.
 
-Producer samples (only the random epoch normalized) are in
-`crates/credentials-module/tests/fixtures/enrollment_wire_contract.json`, pinned by
+Sample notices emitted by the vault itself (a first notice and a change notice) are in
+`crates/credentials-module/tests/fixtures/enrollment_wire_contract.json`. The `epoch`
+field in them is replaced with a fixed placeholder, because the real value is random per
+process; every other byte is what the vault sent. They are pinned by
 `watch_scoped_wire_fixture_is_producer_generated`. Request-path tests in
 `watch_scoped_tests.rs` cover both flag forms, metadata/key changes, refresh silence,
 coalescing, per-caller visibility, uniform refusals, revocation, immediate snapshots,

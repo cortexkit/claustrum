@@ -163,11 +163,11 @@ id = "list-grant-authorizes-inventory"
 guards = "list-only grant discloses identity and adapter in scoped inventory"
 file = "crates/credentials-core/src/store.rs"
 old = """
-                        && (operations.contains(&GrantOperation::Read)
-                            || operations.contains(&GrantOperation::List))"""
+                    let disclose_identity = operations.contains(&GrantOperation::Read)
+                        || operations.contains(&GrantOperation::List);"""
 new = """
-                        && (operations.contains(&GrantOperation::Read)
-                            || false) // NON-VACUITY BREAK"""
+                    let disclose_identity = operations.contains(&GrantOperation::Read)
+                        || false; // NON-VACUITY BREAK"""
 edits = []
 test_file = "crates/credentials-module/src/main.rs"
 runner = "cargo"

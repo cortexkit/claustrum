@@ -897,3 +897,64 @@ result. Verifying a replaced cookie requires retaining its digest outside the va
 cannot see the consent card. The grant is not evidence that a card was shown.
 The hand-authored fixture `deposit_cookie_wire_contract.json` pins these bytes;
 fixture regeneration requires `UPDATE_FIXTURES=1` and a reviewed diff.
+
+## auth.watch_scoped — held scoped-inventory changes
+
+`auth.watch_scoped` accepts exactly the `credential.list_scoped` params, including
+optional `enrollment_token` (token identity takes precedence over the route principal;
+a bad token never falls back). It uses the same principal resolution and grants.
+Send a route `REQUEST`; SUBSCRIPTION (flag bit 7) is accepted but **not required**,
+since the current Rust and TypeScript SDK subscribe methods send ordinary requests.
+The watch is an ordinary in-flight request; the manifest remains
+`Concurrency::ModuleManaged` with 32 in-flight requests per route.
+
+The vault sends one JSON body per `STREAM_DATA` on the request's correlation id,
+route channel and binding epoch. Each notice is sheddable (`ADMISSION=2`):
+
+```json
+{"kind":"changed","epoch":"0123456789abcdef0123456789abcdef","seq":1,"view":"<base64>","keys":"<base64>"}
+```
+
+- `epoch` is a random 128-bit hex id shared by all watches in one daemon process.
+  A restart changes it. `seq` counts emitted notices within this watch, starting at 1.
+- Every open or reopen immediately sends seq 1 with the current digests, even if
+  the caller previously watched the same route. A change while disconnected is not
+  hidden by a remembered cursor.
+- `view` is exactly the `credential.list_scoped` view for this caller, computed by
+  `list_scoped_view`, not a second digest definition.
+- `keys` is standard padded base64 SHA-256 over the bytes of
+  `claustrum.watch_scoped.keys.v1`, byte `1`, a big-endian u32 row count, then each
+  reachable signing/KEM row sorted by id bytes: its id as big-endian u32 UTF-8 byte
+  length plus bytes, followed by its big-endian u64 `record_version`. Kind follows
+  the sealed record, not the id prefix. The material itself never leaves the vault.
+  A byte-identical `put --replace` still advances this digest. Token refresh versions
+  do not participate in either digest.
+- Committed store writes wake recomputation off the async reactor. Bursts coalesce
+  over about 250 ms; a notice is sent only if this caller's `view` or `keys` changed.
+  Losing grants yields the smaller (possibly empty) view, not an ending.
+
+An unauthorized open, or an open beyond the cap, gets the same `RESPONSE` body as
+an unauthorized `credential.list_scoped`:
+`{"result":{"error":{"class":"permanent","code":"not_found"}}}`. Revoking the
+watcher's enrollment terminates its correlation with an `ERROR` carrying those same
+body bytes. No account enumeration is disclosed by a refusal.
+
+There is one watch per route: opening another replaces it and ends the old
+correlation with `STREAM_END`. The daemon-wide cap is **64** open watches. `CANCEL`
+on the watch correlation and a route close stop the watch and free its slot; route
+close is silent. A channel-0 `PUSH` `module.draining` command ends all watches with
+`STREAM_END` before routes finish draining and refuses new opens. Graceful daemon
+`GOODBYE` also queues `STREAM_END` for every watch before the frame loop exits.
+
+Older vaults answer this unknown operation on the `ERROR` lane with code
+`unknown_method`. That unchanged response is the client's fallback signal to poll
+`credential.list_scoped` instead. Sheddable notices are not an event journal: on a
+route reconnect, reopen for a fresh seq-1 snapshot.
+
+Producer samples (only the random epoch normalized) are in
+`crates/credentials-module/tests/fixtures/enrollment_wire_contract.json`, pinned by
+`watch_scoped_wire_fixture_is_producer_generated`. Request-path tests in
+`watch_scoped_tests.rs` cover both flag forms, metadata/key changes, refresh silence,
+coalescing, per-caller visibility, uniform refusals, revocation, immediate snapshots,
+replacement/grant loss, the 64/65 boundary and cancellation/close capacity recovery,
+and termination before drain/shutdown.

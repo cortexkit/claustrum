@@ -1537,6 +1537,7 @@ fn apply_migration_10(
 
 pub struct EncryptedStore {
     store: SqliteStore,
+    writes: tokio::sync::watch::Sender<()>,
     key: MasterKey,
     key_id: KeyId,
     // The audit-chain HMAC key, held in a zeroizing buffer so it is scrubbed from memory
@@ -1603,6 +1604,7 @@ impl EncryptedStore {
         let audit_key = load_or_create_audit_key(&store, &key)?;
         let encrypted = EncryptedStore {
             store,
+            writes: tokio::sync::watch::channel(()).0,
             key,
             key_id,
             audit_key,
@@ -1649,7 +1651,23 @@ impl EncryptedStore {
         if matches!(out, Err(StoreError::Fenced { .. })) {
             self.fenced_out.store(true, Ordering::Relaxed);
         }
+        self.signal_commit(&out);
         out
+    }
+
+    // with_conn_fenced returns only after commit. Runtime mutations pass through
+    // fenced_write, except the deliberately unfenced permission observation, which
+    // also calls this hook after commit. Migrations, audit-key bootstrap and the
+    // enrollment sweep precede serving. Failed transactions never wake readers;
+    // successful no-ops may wake them and are filtered by their projected digests.
+    fn signal_commit<T>(&self, result: &Result<T, StoreError>) {
+        if result.is_ok() {
+            self.writes.send_replace(());
+        }
+    }
+
+    pub fn subscribe_writes(&self) -> tokio::sync::watch::Receiver<()> {
+        self.writes.subscribe()
     }
 
     /// Apply the vault schema migrations to a freshly opened store and set the
@@ -2962,7 +2980,19 @@ impl EncryptedStore {
         principal_kind: &str,
         principal_id: &str,
     ) -> Result<ScopedListSnapshot, StoreOpError> {
-        self.list_scoped_snapshot_inner(principal_kind, principal_id, || Ok(()))
+        self.list_scoped_snapshot_inner(principal_kind, principal_id, false, || Ok(()))
+            .map(|(snapshot, _)| snapshot)
+    }
+
+    /// The list projection and held-key generations from the same SQLite snapshot.
+    /// Key kind is sealed, so watch recomputation also opens sign/open-only rows
+    /// internally. Neither their identity nor their material is disclosed by this API.
+    pub fn watch_scoped_snapshot(
+        &self,
+        principal_kind: &str,
+        principal_id: &str,
+    ) -> Result<(ScopedListSnapshot, Vec<(String, u64)>), StoreOpError> {
+        self.list_scoped_snapshot_inner(principal_kind, principal_id, true, || Ok(()))
     }
 
     #[cfg(test)]
@@ -2975,15 +3005,17 @@ impl EncryptedStore {
     where
         F: FnOnce() -> rusqlite::Result<()>,
     {
-        self.list_scoped_snapshot_inner(principal_kind, principal_id, after_grants)
+        self.list_scoped_snapshot_inner(principal_kind, principal_id, false, after_grants)
+            .map(|(snapshot, _)| snapshot)
     }
 
     fn list_scoped_snapshot_inner<F>(
         &self,
         principal_kind: &str,
         principal_id: &str,
+        include_keys: bool,
         after_grants: F,
-    ) -> Result<ScopedListSnapshot, StoreOpError>
+    ) -> Result<(ScopedListSnapshot, Vec<(String, u64)>), StoreOpError>
     where
         F: FnOnce() -> rusqlite::Result<()>,
     {
@@ -3021,6 +3053,7 @@ impl EncryptedStore {
                 drop(stmt);
 
                 let mut rows = Vec::new();
+                let mut keys = Vec::new();
                 for (id, record_version, state, envelope_bytes, categories, provider_ids, plan_tier) in
                     candidates
                 {
@@ -3048,9 +3081,10 @@ impl EncryptedStore {
                     // caller reaches. A row still stored as readable whose envelope fails
                     // to open does fail the snapshot below: that is corruption nothing has
                     // recorded yet, and it must not be listed as if it were healthy.
+                    let disclose_identity = operations.contains(&GrantOperation::Read)
+                        || operations.contains(&GrantOperation::List);
                     let decoded_record = if state != RecordState::Corrupt
-                        && (operations.contains(&GrantOperation::Read)
-                            || operations.contains(&GrantOperation::List))
+                        && (include_keys || disclose_identity)
                     {
                         let plaintext = envelope::open(
                             &self.key,
@@ -3082,7 +3116,10 @@ impl EncryptedStore {
                             record.kind,
                             record.refresh_adapter.as_deref(),
                         );
-                        Some((record.identity, record.refresh_adapter, auth_method, record.detected_plan))
+                        if include_keys && record.kind.is_vault_held_key() {
+                            keys.push((id.clone(), record_version));
+                        }
+                        disclose_identity.then_some((record.identity, record.refresh_adapter, auth_method, record.detected_plan))
                     } else {
                         None
                     };
@@ -3110,7 +3147,7 @@ impl EncryptedStore {
                     });
                 }
                 tx.commit()?;
-                Ok(ScopedListSnapshot { rows, grants })
+                Ok((ScopedListSnapshot { rows, grants }, keys))
             })
             .map_err(StoreOpError::from)
     }
@@ -5078,7 +5115,7 @@ impl EncryptedStore {
         let Ok(current_json) = serde_json::to_string(permissions) else {
             return;
         };
-        let _ = self.store.with_conn(|c| {
+        let result = self.store.with_conn(|c| {
             let tx = c.unchecked_transaction()?;
             let previous_json: Option<Option<String>> = tx
                 .query_row(
@@ -5122,6 +5159,7 @@ impl EncryptedStore {
             }
             tx.commit()
         });
+        self.signal_commit(&result);
     }
 
     /// Read the dangling intent for one credential, if any (reconciliation + the

@@ -33,6 +33,7 @@
 
 MIN_SEALED_LEN crates/credentials-core/src/apns_submit.rs a_blob_too_short_to_decrypt_is_refused
 GET_MANY_MAX crates/credentials-module/src/limiter.rs get_many_serves_at_the_cap_and_refuses_whole_past_it
+MAX_WATCHES crates/credentials-module/src/watch_scoped.rs watch_scoped_cap_cancel_and_route_close
 MIN_ENVELOPE_LEN crates/credentials-core/src/envelope.rs empty_plaintext_round_trips
 REUSE_LIMIT_SECS crates/credentials-core/src/apns.rs staleness_covers_both_directions
 DEFAULT_DISTINCT_CEILING crates/credentials-module/src/limiter.rs distinct_spread_over_ceiling_flags_once

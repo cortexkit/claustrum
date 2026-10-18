@@ -1,6 +1,18 @@
 {
   "operations": [
     {
+      "op": "auth.watch_scoped",
+      "request": "{}",
+      "success_cases": [
+        "initial snapshot seq 1 (epoch normalized)",
+        "changed snapshot seq 2 (epoch normalized)"
+      ],
+      "success": [
+        "{\"epoch\":\"00000000000000000000000000000000\",\"keys\":\"gWYprQh+NPmmtg2ZrKBrOv9X/F9BYAiK+6rtaHR2xxA=\",\"kind\":\"changed\",\"seq\":1,\"view\":\"WJ4kwtxL+iITIKBjbo2xVnNBe5EIH6Xu+QGOrGBoIKs=\"}",
+        "{\"epoch\":\"00000000000000000000000000000000\",\"keys\":\"gWYprQh+NPmmtg2ZrKBrOv9X/F9BYAiK+6rtaHR2xxA=\",\"kind\":\"changed\",\"seq\":2,\"view\":\"voJahchvv3WOVUvaYC1dqSvNT7k4hUZZrrLYEujPSkg=\"}"
+      ]
+    },
+    {
       "op": "auth.enroll_propose",
       "request": "{\"proposed_name\":\"consumer\",\"request_secret_hash\":\"0000000000000000000000000000000000000000000000000000000000000000\"}",
       "success": [

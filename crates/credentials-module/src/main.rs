@@ -25,6 +25,7 @@ mod limiter;
 mod read_surface;
 #[cfg(test)]
 mod test_support;
+mod watch_scoped;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -103,6 +104,7 @@ const OP_DEPOSIT_COOKIE: &str = "credential.deposit_cookie";
 const OP_GET: &str = "credential.get";
 const OP_GET_SCOPED: &str = "credential.get_scoped";
 const OP_LIST_SCOPED: &str = "credential.list_scoped";
+const OP_WATCH_SCOPED: &str = "auth.watch_scoped";
 const OP_GET_MANY: &str = "credential.get_many";
 const OP_STATUS: &str = "credential.status";
 const OP_REPORT_AUTH_FAILURE: &str = "credential.report_auth_failure";
@@ -371,6 +373,7 @@ where
     // cadence, never on the channel-0 dispatch. Aborted on loop exit via the guard.
     let health_refresher = spawn_health_refresher(Arc::clone(&surface));
     let _refresher_guard = AbortOnDrop(health_refresher);
+    let _watch_guard = watch_scoped::CloseOnDrop(Arc::clone(&surface));
 
     // NO READ TIMEOUT HERE, AND THAT IS DELIBERATE -- but it rests on the supervisor,
     // so the dependency is named rather than left for someone to rediscover.
@@ -981,11 +984,24 @@ async fn handle_frame(
             send(&egress.control, pong).await?;
             Ok(true)
         }
-        FrameType::Goodbye if frame.header.channel == 0 => Ok(false),
+        FrameType::Goodbye if frame.header.channel == 0 => {
+            surface.watches.finish_all().await?;
+            Ok(false)
+        }
+        FrameType::Push if frame.header.channel == 0 => {
+            if matches!(
+                serde_json::from_slice::<subc_protocol::session::ModuleControlCommand>(&frame.body),
+                Ok(subc_protocol::session::ModuleControlCommand::Draining { .. })
+            ) {
+                surface.watches.finish_all().await?;
+            }
+            Ok(true)
+        }
         FrameType::Goodbye => {
             // An epoch-valid route goodbye: forget the binding, that connection's
             // limiter state, AND its admin bind state (principal + nonce).
             routes.remove(frame.header.channel);
+            surface.watches.close(frame.header.channel);
             surface
                 .drop_connection(route_connection_id(
                     frame.header.channel,
@@ -1010,9 +1026,24 @@ async fn handle_frame(
             // that bind's principal before spawning so a later route reuse cannot lend
             // its new principal to an already-accepted request.
             let principal = admin.principal(frame.header.channel);
+            // Register subscriptions before reading the next ingress frame, so a
+            // following CANCEL or route close cannot race ahead of registration.
+            // Opening only spawns the SQLite work; it never waits on the reactor.
+            if serde_json::from_slice::<ReadRequest>(&frame.body)
+                .is_ok_and(|request| request.method == OP_WATCH_SCOPED)
+            {
+                handle_read_request(frame, &route, &surface, &admin, principal).await?;
+                return Ok(true);
+            }
             tokio::spawn(async move {
                 let _ = handle_read_request(frame, &route, &surface, &admin, principal).await;
             });
+            Ok(true)
+        }
+        FrameType::Cancel => {
+            surface
+                .watches
+                .cancel(frame.header.channel, frame.header.corr);
             Ok(true)
         }
         _ => Ok(true),
@@ -1088,6 +1119,7 @@ async fn handle_control_request(
             // traffic can pass layer-2 validation before the bind is acknowledged
             // (§3.2: module traffic legally begins only after the RouteBind ack).
             surface.drop_channel(route_channel).await;
+            surface.watches.close(route_channel);
             routes.install(route_channel, epoch);
             // Record the bind's daemon-stamped principal (Gate 1 provenance) against
             // the route channel, under the newly installed wire epoch. An absent principal stamp
@@ -1270,6 +1302,39 @@ async fn handle_read_request(
     };
 
     let result = match request.method.as_str() {
+        OP_WATCH_SCOPED => {
+            let params = match serde_json::from_value::<ListScopedParams>(request.params) {
+                Ok(params) => params,
+                Err(error) => {
+                    let writer = writer.clone();
+                    tokio::spawn(async move {
+                        let _ =
+                            invalid_params(&writer, ver, channel, epoch, corr, &error.to_string())
+                                .await;
+                    });
+                    return Ok(());
+                }
+            };
+            if !surface.watches.open(
+                Arc::clone(surface),
+                writer.clone(),
+                frame.header,
+                principal,
+                params,
+            ) {
+                let writer = writer.clone();
+                tokio::spawn(async move {
+                    let _ = watch_scoped::refusal(
+                        &writer,
+                        frame.header,
+                        FrameType::Response,
+                        read_surface::ReadError::NotFound,
+                    )
+                    .await;
+                });
+            }
+            return Ok(());
+        }
         OP_DEPOSIT_COOKIE => match serde_json::from_value::<DepositCookieParams>(request.params) {
             Ok(params) => match surface.deposit_cookie(principal.as_ref(), &params) {
                 Ok(result) => wrap_result(result),
@@ -2045,6 +2110,11 @@ fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> 
                 kind: ManagementOperationKind::Query,
             },
             ManagementOperation {
+                name: OP_WATCH_SCOPED.to_string(),
+                description: Some("Subscribe to changes in the caller's scoped inventory and held-key generations.".to_string()),
+                kind: ManagementOperationKind::Query,
+            },
+            ManagementOperation {
                 name: OP_GET_MANY.to_string(),
                 description: Some("Serve a capped batch of handle-addressed credentials, refusing the whole batch past the cap.".to_string()),
                 kind: ManagementOperationKind::Query,
@@ -2136,6 +2206,7 @@ impl std::error::Error for ModuleError {}
 
 #[cfg(test)]
 mod tests {
+    include!("watch_scoped_tests.rs");
     #[test]
     fn daemon_uses_shared_record_and_key_path_override_rules() {
         use credentials_core::resolver::KeySource;
@@ -12781,7 +12852,7 @@ mod tests {
     /// the question in front of whoever does it. The count alone cannot see what an
     /// EXISTING site logs, so the test also reads every site's arguments and refuses any
     /// that call `.expose(`: a `Secret` can be read only through `expose()`, so that is
-    /// the one shape every secret read must take. Covers the four files linked into the
+    /// the one shape every secret read must take. Covers the five files linked into the
     /// daemon binary.
     ///
     /// Patterns are built by concatenation so this test's own text is not counted, and
@@ -12793,6 +12864,7 @@ mod tests {
             include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/read_surface.rs")),
             include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/admin_surface.rs")),
             include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/limiter.rs")),
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/watch_scoped.rs")),
         ];
         let count = |shape: &str| -> usize {
             let pattern = format!("{shape}{}", "!(");

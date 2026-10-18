@@ -887,6 +887,7 @@ const OPEN_REFUSAL_THRESHOLD: usize = 16;
 /// report_auth_failure go in the same chain as admin writes).
 pub struct ReadSurface {
     engine: Arc<RefreshEngine>,
+    pub(crate) watches: crate::watch_scoped::WatchHub,
     limiter: Mutex<FetchLimiter>,
     open_refusals: Mutex<HashMap<u64, (Instant, usize)>>,
     // A PRECOMPUTED health snapshot, refreshed off the probe path on a cadence (see
@@ -1180,6 +1181,7 @@ impl ReadSurface {
         let initial = Self::compute_health(&engine);
         ReadSurface {
             engine,
+            watches: crate::watch_scoped::WatchHub::default(),
             limiter: Mutex::new(limiter),
             open_refusals: Mutex::new(HashMap::new()),
             health: std::sync::Mutex::new(initial),
@@ -2060,6 +2062,40 @@ impl ReadSurface {
             );
         }
         Ok(result)
+    }
+
+    pub(crate) fn watch_scoped(
+        &self,
+        principal: Option<&Principal>,
+        params: &ListScopedParams,
+    ) -> Result<(String, String), ReadError> {
+        let Some((kind, id)) = self.scoped_principal(principal, params.enrollment_token.as_deref())
+        else {
+            return Err(ReadError::NotFound);
+        };
+        let (snapshot, mut keys) = self
+            .engine
+            .store()
+            .watch_scoped_snapshot(kind, &id)
+            .map_err(|_| ReadError::StoreError)?;
+        let view = project_list_scoped(snapshot).view;
+        keys.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+        let mut input = b"claustrum.watch_scoped.keys.v1".to_vec();
+        input.push(1);
+        push_u32(&mut input, keys.len());
+        for (id, version) in keys {
+            push_string(&mut input, &id);
+            input.extend_from_slice(&version.to_be_bytes());
+        }
+        let digest = ring::digest::digest(&ring::digest::SHA256, &input);
+        Ok((
+            view,
+            base64::engine::general_purpose::STANDARD.encode(digest.as_ref()),
+        ))
+    }
+
+    pub(crate) fn subscribe_writes(&self) -> tokio::sync::watch::Receiver<()> {
+        self.engine.store().subscribe_writes()
     }
 
     /// Serve a credential-id read after the route layer captures the bind's principal.

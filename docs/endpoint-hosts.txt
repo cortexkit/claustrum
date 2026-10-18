@@ -113,6 +113,12 @@ crates/credentials-core/src/catalog.rs INLINE_101 app.tavily.com
 crates/credentials-core/src/catalog.rs INLINE_102 kagi.com
 crates/credentials-core/src/catalog.rs INLINE_103 dashboard.exa.ai
 crates/credentials-core/src/catalog.rs INLINE_104 platform.parallel.ai
+crates/credentials-core/src/catalog.rs INLINE_105 api-dashboard.search.brave.com
+crates/credentials-core/src/catalog.rs INLINE_106 www.firecrawl.dev
+crates/credentials-core/src/catalog.rs INLINE_107 api.firecrawl.dev
+crates/credentials-core/src/catalog.rs INLINE_108 jina.ai
+crates/credentials-core/src/catalog.rs INLINE_109 agent.tinyfish.ai
+crates/credentials-core/src/catalog.rs INLINE_110 api.tinyfish.ai
 crates/credentials-core/src/device_flow.rs INLINE_001 auth.openai.com
 crates/credentials-core/src/device_flow.rs INLINE_002 auth.openai.com
 crates/credentials-core/src/device_flow.rs INLINE_003 auth.openai.com

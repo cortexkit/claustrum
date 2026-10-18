@@ -41,6 +41,12 @@ credential caching, refresh, account scheduling, and retry policy.
 The client sends `consumerIdentity: null` for every managed request so inherited
 `SUBC_MODULE_ID` and `SUBC_LAUNCH_NONCE` cannot impersonate a supervising host.
 
+**Changed in 0.11.0:** the client depends on `@cortexkit/subc-client` ^0.22.0 (was
+^0.16.0). A host that also uses subc-client must move to the 0.22 line, so both share one
+copy. One behaviour reaches callers: while the vault is restarting or refusing route
+opens as retryable, a call now keeps retrying for up to 90 s (paced, with jitter) instead
+of 30 s. Give every vault call on a latency-sensitive path its own timeout.
+
 ## OpenCode handle-file exports
 
 `defaultHandleFilePath`, `readHandleFile`, `handleFileRevision`, and `parseHandleFile`

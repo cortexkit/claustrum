@@ -11,10 +11,10 @@
     },
     "packages/client": {
       "name": "@cortexkit/claustrum-client",
-      "version": "0.10.0",
+      "version": "0.11.0",
       "dependencies": {
         "@cortexkit/store": "^0.2.1",
-        "@cortexkit/subc-client": "^0.16.0",
+        "@cortexkit/subc-client": "^0.22.0",
       },
     },
     "packages/opencode": {
@@ -38,7 +38,7 @@
 
     "@cortexkit/store": ["@cortexkit/store@0.2.1", "", { "dependencies": { "@cortexkit/private-files": "^0.1.0" } }, "sha512-QlKHkz8Gl0DlhV+IetBncVbXrirN50L4WJ7WDcPCO6LWNquwy6QScdS/SxbSY7FA3fuJLi7aLG8DVdA1nlY6cQ=="],
 
-    "@cortexkit/subc-client": ["@cortexkit/subc-client@0.16.0", "", {}, "sha512-TYixR0E0CwBsZVi9G0gCfvr7bIrlDifVuP7Sy2CGlX29eCEZ3PXcda82S4VdM1paiAGsPBAm7TtQWvIJje4ArQ=="],
+    "@cortexkit/subc-client": ["@cortexkit/subc-client@0.22.0", "", {}, "sha512-NzsryvIbFlYoYXB2WHptz+BNxOREJch71aHdE6cEKQ5XpGi1fjev31PaazSnnk4MyKk5SUc6st2azFhMsu9+XA=="],
 
     "@msgpackr-extract/msgpackr-extract-darwin-arm64": ["@msgpackr-extract/msgpackr-extract-darwin-arm64@3.0.4", "", { "os": "darwin", "cpu": "arm64" }, "sha512-LCkGo6JDfaBhgST7UpPWgNgLINpcpabaHfyz5OBx75nUYxBsaEPxjnyNjWpeb/xBup/682QnBfRBy2/LvPutZQ=="],
 

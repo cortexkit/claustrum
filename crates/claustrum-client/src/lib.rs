@@ -185,7 +185,8 @@ pub struct ScopedCredentialListing {
 }
 
 /// One vault row as `credential.list_scoped` describes it. The vault fills in
-/// `account_id` and `refresh_adapter` only for rows the caller may list or read.
+/// `account_id`, `refresh_adapter` and the plan tier only for rows the caller may list
+/// or read.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ListedCredential {
     /// The vault credential ID, returned verbatim (for example `oauth:anthropic:yiyi`).
@@ -204,6 +205,13 @@ pub struct ListedCredential {
     pub account_id: Option<String>,
     pub email: Option<String>,
     pub org_name: Option<String>,
+    /// The subscription plan to price this account by (for example `max_20x` or
+    /// `pro_200`). `None` means unknown: an API key, a provider that reports no plan,
+    /// or a vault older than plan tiers.
+    pub plan_tier: Option<String>,
+    /// Where `plan_tier` came from: `operator` (set with `ck auth set-plan`, which wins)
+    /// or `detected` (read from the provider). Present only alongside `plan_tier`.
+    pub plan_tier_source: Option<String>,
 }
 
 /// One grant the caller holds: which selector it names and which operation it allows.
@@ -1395,6 +1403,8 @@ fn decode_listed_credential(row: &Value) -> Result<ListedCredential, String> {
         account_id: listing_optional_string(row, "account_id")?,
         email: listing_optional_string(row, "email")?,
         org_name: listing_optional_string(row, "org_name")?,
+        plan_tier: listing_optional_string(row, "plan_tier")?,
+        plan_tier_source: listing_optional_string(row, "plan_tier_source")?,
     })
 }
 

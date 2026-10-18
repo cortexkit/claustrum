@@ -84,6 +84,8 @@ fn producer_list_scoped_reply_decodes_every_metadata_field_and_grant() {
                     account_id: None,
                     email: None,
                     org_name: None,
+                    plan_tier: None,
+                    plan_tier_source: None,
                 },
                 ListedCredential {
                     id: "apikey:openrouter".into(),
@@ -118,6 +120,8 @@ fn producer_list_scoped_reply_decodes_every_metadata_field_and_grant() {
                     account_id: None,
                     email: None,
                     org_name: None,
+                    plan_tier: None,
+                    plan_tier_source: None,
                 },
                 ListedCredential {
                     id: "chatgpt:openai".into(),
@@ -133,6 +137,8 @@ fn producer_list_scoped_reply_decodes_every_metadata_field_and_grant() {
                     account_id: None,
                     email: None,
                     org_name: None,
+                    plan_tier: Some("pro_200".into()),
+                    plan_tier_source: Some("detected".into()),
                 },
                 ListedCredential {
                     id: "github_app:plex-alfonso".into(),
@@ -148,6 +154,8 @@ fn producer_list_scoped_reply_decodes_every_metadata_field_and_grant() {
                     account_id: None,
                     email: None,
                     org_name: None,
+                    plan_tier: None,
+                    plan_tier_source: None,
                 },
                 ListedCredential {
                     id: "oauth:anthropic".into(),
@@ -163,6 +171,8 @@ fn producer_list_scoped_reply_decodes_every_metadata_field_and_grant() {
                     account_id: Some("00000000-0000-4000-8000-000000000000".into()),
                     email: Some("consumer@example.invalid".into()),
                     org_name: Some("Example Org".into()),
+                    plan_tier: Some("max_20x".into()),
+                    plan_tier_source: Some("operator".into()),
                 },
             ],
             grant_tuples: vec![
@@ -205,6 +215,8 @@ fn producer_list_only_reply_preserves_list_operation_and_identity() {
                 account_id: Some("00000000-0000-4000-8000-000000000000".into()),
                 email: Some("consumer@example.invalid".into()),
                 org_name: Some("Example Org".into()),
+                plan_tier: Some("max_5x".into()),
+                plan_tier_source: Some("detected".into()),
             }],
             grant_tuples: vec![ListedGrant {
                 selector_kind: "category".into(),

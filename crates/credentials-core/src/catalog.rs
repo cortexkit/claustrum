@@ -625,7 +625,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         dashboard_url: "https://ollama.com/settings/keys",
         placeholder: "ollama-cloud-api-key",
         validation: KeyValidation::Unvalidated {
-            reason: "oh-my-pi declares no validation probe for Ollama Cloud",
+            reason: "no known Ollama Cloud endpoint reliably rejects a bad key without cost, so a wrong key shows up on first use",
         },
         categories: LLM_AND_WEB_SEARCH,
         serves: &[OpenAI, Google, DeepSeek, Mistral, Moonshot, Zhipu, Qwen, Nvidia, MiniMax],
@@ -638,7 +638,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         dashboard_url: "https://opencode.ai/auth",
         placeholder: "sk-...",
         validation: KeyValidation::Unvalidated {
-            reason: "oh-my-pi declares no validation probe for OpenCode Go",
+            reason: "no known OpenCode Go endpoint reliably rejects a bad key without cost, so a wrong key shows up on first use",
         },
         categories: LLM,
         serves: &[OpenAI, XAI, DeepSeek, Moonshot, Zhipu, Meta, Qwen, MiniMax, Xiaomi],
@@ -651,7 +651,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         dashboard_url: "https://opencode.ai/auth",
         placeholder: "sk-...",
         validation: KeyValidation::Unvalidated {
-            reason: "oh-my-pi declares no validation probe for OpenCode Zen",
+            reason: "no known OpenCode Zen endpoint reliably rejects a bad key without cost, so a wrong key shows up on first use",
         },
         categories: LLM,
         serves: &[Anthropic, OpenAI, Google, XAI, DeepSeek, Moonshot, Zhipu, Meta, Qwen, Nvidia, MiniMax, Xiaomi],
@@ -846,7 +846,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         dashboard_url: "https://vercel.com/d?to=%2F%5Bteam%5D%2F%7E%2Fai-gateway%2Fapi-keys&title=AI+Gateway+API+Keys",
         placeholder: "vck_...",
         validation: KeyValidation::Unvalidated {
-            reason: "oh-my-pi declares no validation probe for Vercel AI Gateway",
+            reason: "no known Vercel AI Gateway endpoint reliably rejects a bad key without cost, so a wrong key shows up on first use",
         },
         categories: LLM,
         serves: ModelVendor::ALL,
@@ -957,7 +957,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         dashboard_url: "https://app.tavily.com/home",
         placeholder: "tvly-...",
         validation: KeyValidation::Unvalidated {
-            reason: "oh-my-pi declares no validation probe for Tavily",
+            reason: "no known Tavily endpoint reliably rejects a bad key without cost, so a wrong key shows up on first use",
         },
         categories: WEB_SEARCH,
         serves: &[],
@@ -970,7 +970,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         dashboard_url: "https://kagi.com/settings/api",
         placeholder: "KG_...",
         validation: KeyValidation::Unvalidated {
-            reason: "oh-my-pi declares no validation probe for Kagi",
+            reason: "no known Kagi endpoint reliably rejects a bad key without cost, so a wrong key shows up on first use",
         },
         categories: WEB_SEARCH,
         serves: &[],
@@ -983,7 +983,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         dashboard_url: "https://dashboard.exa.ai/api-keys",
         placeholder: "API key",
         validation: KeyValidation::Unvalidated {
-            reason: "oh-my-pi declares no validation probe for Exa",
+            reason: "no known Exa endpoint reliably rejects a bad key without cost, so a wrong key shows up on first use",
         },
         categories: WEB_SEARCH,
         serves: &[],
@@ -996,7 +996,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         dashboard_url: "https://platform.parallel.ai/settings?tab=api-keys",
         placeholder: "sk_...",
         validation: KeyValidation::Unvalidated {
-            reason: "oh-my-pi declares no validation probe for Parallel",
+            reason: "no known Parallel endpoint reliably rejects a bad key without cost, so a wrong key shows up on first use",
         },
         categories: WEB_SEARCH,
         serves: &[],
@@ -1894,7 +1894,8 @@ mod tests {
 
     /// The rows stored without a probe, pinned so a row cannot quietly lose its check.
     /// Each has a reason printed at login; an empty one would print a notice that
-    /// explains nothing.
+    /// explains nothing, and one naming where a row was copied from (another
+    /// project's catalog) tells the operator nothing about the provider.
     #[test]
     fn unvalidated_rows_are_exactly_the_ones_without_a_usable_probe() {
         let unvalidated: Vec<_> = API_KEY_PROVIDERS
@@ -1902,6 +1903,11 @@ mod tests {
             .filter_map(|entry| match entry.validation {
                 KeyValidation::Unvalidated { reason } => {
                     assert!(!reason.trim().is_empty(), "{} has no reason", entry.key);
+                    assert!(
+                        !reason.to_ascii_lowercase().contains("oh-my-pi"),
+                        "{} reason names the source catalog, not the provider: {reason}",
+                        entry.key
+                    );
                     Some(entry.key)
                 }
                 _ => None,

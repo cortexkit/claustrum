@@ -36,6 +36,13 @@ def shell_function(path, name):
     return source[start:end]
 
 
+# watch-ci.sh with a stub gh and a no-op sleep finishes in well under a second; this
+# bound only stops a hung watcher from stalling the suite. It once was 3 s, and that
+# failed under a load average above 140, where starting bash alone can take seconds.
+# Tests assert the outcome, never how fast it arrived.
+WATCH_HANG_GUARD_SECONDS = 120
+
+
 class ScriptContracts(unittest.TestCase):
     def test_ckdev_matcher_has_statement_local_controls(self):
         guard = module('check-ckdev-execution')
@@ -321,13 +328,13 @@ class ScriptContracts(unittest.TestCase):
     def test_watch_bounds_failed_reads(self):
         self.executable('gh', 'exit 1')
         self.executable('sleep', ':')
-        result = subprocess.run(['bash', 'scripts/watch-ci.sh', '123'], cwd=ROOT, env=self.env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=3)
+        result = subprocess.run(['bash', 'scripts/watch-ci.sh', '123'], cwd=ROOT, env=self.env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=WATCH_HANG_GUARD_SECONDS)
         self.assertEqual(result.returncode, 2, result.stdout)
         self.assertIn('giving up after 5', result.stdout)
 
     def test_cancelled_run_is_superseded_not_red(self):
         self.executable('gh', 'case "$*" in *"--json status,conclusion,jobs"*) echo "completed|cancelled|";; *"--json status"*) echo completed;; *"--json conclusion"*) echo cancelled;; esac')
-        result = subprocess.run(['bash', 'scripts/watch-ci.sh', '123'], cwd=ROOT, env=self.env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=3)
+        result = subprocess.run(['bash', 'scripts/watch-ci.sh', '123'], cwd=ROOT, env=self.env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=WATCH_HANG_GUARD_SECONDS)
         self.assertEqual(result.returncode, 2, result.stdout)
         self.assertIn('CI_SUPERSEDED', result.stdout)
 

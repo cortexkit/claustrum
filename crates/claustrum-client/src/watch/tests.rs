@@ -1,4 +1,5 @@
 use super::*;
+#[cfg(feature = "transport")]
 use tokio::net::TcpListener;
 
 fn samples() -> Vec<String> {
@@ -23,6 +24,7 @@ fn notice(seq: u64, epoch: &str) -> Value {
     json!({"kind":"changed", "epoch":epoch, "seq":seq, "view":"view", "keys":"keys"})
 }
 
+#[cfg(feature = "transport")]
 fn refusal() -> Value {
     json!({"result":{"error":{"class":"permanent", "code":"not_found"}}})
 }
@@ -35,6 +37,7 @@ struct StandInReadRequest {
     _params: Value,
 }
 
+#[cfg(feature = "transport")]
 async fn accept_request(server: &mut TcpStream, frame: &Frame, method: &str) -> bool {
     let code = match serde_json::from_slice::<StandInReadRequest>(&frame.body) {
         Ok(request) if request.method == method => return true,
@@ -54,6 +57,7 @@ async fn accept_request(server: &mut TcpStream, frame: &Frame, method: &str) -> 
     false
 }
 
+#[cfg(feature = "transport")]
 async fn stand_in(
     frames: Vec<(FrameType, Value)>,
     list_reply: Value,
@@ -124,6 +128,7 @@ async fn stand_in(
     (watch, task)
 }
 
+#[cfg(feature = "transport")]
 async fn closed(watch: &mut ScopedWatch) -> ScopedWatchOutcome {
     tokio::time::timeout(Duration::from_secs(3), watch.closed())
         .await
@@ -188,6 +193,7 @@ fn notice_schema_is_strict() {
     }
 }
 
+#[cfg(feature = "transport")]
 #[tokio::test]
 async fn stream_end_preserves_sequence_epoch_and_params() {
     let (mut watch, server) = stand_in(
@@ -218,6 +224,7 @@ async fn stream_end_preserves_sequence_epoch_and_params() {
     );
 }
 
+#[cfg(feature = "transport")]
 #[tokio::test]
 async fn response_refusal_is_terminal_even_after_notices() {
     for sent_notice in [false, true] {
@@ -236,6 +243,7 @@ async fn response_refusal_is_terminal_even_after_notices() {
     }
 }
 
+#[cfg(feature = "transport")]
 #[tokio::test]
 async fn route_closed_is_transport_loss() {
     let (mut watch, server) = stand_in(
@@ -254,6 +262,7 @@ async fn route_closed_is_transport_loss() {
     assert_eq!(server.await.unwrap().len(), 1);
 }
 
+#[cfg(feature = "transport")]
 #[tokio::test]
 async fn unknown_method_is_polling_fallback() {
     let (mut watch, server) = stand_in(
@@ -271,6 +280,7 @@ async fn unknown_method_is_polling_fallback() {
     assert_eq!(server.await.unwrap().len(), 1);
 }
 
+#[cfg(feature = "transport")]
 #[tokio::test]
 async fn zero_notice_close_confirms_list_once() {
     for (reply, refused) in [
@@ -294,6 +304,7 @@ async fn zero_notice_close_confirms_list_once() {
     }
 }
 
+#[cfg(feature = "transport")]
 #[tokio::test]
 async fn watch_and_confirming_list_send_exact_method_request_envelopes() {
     let (mut watch, server) = stand_in(
@@ -324,12 +335,13 @@ fn stand_in_rejects_op_and_extra_read_envelope_keys() {
     ] {
         assert!(serde_json::from_value::<StandInReadRequest>(body).is_err());
     }
-    assert!(serde_json::from_value::<StandInReadRequest>(
-        json!({"method":"credential.list_scoped"})
-    )
-    .is_ok());
+    let request =
+        serde_json::from_value::<StandInReadRequest>(json!({"method":"credential.list_scoped"}))
+            .unwrap();
+    assert_eq!(request.method, "credential.list_scoped");
 }
 
+#[cfg(feature = "transport")]
 #[tokio::test]
 async fn malformed_stream_cancels_with_typed_outcome() {
     let (mut watch, server) = stand_in(
@@ -345,6 +357,7 @@ async fn malformed_stream_cancels_with_typed_outcome() {
     assert_eq!(server.await.unwrap().len(), 1);
 }
 
+#[cfg(feature = "transport")]
 #[tokio::test]
 async fn stop_sends_cancel_and_settles() {
     let (mut watch, server) = stand_in(vec![], Value::Null).await;

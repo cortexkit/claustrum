@@ -1,46 +1,87 @@
 #![forbid(unsafe_code)]
 
 //! Claustrum credential consumer for subc-supervised modules.
+//!
+//! Disable the default `transport` feature to reuse the decoders and watch tracker
+//! with a connection owned by the caller.
+//!
+//! ```
+//! use cortexkit_claustrum_client::{decode_credential_reply, WatchAction, WatchNotice, WatchTracker};
+//!
+//! let credential = decode_credential_reply(serde_json::json!({
+//!     "result": {"payload": "example", "record_version": "1"}
+//! })).unwrap();
+//! assert_eq!(credential.expose(), b"example");
+//! let notice = WatchNotice::decode(
+//!     br#"{"kind":"changed","epoch":"launch","seq":1,"view":"v1","keys":"k1"}"#,
+//! ).unwrap();
+//! let mut tracker = WatchTracker::default();
+//! assert_eq!(tracker.notice(&notice), WatchAction::Reread { inventory: true, keys: true });
+//! ```
 
-#[cfg(test)]
+#[cfg(all(test, feature = "transport"))]
 use std::collections::VecDeque;
 use std::future::Future;
-use std::path::{Path, PathBuf};
+#[cfg(any(feature = "transport", test))]
+use std::path::Path;
+#[cfg(feature = "transport")]
+use std::path::PathBuf;
 use std::pin::Pin;
+#[cfg(feature = "transport")]
 use std::sync::Arc;
-#[cfg(test)]
+#[cfg(all(test, feature = "transport"))]
 use std::sync::Mutex;
+#[cfg(feature = "transport")]
 use std::time::Duration;
 
 use base64::Engine;
-use serde_json::{json, Value};
+#[cfg(any(feature = "transport", test))]
+use serde_json::json;
+use serde_json::Value;
 use sha2::{Digest, Sha256};
+#[cfg(feature = "transport")]
 use subc_protocol::{Flags, Frame, FrameType, Priority};
+#[cfg(feature = "transport")]
 use subc_transport::{authenticate_client, connection_file, read_frame, write_frame};
+#[cfg(feature = "transport")]
 use tokio::net::TcpStream;
+#[cfg(feature = "transport")]
 use tokio::sync::Mutex as AsyncMutex;
 
 mod watch;
+#[cfg(feature = "transport")]
+pub use watch::ScopedWatch;
 pub use watch::{
-    ScopedWatch, ScopedWatchKind, ScopedWatchNotice, ScopedWatchOutcome, WatchAction, WatchNotice,
-    WatchTracker,
+    ScopedWatchKind, ScopedWatchNotice, ScopedWatchOutcome, WatchAction, WatchNotice, WatchTracker,
 };
 
+#[cfg(feature = "transport")]
 const CREDENTIAL_MODULE_ID: &str = "claustrum";
+#[cfg(any(feature = "transport", test))]
 const CREDENTIAL_GET_OP: &str = "credential.get";
+#[cfg(any(feature = "transport", test))]
 const CREDENTIAL_GET_SCOPED_OP: &str = "credential.get_scoped";
+#[cfg(any(feature = "transport", test))]
 const CREDENTIAL_REPORT_AUTH_FAILURE_OP: &str = "credential.report_auth_failure";
+#[cfg(any(feature = "transport", test))]
 const CREDENTIAL_STATUS_OP: &str = "credential.status";
+#[cfg(any(feature = "transport", test))]
 const CREDENTIAL_SIGN_OP: &str = "credential.sign";
+#[cfg(any(feature = "transport", test))]
 const CREDENTIAL_PUBLIC_KEY_OP: &str = "credential.public_key";
+#[cfg(any(feature = "transport", test))]
 const CREDENTIAL_LIST_SCOPED_OP: &str = "credential.list_scoped";
+#[cfg(feature = "transport")]
 const CREDENTIAL_READ_TIMEOUT: Duration = Duration::from_secs(3);
+#[cfg(feature = "transport")]
 const CREDENTIAL_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 /// A peer daemon restart can leave this daemon holding an outdated routing
 /// generation. The peer silently discards requests from that generation instead
 /// of returning an error, so the request looks the same as a dead peer; this
 /// deadline detects both cases and lets this daemon recover without restarting.
+#[cfg(feature = "transport")]
 const CREDENTIAL_CALL_DEADLINE: Duration = Duration::from_secs(10);
+#[cfg(feature = "transport")]
 const DEFAULT_TRANSIENT_RETRIES: usize = 2;
 
 pub type CredentialResolverFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -343,6 +384,7 @@ pub trait CredentialResolver: Send + Sync {
     }
 
     /// Opens a dedicated scoped watch. The caller owns reconnection and re-reading.
+    #[cfg(feature = "transport")]
     fn watch_scoped<'a>(
         &'a self,
         _enrollment_token: Option<&'a str>,
@@ -466,6 +508,7 @@ pub trait CredentialGetTarget: Send + Sync {
         })
     }
 
+    #[cfg(feature = "transport")]
     fn credential_watch_scoped<'a>(
         &'a self,
         _enrollment_token: Option<&'a str>,
@@ -489,11 +532,13 @@ pub trait CredentialGetTarget: Send + Sync {
 /// retries transient or transport errors for credential operations;
 /// scoped reads return the first error because each consumer owns its one-shot
 /// redial bound. Auth and permanent failures always return immediately.
+#[cfg(feature = "transport")]
 pub struct ClaustrumCredentialResolver {
     target: Arc<dyn CredentialGetTarget>,
     transient_retries: usize,
 }
 
+#[cfg(feature = "transport")]
 impl std::fmt::Debug for ClaustrumCredentialResolver {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -504,6 +549,7 @@ impl std::fmt::Debug for ClaustrumCredentialResolver {
     }
 }
 
+#[cfg(feature = "transport")]
 impl ClaustrumCredentialResolver {
     pub fn new(
         connection_file_path: PathBuf,
@@ -551,6 +597,7 @@ impl ClaustrumCredentialResolver {
     }
 }
 
+#[cfg(feature = "transport")]
 impl CredentialResolver for ClaustrumCredentialResolver {
     fn watch_scoped<'a>(
         &'a self,
@@ -692,6 +739,7 @@ impl CredentialResolver for ClaustrumCredentialResolver {
     }
 }
 
+#[cfg(feature = "transport")]
 trait CredentialConsumerConnection: Send {
     fn into_scoped_watch(
         self: Box<Self>,
@@ -762,6 +810,7 @@ trait CredentialConsumerConnection: Send {
     }
 }
 
+#[cfg(feature = "transport")]
 trait CredentialConsumerConnector: Send + Sync {
     fn connect<'a>(
         &'a self,
@@ -771,12 +820,14 @@ trait CredentialConsumerConnector: Send + Sync {
     >;
 }
 
+#[cfg(feature = "transport")]
 struct LiveCredentialConnector {
     connection_file_path: PathBuf,
     project_root: PathBuf,
     consumer_module_id: String,
 }
 
+#[cfg(feature = "transport")]
 impl CredentialConsumerConnector for LiveCredentialConnector {
     fn connect<'a>(
         &'a self,
@@ -796,12 +847,14 @@ impl CredentialConsumerConnector for LiveCredentialConnector {
     }
 }
 
+#[cfg(feature = "transport")]
 struct LiveCredentialGetTarget {
     connector: Arc<dyn CredentialConsumerConnector>,
     call_deadline: Duration,
     consumer: AsyncMutex<Option<Box<dyn CredentialConsumerConnection>>>,
 }
 
+#[cfg(feature = "transport")]
 impl LiveCredentialGetTarget {
     fn new(connector: Arc<dyn CredentialConsumerConnector>, call_deadline: Duration) -> Self {
         Self {
@@ -840,6 +893,7 @@ impl LiveCredentialGetTarget {
     }
 }
 
+#[cfg(feature = "transport")]
 impl CredentialGetTarget for LiveCredentialGetTarget {
     fn credential_watch_scoped<'a>(
         &'a self,
@@ -1033,6 +1087,7 @@ impl CredentialGetTarget for LiveCredentialGetTarget {
     }
 }
 
+#[cfg(feature = "transport")]
 struct ClaustrumConsumer {
     stream: TcpStream,
     route_channel: u16,
@@ -1040,6 +1095,7 @@ struct ClaustrumConsumer {
     next_corr: u64,
 }
 
+#[cfg(feature = "transport")]
 impl ClaustrumConsumer {
     async fn connect(
         connection_file_path: &Path,
@@ -1303,6 +1359,7 @@ impl ClaustrumConsumer {
     }
 }
 
+#[cfg(feature = "transport")]
 impl CredentialConsumerConnection for ClaustrumConsumer {
     fn into_scoped_watch(
         self: Box<Self>,
@@ -1389,6 +1446,7 @@ impl CredentialConsumerConnection for ClaustrumConsumer {
     }
 }
 
+#[cfg(any(feature = "transport", test))]
 fn credential_list_scoped_request() -> Value {
     // A supervised module is identified by its route's reserved principal, so it
     // sends no enrollment token; the vault refuses unknown parameters.
@@ -1478,7 +1536,7 @@ fn decode_listed_grant(tuple: &Value) -> Result<ListedGrant, String> {
 
 /// Decode metadata row by row: a malformed credential or grant must not discard
 /// healthy entries listed alongside it. Envelope failures still reject the listing.
-fn decode_list_scoped_reply(
+pub fn decode_list_scoped_reply(
     value: Value,
 ) -> Result<ScopedCredentialListing, CredentialResolverError> {
     let result = reply_result(value)?;
@@ -1522,6 +1580,7 @@ fn decode_list_scoped_reply(
     })
 }
 
+#[cfg(any(feature = "transport", test))]
 fn credential_get_request(raw_handle: &str, min_ttl_ms: Option<u64>, force_refresh: bool) -> Value {
     let mut params =
         serde_json::Map::from_iter([("handle".to_owned(), Value::String(raw_handle.to_owned()))]);
@@ -1537,6 +1596,7 @@ fn credential_get_request(raw_handle: &str, min_ttl_ms: Option<u64>, force_refre
     })
 }
 
+#[cfg(any(feature = "transport", test))]
 fn credential_get_scoped_request(credential_id: &str, min_ttl_ms: Option<u64>) -> Value {
     let mut params = json!({ "credential_id": credential_id });
     if let Some(min_ttl_ms) = min_ttl_ms {
@@ -1548,6 +1608,7 @@ fn credential_get_scoped_request(credential_id: &str, min_ttl_ms: Option<u64>) -
     })
 }
 
+#[cfg(any(feature = "transport", test))]
 fn credential_report_auth_failure_request(
     credential_id: &str,
     record_version: u64,
@@ -1563,6 +1624,7 @@ fn credential_report_auth_failure_request(
     })
 }
 
+#[cfg(any(feature = "transport", test))]
 fn credential_status_request(credential_id: &str) -> Value {
     json!({
         "method": CREDENTIAL_STATUS_OP,
@@ -1570,6 +1632,7 @@ fn credential_status_request(credential_id: &str) -> Value {
     })
 }
 
+#[cfg(any(feature = "transport", test))]
 fn credential_sign_request(credential_id: &str, payload: &[u8]) -> Value {
     // CKCRED 3aaf0e3: sign is handle-less - authorized by the launch-nonce
     // principal against the grant table's sign authority, addressed by the
@@ -1584,6 +1647,7 @@ fn credential_sign_request(credential_id: &str, payload: &[u8]) -> Value {
     })
 }
 
+#[cfg(any(feature = "transport", test))]
 fn credential_public_key_request(credential_id: &str) -> Value {
     // The launch-nonce principal authorizes this named credential lookup; a
     // bearer capability handle must never cross the public-key request.
@@ -1593,7 +1657,8 @@ fn credential_public_key_request(credential_id: &str) -> Value {
     })
 }
 
-fn decode_wire_error(bytes: &[u8]) -> CredentialResolverError {
+/// Decodes a subc error-frame body without opening a connection.
+pub fn decode_wire_error(bytes: &[u8]) -> CredentialResolverError {
     let value = serde_json::from_slice::<Value>(bytes).unwrap_or(Value::Null);
     classify_error_value(&value)
 }
@@ -1682,6 +1747,7 @@ fn classify_error_value(value: &Value) -> CredentialResolverError {
 /// service derives that principal by matching the launch nonce; if it is absent,
 /// claustrum silently treats the caller as unscoped. Route opening must therefore
 /// fail before scoped reads are reduced to an ambiguous `not_found`.
+#[cfg(feature = "transport")]
 fn route_open_body(project_root: &Path, consumer_module_id: &str) -> Value {
     // The process-wide accessor, never the environment: after the first read
     // closes the pipe the daemon handed over, a second independent reader
@@ -1698,6 +1764,7 @@ fn route_open_body(project_root: &Path, consumer_module_id: &str) -> Value {
 
 /// The nonce from a read of it, panicking when there is none: without it the
 /// route would open unscoped (see [`route_open_body`]).
+#[cfg(feature = "transport")]
 fn required_launch_nonce(read: Result<Option<String>, String>) -> String {
     match read {
         Ok(Some(nonce)) if !nonce.trim().is_empty() => nonce,
@@ -1710,6 +1777,7 @@ fn required_launch_nonce(read: Result<Option<String>, String>) -> String {
     }
 }
 
+#[cfg(feature = "transport")]
 fn route_open_body_with_nonce(
     project_root: &Path,
     consumer_module_id: &str,
@@ -1757,7 +1825,10 @@ fn hex_bytes(bytes: &[u8]) -> String {
     encoded
 }
 
-fn decode_signature_reply(value: Value) -> Result<CredentialSignature, CredentialResolverError> {
+/// Decodes a `credential.sign` response, validating the Ed25519 signature shape.
+pub fn decode_signature_reply(
+    value: Value,
+) -> Result<CredentialSignature, CredentialResolverError> {
     let result = reply_result(value)?;
     let signature_b64 = result
         .get("signature_b64")
@@ -1798,7 +1869,10 @@ fn decode_signature_reply(value: Value) -> Result<CredentialSignature, Credentia
     })
 }
 
-fn decode_public_key_reply(value: Value) -> Result<CredentialPublicKey, CredentialResolverError> {
+/// Decodes a `credential.public_key` response, validating its public key and ID.
+pub fn decode_public_key_reply(
+    value: Value,
+) -> Result<CredentialPublicKey, CredentialResolverError> {
     let result = reply_result(value)?;
     let public_key_hex = result
         .get("public_key_hex")
@@ -1849,7 +1923,8 @@ fn decode_public_key_reply(value: Value) -> Result<CredentialPublicKey, Credenti
     })
 }
 
-fn decode_credential_status_reply(
+/// Decodes a `credential.status` response without fetching credential material.
+pub fn decode_credential_status_reply(
     value: Value,
 ) -> Result<CredentialStatus, CredentialResolverError> {
     let result = reply_result(value)?;
@@ -1881,7 +1956,10 @@ fn decode_credential_status_reply(
     })
 }
 
-fn decode_credential_reply(value: Value) -> Result<ResolvedCredential, CredentialResolverError> {
+/// Decodes a `credential.get` or `credential.get_scoped` response into secret bytes.
+pub fn decode_credential_reply(
+    value: Value,
+) -> Result<ResolvedCredential, CredentialResolverError> {
     let result = value.get("result").unwrap_or(&value);
     // A refusal arrives as a SUCCESS frame carrying `result.error`; demanding a
     // payload from it would launder the vault's typed answer (class + code)
@@ -1936,7 +2014,8 @@ fn decode_credential_reply(value: Value) -> Result<ResolvedCredential, Credentia
     ))
 }
 
-fn decode_report_auth_failure_reply(value: Value) -> Result<bool, CredentialResolverError> {
+/// Decodes whether `credential.report_auth_failure` accepted the report.
+pub fn decode_report_auth_failure_reply(value: Value) -> Result<bool, CredentialResolverError> {
     let result = value.get("result").unwrap_or(&value);
     if result.get("error").is_some() {
         return Err(classify_error_value(result));
@@ -1956,10 +2035,12 @@ mod contract_tests;
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "transport")]
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
 
+    #[cfg(feature = "transport")]
     #[derive(Debug)]
     struct FakeCkcredTarget {
         script: Mutex<VecDeque<Result<Value, CredentialResolverError>>>,
@@ -1967,6 +2048,7 @@ mod tests {
         reports: Mutex<Vec<(String, u64, u16)>>,
     }
 
+    #[cfg(feature = "transport")]
     impl CredentialGetTarget for FakeCkcredTarget {
         fn credential_get<'a>(
             &'a self,
@@ -2042,11 +2124,13 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "transport")]
     #[derive(Debug)]
     struct DeadlineConnector {
         dials: Arc<AtomicUsize>,
     }
 
+    #[cfg(feature = "transport")]
     impl CredentialConsumerConnector for DeadlineConnector {
         fn connect<'a>(
             &'a self,
@@ -2062,10 +2146,12 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "transport")]
     struct DeadlineConsumer {
         hangs: bool,
     }
 
+    #[cfg(feature = "transport")]
     impl CredentialConsumerConnection for DeadlineConsumer {
         fn credential_get<'a>(
             &'a mut self,
@@ -2109,6 +2195,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "transport")]
     #[tokio::test]
     async fn silent_call_deadline_is_transport_rebuilds_and_releases_mutex_mutation_proof() {
         let dials = Arc::new(AtomicUsize::new(0));
@@ -2157,6 +2244,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "transport")]
     #[tokio::test]
     async fn live_shape_red_proof_retry_class_and_capability_redaction() {
         let raw_handle = "capability-handle-must-never-leak";
@@ -2383,6 +2471,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "transport")]
     #[tokio::test]
     async fn scoped_transport_failure_returns_without_internal_retry_ladder_mutation_proof() {
         let credential_id = "github_app:bounded-agent";
@@ -2410,6 +2499,7 @@ mod tests {
         assert_eq!(target.requests.lock().unwrap().len(), 1);
     }
 
+    #[cfg(feature = "transport")]
     #[tokio::test]
     async fn scoped_get_with_min_ttl_forwards_the_requested_bound() {
         let credential_id = "oauth:anthropic";
@@ -2436,6 +2526,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "transport")]
     #[tokio::test]
     async fn report_auth_failure_rejects_unsupported_status_before_sending() {
         let credential_id = "apikey:openrouter";
@@ -2456,6 +2547,7 @@ mod tests {
         assert!(target.reports.lock().unwrap().is_empty());
     }
 
+    #[cfg(feature = "transport")]
     #[tokio::test]
     async fn scoped_reads_use_the_credential_id_and_decode_the_record_directly() {
         let credential_id = "github_app:scoped-agent";
@@ -2482,6 +2574,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "transport")]
     #[test]
     fn route_open_body_carries_the_reserved_consumer_identity_when_the_nonce_is_present() {
         let root = Path::new("/probe/root");
@@ -2499,6 +2592,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "transport")]
     #[test]
     fn motor_credential_route_presents_its_launch_nonce() {
         let body =
@@ -2511,6 +2605,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "transport")]
     #[tokio::test]
     async fn signing_not_found_and_auth_required_are_terminal_without_retries() {
         struct TerminalTarget {
@@ -2585,6 +2680,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "transport")]
     #[test]
     fn route_open_body_carries_prefrontal_routing_as_consumer_id() {
         let body = route_open_body_with_nonce(
@@ -2606,6 +2702,7 @@ mod tests {
 
     /// An absent, blank or unreadable nonce stops the route open instead of
     /// letting it through unscoped.
+    #[cfg(feature = "transport")]
     #[test]
     fn route_open_body_requires_the_launch_nonce_for_the_reserved_principal() {
         assert_eq!(

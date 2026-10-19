@@ -1,5 +1,6 @@
 use super::*;
 use serde::{Deserialize, Deserializer};
+#[cfg(feature = "transport")]
 use tokio::sync::{mpsc, oneshot};
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -163,12 +164,14 @@ pub enum ScopedWatchOutcome {
 
 /// A single held request. No reconnect or resubscribe is performed automatically.
 /// Drop or stop cancels it; drain notices with `next` before awaiting `closed`.
+#[cfg(feature = "transport")]
 pub struct ScopedWatch {
     events: mpsc::Receiver<ScopedWatchNotice>,
     closed: oneshot::Receiver<ScopedWatchOutcome>,
     stop: Option<oneshot::Sender<()>>,
 }
 
+#[cfg(feature = "transport")]
 impl ScopedWatch {
     pub async fn next(&mut self) -> Option<ScopedWatchNotice> {
         self.events.recv().await
@@ -189,16 +192,19 @@ impl ScopedWatch {
     }
 }
 
+#[cfg(feature = "transport")]
 impl Drop for ScopedWatch {
     fn drop(&mut self) {
         self.stop();
     }
 }
 
+#[cfg(feature = "transport")]
 fn params(enrollment_token: Option<&str>) -> Value {
     enrollment_token.map_or_else(|| json!({}), |token| json!({"enrollment_token": token}))
 }
 
+#[cfg(feature = "transport")]
 impl ClaustrumConsumer {
     pub(super) async fn start_scoped_watch(
         mut self,

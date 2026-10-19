@@ -6,8 +6,15 @@ decoders can be tested against the producer's serialized replies.
 
 ```toml
 [dependencies]
-cortexkit-claustrum-client = "0.4.0"
+cortexkit-claustrum-client = "0.5.0"
 ```
+
+The default `transport` feature provides the resolver and live watch connection.
+If you already own a bus connection, use `cortexkit-claustrum-client = { version =
+"0.5.0", default-features = false }` for the public `decode_*_reply` functions,
+`decode_wire_error`, record/error types, `WatchNotice`, and `WatchTracker` without
+`subc-transport`, `subc-os`, or Tokio. `subc-protocol` remains for the reply error
+codes; no socket or authentication code is built in this mode.
 
 Construct `ClaustrumCredentialResolver::new(connection_file_path, project_root,
 consumer_module_id)` and import the `CredentialResolver` trait to call it. The

@@ -230,8 +230,51 @@ fn producer_list_only_reply_preserves_list_operation_and_identity() {
     );
 }
 
+#[test]
+fn producer_get_replies_decode_without_a_resolver() {
+    let operation = producer_operation("credential.get");
+    for (reply, (version, expires_at_ms)) in operation["success"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip([("42", Some(1_900_000_000_000)), ("7", None)])
+    {
+        let decoded = decode_credential_reply(producer_reply(reply)).unwrap();
+        assert_eq!(decoded.expose(), b"fixture-not-a-secret");
+        assert_eq!(decoded.record_version, version);
+        assert_eq!(decoded.expires_at_ms, expires_at_ms);
+        if version == "42" {
+            assert_eq!(
+                decoded.account_id.as_deref(),
+                Some("00000000-0000-4000-8000-000000000000")
+            );
+            assert_eq!(decoded.email.as_deref(), Some("consumer@example.invalid"));
+            assert_eq!(decoded.org_name.as_deref(), Some("Example Org"));
+        } else {
+            assert_eq!(decoded.account_id, None);
+            assert_eq!(decoded.email, None);
+            assert_eq!(decoded.org_name, None);
+        }
+        assert!(!format!("{decoded:?}").contains("fixture-not-a-secret"));
+    }
+}
+
+#[test]
+fn producer_get_scoped_reply_decodes_without_a_resolver() {
+    let operation = producer_operation("credential.get_scoped");
+    let decoded = decode_credential_reply(producer_reply(&operation["success"][0])).unwrap();
+    assert_eq!(decoded.expose(), b"fixture-not-a-secret");
+    assert_eq!(decoded.record_version, "1");
+    assert_eq!(decoded.expires_at_ms, Some(4_102_444_800_000));
+    assert_eq!(decoded.account_id, None);
+    assert_eq!(decoded.email, None);
+    assert_eq!(decoded.org_name, None);
+}
+
+#[cfg(feature = "transport")]
 struct ProducerGetTarget(Value);
 
+#[cfg(feature = "transport")]
 impl CredentialGetTarget for ProducerGetTarget {
     fn credential_get<'a>(
         &'a self,
@@ -250,6 +293,7 @@ impl CredentialGetTarget for ProducerGetTarget {
     }
 }
 
+#[cfg(feature = "transport")]
 #[tokio::test]
 async fn producer_get_result_bytes_decode_through_handle_and_scoped_reads() {
     // read_surface.rs serializes both get and get_scoped as GetOutcome::Ok(GetResult).
@@ -368,6 +412,7 @@ fn producer_read_surface_public_key_reply_decodes_exact_metadata() {
     );
 }
 
+#[cfg(feature = "transport")]
 #[tokio::test]
 async fn producer_read_surface_get_scoped_reply_decodes_served_material() {
     let operation = producer_operation("credential.get_scoped");

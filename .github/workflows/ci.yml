@@ -297,6 +297,20 @@ jobs:
       - name: Test
         run: cargo test --locked --workspace --all-targets
 
+      - name: Client without transport
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked -p cortexkit-claustrum-client --no-default-features
+          cargo test --locked -p cortexkit-claustrum-client --no-default-features
+          tree="$(cargo tree --locked -p cortexkit-claustrum-client --no-default-features -e normal --prefix none --color never)"
+          if forbidden="$(printf '%s\n' "$tree" | grep -E '^(subc-transport|subc-os|tokio) v')"; then
+            echo "client_no_default_features_excludes_transport: FAILED" >&2
+            printf '%s\n' "$forbidden" >&2
+            exit 1
+          fi
+          echo "client_no_default_features_excludes_transport: passed (3 forbidden packages absent)"
+
       - name: Windows operator filesystem workflows
         if: runner.os == 'Windows'
         timeout-minutes: 10

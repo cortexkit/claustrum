@@ -106,7 +106,8 @@ fn producer_list_scoped_reply_decodes_every_metadata_field_and_grant() {
                         "nvidia",
                         "minimax",
                         "xiaomi",
-                        "stepfun"
+                        "stepfun",
+                        "inception"
                     ]
                     .into_iter()
                     .map(String::from)

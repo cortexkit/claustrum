@@ -52,6 +52,8 @@ pub enum ModelVendor {
     MiniMax,
     Xiaomi,
     StepFun,
+    /// Inception Labs, whose own model family is Mercury.
+    Inception,
 }
 
 impl ModelVendor {
@@ -71,6 +73,7 @@ impl ModelVendor {
         Self::MiniMax,
         Self::Xiaomi,
         Self::StepFun,
+        Self::Inception,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -90,6 +93,7 @@ impl ModelVendor {
             Self::MiniMax => "minimax",
             Self::Xiaomi => "xiaomi",
             Self::StepFun => "stepfun",
+            Self::Inception => "inception",
         }
     }
 }
@@ -160,8 +164,8 @@ pub struct ApiKeyProvider {
 }
 
 use ModelVendor::{
-    Anthropic, DeepSeek, Google, Meta, MiniMax, Mistral, Moonshot, Nvidia, OpenAI, Perplexity,
-    Qwen, StepFun, Xiaomi, Zhipu, XAI,
+    Anthropic, DeepSeek, Google, Inception, Meta, MiniMax, Mistral, Moonshot, Nvidia, OpenAI,
+    Perplexity, Qwen, StepFun, Xiaomi, Zhipu, XAI,
 };
 
 pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
@@ -402,6 +406,27 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[Anthropic],
+    },
+    // Inception Labs' API for its Mercury models: OpenAI-compatible, Bearer key, env var
+    // INCEPTION_API_KEY in its docs (https://docs.inceptionlabs.ai/llms.txt). The key
+    // prefix is undocumented, so the placeholder is generic.
+    ApiKeyProvider {
+        key: "inception",
+        display_name: "Inception (Mercury)",
+        default_id: "apikey:inception",
+        dashboard_url: "https://platform.inceptionlabs.ai/dashboard/api-keys",
+        placeholder: "API key",
+        // A one-token chat completion, not GET /v1/models: the model listing answers 200
+        // with or without a key, so it cannot tell a bad key from a good one, and no other
+        // free authenticated endpoint exists. The body is validated before auth, so the
+        // probe must be a well-formed request; with a bad key it then answers 401
+        // `invalid_api_key`.
+        validation: KeyValidation::OpenAiChat {
+            base_url: "https://api.inceptionlabs.ai/v1",
+            model: "mercury-2",
+        },
+        categories: LLM,
+        serves: &[Inception],
     },
     // The rows below mirror oh-my-pi's API-key providers. Each `// oh-my-pi auth/<key>.kdl`
     // line names the file (packages/catalog/src/compat/rules/auth/ in that repo) that the
@@ -1629,11 +1654,36 @@ mod tests {
         );
     }
 
+    /// `--provider inception` must find this row, stamp new keys `llm-provider` and
+    /// nothing else, and probe with a chat completion. The model listing cannot be the
+    /// probe: it answers 200 even without a key, so every key would pass.
+    #[test]
+    fn inception_api_key_catalog_entry_is_llm_provider_and_probed_by_chat() {
+        let row = api_key_provider("inception").expect("Inception api-key row");
+        assert_eq!(row.default_id, "apikey:inception");
+        assert_eq!(
+            row.dashboard_url,
+            "https://platform.inceptionlabs.ai/dashboard/api-keys"
+        );
+        assert_eq!(row.categories, LLM);
+        assert_eq!(category_defaults("apikey:inception"), ["llm-provider"]);
+        assert_eq!(category_defaults("apikey:inception:work"), ["llm-provider"]);
+        assert_eq!(row.serves, &[Inception]);
+        assert_eq!(serves_for("apikey:inception"), &[Inception]);
+        assert_eq!(
+            row.validation,
+            KeyValidation::OpenAiChat {
+                base_url: "https://api.inceptionlabs.ai/v1",
+                model: "mercury-2",
+            }
+        );
+    }
+
     #[test]
     fn both_catalogs_have_exact_owner_supplied_assignments() {
         // 15 original API-key rows, 37 model providers mirrored from oh-my-pi,
-        // Kiro, the Anthropic API key, and 8 search APIs.
-        assert_eq!(API_KEY_PROVIDERS.len(), 62);
+        // Kiro, the Anthropic API key, Inception, and 8 search APIs.
+        assert_eq!(API_KEY_PROVIDERS.len(), 63);
         assert_eq!(LOGIN_PROVIDERS.len(), 13);
         // Which api-key rows are `llm-provider` and which are `web-search` is pinned by
         // the two category tests below, which also require every row to be listed.
@@ -1700,7 +1750,8 @@ mod tests {
                 "nvidia",
                 "minimax",
                 "xiaomi",
-                "stepfun"
+                "stepfun",
+                "inception"
             ]
         );
     }
@@ -1816,11 +1867,11 @@ mod tests {
     /// for the bare id and for a labeled account, since both are stamped at creation.
     #[test]
     fn every_model_provider_row_is_stamped_llm_provider() {
-        for key in ORIGINAL_LLM_KEYS
-            .iter()
-            .chain(MIRRORED_LLM_KEYS)
-            .chain([&"kiro", &"anthropic"])
-        {
+        for key in ORIGINAL_LLM_KEYS.iter().chain(MIRRORED_LLM_KEYS).chain([
+            &"kiro",
+            &"anthropic",
+            &"inception",
+        ]) {
             let row = api_key_provider(key).unwrap_or_else(|| panic!("no api-key row {key}"));
             assert_eq!(row.default_id, format!("apikey:{key}"));
             for id in [format!("apikey:{key}"), format!("apikey:{key}:work")] {
@@ -1836,7 +1887,8 @@ mod tests {
                     || DUAL_USE_KEYS.contains(&entry.key)
                     || SEARCH_KEYS.contains(&entry.key)
                     || entry.key == "kiro"
-                    || entry.key == "anthropic",
+                    || entry.key == "anthropic"
+                    || entry.key == "inception",
                 "api-key row {} is in no category list",
                 entry.key
             );
@@ -1984,6 +2036,7 @@ mod tests {
                 "minimax",
                 "xiaomi",
                 "stepfun",
+                "inception",
             ]
         );
     }
@@ -2245,6 +2298,7 @@ mod source_ownership_tests {
                 ("openai", vec!["openai"]),
                 ("google", vec!["google"]),
                 ("anthropic", vec!["anthropic"]),
+                ("inception", vec!["inception"]),
                 ("abliteration", vec!["zhipu"]),
                 (
                     "aiand",

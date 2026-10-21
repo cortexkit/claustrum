@@ -1050,3 +1050,229 @@ only = false
 timeout_s = 600
 build_timeout_s = 3600
 
+
+
+[[control]]
+id = "seal-kind-fence"
+guards = "a seal grant on a non-KEM record answers not_found like no grant at all"
+file = "crates/credentials-module/src/read_surface.rs"
+old = '''
+        // exactly like no grant at all.
+        if record.kind != credentials_core::record::CredentialKind::KemKey {'''
+new = '''
+        // exactly like no grant at all.
+        if false { // NON-VACUITY BREAK'''
+edits = []
+test_file = "crates/credentials-module/src/main.rs"
+runner = "cargo"
+package = "credentials-module"
+target = "--bin ck-claustrum"
+expect_red = ["tests::seal_refusals_are_byte_identical_across_every_reason_the_key_is_out_of_reach"]
+expect_message = 'apikey:not-kem'
+only = false
+timeout_s = 600
+build_timeout_s = 3600
+
+
+[[control]]
+id = "seal-grant-operation"
+guards = "credential.seal authorizes only through a seal grant; an open grant never reaches it"
+file = "crates/credentials-module/src/read_surface.rs"
+old = '''
+            &params.credential_id,
+            GrantOperation::Seal,'''
+new = '''
+            &params.credential_id,
+            GrantOperation::Open, // NON-VACUITY BREAK'''
+edits = []
+test_file = "crates/credentials-module/src/main.rs"
+runner = "cargo"
+package = "credentials-module"
+target = "--bin ck-claustrum"
+expect_red = ["tests::key_and_scoped_wire_fixture_pins_real_success_replies", "tests::seal_and_open_share_one_refusal_threshold_per_connection", "tests::seal_audit_write_failure_returns_store_error_and_no_ciphertext", "tests::seal_input_checks_run_before_authorization_at_their_exact_boundaries", "tests::seal_opens_for_the_recipient_under_the_vault_key_and_audits_one_row_per_call", "tests::seal_refusals_are_byte_identical_across_every_reason_the_key_is_out_of_reach", "tests::seal_refuses_when_the_key_is_replaced_between_the_seal_and_its_audit"]
+only = false
+timeout_s = 600
+build_timeout_s = 3600
+
+
+[[control]]
+id = "seal-audit-required"
+guards = "a seal whose audit row cannot be written returns no ciphertext"
+file = "crates/credentials-module/src/read_surface.rs"
+old = '''
+        // generation sealed with is still the stored one, in the same transaction.
+        write_audit().map_err(|_| ReadError::StoreError)?;'''
+new = '''
+        // generation sealed with is still the stored one, in the same transaction.
+        let _ = write_audit(); // NON-VACUITY BREAK'''
+edits = []
+test_file = "crates/credentials-module/src/main.rs"
+runner = "cargo"
+package = "credentials-module"
+target = "--bin ck-claustrum"
+expect_red = ["tests::seal_audit_write_failure_returns_store_error_and_no_ciphertext", "tests::seal_refuses_when_the_key_is_replaced_between_the_seal_and_its_audit"]
+only = false
+timeout_s = 600
+build_timeout_s = 3600
+
+
+[[control]]
+id = "seal-audit-generation-fence"
+guards = "seal and signature audit rows are refused when the key record changed after it was read"
+file = "crates/credentials-core/src/store.rs"
+old = '''
+            if current != Some(record_version as i64) {
+                return Ok(None);'''
+new = '''
+            if false { // NON-VACUITY BREAK
+                return Ok(None);'''
+edits = []
+test_file = "crates/credentials-module/src/main.rs"
+runner = "cargo"
+package = "credentials-module"
+target = "--bin ck-claustrum"
+expect_red = ["tests::seal_audit_append_refuses_a_replaced_generation_without_a_row", "tests::seal_refuses_when_the_key_is_replaced_between_the_seal_and_its_audit", "tests::signature_audit_refuses_a_replaced_generation_without_a_row"]
+only = false
+timeout_s = 600
+build_timeout_s = 3600
+
+
+[[control]]
+id = "seal-shared-refusal-gate"
+guards = "seal honours the refusal threshold it shares with open"
+file = "crates/credentials-module/src/read_surface.rs"
+old = '''
+            } else if count >= OPEN_REFUSAL_THRESHOLD {
+                return Err(ReadError::SealRateLimited);'''
+new = '''
+            } else if count >= usize::MAX { // NON-VACUITY BREAK
+                return Err(ReadError::SealRateLimited);'''
+edits = []
+test_file = "crates/credentials-module/src/main.rs"
+runner = "cargo"
+package = "credentials-module"
+target = "--bin ck-claustrum"
+expect_red = ["tests::seal_and_open_share_one_refusal_threshold_per_connection"]
+expect_message = 'unwrap_err'
+only = false
+timeout_s = 600
+build_timeout_s = 3600
+
+
+[[control]]
+id = "seal-recipient-length-before-auth"
+guards = "a recipient key that is not 32 bytes is refused before authorization"
+file = "crates/credentials-core/src/kem.rs"
+old = "    if recipient_public_key.len() != X25519_PUBLIC_KEY_LEN {"
+new = "    if false { // NON-VACUITY BREAK"
+edits = []
+test_file = "crates/credentials-module/src/main.rs"
+runner = "cargo"
+package = "credentials-module"
+target = "--bin ck-claustrum"
+expect_red = ["tests::seal_input_checks_run_before_authorization_at_their_exact_boundaries"]
+expect_message = '31-byte recipient'
+only = false
+timeout_s = 600
+build_timeout_s = 3600
+
+
+[[control]]
+id = "seal-exact-selector-store"
+guards = "seal grants require an exact selector in validate_operation"
+file = "crates/credentials-core/src/store.rs"
+old = "        if operation == GrantOperation::Seal && self != Self::Exact {"
+new = "        if false { // NON-VACUITY BREAK"
+edits = []
+test_file = "crates/credentials-core/src/store.rs"
+runner = "cargo"
+package = "credentials-core"
+target = "--lib"
+features = ["test-support"]
+expect_red = ["store::taxonomy_tests::seal_grants_are_exact_only_and_imply_nothing_in_either_direction"]
+only = false
+timeout_s = 600
+build_timeout_s = 3600
+
+
+[[control]]
+id = "seal-exact-selector-cli"
+guards = "ck auth grant and revoke-grant refuse a category or audience seal selector by name"
+file = "crates/credentials-core/src/store.rs"
+old = "        if operation == GrantOperation::Seal && self != Self::Exact {"
+new = "        if false { // NON-VACUITY BREAK"
+edits = []
+test_file = "crates/credentials-module/src/bin/credentials_cli.rs"
+runner = "cargo"
+package = "credentials-module"
+target = "--bin ck-auth"
+expect_red = ["deposit_cli_tests::seal_cli_grants_are_exact_only_listed_and_revocable"]
+expect_message = 'grant category'
+only = false
+timeout_s = 600
+build_timeout_s = 3600
+
+
+[[control]]
+id = "seal-exact-selector-migration-check"
+guards = "migration 18's schema refuses a non-exact seal grant row"
+file = "crates/credentials-core/src/store.rs"
+old = '''
+CHECK (operation <> 'seal' OR selector_kind = 'exact'), \'''
+new = '''
+CHECK (operation <> 'seal' OR selector_kind <> '' /* NON-VACUITY BREAK */), \'''
+edits = []
+test_file = "crates/credentials-core/src/store.rs"
+runner = "cargo"
+package = "credentials-core"
+target = "--lib"
+features = ["test-support"]
+expect_red = ["store::migration_10_tests::migration_18_admits_exact_seal_grants_and_conserves_every_row_counter_and_object"]
+only = false
+timeout_s = 600
+build_timeout_s = 3600
+
+
+[[control]]
+id = "seal-plaintext-cap"
+guards = "a seal plaintext one byte over MAX_SEAL_PLAINTEXT is refused"
+file = "crates/credentials-core/src/kem.rs"
+old = '''
+    if plaintext.len() > MAX_SEAL_PLAINTEXT
+'''
+new = '''
+    if plaintext.len() > MAX_SEAL_PLAINTEXT + 1 // NON-VACUITY BREAK
+'''
+edits = []
+test_file = "crates/credentials-core/src/kem.rs"
+runner = "cargo"
+package = "credentials-core"
+target = "--lib"
+features = ["test-support"]
+expect_red = ["kem::tests::seal_caps_accept_the_cap_and_refuse_one_byte_over"]
+only = false
+timeout_s = 600
+build_timeout_s = 3600
+
+
+[[control]]
+id = "seal-low-order-refusal-code"
+guards = "a low-order recipient point is refused as invalid_recipient (the crate's all-zero check)"
+file = "crates/credentials-core/src/kem.rs"
+old = '''
+    )
+    .map_err(|_| SealError::InvalidRecipient)?;'''
+new = '''
+    )
+    .map_err(|_| SealError::Failed)?; // NON-VACUITY BREAK'''
+edits = []
+test_file = "crates/credentials-core/src/kem.rs"
+runner = "cargo"
+package = "credentials-core"
+target = "--lib"
+features = ["test-support"]
+expect_red = ["kem::tests::low_order_recipients_are_refused_by_the_hpke_crate"]
+expect_message = 'Err(InvalidRecipient)'
+only = false
+timeout_s = 600
+build_timeout_s = 3600

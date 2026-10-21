@@ -990,3 +990,63 @@ expect_message = "audit failure must return an error and no signature"
 only = false
 timeout_s = 600
 build_timeout_s = 3600
+
+[[control]]
+id = "cloudflare-account-id-format-refused-before-probe"
+guards = "a malformed Cloudflare account id is refused before any request carrying the token is sent"
+file = "crates/credentials-module/src/bin/cli_support/api_key_login.rs"
+old = "        (Some(prompt), Some(value)) if prompt.format.accepts(value) => Ok(()),"
+new = "        (Some(prompt), Some(value)) if true || prompt.format.accepts(value) => Ok(()), // NON-VACUITY BREAK"
+edits = []
+test_file = "crates/credentials-module/src/bin/cli_support/api_key_login.rs"
+runner = "cargo"
+package = "credentials-module"
+target = "--bin ck-auth"
+expect_red = ["api_key_login::tests::a_malformed_cloudflare_account_id_is_refused_before_any_request"]
+expect_message = "accepted account id"
+only = false
+timeout_s = 600
+build_timeout_s = 3600
+
+
+[[control]]
+id = "cloudflare-login-check-runs-account-id-check"
+guards = "the login-time key check runs the account-id check before the probe"
+file = "crates/credentials-module/src/bin/cli_support/api_key_login.rs"
+old = "    check_account_id(row, account_id)?;"
+new = "    let _ = check_account_id(row, account_id); // NON-VACUITY BREAK"
+edits = []
+test_file = "crates/credentials-module/src/bin/cli_support/api_key_login.rs"
+runner = "cargo"
+package = "credentials-module"
+target = "--bin ck-auth"
+expect_red = ["api_key_login::tests::a_malformed_cloudflare_account_id_is_refused_before_any_request", "api_key_login::tests::an_account_id_is_refused_on_a_row_without_the_prompt"]
+only = false
+timeout_s = 600
+build_timeout_s = 3600
+
+
+[[control]]
+id = "cloudflare-login-stores-account-id-identity"
+guards = "an API-key login with an account id stores it as the record identity account_id"
+file = "crates/credentials-module/src/bin/credentials_cli.rs"
+old = """
+            Some(account_id) => record.with_identity(RecordIdentity {
+                account_id: Some(account_id),
+                email: None,"""
+new = """
+            Some(account_id) => record.with_identity(RecordIdentity {
+                account_id: Some(account_id).filter(|_| false), // NON-VACUITY BREAK
+                email: None,"""
+edits = []
+test_file = "crates/credentials-module/tests/cli_admin.rs"
+runner = "cargo"
+package = "credentials-module"
+target = "--test cli_admin"
+select = "expected"
+expect_red = ["cloudflare_workers_ai_login_stores_the_account_id_as_identity"]
+expect_message = 'right: Some("0123456789abcdef0123456789abcdef")'
+only = false
+timeout_s = 600
+build_timeout_s = 3600
+

@@ -82,6 +82,13 @@
       ]
     },
     {
+      "op": "credential.seal",
+      "request": "{\"aad_b64\":\"Zml4dHVyZS1zZWFsLWFhZA==\",\"credential_id\":\"kem:wire-fixture\",\"info_b64\":\"Zml4dHVyZS1zZWFsLWluZm8=\",\"plaintext_b64\":\"Zml4dHVyZS1wdXNoLXBheWxvYWQ=\",\"recipient_public_key_b64\":\"eaYx7t4b+cmPEgMs3q3Q56B5OY/HhriMyEbsia+FpRo=\"}",
+      "success": [
+        "{\"result\":{\"ciphertext_b64\":\"fFqiAg/ezqZ1PbUjnhJHla9ovENl2eIQf/rFqft4e1hHM2iC\",\"enc_b64\":\"utdi4JhEbLzFizDH6AT4KEe4uREYWZZYKvnye/1Oh18=\",\"key_id\":\"a0289810032eb417\"}}"
+      ]
+    },
+    {
       "op": "credential.get",
       "success_cases": [
         "every optional field present",

@@ -59,6 +59,7 @@ async fn main() {
     let mut sign_payload_bytes: Option<Vec<u8>> = None;
     let mut public_key = false;
     let mut open_fields: Option<PathBuf> = None;
+    let mut seal_fields: Option<PathBuf> = None;
     let mut provider_status: u16 = 401;
     let mut record_version: Option<u64> = None;
     let mut anthropic_headers = false;
@@ -242,6 +243,9 @@ async fn main() {
             }
             "--public-key" => public_key = true,
             "--open-fields" => open_fields = args.next().map(PathBuf::from),
+            // A JSON file with `recipient_public_key_b64`, `info_b64`, `aad_b64` and
+            // `plaintext_b64`, sent as one `credential.seal` for `--scoped-id`.
+            "--seal-fields" => seal_fields = args.next().map(PathBuf::from),
             "--provider-status" => {
                 provider_status = args.next().and_then(|v| v.parse().ok()).unwrap_or(401);
             }
@@ -298,6 +302,7 @@ async fn main() {
                 || status_ids.is_some()
                 || list_scoped
                 || open_fields.is_some()
+                || seal_fields.is_some()
                 || enroll_propose.is_some()
                 || enroll_poll.is_some() =>
         {
@@ -462,6 +467,44 @@ async fn main() {
             "[probe] report_auth_failure status={provider_status} record_version={version} -> {}",
             serde_json::to_string(&parsed).unwrap_or_default()
         );
+        return;
+    }
+
+    if let Some(path) = seal_fields {
+        let id = scoped_id
+            .as_deref()
+            .expect("--seal-fields requires --scoped-id");
+        let fields: Value = serde_json::from_slice(&std::fs::read(path).expect("read seal fields"))
+            .expect("seal fields JSON");
+        let frame = Frame::build(
+            FrameType::Request,
+            Flags::new(false, Priority::Interactive, false),
+            route_channel,
+            route_epoch,
+            92,
+            serde_json::to_vec(&json!({ "method": "credential.seal", "params": {
+                "credential_id": id,
+                "recipient_public_key_b64": fields["recipient_public_key_b64"],
+                "info_b64": fields["info_b64"],
+                "aad_b64": fields["aad_b64"],
+                "plaintext_b64": fields["plaintext_b64"],
+                "enrollment_token": enrollment_token,
+            }}))
+            .expect("encode seal request"),
+        )
+        .expect("build seal request");
+        write_frame(&mut stream, &frame)
+            .await
+            .expect("send seal request");
+        loop {
+            let reply = read_frame_timeout(&mut stream).await;
+            if reply.header.corr == 92
+                && matches!(reply.header.ty, FrameType::Response | FrameType::Error)
+            {
+                println!("{}", String::from_utf8_lossy(&reply.body));
+                break;
+            }
+        }
         return;
     }
 

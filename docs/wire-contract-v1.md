@@ -51,7 +51,9 @@ cannot be met; retrying unchanged buys another one against the provider's mint b
 | `kind_not_openable` | permanent | authorized `credential.open` on a record that is not a `KemKey` |
 | `open_failed` | permanent | KEM payload or HPKE opening failed; all crypto faults have the same reply |
 | `open_rate_limited` | transient | this connection has reached the scoped-open refusal threshold |
-| `malformed_encoding` | permanent | a `credential.sign` payload or `credential.open` byte field failed strict standard base64 decoding |
+| `malformed_encoding` | permanent | a `credential.sign` payload or a `credential.open` or `credential.seal` byte field failed strict standard base64 decoding |
+| `invalid_recipient_key` | permanent | a `credential.seal` recipient key is not 32 bytes, or is a low-order X25519 point |
+| `seal_rate_limited` | transient | this connection has reached the scoped refusal threshold `credential.open` and `credential.seal` share |
 | `corrupt` | permanent | the record failed to decrypt or parse and has been quarantined |
 | `refresh_unsupported` | permanent | a refresh was demanded of a record with no refresh adapter |
 | `needs_reauth` | auth_required | the credential is latched dead, or deliberately retired |
@@ -66,6 +68,7 @@ cannot be met; retrying unchanged buys another one against the provider's mint b
 | `report_status_not_credential_death` | permanent | `report_auth_failure` carried a `provider_status` outside {401, 403} |
 | `too_many_items` | context_overflow | a batch exceeded the per-request cap |
 | `sign_payload_too_large` | context_overflow | a sign payload or the combined `credential.open` fields exceeded 1 MiB (`MAX_SIGN_PAYLOAD`) |
+| `seal_input_too_large` | context_overflow | a `credential.seal` plaintext over 64 KiB, or info or aad over 1 KiB |
 | `ttl_unsatisfiable` | context_overflow | a freshly minted token still cannot satisfy your `min_ttl_ms` |
 
 **Codes from the admin write path, not the read surface:** `invalid_category_name`,
@@ -184,8 +187,8 @@ is the point: a grant whose reach can grow when someone else names a credential 
 grant you can reason about. Use `category` when you want a set that moves, and it moves
 only when an operator assigns the category under the master key.
 
-A grant carries one of four operations. Each authorizes only its own surfaces, and none
-implies another:
+A grant carries one operation. Each authorizes only its own surfaces, and none implies
+another (`deposit` and `account_token` are described in sections 11 and 12):
 
 | grant operation | authorizes | does not authorize |
 |---|---|---|
@@ -193,6 +196,7 @@ implies another:
 | `sign` | `credential.sign` with a signing key; the row (without identity) in `list_scoped` | the token, `public_key`, `open` |
 | `open` | `credential.open` with a KEM key; the row (without identity) in `list_scoped` | the token, `sign` |
 | `list` | the row in `list_scoped` WITH its identity (`account_id`, `email`, `org_name`) and `refresh_adapter` | every other operation: no token, no status, no key use, no report |
+| `seal` | `credential.seal` with a KEM key; the row (without identity) in `list_scoped`. **Exact selector only** | the token, `public_key`, `sign`, `open` |
 
 `list` is the account roster without the tokens, for a consumer that chooses which
 account serves a request and must never be able to fetch one. It unseals the record only
@@ -209,6 +213,7 @@ cannot use those surfaces to learn whether an id exists.
 | `credential.list_scoped` | — | principal-addressed; all of the caller's grants | yes |
 | `credential.sign` | yes | yes (`sign`) | — |
 | `credential.open` | — | yes (`open`) | yes |
+| `credential.seal` | — | yes (`seal`) | yes |
 | `credential.public_key` | yes | yes (`read`) | — |
 | `credential.status` | yes | yes (`read`) | — |
 | `credential.report_auth_failure` | yes | yes (`read`) | — |
@@ -1046,3 +1051,80 @@ are in `crates/credentials-module/tests/fixtures/account-machine/`.
 records `scoped_read_refusal` with the account-service code and status. These are
 trimmable diagnostics, not HMAC-chain appends: periodic mints never grow the
 untrimmable audit chain. The chain still records operator grant changes.
+
+## 13. `credential.seal`
+
+`credential.seal` seals one message to a caller-named X25519 public key in RFC 9180
+**Auth mode** (mode 2), suite DHKEM(X25519, HKDF-SHA256) / HKDF-SHA256 /
+ChaCha20-Poly1305 (KEM `0x0020`, KDF `0x0001`, AEAD `0x0003`), the same suite as
+`credential.open`. The vault-held `KemKey` named by `credential_id` is the sender's
+static key (skS); the request's key is the recipient's (pkR). The recipient opens the
+message with the vault key's public half, which `credential.public_key` serves, and a
+successful open proves the message was sealed by the holder of that key. The private
+key never leaves the vault, and there is no operation that returns a raw
+Diffie-Hellman value, a derived secret or an exported key: for a caller-chosen public
+key that would be a key-agreement oracle.
+
+Request, with no other fields (including `handle`):
+
+```json
+{"method":"credential.seal","params":{"credential_id":"kem:push","recipient_public_key_b64":"<32 bytes>","info_b64":"<bytes>","aad_b64":"<bytes>","plaintext_b64":"<bytes>","enrollment_token":"<optional>"}}
+```
+
+Every byte field uses the strict, padded standard-alphabet decoder `credential.open`
+uses. The reply is `{result:{enc_b64,ciphertext_b64,key_id}}`: `enc_b64` is the 32-byte
+encapsulated key, `ciphertext_b64` the AEAD output for sequence zero of a fresh
+context, and `key_id` names the sealing key in the same format `credential.open` and
+`credential.public_key` return. Every call uses a fresh ephemeral key.
+
+Checks run in order, each only after its predecessors pass:
+
+1. shape decode: an unknown or missing field is a transport `Error` frame with code
+   `invalid_params` and **no class** (§1a);
+2. size caps on the encoded text, before anything is decoded: a `plaintext_b64`,
+   `info_b64` or `aad_b64` longer than its cap can encode to is
+   `seal_input_too_large` / context_overflow, and a `recipient_public_key_b64` longer
+   than a 32-byte key encodes to is `invalid_recipient_key` / permanent. The caps are
+   `plaintext` at most 65536 bytes (`MAX_SEAL_PLAINTEXT`), `info` and `aad` at most 1024
+   bytes each (`MAX_SEAL_INFO`, `MAX_SEAL_AAD`, all in `credentials_core::kem`);
+3. base64 decode of every field: `malformed_encoding`, permanent;
+4. the same caps on the decoded bytes (`seal_input_too_large`), then the recipient key
+   must be exactly 32 bytes (`invalid_recipient_key`);
+5. the per-connection refusal counter shared with `credential.open`: 16 refusals of
+   either operation within 60 seconds refuse further calls `seal_rate_limited`,
+   transient, until the window passes. Successful seals do not count;
+6. authorization by an **exact** `seal` grant for the resolved principal (enrollment
+   token first, then the route-bound reserved principal);
+7. the record is read and must be a `KemKey`;
+8. the seal. A low-order recipient point, whose shared secret would be all zeros, is
+   refused here `invalid_recipient_key` with no ciphertext. A stored key that will
+   not parse is `corrupt`;
+9. one audit row (below), then the reply.
+
+Steps 2 to 5 run before anything is authorized or read, so a malformed request never
+touches a key. **One answer for everything about the key:** an unknown id, no grant, a
+revoked grant, a grant for another operation (`read`, `open`, `sign`, `list`), a seal
+grant on a record that is not a `KemKey`, and a store fault while checking the grant
+or reading the record all return the identical `not_found` / permanent body, and each
+counts toward the refusal threshold. A `seal` grant authorizes no other operation, and
+no other grant authorizes `seal`.
+
+**Every seal is audited.** Before the ciphertext is returned the vault commits one
+HMAC-chained row with `audit_log.op = seal`, the credential id, `payload_hash` set to
+the SHA-256 of the decoded plaintext, and the resolved `reserved:<module>` or
+`enrolled:<name>` actor. The plaintext is never recorded; the audit row has no column
+for the recipient key, so it is not recorded either. If the row cannot be written, or
+the key record was replaced between the read and the audit write, the ciphertext is
+discarded and the call returns `store_error` / transient. A refused seal writes no
+audit row.
+
+Grants are exact-only, and the CLI and the store both refuse a category or audience
+selector:
+
+```sh
+ck auth grant --principal reserved:prefrontal-core --selector-kind exact --selector kem:push --operation seal
+ck auth revoke-grant --principal reserved:prefrontal-core --selector-kind exact --selector kem:push --operation seal
+```
+
+The grant operation arrives with store migration 18. A binary older than that
+migration cannot read a store that holds a `seal` grant's operation name.

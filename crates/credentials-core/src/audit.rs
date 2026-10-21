@@ -77,6 +77,12 @@ pub enum AuditOp {
     /// the most recent put/overwrite row for its credential id. Chain order places
     /// signatures on either side of a replacement; normal rotation uses a new id.
     Sign,
+    /// One `credential.seal`: an auth-mode HPKE seal under a vault-held KEM key. Every
+    /// seal writes one row, before the ciphertext is returned, because a sealed message
+    /// is attributed to this key by whoever opens it. `payload_hash` is the SHA-256 of
+    /// the plaintext, never its bytes. Like a sign row, it belongs to the key generation
+    /// installed by the most recent put/overwrite row for its credential id.
+    Seal,
     /// A principal-scoped operation grant was created.
     GrantCreate,
     /// A principal-scoped operation grant was revoked.
@@ -146,6 +152,7 @@ impl AuditOp {
             AuditOp::RevokeHandle => "revoke_handle",
             AuditOp::FetchAnomaly => "fetch_anomaly",
             AuditOp::Sign => "sign",
+            AuditOp::Seal => "seal",
             AuditOp::GrantCreate => "grant_create",
             AuditOp::GrantRevoke => "grant_revoke",
             AuditOp::SetCategory => "set_category",
@@ -672,6 +679,7 @@ mod vocabulary_documentation_tests {
                 AuditOp::RevokeHandle => AuditOp::RevokeHandle.as_str(),
                 AuditOp::FetchAnomaly => AuditOp::FetchAnomaly.as_str(),
                 AuditOp::Sign => AuditOp::Sign.as_str(),
+                AuditOp::Seal => AuditOp::Seal.as_str(),
                 AuditOp::GrantCreate => AuditOp::GrantCreate.as_str(),
                 AuditOp::GrantRevoke => AuditOp::GrantRevoke.as_str(),
                 AuditOp::SetCategory => AuditOp::SetCategory.as_str(),
@@ -727,6 +735,13 @@ mod vocabulary_documentation_tests {
             assert_documented(section, "audit_log.op", value(op));
         }
         assert_documented(section, "audit_log.op", value(AuditOp::Approval));
+        // Backticked, because "seal" alone also matches "sealed" elsewhere in the text.
+        assert_documented(section, "audit_log.op", "`seal`");
+        assert_eq!(value(AuditOp::Seal), "seal");
+        assert!(
+            WIRE_CONTRACT.contains("`audit_log.op = seal`"),
+            "the per-seal audit op must be documented in the wire contract"
+        );
     }
 
     #[test]

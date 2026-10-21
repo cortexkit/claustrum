@@ -34,8 +34,8 @@
 //!   mint-handle --id <id>                      print a fresh handle (once)
 //!   revoke-handle --handle <ckh_...> | --hash <hex>
 //!   revoke-all-handles --id <id>
-//!   grant --principal <id> --selector-kind <exact|category|audience> --selector <value> --operation <read|sign|open|list|deposit|account_token>
-//!   revoke-grant --principal <id> --selector-kind <exact|category|audience> --selector <value> --operation <read|sign|open|list|deposit|account_token>
+//!   grant --principal <id> --selector-kind <exact|category|audience> --selector <value> --operation <read|sign|open|list|deposit|account_token|seal>
+//!   revoke-grant --principal <id> --selector-kind <exact|category|audience> --selector <value> --operation <read|sign|open|list|deposit|account_token|seal>
 //!   grants
 //!   audit [--limit N] | verify-audit
 //! ```
@@ -1030,7 +1030,7 @@ fn help_verb(verb: &str) -> String {
         "grant" => {
             "ck auth grant --principal <id|reserved:id>\n\
              \x20             --selector-kind <exact|category|audience> --selector <value>\n\
-             \x20             --operation <read|sign|open|list|deposit|account_token>\n\
+             \x20             --operation <read|sign|open|list|deposit|account_token|seal>\n\
              \n\
              \x20 --principal <id|reserved:id>  reserved module principal\n\
              \x20 --selector-kind <kind>        required: exact, category or audience\n\
@@ -1054,6 +1054,10 @@ fn help_verb(verb: &str) -> String {
              account_token: exchange a machine proof for one audience's worker token.\n\
              It requires selector-kind audience; audience permits only account_token.\n\
              Audience grants show token in REACHES, not a credential count.\n\
+             seal: seal messages in HPKE auth mode under one KEM key, which recipients\n\
+             then attribute to that key. Exact selector only: a category grant would\n\
+             extend that to keys added later. Every seal is audited. It grants no read,\n\
+             open, sign or list access, and no other grant implies it.\n\
              On success a second line says how many credentials the grant reaches\n\
              now (`reaches N credentials`), counted as `ck auth grants` counts it. A\n\
              grant that reaches nothing still succeeds, with a warning on stderr\n\
@@ -1065,7 +1069,7 @@ fn help_verb(verb: &str) -> String {
         "revoke-grant" => {
             "ck auth revoke-grant --principal <id|reserved:id>\n\
              \x20             --selector-kind <exact|category|audience> --selector <value>\n\
-             \x20                    --operation <read|sign|open|list|deposit|account_token>\n\
+             \x20             --operation <read|sign|open|list|deposit|account_token|seal>\n\
              \n\
              \x20 --principal <id|reserved:id>  reserved module principal\n\
              \x20 --selector-kind <kind>        required: exact, category or audience\n\
@@ -1074,7 +1078,8 @@ fn help_verb(verb: &str) -> String {
              \n\
              NOTES\n\
              Revocation is exact over principal, selector kind, selector, and operation.\n\
-             Revoking list leaves any read grant on the same selector in place."
+             Revoking list leaves any read grant on the same selector in place.\n\
+             seal grants are exact-only, so revoke them with --selector-kind exact."
         }
         "reactivate" => {
             "ck auth reactivate --id <id>\n\
@@ -4142,7 +4147,7 @@ fn parse_grants(result: &serde_json::Value) -> Result<Vec<GrantRow>, CliError> {
             .filter(|operation| {
                 matches!(
                     *operation,
-                    "read" | "sign" | "open" | "list" | "deposit" | "account_token"
+                    "read" | "sign" | "open" | "list" | "deposit" | "account_token" | "seal"
                 )
             })
             .ok_or_else(|| {
@@ -7714,6 +7719,79 @@ mod deposit_cli_tests {
     }
 
     #[test]
+    fn seal_cli_grants_are_exact_only_listed_and_revocable() {
+        let root = root("seal-grants");
+        let grant = [
+            "grant",
+            "--principal",
+            "reserved:prefrontal-core",
+            "--selector-kind",
+            "exact",
+            "--selector",
+            "kem:push",
+            "--operation",
+            "seal",
+        ];
+        let granted = success(&root, &grant);
+        assert!(
+            granted.contains("granted reserved:prefrontal-core seal exact:kem:push"),
+            "{granted}"
+        );
+        // Match the grant row, never a bare word: the child's stdout also carries
+        // libtest's own lines.
+        let has_row = |table: &str| {
+            table.lines().any(|line| {
+                line.contains("prefrontal-core")
+                    && line.contains("exact")
+                    && line.contains("kem:push")
+                    && line.contains("seal")
+            })
+        };
+        let table = success(&root, &["grants"]);
+        assert!(has_row(&table), "granted row missing:\n{table}");
+        for kind in ["category", "audience"] {
+            for verb in ["grant", "revoke-grant"] {
+                let output = invoke(
+                    &root,
+                    &[
+                        verb,
+                        "--principal",
+                        "reserved:prefrontal-core",
+                        "--selector-kind",
+                        kind,
+                        "--selector",
+                        "push-keys",
+                        "--operation",
+                        "seal",
+                    ],
+                );
+                assert!(!output.status.success(), "{verb} {kind}");
+                let stderr = String::from_utf8(output.stderr).unwrap();
+                let expected = if kind == "audience" {
+                    "error: account_token requires selector-kind audience, and audience requires operation account_token\n"
+                } else {
+                    "error: seal requires selector-kind exact: it names one KEM key, never a category\n"
+                };
+                assert_eq!(stderr, expected, "{verb} {kind}");
+            }
+        }
+        assert!(
+            has_row(&success(&root, &["grants"])),
+            "a refused verb changed nothing"
+        );
+        let mut revoke = grant;
+        revoke[0] = "revoke-grant";
+        success(&root, &revoke);
+        let after = success(&root, &["grants"]);
+        assert!(!has_row(&after), "row still listed after revoke:\n{after}");
+        assert!(after.contains("no grants"), "{after}");
+        assert!(
+            help_verb("grant").contains("seal: seal messages in HPKE auth mode under one KEM key")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn deposit_grant_round_trip_and_invalid_deposit_grant_stderr_are_pinned() {
         let root = root("deposit-grants");
         let grant = [
@@ -7770,7 +7848,7 @@ mod deposit_cli_tests {
             assert_eq!(String::from_utf8(output.stderr).unwrap(), "error: deposit requires a reserved principal and category browser-session selector\n");
         }
         for verb in ["grant", "revoke-grant"] {
-            assert!(help_verb(verb).contains("<read|sign|open|list|deposit|account_token>"));
+            assert!(help_verb(verb).contains("<read|sign|open|list|deposit|account_token|seal>"));
         }
         assert!(help_verb("grant")
             .contains("cerebellum-style module write access for cookie: records only"));

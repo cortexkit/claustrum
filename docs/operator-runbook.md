@@ -823,6 +823,7 @@ These values come from the closed `AuditOp` enum and name the mutation or chain 
 | `enroll.reissue` | Operator-reissue a replacement enrollment token. |
 | `category.migrate` | Record migration 10's audited category backfill. |
 | `approval` | Record an approver's approval of the exact artifact bytes identified by a hash. |
+| `seal` | Record one `credential.seal` (auth-mode HPKE under a vault-held KEM key) before its ciphertext is returned; `payload_hash` is the SHA-256 of the plaintext. |
 
 The `set_category`, `set_providers`, `deposit_cookie_create` and `deposit_cookie_replace` ops
 and their target formats are specified in [the wire contract](wire-contract-v1.md).

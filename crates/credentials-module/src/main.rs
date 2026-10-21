@@ -112,6 +112,7 @@ const OP_REPORT_AUTH_FAILURE: &str = "credential.report_auth_failure";
 const OP_SIGN: &str = "credential.sign";
 const OP_PUBLIC_KEY: &str = "credential.public_key";
 const OP_OPEN: &str = "credential.open";
+const OP_SEAL: &str = "credential.seal";
 const OP_ENROLL_PROPOSE: &str = "auth.enroll_propose";
 const OP_ENROLL_POLL: &str = "auth.enroll_poll";
 const OP_ENROLL_ROTATE: &str = "auth.enroll_rotate";
@@ -1497,6 +1498,17 @@ async fn handle_read_request(
                 return invalid_params(writer, ver, channel, epoch, corr, &error.to_string()).await
             }
         },
+        OP_SEAL => match serde_json::from_value::<read_surface::SealParams>(request.params) {
+            Ok(p) => match surface.seal(connection_id, principal.as_ref(), &p).await {
+                Ok(result) => wrap_result(result),
+                Err(code) => wrap_result(json!({
+                    "error": read_surface::ErrorBody { code, class: code.class() }
+                })),
+            },
+            Err(error) => {
+                return invalid_params(writer, ver, channel, epoch, corr, &error.to_string()).await
+            }
+        },
         OP_PUBLIC_KEY => match serde_json::from_value::<PublicKeyParams>(request.params) {
             Ok(p) if p.has_exactly_one_authorization() => {
                 match surface
@@ -2170,6 +2182,14 @@ fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> 
             ManagementOperation {
                 name: OP_OPEN.to_string(),
                 description: Some("Open a base-mode HPKE message with a scoped KEM key.".to_string()),
+                kind: ManagementOperationKind::Query,
+            },
+            // Query, as `credential.sign` with per-signature audit is: the one durable
+            // write is an audit-chain row recording that the key was used. No record,
+            // version or grant changes, and a repeated call just records a second use.
+            ManagementOperation {
+                name: OP_SEAL.to_string(),
+                description: Some("Seal a message in HPKE auth mode under a scoped KEM key, to a caller-named recipient. Audits every call; the key never leaves the vault.".to_string()),
                 kind: ManagementOperationKind::Query,
             },
             ManagementOperation {
@@ -3689,6 +3709,17 @@ mod tests {
         ] {
             deposit_cookie_grant(&store, "reader", operation);
         }
+        // Seal grants are exact-only, so the positive control gets one on the KEM id.
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "reader",
+                SelectorKind::Exact,
+                kem_id,
+                GrantOperation::Seal,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .unwrap();
         let reader = Some(subc_protocol::Principal::Reserved {
             module_id: "reader".into(),
         });
@@ -3717,6 +3748,10 @@ mod tests {
             (
                 OP_OPEN,
                 json!({"credential_id":kem_id,"enc_b64":encode(&enc),"ciphertext_b64":encode(&ct),"info_b64":encode(b"info"),"aad_b64":encode(b"aad")}),
+            ),
+            (
+                OP_SEAL,
+                json!({"credential_id":kem_id,"recipient_public_key_b64":encode(&public),"info_b64":encode(b"info"),"aad_b64":encode(b"aad"),"plaintext_b64":encode(b"push")}),
             ),
         ];
         for (method, params) in rows {
@@ -6125,6 +6160,10 @@ mod tests {
     /// inputs are fixed here; the signing, public-key derivation, read, report receipt
     /// and result envelope all run through production code. A fixed Ed25519 seed and
     /// message make the signature deterministic without publishing any real key material.
+    /// The seal sample is made the same way: synthetic X25519 scalars for the vault key
+    /// (bytes 32..64) and the recipient (64..96), and a fixed ephemeral seed (96..128)
+    /// in place of fresh randomness. `scripts/hpke-independent-open.py` opens it with a
+    /// separate HPKE implementation using those same scalars.
     #[tokio::test]
     async fn key_and_scoped_wire_fixture_pins_real_success_replies() {
         use base64::Engine as _;
@@ -6173,10 +6212,29 @@ mod tests {
                 ),
             )
             .expect("create synthetic scoped credential");
+        let kem_id = "kem:wire-fixture";
+        let scalar = |start: u8| -> [u8; 32] { std::array::from_fn(|i| start + i as u8) };
+        store
+            .create(
+                kem_id,
+                &VaultRecord::new_static(
+                    CredentialKind::KemKey,
+                    "test",
+                    credentials_core::kem::pem_from_scalar(&scalar(32)).into_bytes(),
+                    None,
+                ),
+            )
+            .expect("create synthetic KEM key");
+        let (recipient_public, _) = credentials_core::kem::public_half(
+            &credentials_core::kem::pem_from_scalar(&scalar(64)),
+        )
+        .unwrap();
+        surface.fix_seal_ephemeral_for_test(scalar(96));
         for (id, operation) in [
             (key_id, GrantOperation::Sign),
             (key_id, GrantOperation::Read),
             ("oauth:anthropic", GrantOperation::Read),
+            (kem_id, GrantOperation::Seal),
         ] {
             store
                 .create_read_grant_audited(
@@ -6193,12 +6251,23 @@ mod tests {
 
         let payload_b64 =
             base64::engine::general_purpose::STANDARD.encode(b"fixture-ed25519-message");
+        let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
         let requests = [
             (
                 OP_SIGN,
                 json!({"credential_id": key_id, "payload_b64": payload_b64}),
             ),
             (OP_PUBLIC_KEY, json!({"credential_id": key_id})),
+            (
+                OP_SEAL,
+                json!({
+                    "credential_id": kem_id,
+                    "recipient_public_key_b64": encode(&recipient_public),
+                    "info_b64": encode(b"fixture-seal-info"),
+                    "aad_b64": encode(b"fixture-seal-aad"),
+                    "plaintext_b64": encode(b"fixture-push-payload"),
+                }),
+            ),
             (
                 OP_GET_SCOPED,
                 json!({"credential_id": "oauth:anthropic", "min_ttl_ms": 300_000}),
@@ -6212,7 +6281,7 @@ mod tests {
         let mut produced = Vec::new();
         let mut key_requests = Vec::new();
         for (op, params) in requests {
-            if matches!(op, OP_SIGN | OP_PUBLIC_KEY) {
+            if matches!(op, OP_SIGN | OP_PUBLIC_KEY | OP_SEAL) {
                 key_requests.push((op, serde_json::to_string(&params).unwrap()));
             }
             let reply = scoped_route_request(&surface, &admin, 22, op, params).await;
@@ -6685,6 +6754,29 @@ mod tests {
             },
             &["handle", "credential_id", "enrollment_token"],
             "credential.public_key",
+        );
+    }
+
+    #[test]
+    fn credential_seal_request_key_set_is_pinned() {
+        assert_request_key_set(
+            read_surface::SealParams {
+                credential_id: "kem:request-shape".to_owned(),
+                recipient_public_key_b64: "AQI=".to_owned(),
+                info_b64: "AQI=".to_owned(),
+                aad_b64: "AQI=".to_owned(),
+                plaintext_b64: "AQI=".to_owned(),
+                enrollment_token: Some("tok_request_shape".to_owned()),
+            },
+            &[
+                "credential_id",
+                "recipient_public_key_b64",
+                "info_b64",
+                "aad_b64",
+                "plaintext_b64",
+                "enrollment_token",
+            ],
+            "credential.seal",
         );
     }
 
@@ -9264,6 +9356,584 @@ mod tests {
             surface.open(94, None, &params).await.unwrap_err(),
             read_surface::ReadError::SignPayloadTooLarge
         );
+    }
+
+    /// A KEM key at `kem:push`, a seal grant for `reserved:prefrontal-core` bound on
+    /// channel 193, and a recipient key pair the test holds. Returns the recipient's
+    /// private PEM and the vault key's public half and key id.
+    fn seal_rig() -> (
+        Arc<ReadSurface>,
+        Arc<admin_surface::AdminSurface>,
+        Arc<EncryptedStore>,
+        String,
+        Vec<u8>,
+        String,
+    ) {
+        let (surface, admin, store) = scoped_rig(193);
+        let pem = credentials_core::kem::generate_key().unwrap();
+        let (sender_public, key_id) = credentials_core::kem::public_half(&pem).unwrap();
+        store
+            .create_audited(
+                "kem:push",
+                &VaultRecord::new_static(
+                    CredentialKind::KemKey,
+                    "operator",
+                    pem.into_bytes(),
+                    None,
+                ),
+                AuditCtx::admin(AuditOp::Put),
+            )
+            .unwrap();
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "prefrontal-core",
+                SelectorKind::Exact,
+                "kem:push",
+                GrantOperation::Seal,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .unwrap();
+        admin.record_bind(193, reserved("prefrontal-core"));
+        (
+            surface,
+            admin,
+            store,
+            credentials_core::kem::generate_key().unwrap(),
+            sender_public,
+            key_id,
+        )
+    }
+
+    fn seal_params(credential_id: &str, recipient: &[u8], plaintext: &[u8]) -> serde_json::Value {
+        use base64::Engine as _;
+        let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        json!({
+            "credential_id": credential_id,
+            "recipient_public_key_b64": encode(recipient),
+            "info_b64": encode(b"push-info"),
+            "aad_b64": encode(b"push-aad"),
+            "plaintext_b64": encode(plaintext),
+        })
+    }
+
+    fn recipient_public(recipient_pem: &str) -> Vec<u8> {
+        credentials_core::kem::public_half(recipient_pem).unwrap().0
+    }
+
+    /// Open a seal reply as the phone would: Auth mode, with the vault key's public half.
+    fn open_seal_reply(
+        reply: &serde_json::Value,
+        recipient_pem: &str,
+        sender_public: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        use base64::Engine as _;
+        let decode = |field: &str| {
+            base64::engine::general_purpose::STANDARD
+                .decode(reply["result"][field].as_str().expect(field))
+                .unwrap()
+        };
+        credentials_core::kem::open_auth(
+            recipient_pem,
+            sender_public,
+            &decode("enc_b64"),
+            &decode("ciphertext_b64"),
+            b"push-info",
+            b"push-aad",
+        )
+    }
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        ring::digest::digest(&ring::digest::SHA256, bytes)
+            .as_ref()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+
+    fn seal_rows(store: &EncryptedStore) -> Vec<credentials_core::audit::AuditEntry> {
+        store
+            .read_audit(None)
+            .unwrap()
+            .into_iter()
+            .filter(|row| row.op == "seal")
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn seal_opens_for_the_recipient_under_the_vault_key_and_audits_one_row_per_call() {
+        for enrolled in [false, true] {
+            let (surface, admin, store, recipient, sender_public, key_id) = seal_rig();
+            let token = if enrolled {
+                let secret = "cd".repeat(32);
+                let hash = credentials_core::enrollment::enrollment_secret_hash(&secret).unwrap();
+                let request = store.propose_enrollment("pusher", &hash).unwrap();
+                store
+                    .approve_enrollment(&request.request_id, "pusher", "operator")
+                    .unwrap();
+                store
+                    .create_read_grant_audited(
+                        "enrolled",
+                        "pusher",
+                        SelectorKind::Exact,
+                        "kem:push",
+                        GrantOperation::Seal,
+                        AuditCtx::admin(AuditOp::GrantCreate),
+                    )
+                    .unwrap();
+                match store.poll_enrollment(&request.request_id, &secret).unwrap() {
+                    credentials_core::enrollment::EnrollmentPoll::Approved { token, .. } => {
+                        Some(token)
+                    }
+                    other => panic!("approved enrollment: {other:?}"),
+                }
+            } else {
+                None
+            };
+            let before = store.read_audit(None).unwrap().len();
+            let plaintexts: [&[u8]; 3] = [b"first push", b"second\x00\xffpush", b"first push"];
+            let mut ciphertexts = Vec::new();
+            for plaintext in plaintexts {
+                let mut params = seal_params("kem:push", &recipient_public(&recipient), plaintext);
+                params["enrollment_token"] = json!(token);
+                let reply = scoped_route_request(&surface, &admin, 193, OP_SEAL, params).await;
+                assert_eq!(reply["result"]["key_id"], key_id.as_str(), "{reply}");
+                assert_eq!(
+                    open_seal_reply(&reply, &recipient, &sender_public).unwrap(),
+                    plaintext
+                );
+                ciphertexts.push(reply["result"]["ciphertext_b64"].clone());
+            }
+            assert_ne!(
+                ciphertexts[0], ciphertexts[2],
+                "every seal uses a fresh ephemeral key"
+            );
+            let rows = store.read_audit(None).unwrap();
+            let rows = &rows[before..];
+            assert_eq!(rows.len(), plaintexts.len(), "exactly one row per seal");
+            for (row, plaintext) in rows.iter().zip(plaintexts) {
+                assert_eq!(row.op, "seal");
+                assert_eq!(row.credential_id.as_deref(), Some("kem:push"));
+                assert_eq!(
+                    row.payload_hash.as_deref(),
+                    Some(sha256_hex(plaintext).as_str())
+                );
+                assert_eq!(
+                    row.actor,
+                    if enrolled {
+                        "enrolled:pusher"
+                    } else {
+                        "reserved:prefrontal-core"
+                    }
+                );
+                assert!(!row.alarm);
+            }
+            store.verify_audit_chain().unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn seal_refusals_are_byte_identical_across_every_reason_the_key_is_out_of_reach() {
+        let (surface, admin, store, recipient, _, _) = seal_rig();
+        let recipient = recipient_public(&recipient);
+        let api_record =
+            VaultRecord::new_static(CredentialKind::ApiKey, "operator", b"api".to_vec(), None);
+        store.create("apikey:not-kem", &api_record).unwrap();
+        let other_kem = credentials_core::kem::generate_key().unwrap();
+        for id in [
+            "kem:read-only",
+            "kem:open-only",
+            "kem:sign-list",
+            "kem:ungranted",
+            "kem:revoked",
+        ] {
+            store
+                .create(
+                    id,
+                    &VaultRecord::new_static(
+                        CredentialKind::KemKey,
+                        "operator",
+                        other_kem.clone().into_bytes(),
+                        None,
+                    ),
+                )
+                .unwrap();
+        }
+        let grant = |id: &str, operation| {
+            store
+                .create_read_grant_audited(
+                    "reserved",
+                    "prefrontal-core",
+                    SelectorKind::Exact,
+                    id,
+                    operation,
+                    AuditCtx::admin(AuditOp::GrantCreate),
+                )
+                .unwrap()
+        };
+        grant("kem:read-only", GrantOperation::Read);
+        grant("kem:open-only", GrantOperation::Open);
+        grant("kem:sign-list", GrantOperation::Sign);
+        grant("kem:sign-list", GrantOperation::List);
+        // A seal grant on a record that is not a KEM key reaches nothing.
+        grant("apikey:not-kem", GrantOperation::Seal);
+        grant("kem:revoked", GrantOperation::Seal);
+        store
+            .revoke_read_grant_audited(
+                "reserved",
+                "prefrontal-core",
+                SelectorKind::Exact,
+                "kem:revoked",
+                GrantOperation::Seal,
+                AuditCtx::admin(AuditOp::GrantRevoke),
+            )
+            .unwrap();
+
+        let audit_before = store.read_audit(None).unwrap().len();
+        let mut bodies = Vec::new();
+        for id in [
+            "kem:unknown",
+            "kem:ungranted",
+            "kem:read-only",
+            "kem:open-only",
+            "kem:sign-list",
+            "apikey:not-kem",
+            "kem:revoked",
+        ] {
+            let reply = scoped_route_request(
+                &surface,
+                &admin,
+                193,
+                OP_SEAL,
+                seal_params(id, &recipient, b"probe"),
+            )
+            .await;
+            bodies.push((id, serde_json::to_string(&reply).unwrap()));
+        }
+        // A store fault in the grant lookup answers the same way.
+        surface.force_scoped_grant_lookup_error_for_test();
+        let reply = scoped_route_request(
+            &surface,
+            &admin,
+            193,
+            OP_SEAL,
+            seal_params("kem:push", &recipient, b"probe"),
+        )
+        .await;
+        bodies.push(("grant lookup fault", serde_json::to_string(&reply).unwrap()));
+        let expected = r#"{"result":{"error":{"class":"permanent","code":"not_found"}}}"#;
+        for (reason, body) in &bodies {
+            assert_eq!(body, expected, "{reason}");
+        }
+        assert_eq!(
+            store.read_audit(None).unwrap().len(),
+            audit_before,
+            "a refused seal writes no audit row"
+        );
+        // Positive control: the same caller, request shape and connection seal the
+        // granted key, so the refusals above are about reach and nothing else.
+        let reply = scoped_route_request(
+            &surface,
+            &admin,
+            193,
+            OP_SEAL,
+            seal_params("kem:push", &recipient, b"probe"),
+        )
+        .await;
+        assert!(reply["result"]["error"].is_null(), "{reply}");
+    }
+
+    #[tokio::test]
+    async fn a_seal_grant_authorizes_no_other_operation() {
+        use base64::Engine as _;
+        use credentials_core::kem::*;
+        let (surface, admin, _store, _, _, _) = seal_rig();
+        let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        let (public, _) = public_half(&generate_key().unwrap()).unwrap();
+        let (enc, ct) = seal_base(&public, b"x", b"", b"").unwrap();
+        for (method, params) in [
+            (OP_GET_SCOPED, json!({"credential_id": "kem:push"})),
+            (OP_PUBLIC_KEY, json!({"credential_id": "kem:push"})),
+            (
+                OP_SIGN,
+                json!({"credential_id": "kem:push", "payload_b64": encode(b"x")}),
+            ),
+            (
+                OP_OPEN,
+                json!({"credential_id": "kem:push", "enc_b64": encode(&enc),
+                       "ciphertext_b64": encode(&ct), "info_b64": "", "aad_b64": ""}),
+            ),
+        ] {
+            let reply = scoped_route_request(&surface, &admin, 193, method, params).await;
+            assert_eq!(
+                reply["result"]["error"]["code"], "not_found",
+                "{method}: {reply}"
+            );
+        }
+        let listing = scoped_route_request(&surface, &admin, 193, OP_LIST_SCOPED, json!({})).await;
+        let rows = listing["result"]["credentials"].as_array().unwrap();
+        assert_eq!(rows.len(), 1, "{listing}");
+        assert_eq!(rows[0]["operations"], json!(["seal"]));
+        for field in ["refresh_adapter", "auth_method", "account_id", "email"] {
+            assert!(rows[0].get(field).is_none(), "seal reveals no {field}");
+        }
+    }
+
+    #[tokio::test]
+    async fn seal_audit_write_failure_returns_store_error_and_no_ciphertext() {
+        let (surface, admin, store, recipient, sender_public, _) = seal_rig();
+        let params = seal_params("kem:push", &recipient_public(&recipient), b"push");
+        let before = store.read_audit(None).unwrap();
+        surface.force_seal_audit_write_fault_for_test();
+        let refused = scoped_route_request(&surface, &admin, 193, OP_SEAL, params.clone()).await;
+        assert_eq!(
+            refused["result"],
+            json!({ "error": { "code": "store_error", "class": "transient" } })
+        );
+        assert_eq!(store.read_audit(None).unwrap(), before);
+        let recovered = scoped_route_request(&surface, &admin, 193, OP_SEAL, params).await;
+        assert_eq!(
+            open_seal_reply(&recovered, &recipient, &sender_public).unwrap(),
+            b"push"
+        );
+        assert_eq!(seal_rows(&store).len(), 1);
+        store.verify_audit_chain().unwrap();
+    }
+
+    #[tokio::test]
+    async fn seal_refuses_when_the_key_is_replaced_between_the_seal_and_its_audit() {
+        let (surface, admin, store, recipient, _, _) = seal_rig();
+        let params = seal_params("kem:push", &recipient_public(&recipient), b"push");
+        let replacement = credentials_core::kem::generate_key().unwrap();
+        let (new_public, new_key_id) = credentials_core::kem::public_half(&replacement).unwrap();
+        let writer = Arc::clone(&store);
+        surface.run_before_next_seal_audit_for_test(Box::new(move || {
+            writer
+                .overwrite_unconditional_audited(
+                    "kem:push",
+                    &VaultRecord::new_static(
+                        CredentialKind::KemKey,
+                        "operator",
+                        replacement.into_bytes(),
+                        None,
+                    ),
+                    AuditCtx::admin(AuditOp::Overwrite),
+                )
+                .unwrap();
+        }));
+        let refused = scoped_route_request(&surface, &admin, 193, OP_SEAL, params.clone()).await;
+        assert_eq!(
+            refused["result"],
+            json!({ "error": { "code": "store_error", "class": "transient" } }),
+            "a ciphertext made with the replaced key must not be returned"
+        );
+        assert!(seal_rows(&store).is_empty());
+        // The next seal uses, names and audits the replacement key.
+        let sealed = scoped_route_request(&surface, &admin, 193, OP_SEAL, params).await;
+        assert_eq!(sealed["result"]["key_id"], new_key_id.as_str());
+        assert_eq!(
+            open_seal_reply(&sealed, &recipient, &new_public).unwrap(),
+            b"push"
+        );
+        let ops: Vec<_> = store
+            .read_audit(None)
+            .unwrap()
+            .into_iter()
+            .filter(|row| row.credential_id.as_deref() == Some("kem:push"))
+            .map(|row| row.op)
+            .collect();
+        assert_eq!(ops, ["put", "overwrite", "seal"]);
+        store.verify_audit_chain().unwrap();
+    }
+
+    #[test]
+    fn seal_audit_append_refuses_a_replaced_generation_without_a_row() {
+        let (_surface, _admin, store, _, _, _) = seal_rig();
+        let original = store.get("kem:push").unwrap();
+        store
+            .overwrite_unconditional_audited(
+                "kem:push",
+                &VaultRecord::new_static(
+                    CredentialKind::KemKey,
+                    "operator",
+                    credentials_core::kem::generate_key().unwrap().into_bytes(),
+                    None,
+                ),
+                AuditCtx::admin(AuditOp::Overwrite),
+            )
+            .unwrap();
+        let before = store.read_audit(None).unwrap();
+        let hash = credentials_core::store::payload_hash(b"push");
+        assert!(matches!(
+            store.append_seal_audit("kem:push", original.record_version, &hash, "reserved:p"),
+            Err(credentials_core::store::StoreOpError::CasMismatch)
+        ));
+        assert_eq!(store.read_audit(None).unwrap(), before);
+        let current = store.get("kem:push").unwrap();
+        let row = store
+            .append_seal_audit("kem:push", current.record_version, &hash, "reserved:p")
+            .unwrap();
+        assert_eq!(row.op, "seal");
+        assert_eq!(store.read_audit(None).unwrap().len(), before.len() + 1);
+    }
+
+    #[tokio::test]
+    async fn seal_input_checks_run_before_authorization_at_their_exact_boundaries() {
+        use base64::Engine as _;
+        use credentials_core::kem::{MAX_SEAL_AAD, MAX_SEAL_INFO, MAX_SEAL_PLAINTEXT};
+        let (surface, admin, store, recipient, _, _) = seal_rig();
+        let recipient = recipient_public(&recipient);
+        let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        let code = |reply: &serde_json::Value| reply["result"]["error"]["code"].clone();
+        let audit_before = store.read_audit(None).unwrap().len();
+        // An id nothing grants: a request that passes the input checks answers
+        // `not_found`, so a different code proves the check ran before authorization.
+        for (field, cap) in [
+            ("plaintext_b64", MAX_SEAL_PLAINTEXT),
+            ("info_b64", MAX_SEAL_INFO),
+            ("aad_b64", MAX_SEAL_AAD),
+        ] {
+            for (len, expected) in [(cap, "not_found"), (cap + 1, "seal_input_too_large")] {
+                let mut params = seal_params("kem:unknown", &recipient, b"");
+                params[field] = json!(encode(&vec![1u8; len]));
+                let reply = scoped_route_request(&surface, &admin, 194, OP_SEAL, params).await;
+                assert_eq!(code(&reply), expected, "{field} at {len}");
+                if expected != "not_found" {
+                    assert_eq!(reply["result"]["error"]["class"], "context_overflow");
+                }
+            }
+            // The decoded length is what counts, not the encoded text: one byte over
+            // the cap is refused even though its encoding fits the encoded bound.
+            let mut params = seal_params("kem:push", &recipient, b"");
+            params[field] = json!(encode(&vec![1u8; cap + 1]));
+            let reply = scoped_route_request(&surface, &admin, 193, OP_SEAL, params).await;
+            assert_eq!(code(&reply), "seal_input_too_large", "{field} granted");
+        }
+        for len in [31, 33, 0] {
+            let reply = scoped_route_request(
+                &surface,
+                &admin,
+                194,
+                OP_SEAL,
+                seal_params("kem:unknown", &vec![9u8; len], b"push"),
+            )
+            .await;
+            assert_eq!(
+                code(&reply),
+                "invalid_recipient_key",
+                "{len}-byte recipient"
+            );
+            assert_eq!(reply["result"]["error"]["class"], "permanent");
+        }
+        // A low-order point is 32 bytes and passes the length check; the seal itself
+        // refuses it, with no ciphertext and no audit row.
+        let reply = scoped_route_request(
+            &surface,
+            &admin,
+            193,
+            OP_SEAL,
+            seal_params("kem:push", &[0u8; 32], b"push"),
+        )
+        .await;
+        assert_eq!(code(&reply), "invalid_recipient_key");
+        assert!(reply["result"].get("ciphertext_b64").is_none());
+        for field in [
+            "recipient_public_key_b64",
+            "info_b64",
+            "aad_b64",
+            "plaintext_b64",
+        ] {
+            let mut params = seal_params("kem:unknown", &recipient, b"push");
+            params[field] = json!("!");
+            let reply = scoped_route_request(&surface, &admin, 194, OP_SEAL, params).await;
+            assert_eq!(code(&reply), "malformed_encoding", "{field}");
+        }
+        assert_eq!(store.read_audit(None).unwrap().len(), audit_before);
+        // Unknown fields, `handle` included, are a transport refusal like `open`'s.
+        for extra in ["handle", "unexpected"] {
+            let mut params = seal_params("kem:push", &recipient, b"push");
+            params[extra] = json!("x");
+            let (writer, mut responses) = mpsc::channel(1);
+            let frame = Frame::build_with_version(
+                PROTOCOL_VERSION,
+                FrameType::Request,
+                Flags::new(false, Priority::Interactive, false),
+                193,
+                1,
+                1,
+                serde_json::to_vec(&json!({"method": OP_SEAL, "params": params})).unwrap(),
+            )
+            .unwrap();
+            handle_read_request(frame, &writer, &surface, &admin, admin.principal(193))
+                .await
+                .unwrap();
+            let response = responses.recv().await.unwrap();
+            assert_eq!(response.header.ty, FrameType::Error, "{extra}");
+            let body: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+            assert_eq!(body["code"], "invalid_params", "{extra}");
+        }
+    }
+
+    #[tokio::test]
+    async fn seal_and_open_share_one_refusal_threshold_per_connection() {
+        let (surface, _admin, _store, recipient, _, _) = seal_rig();
+        let principal = reserved("prefrontal-core");
+        let recipient = recipient_public(&recipient);
+        let seal = |id: &str| -> read_surface::SealParams {
+            serde_json::from_value(seal_params(id, &recipient, b"push")).unwrap()
+        };
+        let open = read_surface::OpenParams {
+            credential_id: "kem:unknown".into(),
+            enc_b64: String::new(),
+            ciphertext_b64: String::new(),
+            info_b64: String::new(),
+            aad_b64: String::new(),
+            enrollment_token: None,
+        };
+        // Eight refused opens and eight refused seals on one connection reach the
+        // shared threshold of sixteen.
+        for n in 0..8 {
+            assert_eq!(
+                surface.open(70, Some(&principal), &open).await.unwrap_err(),
+                read_surface::ReadError::NotFound
+            );
+            assert_eq!(
+                surface
+                    .seal(70, Some(&principal), &seal(&format!("kem:unknown:{n}")))
+                    .await
+                    .unwrap_err(),
+                read_surface::ReadError::NotFound
+            );
+        }
+        assert_eq!(
+            surface
+                .seal(70, Some(&principal), &seal("kem:push"))
+                .await
+                .unwrap_err(),
+            read_surface::ReadError::SealRateLimited,
+            "even a granted seal waits out the window"
+        );
+        assert_eq!(
+            surface.open(70, Some(&principal), &open).await.unwrap_err(),
+            read_surface::ReadError::OpenRateLimited
+        );
+        // Another connection is unaffected, and the window recovers.
+        assert!(surface
+            .seal(71, Some(&principal), &seal("kem:push"))
+            .await
+            .is_ok());
+        surface.expire_open_window_for_test(70).await;
+        assert!(surface
+            .seal(70, Some(&principal), &seal("kem:push"))
+            .await
+            .is_ok());
+        // Successful seals do not count: many in a row never trip the gate.
+        for _ in 0..20 {
+            assert!(surface
+                .seal(72, Some(&principal), &seal("kem:push"))
+                .await
+                .is_ok());
+        }
     }
 
     #[tokio::test]

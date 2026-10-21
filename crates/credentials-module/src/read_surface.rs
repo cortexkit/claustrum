@@ -448,6 +448,33 @@ pub struct OpenResult {
     pub key_id: String,
 }
 
+/// Parameters for `credential.seal`, the RFC 9180 Auth-mode sender. Every byte field is
+/// strict standard base64. Unknown fields, including `handle`, are refused before
+/// decoding: a seal is authorized only by a principal's exact `seal` grant.
+#[cfg_attr(test, derive(Serialize))]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SealParams {
+    pub credential_id: String,
+    /// The recipient's 32-byte X25519 public key (pkR).
+    pub recipient_public_key_b64: String,
+    pub info_b64: String,
+    pub aad_b64: String,
+    pub plaintext_b64: String,
+    #[serde(default)]
+    pub enrollment_token: Option<String>,
+}
+
+/// A `credential.seal` result. `key_id` names the vault key that sealed, in the same
+/// format `credential.public_key` returns, so the recipient can pick the sender public
+/// half to open with.
+#[derive(Debug, Serialize)]
+pub struct SealResult {
+    pub enc_b64: String,
+    pub ciphertext_b64: String,
+    pub key_id: String,
+}
+
 /// The public material of an Ed25519 signing key.
 ///
 /// `credential.get` returns a record payload verbatim, and a signing-key payload is
@@ -654,6 +681,16 @@ pub enum ReadError {
     OpenRateLimited,
     /// A `credential.open` byte field is not strict standard base64.
     MalformedEncoding,
+    /// A `credential.seal` plaintext, info or aad is over its cap (`MAX_SEAL_PLAINTEXT`,
+    /// `MAX_SEAL_INFO`, `MAX_SEAL_AAD` in `credentials_core::kem`). Refused before
+    /// authorization or any key use.
+    SealInputTooLarge,
+    /// A `credential.seal` recipient key is not 32 bytes, or is a low-order X25519 point
+    /// whose shared secret would be all zeros. No retry with the same key can succeed.
+    InvalidRecipientKey,
+    /// This connection reached the scoped refusal threshold that `credential.open` and
+    /// `credential.seal` share. Transient: the window recovers after 60 seconds.
+    SealRateLimited,
 }
 
 /// The fleet-wide error-class vocabulary (error-class contract, ratified 2026-07-08;
@@ -711,6 +748,7 @@ impl ReadError {
             | ReadError::KindNotOpenable
             | ReadError::OpenFailed
             | ReadError::MalformedEncoding
+            | ReadError::InvalidRecipientKey
             | ReadError::ReportStatusNotCredentialDeath => ErrorClass::Permanent,
             // The refresh token is dead; a human must run a fresh login.
             ReadError::NeedsReauth => ErrorClass::AuthRequired,
@@ -719,7 +757,8 @@ impl ReadError {
             ReadError::RefreshFailed
             | ReadError::StoreError
             | ReadError::VaultLocked
-            | ReadError::OpenRateLimited => ErrorClass::Transient,
+            | ReadError::OpenRateLimited
+            | ReadError::SealRateLimited => ErrorClass::Transient,
             // Over the `get_many` cap, over the signing-payload cap, or a minimum-TTL
             // demand a fresh token cannot meet: reduce the request and retry. All are
             // bounds on ONE request rather than statements about the credential, which
@@ -742,6 +781,7 @@ impl ReadError {
             // holder of that App.
             ReadError::TooManyItems
             | ReadError::SignPayloadTooLarge
+            | ReadError::SealInputTooLarge
             | ReadError::TtlUnsatisfiable => ErrorClass::ContextOverflow,
         }
     }
@@ -922,6 +962,15 @@ pub struct ReadSurface {
     deposit_cookie_first_use_fault: std::sync::atomic::AtomicBool,
     #[cfg(test)]
     sign_audit_write_fault: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    seal_audit_write_fault: std::sync::atomic::AtomicBool,
+    // Runs once between the seal and its audit write, so a test can replace the key
+    // record in exactly the window the audit fence exists for.
+    #[cfg(test)]
+    seal_before_audit_hook: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    // Fixes the ephemeral key so the pinned wire sample is reproducible byte for byte.
+    #[cfg(test)]
+    seal_ephemeral_ikm_for_test: std::sync::Mutex<Option<[u8; 32]>>,
 }
 
 /// If the cached health snapshot has not been refreshed within this window, the probe
@@ -1200,6 +1249,12 @@ impl ReadSurface {
             deposit_cookie_first_use_fault: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             sign_audit_write_fault: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            seal_audit_write_fault: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            seal_before_audit_hook: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            seal_ephemeral_ikm_for_test: std::sync::Mutex::new(None),
         }
     }
 
@@ -1441,6 +1496,193 @@ impl ReadSurface {
             ),
             key_id,
         })
+    }
+
+    /// Seal one message in RFC 9180 Auth mode with a vault-held KEM key as the sender's
+    /// static key, for a recipient public key the caller names. THE PRIVATE KEY NEVER
+    /// LEAVES THIS PROCESS, and only AEAD output comes back: no raw Diffie-Hellman value
+    /// or derived secret, which for a caller-chosen public key would be a key-agreement
+    /// oracle.
+    ///
+    /// Order, each step only after the previous passes: decode and size the request,
+    /// check the recipient key length (both before anything is authorized or read, so
+    /// a malformed request costs no key access); the refusal-rate gate `open` also uses;
+    /// the exact `seal` grant; the record and its kind; the seal; one audit row; reply.
+    ///
+    /// ONE REFUSAL FOR EVERYTHING ABOUT THE KEY. An unknown id, no grant, a revoked
+    /// grant, a grant for another operation, a record that is not a KEM key, and a
+    /// store fault while reading it all answer `not_found`, so a caller cannot use this
+    /// op to learn which ids exist or what kind they are. Each counts toward the shared
+    /// refusal threshold.
+    ///
+    /// AUDITED ON EVERY CALL, before the ciphertext is returned, because whoever opens
+    /// the message attributes it to this key. If the row cannot be written, or the key
+    /// record changed between the read and the audit, the ciphertext is dropped and the
+    /// call answers `store_error`.
+    pub async fn seal(
+        &self,
+        connection_id: u64,
+        principal: Option<&Principal>,
+        params: &SealParams,
+    ) -> Result<SealResult, ReadError> {
+        use credentials_core::kem::{
+            MAX_SEAL_AAD, MAX_SEAL_INFO, MAX_SEAL_PLAINTEXT, X25519_PUBLIC_KEY_LEN,
+        };
+        // Bound the encoded text before decoding, so an oversized field is refused
+        // without allocating its decoded copy. Strict padded base64 encodes n bytes in
+        // exactly 4 * ceil(n / 3) characters, so these bounds admit every field at its
+        // cap and nothing a decode could turn into an over-cap value is lost: the
+        // decoded lengths are checked again below.
+        let encoded = |cap: usize| cap.div_ceil(3) * 4;
+        if params.plaintext_b64.len() > encoded(MAX_SEAL_PLAINTEXT)
+            || params.info_b64.len() > encoded(MAX_SEAL_INFO)
+            || params.aad_b64.len() > encoded(MAX_SEAL_AAD)
+        {
+            return Err(ReadError::SealInputTooLarge);
+        }
+        if params.recipient_public_key_b64.len() > encoded(X25519_PUBLIC_KEY_LEN) {
+            return Err(ReadError::InvalidRecipientKey);
+        }
+        let decode = |field: &String| {
+            base64::engine::general_purpose::STANDARD
+                .decode(field.as_bytes())
+                .map_err(|_| ReadError::MalformedEncoding)
+        };
+        let recipient = decode(&params.recipient_public_key_b64)?;
+        let info = decode(&params.info_b64)?;
+        let aad = decode(&params.aad_b64)?;
+        let plaintext = credentials_core::secret::Secret::new(decode(&params.plaintext_b64)?);
+        credentials_core::kem::check_seal_inputs(&recipient, plaintext.expose(), &info, &aad)
+            .map_err(map_seal_error)?;
+
+        // The same per-connection counter `open` uses, held through resolution so
+        // pipelined probes cannot all pass the gate before any refusal is counted.
+        let mut counters = self.open_refusals.lock().await;
+        if let Some((start, count)) = counters.get(&connection_id).copied() {
+            if start.elapsed() >= OPEN_REFUSAL_WINDOW {
+                counters.remove(&connection_id);
+            } else if count >= OPEN_REFUSAL_THRESHOLD {
+                return Err(ReadError::SealRateLimited);
+            }
+        }
+        let refuse = |counters: &mut HashMap<u64, (Instant, usize)>| {
+            let entry = counters.entry(connection_id).or_insert((Instant::now(), 0));
+            if entry.0.elapsed() >= OPEN_REFUSAL_WINDOW {
+                *entry = (Instant::now(), 0);
+            }
+            entry.1 += 1;
+            ReadError::NotFound
+        };
+        let resolved_principal = match self.authorize_scoped_as(
+            principal,
+            params.enrollment_token.as_deref(),
+            &params.credential_id,
+            GrantOperation::Seal,
+        ) {
+            Ok(resolved) => resolved,
+            Err(_) => return Err(refuse(&mut counters)),
+        };
+        let credential_id = params.credential_id.as_str();
+        let record = match self.engine.store().get(credential_id) {
+            Ok(record) => record,
+            Err(error) => {
+                let refusal = match error {
+                    StoreOpError::NotFound => ScopedReadRefusal::NotFound,
+                    _ => ScopedReadRefusal::StoreError,
+                };
+                self.record_scoped_refusal(principal, credential_id, refusal);
+                return Err(refuse(&mut counters));
+            }
+        };
+        // Only a vault-held KEM key can seal. A seal grant on any other kind answers
+        // exactly like no grant at all.
+        if record.kind != credentials_core::record::CredentialKind::KemKey {
+            self.record_scoped_refusal(principal, credential_id, ScopedReadRefusal::WrongKind);
+            return Err(refuse(&mut counters));
+        }
+        drop(counters);
+
+        // A record typed as a KEM key whose bytes are not one is vault damage, reported
+        // as `corrupt` exactly as `sign` reports an unusable signing key.
+        let pem = std::str::from_utf8(record.payload.expose()).map_err(|_| ReadError::Corrupt)?;
+        let (_, key_id) =
+            credentials_core::kem::public_half(pem).map_err(|_| ReadError::Corrupt)?;
+        #[cfg(not(test))]
+        let sealed =
+            credentials_core::kem::seal_auth(pem, &recipient, plaintext.expose(), &info, &aad);
+        #[cfg(test)]
+        let sealed = match *self
+            .seal_ephemeral_ikm_for_test
+            .lock()
+            .expect("seal ephemeral lock")
+        {
+            Some(ikm) => credentials_core::kem::seal_auth_with_ephemeral_ikm(
+                pem,
+                &recipient,
+                plaintext.expose(),
+                &info,
+                &aad,
+                ikm,
+            ),
+            None => {
+                credentials_core::kem::seal_auth(pem, &recipient, plaintext.expose(), &info, &aad)
+            }
+        };
+        let (enc, ciphertext) = sealed.map_err(map_seal_error)?;
+
+        #[cfg(test)]
+        if let Some(hook) = self
+            .seal_before_audit_hook
+            .lock()
+            .expect("seal hook lock")
+            .take()
+        {
+            hook();
+        }
+        let actor = format!("{}:{}", resolved_principal.0, resolved_principal.1);
+        let write_audit = || {
+            #[cfg(test)]
+            if self
+                .seal_audit_write_fault
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(StoreOpError::Store("test seal audit write failure".into()));
+            }
+            self.engine.store().append_seal_audit(
+                credential_id,
+                record.record_version,
+                &credentials_core::store::payload_hash(plaintext.expose()),
+                &actor,
+            )
+        };
+        // No row, no ciphertext. The append re-checks the writer fence and that the key
+        // generation sealed with is still the stored one, in the same transaction.
+        write_audit().map_err(|_| ReadError::StoreError)?;
+        let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        Ok(SealResult {
+            enc_b64: encode(&enc),
+            ciphertext_b64: encode(&ciphertext),
+            key_id,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn force_seal_audit_write_fault_for_test(&self) {
+        self.seal_audit_write_fault
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fix_seal_ephemeral_for_test(&self, ikm: [u8; 32]) {
+        *self
+            .seal_ephemeral_ikm_for_test
+            .lock()
+            .expect("seal ephemeral lock") = Some(ikm);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn run_before_next_seal_audit_for_test(&self, hook: Box<dyn FnOnce() + Send>) {
+        *self.seal_before_audit_hook.lock().expect("seal hook lock") = Some(hook);
     }
 
     /// Return the public half of a signing-key record without ever serving its private
@@ -2805,6 +3047,18 @@ fn err(code: ReadError) -> GetOutcome {
 /// not found" is a reasonable simplification that silently inverts a cross-repo
 /// promise. It is pinned by `an_unmapped_store_error_is_never_permanent`, which
 /// exists because that mutation once left the entire workspace green.
+/// Map a refused seal to its wire code. A key that will not parse, and the AEAD failure
+/// a fresh context cannot actually hit, are vault-side faults: `corrupt`, as `sign`
+/// reports an unusable signing key.
+fn map_seal_error(error: credentials_core::kem::SealError) -> ReadError {
+    use credentials_core::kem::SealError;
+    match error {
+        SealError::TooLarge => ReadError::SealInputTooLarge,
+        SealError::InvalidRecipient => ReadError::InvalidRecipientKey,
+        SealError::UnusableKey | SealError::Failed => ReadError::Corrupt,
+    }
+}
+
 fn map_store_error(e: &StoreOpError) -> ReadError {
     use credentials_core::envelope::EnvelopeError;
     match e {
@@ -2934,7 +3188,7 @@ mod error_class_tests {
                 "code": "malformed_encoding", "class": "permanent"
             })
         );
-        let row = "| `malformed_encoding` | permanent | a `credential.sign` payload or `credential.open` byte field failed strict standard base64 decoding |";
+        let row = "| `malformed_encoding` | permanent | a `credential.sign` payload or a `credential.open` or `credential.seal` byte field failed strict standard base64 decoding |";
         assert_eq!(
             doc.matches(row).count(),
             1,
@@ -3227,6 +3481,9 @@ mod error_class_tests {
         OpenFailed => "open_failed", "permanent";
         OpenRateLimited => "open_rate_limited", "transient";
         MalformedEncoding => "malformed_encoding", "permanent";
+        SealInputTooLarge => "seal_input_too_large", "context_overflow";
+        InvalidRecipientKey => "invalid_recipient_key", "permanent";
+        SealRateLimited => "seal_rate_limited", "transient";
     }
 
     /// `(code, class)` for every row of the "Codes you will see" table in the wire

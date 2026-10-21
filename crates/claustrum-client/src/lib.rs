@@ -70,6 +70,8 @@ const CREDENTIAL_SIGN_OP: &str = "credential.sign";
 #[cfg(any(feature = "transport", test))]
 const CREDENTIAL_PUBLIC_KEY_OP: &str = "credential.public_key";
 #[cfg(any(feature = "transport", test))]
+const CREDENTIAL_SEAL_OP: &str = "credential.seal";
+#[cfg(any(feature = "transport", test))]
 const CREDENTIAL_LIST_SCOPED_OP: &str = "credential.list_scoped";
 #[cfg(feature = "transport")]
 const CREDENTIAL_READ_TIMEOUT: Duration = Duration::from_secs(3);
@@ -214,6 +216,36 @@ pub struct CredentialPublicKey {
     pub public_key_hex: String,
     pub key_id: String,
     pub algorithm: String,
+}
+
+/// One `credential.seal` request: seal `plaintext` to `recipient_public_key` in RFC 9180
+/// Auth mode, with the vault-held KEM key `credential_id` as the sender. The caller's
+/// route principal must hold an exact `seal` grant for that key.
+///
+/// No `Debug`: the plaintext is the message being protected.
+#[derive(Clone, Copy)]
+pub struct SealRequest<'a> {
+    pub credential_id: &'a str,
+    /// The recipient's X25519 public key.
+    pub recipient_public_key: &'a [u8; 32],
+    /// HPKE `info`, at most 1 KiB.
+    pub info: &'a [u8],
+    /// Associated data, at most 1 KiB.
+    pub aad: &'a [u8],
+    /// At most 64 KiB.
+    pub plaintext: &'a [u8],
+}
+
+/// A `credential.seal` result. The recipient opens `ciphertext` with `enc`, the same
+/// `info` and `aad`, and the public half of the key `key_id` names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialSeal {
+    /// The 32-byte encapsulated ephemeral key.
+    pub enc: Vec<u8>,
+    /// ChaCha20-Poly1305 output: the plaintext's length plus a 16-byte tag.
+    pub ciphertext: Vec<u8>,
+    /// The sealing key's id, as `credential.public_key` reports it.
+    pub key_id: String,
 }
 
 /// The metadata `credential.list_scoped` returns for the caller's own grants.
@@ -383,6 +415,15 @@ pub trait CredentialResolver: Send + Sync {
         Box::pin(async { Err(CredentialResolverError::unavailable()) })
     }
 
+    /// Seals one message under a vault-held KEM key (`credential.seal`). The vault
+    /// audits every call, so a retried seal is recorded twice.
+    fn seal<'a>(
+        &'a self,
+        _request: SealRequest<'a>,
+    ) -> CredentialResolverFuture<'a, Result<CredentialSeal, CredentialResolverError>> {
+        Box::pin(async { Err(CredentialResolverError::unavailable()) })
+    }
+
     /// Opens a dedicated scoped watch. The caller owns reconnection and re-reading.
     #[cfg(feature = "transport")]
     fn watch_scoped<'a>(
@@ -504,6 +545,18 @@ pub trait CredentialGetTarget: Send + Sync {
             Err(CredentialResolverError::new(
                 CredentialErrorClass::Permanent,
                 "credential public-key reads are unavailable",
+            ))
+        })
+    }
+
+    fn credential_seal<'a>(
+        &'a self,
+        _request: SealRequest<'a>,
+    ) -> CredentialResolverFuture<'a, Result<Value, CredentialResolverError>> {
+        Box::pin(async {
+            Err(CredentialResolverError::new(
+                CredentialErrorClass::Permanent,
+                "credential sealing is unavailable",
             ))
         })
     }
@@ -724,6 +777,24 @@ impl CredentialResolver for ClaustrumCredentialResolver {
         })
     }
 
+    fn seal<'a>(
+        &'a self,
+        request: SealRequest<'a>,
+    ) -> CredentialResolverFuture<'a, Result<CredentialSeal, CredentialResolverError>> {
+        Box::pin(async move {
+            let mut retries = 0;
+            loop {
+                match self.target.credential_seal(request).await {
+                    Ok(reply) => return decode_seal_reply(reply),
+                    Err(error) if error.retryable() && retries < self.transient_retries => {
+                        retries += 1;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        })
+    }
+
     fn list_scoped(
         &self,
     ) -> CredentialResolverFuture<'_, Result<ScopedCredentialListing, CredentialResolverError>>
@@ -797,6 +868,18 @@ trait CredentialConsumerConnection: Send {
         &'a mut self,
         credential_id: &'a str,
     ) -> CredentialResolverFuture<'a, Result<Value, CredentialResolverError>>;
+
+    fn credential_seal<'a>(
+        &'a mut self,
+        _request: SealRequest<'a>,
+    ) -> CredentialResolverFuture<'a, Result<Value, CredentialResolverError>> {
+        Box::pin(async {
+            Err(CredentialResolverError::new(
+                CredentialErrorClass::Permanent,
+                "credential sealing is unavailable",
+            ))
+        })
+    }
 
     fn credential_list_scoped(
         &mut self,
@@ -1066,6 +1149,27 @@ impl CredentialGetTarget for LiveCredentialGetTarget {
         })
     }
 
+    fn credential_seal<'a>(
+        &'a self,
+        request: SealRequest<'a>,
+    ) -> CredentialResolverFuture<'a, Result<Value, CredentialResolverError>> {
+        Box::pin(async move {
+            let mut consumer = self.consumer.lock().await;
+            self.connect_if_needed(&mut consumer).await?;
+            let result = tokio::time::timeout(
+                self.call_deadline,
+                consumer
+                    .as_mut()
+                    .expect("credential consumer initialized")
+                    .credential_seal(request),
+            )
+            .await
+            .unwrap_or_else(|_| Err(Self::deadline_error(CREDENTIAL_SEAL_OP)));
+            Self::clear_failed_transport(&mut consumer, &result);
+            result
+        })
+    }
+
     fn credential_list_scoped(
         &self,
     ) -> CredentialResolverFuture<'_, Result<Value, CredentialResolverError>> {
@@ -1261,6 +1365,14 @@ impl ClaustrumConsumer {
         .await
     }
 
+    async fn credential_seal(
+        &mut self,
+        request: SealRequest<'_>,
+    ) -> Result<Value, CredentialResolverError> {
+        self.credential_request(credential_seal_request(request), CREDENTIAL_SEAL_OP)
+            .await
+    }
+
     async fn credential_request(
         &mut self,
         request: Value,
@@ -1435,6 +1547,13 @@ impl CredentialConsumerConnection for ClaustrumConsumer {
             self,
             credential_id,
         ))
+    }
+
+    fn credential_seal<'a>(
+        &'a mut self,
+        request: SealRequest<'a>,
+    ) -> CredentialResolverFuture<'a, Result<Value, CredentialResolverError>> {
+        Box::pin(ClaustrumConsumer::credential_seal(self, request))
     }
 
     fn credential_list_scoped(
@@ -1654,6 +1773,23 @@ fn credential_public_key_request(credential_id: &str) -> Value {
     json!({
         "method": CREDENTIAL_PUBLIC_KEY_OP,
         "params": { "credential_id": credential_id },
+    })
+}
+
+#[cfg(any(feature = "transport", test))]
+fn credential_seal_request(request: SealRequest<'_>) -> Value {
+    // Addressed by credential NAME under the route principal's exact seal grant, like
+    // sign. The vault refuses unknown parameters, so no enrollment token is sent.
+    let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+    json!({
+        "method": CREDENTIAL_SEAL_OP,
+        "params": {
+            "credential_id": request.credential_id,
+            "recipient_public_key_b64": encode(request.recipient_public_key),
+            "info_b64": encode(request.info),
+            "aad_b64": encode(request.aad),
+            "plaintext_b64": encode(request.plaintext),
+        },
     })
 }
 
@@ -1920,6 +2056,45 @@ pub fn decode_public_key_reply(
         public_key_hex: public_key_hex.to_owned(),
         key_id: key_id.to_owned(),
         algorithm: algorithm.to_owned(),
+    })
+}
+
+/// Decodes a `credential.seal` response: a 32-byte encapsulated key, a ciphertext at
+/// least as long as the AEAD tag, and a key id in `credential.public_key` format.
+pub fn decode_seal_reply(value: Value) -> Result<CredentialSeal, CredentialResolverError> {
+    let result = reply_result(value)?;
+    let invalid = |detail: &str| {
+        CredentialResolverError::new(
+            CredentialErrorClass::InvalidResponse,
+            format!("credential seal reply {detail}"),
+        )
+    };
+    let bytes = |field: &str| {
+        let text = result
+            .get(field)
+            .and_then(Value::as_str)
+            .ok_or_else(|| invalid(&format!("has no {field}")))?;
+        base64::engine::general_purpose::STANDARD
+            .decode(text)
+            .map_err(|_| invalid(&format!("has invalid base64 in {field}")))
+    };
+    let enc = bytes("enc_b64")?;
+    if enc.len() != 32 {
+        return Err(invalid("has a non-X25519 encapsulated key length"));
+    }
+    let ciphertext = bytes("ciphertext_b64")?;
+    if ciphertext.len() < 16 {
+        return Err(invalid("has a ciphertext shorter than the AEAD tag"));
+    }
+    let key_id = result
+        .get("key_id")
+        .and_then(Value::as_str)
+        .filter(|value| valid_lower_hex(value, 16))
+        .ok_or_else(|| invalid("has no valid key_id"))?;
+    Ok(CredentialSeal {
+        enc,
+        ciphertext,
+        key_id: key_id.to_owned(),
     })
 }
 

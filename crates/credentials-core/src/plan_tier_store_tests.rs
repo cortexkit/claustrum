@@ -79,7 +79,7 @@ fn migration_16_adds_only_an_empty_tier_table_and_behind_readers_tolerate_absenc
     assert_eq!(store.list_meta().unwrap(), before);
     assert_eq!(store.read_audit(None).unwrap(), audit_before);
     assert_eq!(audit.len(), 1);
-    assert_eq!(newest_migration_version(), 17);
+    assert_eq!(newest_migration_version(), 18);
     assert_eq!(store.verify_audit_chain().unwrap(), None);
 }
 

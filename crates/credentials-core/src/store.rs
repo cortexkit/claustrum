@@ -631,6 +631,28 @@ const MIGRATIONS: &[Migration] = &[
                      DROP TABLE read_grants; \
                      ALTER TABLE read_grants_v17 RENAME TO read_grants;",
     },
+    // Admit the `seal` operation, exact selectors only. SQLite cannot alter a CHECK in
+    // place, so the table is rebuilt the way migrations 13, 14 and 17 rebuilt it. Every
+    // row is copied unchanged and the grant generation is not bumped: no existing grant
+    // gains or loses authority. The seal/exact pairing is a CHECK as well as a code rule
+    // so a row written by any path that skips `validate_operation` is still refused.
+    Migration {
+        version: 18,
+        statements: "CREATE TABLE read_grants_v18 (\
+                         principal_kind TEXT NOT NULL CHECK (principal_kind IN ('reserved','enrolled')), \
+                         principal_id TEXT NOT NULL, \
+                         selector_kind TEXT NOT NULL CHECK (selector_kind IN ('exact','category','audience')), \
+                         selector TEXT NOT NULL, \
+                         operation TEXT NOT NULL CHECK (operation IN ('read','sign','open','list','deposit','account_token','seal')), \
+                         created_at_ms INTEGER NOT NULL, \
+                         CHECK ((operation = 'account_token') = (selector_kind = 'audience')), \
+                         CHECK (operation <> 'seal' OR selector_kind = 'exact'), \
+                         PRIMARY KEY (principal_kind, principal_id, selector_kind, selector, operation)\
+                     ); \
+                     INSERT INTO read_grants_v18 SELECT * FROM read_grants; \
+                     DROP TABLE read_grants; \
+                     ALTER TABLE read_grants_v18 RENAME TO read_grants;",
+    },
 ];
 
 /// The newest store migration THIS BINARY knows how to apply.
@@ -738,9 +760,15 @@ pub struct RecordMeta {
 /// exercise a key. It exists so a module can be given the account roster without also
 /// being given every token, which `Read` would do.
 ///
-/// `Deposit` is declared last so derived ordering preserves the older operations'
+/// `Deposit` is declared after the older operations so derived ordering preserves their
 /// order in list_scoped responses. It permits cookie creation and replacement only
 /// when the stored creator is the same depositing principal.
+///
+/// `Seal` is declared last for the same reason. It permits `credential.seal`: an
+/// auth-mode HPKE seal under one vault-held KEM key, to a caller-chosen recipient. It
+/// takes an exact selector only, because it lets the caller send messages that the
+/// recipient will attribute to that key, and a category grant would extend that to
+/// every key later put in the category without anyone choosing it.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]
@@ -752,6 +780,7 @@ pub enum GrantOperation {
     List,
     Deposit,
     AccountToken,
+    Seal,
 }
 
 impl GrantOperation {
@@ -763,6 +792,7 @@ impl GrantOperation {
             Self::List => "list",
             Self::Deposit => "deposit",
             Self::AccountToken => "account_token",
+            Self::Seal => "seal",
         }
     }
 }
@@ -778,8 +808,9 @@ impl std::str::FromStr for GrantOperation {
             "list" => Ok(Self::List),
             "deposit" => Ok(Self::Deposit),
             "account_token" => Ok(Self::AccountToken),
+            "seal" => Ok(Self::Seal),
             _ => Err(format!(
-                "unknown grant operation '{value}' (expected read, sign, open, list, deposit, or account_token)"
+                "unknown grant operation '{value}' (expected read, sign, open, list, deposit, account_token, or seal)"
             )),
         }
     }
@@ -801,6 +832,13 @@ impl SelectorKind {
     pub fn validate_operation(self, operation: GrantOperation) -> Result<(), String> {
         if (self == Self::Audience) != (operation == GrantOperation::AccountToken) {
             return Err("account_token requires selector-kind audience, and audience requires operation account_token".into());
+        }
+        // A seal grant names one key. Migration 18 enforces the same rule in the schema,
+        // so a row written around this check is refused by SQLite as well.
+        if operation == GrantOperation::Seal && self != Self::Exact {
+            return Err(
+                "seal requires selector-kind exact: it names one KEM key, never a category".into(),
+            );
         }
         Ok(())
     }
@@ -5491,6 +5529,43 @@ impl EncryptedStore {
         signed_payload_hash: &[u8; 32],
         actor: &str,
     ) -> Result<AuditEntry, StoreOpError> {
+        self.append_key_use_audit(
+            AuditOp::Sign,
+            credential_id,
+            record_version,
+            signed_payload_hash,
+            actor,
+        )
+    }
+
+    /// Record one `credential.seal` before its ciphertext is returned, under the same
+    /// fence as a signature row: the row is written only while the key generation the
+    /// daemon sealed with is still the stored one. `sealed_plaintext_hash` is the
+    /// SHA-256 of the plaintext; the plaintext itself is never recorded.
+    pub fn append_seal_audit(
+        &self,
+        credential_id: &str,
+        record_version: u64,
+        sealed_plaintext_hash: &[u8; 32],
+        actor: &str,
+    ) -> Result<AuditEntry, StoreOpError> {
+        self.append_key_use_audit(
+            AuditOp::Seal,
+            credential_id,
+            record_version,
+            sealed_plaintext_hash,
+            actor,
+        )
+    }
+
+    fn append_key_use_audit(
+        &self,
+        op: AuditOp,
+        credential_id: &str,
+        record_version: u64,
+        payload_hash: &[u8; 32],
+        actor: &str,
+    ) -> Result<AuditEntry, StoreOpError> {
         let audit_key = self.audit_key.clone();
         self.fenced_write(|tx| {
             let current: Option<i64> = tx
@@ -5507,9 +5582,9 @@ impl EncryptedStore {
                 tx,
                 &audit_key,
                 &AuditRecord {
-                    op: AuditOp::Sign,
+                    op,
                     credential_id: Some(credential_id.to_string()),
-                    payload_hash: Some(hex32(signed_payload_hash)),
+                    payload_hash: Some(hex32(payload_hash)),
                     actor: actor.to_string(),
                     alarm: None,
                 },
@@ -11387,7 +11462,7 @@ mod tests {
     fn the_newest_migration_version_is_pinned_because_the_manifest_declares_it() {
         assert_eq!(
             newest_migration_version(),
-            17,
+            18,
             "the newest migration changed. This value is DECLARED in the module manifest \
              as store_schema_version, so a supervisor comparing declared-against-actual \
              sees it. Update the literal, and note the manifest consequence."
@@ -11858,6 +11933,100 @@ mod taxonomy_tests {
             store.categories("oauth:snowflake").unwrap(),
             ["data-warehouse", "snowflake-native"]
         );
+    }
+
+    #[test]
+    fn seal_grants_are_exact_only_and_imply_nothing_in_either_direction() {
+        let (_root, store) = rig("seal-grants", 86);
+        store
+            .create_audited("kem:push", &api_record(), AuditCtx::admin(AuditOp::Put))
+            .unwrap();
+        store
+            .set_categories_audited(
+                "kem:push",
+                SetCategoryMode::Set,
+                &["push-keys".to_string()],
+                AuditCtx::admin(AuditOp::SetCategory),
+            )
+            .unwrap();
+        for kind in [SelectorKind::Category, SelectorKind::Audience] {
+            assert!(
+                kind.validate_operation(GrantOperation::Seal).is_err(),
+                "{kind:?}"
+            );
+            let refused = store.create_read_grant_audited(
+                "reserved",
+                "pusher",
+                kind,
+                "push-keys",
+                GrantOperation::Seal,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            );
+            assert!(refused.is_err(), "{kind:?} seal grant must be refused");
+        }
+        assert!(store.list_read_grants().unwrap().is_empty());
+        assert_eq!(
+            SelectorKind::Exact.validate_operation(GrantOperation::Seal),
+            Ok(())
+        );
+
+        // A seal grant covers seal only.
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "pusher",
+                SelectorKind::Exact,
+                "kem:push",
+                GrantOperation::Seal,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .unwrap();
+        let covers = |principal: &str, operation| {
+            store
+                .evaluate_scoped_coverage("reserved", principal, "kem:push", operation)
+                .unwrap()
+                .covered
+        };
+        assert!(covers("pusher", GrantOperation::Seal));
+        for operation in [
+            GrantOperation::Read,
+            GrantOperation::Sign,
+            GrantOperation::Open,
+            GrantOperation::List,
+        ] {
+            assert!(
+                !covers("pusher", operation),
+                "seal must not imply {operation:?}"
+            );
+        }
+        // And no other operation covers seal, by exact or by category selector.
+        for operation in [
+            GrantOperation::Read,
+            GrantOperation::Sign,
+            GrantOperation::Open,
+            GrantOperation::List,
+        ] {
+            for (kind, selector) in [
+                (SelectorKind::Exact, "kem:push"),
+                (SelectorKind::Category, "push-keys"),
+            ] {
+                store
+                    .create_read_grant_audited(
+                        "reserved",
+                        "other",
+                        kind,
+                        selector,
+                        operation,
+                        AuditCtx::admin(AuditOp::GrantCreate),
+                    )
+                    .unwrap();
+            }
+        }
+        assert!(
+            !covers("other", GrantOperation::Seal),
+            "nothing implies seal"
+        );
+        assert!(covers("other", GrantOperation::Open));
     }
 
     #[test]
@@ -13306,6 +13475,178 @@ mod migration_10_tests {
         }).unwrap();
     }
 
+    /// Every row of every vault table, sorted by all of its columns, keyed by table name.
+    /// Used to show a DDL-only migration copied every row of every table unchanged. Sorted
+    /// rather than in rowid order because a rebuilt table assigns fresh rowids, and the
+    /// migration runner's own version table is left out because it is meant to change.
+    fn every_table_row(store: &SqliteStore) -> BTreeMap<String, Vec<Vec<rusqlite::types::Value>>> {
+        store
+            .with_conn(|conn| {
+                let mut names = conn.prepare(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' \
+                       AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'cortexkit%' ORDER BY name",
+                )?;
+                let names = names
+                    .query_map([], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                let mut tables = BTreeMap::new();
+                for name in names {
+                    let width = conn
+                        .prepare(&format!("SELECT * FROM \"{name}\" LIMIT 0"))?
+                        .column_count();
+                    let order = (1..=width)
+                        .map(|i| i.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let mut stmt =
+                        conn.prepare(&format!("SELECT * FROM \"{name}\" ORDER BY {order}"))?;
+                    let rows = stmt
+                        .query_map([], |row| {
+                            (0..width)
+                                .map(|i| row.get::<_, rusqlite::types::Value>(i))
+                                .collect::<rusqlite::Result<Vec<_>>>()
+                        })?
+                        .collect::<rusqlite::Result<Vec<_>>>()?;
+                    tables.insert(name, rows);
+                }
+                Ok(tables)
+            })
+            .expect("dump every table")
+    }
+
+    #[test]
+    fn migration_18_admits_exact_seal_grants_and_conserves_every_row_counter_and_object() {
+        let (_root, store) = sqlite("migration-18", 183);
+        migrate_through_for_test(&store, 17).unwrap();
+        let insert_grant = |conn: &rusqlite::Connection,
+                            principal: &str,
+                            selector_kind: &str,
+                            selector: &str,
+                            operation: &str,
+                            timestamp: i64| {
+            conn.execute(
+                "INSERT INTO read_grants VALUES (?1,'agent',?2,?3,?4,?5)",
+                rusqlite::params![principal, selector_kind, selector, operation, timestamp],
+            )
+        };
+        store
+            .with_conn(|conn| {
+                // Every schema-17 operation over every selector kind it may carry, for
+                // both principal kinds.
+                let mut timestamp = 100;
+                for principal in ["reserved", "enrolled"] {
+                    for (selector_kind, operation) in [
+                        ("exact", "read"),
+                        ("exact", "sign"),
+                        ("exact", "open"),
+                        ("exact", "list"),
+                        ("exact", "deposit"),
+                        ("category", "read"),
+                        ("category", "sign"),
+                        ("category", "open"),
+                        ("category", "list"),
+                        ("category", "deposit"),
+                        ("audience", "account_token"),
+                    ] {
+                        timestamp += 1;
+                        insert_grant(
+                            conn,
+                            principal,
+                            selector_kind,
+                            &format!("selector-{timestamp}"),
+                            operation,
+                            timestamp,
+                        )?;
+                    }
+                }
+                // Companion tables a grant rebuild must not touch.
+                conn.execute(
+                    "INSERT INTO credentials (credential_id, record_version, key_id, state, envelope, updated_at_ms, created_at_ms) \
+                     VALUES ('kem:push', 3, '00', 'active', X'00', 7, 7)",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO credential_categories VALUES ('kem:push', 'push-keys')",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO credential_provider_ids VALUES ('kem:push', 'apns')",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO credential_plan_tiers VALUES ('kem:push', 'pro')",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO audit_log \
+                     (seq, ts_ms, op, credential_id, payload_hash, actor, alarm, alarm_reason, prev_mac, entry_mac) \
+                     VALUES (1, 1, 'put', 'kem:push', NULL, 'test', 0, NULL, 'previous', 'entry')",
+                    [],
+                )?;
+                conn.execute("UPDATE grants_generation SET value = 57 WHERE id = 1", [])?;
+                Ok(())
+            })
+            .unwrap();
+        // Schema 17 must refuse `seal`, or the migration below proves nothing about it.
+        assert!(store
+            .with_conn(|conn| insert_grant(conn, "reserved", "exact", "kem:push", "seal", 1))
+            .is_err());
+        let before_rows = every_table_row(&store);
+        assert_eq!(before_rows["read_grants"].len(), 22);
+        let before_objects = vault_schema_objects(&store);
+        let old_ddl = object_sql(&before_objects, "read_grants");
+
+        migrate_through_for_test(&store, 18).unwrap();
+        assert_eq!(schema_version_of(&store), 18);
+        assert_eq!(
+            every_table_row(&store),
+            before_rows,
+            "every row of every table, grants included, survives byte for byte"
+        );
+        assert_eq!(
+            generation_of(&store),
+            57,
+            "a DDL-only migration is not a grant mutation"
+        );
+        let after_objects = vault_schema_objects(&store);
+        let new_ddl = object_sql(&after_objects, "read_grants");
+        assert_ne!(new_ddl, old_ddl);
+        assert!(new_ddl.contains("'account_token','seal')"));
+        assert!(new_ddl.contains("CHECK (operation <> 'seal' OR selector_kind = 'exact')"));
+        assert!(new_ddl
+            .contains("CHECK ((operation = 'account_token') = (selector_kind = 'audience'))"));
+        let others = |objects: &[(String, String, String)]| {
+            objects
+                .iter()
+                .filter(|(_, name, _)| name != "read_grants")
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            others(&after_objects),
+            others(&before_objects),
+            "only the grant table's DDL may change"
+        );
+
+        store
+            .with_conn(|conn| {
+                insert_grant(conn, "reserved", "exact", "kem:push", "seal", 900)?;
+                for selector_kind in ["category", "audience"] {
+                    assert!(
+                        insert_grant(conn, "reserved", selector_kind, "push-keys", "seal", 901)
+                            .is_err(),
+                        "{selector_kind} seal"
+                    );
+                }
+                // The account_token pairing survives the rebuild.
+                assert!(
+                    insert_grant(conn, "reserved", "exact", "x", "account_token", 902).is_err()
+                );
+                Ok(())
+            })
+            .unwrap();
+    }
+
     #[test]
     fn migration_13_admits_list_and_copies_every_grant_without_touching_the_generation() {
         let (root, store) = sqlite("migration-13", 124);
@@ -13546,7 +13887,7 @@ mod migration_10_tests {
         assert_eq!(
             "other".parse::<GrantOperation>(),
             Err(
-                "unknown grant operation 'other' (expected read, sign, open, list, deposit, or account_token)"
+                "unknown grant operation 'other' (expected read, sign, open, list, deposit, account_token, or seal)"
                     .to_string()
             )
         );
@@ -13583,7 +13924,7 @@ mod migration_10_tests {
             .to_string();
         assert!(
             error.contains(
-                "unknown grant operation 'other' (expected read, sign, open, list, deposit, or account_token)"
+                "unknown grant operation 'other' (expected read, sign, open, list, deposit, account_token, or seal)"
             ),
             "{error}"
         );

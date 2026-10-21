@@ -437,3 +437,126 @@ fn producer_report_auth_failure_reply_decodes_the_accepted_answer() {
     assert_eq!(replies.len(), 1);
     assert!(decode_report_auth_failure_reply(producer_reply(&replies[0])).unwrap());
 }
+
+/// The producer's pinned seal request, decoded back into the bytes a caller passes.
+fn producer_seal_inputs() -> (String, [u8; 32], Vec<u8>, Vec<u8>, Vec<u8>) {
+    let request = producer_reply(&producer_operation("credential.seal")["request"]);
+    let field = |name: &str| {
+        base64::engine::general_purpose::STANDARD
+            .decode(request[name].as_str().unwrap())
+            .unwrap()
+    };
+    (
+        request["credential_id"].as_str().unwrap().to_owned(),
+        field("recipient_public_key_b64").try_into().unwrap(),
+        field("info_b64"),
+        field("aad_b64"),
+        field("plaintext_b64"),
+    )
+}
+
+#[test]
+fn producer_seal_request_is_what_the_client_sends() {
+    let (credential_id, recipient, info, aad, plaintext) = producer_seal_inputs();
+    let sent = credential_seal_request(SealRequest {
+        credential_id: &credential_id,
+        recipient_public_key: &recipient,
+        info: &info,
+        aad: &aad,
+        plaintext: &plaintext,
+    });
+    assert_eq!(sent["method"], "credential.seal");
+    assert_eq!(
+        sent["params"],
+        producer_reply(&producer_operation("credential.seal")["request"]),
+        "the client must send exactly the parameters the producer accepted"
+    );
+}
+
+#[test]
+fn producer_seal_reply_decodes_exact_bytes() {
+    let operation = producer_operation("credential.seal");
+    let reply = producer_reply(&operation["success"][0]);
+    let decoded = decode_seal_reply(reply.clone()).unwrap();
+    let raw = |field: &str| {
+        base64::engine::general_purpose::STANDARD
+            .decode(reply["result"][field].as_str().unwrap())
+            .unwrap()
+    };
+    assert_eq!(decoded.enc, raw("enc_b64"));
+    assert_eq!(decoded.enc.len(), 32);
+    assert_eq!(decoded.ciphertext, raw("ciphertext_b64"));
+    let (_, _, _, _, plaintext) = producer_seal_inputs();
+    assert_eq!(
+        decoded.ciphertext.len(),
+        plaintext.len() + 16,
+        "ChaCha20-Poly1305 adds exactly one 16-byte tag"
+    );
+    assert_eq!(decoded.key_id, "a0289810032eb417");
+
+    // Malformed replies are refused, never decoded into a usable seal.
+    for broken in [
+        json!({"result": {"enc_b64": "AAAA", "ciphertext_b64": reply["result"]["ciphertext_b64"], "key_id": "a0289810032eb417"}}),
+        json!({"result": {"enc_b64": reply["result"]["enc_b64"], "ciphertext_b64": "AAAA", "key_id": "a0289810032eb417"}}),
+        json!({"result": {"enc_b64": reply["result"]["enc_b64"], "ciphertext_b64": reply["result"]["ciphertext_b64"], "key_id": "A0289810032EB417"}}),
+        json!({"result": {"ciphertext_b64": reply["result"]["ciphertext_b64"], "key_id": "a0289810032eb417"}}),
+    ] {
+        assert_eq!(
+            decode_seal_reply(broken).unwrap_err().class,
+            CredentialErrorClass::InvalidResponse
+        );
+    }
+    // A vault refusal is classified like every other operation's, not as a bad reply.
+    let refusal = json!({"result": {"error": {"code": "not_found", "class": "permanent"}}});
+    let refused = decode_seal_reply(refusal.clone()).unwrap_err();
+    assert_ne!(refused.class, CredentialErrorClass::InvalidResponse);
+    assert_eq!(
+        refused.class,
+        decode_signature_reply(refusal).unwrap_err().class
+    );
+}
+
+#[cfg(feature = "transport")]
+struct ProducerSealTarget(Value);
+
+#[cfg(feature = "transport")]
+impl CredentialGetTarget for ProducerSealTarget {
+    fn credential_get<'a>(
+        &'a self,
+        _raw_handle: &'a str,
+        _min_ttl_ms: Option<u64>,
+        _force_refresh: bool,
+    ) -> CredentialResolverFuture<'a, Result<Value, CredentialResolverError>> {
+        Box::pin(async { Err(CredentialResolverError::unavailable()) })
+    }
+
+    fn credential_seal<'a>(
+        &'a self,
+        _request: SealRequest<'a>,
+    ) -> CredentialResolverFuture<'a, Result<Value, CredentialResolverError>> {
+        Box::pin(async { Ok(self.0.clone()) })
+    }
+}
+
+#[cfg(feature = "transport")]
+#[tokio::test]
+async fn producer_seal_reply_decodes_through_the_resolver() {
+    let operation = producer_operation("credential.seal");
+    let resolver = ClaustrumCredentialResolver::with_target(
+        Arc::new(ProducerSealTarget(producer_reply(&operation["success"][0]))),
+        0,
+    );
+    let (credential_id, recipient, info, aad, plaintext) = producer_seal_inputs();
+    let sealed = resolver
+        .seal(SealRequest {
+            credential_id: &credential_id,
+            recipient_public_key: &recipient,
+            info: &info,
+            aad: &aad,
+            plaintext: &plaintext,
+        })
+        .await
+        .unwrap();
+    assert_eq!(sealed.key_id, "a0289810032eb417");
+    assert_eq!(sealed.enc.len(), 32);
+}

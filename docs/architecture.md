@@ -77,7 +77,7 @@ coming up empty.
 
 A binary refuses to open a store whose schema is newer than its own migration chain
 (`store::tests::a_store_ahead_of_this_binary_refuses_to_migrate`). The current chain
-ends at migration 16.
+ends at migration 18.
 
 ### Reading a credential
 
@@ -99,8 +99,9 @@ A consumer authorizes in one of three ways, described in full in
   consumer after an operator approves its name.
 
 Principals reach credentials through grants. A grant names a principal, a selector
-(`exact` id or `category`), and one operation: `read`, `sign`, `open`, `list` or
-`deposit`. No operation implies another.
+(`exact` id, `category`, or `audience`), and one operation: `read`, `sign`, `open`,
+`list`, `deposit`, `account_token` or `seal`. No operation implies another. `seal`
+takes an exact selector only.
 
 ### Refreshing a credential
 
@@ -286,8 +287,10 @@ inventoried in [Windows file custody](windows-file-custody.md).
   consumer must impose a per-call deadline and rebind on expiry
   ([wire contract, section 9](wire-contract-v1.md#9-a-daemon-restart-is-silent-so-impose-a-per-call-deadline)).
 - **The private half of a signing or KEM key never leaves the vault.** `get` refuses those
-  kinds; `credential.sign` and `credential.open` exercise them in place
-  (`tests::scoped_get_reveals_signing_kind_only_after_read_grant`).
+  kinds; `credential.sign`, `credential.open` and `credential.seal` exercise them in place
+  (`tests::scoped_get_reveals_signing_kind_only_after_read_grant`). `credential.seal`
+  returns only HPKE output and writes one audit row per call before replying; no
+  operation returns a raw Diffie-Hellman value or a derived key.
 - **Copy the data directory, never `store.db` alone, and never beside the live one.** See
   [the operator runbook](operator-runbook.md#reading-the-store-directly).
 

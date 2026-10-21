@@ -6,12 +6,12 @@ decoders can be tested against the producer's serialized replies.
 
 ```toml
 [dependencies]
-cortexkit-claustrum-client = "0.5.0"
+cortexkit-claustrum-client = "0.6.0"
 ```
 
 The default `transport` feature provides the resolver and live watch connection.
 If you already own a bus connection, use `cortexkit-claustrum-client = { version =
-"0.5.0", default-features = false }` for the public `decode_*_reply` functions,
+"0.6.0", default-features = false }` for the public `decode_*_reply` functions,
 `decode_wire_error`, record/error types, `WatchNotice`, and `WatchTracker` without
 `subc-transport`, `subc-os`, or Tokio. `subc-protocol` remains for the reply error
 codes; no socket or authentication code is built in this mode.
@@ -40,8 +40,12 @@ accepted and ignored. After reporting, read again; if the version did not move,
 stop rather than looping. For a static API key, a 401 means the key is dead.
 
 `sign` and `public_key` use vault-held signing keys, which never leave the vault.
+`seal(SealRequest { credential_id, recipient_public_key, info, aad, plaintext })`
+seals one message in HPKE Auth mode (RFC 9180 mode 2) under a vault-held KEM key,
+for a recipient that opens it with that key's public half. It needs an exact `seal`
+grant; the vault audits every call, so a retried seal is recorded once per attempt.
 `list_scoped` lists the credentials the caller's grants cover. Handle reads,
-signing and public-key reads retry transient and transport failures a bounded
+signing, sealing and public-key reads retry transient and transport failures a bounded
 number of times; scoped reads return the first error and leave the redial to the
 caller. `auth_required` and permanent refusals always return at once. Listing
 failures are row-local: callers should check `undecodable_credentials` and
@@ -139,12 +143,14 @@ cargo test --locked -p cortexkit-claustrum-client
 ```
 
 The fixture holds real `list_scoped`, `credential.get`, `credential.get_scoped`,
-`credential.status`, `credential.sign`, `credential.public_key` and
-`credential.report_auth_failure` replies. The Rust tests decode producer-generated
+`credential.status`, `credential.sign`, `credential.public_key`, `credential.seal`
+and `credential.report_auth_failure` replies. The Rust tests decode producer-generated
 account identity metadata when present, verify absence when omitted, and decode
 the report's `accepted` answer. The signing and scoped successes run through the
 vault's real read surface and request dispatcher with synthetic test material.
 Rust tests pin the decoded Ed25519 key ID, algorithm and exact signature and
 public-key hex, and verify the signature over the fixture's message with `ring`.
+The seal tests pin that the client sends exactly the producer's accepted request
+and decodes its reply's exact bytes.
 
 License: MIT.

@@ -935,7 +935,10 @@ mod tests {
             "0123456789abcdef0123456789abcdef/../../user",
             "",
         ] {
-            let transport = FixtureTransport::new(Vec::new());
+            // A success is queued so that, if the check ever let this id through, the
+            // probe would answer "valid" and the failure below would name the accepted
+            // id, rather than the transport panicking for want of a response.
+            let transport = FixtureTransport::ok(200, r#"{"success":true,"result":[]}"#);
             let refused =
                 check_login_key(&transport, cloudflare_row(), "cf-secret-token", Some(bad)).await;
             let Err(message) = refused else {
@@ -964,7 +967,7 @@ mod tests {
         assert!(zai.account_id_prompt.is_none());
         let refusal = check_account_id(zai, Some(CLOUDFLARE_ACCOUNT)).unwrap_err();
         assert!(refusal.contains("--account-id does not apply"), "{refusal}");
-        let transport = FixtureTransport::new(Vec::new());
+        let transport = FixtureTransport::ok(200, "{}");
         assert!(
             check_login_key(&transport, zai, "t", Some(CLOUDFLARE_ACCOUNT))
                 .await

@@ -3926,6 +3926,23 @@ fn cloudflare_workers_ai_login_stores_the_account_id_as_identity() {
     );
     assert!(stderr.contains("--account-id does not apply"), "{stderr}");
 
+    // So does a login that is not an API-key login at all, before any browser flow.
+    let oauth = run(&[
+        "login",
+        "--provider",
+        "anthropic",
+        "--no-browser",
+        "--no-listener",
+        "--account-id",
+        account,
+    ]);
+    let stderr = String::from_utf8_lossy(&oauth.stderr);
+    assert!(!oauth.status.success(), "anthropic accepted --account-id");
+    assert!(
+        stderr.contains("--account-id does not apply to 'anthropic'"),
+        "{stderr}"
+    );
+
     let stored = run(&[
         "login",
         "--provider",

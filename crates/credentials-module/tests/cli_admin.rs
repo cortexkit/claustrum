@@ -3846,6 +3846,138 @@ fn api_key_login_flow_integration() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// A Cloudflare Workers AI login keeps the token as the payload and the account id as
+/// the record's identity `account_id`, the field the read surface serves to consumers.
+/// It also refuses a malformed `--account-id`, and `--account-id` on a provider that
+/// never asks for one, without storing anything.
+///
+/// Needs the debug-only validation bypass for the stored case, so it is skipped
+/// against a staged release binary for the reason `api_key_login_flow_integration`
+/// gives.
+#[test]
+fn cloudflare_workers_ai_login_stores_the_account_id_as_identity() {
+    use credentials_core::resolver::{KeySource, ResolverConfig};
+    if std::env::var_os(CLI_BIN_ENV).is_some() {
+        eprintln!(
+            "SKIPPING cloudflare_workers_ai_login_stores_the_account_id_as_identity: \
+             {CLI_BIN_ENV} is set, and this arm needs the debug-only validation bypass"
+        );
+        return;
+    }
+    let root = tmp_root("cloudflare-login");
+    let data_dir = root.join("data");
+    let key_path = root.join("secrets").join("master.key");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    std::fs::create_dir_all(key_path.parent().unwrap()).unwrap();
+    let token_file = root.join("cf.token");
+    std::fs::write(&token_file, "cf-secret-token\n").unwrap();
+    let account = "0123456789abcdef0123456789abcdef";
+
+    let run = |args: &[&str]| -> std::process::Output {
+        cli()
+            .args(args)
+            .arg("--data-dir")
+            .arg(&data_dir)
+            .arg("--key-path")
+            .arg(&key_path)
+            .env("CORTEXKIT_TEST_BYPASS_VALIDATION", "1")
+            .output()
+            .expect("run ck-auth")
+    };
+    assert!(run(&["bootstrap"]).status.success(), "bootstrap");
+    let token_path = token_file.to_str().unwrap();
+
+    // A malformed account id is refused before anything else happens. Uppercase hex is
+    // the likeliest mistake (copied from somewhere that upper-cases ids).
+    let malformed = run(&[
+        "login",
+        "--provider",
+        "cloudflare-workers-ai",
+        "--payload-file",
+        token_path,
+        "--account-id",
+        "0123456789ABCDEF0123456789ABCDEF",
+    ]);
+    let stderr = String::from_utf8_lossy(&malformed.stderr);
+    assert!(
+        !malformed.status.success(),
+        "malformed account id was accepted"
+    );
+    assert!(stderr.contains("32 lowercase hexadecimal"), "{stderr}");
+    assert!(
+        !String::from_utf8_lossy(&malformed.stdout).contains("Validating"),
+        "the probe must not start for a malformed account id"
+    );
+
+    // A provider without an account-id prompt refuses the flag.
+    let wrong_provider = run(&[
+        "login",
+        "--provider",
+        "zai",
+        "--payload-file",
+        token_path,
+        "--account-id",
+        account,
+    ]);
+    let stderr = String::from_utf8_lossy(&wrong_provider.stderr);
+    assert!(
+        !wrong_provider.status.success(),
+        "zai accepted --account-id"
+    );
+    assert!(stderr.contains("--account-id does not apply"), "{stderr}");
+
+    let stored = run(&[
+        "login",
+        "--provider",
+        "cloudflare-workers-ai",
+        "--payload-file",
+        token_path,
+        "--account-id",
+        account,
+    ]);
+    assert!(
+        stored.status.success(),
+        "login failed: {}",
+        String::from_utf8_lossy(&stored.stderr)
+    );
+    assert!(String::from_utf8_lossy(&stored.stdout)
+        .contains("logged in and stored apikey:cloudflare-workers-ai"));
+
+    let config = ResolverConfig {
+        data_dir: data_dir.clone(),
+        source: KeySource::OperatorPath {
+            path: key_path.clone(),
+        },
+    };
+    let key = credentials_core::resolver::resolve(&config, None).expect("resolve key");
+    let sqlite = open_sqlite(&StorageDescriptor {
+        module_id: credentials_core::contract::MODULE_ID.into(),
+        storage_namespace: credentials_core::contract::STORAGE_NAMESPACE.into(),
+        isolation: Isolation::Module,
+        backend: StorageBackend::Sqlite {
+            path: data_dir.join("store.db").to_string_lossy().into_owned(),
+        },
+    })
+    .expect("open store");
+    EncryptedStore::migrate(&sqlite).expect("migrate");
+    let store = EncryptedStore::open(sqlite, key).expect("open vault");
+    let record = store
+        .get("apikey:cloudflare-workers-ai")
+        .expect("stored record");
+    assert_eq!(record.kind, CredentialKind::ApiKey);
+    assert_eq!(record.payload.expose(), b"cf-secret-token");
+    assert_eq!(record.identity.account_id.as_deref(), Some(account));
+    assert_eq!(record.identity.email, None);
+    // The two refused logins stored nothing.
+    assert!(
+        store.get("apikey:zai").is_err(),
+        "the refused zai login stored a key"
+    );
+    drop(store);
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// The rotate verb's HAPPY PATH, end to end through the real binary.
 ///
 /// The crash-cut suite proves the two-slot handover survives a SIGKILL at each cut,

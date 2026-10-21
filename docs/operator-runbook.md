@@ -226,10 +226,11 @@ ck auth login
 The picker covers OAuth (`anthropic`, `openai`, `xai`, `google`, `antigravity`),
 device-flow (`github-copilot`, `kimi`, `meta`, and `--device` for openai and xai), custom
 browser flows (`cursor`, `devin`, `snowflake`, `digitalocean`), and API-key providers
-(`zai`, `openrouter`, `kiro`, `deepseek`, `groq`, …), which are validated against the
-provider before being stored. A few API-key providers have no probe that can tell a bad
-key from a good one (for example `opencode-go`, `vercel-ai-gateway`, `cline-pass`); for
-those, login prints a `NOTE:` line saying the key was stored without being checked.
+(`zai`, `openrouter`, `kiro`, `deepseek`, `groq`, `cloudflare-workers-ai`, …), which are
+validated against the provider before being stored. A few API-key providers have no probe
+that can tell a bad key from a good one (for example `opencode-go`, `vercel-ai-gateway`,
+`cline-pass`); for those, login prints a `NOTE:` line saying the key was stored without
+being checked.
 
 OAuth logins open a browser and complete automatically: a one-shot listener on the
 loopback redirect captures the code, so **when the browser shows a paste code, ignore it;
@@ -255,6 +256,22 @@ labeled account). Login checks the key against Amazon Q's model catalog using be
 and `TokenType: API_KEY`; a successful response verifies it, the 403 auth refusal rejects
 it, and other statuses or network errors produce a warning. No profile ARN is stored or
 served.
+
+**Cloudflare Workers AI.** At https://dash.cloudflare.com/profile/api-tokens create an API
+token scoped to **Workers AI** with the Read and Edit permissions. Never use the Global API
+Key: it grants the whole account and does not authenticate as a bearer token. Run
+`ck auth login --provider cloudflare-workers-ai`; after the token, login asks for the
+Cloudflare account id (32 lowercase hex characters, shown on the dashboard's account home
+and in the Workers AI "Use REST API" panel). For a non-interactive login pass
+`--payload-file <token-file> --account-id <id>`. A malformed account id is refused before any
+request is sent. Login then checks both values together with Cloudflare's free Workers AI
+model search for that account: a 401 or an unreadable token is refused as a bad token, a
+403 is refused as a token that lacks the Workers AI permissions or belongs to another
+account, and other statuses or network errors produce a warning and store the token anyway.
+The token is stored as `apikey:cloudflare-workers-ai` (`llm-provider`). The account id is
+not secret: it is stored as the record's `account_id` identity and served to consumers on
+`credential.get_scoped` and `credential.list_scoped`. `--account-id` is refused for every
+other provider.
 
 **Meta Muse subscription.** Run `ck auth login --provider meta` (or add
 `--id oauth:meta:work`). The device flow prints a verification URL and code, then the

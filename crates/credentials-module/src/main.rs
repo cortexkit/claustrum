@@ -7828,6 +7828,73 @@ mod tests {
         assert_eq!(first_use.detail.as_deref(), Some("list"));
     }
 
+    /// A Cloudflare Workers AI login stores a static API-key record whose identity
+    /// `account_id` is the Cloudflare account the token acts on (`ck auth login` writes
+    /// `new_static(ApiKey, "login", ..).with_identity(..)`; the CLI test
+    /// `cloudflare_workers_ai_login_stores_the_account_id_as_identity` pins that the
+    /// login writes it). Consumers need it to build request URLs, so both scoped reads
+    /// must serve it from the stored record. API-key records carry no refresh adapter,
+    /// so the value can only come from the stored identity.
+    #[tokio::test]
+    async fn a_stored_cloudflare_login_serves_its_account_id_on_get_and_list_scoped() {
+        use credentials_core::store::GrantOperation;
+        let (surface, store, _db, _root) = tmp_surface_with_store(203);
+        let id = "apikey:cloudflare-workers-ai";
+        let account = "0123456789abcdef0123456789abcdef";
+        let record =
+            VaultRecord::new_static(CredentialKind::ApiKey, "login", b"cf-token".to_vec(), None)
+                .with_identity(credentials_core::record::RecordIdentity {
+                    account_id: Some(account.to_string()),
+                    email: None,
+                    org_name: None,
+                });
+        store
+            .create_audited(id, &record, AuditCtx::admin(AuditOp::Put))
+            .expect("seed");
+        assert_eq!(
+            store
+                .get(id)
+                .expect("stored")
+                .identity
+                .account_id
+                .as_deref(),
+            Some(account)
+        );
+        grant_for(&store, "broca", id, GrantOperation::Read);
+        let broca = reserved("broca");
+
+        let served = surface
+            .get_scoped(
+                Some(&broca),
+                &read_surface::GetScopedParams {
+                    credential_id: id.into(),
+                    enrollment_token: None,
+                    min_ttl_ms: None,
+                },
+            )
+            .await;
+        let read_surface::GetOutcome::Ok(result) = served else {
+            panic!("get_scoped must serve the granted row, got {served:?}");
+        };
+        assert_eq!(result.payload, b"cf-token");
+        assert_eq!(result.account_id.as_deref(), Some(account));
+
+        let listed = surface
+            .list_scoped(
+                Some(&broca),
+                &read_surface::ListScopedParams {
+                    enrollment_token: None,
+                },
+            )
+            .expect("list_scoped");
+        let row = listed
+            .credentials
+            .iter()
+            .find(|row| row.id == id)
+            .unwrap_or_else(|| panic!("no {id} row in {:?}", listed.credentials));
+        assert_eq!(row.account_id.as_deref(), Some(account));
+    }
+
     /// An OAuth record whose refresh adapter is `adapter`, whatever its id says, so the
     /// auth method can be shown to follow the record and not the id.
     fn oauth_record_with_adapter(adapter: &str) -> VaultRecord {

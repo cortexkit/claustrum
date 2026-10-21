@@ -468,6 +468,7 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
             "--client-secret-file",
             "--payload-file",
             "--account",
+            "--account-id",
             "--provider-id",
         ],
         "invalidate" | "reactivate" | "mint-handle" | "revoke-all-handles" | "remove" => &["--id"],
@@ -649,6 +650,7 @@ fn help_verb(verb: &str) -> String {
         "login" => {
             "ck auth login [--provider <name>] [--id <id>] [--account <id>] [--replace]\n\
              \x20             [--no-listener] [--no-browser] [--device] [--payload-file <path>]\n\
+             \x20             [--account-id <id>]\n\
              \n\
              \x20 --provider <name>      pick a provider; omit for an interactive picker of\n\
              \x20                        every provider\n\
@@ -666,6 +668,8 @@ fn help_verb(verb: &str) -> String {
              \x20 --device               select headless device authorization for openai/xai\n\
              \x20 --payload-file <path>  api-key logins: read the key from a file instead of\n\
              \x20                        prompting\n\
+             \x20 --account-id <id>      cloudflare-workers-ai only: the Cloudflare account id\n\
+             \x20                        (32 lowercase hex characters) instead of prompting\n\
              \n\
              NOTES\n\
              Vault-native first-party login — mints an INDEPENDENT credential the vault\n\
@@ -680,8 +684,10 @@ fn help_verb(verb: &str) -> String {
              \n\
              Providers: anthropic, openai, xai, google, gmail, antigravity, github-copilot,\n\
              kimi, cursor, devin, snowflake, digitalocean, plus api-key providers\n\
-             (zai, openrouter, deepseek, groq, ...) and web-search keys\n\
-             (tavily, kagi, exa, parallel).\n\
+             (zai, openrouter, deepseek, groq, cloudflare-workers-ai, ...) and web-search\n\
+             keys (tavily, kagi, exa, parallel). cloudflare-workers-ai also asks for the\n\
+             account id; use an API token scoped to Workers AI (Read and Edit), never the\n\
+             Global API Key.\n\
              \n\
              MULTIPLE ACCOUNTS per provider — give each its own labeled id: ck auth login\n\
              --provider anthropic --id oauth:anthropic:work (label freely chosen; each\n\
@@ -2527,6 +2533,28 @@ fn new_login_id(provider: &str, default_id: &str, label: Option<&str>) -> Option
     ))
 }
 
+/// Every row the interactive login picker offers, as (provider key, display name,
+/// default id): the OAuth/device logins first, then every API-key catalog row.
+fn login_picker_rows() -> Vec<(String, String, String)> {
+    let mut rows = Vec::new();
+    for &(key, name) in LOGIN_PICKER_ROWS {
+        let wire = login_provider(key).expect("picker rows are valid providers");
+        rows.push((
+            key.to_string(),
+            name.to_string(),
+            wire.default_id.to_string(),
+        ));
+    }
+    for provider in api_key_login::API_KEY_PROVIDERS {
+        rows.push((
+            provider.key.to_string(),
+            provider.display_name.to_string(),
+            provider.default_id.to_string(),
+        ));
+    }
+    rows
+}
+
 fn pick_login_interactively(
     global: &GlobalArgs,
     args: &[String],
@@ -2534,23 +2562,7 @@ fn pick_login_interactively(
     use dialoguer::{theme::ColorfulTheme, FuzzySelect, Input, Select};
 
     let inventory = inventory_for_picker(global).unwrap_or_default();
-    let mut combined_rows = Vec::new();
-    for &(key, name) in LOGIN_PICKER_ROWS {
-        let wire = login_provider(key).expect("picker rows are valid providers");
-        combined_rows.push((
-            key.to_string(),
-            name.to_string(),
-            wire.default_id.to_string(),
-        ));
-    }
-    for provider in api_key_login::API_KEY_PROVIDERS {
-        combined_rows.push((
-            provider.key.to_string(),
-            provider.display_name.to_string(),
-            provider.default_id.to_string(),
-        ));
-    }
-
+    let combined_rows = login_picker_rows();
     let items: Vec<String> = combined_rows
         .iter()
         .map(|(_key, name, default_id)| {
@@ -2882,6 +2894,25 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     let route_api_key =
         apikey_row.is_some() && (!has_oauth_login || target_id.starts_with("apikey:"));
 
+    // `--account-id` is checked here, before any prompt, preflight or network call, so
+    // a script that passes it to the wrong provider, or passes a malformed id, fails
+    // without side effects. Only an API-key row with an `account_id_prompt` takes one;
+    // every other login (OAuth, device, browser) would otherwise ignore it silently.
+    let account_id_flag = optional(args, "--account-id").map(|v| v.trim().to_string());
+    if let Some(flag) = account_id_flag.as_deref() {
+        match apikey_row.filter(|_| route_api_key) {
+            Some(row) => {
+                api_key_login::check_account_id(row, Some(flag)).map_err(CliError::Usage)?
+            }
+            None => {
+                return Err(CliError::Usage(format!(
+                    "--account-id does not apply to '{provider}': only providers whose login \
+                     asks for an account id take one"
+                )))
+            }
+        }
+    }
+
     if !route_api_key && google_login::is_provider(&provider) {
         return google_login::cmd_login(
             global,
@@ -2925,8 +2956,8 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
         } else {
             use dialoguer::Password;
             let prompt = format!(
-                "Enter API key for {} (dashboard: {})",
-                p.display_name, p.dashboard_url
+                "Enter API key for {} ({}; dashboard: {})",
+                p.display_name, p.placeholder, p.dashboard_url
             );
             Password::new()
                 .with_prompt(prompt)
@@ -2936,6 +2967,27 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
                 .to_string()
         };
 
+        // The account id is NOT secret, so it is read as visible input, after the key.
+        // It is checked against the row's format before the probe below, which builds
+        // its URL from it.
+        let account_id = match (p.account_id_prompt, account_id_flag) {
+            (None, _) => None,
+            (Some(_), Some(flag)) => Some(flag),
+            (Some(prompt), None) => {
+                let value: String = dialoguer::Input::new()
+                    .with_prompt(prompt.label)
+                    .interact_text()
+                    .map_err(|e| {
+                        CliError::Usage(format!(
+                            "reading the account id: {e}; pass --account-id <id> when \
+                             running without a terminal"
+                        ))
+                    })?;
+                Some(value.trim().to_string())
+            }
+        };
+        api_key_login::check_account_id(p, account_id.as_deref()).map_err(CliError::Usage)?;
+
         if !matches!(
             p.validation,
             api_key_login::KeyValidation::Unvalidated { .. }
@@ -2944,7 +2996,13 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
         }
         let http = credentials_core::http::ReqwestTransport::new()
             .map_err(|e| CliError::Io(e.to_string()))?;
-        let outcome = tokio_block_on(api_key_login::validate_key(&http, &p.validation, &key));
+        let outcome = tokio_block_on(api_key_login::check_login_key(
+            &http,
+            p,
+            &key,
+            account_id.as_deref(),
+        ))
+        .map_err(CliError::Usage)?;
         match outcome {
             api_key_login::ValidationOutcome::Valid => {
                 println!("API key is valid.");
@@ -2962,6 +3020,17 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
 
         let record =
             VaultRecord::new_static(CredentialKind::ApiKey, "login", key.into_bytes(), None);
+        // The account id becomes the record's identity, which the read surface serves as
+        // `identity.account_id` on `credential.get_scoped` and `credential.list_scoped`:
+        // consumers such as Broca need it to build the provider's request URLs.
+        let record = match account_id {
+            Some(account_id) => record.with_identity(RecordIdentity {
+                account_id: Some(account_id),
+                email: None,
+                org_name: None,
+            }),
+            None => record,
+        };
 
         let (audit_op, store_mode) = if replace {
             (AdminAuditOp::Overwrite, StoreMode::ReplaceUnconditional)
@@ -7846,6 +7915,20 @@ mod login_regressions {
         assert!(login_replace(&[], true));
         assert!(!login_replace(&[], false));
         assert!(login_replace(&["--replace".into()], false));
+    }
+
+    /// The picker is the only way an operator who runs a bare `ck auth login` reaches a
+    /// provider, so a catalog row it does not list is unreachable interactively.
+    #[test]
+    fn the_login_picker_offers_cloudflare_workers_ai() {
+        let rows = login_picker_rows();
+        assert!(
+            rows.iter()
+                .any(|(key, name, default_id)| key == "cloudflare-workers-ai"
+                    && name == "Cloudflare Workers AI"
+                    && default_id == "apikey:cloudflare-workers-ai"),
+            "picker rows: {rows:?}"
+        );
     }
 
     #[test]

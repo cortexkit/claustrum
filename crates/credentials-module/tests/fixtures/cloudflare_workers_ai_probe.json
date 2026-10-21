@@ -1,0 +1,26 @@
+{
+  "about": "Cloudflare's answers to the Workers AI login probe GET /client/v4/accounts/{account_id}/ai/models/search?per_page=1 on api.cloudflare.com. The 'recorded' cases were captured live on 2026-10-21 (cf-ray a4e25c44bd9a034d-MAD) with FAKE credentials only: account id 0123456789abcdef0123456789abcdef and made-up tokens. The 'documented' case was not reproducible without a real token; its shape follows Cloudflare's API envelope and wrangler's Workers AI handling (packages/wrangler/src/ai/fetcher.ts treats a 403 with error code 1031 as missing permissions).",
+  "recorded": {
+    "unknown_well_formed_token": {
+      "request_token": "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCd",
+      "status": 401,
+      "body": "{\"success\":false,\"errors\":[{\"code\":10000,\"message\":\"Authentication error\"}],\"messages\":[],\"result\":null}"
+    },
+    "unparseable_token": {
+      "request_token": "abc def",
+      "status": 400,
+      "body": "{\"success\":false,\"errors\":[{\"code\":9106,\"message\":\"Authentication failed (status: 400)\"}],\"messages\":[],\"result\":null}"
+    },
+    "no_authorization_header": {
+      "request_token": null,
+      "status": 400,
+      "body": "{\"success\":false,\"errors\":[{\"code\":9106,\"message\":\"Missing X-Auth-Key, X-Auth-Email or Authorization headers\"}],\"messages\":[],\"result\":null}"
+    }
+  },
+  "documented": {
+    "token_without_workers_ai_permission_or_wrong_account": {
+      "status": 403,
+      "body": "{\"success\":false,\"errors\":[{\"code\":10000,\"message\":\"Authentication error\"}],\"messages\":[],\"result\":null}"
+    }
+  }
+}

@@ -340,13 +340,17 @@ impl VaultRecord {
     /// per account would collapse its accounts into one unlabelled entry -- a symptom
     /// that reads as "identity was never captured".
     ///
-    /// Enforced at the sink rather than trusted at each source. There are three
-    /// capture sites and they do not share a shape: `account_id` has exactly two
-    /// origins (Anthropic's inline account uuid, ChatGPT's token claim) while `email`
-    /// has a third (any OIDC `id_token`), so a provider that returns an id_token
-    /// without either account form produces the bad shape without anyone writing it
-    /// deliberately. xAI requests `openid`+`email` and matches neither account form,
-    /// so it is one provider-side response change away from doing exactly that.
+    /// Enforced at the sink rather than trusted at each source, because the capture
+    /// sites do not share a shape. `account_id` comes from several places: Anthropic's
+    /// inline account uuid and ChatGPT's token claim at OAuth login, the user id (or
+    /// email) in Meta's device-login key reply, the account email for Google-family
+    /// logins and imports, and values an operator types (`import`/`set-identity`
+    /// `--account-id`, and the Cloudflare account id an API-key login asks for).
+    /// `email` has a further source of its own (any OIDC `id_token`), so a provider
+    /// that returns an id_token without any account form produces the bad shape without
+    /// anyone writing it deliberately. xAI requests `openid`+`email` and matches no
+    /// account form, so it is one provider-side response change away from doing
+    /// exactly that.
     ///
     /// Normalising beats refusing: an identity is display metadata, and failing a
     /// login over it would trade a labelling gap for a lost credential.

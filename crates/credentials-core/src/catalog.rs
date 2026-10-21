@@ -142,6 +142,11 @@ pub enum KeyValidation {
         url: &'static str,
         auth_header: AuthHeaderScheme,
     },
+    /// Cloudflare Workers AI: `GET {api_base}/accounts/{account_id}/ai/models/search?per_page=1`
+    /// with a Bearer token. Free and read-only, and unlike `/user/tokens/verify` (which
+    /// account-owned tokens fail) it checks the token and the account pairing at once.
+    /// The row must carry an `account_id_prompt`, since the account id is part of the URL.
+    CloudflareWorkersAiModels { api_base: &'static str },
     /// The key is stored without any probe. Used where no check is possible without
     /// something this table cannot express (a provider-specific header, a per-deployment
     /// base URL, a model-denied response that must not count as a bad key), or where the
@@ -149,6 +154,45 @@ pub enum KeyValidation {
     /// blocks the login outright, which is worse than not checking. `reason` is printed
     /// at login so the operator knows the key was not verified and why.
     Unvalidated { reason: &'static str },
+}
+
+/// The accepted shape of a provider account id, checked at login before any network
+/// call so a typo is refused locally instead of surfacing as a confusing provider error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountIdFormat {
+    /// Exactly 32 lowercase hexadecimal characters: the shape of a Cloudflare account id.
+    LowerHex32,
+}
+
+impl AccountIdFormat {
+    pub fn accepts(self, value: &str) -> bool {
+        match self {
+            Self::LowerHex32 => {
+                value.len() == 32
+                    && value
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            }
+        }
+    }
+
+    /// The shape in words, for the refusal message.
+    pub const fn describe(self) -> &'static str {
+        match self {
+            Self::LowerHex32 => "32 lowercase hexadecimal characters (0-9, a-f)",
+        }
+    }
+}
+
+/// A second, NON-secret value some API-key logins need besides the key: the provider
+/// account the key acts on. Login asks for it after the key, as visible input (or takes
+/// `--account-id`), and stores it as the record's `identity.account_id`, which the read
+/// surface serves to consumers on `credential.get_scoped` and `credential.list_scoped`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AccountIdPrompt {
+    /// Shown in the interactive prompt; says where to find the value.
+    pub label: &'static str,
+    pub format: AccountIdFormat,
 }
 
 #[derive(Debug, Clone)]
@@ -161,6 +205,9 @@ pub struct ApiKeyProvider {
     pub validation: KeyValidation,
     pub categories: &'static [CredentialCategory],
     pub serves: &'static [ModelVendor],
+    /// `Some` only for providers whose key is unusable without an account id (Cloudflare
+    /// Workers AI puts the account in every request path). Every other row is `None`.
+    pub account_id_prompt: Option<AccountIdPrompt>,
 }
 
 use ModelVendor::{
@@ -183,6 +230,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         // Qwen, GLM and MiniMax models. Its kiroConstants.js adds thinking/agentic
         // suffix variants of those models, not additional model vendors.
         serves: &[Anthropic, DeepSeek, Qwen, Zhipu, MiniMax],
+        account_id_prompt: None,
     },
     ApiKeyProvider {
         key: "zai",
@@ -196,6 +244,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM_AND_WEB_SEARCH,
         serves: &[Zhipu],
+        account_id_prompt: None,
     },
     ApiKeyProvider {
         key: "openrouter",
@@ -209,6 +258,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: ModelVendor::ALL,
+        account_id_prompt: None,
     },
     ApiKeyProvider {
         key: "deepseek",
@@ -222,6 +272,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM_AND_WEB_SEARCH,
         serves: &[DeepSeek],
+        account_id_prompt: None,
     },
     ApiKeyProvider {
         key: "cerebras",
@@ -235,6 +286,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[Meta, Qwen, OpenAI],
+        account_id_prompt: None,
     },
     ApiKeyProvider {
         key: "fireworks-ai",
@@ -257,6 +309,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[Meta, Qwen, DeepSeek, Mistral, OpenAI],
+        account_id_prompt: None,
     },
     ApiKeyProvider {
         key: "groq",
@@ -270,6 +323,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[Meta, Qwen, OpenAI, Moonshot, Mistral],
+        account_id_prompt: None,
     },
     ApiKeyProvider {
         key: "mistral",
@@ -283,6 +337,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[Mistral],
+        account_id_prompt: None,
     },
     ApiKeyProvider {
         key: "together",
@@ -296,6 +351,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[Meta, Qwen, DeepSeek, Mistral, OpenAI, Moonshot],
+        account_id_prompt: None,
     },
     ApiKeyProvider {
         key: "perplexity",
@@ -309,6 +365,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM_AND_WEB_SEARCH,
         serves: &[Perplexity],
+        account_id_prompt: None,
     },
     ApiKeyProvider {
         key: "moonshot",
@@ -322,6 +379,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[Moonshot],
+        account_id_prompt: None,
     },
     ApiKeyProvider {
         key: "huggingface",
@@ -335,6 +393,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[Meta, Qwen, DeepSeek, Mistral, OpenAI, Moonshot, Zhipu],
+        account_id_prompt: None,
     },
     ApiKeyProvider {
         key: "nvidia",
@@ -348,6 +407,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[Nvidia, Meta, Qwen, DeepSeek, Mistral, OpenAI, Moonshot],
+        account_id_prompt: None,
     },
     ApiKeyProvider {
         key: "xai",
@@ -361,6 +421,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[XAI],
+        account_id_prompt: None,
     },
     ApiKeyProvider {
         key: "openai",
@@ -374,6 +435,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[OpenAI],
+        account_id_prompt: None,
     },
     ApiKeyProvider {
         key: "google",
@@ -387,6 +449,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[Google],
+        account_id_prompt: None,
     },
     // Anthropic's paid API, as opposed to the `oauth:anthropic` subscription login. A bare
     // `--provider anthropic` still means the OAuth login; this row is reached with
@@ -406,6 +469,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[Anthropic],
+        account_id_prompt: None,
     },
     // Inception Labs' API for its Mercury models: OpenAI-compatible, Bearer key, env var
     // INCEPTION_API_KEY in its docs (https://docs.inceptionlabs.ai/llms.txt). The key
@@ -427,6 +491,37 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[Inception],
+        account_id_prompt: None,
+    },
+    // Cloudflare Workers AI, through Cloudflare's REST API. The token alone is not enough:
+    // every Workers AI request path names the account, so this row also asks for the
+    // (non-secret) account id and stores it as the record's identity `account_id`.
+    //
+    // The placeholder steers the operator to an account API token scoped to Workers AI
+    // (Read and Edit). The Global API Key is never wanted: it grants the whole account,
+    // and it authenticates with X-Auth-Email/X-Auth-Key headers rather than a Bearer
+    // token, so it would not work here anyway.
+    ApiKeyProvider {
+        key: "cloudflare-workers-ai",
+        display_name: "Cloudflare Workers AI",
+        default_id: "apikey:cloudflare-workers-ai",
+        dashboard_url: "https://dash.cloudflare.com/profile/api-tokens",
+        placeholder: "an API token with Workers AI Read and Edit permissions (not the Global API Key)",
+        validation: KeyValidation::CloudflareWorkersAiModels {
+            api_base: "https://api.cloudflare.com/client/v4",
+        },
+        categories: LLM,
+        // A model host rather than a model maker, so like the other hosting rows `serves`
+        // lists the vendors with at least one current text-generation model in the
+        // catalog (https://developers.cloudflare.com/workers-ai/models/, read 2026-10-21):
+        // gpt-oss, Gemma, DeepSeek, Mistral, Kimi, GLM, Llama, Qwen and Nemotron. Its
+        // other text-generation authors (Cloudflare, IBM, swiss-ai and others) have no
+        // `ModelVendor`.
+        serves: &[OpenAI, Google, DeepSeek, Mistral, Moonshot, Zhipu, Meta, Qwen, Nvidia],
+        account_id_prompt: Some(AccountIdPrompt {
+            label: "Cloudflare account id (32 hex characters; shown on the dashboard's Account home and in the Workers AI 'Use REST API' panel)",
+            format: AccountIdFormat::LowerHex32,
+        }),
     },
     // The rows below mirror oh-my-pi's API-key providers. Each `// oh-my-pi auth/<key>.kdl`
     // line names the file (packages/catalog/src/compat/rules/auth/ in that repo) that the
@@ -450,6 +545,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[Zhipu],
+        account_id_prompt: None,
     },
     // oh-my-pi auth/aiand.kdl; serves from its models.json rows.
     ApiKeyProvider {
@@ -464,6 +560,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[OpenAI, Google, DeepSeek, Moonshot, Zhipu, Qwen],
+        account_id_prompt: None,
     },
     // oh-my-pi auth/baseten.kdl; serves from its models.json rows.
     ApiKeyProvider {
@@ -478,6 +575,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[OpenAI, DeepSeek, Moonshot, Zhipu, Nvidia],
+        account_id_prompt: None,
     },
     // oh-my-pi auth/charm-hyper.kdl.
     // The probe is `/v1/credits`, not `/v1/models`: charm-hyper.kdl records that the models
@@ -496,6 +594,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[Google, Moonshot, Zhipu],
+        account_id_prompt: None,
     },
     // oh-my-pi auth/cline-pass.kdl; serves from its models.json rows.
     ApiKeyProvider {
@@ -509,6 +608,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[Google, DeepSeek, Moonshot, Zhipu, Meta, Qwen, MiniMax, Xiaomi],
+        account_id_prompt: None,
     },
     // oh-my-pi auth/commandcode.kdl; serves from its models.json rows.
     ApiKeyProvider {
@@ -522,6 +622,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[Anthropic, OpenAI, Google, XAI, DeepSeek, Moonshot, Zhipu, Meta, Qwen, Nvidia, MiniMax, Xiaomi, StepFun],
+        account_id_prompt: None,
     },
     // oh-my-pi auth/deepinfra.kdl; serves from its models.json rows.
     // A chat probe rather than `/models`: deepinfra.kdl records that DeepInfra's models
@@ -538,6 +639,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[Anthropic, OpenAI, Google, DeepSeek, Mistral, Moonshot, Zhipu, Meta, Qwen, Nvidia, MiniMax, Xiaomi],
+        account_id_prompt: None,
     },
     // oh-my-pi auth/firepass.kdl; serves from its models.json rows.
     // firepass.kdl: Fire Pass keys are scoped to router endpoints and do not authorize
@@ -554,6 +656,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[Moonshot, Zhipu],
+        account_id_prompt: None,
     },
     // oh-my-pi auth/gmi-cloud.kdl; serves from its models.json rows.
     ApiKeyProvider {
@@ -568,6 +671,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[DeepSeek],
+        account_id_prompt: None,
     },
     // oh-my-pi auth/meta.kdl; serves from its models.json rows.
     ApiKeyProvider {
@@ -582,6 +686,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[Meta],
+        account_id_prompt: None,
     },
     // oh-my-pi auth/minimax-code.kdl; serves from its models.json rows.
     ApiKeyProvider {
@@ -596,6 +701,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[MiniMax],
+        account_id_prompt: None,
     },
     // oh-my-pi auth/minimax-code-cn.kdl; serves from its models.json rows.
     ApiKeyProvider {
@@ -610,6 +716,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[MiniMax],
+        account_id_prompt: None,
     },
     // oh-my-pi auth/nanogpt.kdl.
     // A broad aggregator: its catalog carries models from every vendor listed here.
@@ -625,6 +732,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: ModelVendor::ALL,
+        account_id_prompt: None,
     },
     // oh-my-pi auth/novita.kdl; serves from its models.json rows.
     // novita.kdl: the probe is inference, not billing, because the billing route needs a
@@ -641,6 +749,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[OpenAI, Google, DeepSeek, Mistral, Moonshot, Zhipu, Meta, Qwen, Nvidia, MiniMax, Xiaomi, StepFun],
+        account_id_prompt: None,
     },
     // oh-my-pi auth/ollama-cloud.kdl; serves from its models.json rows.
     ApiKeyProvider {
@@ -654,6 +763,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM_AND_WEB_SEARCH,
         serves: &[OpenAI, Google, DeepSeek, Mistral, Moonshot, Zhipu, Qwen, Nvidia, MiniMax],
+        account_id_prompt: None,
     },
     // oh-my-pi auth/opencode-go.kdl; serves from its models.json rows.
     ApiKeyProvider {
@@ -667,6 +777,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[OpenAI, XAI, DeepSeek, Moonshot, Zhipu, Meta, Qwen, MiniMax, Xiaomi],
+        account_id_prompt: None,
     },
     // oh-my-pi auth/opencode-zen.kdl; serves from its models.json rows.
     ApiKeyProvider {
@@ -680,6 +791,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[Anthropic, OpenAI, Google, XAI, DeepSeek, Moonshot, Zhipu, Meta, Qwen, Nvidia, MiniMax, Xiaomi],
+        account_id_prompt: None,
     },
     // oh-my-pi auth/qianfan.kdl; serves from its models.json rows.
     // Unvalidated rather than a chat probe: oh-my-pi's probe for Qianfan tolerates a 401
@@ -696,6 +808,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[DeepSeek],
+        account_id_prompt: None,
     },
     // oh-my-pi auth/qwen-portal.kdl.
     // Qwen's own portal (portal.qwen.ai); its model ids are opaque aliases, so `serves` is
@@ -712,6 +825,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[Qwen],
+        account_id_prompt: None,
     },
     // oh-my-pi auth/sakana.kdl.
     // Serves Sakana's own models only, and Sakana is not a vendor in `ModelVendor`.
@@ -727,6 +841,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        account_id_prompt: None,
     },
     // oh-my-pi auth/siliconflow.kdl.
     // The roster is live-only; `serves` is only the default model's family (GLM) named in
@@ -743,6 +858,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[Zhipu],
+        account_id_prompt: None,
     },
     // oh-my-pi auth/siliconflow-cn.kdl.
     // The roster is live-only; `serves` is only the default model's family (DeepSeek) named
@@ -759,6 +875,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[DeepSeek],
+        account_id_prompt: None,
     },
     // oh-my-pi auth/singularityapi-dev.kdl.
     // The roster is per key; `serves` is the families oh-my-pi's
@@ -775,6 +892,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[DeepSeek, Moonshot, Zhipu],
+        account_id_prompt: None,
     },
     // oh-my-pi auth/singularityapi-tech.kdl. The roster is per key (no models.json rows);
     // `serves` comes from oh-my-pi's providers/singularityapi-tech.kdl, which says this
@@ -791,6 +909,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[DeepSeek],
+        account_id_prompt: None,
     },
     // oh-my-pi auth/stepfun.kdl; serves from its models.json rows.
     ApiKeyProvider {
@@ -805,6 +924,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[StepFun],
+        account_id_prompt: None,
     },
     // oh-my-pi auth/synthetic.kdl; serves from its models.json rows.
     ApiKeyProvider {
@@ -819,6 +939,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM_AND_WEB_SEARCH,
         serves: &[OpenAI, DeepSeek, Moonshot, Zhipu, Qwen, Nvidia],
+        account_id_prompt: None,
     },
     // oh-my-pi auth/typesafe.kdl.
     // Serves TypeSafe's own judgment models only, which match no vendor in `ModelVendor`.
@@ -833,6 +954,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[],
+        account_id_prompt: None,
     },
     // oh-my-pi auth/umans.kdl; serves from its models.json rows.
     ApiKeyProvider {
@@ -847,6 +969,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[DeepSeek, Moonshot, Zhipu, Qwen, Xiaomi],
+        account_id_prompt: None,
     },
     // oh-my-pi auth/venice.kdl; serves from its models.json rows.
     ApiKeyProvider {
@@ -861,6 +984,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[Anthropic, OpenAI, Google, XAI, DeepSeek, Mistral, Moonshot, Zhipu, Meta, Qwen, Nvidia, MiniMax, Xiaomi],
+        account_id_prompt: None,
     },
     // oh-my-pi auth/vercel-ai-gateway.kdl.
     // A broad aggregator: its catalog carries models from every vendor listed here.
@@ -875,6 +999,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: ModelVendor::ALL,
+        account_id_prompt: None,
     },
     // oh-my-pi auth/wafer-serverless.kdl; serves from its models.json rows.
     ApiKeyProvider {
@@ -889,6 +1014,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[DeepSeek, Moonshot, Zhipu, Qwen, MiniMax],
+        account_id_prompt: None,
     },
     // oh-my-pi auth/xiaomi-token-plan-ams.kdl; serves from its models.json rows.
     ApiKeyProvider {
@@ -903,6 +1029,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[Xiaomi],
+        account_id_prompt: None,
     },
     // oh-my-pi auth/xiaomi-token-plan-cn.kdl; serves from its models.json rows.
     ApiKeyProvider {
@@ -917,6 +1044,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[Xiaomi],
+        account_id_prompt: None,
     },
     // oh-my-pi auth/xiaomi-token-plan-sgp.kdl; serves from its models.json rows.
     ApiKeyProvider {
@@ -931,6 +1059,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[Xiaomi],
+        account_id_prompt: None,
     },
     // oh-my-pi auth/yolo-auto.kdl; serves from its models.json rows.
     ApiKeyProvider {
@@ -945,6 +1074,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[DeepSeek, Qwen],
+        account_id_prompt: None,
     },
     // oh-my-pi auth/zenmux.kdl; serves from its models.json rows.
     ApiKeyProvider {
@@ -959,6 +1089,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[Anthropic, OpenAI, Google, XAI, DeepSeek, Mistral, Moonshot, Zhipu, Meta, Qwen, MiniMax, Xiaomi, StepFun],
+        account_id_prompt: None,
     },
     // oh-my-pi auth/zhipu-coding-plan.kdl; serves from its models.json rows.
     ApiKeyProvider {
@@ -973,6 +1104,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: LLM,
         serves: &[Zhipu],
+        account_id_prompt: None,
     },
     // oh-my-pi auth/tavily.kdl. A web search API, not a model provider.
     ApiKeyProvider {
@@ -986,6 +1118,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: WEB_SEARCH,
         serves: &[],
+        account_id_prompt: None,
     },
     // oh-my-pi auth/kagi.kdl. A web search API, not a model provider.
     ApiKeyProvider {
@@ -999,6 +1132,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: WEB_SEARCH,
         serves: &[],
+        account_id_prompt: None,
     },
     // oh-my-pi auth/exa.kdl. A web search API, not a model provider.
     ApiKeyProvider {
@@ -1012,6 +1146,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: WEB_SEARCH,
         serves: &[],
+        account_id_prompt: None,
     },
     // oh-my-pi auth/parallel.kdl. A web search API, not a model provider.
     ApiKeyProvider {
@@ -1025,6 +1160,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: WEB_SEARCH,
         serves: &[],
+        account_id_prompt: None,
     },
     // Brave documents this header and endpoint, but not a distinct bad-key response; keep
     // the credential unchecked instead of treating every authorization refusal as a bad key.
@@ -1041,6 +1177,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: WEB_SEARCH,
         serves: &[],
+        account_id_prompt: None,
     },
     // Firecrawl documents the exact invalid-token message on its read-only credit-usage route.
     // https://docs.firecrawl.dev/api-reference/introduction
@@ -1057,6 +1194,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: WEB_SEARCH,
         serves: &[],
+        account_id_prompt: None,
     },
     // Jina documents bearer auth but no unique invalid-key response, so do not use a
     // metered embedding request as a login probe.
@@ -1072,6 +1210,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: WEB_SEARCH,
         serves: &[],
+        account_id_prompt: None,
     },
     // TinyFish's wallet read is authenticated with X-API-Key and documents
     // INVALID_API_KEY separately from the missing-key response.
@@ -1088,6 +1227,7 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         },
         categories: WEB_SEARCH,
         serves: &[],
+        account_id_prompt: None,
     },
 ];
 
@@ -1679,11 +1819,67 @@ mod tests {
         );
     }
 
+    /// `--provider cloudflare-workers-ai` must find this row, stamp new tokens
+    /// `llm-provider` only, probe the account-scoped model search, and ask for an account
+    /// id in Cloudflare's shape. It is the only row that asks for one.
+    #[test]
+    fn cloudflare_workers_ai_row_is_llm_provider_and_asks_for_a_hex_account_id() {
+        let row = api_key_provider("cloudflare-workers-ai").expect("Cloudflare api-key row");
+        assert_eq!(row.default_id, "apikey:cloudflare-workers-ai");
+        assert_eq!(row.display_name, "Cloudflare Workers AI");
+        assert_eq!(
+            row.dashboard_url,
+            "https://dash.cloudflare.com/profile/api-tokens"
+        );
+        assert!(row.placeholder.contains("Workers AI"));
+        assert!(row.placeholder.contains("not the Global API Key"));
+        assert_eq!(row.categories, LLM);
+        assert_eq!(
+            category_defaults("apikey:cloudflare-workers-ai"),
+            ["llm-provider"]
+        );
+        assert_eq!(
+            category_defaults("apikey:cloudflare-workers-ai:work"),
+            ["llm-provider"]
+        );
+        assert_eq!(
+            row.validation,
+            KeyValidation::CloudflareWorkersAiModels {
+                api_base: "https://api.cloudflare.com/client/v4",
+            }
+        );
+        let prompt = row.account_id_prompt.expect("asks for an account id");
+        assert_eq!(prompt.format, AccountIdFormat::LowerHex32);
+        let with_prompt: Vec<_> = API_KEY_PROVIDERS
+            .iter()
+            .filter(|entry| entry.account_id_prompt.is_some())
+            .map(|entry| entry.key)
+            .collect();
+        assert_eq!(with_prompt, ["cloudflare-workers-ai"]);
+    }
+
+    #[test]
+    fn lower_hex_32_accepts_only_a_cloudflare_shaped_account_id() {
+        let format = AccountIdFormat::LowerHex32;
+        assert!(format.accepts("0123456789abcdef0123456789abcdef"));
+        for bad in [
+            "",
+            "0123456789abcdef0123456789abcde",
+            "0123456789abcdef0123456789abcdef0",
+            "0123456789ABCDEF0123456789ABCDEF",
+            "0123456789abcdef0123456789abcdeg",
+            " 0123456789abcdef0123456789abcde",
+            "0123456789abcdef-123456789abcdef",
+        ] {
+            assert!(!format.accepts(bad), "accepted {bad:?}");
+        }
+    }
+
     #[test]
     fn both_catalogs_have_exact_owner_supplied_assignments() {
         // 15 original API-key rows, 37 model providers mirrored from oh-my-pi,
-        // Kiro, the Anthropic API key, Inception, and 8 search APIs.
-        assert_eq!(API_KEY_PROVIDERS.len(), 63);
+        // Kiro, the Anthropic API key, Inception, Cloudflare Workers AI, and 8 search APIs.
+        assert_eq!(API_KEY_PROVIDERS.len(), 64);
         assert_eq!(LOGIN_PROVIDERS.len(), 13);
         // Which api-key rows are `llm-provider` and which are `web-search` is pinned by
         // the two category tests below, which also require every row to be listed.
@@ -1871,6 +2067,7 @@ mod tests {
             &"kiro",
             &"anthropic",
             &"inception",
+            &"cloudflare-workers-ai",
         ]) {
             let row = api_key_provider(key).unwrap_or_else(|| panic!("no api-key row {key}"));
             assert_eq!(row.default_id, format!("apikey:{key}"));
@@ -1888,7 +2085,8 @@ mod tests {
                     || SEARCH_KEYS.contains(&entry.key)
                     || entry.key == "kiro"
                     || entry.key == "anthropic"
-                    || entry.key == "inception",
+                    || entry.key == "inception"
+                    || entry.key == "cloudflare-workers-ai",
                 "api-key row {} is in no category list",
                 entry.key
             );
@@ -2299,6 +2497,13 @@ mod source_ownership_tests {
                 ("google", vec!["google"]),
                 ("anthropic", vec!["anthropic"]),
                 ("inception", vec!["inception"]),
+                (
+                    "cloudflare-workers-ai",
+                    vec![
+                        "openai", "google", "deepseek", "mistral", "moonshot", "zhipu", "meta",
+                        "qwen", "nvidia"
+                    ]
+                ),
                 ("abliteration", vec!["zhipu"]),
                 (
                     "aiand",

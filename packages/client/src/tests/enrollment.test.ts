@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { writeEnrollmentTokenFile } from '../enrollment.js'
+import { rejectionOf, throwerOf } from './settle'
 
 const roots: string[] = []
 afterEach(async () => {
@@ -48,11 +49,11 @@ describe('enrollment token file', () => {
 
       const path = join(child, 'consumer.json')
       await withSharedAncestorGroup(unsafe, async () => {
-        await expect(
+        expect(await throwerOf(
           writeEnrollmentTokenFile(path, { token: 'cd'.repeat(32), token_generation: 1 }),
-        ).rejects.toThrow(/enrollment token folder .* is not private: (group|world)-writable ancestor/)
+        )).toThrow(/enrollment token folder .* is not private: (group|world)-writable ancestor/)
       })
-      await expect(stat(path)).rejects.toMatchObject({ code: 'ENOENT' })
+      expect(await rejectionOf(stat(path))).toMatchObject({ code: 'ENOENT' })
     })
   }
 })

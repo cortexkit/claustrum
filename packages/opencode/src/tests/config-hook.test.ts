@@ -11,6 +11,7 @@ import {
 import { CustodySplitError, HandleFileValidationError } from "../errors";
 import { handleFileRevision, parseHandleFile, readHandleFile } from "../handles";
 import { sentinel, tombstoneFor, TOMBSTONE_PREFIX } from "../tombstone";
+import { rejectionOf, throwerOf } from "./settle";
 
 const ROOT = "/tmp/opencode/custody-t6";
 const HANDLE = `ckh_${"a".repeat(43)}`;
@@ -210,7 +211,7 @@ async function expectRefusal(cfg: TestConfig, provider: string, cause: RegExp) {
   const options = cfg.provider[provider]?.options;
   expect(options?.apiKey).toBe(probe.apiKey);
   expect(options?.fetch).toBeFunction();
-  await expect((options?.fetch as typeof globalThis.fetch)("https://upstream.example")).rejects.toThrow(cause);
+  expect(await throwerOf((options?.fetch as typeof globalThis.fetch)("https://upstream.example"))).toThrow(cause);
   expect(probe.forwarded).toBe(0);
 }
 
@@ -424,10 +425,10 @@ async function hook(cfg: TestConfig, deps: ConfigHookDependencies = {}) {
     const parent = join(ROOT, "handle-parent-mode", "config", "cortexkit");
 
     await chmod(parent, 0o777);
-    await expect(readHandleFile(files.handles)).rejects.toBeInstanceOf(HandleFileValidationError);
+    expect(await rejectionOf(readHandleFile(files.handles))).toBeInstanceOf(HandleFileValidationError);
 
     await chmod(parent, 0o755);
-    await expect(readHandleFile(files.handles)).resolves.toMatchObject(handles("deepseek"));
+    expect(await readHandleFile(files.handles)).toMatchObject(handles("deepseek"));
   });
 
   test("the config hook rejects a world-writable non-sticky handle parent", async () => {
@@ -449,7 +450,7 @@ async function hook(cfg: TestConfig, deps: ConfigHookDependencies = {}) {
     const files = await fixture("large-handle-file");
     await writeHandles(files.handles, { ...handles("deepseek"), padding: "x".repeat(256 * 1024) });
 
-    await expect(readHandleFile(files.handles)).rejects.toThrow("256 KiB");
+    expect(await throwerOf(readHandleFile(files.handles))).toThrow("256 KiB");
 
     await writeHandles(files.handles, handles("deepseek"));
     expect(await handleFileRevision(files.handles)).not.toContain("ckh_");
@@ -461,7 +462,7 @@ async function hook(cfg: TestConfig, deps: ConfigHookDependencies = {}) {
     await writeHandles(files.handles, handles("deepseek"));
     await chmod(files.handles, 0o640);
     const before = readdirSync("/proc/self/fd").length;
-    for (let index = 0; index < 5; index += 1) await expect(readHandleFile(files.handles)).rejects.toThrow("0600");
+    for (let index = 0; index < 5; index += 1) expect(await throwerOf(readHandleFile(files.handles))).toThrow("0600");
     expect(readdirSync("/proc/self/fd").length).toBe(before);
   });
 
@@ -474,7 +475,7 @@ async function hook(cfg: TestConfig, deps: ConfigHookDependencies = {}) {
       readFile: async () => ++reads === 1 ? source : "x".repeat(512 * 1024),
     };
 
-    await expect(handleFileRevision("/tmp/handles.json", io)).resolves.not.toContain("x".repeat(20));
+    expect(await handleFileRevision("/tmp/handles.json", io)).not.toContain("x".repeat(20));
     expect(reads).toBe(1);
   });
 
@@ -484,7 +485,7 @@ async function hook(cfg: TestConfig, deps: ConfigHookDependencies = {}) {
     await writeHandles(target, handles("deepseek"));
     await symlink(target, files.handles);
 
-    await expect(readHandleFile(files.handles)).rejects.toThrow("symlink");
+    expect(await throwerOf(readHandleFile(files.handles))).toThrow("symlink");
   });
 
   test("refuses a handle descriptor that grows past the 256 KiB cap between fstat and read", async () => {
@@ -495,7 +496,7 @@ async function hook(cfg: TestConfig, deps: ConfigHookDependencies = {}) {
     // descriptor.
     let requestedLengths: number[] = [];
     let totalBuffered = 0;
-    await expect(readHandleFile("/tmp/handles.json", {
+    expect(await throwerOf(readHandleFile("/tmp/handles.json", {
       stat: async () => ({ isFile: () => false, isDirectory: () => true, mode: 0o40755, uid: process.getuid?.() }),
       open: async () => {
         const chunk = Buffer.alloc(512 * 1024, 0x78);
@@ -514,7 +515,7 @@ async function hook(cfg: TestConfig, deps: ConfigHookDependencies = {}) {
           close: async () => {},
         };
       },
-    })).rejects.toThrow("256 KiB");
+    }))).toThrow("256 KiB");
     expect(requestedLengths.every((length) => length <= 256 * 1024 + 1)).toBe(true);
     expect(totalBuffered).toBeLessThanOrEqual(256 * 1024 + 1);
   });
@@ -535,11 +536,11 @@ async function hook(cfg: TestConfig, deps: ConfigHookDependencies = {}) {
 
   test("bounds auth content against the descriptor stat before reading it", async () => {
     let reads = 0;
-    await expect(readAuthFile("/tmp/auth.json", async () => ({
+    expect(await throwerOf(readAuthFile("/tmp/auth.json", async () => ({
       stat: async () => ({ size: 1024 * 1024 + 1 }),
       readFile: async () => { reads += 1; return "{}"; },
       close: async () => {},
-    }))).rejects.toThrow("exceeds 1 MiB");
+    })))).toThrow("exceeds 1 MiB");
     expect(reads).toBe(0);
   });
 
@@ -551,7 +552,7 @@ async function hook(cfg: TestConfig, deps: ConfigHookDependencies = {}) {
     let requestedLengths: number[] = [];
     let totalBuffered = 0;
     let closed = 0;
-    await expect(readAuthFile("/tmp/auth.json", async () => {
+    expect(await throwerOf(readAuthFile("/tmp/auth.json", async () => {
       const chunk = Buffer.alloc(2 * 1024 * 1024, 0x78); // 2 MiB of `x` would exceed
       return {
         stat: async () => ({ size: 256 }), // initial fstat lies small
@@ -568,7 +569,7 @@ async function hook(cfg: TestConfig, deps: ConfigHookDependencies = {}) {
         },
         close: async () => { closed += 1; },
       };
-    })).rejects.toThrow("exceeds 1 MiB");
+    }))).toThrow("exceeds 1 MiB");
     // The bounded reader asked for AT MOST cap+1 bytes (1 MiB + 1) on every call;
     // anything beyond proves the TOCTOU hole is still open.
     expect(reads).toBeGreaterThan(0);
@@ -853,8 +854,8 @@ async function hook(cfg: TestConfig, deps: ConfigHookDependencies = {}) {
 
     expect(cfg.provider.deepseek.options?.apiKey).toBeUndefined();
     expect(cfg.provider.deepseek.options?.fetch).toBeFunction();
-    await expect((cfg.provider.deepseek.options?.fetch as typeof globalThis.fetch)("https://upstream.example"))
-      .rejects.toBeInstanceOf(CustodySplitError);
+    expect(await rejectionOf((cfg.provider.deepseek.options?.fetch as typeof globalThis.fetch)("https://upstream.example")))
+      .toBeInstanceOf(CustodySplitError);
   });
 
   for (const env of [
@@ -1036,9 +1037,9 @@ async function hook(cfg: TestConfig, deps: ConfigHookDependencies = {}) {
     });
     useEnv("OPENCODE_AUTH_CONTENT", JSON.stringify({ deepseek: { type: "api", key: "real-env-key" } }));
 
-    await expect((cfg.provider.deepseek.options?.fetch as typeof globalThis.fetch)("https://upstream.example", {
+    expect(await rejectionOf((cfg.provider.deepseek.options?.fetch as typeof globalThis.fetch)("https://upstream.example", {
       headers: { Authorization: `Bearer ${sentinel("deepseek")}` },
-    })).rejects.toBeInstanceOf(CustodySplitError);
+    }))).toBeInstanceOf(CustodySplitError);
     expect(forwarded).toBe(0);
   });
 
@@ -1064,9 +1065,9 @@ async function hook(cfg: TestConfig, deps: ConfigHookDependencies = {}) {
     });
     await chmod(files.handles, 0o640);
 
-    await expect((cfg.provider.deepseek.options?.fetch as typeof globalThis.fetch)("https://upstream.example", {
+    expect(await throwerOf((cfg.provider.deepseek.options?.fetch as typeof globalThis.fetch)("https://upstream.example", {
       headers: { Authorization: `Bearer ${sentinel("deepseek")}` },
-    })).rejects.toThrow("could not verify custody handle ownership: HandleFileValidationError");
+    }))).toThrow("could not verify custody handle ownership: HandleFileValidationError");
     expect(forwarded).toBe(0);
     expect(logs.join("\n")).toContain("HandleFileValidationError");
   });
@@ -1122,8 +1123,8 @@ async function hook(cfg: TestConfig, deps: ConfigHookDependencies = {}) {
     await hooks.config?.(cfg as never);
     const fetch = cfg.provider.deepseek.options?.fetch as typeof globalThis.fetch;
 
-    await expect(fetch("https://upstream.example", { headers: { Authorization: `Bearer ${sentinel("deepseek")}` } }))
-      .rejects.toThrow("accounts exhausted");
+    expect(await throwerOf(fetch("https://upstream.example", { headers: { Authorization: `Bearer ${sentinel("deepseek")}` } })))
+      .toThrow("accounts exhausted");
     now += 60_000;
     available = true;
 

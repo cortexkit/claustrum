@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { ClaustrumClient } from '../wire.js'
+import { throwerOf } from './settle'
 
 /**
  * THE DECODERS I RULED WERE MINE, DRIVEN WITH REAL PAYLOADS.
@@ -99,7 +100,7 @@ describe('list_scoped decoding', () => {
     const { client } = await clientWith([{ result: { credentials: [withoutId], grants: 1, view: 'v1' } }])
     // A nameless row would be routed against by SOMETHING -- whichever field the consumer
     // happened to trust -- so failing closed is the only safe outcome.
-    expect(client.listScoped()).rejects.toThrow()
+    expect(await throwerOf(client.listScoped())).toThrow()
   })
 
   test('a non-integer record_version is refused, because it is a comparison cursor', async () => {
@@ -108,14 +109,14 @@ describe('list_scoped decoding', () => {
     ])
     // A version that decodes to NaN compares false against everything, so a consumer's
     // "has this changed" check would answer no forever.
-    expect(client.listScoped()).rejects.toThrow()
+    expect(await throwerOf(client.listScoped())).toThrow()
   })
 
   test('a categories array holding a non-string is refused, not silently coerced', async () => {
     const { client } = await clientWith([
       { result: { credentials: [{ ...ROW, categories: ['llm-provider', 7] }], grants: 1, view: 'v1' } },
     ])
-    expect(client.listScoped()).rejects.toThrow()
+    expect(await throwerOf(client.listScoped())).toThrow()
   })
 })
 
@@ -139,7 +140,7 @@ describe('the cursor and the rotate fence, both missing from 0.2.0', () => {
     const { client } = await clientWith([{ result: { credentials: [ROW], grants: 1 } }])
     // An undefined cursor compares unequal to everything, so a consumer would reconcile
     // forever and read it as churn in the vault.
-    expect(client.listScoped()).rejects.toThrow()
+    expect(await throwerOf(client.listScoped())).toThrow()
   })
 
   /**
@@ -191,13 +192,13 @@ describe('enrollment poll decoding', () => {
     const { client } = await clientWith([
       { result: { status: 'approved', name: 'consumer', token_generation: 1 } },
     ])
-    expect(client.enrollPoll({ requestId: 'r', requestSecret: 's' })).rejects.toThrow()
+    expect(await throwerOf(client.enrollPoll({ requestId: 'r', requestSecret: 's' }))).toThrow()
   })
 
   test('an unrecognised status is refused rather than treated as pending', async () => {
     const { client } = await clientWith([{ result: { status: 'thinking-about-it' } }])
     // Treating an unknown status as pending would make a consumer poll forever against a
     // vault that had already answered.
-    expect(client.enrollPoll({ requestId: 'r', requestSecret: 's' })).rejects.toThrow()
+    expect(await throwerOf(client.enrollPoll({ requestId: 'r', requestSecret: 's' }))).toThrow()
   })
 })

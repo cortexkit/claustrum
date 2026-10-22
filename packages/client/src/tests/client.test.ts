@@ -14,6 +14,7 @@ import {
 } from '../index'
 
 import { userConnectionToken } from '../detect'
+import { rejectionOf } from './settle'
 
 test('non-Unix user token sanitizes Unicode by code point and follows environment order', () => {
   expect(userConnectionToken(null, { USER: 'aé😀-b_', USERNAME: 'ignored' })).toBe('a__-b_')
@@ -152,7 +153,7 @@ describe('ClaustrumClient', () => {
       const b = client.getCredential('b')
       await a
       late.reject(terminal('route_wedged'))
-      await expect(b).resolves.toMatchObject({ material: 'ok' })
+      expect(await b).toMatchObject({ material: 'ok' })
       expect(connects).toBe(2)
       expect(second.calls).toHaveLength(2)
     } finally { client.close() }
@@ -161,11 +162,11 @@ describe('ClaustrumClient', () => {
   test('enrollRotate rejects non-integer and negative generations', async () => {
     for (const generation of [1.5, -3, NaN, Infinity]) {
       const client = await ClaustrumClient.connect({ connector: async () => new FakeDaemon([{ result: { token: 'token', token_generation: generation } }]) as never })
-      try { await expect(client.enrollRotate({ token: 'old', expectedTokenGeneration: 1 })).rejects.toMatchObject({ code: 'invalid_response' }) } finally { client.close() }
+      try { expect(await rejectionOf(client.enrollRotate({ token: 'old', expectedTokenGeneration: 1 }))).toMatchObject({ code: 'invalid_response' }) } finally { client.close() }
     }
     for (const generation of [0, 1]) {
       const client = await ClaustrumClient.connect({ connector: async () => new FakeDaemon([{ result: { token: 'token', token_generation: generation } }]) as never })
-      try { await expect(client.enrollRotate({ token: 'old', expectedTokenGeneration: 1 })).resolves.toEqual({ token: 'token', tokenGeneration: generation }) } finally { client.close() }
+      try { expect(await client.enrollRotate({ token: 'old', expectedTokenGeneration: 1 })).toEqual({ token: 'token', tokenGeneration: generation }) } finally { client.close() }
     }
   })
 
@@ -238,7 +239,7 @@ describe('ClaustrumClient', () => {
     }))
     await chmod(path, 0o600)
 
-    await expect(detectClaustrumConnection(path)).resolves.toMatchObject({
+    expect(await detectClaustrumConnection(path)).toMatchObject({
       status: 'available',
       schema: 1,
       endpoints: [{ host: '127.0.0.1', port: 8765 }],
@@ -442,9 +443,9 @@ describe('ClaustrumClient', () => {
       connector: async () => (++connects === 1 ? first : second) as never,
     })
 
-    await expect(
+    expect(await
       Promise.all([client.getCredential('a'), client.getCredential('b')]),
-    ).resolves.toHaveLength(2)
+    ).toHaveLength(2)
     expect(connects).toBe(2)
     expect(first.closed).toBe(true)
 
@@ -456,7 +457,7 @@ describe('ClaustrumClient', () => {
           return new FakeDaemon([], terminal(code)) as never
         },
       })
-      await expect(nonReconnectClient.getCredential(code)).rejects.toMatchObject({ code })
+      expect(await rejectionOf(nonReconnectClient.getCredential(code))).toMatchObject({ code })
       expect(prohibitedReconnects).toBe(1)
       nonReconnectClient.close()
     }
@@ -471,7 +472,7 @@ describe('ClaustrumClient', () => {
         return new FakeDaemon([], terminal('unknown_module')) as never
       },
     })
-    await expect(client.getCredential('a')).rejects.toMatchObject({ code: 'unknown_module' })
+    expect(await rejectionOf(client.getCredential('a'))).toMatchObject({ code: 'unknown_module' })
     expect(connects).toBe(1)
     client.close()
   })
@@ -488,7 +489,7 @@ describe('ClaustrumClient', () => {
         connector: async () =>
           new FakeDaemon([{ result: { error: { class: errorClass, code } } }]) as never,
       })
-      await expect(client.getCredential('credential-handle')).rejects.toMatchObject({
+      expect(await rejectionOf(client.getCredential('credential-handle'))).toMatchObject({
         code,
         class: errorClass,
         action,
@@ -511,7 +512,7 @@ describe('ClaustrumClient', () => {
         ]) as never,
     })
 
-    await expect(client.getCredential('credential-handle')).rejects.toMatchObject({
+    expect(await rejectionOf(client.getCredential('credential-handle'))).toMatchObject({
       code: 'invalid_response',
       class: 'transient',
       action: 'retry',
@@ -529,7 +530,7 @@ describe('ClaustrumClient', () => {
         ]) as never,
     })
 
-    await expect(client.getCredential('private-handle')).rejects.toMatchObject({
+    expect(await rejectionOf(client.getCredential('private-handle'))).toMatchObject({
       code: 'future_code',
       class: 'transient',
       action: 'retry',
@@ -578,7 +579,7 @@ describe('ClaustrumClient', () => {
       }]) as never,
     })
 
-    await expect(client.getCredential('h_1')).resolves.toEqual({
+    expect(await client.getCredential('h_1')).toEqual({
       material: 'ok',
       expiresAtMs: 1_000,
       recordVersion: 63,
@@ -605,7 +606,7 @@ describe('ClaustrumClient', () => {
         }]) as never,
       })
 
-      await expect(client.getCredential('h_1')).rejects.toMatchObject({ code: 'invalid_response' })
+      expect(await rejectionOf(client.getCredential('h_1'))).toMatchObject({ code: 'invalid_response' })
       client.close()
     }
   })
@@ -720,12 +721,12 @@ describe('ClaustrumClient', () => {
       connector: async () => new FakeDaemon([{ result: { accepted: false } }]) as never,
     })
 
-    await expect(client.reportAuthFailure({
+    expect(await rejectionOf(client.reportAuthFailure({
       handle: 'h_1',
       providerStatus: 401,
       recordVersion: 63,
       reporterSource: 'direct',
-    })).rejects.toMatchObject({ code: 'invalid_response' })
+    }))).toMatchObject({ code: 'invalid_response' })
     client.close()
   })
 })

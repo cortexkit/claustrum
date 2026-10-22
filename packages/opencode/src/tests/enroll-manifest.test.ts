@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseHandleFile } from "../handles";
 import { removeEnrollmentManifest, writeEnrollmentManifest } from "../enroll-manifest";
+import { throwerOf } from "./settle";
 import { withManifestLock, writeHandleFileLocked } from "@cortexkit/claustrum-client";
 
 const handle = `ckh_${"a".repeat(43)}`;
@@ -68,22 +69,22 @@ describe("xai enrollment manifest", () => {
     const path = await fresh();
     await writeEnrollmentManifest(path, input);
     const before = await raw(path);
-    await expect(writeEnrollmentManifest(path, { ...input, handle: otherHandle })).rejects.toThrow("xai main handle differs; remove first, then enroll");
+    expect(await throwerOf(writeEnrollmentManifest(path, { ...input, handle: otherHandle }))).toThrow("xai main handle differs; remove first, then enroll");
     expect(await raw(path)).toEqual(before);
     await seed(path, { version: 1, providers: [{ provider: "xai", shape: "oauth", serve: "someone-else", accounts: [{ label: "main", handle, credential_id: "oauth:xai" }] }] });
     const foreignBefore = await raw(path);
-    await expect(writeEnrollmentManifest(path, input)).rejects.toThrow("xai manifest block is owned by another tenant");
+    expect(await throwerOf(writeEnrollmentManifest(path, input))).toThrow("xai manifest block is owned by another tenant");
     expect(await raw(path)).toEqual(foreignBefore);
   });
 
   test("refuses non-oauth, empty, multi-account, and different credential blocks", async () => {
     const path = await fresh();
     await seed(path, { version: 1, providers: [{ provider: "xai", shape: "api", serve: "opencode-claustrum", accounts: [{ label: "main", handle, credential_id: "oauth:xai" }] }] });
-    await expect(writeEnrollmentManifest(path, input)).rejects.toThrow("xai manifest block has a non-oauth shape");
+    expect(await throwerOf(writeEnrollmentManifest(path, input))).toThrow("xai manifest block has a non-oauth shape");
     await seed(path, { version: 1, providers: [{ provider: "xai", shape: "oauth", serve: "opencode-claustrum", accounts: [{ label: "main", handle, credential_id: "oauth:xai:other" }] }] });
-    await expect(writeEnrollmentManifest(path, input)).rejects.toThrow("xai manifest block binds a different credential");
+    expect(await throwerOf(writeEnrollmentManifest(path, input))).toThrow("xai manifest block binds a different credential");
     await seed(path, { version: 1, providers: [{ provider: "xai", shape: "oauth", serve: "opencode-claustrum", accounts: [{ label: "main", handle, credential_id: "oauth:xai" }, { label: "fallback", handle: otherHandle, credential_id: "oauth:xai:fallback" }] }] });
-    await expect(writeEnrollmentManifest(path, input)).rejects.toThrow("xai manifest block has unexpected accounts");
+    expect(await throwerOf(writeEnrollmentManifest(path, input))).toThrow("xai manifest block has unexpected accounts");
   });
 
   test("removal filters xai only and drops the last account", async () => {
@@ -102,7 +103,7 @@ describe("xai enrollment manifest", () => {
     const path = await fresh();
     await removeEnrollmentManifest(path, { provider: "xai", credentialId: "oauth:xai" });
     await seed(path, { version: 1, providers: [{ provider: "xai", shape: "oauth", serve: "someone-else", accounts: [{ label: "main", handle, credential_id: "oauth:xai" }] }] });
-    await expect(removeEnrollmentManifest(path, { provider: "xai", credentialId: "oauth:xai" })).rejects.toThrow("xai manifest block is owned by another tenant");
+    expect(await throwerOf(removeEnrollmentManifest(path, { provider: "xai", credentialId: "oauth:xai" }))).toThrow("xai manifest block is owned by another tenant");
   });
 
   test("waits for the manifest lock and then sees a fresh snapshot", async () => {
@@ -133,10 +134,10 @@ describe("xai enrollment manifest", () => {
 
   test("rejects invalid input before acquiring a lock", async () => {
     const path = await fresh();
-    await expect(writeEnrollmentManifest(path, { ...input, credentialId: "oauth:openai" as "oauth:xai" })).rejects.toThrow("invalid xai enrollment credential");
-    await expect(writeEnrollmentManifest(path, { ...input, handle: "bad" })).rejects.toThrow("invalid xai enrollment handle");
-    await expect(writeEnrollmentManifest(path, { ...input, minTtlMs: -1 })).rejects.toThrow("invalid xai enrollment minTtlMs");
-    await expect(writeEnrollmentManifest(path, { ...input, minTtlMs: 1.5 })).rejects.toThrow("invalid xai enrollment minTtlMs");
+    expect(await throwerOf(writeEnrollmentManifest(path, { ...input, credentialId: "oauth:openai" as "oauth:xai" }))).toThrow("invalid xai enrollment credential");
+    expect(await throwerOf(writeEnrollmentManifest(path, { ...input, handle: "bad" }))).toThrow("invalid xai enrollment handle");
+    expect(await throwerOf(writeEnrollmentManifest(path, { ...input, minTtlMs: -1 }))).toThrow("invalid xai enrollment minTtlMs");
+    expect(await throwerOf(writeEnrollmentManifest(path, { ...input, minTtlMs: 1.5 }))).toThrow("invalid xai enrollment minTtlMs");
     // "Before acquiring a lock" is observable only while someone else HOLDS it: a writer that
     // validated first rejects immediately; one that locked first would block on the held lock.
     // (A post-hoc "no lock dir" check cannot tell them apart -- release removes the dir either way.)

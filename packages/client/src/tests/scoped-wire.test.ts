@@ -45,18 +45,18 @@ test('producer get_scoped success decodes through the real client method', async
 test('producer report_auth_failure receipt is accepted by both addressing methods', async () => {
   const client = await clientFor('credential.report_auth_failure')
   try {
-    await expect(client.reportAuthFailureScoped({
+    expect(await client.reportAuthFailureScoped({
       credentialId: 'oauth:anthropic',
       providerStatus: 401,
       recordVersion: 1,
       reporterSource: 'direct',
-    })).resolves.toBeUndefined()
-    await expect(client.reportAuthFailure({
+    })).toBeUndefined()
+    expect(await client.reportAuthFailure({
       handle: 'ckh_fixture',
       providerStatus: 401,
       recordVersion: 1,
       reporterSource: 'direct',
-    })).resolves.toBeUndefined()
+    })).toBeUndefined()
   } finally {
     client.close()
   }

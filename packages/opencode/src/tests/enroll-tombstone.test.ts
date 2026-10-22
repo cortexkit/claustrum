@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { isProviderTombstone, tombstoneFor } from "../tombstone";
 import { defaultIo, writeOAuthTombstone, type AuthTombstoneIo } from "../enroll-tombstone";
 import { AuthFileValidationError } from "../errors";
+import { rejectionOf, throwerOf } from "./settle";
 
 const provider = "xai";
 const canonical = Buffer.from(JSON.stringify({ [provider]: tombstoneFor("oauth", provider) }) + "\n");
@@ -39,14 +40,14 @@ describe("OAuth tombstone enrollment", () => {
     const before = Buffer.from('{}\n');
     const f = fake(before);
     f.io.write = async (_path, bytes) => { f.writes.push(bytes.subarray()); f.disk = before; };
-    await expect(writeOAuthTombstone("auth.json", provider, f.io)).rejects.toThrow("auth repeatedly restored by workspace child; stop the child and retry");
+    expect(await throwerOf(writeOAuthTombstone("auth.json", provider, f.io))).toThrow("auth repeatedly restored by workspace child; stop the child and retry");
     expect(f.writes).toHaveLength(2);
   });
 
   test("refuses newer bytes without another write", async () => {
     const f = fake(Buffer.from('{}\n'));
     f.io.write = async (_path, bytes) => { f.writes.push(bytes.subarray()); f.disk = Buffer.from('{"xai":{"type":"oauth","access":"new","refresh":"new","expires":9}}\n'); };
-    await expect(writeOAuthTombstone("auth.json", provider, f.io)).rejects.toThrow("auth changed during enrolment; newer material left untouched");
+    expect(await throwerOf(writeOAuthTombstone("auth.json", provider, f.io))).toThrow("auth changed during enrolment; newer material left untouched");
     expect(f.writes).toHaveLength(1);
   });
 
@@ -55,7 +56,7 @@ describe("OAuth tombstone enrollment", () => {
     const after = Buffer.from('{"xai":{"type":"oauth","access":"old","refresh":"old","expires":1},"anthropic":"A2"}\n');
     const f = fake(before);
     f.io.write = async (_path, bytes) => { f.writes.push(bytes.subarray()); f.disk = after; };
-    await expect(writeOAuthTombstone("auth.json", provider, f.io)).rejects.toThrow("auth changed during enrolment; newer material left untouched");
+    expect(await throwerOf(writeOAuthTombstone("auth.json", provider, f.io))).toThrow("auth changed during enrolment; newer material left untouched");
     expect(f.writes).toHaveLength(1);
     expect(f.disk).toEqual(after);
   });
@@ -63,7 +64,7 @@ describe("OAuth tombstone enrollment", () => {
   test("reformatted equal JSON is newer bytes", async () => {
     const f = fake(Buffer.from('{"anthropic":{}}\n'));
     f.io.write = async (_path, bytes) => { f.writes.push(bytes.subarray()); f.disk = Buffer.from('{ "anthropic": {} }\n'); };
-    await expect(writeOAuthTombstone("auth.json", provider, f.io)).rejects.toThrow("auth changed during enrolment; newer material left untouched");
+    expect(await throwerOf(writeOAuthTombstone("auth.json", provider, f.io))).toThrow("auth changed during enrolment; newer material left untouched");
   });
 
   test("recognizes existing canonical tombstone", async () => {
@@ -75,7 +76,7 @@ describe("OAuth tombstone enrollment", () => {
   test("rejects malformed and non-object auth", async () => {
     for (const [bytes, message] of [[Buffer.from("{oops"), "auth file contains invalid JSON"], [Buffer.from("[]"), "auth file must contain a JSON object"], [Buffer.from("null"), "auth file must contain a JSON object"]] as const) {
       const f = fake(bytes);
-      await expect(writeOAuthTombstone("auth.json", provider, f.io)).rejects.toThrow(message);
+      expect(await throwerOf(writeOAuthTombstone("auth.json", provider, f.io))).toThrow(message);
       expect(f.writes).toHaveLength(0);
     }
   });
@@ -90,7 +91,7 @@ describe("OAuth tombstone enrollment", () => {
     let reads = 0;
     const io: AuthTombstoneIo = { ...defaultIo(), async read() { reads++; return null; }, async write() {} };
     for (const invalid of ["x y", "constructor", "prototype"]) {
-      await expect(writeOAuthTombstone("auth.json", invalid, io)).rejects.toThrow("invalid auth provider identifier");
+      expect(await throwerOf(writeOAuthTombstone("auth.json", invalid, io))).toThrow("invalid auth provider identifier");
     }
     expect(reads).toBe(0);
   });
@@ -107,7 +108,7 @@ describe("OAuth tombstone enrollment", () => {
 
     const disappeared = fake(Buffer.from('{}\n'));
     disappeared.io.write = async (_path, bytes) => { disappeared.writes.push(bytes.subarray()); disappeared.disk = null; };
-    await expect(writeOAuthTombstone("auth.json", provider, disappeared.io)).rejects.toThrow("auth file disappeared during enrolment; nothing written back");
+    expect(await throwerOf(writeOAuthTombstone("auth.json", provider, disappeared.io))).toThrow("auth file disappeared during enrolment; nothing written back");
   });
 
   test("never includes raw auth material in thrown errors", async () => {
@@ -143,7 +144,7 @@ describe("OAuth tombstone real IO", () => {
     dir = await mkdtemp(join(tmpdir(), "enroll-tombstone-"));
     const target = join(dir, "target"); const path = join(dir, "auth.json");
     await writeFile(target, "{}\n"); await symlink(target, path);
-    await expect(writeOAuthTombstone(path, provider)).rejects.toThrow("auth file must be a regular 0600 file");
+    expect(await throwerOf(writeOAuthTombstone(path, provider))).toThrow("auth file must be a regular 0600 file");
     expect((await lstat(path)).isSymbolicLink()).toBe(true);
   });
 
@@ -151,23 +152,23 @@ describe("OAuth tombstone real IO", () => {
     dir = await mkdtemp(join(tmpdir(), "enroll-tombstone-"));
     const path = join(dir, "auth.json");
     await writeFile(path, Buffer.alloc(1024 * 1024 + 1, 65), { mode: 0o600 });
-    await expect(writeOAuthTombstone(path, provider)).rejects.toThrow("auth file exceeds 1 MiB");
-    await expect(writeOAuthTombstone(path, provider)).rejects.toBeInstanceOf(AuthFileValidationError);
+    expect(await throwerOf(writeOAuthTombstone(path, provider))).toThrow("auth file exceeds 1 MiB");
+    expect(await rejectionOf(writeOAuthTombstone(path, provider))).toBeInstanceOf(AuthFileValidationError);
   });
 
   test("refuses insecure mode", async () => {
     dir = await mkdtemp(join(tmpdir(), "enroll-tombstone-"));
     const path = join(dir, "auth.json");
     await writeFile(path, "{}\n", { mode: 0o644 });
-    await expect(writeOAuthTombstone(path, provider)).rejects.toThrow("auth file must be a regular 0600 file");
-    await expect(writeOAuthTombstone(path, provider)).rejects.toBeInstanceOf(AuthFileValidationError);
+    expect(await throwerOf(writeOAuthTombstone(path, provider))).toThrow("auth file must be a regular 0600 file");
+    expect(await rejectionOf(writeOAuthTombstone(path, provider))).toBeInstanceOf(AuthFileValidationError);
   });
 
   test("refuses a directory at the auth path", async () => {
     dir = await mkdtemp(join(tmpdir(), "enroll-tombstone-"));
     const path = join(dir, "auth.json");
     await mkdir(path);
-    await expect(writeOAuthTombstone(path, provider)).rejects.toThrow("auth file must be a regular 0600 file");
+    expect(await throwerOf(writeOAuthTombstone(path, provider))).toThrow("auth file must be a regular 0600 file");
   });
 
   test("cleans temporary file when replacement fails", async () => {
@@ -177,7 +178,7 @@ describe("OAuth tombstone real IO", () => {
     await writeFile(path, original, { mode: 0o600 });
     try {
       await chmod(dir, 0o500);
-      await expect(writeOAuthTombstone(path, provider)).rejects.toThrow("auth file replacement failed");
+      expect(await throwerOf(writeOAuthTombstone(path, provider))).toThrow("auth file replacement failed");
     } finally {
       await chmod(dir, 0o700);
     }
@@ -202,7 +203,7 @@ describe("OAuth tombstone real IO", () => {
         return io.lstat(candidate);
       },
     };
-    await expect(writeOAuthTombstone(path, provider, racing)).rejects.toThrow("auth file must be a regular 0600 file");
+    expect(await throwerOf(writeOAuthTombstone(path, provider, racing))).toThrow("auth file must be a regular 0600 file");
     expect(planted).toBe(true);
   });
 });

@@ -15,6 +15,7 @@ import {
   readHandleFile,
   type OpenCodeHandleFileV1,
 } from '../handles.js'
+import { throwerOf } from './settle'
 
 // Only Unix chmod/mode and symlink fixtures are skipped on Windows. The valid read
 // test runs on every platform and uses the store's native ACL verification on Windows.
@@ -66,11 +67,11 @@ describe('client handle-file contract', () => {
     const path = join(root, 'handles.json')
     await writeFile(path, JSON.stringify(validFile()), { mode: 0o600 })
     await chmod(root, 0o777)
-    await expect(readHandleFile(path)).rejects.toThrow('handle file folder') 
-    await expect(readHandleFile(path)).rejects.toThrow('is not private: world-writable ancestor')
+    expect(await throwerOf(readHandleFile(path))).toThrow('handle file folder')
+    expect(await throwerOf(readHandleFile(path))).toThrow('is not private: world-writable ancestor')
     await chmod(root, 0o700)
     await chmod(path, 0o640)
-    await expect(readHandleFile(path)).rejects.toThrow('exactly 0600')
+    expect(await throwerOf(readHandleFile(path))).toThrow('exactly 0600')
   })
 
   // A GROUP-WRITABLE PARENT IS REFUSED, NOT ONLY A WORLD-WRITABLE ONE.
@@ -89,7 +90,7 @@ describe('client handle-file contract', () => {
     await writeFile(path, JSON.stringify(validFile()), { mode: 0o600 })
     await chmod(root, 0o770)
     await withSharedAncestorGroup(root, async () => {
-      await expect(readHandleFile(path)).rejects.toThrow('is not private: group-writable ancestor')
+      expect(await throwerOf(readHandleFile(path))).toThrow('is not private: group-writable ancestor')
     })
     // The same directory without the group bit reads cleanly -- proving the refusal came
     // from that bit and not from something else about the fixture.
@@ -119,7 +120,7 @@ describe('client handle-file contract', () => {
 
     await chmod(root, 0o770)
     await withSharedAncestorGroup(root, async () => {
-      await expect(readHandleFile(path)).rejects.toThrow('ancestor')
+      expect(await throwerOf(readHandleFile(path))).toThrow('ancestor')
     })
     await chmod(root, 0o700)
   })
@@ -130,7 +131,7 @@ describe('client handle-file contract', () => {
     await mkdir(root, { recursive: true, mode: 0o700 })
     const path = join(root, 'handles.json')
     await writeFile(path, 'x'.repeat(262145), { mode: 0o600 })
-    await expect(readHandleFile(path)).rejects.toThrow('exceeds 256 KiB')
+    expect(await throwerOf(readHandleFile(path))).toThrow('exceeds 256 KiB')
   })
 
   test('rejects invalid account minTtlMs values', () => {
@@ -197,24 +198,24 @@ describe('client handle-file contract', () => {
     const source = JSON.stringify(validFile())
     const regular = { isFile: () => true, mode: 0o100600, uid: 1000, size: source.length }
     const parent = { isFile: () => false, isDirectory: () => true, mode: 0o040755, uid: 1000 }
-    await expect(readHandleFile('/tmp/handles.json', {
+    expect(await throwerOf(readHandleFile('/tmp/handles.json', {
       currentUid: () => 1000,
       lstat: async () => regular,
       stat: async () => { throw new Error('parent denied') },
       readFile: async () => source,
-    })).rejects.toThrow('cannot stat handle file parent: parent denied')
-    await expect(readHandleFile('/tmp/handles.json', {
+    }))).toThrow('cannot stat handle file parent: parent denied')
+    expect(await throwerOf(readHandleFile('/tmp/handles.json', {
       currentUid: () => 1000,
       lstat: async () => regular,
       stat: async () => parent,
       readFile: async () => { throw new Error('read denied') },
-    })).rejects.toThrow('cannot read handle file: read denied')
-    if (posix) await expect(readHandleFile('/tmp/handles.json', {
+    }))).toThrow('cannot read handle file: read denied')
+    if (posix) expect(await throwerOf(readHandleFile('/tmp/handles.json', {
       currentUid: () => 1000,
       lstat: async () => ({ ...regular, mode: 0o100640, uid: 1001 }),
       stat: async () => { throw new Error('must not reach parent') },
       readFile: async () => { throw new Error('must not read') },
-    })).rejects.toThrow('handle file mode must be exactly 0600')
+    }))).toThrow('handle file mode must be exactly 0600')
   }))
 
   test.skipIf(!posix)('preserves the historical symlink and grow-after-fstat fixture outcomes', async () => {
@@ -223,10 +224,10 @@ describe('client handle-file contract', () => {
     const link = join(root, 'handles.json')
     await writeFile(target, JSON.stringify(validFile()), { mode: 0o600 })
     await symlink(target, link)
-    await expect(readHandleFile(link)).rejects.toThrow('handle file must not be a symlink')
+    expect(await throwerOf(readHandleFile(link))).toThrow('handle file must not be a symlink')
 
     const chunk = Buffer.alloc(HANDLE_FILE_CONTRACT.maxBytes + 2, 0x78)
-    await privatePathContext.run(readerFixtureOptions, () => expect(readHandleFile('/tmp/handles.json', {
+    await privatePathContext.run(readerFixtureOptions, async () => expect(await throwerOf(readHandleFile('/tmp/handles.json', {
       currentUid: () => 1000,
       stat: async () => ({ isFile: () => false, isDirectory: () => true, mode: 0o040755, uid: 1000 }),
       open: async () => ({
@@ -241,7 +242,7 @@ describe('client handle-file contract', () => {
         },
         close: async () => {},
       }),
-    })).rejects.toThrow('handle file exceeds 256 KiB'))
+    }))).toThrow('handle file exceeds 256 KiB'))
   })
 
 })

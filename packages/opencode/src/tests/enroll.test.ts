@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ServedCredential } from "@cortexkit/claustrum-client";
 import { parseEnrollArgs, readEnrollmentHandle, runEnrollment, type EnrollArgs, type EnrollDependencies } from "../enroll";
+import { throwerOf } from "./settle";
 
 process.env.CLAUSTRUM_CUSTODY_LOG = "off";
 
@@ -71,45 +72,45 @@ describe("enrollment runner", () => {
   test("orders successful enrollment and closes the client", async () => {
     const events: string[] = [];
     const deps = dependencies(events, { connect: async () => { events.push("connect"); return (await dependencies(events).connect()); } });
-    await expect(runEnrollment(args(), deps)).resolves.toBe("Enrolled xai main in opencode-claustrum; reload OpenCode.");
+    expect(await runEnrollment(args(), deps)).toBe("Enrolled xai main in opencode-claustrum; reload OpenCode.");
     expect(events).toEqual(["connect", "get", "manifest", "tombstone", "close"]);
   });
 
   test("refuses a served identity mismatch", async () => {
     const events: string[] = [];
     const deps = dependencies(events, { connect: async () => ({ getCredential: async () => { events.push("get"); return served("oauth:other"); }, close: () => { events.push("close"); } }) });
-    await expect(runEnrollment(args(), deps)).rejects.toThrow("credential identity mismatch");
+    expect(await throwerOf(runEnrollment(args(), deps))).toThrow("credential identity mismatch");
     expect(events).toEqual(["get", "close"]);
   });
 
   test("refuses a served credential without identity metadata", async () => {
     const events: string[] = [];
     const deps = dependencies(events, { connect: async () => ({ getCredential: async () => { events.push("get"); return served(undefined); }, close: () => { events.push("close"); } }) });
-    await expect(runEnrollment(args(), deps)).rejects.toThrow("credential identity mismatch");
+    expect(await throwerOf(runEnrollment(args(), deps))).toThrow("credential identity mismatch");
     expect(events).toEqual(["get", "close"]);
   });
 
   test("refuses unusable material, vault failures, and write failures without later writes", async () => {
     const empty = dependencies([], { connect: async () => ({ getCredential: async () => served("oauth:xai", ""), close: () => {} }) });
-    await expect(runEnrollment(args(), empty)).rejects.toThrow("credential did not serve usable material");
+    expect(await throwerOf(runEnrollment(args(), empty))).toThrow("credential did not serve usable material");
     const rpcEvents: string[] = [];
     const rpc = dependencies(rpcEvents, { connect: async () => ({ getCredential: async () => { rpcEvents.push("get"); throw new Error(token); }, close: () => { rpcEvents.push("close"); } }) });
-    await expect(runEnrollment(args(), rpc)).rejects.toThrow("vault read failed");
+    expect(await throwerOf(runEnrollment(args(), rpc))).toThrow("vault read failed");
     expect(rpcEvents).toEqual(["get", "close"]);
     const manifestEvents: string[] = [];
-    await expect(runEnrollment(args(), dependencies(manifestEvents, { writeManifest: async () => { manifestEvents.push("manifest"); throw new Error(token); } }))).rejects.toThrow("manifest write failed");
+    expect(await throwerOf(runEnrollment(args(), dependencies(manifestEvents, { writeManifest: async () => { manifestEvents.push("manifest"); throw new Error(token); } })))).toThrow("manifest write failed");
     expect(manifestEvents).not.toContain("tombstone");
     const tombstoneEvents: string[] = [];
-    await expect(runEnrollment(args(), dependencies(tombstoneEvents, { writeTombstone: async () => { tombstoneEvents.push("tombstone"); throw new Error(token); } }))).rejects.toThrow("tombstone write failed after manifest write; manifest entry remains — run --remove before /login");
+    expect(await throwerOf(runEnrollment(args(), dependencies(tombstoneEvents, { writeTombstone: async () => { tombstoneEvents.push("tombstone"); throw new Error(token); } })))).toThrow("tombstone write failed after manifest write; manifest entry remains — run --remove before /login");
   });
 
   test("removes only the manifest and reports remove failures without login instruction", async () => {
     const events: string[] = [];
     const removeArgs = { ...args(), remove: true, handleFile: undefined, minTtlMs: undefined, tokenLifetimeMs: undefined };
     const deps = dependencies(events, { readHandle: async () => { throw new Error("must not read"); }, connect: async () => { throw new Error("must not connect"); } });
-    await expect(runEnrollment(removeArgs, deps)).resolves.toContain("/login");
+    expect(await runEnrollment(removeArgs, deps)).toContain("/login");
     expect(events).toEqual(["remove"]);
-    await expect(runEnrollment(removeArgs, dependencies([], { removeManifest: async () => { throw new Error(token); } }))).rejects.toThrow("manifest removal failed");
+    expect(await throwerOf(runEnrollment(removeArgs, dependencies([], { removeManifest: async () => { throw new Error(token); } })))).toThrow("manifest removal failed");
   });
 
   test("refuses handle failures before connection without touching seeded files", async () => {
@@ -118,7 +119,7 @@ describe("enrollment runner", () => {
     await writeFile(authPath, "auth-bytes"); await writeFile(manifestPath, "manifest-bytes");
     const before = await Promise.all([readFile(authPath), readFile(manifestPath)]);
     const events: string[] = [];
-    await expect(runEnrollment({ ...args(), handleFile: join(root, "missing"), authPath, manifestPath }, dependencies(events, { readHandle: readEnrollmentHandle, connect: async () => { throw new Error("connected"); } }))).rejects.toThrow("handle file unreadable");
+    expect(await throwerOf(runEnrollment({ ...args(), handleFile: join(root, "missing"), authPath, manifestPath }, dependencies(events, { readHandle: readEnrollmentHandle, connect: async () => { throw new Error("connected"); } })))).toThrow("handle file unreadable");
     expect(events).toEqual([]);
     expect(await Promise.all([readFile(authPath), readFile(manifestPath)])).toEqual(before);
   });
@@ -128,13 +129,13 @@ describe("capability handle reader", () => {
   test("trims one surrounding whitespace region and refuses unsafe files", async () => {
     const root = await fresh(); const path = join(root, "handle");
     await writeFile(path, `\n${handle}\n`, { mode: 0o600 }); await chmod(path, 0o600);
-    await expect(readEnrollmentHandle(path)).resolves.toBe(handle);
-    await chmod(path, 0o644); await expect(readEnrollmentHandle(path)).rejects.toThrow("unsafe handle file");
-    await chmod(path, 0o600); await writeFile(path, "x".repeat(300)); await expect(readEnrollmentHandle(path)).rejects.toThrow("handle file exceeds limit");
-    await writeFile(path, `${handle}\n${handle}`); await expect(readEnrollmentHandle(path)).rejects.toThrow("invalid handle file");
-    await writeFile(path, "garbage"); await expect(readEnrollmentHandle(path)).rejects.toThrow("invalid handle file");
-    await writeFile(path, handle, { mode: 0o600 }); await symlink(path, join(root, "link")); await expect(readEnrollmentHandle(join(root, "link"))).rejects.toThrow("ELOOP: too many symbolic links encountered, open");
-    await expect(readEnrollmentHandle(root)).rejects.toThrow("unsafe handle file");
+    expect(await readEnrollmentHandle(path)).toBe(handle);
+    await chmod(path, 0o644); expect(await throwerOf(readEnrollmentHandle(path))).toThrow("unsafe handle file");
+    await chmod(path, 0o600); await writeFile(path, "x".repeat(300)); expect(await throwerOf(readEnrollmentHandle(path))).toThrow("handle file exceeds limit");
+    await writeFile(path, `${handle}\n${handle}`); expect(await throwerOf(readEnrollmentHandle(path))).toThrow("invalid handle file");
+    await writeFile(path, "garbage"); expect(await throwerOf(readEnrollmentHandle(path))).toThrow("invalid handle file");
+    await writeFile(path, handle, { mode: 0o600 }); await symlink(path, join(root, "link")); expect(await throwerOf(readEnrollmentHandle(join(root, "link")))).toThrow("ELOOP: too many symbolic links encountered, open");
+    expect(await throwerOf(readEnrollmentHandle(root))).toThrow("unsafe handle file");
   });
 });
 

@@ -2,6 +2,7 @@ import { expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { ClaustrumClient, ScopedWatchError, type ScopedWatchNotice } from '../index'
 import { decodeScopedWatchNotice } from '../watch'
+import { rejectionOf } from './settle'
 
 const fixture = JSON.parse(readFileSync(new URL('../../../../crates/credentials-module/tests/fixtures/enrollment_wire_contract.json', import.meta.url), 'utf8'))
 // `op` labels sections in the producer fixture; route request bodies use `method`.
@@ -69,7 +70,7 @@ test('watch stand-in rejects op and extra read-envelope keys', async () => {
     { method: 1, params: {} },
   ]) {
     const daemon = new WatchDaemon(); daemon.scripts = [{ notices: [] }]
-    await expect(daemon.subscribe({}, body, () => {}).closed).rejects.toMatchObject({ code: 'invalid_request' })
+    expect(await rejectionOf(daemon.subscribe({}, body, () => {}).closed)).toMatchObject({ code: 'invalid_request' })
   }
 })
 
@@ -88,7 +89,7 @@ test('watch malformed notices reject with a typed error and cancel', async () =>
     { ...notice(), view: null }, { ...notice(), keys: 1 }]) {
     const daemon = new WatchDaemon(); daemon.scripts = [{ notices: [encode(value)], hold: true }]
     const watch = (await clientWith(daemon)).watchScoped(() => { throw new Error('must not deliver') })
-    await expect(watch.closed).rejects.toMatchObject({ name: 'ScopedWatchError', code: 'invalid_notice' })
+    expect(await rejectionOf(watch.closed)).toMatchObject({ name: 'ScopedWatchError', code: 'invalid_notice' })
     expect(daemon.cancels).toBe(1)
     expect(daemon.reads).toHaveLength(0)
   }
@@ -157,6 +158,6 @@ test('watch stop is idempotent and callback failure is typed', async () => {
   await Promise.resolve(); watch.stop(); watch.stop()
   expect(await watch.closed).toEqual({ kind: 'stopped' })
   const broken = client.watchScoped(() => { throw new Error('callback') })
-  await expect(broken.closed).rejects.toMatchObject({ code: 'callback_failed' })
+  expect(await rejectionOf(broken.closed)).toMatchObject({ code: 'callback_failed' })
   expect(daemon.cancels).toBe(2)
 })

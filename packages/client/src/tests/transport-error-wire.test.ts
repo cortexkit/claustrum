@@ -223,7 +223,7 @@ test('a transient terminal error reconnects once and retries the call', async ()
   let calls = 0
   await withVault(() => (++calls === 1 ? errorFrame('module_timeout') : { type: FrameType.Response, body: PROPOSED }),
     async ({ client, vault, connects }) => {
-      await expect(client.enrollPropose(PROPOSE)).resolves.toEqual({ requestId: 'request-id' })
+      expect(await client.enrollPropose(PROPOSE)).toEqual({ requestId: 'request-id' })
       expect(vault.requests.map((request) => request.method)).toEqual(['auth.enroll_propose', 'auth.enroll_propose'])
       expect(vault.connections()).toBe(2)
       expect(connects()).toBe(2)

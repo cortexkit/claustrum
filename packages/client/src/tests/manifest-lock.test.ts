@@ -15,6 +15,7 @@ import {
   writeHandleFileLocked,
 } from '../manifest-lock'
 import type { ManifestLockError, ManifestLockErrorCode } from '../index'
+import { rejectionOf, throwerOf } from './settle'
 
 const roots: string[] = []
 const handle = (letter: string) => `ckh_${letter.repeat(43)}`
@@ -98,8 +99,8 @@ const lockTest = onPosix ? test : test.skip
 describe('manifest writer lock', () => {
   test.skipIf(onPosix)('refuses on Windows rather than risk two overlapping writers', async () => {
     const path = join(await mkdtemp(join(tmpdir(), 'claustrum-win-lock-')), 'opencode-handles.json')
-    await expect(withManifestLock(path, 'tenant', () => 'ran')).rejects.toMatchObject({ code: 'unsupported_platform' })
-    await expect(writeHandleFileLocked(path, 'tenant', () => {})).rejects.toMatchObject({ code: 'unsupported_platform' })
+    expect(await rejectionOf(withManifestLock(path, 'tenant', () => 'ran'))).toMatchObject({ code: 'unsupported_platform' })
+    expect(await rejectionOf(writeHandleFileLocked(path, 'tenant', () => {}))).toMatchObject({ code: 'unsupported_platform' })
   })
 
   lockTest('lock directory and owner record are owner-only before the callback', async () => {
@@ -119,7 +120,7 @@ describe('manifest writer lock', () => {
     await chmod(root, 0o775)
     const target = join(root, 'private', 'manifest.json')
     await withSharedAncestorGroup(root, async () => {
-      await expect(writeHandleFileLocked(target, 'tenant', () => {})).rejects.toThrow('is not private: group-writable ancestor')
+      expect(await throwerOf(writeHandleFileLocked(target, 'tenant', () => {}))).toThrow('is not private: group-writable ancestor')
     })
     expect(await readdir(root)).toEqual([])
   })
@@ -129,7 +130,7 @@ describe('manifest writer lock', () => {
   test.skipIf(!onPosix)('writer refuses a sticky world-writable parent the user owns', async () => {
     const path = await cleanAncestorManifestPath()
     await makeSticky(join(path, '..'))
-    await expect(writeHandleFileLocked(path, 'tenant', () => {})).rejects.toThrow('is not private: world-writable ancestor')
+    expect(await throwerOf(writeHandleFileLocked(path, 'tenant', () => {}))).toThrow('is not private: world-writable ancestor')
   })
 
   test.skipIf(!onPosix)('writer refuses a parent owned by another uid before writing', async () => {
@@ -137,7 +138,7 @@ describe('manifest writer lock', () => {
     const getuid = process.getuid!
     process.getuid = () => getuid() + 1
     try {
-      await expect(writeHandleFileLocked(path, 'tenant', () => {})).rejects.toThrow('not owned by the current uid')
+      expect(await throwerOf(writeHandleFileLocked(path, 'tenant', () => {}))).toThrow('not owned by the current uid')
       expect(await readdir(join(path, '..'))).toEqual([])
     } finally { process.getuid = getuid }
   })
@@ -148,7 +149,7 @@ describe('manifest writer lock', () => {
     await mkdir(`${path}.lock`)
     const old = (Date.now() - 1_000) / 1_000
     await utimes(`${path}.lock`, old, old)
-    await expect(withManifestLock(path, 'tenant', () => 'claimed')).resolves.toBe('claimed')
+    expect(await withManifestLock(path, 'tenant', () => 'claimed')).toBe('claimed')
   })
 
   lockTest('ownerless lock with recent mtime is retained until ttl', async () => {
@@ -157,7 +158,7 @@ describe('manifest writer lock', () => {
     await mkdir(`${path}.lock`)
     const future = (Date.now() + 10_000) / 1_000
     await utimes(`${path}.lock`, future, future)
-    await expect(withManifestLock(path, 'tenant', () => {})).rejects.toMatchObject({ code: 'lock_busy' })
+    expect(await rejectionOf(withManifestLock(path, 'tenant', () => {}))).toMatchObject({ code: 'lock_busy' })
     expect((await readdir(`${path}.lock`))).toEqual([])
   })
 
@@ -169,7 +170,7 @@ describe('manifest writer lock', () => {
     await mkdir(`${path}.lock`)
     const old = (Date.now() - 1_000) / 1_000
     await utimes(`${path}.lock`, old, old)
-    await expect(withManifestLock(path, 'tenant', () => {})).rejects.toMatchObject({ code: 'lock_busy' })
+    expect(await rejectionOf(withManifestLock(path, 'tenant', () => {}))).toMatchObject({ code: 'lock_busy' })
     expect(JSON.parse(await readFile(join(`${path}.lock`, 'owner'), 'utf8')).nonce).toBe('other')
   })
 
@@ -224,7 +225,7 @@ describe('manifest writer lock', () => {
 
     await withManifestLock(path, 'claimant', async () => {})
 
-    await expect(stat(target)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await rejectionOf(stat(target))).toMatchObject({ code: 'ENOENT' })
   })
 
   lockTest('quarantine past ttl but inside margin is retained', async () => {
@@ -306,7 +307,7 @@ describe('manifest writer lock', () => {
       expect(error.code).toBe('owner_invalid')
       expect((await stat(lockPath)).isDirectory()).toBe(true)
       expect((await readdir(join(path, '..'))).some((name) => name.includes('.lock.stale-'))).toBe(false)
-      await expect(stat(join(path, '..', 'escape'))).rejects.toMatchObject({ code: 'ENOENT' })
+      expect(await rejectionOf(stat(join(path, '..', 'escape')))).toMatchObject({ code: 'ENOENT' })
     }
   })
 
@@ -382,7 +383,7 @@ describe('manifest writer lock', () => {
       }).catch((error: unknown) => { tickError = error })
     }, 5)
     try {
-      await expect(withManifestLock(path, 'anthropic-auth', async () => {})).rejects.toThrow('manifest lock busy')
+      expect(await throwerOf(withManifestLock(path, 'anthropic-auth', async () => {}))).toThrow('manifest lock busy')
       expect(Date.now() - started).toBeGreaterThanOrEqual(35)
     } finally { clearInterval(renewal); await tick }
     if (tickError !== undefined) throw tickError
@@ -398,7 +399,7 @@ describe('manifest writer lock', () => {
       expect(parsed.tenant).toBe('anthropic-auth')
     })
 
-    await expect(stat(lockPath)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await rejectionOf(stat(lockPath))).toMatchObject({ code: 'ENOENT' })
   })
 
   // POSIX only: stale eviction relies on renaming a lock another process may hold
@@ -487,7 +488,7 @@ describe('manifest writer lock', () => {
     allowAttemptCompletion.resolve()
     await loser
 
-    await expect(stat(`${path}.lock`)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await rejectionOf(stat(`${path}.lock`))).toMatchObject({ code: 'ENOENT' })
   })
 
   lockTest('an expired holder does not release its directory and logs the lost lease', async () => {
@@ -508,7 +509,7 @@ describe('manifest writer lock', () => {
       console.warn = originalWarn
     }
 
-    await expect(stat(lockPath)).resolves.toBeDefined()
+    expect(await stat(lockPath)).toBeDefined()
     expect(warnings.some((args) => args.includes('manifest lock lease lost, not releasing'))).toBe(true)
   })
 
@@ -560,7 +561,7 @@ describe('manifest writer lock', () => {
     await chmod(parent, 0o770)
 
     await withSharedAncestorGroup(parent, async () => {
-      await expect(writeHandleFileLocked(path, 'anthropic-auth', () => {})).rejects.toThrow('is not private: group-writable ancestor')
+      expect(await throwerOf(writeHandleFileLocked(path, 'anthropic-auth', () => {}))).toThrow('is not private: group-writable ancestor')
     })
     expect((await stat(parent)).mode & 0o777).toBe(0o770)
   })
@@ -591,7 +592,7 @@ describe('manifest writer lock', () => {
     const path = await manifestPath()
     __setManifestLockTestOptions({ ttlMs: 30, renewEveryMs: 10, retryMinMs: 2, retryMaxMs: 3 })
     await owner(path, Date.now() + 1_000, 'opencode-claustrum')
-    await expect(withManifestLock(path, 'anthropic-auth', async () => {})).rejects.toThrow('manifest lock busy')
+    expect(await throwerOf(withManifestLock(path, 'anthropic-auth', async () => {}))).toThrow('manifest lock busy')
   })
 
   test.skipIf(!onPosix)('refuses a dangling manifest symlink without replacing it', async () => {
@@ -599,12 +600,12 @@ describe('manifest writer lock', () => {
     const target = join(path, '..', 'missing-target.json')
     await symlink(target, path)
 
-    await expect(writeHandleFileLocked(path, 'anthropic-auth', (file) => {
+    expect(await throwerOf(writeHandleFileLocked(path, 'anthropic-auth', (file) => {
       file.providers.push(provider('anthropic', 'anthropic-auth'))
-    })).rejects.toThrow('handle file must be a regular file')
+    }))).toThrow('handle file must be a regular file')
 
     expect((await lstat(path)).isSymbolicLink()).toBe(true)
-    await expect(stat(target)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await rejectionOf(stat(target))).toMatchObject({ code: 'ENOENT' })
   })
 
   // POSIX only: stale eviction relies on renaming a lock another process may hold
@@ -626,13 +627,13 @@ describe('manifest writer lock', () => {
       },
     } as never)
 
-    await expect(writeHandleFileLocked(path, 'anthropic-auth', (file) => {
+    expect(await throwerOf(writeHandleFileLocked(path, 'anthropic-auth', (file) => {
       file.providers[0]!.accounts.push({
         label: 'backup',
         handle: handle('Z'),
         credential_id: 'apikey:anthropic:backup',
       })
-    })).rejects.toThrow('manifest lock renewal failed; write aborted')
+    }))).toThrow('manifest lock renewal failed; write aborted')
 
     expect(await readFile(path, 'utf8')).toBe(before)
   })
@@ -701,7 +702,7 @@ describe('thrown errors carry a stable code', () => {
     }).catch((e) => e)
     expect(error).toBeInstanceOf(EnrollRefusal)
     expect((error as Error).message).toBe('identity mismatch')
-    await expect(stat(`${path}.lock`)).rejects.toThrow()
+    expect(await throwerOf(stat(`${path}.lock`))).toThrow()
     // The consumer-visible consequence: the next claimant is not stalled for the 30s
     // TTL. The lock file being gone (asserted above) is the release proof; this checks
     // that a second claim then succeeds. The race only stops a hang and names the

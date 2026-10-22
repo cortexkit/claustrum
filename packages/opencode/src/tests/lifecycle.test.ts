@@ -4,6 +4,7 @@ import { type ServedCredential } from "@cortexkit/claustrum-client";
 
 import { createOpencodeClaustrumPlugin } from "../index";
 import { tombstoneFor } from "../tombstone";
+import { throwerOf } from "./settle";
 
 const PROVIDER = "deepseek";
 const MAIN_HANDLE = `ckh_${"a".repeat(43)}`;
@@ -141,8 +142,8 @@ describe("exported OpenCode custody plugin lifecycle", () => {
     await hooks.config?.(cfg);
     expect(cfg.provider[PROVIDER].options.apiKey).toBeUndefined();
     expect(typeof cfg.provider[PROVIDER].options.fetch).toBe("function");
-    await expect((cfg.provider[PROVIDER].options.fetch as typeof globalThis.fetch)("https://upstream.test"))
-      .rejects.toThrow(/native LLM mode/);
+    expect(await throwerOf((cfg.provider[PROVIDER].options.fetch as typeof globalThis.fetch)("https://upstream.test")))
+      .toThrow(/native LLM mode/);
   });
   test("exports the OpenCode v1 plugin object from a dedicated file-plugin entrypoint", async () => {
     const module = await import("../opencode-plugin") as unknown as { default?: { id?: unknown; server?: unknown } };
@@ -237,7 +238,7 @@ describe("exported OpenCode custody plugin lifecycle", () => {
     const fetch = cfg.provider[PROVIDER].options.fetch as typeof globalThis.fetch;
 
     expect(cfg.provider[PROVIDER].options.apiKey).toBe("local-key");
-    await expect(fetch("https://upstream.test")).rejects.toThrow("migrate-opencode");
+    expect(await throwerOf(fetch("https://upstream.test"))).toThrow("migrate-opencode");
     expect(forwarded).toBe(0);
   });
 
@@ -254,7 +255,7 @@ describe("exported OpenCode custody plugin lifecycle", () => {
 
     expect(cfg.provider[PROVIDER].options.baseURL).toBe("https://upstream.test");
     expect(cfg.provider[PROVIDER].options.headers).toEqual({ "x-stock": "kept" });
-    await expect((cfg.provider[PROVIDER].options.fetch as typeof globalThis.fetch)("https://upstream.test"))
-      .rejects.toThrow("migrate-opencode");
+    expect(await throwerOf((cfg.provider[PROVIDER].options.fetch as typeof globalThis.fetch)("https://upstream.test")))
+      .toThrow("migrate-opencode");
   });
 });

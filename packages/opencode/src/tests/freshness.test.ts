@@ -7,6 +7,7 @@ import { createLogger } from "../log";
 import { createOpencodeClaustrumPlugin } from "../plugin";
 import { createServeFetch } from "../serve";
 import { sentinel, tombstoneFor } from "../tombstone";
+import { throwerOf } from "./settle";
 
 const PROVIDER = "deepseek";
 const MAIN_HANDLE = `ckh_${"a".repeat(43)}`;
@@ -565,9 +566,9 @@ describe("custody freshness", () => {
     await success("https://example.test", { method: "POST", body: rawBody, headers: { Authorization: authorization } });
     await authFailure("https://example.test", { headers: { Authorization: authorization } });
     await rateLimited("https://example.test", { headers: { Authorization: authorization } });
-    await expect(transient("https://example.test")).rejects.toThrow();
-    await expect(split("https://example.test")).rejects.toThrow();
-    await expect(exhausted("https://example.test")).rejects.toThrow();
+    expect(await throwerOf(transient("https://example.test"))).toThrow();
+    expect(await throwerOf(split("https://example.test"))).toThrow();
+    expect(await throwerOf(exhausted("https://example.test"))).toThrow();
 
     const serialized = JSON.stringify(entries);
     for (const forbidden of [material, sent, handle, connectionKey, rawBody, authorization]) {

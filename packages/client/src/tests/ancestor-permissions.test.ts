@@ -5,6 +5,7 @@ import { type OwnerOnlyPathAsyncOptions, type OwnerOnlyPathMetadata } from '@cor
 import { privatePathContext } from '../private-path.js'
 import { writeEnrollmentTokenFile } from '../enrollment.js'
 import { accountOptions, privateFixtureDirectory } from './ancestor-fixture.js'
+import { rejectionOf, throwerOf } from './settle'
 
 const cases = [
   ['private group', true, {}],
@@ -61,7 +62,7 @@ for (const [name, accepted, overrides] of cases) {
       await privatePathContext.run(options, async () => {
         const result = writeEnrollmentTokenFile(path, { token: 'a'.repeat(64), token_generation: 1 })
         if (accepted) { await result; expect(JSON.parse(await readFile(path, 'utf8')).token_generation).toBe(1) }
-        else { await expect(result).rejects.toThrow('is not private:'); await expect(readFile(path)).rejects.toMatchObject({ code: 'ENOENT' }) }
+        else { expect(await throwerOf(result)).toThrow('is not private:'); expect(await rejectionOf(readFile(path))).toMatchObject({ code: 'ENOENT' }) }
       })
     } finally { await rm(dir, { recursive: true, force: true }) }
   })

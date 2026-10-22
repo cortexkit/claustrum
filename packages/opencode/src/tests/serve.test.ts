@@ -11,6 +11,7 @@ import * as pkg from "../index";
 import { snapshotRequest } from "../request";
 import { createServeFetch } from "../serve";
 import { sentinel, tombstoneFor } from "../tombstone";
+import { rejectionOf, throwerOf } from "./settle";
 
 const ROOT = "/tmp/opencode/custody-t7";
 const PROVIDER = "deepseek";
@@ -586,8 +587,8 @@ describe("OpenCode custody serve fetch", () => {
     };
     const fetch = serve({ client, upstream });
 
-    await expect(fetch("https://upstream.example/v1/chat", { headers: { "X-Api-Key": SENTINEL } }))
-      .rejects.toThrow("custody redirect refused");
+    expect(await throwerOf(fetch("https://upstream.example/v1/chat", { headers: { "X-Api-Key": SENTINEL } })))
+      .toThrow("custody redirect refused");
     expect(attackerRequests).toEqual([]);
     expect(client.reports).toEqual([]);
   });
@@ -652,7 +653,7 @@ describe("OpenCode custody serve fetch", () => {
       log: { debug() {}, info() {}, warn() {}, error(entry) { entries.push(entry); } },
     });
 
-    await expect(fetch(`https://upstream.example/?key=${encodeURIComponent(SENTINEL)}`)).rejects.toThrow("upstream request failed");
+    expect(await throwerOf(fetch(`https://upstream.example/?key=${encodeURIComponent(SENTINEL)}`))).toThrow("upstream request failed");
     expect(JSON.stringify(entries)).not.toContain("MATERIAL-CANARY");
   });
 
@@ -668,7 +669,7 @@ describe("OpenCode custody serve fetch", () => {
       log: { debug() {}, info() {}, warn() {}, error(entry) { entries.push(entry); } },
     });
 
-    await expect(fetch("https://upstream.example/v1/chat")).rejects.toThrow("could not verify custody handle ownership: Error");
+    expect(await throwerOf(fetch("https://upstream.example/v1/chat"))).toThrow("could not verify custody handle ownership: Error");
     expect(JSON.stringify(entries)).not.toContain("MATERIAL-CANARY");
   });
 
@@ -752,7 +753,7 @@ describe("OpenCode custody serve fetch", () => {
       },
     });
 
-    await expect(fetch(`https://upstream.example/v1/chat?key=${encodeURIComponent(SENTINEL)}`)).rejects.toBeInstanceOf(CustodySplitError);
+    expect(await rejectionOf(fetch(`https://upstream.example/v1/chat?key=${encodeURIComponent(SENTINEL)}`))).toBeInstanceOf(CustodySplitError);
     expect(forwarded).toBe(0);
   });
 
@@ -766,7 +767,7 @@ describe("OpenCode custody serve fetch", () => {
       },
     });
 
-    await expect(fetch("https://upstream.example/v1/chat")).rejects.toHaveProperty("name", "CustodyAuthReadError");
+    expect(await rejectionOf(fetch("https://upstream.example/v1/chat"))).toHaveProperty("name", "CustodyAuthReadError");
     expect(forwarded).toBe(0);
   });
 
@@ -804,7 +805,7 @@ describe("OpenCode custody serve fetch", () => {
       upstream: createUpstream([new Response("slow down", { status: 429 }), 200], requests),
     });
 
-    await expect(fetch("https://upstream.example/v1/chat")).rejects.toThrow(/provider=deepseek.*main:gone.*backup:cooldown.*ck auth migrate-opencode/);
+    expect(await throwerOf(fetch("https://upstream.example/v1/chat"))).toThrow(/provider=deepseek.*main:gone.*backup:cooldown.*ck auth migrate-opencode/);
     try {
       await fetch("https://upstream.example/v1/chat");
     } catch (error) {
@@ -917,7 +918,7 @@ describe("OpenCode custody serve fetch", () => {
       upstreamFetch: async () => new Response("upstream", { status: 200 }),
     });
 
-    await expect(fetch("https://upstream.example/v1/chat")).rejects.toThrow();
+    expect(await throwerOf(fetch("https://upstream.example/v1/chat"))).toThrow();
     expect(freshness.state(accounts[0]!)).toBe("available");
     allowTimeout = false;
 

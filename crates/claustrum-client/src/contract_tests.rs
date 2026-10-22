@@ -564,6 +564,74 @@ impl CredentialGetTarget for ProducerSealTarget {
     }
 }
 
+/// Answers seal with a retryable error the first time and the producer's success reply
+/// after that, counting every call.
+#[cfg(feature = "transport")]
+struct FlakySealTarget {
+    success: Value,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(feature = "transport")]
+impl CredentialGetTarget for FlakySealTarget {
+    fn credential_get<'a>(
+        &'a self,
+        _raw_handle: &'a str,
+        _min_ttl_ms: Option<u64>,
+        _force_refresh: bool,
+    ) -> CredentialResolverFuture<'a, Result<Value, CredentialResolverError>> {
+        Box::pin(async { Err(CredentialResolverError::unavailable()) })
+    }
+
+    fn credential_seal<'a>(
+        &'a self,
+        _request: SealRequest<'a>,
+    ) -> CredentialResolverFuture<'a, Result<Value, CredentialResolverError>> {
+        let first = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
+        let success = self.success.clone();
+        Box::pin(async move {
+            if first {
+                Err(CredentialResolverError::new(
+                    CredentialErrorClass::Transient,
+                    "credential service is temporarily unavailable",
+                ))
+            } else {
+                Ok(success)
+            }
+        })
+    }
+}
+
+/// Every seal is a fresh ciphertext with its own audit row, so the caller owns retries.
+/// A resolver configured to retry other operations must still try a seal exactly once
+/// and hand the retryable error back, even though a second attempt would succeed.
+#[cfg(feature = "transport")]
+#[tokio::test]
+async fn seal_makes_exactly_one_attempt_even_when_retries_are_allowed() {
+    let operation = producer_operation("credential.seal");
+    let target = Arc::new(FlakySealTarget {
+        success: producer_reply(&operation["success"][0]),
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let resolver = ClaustrumCredentialResolver::with_target(target.clone(), 2);
+    let (credential_id, recipient, info, aad, plaintext) = producer_seal_inputs();
+    let error = resolver
+        .seal(SealRequest {
+            credential_id: &credential_id,
+            recipient_public_key: &recipient,
+            info: &info,
+            aad: &aad,
+            plaintext: &plaintext,
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        error.retryable(),
+        "the caller must see that a retry is allowed"
+    );
+    assert_eq!(target.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
 #[cfg(feature = "transport")]
 #[tokio::test]
 async fn producer_seal_reply_decodes_through_the_resolver() {

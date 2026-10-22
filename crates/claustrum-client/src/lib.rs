@@ -426,7 +426,7 @@ pub trait CredentialResolver: Send + Sync {
 
     fn sign<'a>(
         &'a self,
-        _handle: &'a str,
+        _credential_id: &'a str,
         _payload: &'a [u8],
     ) -> CredentialResolverFuture<'a, Result<CredentialSignature, CredentialResolverError>> {
         Box::pin(async { Err(CredentialResolverError::unavailable()) })
@@ -434,13 +434,15 @@ pub trait CredentialResolver: Send + Sync {
 
     fn public_key<'a>(
         &'a self,
-        _handle: &'a str,
+        _credential_id: &'a str,
     ) -> CredentialResolverFuture<'a, Result<CredentialPublicKey, CredentialResolverError>> {
         Box::pin(async { Err(CredentialResolverError::unavailable()) })
     }
 
-    /// Seals one message under a vault-held KEM key (`credential.seal`). The vault
-    /// audits every call, so a retried seal is recorded twice.
+    /// Seals one message under a vault-held KEM key (`credential.seal`). Makes exactly
+    /// one attempt, even on a retryable error: every seal is a fresh ciphertext with its
+    /// own audit row, so retrying is the caller's decision (its own backoff, its own
+    /// record of what was sent), never something the client does silently.
     fn seal<'a>(
         &'a self,
         _request: SealRequest<'a>,
@@ -550,7 +552,7 @@ pub trait CredentialGetTarget: Send + Sync {
 
     fn credential_sign<'a>(
         &'a self,
-        _handle: &'a str,
+        _credential_id: &'a str,
         _payload: &'a [u8],
     ) -> CredentialResolverFuture<'a, Result<Value, CredentialResolverError>> {
         Box::pin(async {
@@ -563,7 +565,7 @@ pub trait CredentialGetTarget: Send + Sync {
 
     fn credential_public_key<'a>(
         &'a self,
-        _handle: &'a str,
+        _credential_id: &'a str,
     ) -> CredentialResolverFuture<'a, Result<Value, CredentialResolverError>> {
         Box::pin(async {
             Err(CredentialResolverError::new(
@@ -766,13 +768,13 @@ impl CredentialResolver for ClaustrumCredentialResolver {
 
     fn sign<'a>(
         &'a self,
-        handle: &'a str,
+        credential_id: &'a str,
         payload: &'a [u8],
     ) -> CredentialResolverFuture<'a, Result<CredentialSignature, CredentialResolverError>> {
         Box::pin(async move {
             let mut retries = 0;
             loop {
-                match self.target.credential_sign(handle, payload).await {
+                match self.target.credential_sign(credential_id, payload).await {
                     Ok(reply) => return decode_signature_reply(reply),
                     Err(error) if error.retryable() && retries < self.transient_retries => {
                         retries += 1;
@@ -785,12 +787,12 @@ impl CredentialResolver for ClaustrumCredentialResolver {
 
     fn public_key<'a>(
         &'a self,
-        handle: &'a str,
+        credential_id: &'a str,
     ) -> CredentialResolverFuture<'a, Result<CredentialPublicKey, CredentialResolverError>> {
         Box::pin(async move {
             let mut retries = 0;
             loop {
-                match self.target.credential_public_key(handle).await {
+                match self.target.credential_public_key(credential_id).await {
                     Ok(reply) => return decode_public_key_reply(reply),
                     Err(error) if error.retryable() && retries < self.transient_retries => {
                         retries += 1;
@@ -805,17 +807,12 @@ impl CredentialResolver for ClaustrumCredentialResolver {
         &'a self,
         request: SealRequest<'a>,
     ) -> CredentialResolverFuture<'a, Result<CredentialSeal, CredentialResolverError>> {
+        // One attempt only; see the trait method for why seal is never retried here.
         Box::pin(async move {
-            let mut retries = 0;
-            loop {
-                match self.target.credential_seal(request).await {
-                    Ok(reply) => return decode_seal_reply(reply),
-                    Err(error) if error.retryable() && retries < self.transient_retries => {
-                        retries += 1;
-                    }
-                    Err(error) => return Err(error),
-                }
-            }
+            self.target
+                .credential_seal(request)
+                .await
+                .and_then(decode_seal_reply)
         })
     }
 
@@ -1371,19 +1368,22 @@ impl ClaustrumConsumer {
 
     async fn credential_sign(
         &mut self,
-        handle: &str,
+        credential_id: &str,
         payload: &[u8],
     ) -> Result<Value, CredentialResolverError> {
-        self.credential_request(credential_sign_request(handle, payload), CREDENTIAL_SIGN_OP)
-            .await
+        self.credential_request(
+            credential_sign_request(credential_id, payload),
+            CREDENTIAL_SIGN_OP,
+        )
+        .await
     }
 
     async fn credential_public_key(
         &mut self,
-        handle: &str,
+        credential_id: &str,
     ) -> Result<Value, CredentialResolverError> {
         self.credential_request(
-            credential_public_key_request(handle),
+            credential_public_key_request(credential_id),
             CREDENTIAL_PUBLIC_KEY_OP,
         )
         .await

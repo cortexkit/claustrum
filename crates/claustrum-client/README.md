@@ -48,11 +48,11 @@ the public key.
 `seal(SealRequest { credential_id, recipient_public_key, info, aad, plaintext })`
 seals one message in HPKE Auth mode (RFC 9180 mode 2) under a vault-held KEM key,
 for a recipient that opens it with that key's public half. It needs an exact `seal`
-grant; the vault audits every call, so a retried seal is recorded once per attempt.
-`list_scoped` lists the credentials the caller's grants cover. Handle reads,
-signing, sealing and public-key reads retry transient and transport failures a bounded
-number of times; scoped reads return the first error and leave the redial to the
-caller. `auth_required` and permanent refusals always return at once. Listing
+grant. Seal makes exactly one attempt and hands a retryable error back: every seal is
+a fresh ciphertext with its own audit row, so the caller decides whether to retry.
+`list_scoped` lists the credentials the caller's grants cover. Handle reads, signing
+and public-key reads retry transient and transport failures a bounded number of
+times; scoped reads return the first error and leave the redial to the caller. `auth_required` and permanent refusals always return at once. Listing
 failures are row-local: callers should check `undecodable_credentials` and
 `undecodable_grants`, because the library does not log them. A grant tuple with
 a missing, empty or non-string field is skipped and reported there, never turned

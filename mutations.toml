@@ -1383,3 +1383,33 @@ expect_message = "permanent"
 only = false
 timeout_s = 600
 build_timeout_s = 1800
+
+[[control]]
+id = "client-seal-single-attempt"
+guards = "the Rust client seals exactly once and returns a retryable error rather than retrying"
+file = "crates/claustrum-client/src/lib.rs"
+old = """
+            self.target
+                .credential_seal(request)
+                .await
+                .and_then(decode_seal_reply)
+"""
+new = """
+            // NON-VACUITY BREAK: retry a retryable seal once inside the client
+            match self.target.credential_seal(request).await {
+                Err(error) if error.retryable() && self.transient_retries > 0 => self
+                    .target
+                    .credential_seal(request)
+                    .await
+                    .and_then(decode_seal_reply),
+                result => result.and_then(decode_seal_reply),
+            }
+"""
+edits = []
+test_file = "crates/claustrum-client/src/contract_tests.rs"
+runner = "cargo"
+package = "cortexkit-claustrum-client"
+target = "--lib"
+expect_red = ["contract_tests::seal_makes_exactly_one_attempt_even_when_retries_are_allowed"]
+only = false
+timeout_s = 600

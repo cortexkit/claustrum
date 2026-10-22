@@ -108,11 +108,10 @@ supervisor core first by construction. The binaries live in
 `~/.local/share/cortexkit/bin/`, with `ck-auth` also symlinked into `~/.local/bin/` for the
 `ck` dispatcher.
 
-**Releases from v0.1.3 need subc 0.17.20 or newer.** An older supervisor refuses the
-module's HELLO with `malformed HELLO body: missing field "consumes"` and parks it after
-three restarts. That message names a protocol field rather than a version mismatch, so it
-reads as a broken release when the supervisor predates the field. Upgrade the supervisor
-first. This matters only when installing from the release page by hand.
+**v0.2.0 and later need subc-core 0.20.83 (`ck` 0.20.83) or newer.** Upgrade the
+supervisor before installing a new vault release, not after. This matters only when
+installing from the release page by hand; `ck setup claustrum` installs the supervisor
+first.
 
 The supervisor runs the daemon from its `subc.jsonc`, with the vault module marked
 `reserved: true` and a `sqlite` storage section. `reserved: true` means only the process

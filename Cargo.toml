@@ -2,6 +2,9 @@
 resolver = "2"
 members = ["crates/credentials-core", "crates/credentials-module", "crates/claustrum-client"]
 
+[workspace.metadata.release]
+requires_core = "0.20.83"
+
 # cortexkit-credentials — a subc-supervised module that holds credentials
 # (OAuth tokens, API keys, DSNs) encrypted at rest and serves each consumer the
 # credential it needs, kept fresh via vault-owned OAuth refresh. It replaces the

@@ -74,9 +74,9 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for what the gate checks and how to commi
 
 ## Install and operate
 
-`ck setup claustrum` installs the vault. **v0.2.0 needs subc-core 0.20.83 (`ck` 0.20.83) or
-newer**, so upgrade the supervisor first. This concerns you only if you install from the
-release page by hand; `ck setup claustrum` installs the supervisor first.
+`ck setup claustrum` installs the vault. **Claustrum releases require subc-core (the
+supervisor core), version 0.20.83 or newer.** Upgrade the supervisor first when installing
+from the release page; `ck setup claustrum` installs it first.
 
 - [Operator runbook](docs/operator-runbook.md): install, master key, logins, grants and
   enrollments, backups and restore, key rotation, deploy and rollback.

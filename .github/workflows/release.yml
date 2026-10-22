@@ -97,12 +97,20 @@ jobs:
           fi
           echo "tag commit $(git rev-parse --short HEAD) is on master"
 
+      - name: Resolve minimum core version
+        id: core
+        run: |
+          set -euo pipefail
+          requires_core=$(python3 scripts/release-manifest.py)
+          printf 'requires_core=%s\n' "$requires_core" >> "$GITHUB_OUTPUT"
+
       - name: Create the release if it does not exist
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag || github.ref_name }}
           REPLACE_PUBLISHED: ${{ inputs.replace_published || false }}
           RELEASE_NOTES: ${{ inputs.notes }}
+          REQUIRES_CORE: ${{ steps.core.outputs.requires_core }}
         run: |
           set -euo pipefail
           cat > release-notes.txt <<'NOTES'
@@ -125,9 +133,20 @@ jobs:
           records the choice in the vault's `key-source` file, so later runs of the
           daemon and `ck auth` need no key-path override.
 
-          REQUIRES subc-core 0.20.83 OR NEWER (`ck` 0.20.83). Upgrade the supervisor
+          REQUIRES subc-core __REQUIRES_CORE__ OR NEWER. Upgrade the supervisor
           before installing this release.
           NOTES
+          python3 - <<'PY'
+          from pathlib import Path
+          import os
+
+          notes = Path("release-notes.txt")
+          body = notes.read_text()
+          marker = "__REQUIRES_CORE__"
+          if body.count(marker) != 1:
+              raise SystemExit("REFUSING: release notes must contain one core-version marker")
+          notes.write_text(body.replace(marker, os.environ["REQUIRES_CORE"]))
+          PY
           if [ -n "$RELEASE_NOTES" ]; then
             printf '\n%s\n' "$RELEASE_NOTES" >> release-notes.txt
           fi
@@ -144,6 +163,17 @@ jobs:
               --title "$TAG" --draft --verify-tag \
               --notes-file release-notes.txt
           fi
+
+      - name: Upload release manifest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+          REQUIRES_CORE: ${{ steps.core.outputs.requires_core }}
+        run: |
+          set -euo pipefail
+          printf '{"requires_core":"%s"}\n' "$REQUIRES_CORE" > release-manifest.json
+          gh release upload "$TAG" release-manifest.json \
+            --repo "$GITHUB_REPOSITORY" --clobber
 
   assets:
     permissions:
@@ -444,5 +474,9 @@ jobs:
               done
             done
           done
+          if ! grep -Fx "release-manifest.json" <<< "$names" >/dev/null; then
+            echo "REFUSING to publish: missing release-manifest.json. Leaving release in draft." >&2
+            exit 1
+          fi
           gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body --jq '.body' > release-notes.txt
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file release-notes.txt --draft=false

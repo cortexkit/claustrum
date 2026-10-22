@@ -29,6 +29,16 @@ def text(name):
     return (ROOT / name).read_text()
 
 
+def workspace_core_version():
+    match = re.search(
+        r'(?ms)^\[workspace\.metadata\.release\]\s*requires_core\s*=\s*"([^"]+)"',
+        text('Cargo.toml'),
+    )
+    if match is None:
+        raise AssertionError('Cargo.toml is missing workspace.metadata.release.requires_core')
+    return match.group(1)
+
+
 def shell_function(path, name):
     source = text(path)
     start = source.index(name + '() {')
@@ -142,7 +152,8 @@ class ScriptContracts(unittest.TestCase):
         self.bin = self.root / 'bin'
         self.bin.mkdir()
         self.env = dict(os.environ, HOME=os.fspath(self.root), REPO='scratch/repo',
-                        PATH=os.fspath(self.bin) + ':' + os.environ['PATH'], OPERATOR_GH_FALLBACK_PATHS='')
+                        PATH=os.fspath(self.bin) + ':' + os.environ['PATH'], OPERATOR_GH_FALLBACK_PATHS='',
+                        REQUIRES_CORE=workspace_core_version())
 
     def executable(self, name, body):
         path = self.bin / name
@@ -423,11 +434,61 @@ class ScriptContracts(unittest.TestCase):
         self.assertEqual(self.run_shell(step['run'], env, cwd=self.root).returncode, 0)
 
     def test_release_asset_gate_requires_expected_names(self):
-        self.executable('gh', 'case "$*" in *--json*) printf "junk\\n%.0s" {1..12};; *) exit 0;; esac')
+        assets = [f'{binary}-{platform}.{suffix}'
+                  for platform in ('darwin-arm64', 'linux-x64', 'windows-x64')
+                  for binary in ('ck-auth', 'ck-claustrum')
+                  for suffix in ('zip', 'zip.sha256')]
+        asset_args = ' '.join("'" + name + "'" for name in assets)
+        self.executable('gh', f'''case "$*" in
+          *"--json assets"*) printf "%s\\n" {asset_args};;
+          *"--json body"*) echo release-notes;;
+          *) exit 0;;
+        esac''')
         step = self.release_step('Undraft the release')
         result = self.run_shell(step['run'], dict(self.env, TAG='v1', GITHUB_REPOSITORY='scratch/repo'), cwd=self.root)
         self.assertEqual(result.returncode, 1)
-        self.assertIn('missing ck-auth-darwin-arm64.zip', result.stdout)
+        self.assertIn('missing release-manifest.json', result.stdout)
+
+    def test_release_manifest_is_uploaded_from_workspace_core_floor(self):
+        version = workspace_core_version()
+        resolve = self.release_step('Resolve minimum core version')
+        output = self.root / 'core-output'
+        result = self.run_shell(resolve['run'], dict(self.env, GITHUB_OUTPUT=os.fspath(output)), cwd=ROOT)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(output.read_text(), f'requires_core={version}\n')
+        self.assertIn('python3 scripts/release-manifest.py', resolve['run'])
+
+        upload = self.release_step('Upload release manifest')
+        self.assertEqual(upload['env']['REQUIRES_CORE'], '${{ steps.core.outputs.requires_core }}')
+        self.executable('gh', 'printf "%s\\n" "$*" > "$HOME/upload-args"\ncp release-manifest.json "$HOME/uploaded-manifest"')
+        env = dict(self.env, TAG='v1', GITHUB_REPOSITORY='scratch/repo', REQUIRES_CORE=version)
+        result = self.run_shell(upload['run'], env, cwd=self.root)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual((self.root / 'uploaded-manifest').read_bytes(),
+                         f'{{"requires_core":"{version}"}}\n'.encode())
+        self.assertIn('release-manifest.json', (self.root / 'upload-args').read_text())
+        self.assertIn('--clobber', (self.root / 'upload-args').read_text())
+
+    def test_release_notes_use_workspace_core_floor(self):
+        version = workspace_core_version()
+        self.executable('gh', 'case "$*" in *"release view"*) exit 1;; *"release create"*) while [ "$#" -gt 0 ]; do case "$1" in --notes-file) cp "$2" "$HOME/captured-notes"; exit $?;; --notes) printf "%s\\n" "$2" > "$HOME/captured-notes"; exit 0;; esac; shift; done; exit 1;; *) exit 1;; esac')
+        step = self.release_step('Create the release if it does not exist')
+        env = dict(self.env, TAG='v1', GITHUB_REPOSITORY='scratch/repo', REPLACE_PUBLISHED='false',
+                   RELEASE_NOTES='', REQUIRES_CORE=version)
+        result = self.run_shell(step['run'], env, cwd=self.root)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn(f'REQUIRES subc-core {version} OR NEWER',
+                      (self.root / 'captured-notes').read_text())
+        self.assertEqual(step['env']['REQUIRES_CORE'], '${{ steps.core.outputs.requires_core }}')
+
+    def test_operator_docs_require_workspace_core_floor(self):
+        version = workspace_core_version()
+        for path in ('README.md', 'docs/operator-runbook.md'):
+            document = ' '.join(text(path).split())
+            match = re.search(r'subc-core(?: \(the supervisor core\), version)? ([0-9]+\.[0-9]+\.[0-9]+)', document)
+            if match is None:
+                raise AssertionError(f'{path} does not name a numeric subc-core floor')
+            self.assertEqual(match.group(1), version, path)
 
     def test_release_notes_are_not_tied_to_one_migration(self):
         source = text('.github/workflows/release.yml')
@@ -444,7 +505,8 @@ class ScriptContracts(unittest.TestCase):
                      'Credential Manager', 'Secret Service', '--key-path', 'CK_MASTER_KEY_PATH',
                      'no automatic fallback', 'key-source', 'REQUIRES subc-core ')
         for extra in ('', 'Release-specific migration instructions.'):
-            env = dict(self.env, TAG='v1', GITHUB_REPOSITORY='scratch/repo', REPLACE_PUBLISHED='false', RELEASE_NOTES=extra)
+            env = dict(self.env, TAG='v1', GITHUB_REPOSITORY='scratch/repo', REPLACE_PUBLISHED='false',
+                       RELEASE_NOTES=extra, REQUIRES_CORE=workspace_core_version())
             result = self.run_shell(step['run'], env, cwd=self.root)
             self.assertEqual(result.returncode, 0, result.stdout)
             notes = (self.root / 'captured-notes').read_text()
@@ -500,6 +562,7 @@ class ScriptContracts(unittest.TestCase):
         self.assertNotIn('cortexkit/commons', repositories)
         self.assertFalse(any('sibling' in step.get('name', '').lower() for step in steps))
         names = '\n'.join(f'{binary}-{platform}.{suffix}' for platform in ('darwin-arm64', 'linux-x64', 'windows-x64') for binary in ('ck-auth', 'ck-claustrum') for suffix in ('zip', 'zip.sha256'))
+        names += '\nrelease-manifest.json'
         self.executable('gh', 'case "$*" in *"--json assets"*) printf "%s\\n" "$ASSET_NAMES";; *"--json body"*) echo "Permanent notes plus release-specific instructions.";; *"release edit"*) cp release-notes.txt "$HOME/captured-notes";; *) exit 1;; esac')
         publish = self.release_step('Undraft the release')
         result = self.run_shell(publish['run'], dict(self.env, TAG='v1', GITHUB_REPOSITORY='scratch/repo', ASSET_NAMES=names), cwd=self.root)

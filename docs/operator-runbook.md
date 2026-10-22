@@ -108,10 +108,8 @@ supervisor core first by construction. The binaries live in
 `~/.local/share/cortexkit/bin/`, with `ck-auth` also symlinked into `~/.local/bin/` for the
 `ck` dispatcher.
 
-**v0.2.0 and later need subc-core 0.20.83 (`ck` 0.20.83) or newer.** Upgrade the
-supervisor before installing a new vault release, not after. This matters only when
-installing from the release page by hand; `ck setup claustrum` installs the supervisor
-first.
+**Claustrum releases require subc-core (the supervisor core), version 0.20.83 or newer.**
+Upgrade the supervisor before installing from the release page; `ck setup claustrum` installs it first.
 
 The supervisor runs the daemon from its `subc.jsonc`, with the vault module marked
 `reserved: true` and a `sqlite` storage section. `reserved: true` means only the process

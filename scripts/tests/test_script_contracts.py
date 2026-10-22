@@ -442,7 +442,7 @@ class ScriptContracts(unittest.TestCase):
         permanent = ('SHA-256', 'sidecar', 'ad-hoc signed, not notarized', 'quarantine',
                      'Gatekeeper', 'curl', 'does not self-initialize', 'ck auth bootstrap',
                      'Credential Manager', 'Secret Service', '--key-path', 'CK_MASTER_KEY_PATH',
-                     'no automatic fallback', 'key-source', 'REQUIRES subc ')
+                     'no automatic fallback', 'key-source', 'REQUIRES subc-core ')
         for extra in ('', 'Release-specific migration instructions.'):
             env = dict(self.env, TAG='v1', GITHUB_REPOSITORY='scratch/repo', REPLACE_PUBLISHED='false', RELEASE_NOTES=extra)
             result = self.run_shell(step['run'], env, cwd=self.root)

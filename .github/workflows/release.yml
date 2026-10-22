@@ -125,7 +125,8 @@ jobs:
           records the choice in the vault's `key-source` file, so later runs of the
           daemon and `ck auth` need no key-path override.
 
-          REQUIRES subc <MIN_SUBC> OR NEWER.
+          REQUIRES subc-core 0.20.83 OR NEWER (`ck` 0.20.83). Upgrade the supervisor
+          before installing this release.
           NOTES
           if [ -n "$RELEASE_NOTES" ]; then
             printf '\n%s\n' "$RELEASE_NOTES" >> release-notes.txt

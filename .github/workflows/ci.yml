@@ -393,14 +393,19 @@ jobs:
 
   # Separate checkouts per shard: never replay two mutants in one tree. Include
   # train pushes because train-push.sh waits for this workflow before landing.
+  # Four shards because the replay is the slowest job on every push: with two, a
+  # shard took about 11 minutes (2026-10-22) and held every train behind it. Keep
+  # SHARDS and the matrix list in step.
   mutations:
-    name: Mutation proofs (${{ matrix.shard }}/2)
+    name: Mutation proofs (${{ matrix.shard }}/4)
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    env:
+      SHARDS: 4
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2]
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v5
         with:
@@ -424,8 +429,9 @@ jobs:
         # An expression, not "$CKDEV_MUTATE_REV": this step runs in PowerShell on
         # Windows, where that form is an empty PowerShell variable.
         run: cargo install --locked --git https://github.com/cortexkit/commons --rev ${{ env.CKDEV_MUTATE_REV }} cortexkit-mutate
-      - name: Mutation catalogue check
-        run: ckdev-mutate check
+      # No catalogue check here: the test job runs `ckdev-mutate check` once, and
+      # `run` refuses a row whose anchor doesn't match anyway. Repeating it cost about
+      # a minute on every shard, on the slowest path of the workflow.
       - name: Replay selected safety proofs
         shell: bash
         env:
@@ -434,11 +440,11 @@ jobs:
         run: |
           mkdir -p target/mutations
           if [[ "$EVENT" == "pull_request" ]]; then
-            ckdev-mutate run --diff origin/master --shard "$SHARD/2" --report target/mutations/diff.json
+            ckdev-mutate run --diff origin/master --shard "$SHARD/$SHARDS" --report target/mutations/diff.json
           elif [[ "$EVENT" == "schedule" ]]; then
-            ckdev-mutate run --all --broad --shard "$SHARD/2" --report target/mutations/broad.json
+            ckdev-mutate run --all --broad --shard "$SHARD/$SHARDS" --report target/mutations/broad.json
           else
-            ckdev-mutate run --all --shard "$SHARD/2" --report target/mutations/all.json
+            ckdev-mutate run --all --shard "$SHARD/$SHARDS" --report target/mutations/all.json
           fi
       - name: Upload mutation reports
         if: always()

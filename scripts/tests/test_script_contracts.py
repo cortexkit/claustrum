@@ -539,6 +539,18 @@ class ScriptContracts(unittest.TestCase):
         ci_flags = re.search(r'cargo clippy.*--features ([^\s]+)', ci).group(1).split(',')
         self.assertEqual(set(gate_flags), set(ci_flags))
 
+    def test_mutation_shards_cover_every_row_once(self):
+        # The replay splits the catalogue into SHARDS slices and each matrix entry runs
+        # one. A matrix shorter than SHARDS silently skips the missing slices' rows.
+        workflow = module('lib/workflow-gates').parse_workflow(os.fspath(ROOT / '.github/workflows/ci.yml'))
+        job = workflow['jobs']['mutations']
+        shards = int(job['env']['SHARDS'])
+        # The workflow parser yields scalars as strings.
+        self.assertEqual([int(shard) for shard in job['strategy']['matrix']['shard']], list(range(1, shards + 1)))
+        replay = next(step for step in job['steps'] if step.get('name') == 'Replay selected safety proofs')
+        self.assertEqual(replay['run'].count('--shard "$SHARD/$SHARDS"'), 3)
+        self.assertNotIn('/2"', replay['run'])
+
     def test_windows_runtime_workflows_are_a_required_ci_and_gate_arm(self):
         workflow = module('lib/workflow-gates').parse_workflow(os.fspath(ROOT / '.github/workflows/ci.yml'))
         steps = workflow['jobs']['test']['steps']

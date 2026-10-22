@@ -1281,7 +1281,9 @@ impl ClaustrumConsumer {
         consumer_module_id: &str,
     ) -> Result<(u16, u32), CredentialResolverError> {
         let correlation = self.next_correlation();
-        let body = route_open_body(project_root, consumer_module_id);
+        // A missing launch nonce refuses here, before anything is written: the route
+        // must never open unscoped.
+        let body = route_open_body(project_root, consumer_module_id)?;
         self.write_request(0, 0, correlation, Priority::Passive, body)
             .await?;
         let reply = self.read_reply(0, 0, correlation).await?;
@@ -1615,7 +1617,10 @@ fn invalid_listing(detail: &str) -> CredentialResolverError {
 }
 
 fn listing_strings(row: &Value, key: &str, optional: bool) -> Result<Vec<String>, String> {
-    if optional && row.get(key).is_none() {
+    // An optional field sent as explicit null means the same as an omitted one. The
+    // vault omits absent fields, but rejecting null would drop a usable credential
+    // from the listing over a serialization choice.
+    if optional && matches!(row.get(key), None | Some(Value::Null)) {
         return Ok(Vec::new());
     }
     let items = row
@@ -1638,7 +1643,8 @@ fn listing_string(row: &Value, key: &str) -> Result<String, String> {
 
 fn listing_optional_string(row: &Value, key: &str) -> Result<Option<String>, String> {
     match row.get(key) {
-        None => Ok(None),
+        // Null is absent too; see listing_strings for why it isn't a decode failure.
+        None | Some(Value::Null) => Ok(None),
         Some(value) => value
             .as_str()
             .map(|s| Some(s.to_owned()))
@@ -1908,32 +1914,43 @@ fn classify_error_value(value: &Value) -> CredentialResolverError {
 /// claustrum silently treats the caller as unscoped. Route opening must therefore
 /// fail before scoped reads are reduced to an ambiguous `not_found`.
 #[cfg(feature = "transport")]
-fn route_open_body(project_root: &Path, consumer_module_id: &str) -> Value {
+fn route_open_body(
+    project_root: &Path,
+    consumer_module_id: &str,
+) -> Result<Value, CredentialResolverError> {
     // The process-wide accessor, never the environment: after the first read
     // closes the pipe the daemon handed over, a second independent reader
     // would read whatever the process opened next at that descriptor number.
     let read = subc_os::launch_nonce()
         .map(|nonce| nonce.map(|nonce| nonce.value().to_owned()))
         .map_err(|error| error.to_string());
-    route_open_body_with_nonce(
+    Ok(route_open_body_with_nonce(
         project_root,
         consumer_module_id,
-        &required_launch_nonce(read),
-    )
+        &required_launch_nonce(read)?,
+    ))
 }
 
-/// The nonce from a read of it, panicking when there is none: without it the
-/// route would open unscoped (see [`route_open_body`]).
+/// The nonce from a read of it, or an `AuthRequired` refusal when there is none.
+/// Without the nonce the route would open unscoped, so the caller must stop before
+/// sending anything; returning an error (never panicking) lets a module process
+/// refuse cleanly and report why, instead of crashing.
 #[cfg(feature = "transport")]
-fn required_launch_nonce(read: Result<Option<String>, String>) -> String {
+fn required_launch_nonce(
+    read: Result<Option<String>, String>,
+) -> Result<String, CredentialResolverError> {
     match read {
-        Ok(Some(nonce)) if !nonce.trim().is_empty() => nonce,
-        Ok(_) => panic!(
-            "credential consumer requires a non-empty launch nonce for the reserved principal"
-        ),
-        Err(error) => panic!(
-            "credential consumer could not read the launch nonce for the reserved principal: {error}"
-        ),
+        Ok(Some(nonce)) if !nonce.trim().is_empty() => Ok(nonce),
+        Ok(_) => Err(CredentialResolverError::new(
+            CredentialErrorClass::AuthRequired,
+            "credential consumer requires a non-empty launch nonce for the reserved principal",
+        )),
+        Err(error) => Err(CredentialResolverError::new(
+            CredentialErrorClass::AuthRequired,
+            format!(
+                "credential consumer could not read the launch nonce for the reserved principal: {error}"
+            ),
+        )),
     }
 }
 
@@ -2950,13 +2967,14 @@ mod tests {
         );
     }
 
-    /// An absent, blank or unreadable nonce stops the route open instead of
-    /// letting it through unscoped.
+    /// An absent, blank or unreadable nonce stops the route open instead of letting it
+    /// through unscoped, and does so with an error the module can refuse with, not a
+    /// panic that would take the module process down.
     #[cfg(feature = "transport")]
     #[test]
     fn route_open_body_requires_the_launch_nonce_for_the_reserved_principal() {
         assert_eq!(
-            required_launch_nonce(Ok(Some("nonce".to_string()))),
+            required_launch_nonce(Ok(Some("nonce".to_string()))).unwrap(),
             "nonce"
         );
         for read in [
@@ -2965,7 +2983,15 @@ mod tests {
             Err("descriptor 3 is not open".to_string()),
         ] {
             let result = std::panic::catch_unwind(|| required_launch_nonce(read.clone()));
-            assert!(result.is_err(), "{read:?} must not yield a nonce");
+            let refusal = result
+                .unwrap_or_else(|_| panic!("{read:?} panicked instead of refusing"))
+                .expect_err("a missing nonce must not yield one");
+            assert_eq!(
+                refusal.class,
+                CredentialErrorClass::AuthRequired,
+                "{read:?}"
+            );
+            assert!(!refusal.retryable(), "{read:?}");
         }
     }
 
@@ -3049,6 +3075,70 @@ mod tests {
         assert_eq!(
             no_id.undecodable_credentials,
             ["row 0: id is not a non-empty string"]
+        );
+    }
+
+    /// Optional metadata sent as explicit null decodes as absent, so the row stays in
+    /// the listing; a wrong type in the same field is still a row-local decode failure.
+    #[test]
+    fn list_scoped_reply_treats_explicit_null_optional_fields_as_absent() {
+        let row = |extra: Value| {
+            let mut row = json!({
+                "id": "oauth:anthropic",
+                "categories": ["llm-provider"],
+                "type": "oauth",
+                "serves": ["anthropic"],
+                "state": "active",
+                "record_version": 3,
+                "operations": ["read"],
+            });
+            row.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            row
+        };
+        let listing = decode_list_scoped_reply(json!({
+            "result": {
+                "credentials": [
+                    row(json!({
+                        "provider_ids": null,
+                        "auth_method": null,
+                        "refresh_adapter": null,
+                        "account_id": null,
+                        "email": null,
+                        "org_name": null,
+                        "plan_tier": null,
+                        "plan_tier_source": null,
+                    })),
+                    row(json!({ "plan_tier": 20 })),
+                ],
+                "view": "v",
+            }
+        }))
+        .expect("listing");
+        assert_eq!(
+            listing.credentials.len(),
+            1,
+            "{:?}",
+            listing.undecodable_credentials
+        );
+        let listed = &listing.credentials[0];
+        assert!(listed.provider_ids.is_empty());
+        assert_eq!(
+            (
+                &listed.auth_method,
+                &listed.refresh_adapter,
+                &listed.account_id,
+                &listed.email,
+                &listed.org_name,
+                &listed.plan_tier,
+                &listed.plan_tier_source,
+            ),
+            (&None, &None, &None, &None, &None, &None, &None)
+        );
+        assert_eq!(
+            listing.undecodable_credentials,
+            ["oauth:anthropic: plan_tier is not a string"]
         );
     }
 }

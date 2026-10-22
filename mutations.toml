@@ -1413,3 +1413,44 @@ target = "--lib"
 expect_red = ["contract_tests::seal_makes_exactly_one_attempt_even_when_retries_are_allowed"]
 only = false
 timeout_s = 600
+
+[[control]]
+id = "client-list-null-optional-is-absent"
+guards = "the Rust client decodes an explicit null optional listing field as absent instead of dropping the row"
+file = "crates/claustrum-client/src/lib.rs"
+old = """
+        None | Some(Value::Null) => Ok(None),
+"""
+new = """
+        None => Ok(None), // NON-VACUITY BREAK: null becomes a decode failure
+"""
+edits = []
+test_file = "crates/claustrum-client/src/lib.rs"
+runner = "cargo"
+package = "cortexkit-claustrum-client"
+target = "--lib"
+expect_red = ["tests::list_scoped_reply_treats_explicit_null_optional_fields_as_absent"]
+only = false
+timeout_s = 600
+
+[[control]]
+id = "client-missing-nonce-refuses-without-panic"
+guards = "a missing launch nonce returns an AuthRequired refusal instead of panicking the module process"
+file = "crates/claustrum-client/src/lib.rs"
+old = """
+        Ok(_) => Err(CredentialResolverError::new(
+            CredentialErrorClass::AuthRequired,
+            "credential consumer requires a non-empty launch nonce for the reserved principal",
+        )),
+"""
+new = """
+        Ok(_) => panic!("NON-VACUITY BREAK: panic on a missing launch nonce"),
+"""
+edits = []
+test_file = "crates/claustrum-client/src/lib.rs"
+runner = "cargo"
+package = "cortexkit-claustrum-client"
+target = "--lib"
+expect_red = ["tests::route_open_body_requires_the_launch_nonce_for_the_reserved_principal"]
+only = false
+timeout_s = 600

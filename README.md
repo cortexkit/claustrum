@@ -74,12 +74,9 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for what the gate checks and how to commi
 
 ## Install and operate
 
-`ck setup claustrum` installs the vault. **Releases from v0.1.3 need subc 0.17.20 or newer**:
-an older supervisor refuses the module's HELLO with
-`malformed HELLO body: missing field "consumes"` and parks it after three restarts. That
-message names a protocol field rather than a version mismatch, so upgrade the supervisor first.
-This concerns you only if you install from the release page by hand; `ck setup claustrum`
-installs the supervisor first.
+`ck setup claustrum` installs the vault. **v0.2.0 needs subc <MIN_SUBC> or newer**, so
+upgrade the supervisor first. This concerns you only if you install from the release page by
+hand; `ck setup claustrum` installs the supervisor first.
 
 - [Operator runbook](docs/operator-runbook.md): install, master key, logins, grants and
   enrollments, backups and restore, key rotation, deploy and rollback.

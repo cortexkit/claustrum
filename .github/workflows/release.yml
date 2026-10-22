@@ -115,13 +115,17 @@ jobs:
 
           claustrum does not self-initialize. Run `ck auth bootstrap` before enabling
           the module, or the daemon will exit with 'no master key has been provisioned'.
-          On Linux and Windows there is no keychain, so bootstrap with `--key-path`
-          and give the daemon the same path via CK_MASTER_KEY_PATH.
+          A new vault keeps its master key in the OS key store: the Keychain on
+          macOS, Credential Manager on Windows, and the Secret Service (GNOME Keyring
+          or KWallet, already unlocked) on Linux. Where no unlocked Secret Service is
+          reachable, as on a headless Linux server, bootstrap with `--key-path <file>`
+          or CK_MASTER_KEY_PATH=<file> instead: a file outside the data directory,
+          owned by the vault user, with owner-only permissions. A missing or locked
+          OS store is refused; there is no automatic fallback to a file. Bootstrap
+          records the choice in the vault's `key-source` file, so later runs of the
+          daemon and `ck auth` need no key-path override.
 
-          REQUIRES subc 0.17.20 OR NEWER. An older supervisor refuses this module's
-          HELLO with 'malformed HELLO body: missing field `consumes`' and parks it
-          after three restarts. The error names a protocol field rather than a version,
-          so it reads as a broken release; the supervisor predates that field becoming optional.
+          REQUIRES subc <MIN_SUBC> OR NEWER.
           NOTES
           if [ -n "$RELEASE_NOTES" ]; then
             printf '\n%s\n' "$RELEASE_NOTES" >> release-notes.txt

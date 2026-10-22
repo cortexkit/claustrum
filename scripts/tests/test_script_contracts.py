@@ -434,13 +434,15 @@ class ScriptContracts(unittest.TestCase):
         self.assertNotIn('CARRIES STORE MIGRATION 9', source)
         self.assertIn('RELEASE_NOTES: ${{ inputs.notes }}', source)
         self.assertNotIn('v0.1.2 does not carry this floor', source)
+        # Linux and Windows gained native master-key stores; the notes must not tell
+        # users those platforms have none.
+        self.assertNotIn('there is no keychain', source)
         self.executable('gh', 'case "$*" in *"release view"*) exit 1;; *"release create"*) while [ "$#" -gt 0 ]; do case "$1" in --notes-file) cp "$2" "$HOME/captured-notes"; exit $?;; --notes) printf "%s\\n" "$2" > "$HOME/captured-notes"; exit 0;; esac; shift; done; exit 1;; *) exit 1;; esac')
         step = self.release_step('Create the release if it does not exist')
         permanent = ('SHA-256', 'sidecar', 'ad-hoc signed, not notarized', 'quarantine',
                      'Gatekeeper', 'curl', 'does not self-initialize', 'ck auth bootstrap',
-                     'On Linux and Windows', '--key-path', 'CK_MASTER_KEY_PATH',
-                     'REQUIRES subc 0.17.20 OR NEWER', 'malformed HELLO body: missing field `consumes`',
-                     'three restarts')
+                     'Credential Manager', 'Secret Service', '--key-path', 'CK_MASTER_KEY_PATH',
+                     'no automatic fallback', 'key-source', 'REQUIRES subc ')
         for extra in ('', 'Release-specific migration instructions.'):
             env = dict(self.env, TAG='v1', GITHUB_REPOSITORY='scratch/repo', REPLACE_PUBLISHED='false', RELEASE_NOTES=extra)
             result = self.run_shell(step['run'], env, cwd=self.root)

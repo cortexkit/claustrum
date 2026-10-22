@@ -62,9 +62,12 @@ A transport `Error` frame (`{code, message}`, no class) whose code a retry canno
 change, such as `unknown_method`, `invalid_params`, `invalid_request`,
 `flow_scopes_unsupported` or `invalid_control_body`, comes back as
 `CredentialErrorClass::Unclassified` with the vault's code in `code()`. It is not
-`retryable()`, so it returns at once and is never retried, and it keeps the
-connection rather than redialing. `unknown_method` from a vault means the vault
-predates the operation: update the vault. `unknown_module` and the other daemon
+`retryable()`, so it returns at once and is never retried. One that answers a call on
+an established route keeps that connection rather than redialing; one that refuses the
+route itself (`flow_scopes_unsupported`, `invalid_control_body`) fails the connect, so
+the next call dials again. `unknown_method` from a vault means the vault
+predates the operation: update the vault. A scoped watch is the exception: there
+`unknown_method` ends the watch as `Unsupported`, the signal to poll instead. `unknown_module` and the other daemon
 routing refusals are the exception: they are `Transport`, so the next call redials and
 the reads that retry transport failures retry them, because they say the credential
 module was not reachable rather than anything about the request.

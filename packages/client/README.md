@@ -31,12 +31,13 @@ credential caching, refresh, account scheduling, and retry policy.
   anything gone or needing re-authentication on them; stop retrying and surface the
   code. `unknown_method` from a vault means the vault predates that operation (for
   example an enrollment op against a vault older than the enrollment ceremony):
-  update the vault. Before 0.13.0 these were `transient`/`retry`. Every other
+  update the vault. `watchScoped` is the exception: there `unknown_method` resolves
+  `closed` as `unsupported`, the signal to fall back to polling `listScoped`. Before 0.13.0 these were `transient`/`retry`. Every other
   transport failure is still `transient`/`retry`.
 • Since 0.13.0, when a terminal transport failure makes the client reconnect and the
   reconnect or the retried call then fails, the error carries the ORIGINAL call's code
   and class. Earlier versions threw the reconnect's error instead, usually
-  `transport_error`, hiding the code the vault actually sent.
+  `transport_error`, hiding the original call's code.
 • `listScoped` rows always carry `providerIds` (a required field since 0.6.0, so code
   that builds rows by hand, such as test fixtures, must set it). An empty array means
   no provider ids are set. Since 0.6.2 a daemon too old to send the field decodes the

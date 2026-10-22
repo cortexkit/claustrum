@@ -489,7 +489,7 @@ export class ClaustrumClient {
         })
       } catch (recoveryError) {
         // Report the call's own failure, not the recovery's. A failed reconnect would
-        // otherwise replace the code the vault actually sent with `transport_error`, so
+        // otherwise replace the original call's code with `transport_error`, so
         // the one actionable code would appear once and every later diagnostic would
         // name a transport failure that never happened. Only a failure that carried no
         // code at all has nothing to preserve.

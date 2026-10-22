@@ -1,6 +1,6 @@
 [package]
 name = "cortexkit-claustrum-client"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 license = "MIT"
 description = "Rust credential vault client for subc-supervised CortexKit modules."

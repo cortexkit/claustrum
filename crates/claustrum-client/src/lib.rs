@@ -211,11 +211,35 @@ pub struct CredentialSignature {
     pub key_id: String,
 }
 
+/// The kind of key a `credential.public_key` reply carries.
+///
+/// One vault operation serves the public half of both vault-held key kinds, so the
+/// algorithm is a closed type rather than a string: a caller that expects a signing
+/// verifier must match `Ed25519` and cannot mistake an X25519 encryption key for one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PublicKeyAlgorithm {
+    /// An Ed25519 signing key's public half, which verifies `credential.sign` output.
+    Ed25519,
+    /// An X25519 KEM key's public half, which HPKE senders and recipients use with
+    /// `credential.seal` and `credential.open`.
+    X25519,
+}
+
+impl PublicKeyAlgorithm {
+    /// The `algorithm` string the vault sends for this kind.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ed25519 => "ed25519",
+            Self::X25519 => "x25519",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialPublicKey {
     pub public_key_hex: String,
     pub key_id: String,
-    pub algorithm: String,
+    pub algorithm: PublicKeyAlgorithm,
 }
 
 /// One `credential.seal` request: seal `plaintext` to `recipient_public_key` in RFC 9180
@@ -2006,6 +2030,11 @@ pub fn decode_signature_reply(
 }
 
 /// Decodes a `credential.public_key` response, validating its public key and ID.
+///
+/// The reply is either an Ed25519 signing key or an X25519 KEM key. Both are 32
+/// bytes, and the vault derives both kinds' `key_id` the same way (the first 8 bytes
+/// of SHA-256 over the public key), so one length check and one key-id check cover
+/// both. Any other `algorithm` is refused.
 pub fn decode_public_key_reply(
     value: Value,
 ) -> Result<CredentialPublicKey, CredentialResolverError> {
@@ -2042,20 +2071,20 @@ pub fn decode_public_key_reply(
             "credential public-key reply key_id does not identify public_key_hex",
         ));
     }
-    let algorithm = result
-        .get("algorithm")
-        .and_then(Value::as_str)
-        .filter(|value| *value == "ed25519")
-        .ok_or_else(|| {
-            CredentialResolverError::new(
+    let algorithm = match result.get("algorithm").and_then(Value::as_str) {
+        Some("ed25519") => PublicKeyAlgorithm::Ed25519,
+        Some("x25519") => PublicKeyAlgorithm::X25519,
+        _ => {
+            return Err(CredentialResolverError::new(
                 CredentialErrorClass::InvalidResponse,
-                "credential public-key reply is not Ed25519",
-            )
-        })?;
+                "credential public-key reply is neither Ed25519 nor X25519",
+            ))
+        }
+    };
     Ok(CredentialPublicKey {
         public_key_hex: public_key_hex.to_owned(),
         key_id: key_id.to_owned(),
-        algorithm: algorithm.to_owned(),
+        algorithm,
     })
 }
 
@@ -2598,7 +2627,7 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(public_key.public_key_hex, "ab".repeat(32));
-        assert_eq!(public_key.algorithm, "ed25519");
+        assert_eq!(public_key.algorithm, PublicKeyAlgorithm::Ed25519);
 
         let error = decode_public_key_reply(json!({
             "result": {
@@ -2609,6 +2638,52 @@ mod tests {
         }))
         .unwrap_err();
         assert_eq!(error.class, CredentialErrorClass::InvalidResponse);
+    }
+
+    #[test]
+    fn public_key_replies_type_x25519_and_refuse_unknown_algorithms_and_wrong_key_ids() {
+        let public_key_bytes = [0xcd_u8; 32];
+        let key_id = hex_bytes(&Sha256::digest(public_key_bytes)[..8]);
+        let reply = |algorithm: &str, key_id: &str| {
+            json!({
+                "result": {
+                    "public_key_hex": "cd".repeat(32),
+                    "key_id": key_id,
+                    "algorithm": algorithm,
+                }
+            })
+        };
+
+        let x25519 = decode_public_key_reply(reply("x25519", &key_id)).unwrap();
+        assert_eq!(x25519.algorithm, PublicKeyAlgorithm::X25519);
+        assert_eq!(x25519.algorithm.as_str(), "x25519");
+        assert_eq!(x25519.public_key_hex, "cd".repeat(32));
+        assert_eq!(x25519.key_id, key_id);
+        let ed25519 = decode_public_key_reply(reply("ed25519", &key_id)).unwrap();
+        assert_eq!(ed25519.algorithm, PublicKeyAlgorithm::Ed25519);
+
+        // Only the two exact lowercase names the vault sends are keys this client knows
+        // how to use; anything else, including a case variant, is a bad reply.
+        for algorithm in ["rsa", "X25519", "Ed25519", ""] {
+            assert_eq!(
+                decode_public_key_reply(reply(algorithm, &key_id))
+                    .unwrap_err()
+                    .class,
+                CredentialErrorClass::InvalidResponse,
+                "{algorithm:?}"
+            );
+        }
+        // A key id that does not identify the key is refused for both kinds, so an
+        // X25519 reply gets the same binding check a signing key does.
+        let wrong_key_id = hex_bytes(&Sha256::digest([0xab_u8; 32])[..8]);
+        for algorithm in ["x25519", "ed25519"] {
+            let error = decode_public_key_reply(reply(algorithm, &wrong_key_id)).unwrap_err();
+            assert_eq!(error.class, CredentialErrorClass::InvalidResponse);
+            assert!(
+                error.to_string().contains("key_id does not identify"),
+                "{algorithm}: {error}"
+            );
+        }
     }
 
     #[test]

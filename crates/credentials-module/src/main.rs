@@ -6163,7 +6163,9 @@ mod tests {
     /// The seal sample is made the same way: synthetic X25519 scalars for the vault key
     /// (bytes 32..64) and the recipient (64..96), and a fixed ephemeral seed (96..128)
     /// in place of fresh randomness. `scripts/hpke-independent-open.py` opens it with a
-    /// separate HPKE implementation using those same scalars.
+    /// separate HPKE implementation using those same scalars. The same vault KEM key
+    /// also yields the second `credential.public_key` sample, so clients decode the
+    /// X25519 reply the vault really sends, not only the Ed25519 one.
     #[tokio::test]
     async fn key_and_scoped_wire_fixture_pins_real_success_replies() {
         use base64::Engine as _;
@@ -6235,6 +6237,7 @@ mod tests {
             (key_id, GrantOperation::Read),
             ("oauth:anthropic", GrantOperation::Read),
             (kem_id, GrantOperation::Seal),
+            (kem_id, GrantOperation::Read),
         ] {
             store
                 .create_read_grant_audited(
@@ -6252,14 +6255,28 @@ mod tests {
         let payload_b64 =
             base64::engine::general_purpose::STANDARD.encode(b"fixture-ed25519-message");
         let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        // Each request names the fixture field that pins its input, or None when only
+        // its reply is pinned. A row's replies are pinned in request order: the first
+        // request for an op is `success[0]`, the next `success[1]`.
         let requests = [
             (
                 OP_SIGN,
+                Some("request"),
                 json!({"credential_id": key_id, "payload_b64": payload_b64}),
             ),
-            (OP_PUBLIC_KEY, json!({"credential_id": key_id})),
+            (
+                OP_PUBLIC_KEY,
+                Some("request"),
+                json!({"credential_id": key_id}),
+            ),
+            (
+                OP_PUBLIC_KEY,
+                Some("x25519_request"),
+                json!({"credential_id": kem_id}),
+            ),
             (
                 OP_SEAL,
+                Some("request"),
                 json!({
                     "credential_id": kem_id,
                     "recipient_public_key_b64": encode(&recipient_public),
@@ -6270,19 +6287,21 @@ mod tests {
             ),
             (
                 OP_GET_SCOPED,
+                None,
                 json!({"credential_id": "oauth:anthropic", "min_ttl_ms": 300_000}),
             ),
             (
                 OP_REPORT_AUTH_FAILURE,
+                None,
                 json!({"credential_id": "oauth:anthropic", "provider_status": 401,
                 "record_version": 1, "reporter_source": "direct"}),
             ),
         ];
         let mut produced = Vec::new();
         let mut key_requests = Vec::new();
-        for (op, params) in requests {
-            if matches!(op, OP_SIGN | OP_PUBLIC_KEY | OP_SEAL) {
-                key_requests.push((op, serde_json::to_string(&params).unwrap()));
+        for (op, request_field, params) in requests {
+            if let Some(field) = request_field {
+                key_requests.push((op, field, serde_json::to_string(&params).unwrap()));
             }
             let reply = scoped_route_request(&surface, &admin, 22, op, params).await;
             assert!(reply["result"]["error"].is_null(), "{op}: {reply}");
@@ -6295,7 +6314,12 @@ mod tests {
         .expect("decode wire fixture");
         let pinned: Vec<_> = produced
             .iter()
-            .map(|(op, _)| {
+            .enumerate()
+            .map(|(position, (op, _))| {
+                let index = produced[..position]
+                    .iter()
+                    .filter(|(earlier, _)| earlier == op)
+                    .count();
                 let row = fixture["operations"]
                     .as_array()
                     .unwrap()
@@ -6303,7 +6327,7 @@ mod tests {
                     .find(|row| row["op"] == *op);
                 (
                     *op,
-                    row.map_or(serde_json::Value::Null, |row| row["success"][0].clone()),
+                    row.map_or(serde_json::Value::Null, |row| row["success"][index].clone()),
                 )
             })
             .collect();
@@ -6316,7 +6340,7 @@ mod tests {
             "regenerate only these fixture successes from the producer bytes on the left; \
              preserve all other entries byte-for-byte"
         );
-        for (op, request) in key_requests {
+        for (op, field, request) in key_requests {
             let row = fixture["operations"]
                 .as_array()
                 .unwrap()
@@ -6324,8 +6348,8 @@ mod tests {
                 .find(|row| row["op"] == op)
                 .unwrap();
             assert_eq!(
-                request, row["request"],
-                "pin the {op} input used for the real reply"
+                request, row[field],
+                "pin the {op} input used for the real reply in `{field}`"
             );
         }
     }

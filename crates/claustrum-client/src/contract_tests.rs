@@ -406,11 +406,37 @@ fn producer_read_surface_public_key_reply_decodes_exact_metadata() {
         decode_public_key_reply(producer_reply(&operation["success"][0])).unwrap(),
         CredentialPublicKey {
             key_id: "56475aa75463474c".into(),
-            algorithm: "ed25519".into(),
+            algorithm: PublicKeyAlgorithm::Ed25519,
             public_key_hex: "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8"
                 .into(),
         }
     );
+}
+
+/// The vault serves a KEM key's public half through the same operation, and a sealed
+/// message's recipient needs it to open the message. This sample comes from the same
+/// synthetic vault KEM key that produced the seal sample.
+#[test]
+fn producer_read_surface_x25519_public_key_reply_decodes_as_x25519() {
+    let operation = producer_operation("credential.public_key");
+    assert_eq!(
+        producer_reply(&operation["x25519_request"]),
+        json!({"credential_id": "kem:wire-fixture"})
+    );
+    let decoded = decode_public_key_reply(producer_reply(&operation["success"][1])).unwrap();
+    assert_eq!(
+        decoded,
+        CredentialPublicKey {
+            key_id: "a0289810032eb417".into(),
+            algorithm: PublicKeyAlgorithm::X25519,
+            public_key_hex: "358072d6365880d1aeea329adf9121383851ed21a28e3b75e965d0d2cd166254"
+                .into(),
+        }
+    );
+    // The seal reply names its sending key by this same id, which is how a recipient
+    // matches a sealed message to the public key it fetched.
+    let seal = producer_reply(&producer_operation("credential.seal")["success"][0]);
+    assert_eq!(seal["result"]["key_id"], decoded.key_id.as_str());
 }
 
 #[cfg(feature = "transport")]

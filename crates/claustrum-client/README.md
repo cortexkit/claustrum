@@ -6,12 +6,12 @@ decoders can be tested against the producer's serialized replies.
 
 ```toml
 [dependencies]
-cortexkit-claustrum-client = "0.6.0"
+cortexkit-claustrum-client = "0.7.0"
 ```
 
 The default `transport` feature provides the resolver and live watch connection.
 If you already own a bus connection, use `cortexkit-claustrum-client = { version =
-"0.6.0", default-features = false }` for the public `decode_*_reply` functions,
+"0.7.0", default-features = false }` for the public `decode_*_reply` functions,
 `decode_wire_error`, record/error types, `WatchNotice`, and `WatchTracker` without
 `subc-transport`, `subc-os`, or Tokio. `subc-protocol` remains for the reply error
 codes; no socket or authentication code is built in this mode.
@@ -39,7 +39,12 @@ vault's `accepted` answer, not proof that state changed: a stale version is
 accepted and ignored. After reporting, read again; if the version did not move,
 stop rather than looping. For a static API key, a 401 means the key is dead.
 
-`sign` and `public_key` use vault-held signing keys, which never leave the vault.
+`sign` uses vault-held signing keys, which never leave the vault. `public_key` returns
+the public half of a vault-held key: an Ed25519 signing key or an X25519 KEM key.
+`CredentialPublicKey::algorithm` is a `PublicKeyAlgorithm` (`Ed25519` or `X25519`);
+check it before use, because a KEM key cannot verify a signature. The decoder refuses
+any other algorithm, and a `key_id` that is not the first 8 bytes of SHA-256 over
+the public key.
 `seal(SealRequest { credential_id, recipient_public_key, info, aad, plaintext })`
 seals one message in HPKE Auth mode (RFC 9180 mode 2) under a vault-held KEM key,
 for a recipient that opens it with that key's public half. It needs an exact `seal`
@@ -150,7 +155,16 @@ the report's `accepted` answer. The signing and scoped successes run through the
 vault's real read surface and request dispatcher with synthetic test material.
 Rust tests pin the decoded Ed25519 key ID, algorithm and exact signature and
 public-key hex, and verify the signature over the fixture's message with `ring`.
+They also decode the X25519 public-key reply for the vault KEM key that produced
+the seal sample.
 The seal tests pin that the client sends exactly the producer's accepted request
 and decodes its reply's exact bytes.
+
+## Changes
+
+- 0.7.0 (breaking): `CredentialPublicKey::algorithm` is now the
+  `PublicKeyAlgorithm` enum instead of a `String`, and `decode_public_key_reply`
+  accepts X25519 KEM public keys as well as Ed25519 signing keys. Callers that
+  compared the field to `"ed25519"` should match `PublicKeyAlgorithm::Ed25519`.
 
 License: MIT.

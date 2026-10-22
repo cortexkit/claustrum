@@ -77,8 +77,14 @@
     {
       "op": "credential.public_key",
       "request": "{\"credential_id\":\"signing:wire-fixture\"}",
+      "x25519_request": "{\"credential_id\":\"kem:wire-fixture\"}",
+      "success_cases": [
+        "Ed25519 signing key (request)",
+        "X25519 KEM key (x25519_request)"
+      ],
       "success": [
-        "{\"result\":{\"algorithm\":\"ed25519\",\"key_id\":\"56475aa75463474c\",\"public_key_hex\":\"03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8\"}}"
+        "{\"result\":{\"algorithm\":\"ed25519\",\"key_id\":\"56475aa75463474c\",\"public_key_hex\":\"03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8\"}}",
+        "{\"result\":{\"algorithm\":\"x25519\",\"key_id\":\"a0289810032eb417\",\"public_key_hex\":\"358072d6365880d1aeea329adf9121383851ed21a28e3b75e965d0d2cd166254\"}}"
       ]
     },
     {

@@ -1298,3 +1298,88 @@ only = false
 timeout_s = 600
 build_timeout_s = 3600
 
+
+[[control]]
+id = "client-unknown-method-is-definitive"
+guards = "the TypeScript client reports unknown_method as permanent/gone and never reconnects, from its single definitive-code list"
+file = "packages/client/src/wire.ts"
+old = """
+  'unknown_method',
+  'invalid_params',
+"""
+new = """
+  'invalid_params', // NON-VACUITY BREAK: unknown_method dropped from the definitive list
+"""
+edits = []
+test_file = "packages/client/src/tests/transport-error-wire.test.ts"
+runner = "command"
+command = ["bun", "test", "packages/client/src/tests/transport-error-wire.test.ts", "-t", "{test}"]
+test_count_pattern = "Ran {count} test"
+expect_red = ["unknown_method from a vault that predates the op is permanent and never reconnected"]
+expect_message = "transient"
+only = false
+timeout_s = 600
+build_timeout_s = 1800
+
+[[control]]
+id = "client-transient-terminal-reconnects"
+guards = "the TypeScript client still reconnects once and retries after a transient terminal transport error"
+file = "packages/client/src/wire.ts"
+old = """
+      error.kind === 'terminal' &&
+"""
+new = """
+      error.kind === 'never_reconnect' && // NON-VACUITY BREAK
+"""
+edits = []
+test_file = "packages/client/src/tests/transport-error-wire.test.ts"
+runner = "command"
+command = ["bun", "test", "packages/client/src/tests/transport-error-wire.test.ts", "-t", "{test}"]
+test_count_pattern = "Ran {count} test"
+expect_red = ["a transient terminal error reconnects once and retries the call"]
+expect_message = "module_timeout"
+only = false
+timeout_s = 600
+build_timeout_s = 1800
+
+[[control]]
+id = "client-failed-recovery-keeps-original-code"
+guards = "a failed reconnect or post-reconnect retry reports the original call's code and class, not the recovery's"
+file = "packages/client/src/wire.ts"
+old = """
+          : this.#asTransportError(error)
+"""
+new = """
+          : this.#asTransportError(recoveryError) // NON-VACUITY BREAK
+"""
+edits = []
+test_file = "packages/client/src/tests/transport-error-wire.test.ts"
+runner = "command"
+command = ["bun", "test", "packages/client/src/tests/transport-error-wire.test.ts", "-t", "{test}"]
+test_count_pattern = "Ran {count} test"
+expect_red = ["a failed reconnect keeps the original code and class", "a failed retry after a reconnect keeps the original code and class"]
+expect_message = "module_timeout"
+only = false
+timeout_s = 600
+build_timeout_s = 1800
+
+[[control]]
+id = "client-definitive-codes-are-permanent"
+guards = "every definitive transport code becomes a permanent/gone credential error"
+file = "packages/client/src/wire.ts"
+old = """
+      return new ClaustrumCredentialError(code, 'permanent', 'gone')
+"""
+new = """
+      return new ClaustrumCredentialError(code, 'transient', 'retry') // NON-VACUITY BREAK
+"""
+edits = []
+test_file = "packages/client/src/tests/transport-error-wire.test.ts"
+runner = "command"
+command = ["bun", "test", "packages/client/src/tests/transport-error-wire.test.ts", "-t", "{test}"]
+test_count_pattern = "Ran {count} test"
+expect_red = ["every other definitive transport code is permanent and skips the reconnect"]
+expect_message = "permanent"
+only = false
+timeout_s = 600
+build_timeout_s = 1800

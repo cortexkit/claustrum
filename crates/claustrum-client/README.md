@@ -58,6 +58,17 @@ failures are row-local: callers should check `undecodable_credentials` and
 a missing, empty or non-string field is skipped and reported there, never turned
 into an empty-string grant.
 
+A transport `Error` frame (`{code, message}`, no class) whose code a retry cannot
+change, such as `unknown_method`, `invalid_params`, `invalid_request`,
+`flow_scopes_unsupported` or `invalid_control_body`, comes back as
+`CredentialErrorClass::Unclassified` with the vault's code in `code()`. It is not
+`retryable()`, so it returns at once and is never retried, and it keeps the
+connection rather than redialing. `unknown_method` from a vault means the vault
+predates the operation: update the vault. `unknown_module` and the other daemon
+routing refusals are the exception: they are `Transport`, so the next call redials and
+the reads that retry transport failures retry them, because they say the credential
+module was not reachable rather than anything about the request.
+
 ## Watching for changes
 
 `CredentialResolver::watch_scoped(enrollment_token)` opens one dedicated raw

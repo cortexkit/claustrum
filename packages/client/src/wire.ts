@@ -15,6 +15,38 @@ import { openScopedWatch, type ScopedWatch, type ScopedWatchNotice, type ScopedW
 const CLAUSTRUM_MODULE_ID = 'claustrum'
 const RECONNECT_BACKOFF_MS = 60_000
 
+/**
+ * Transport `Error` frame codes whose answer neither a retry nor a fresh connection can
+ * change. A call failing with one of these is reported as `permanent`/`gone` and is never
+ * reconnected; every other transport failure stays `transient`/`retry`.
+ *
+ * This is the ONLY list of such codes: the error classification and the reconnect
+ * decision both read it, so the two cannot disagree about a code.
+ *
+ * - `unknown_method`: the vault does not implement the operation. From a released vault
+ *   this means the vault predates the operation, and the remedy is to update the vault.
+ * - `invalid_params`, `invalid_request`: the vault could not decode the request body or
+ *   its params. The same bytes are refused the same way on any connection.
+ * - `flow_scopes_unsupported`: the vault refuses routes opened under a flow scope.
+ * - `invalid_control_body`: the vault build cannot decode the daemon's route bind.
+ * - `unknown_module`: the daemon has no module with this id registered or supervised at
+ *   all. A vault that is restarting or warming up is reported as `module_warming` or
+ *   `target_unavailable` instead, which the SDK already retries in place. A fresh
+ *   connection to the same daemon gets the same answer, and the wasted reconnect would
+ *   also start the reconnect backoff, leaving a genuinely wedged connection unable to
+ *   recover for a minute.
+ * - `missing_identity`: the SDK refused before sending because no bind identity was set.
+ */
+const DEFINITIVE_TRANSPORT_CODES: ReadonlySet<string> = new Set([
+  'unknown_method',
+  'invalid_params',
+  'invalid_request',
+  'flow_scopes_unsupported',
+  'invalid_control_body',
+  'unknown_module',
+  'missing_identity',
+])
+
 type ClaustrumTransport = Pick<SubcClient, 'call' | 'close' | 'routeOpen' | 'subscribe' | 'closeRoute'>
 
 export type ClaustrumConnector = (options: {
@@ -448,29 +480,37 @@ export class ClaustrumClient {
         consumerIdentity: null,
       })
     } catch (error) {
-      if (this.#shouldReconnect(error)) {
-        try {
-          if (this.#client === sentClient) await this.#reconnect()
-        } catch (reconnectError) {
-          throw this.#asTransportError(reconnectError)
-        }
-        try {
-          return await this.#client.call(CLAUSTRUM_MODULE_ID, method, params, {
-            identity: this.#identity,
-            consumerIdentity: null,
-          })
-        } catch (retryError) {
-          throw this.#asTransportError(retryError)
-        }
+      if (!this.#shouldReconnect(error)) throw this.#asTransportError(error)
+      try {
+        if (this.#client === sentClient) await this.#reconnect()
+        return await this.#client.call(CLAUSTRUM_MODULE_ID, method, params, {
+          identity: this.#identity,
+          consumerIdentity: null,
+        })
+      } catch (recoveryError) {
+        // Report the call's own failure, not the recovery's. A failed reconnect would
+        // otherwise replace the code the vault actually sent with `transport_error`, so
+        // the one actionable code would appear once and every later diagnostic would
+        // name a transport failure that never happened. Only a failure that carried no
+        // code at all has nothing to preserve.
+        throw this.#transportErrorCode(error) === undefined
+          ? this.#asTransportError(recoveryError)
+          : this.#asTransportError(error)
       }
-      throw this.#asTransportError(error)
     }
+  }
+
+  #transportErrorCode(error: unknown): string | undefined {
+    return error instanceof SubcCallError && error.code ? error.code : undefined
   }
 
   #asTransportError(error: unknown): ClaustrumCredentialError {
     if (error instanceof ClaustrumCredentialError) return error
-    const code = error instanceof SubcCallError && error.code ? error.code : 'transport_error'
-    return new ClaustrumCredentialError(code, 'transient', 'retry')
+    const code = this.#transportErrorCode(error)
+    if (code !== undefined && DEFINITIVE_TRANSPORT_CODES.has(code)) {
+      return new ClaustrumCredentialError(code, 'permanent', 'gone')
+    }
+    return new ClaustrumCredentialError(code ?? 'transport_error', 'transient', 'retry')
   }
 
   #shouldReconnect(error: unknown): boolean {
@@ -478,15 +518,7 @@ export class ClaustrumClient {
       !this.#closed &&
       error instanceof SubcCallError &&
       error.kind === 'terminal' &&
-      error.code !== 'missing_identity' &&
-      error.code !== 'invalid_control_body' &&
-      // The daemon answers unknown_module only when no module with this id is
-      // registered or supervised at all; a vault that is restarting or warming up
-      // is reported as module_warming or target_unavailable, which the SDK already
-      // retries in place. A fresh connection to the same daemon gets the same
-      // answer, and the wasted reconnect would also start the reconnect backoff,
-      // leaving a genuinely wedged connection unable to recover for a minute.
-      error.code !== 'unknown_module'
+      !DEFINITIVE_TRANSPORT_CODES.has(error.code ?? '')
     )
   }
 

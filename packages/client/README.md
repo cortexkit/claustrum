@@ -23,6 +23,20 @@ credential caching, refresh, account scheduling, and retry policy.
   as a version older than every real one.
 • Unknown server error classes are bounded to `transient`; callers must retry them
   rather than treating a forward-compatible class as permanent.
+• **Changed in 0.13.0:** a transport `Error` frame whose answer no retry or reconnect
+  can change is reported as `permanent` with action `gone`, and the client no longer
+  reconnects for it: `unknown_method`, `invalid_params`, `invalid_request`,
+  `flow_scopes_unsupported`, `invalid_control_body`, `unknown_module`, and the SDK's
+  pre-send `missing_identity`. These are not verdicts about a credential: do not mark
+  anything gone or needing re-authentication on them; stop retrying and surface the
+  code. `unknown_method` from a vault means the vault predates that operation (for
+  example an enrollment op against a vault older than the enrollment ceremony):
+  update the vault. Before 0.13.0 these were `transient`/`retry`. Every other
+  transport failure is still `transient`/`retry`.
+• Since 0.13.0, when a terminal transport failure makes the client reconnect and the
+  reconnect or the retried call then fails, the error carries the ORIGINAL call's code
+  and class. Earlier versions threw the reconnect's error instead, usually
+  `transport_error`, hiding the code the vault actually sent.
 • `listScoped` rows always carry `providerIds` (a required field since 0.6.0, so code
   that builds rows by hand, such as test fixtures, must set it). An empty array means
   no provider ids are set. Since 0.6.2 a daemon too old to send the field decodes the

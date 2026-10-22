@@ -113,6 +113,38 @@ state, do not mark anything `needs_reauth`, and do not delete client state on it
 an unrecognised `Error` code as retryable, because the alternative is letting a
 transport condition masquerade as a permanent verdict about a credential that is fine.
 
+**Some `Error` codes are definitive: retrying or reconnecting cannot change them.** They
+say nothing about a credential, but the same request will be refused the same way on
+any connection, so a retry loop around them only delays the failure. Stop and surface
+the code:
+
+- `unknown_method`: the vault does not implement the operation. From a released vault
+  this means **the vault predates that operation**: update the vault. (The one
+  exception is `auth.watch_scoped`, where `unknown_method` is the documented signal to
+  fall back to polling `credential.list_scoped`.)
+- `invalid_params`, `invalid_request`: the params, or the whole request body, did not
+  decode. The fix is in the caller's serialisation.
+- `flow_scopes_unsupported`: a route opened under a flow scope; the vault never serves
+  those.
+- `invalid_control_body`: this vault build cannot decode the daemon's route bind; the
+  daemon is newer than the vault in a way the vault cannot follow. Update the vault.
+- `unknown_module` (sent by subc, not the vault): no module with this id is registered
+  or supervised on the daemon at all. A vault that is starting, restarting or busy is
+  reported as `module_warming`, `module_reloading`, `target_unavailable` or
+  `module_timeout` instead, and those stay retryable.
+
+`admin_refused` is also sent on this lane, but only by the admin operations, never by a
+credential read. Treat every other `Error` code as retryable, as above; connection loss
+and route churn (`route_closed`, `unknown_channel`, `stale_route_epoch`) are the common
+ones.
+
+The TypeScript client (`@cortexkit/claustrum-client` 0.13.0 and later) reports the
+definitive codes, plus its own pre-send `missing_identity`, as
+`ClaustrumCredentialError(code, 'permanent', 'gone')` and never reconnects for them;
+every other transport failure stays `transient`/`retry`. The Rust client returns them
+unclassified and not retryable (`unknown_module` excepted, which it treats as a
+transport failure and redials).
+
 **And do not decode an `Error` frame's body as a result.** A decoder reaching for
 `result.credentials` in an `Error` body gets a missing-field failure, which presents as
 corruption and sends the reader hunting a serialisation defect in the producer that does

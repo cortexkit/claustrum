@@ -742,8 +742,14 @@ async fn main() {
             }
         }
         if public_key {
-            let body =
-                credential_public_key(&mut stream, route_channel, route_epoch, &handle).await;
+            // With --scoped-id the key is addressed by id under the caller's grant, as a
+            // module or enrolled consumer reads it (Callosum reads `kem:mac-push:1` this
+            // way); without it, by capability handle.
+            let params = match scoped_id.as_deref() {
+                Some(id) => json!({ "credential_id": id, "enrollment_token": enrollment_token }),
+                None => json!({ "handle": handle }),
+            };
+            let body = credential_public_key(&mut stream, route_channel, route_epoch, params).await;
             let parsed: Value = serde_json::from_slice(&body.body).unwrap_or(Value::Null);
             eprintln!(
                 "[probe] public_key -> {}",
@@ -960,7 +966,7 @@ async fn credential_public_key(
     stream: &mut TcpStream,
     route_channel: u16,
     route_epoch: u32,
-    handle: &str,
+    params: Value,
 ) -> Frame {
     let frame = Frame::build(
         FrameType::Request,
@@ -970,7 +976,7 @@ async fn credential_public_key(
         11,
         serde_json::to_vec(&json!({
             "method": "credential.public_key",
-            "params": { "handle": handle },
+            "params": params,
         }))
         .unwrap(),
     )

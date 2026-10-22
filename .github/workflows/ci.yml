@@ -126,6 +126,10 @@ jobs:
         run: bun run typecheck
 
       - name: Bun test packages
+        # A hung test held this step for over four hours on Windows (until the job's default
+        # 360-minute limit), and with it every train waiting on CI. The whole step takes
+        # under five minutes when healthy, so fail it well before then.
+        timeout-minutes: 20
         # The Unix-only files below use POSIX mode bits (0o600 / 0o640 / 0o777) that
         # `chmod()` cannot express on Windows and that `handles.ts` validates against;
         # the `/proc/self/fd` descriptor-closure probe is Linux-only. They would

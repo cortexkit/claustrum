@@ -1276,3 +1276,25 @@ expect_message = 'Err(InvalidRecipient)'
 only = false
 timeout_s = 600
 build_timeout_s = 3600
+
+[[control]]
+id = "client-public-key-accepts-x25519"
+guards = "the Rust client decodes a vault X25519 KEM public-key reply as PublicKeyAlgorithm::X25519"
+file = "crates/claustrum-client/src/lib.rs"
+old = """
+        Some("x25519") => PublicKeyAlgorithm::X25519,
+"""
+new = """
+        // NON-VACUITY BREAK: x25519 falls through to the refusal
+"""
+edits = []
+test_file = "crates/claustrum-client/src/contract_tests.rs"
+runner = "cargo"
+package = "cortexkit-claustrum-client"
+target = "--lib"
+expect_red = ["contract_tests::producer_read_surface_x25519_public_key_reply_decodes_as_x25519", "tests::public_key_replies_type_x25519_and_refuse_unknown_algorithms_and_wrong_key_ids"]
+expect_message = "neither Ed25519 nor X25519"
+only = false
+timeout_s = 600
+build_timeout_s = 3600
+

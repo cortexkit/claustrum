@@ -105,7 +105,17 @@ jobs:
 
       - name: Install Linux native store test services
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y dbus gnome-keyring
+        # Refresh only Ubuntu's own archive. The runner image also lists third-party
+        # repositories (Microsoft's among them) that these packages don't come from, and a
+        # plain `apt-get update` fails the whole job when one of them is unreachable: on
+        # 2026-10-22 packages.microsoft.com answered 403 and failed a scheduled run.
+        run: |
+          set -euo pipefail
+          sudo apt-get update \
+            -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources \
+            -o Dir::Etc::sourceparts=- \
+            -o APT::Get::List-Cleanup=0
+          sudo apt-get install -y --no-install-recommends dbus gnome-keyring
 
       - name: Bun build
         # test:hermetic already builds on Unix; the Windows subset invokes bun test directly.

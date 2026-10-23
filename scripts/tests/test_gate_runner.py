@@ -265,6 +265,23 @@ exec "$REAL_PYTHON" "$@"
         subprocess.run(["git", "-C", str(copy), "checkout", "--", "file"], check=True)
         self.assertEqual((source / "file").read_text(), "dirty")
 
+    def test_copy_location_is_stable_per_checkout_and_emptied(self):
+        # Cached test binaries bake in the copy's CARGO_MANIFEST_DIR, so the copy must
+        # sit at the same path on every run; a fresh random directory left them
+        # reading fixtures from a deleted copy.
+        spec = importlib.util.spec_from_file_location("gate_remote", ROOT / "scripts/gate-remote.py")
+        assert spec is not None and spec.loader is not None
+        remote = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(remote)
+        with patch.object(remote.tempfile, "gettempdir", return_value=str(self.bin)):
+            first = remote.stable_scratch(Path("/snapshots/claustrum"))
+            (first / "leftover").write_text("from the previous run")
+            second = remote.stable_scratch(Path("/snapshots/claustrum"))
+            other = remote.stable_scratch(Path("/snapshots/other-worktree"))
+        self.assertEqual(first, second)
+        self.assertFalse((second / "leftover").exists())
+        self.assertNotEqual(first, other)
+
     def test_snapshot_clones_trust_only_each_exact_git_directory(self):
         spec = importlib.util.spec_from_file_location("gate_remote", ROOT / "scripts/gate-remote.py")
         assert spec is not None and spec.loader is not None

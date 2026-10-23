@@ -29,7 +29,11 @@ def remote_command(mode, plan=None):
     arguments = []
     if mode == "full":
         sibling = os.environ.get("CRED_SUBCONSCIOUS_ROOT", "../subconscious")
-        command += ["--sibling", sibling]
+        # Runner jobs are offline unless asked. The full gate's v0.1.2 compatibility
+        # arm downloads that release once from GitHub (then reuses its verified copy
+        # from the build cache), so the full job needs outbound network. The fast
+        # gate doesn't, and stays offline.
+        command += ["--net", "--sibling", sibling]
         arguments += ["--sibling", sibling]
     if plan is not None:
         arguments += ["--plan", json.dumps(plan)]

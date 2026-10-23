@@ -133,6 +133,7 @@ exit "$SCENARIO"
         plan = {"crates": ["credentials-core"], "paths": ["crates/credentials-core/src/lib.rs"]}
         command = runtime.remote_command("fast", plan)
         self.assertNotIn("--sibling", command)
+        self.assertNotIn("--net", command[:command.index("--")])
         self.assertNotIn("--env", command)
         self.assertEqual(command[command.index("--") + 1:],
                          ["python3", "scripts/gate-remote.py", "fast", "--plan", json.dumps(plan)])
@@ -142,6 +143,9 @@ exit "$SCENARIO"
         with patch.dict(os.environ, CRED_SUBCONSCIOUS_ROOT=sibling):
             command = runtime.remote_command("full")
         self.assertNotIn("--env", command)
+        # The v0.1.2 compatibility arm downloads its release once; runner jobs are
+        # offline without --net, and that arm then fails resolving github.com.
+        self.assertIn("--net", command[:command.index("--")])
         self.assertEqual(command[command.index("--") + 1:],
                          ["python3", "scripts/gate-remote.py", "full", "--sibling", sibling])
         self.assertEqual(command[command.index("--sibling") + 1], sibling)

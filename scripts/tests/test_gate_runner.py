@@ -20,7 +20,9 @@ class RunnerContracts(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.bin = Path(self.temp.name)
+        # Resolved: on macOS the temp dir sits under /var, a symlink to /private/var,
+        # and the worker reports resolved paths, so unresolved expectations never match.
+        self.bin = Path(self.temp.name).resolve()
         bash = shutil.which("bash")
         assert bash is not None
         self.env = dict(os.environ, PATH=str(self.bin) + os.pathsep + os.environ["PATH"],

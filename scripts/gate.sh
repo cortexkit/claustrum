@@ -110,6 +110,10 @@ FMT_PKGS=$(cargo metadata --no-deps --format-version 1 \
 [ -n "$FMT_PKGS" ] || fail "format (could not derive workspace members -- refusing to run an empty scope)"
 # shellcheck disable=SC2086
 run_check "format" cargo fmt $FMT_PKGS -- --check
+# The catalogue's anchors, checked without building anything (well under a second), so
+# a stale anchor fails here, not after the minutes-long Linux job. Test names still
+# need a build to list, so the full check runs in the Linux lane.
+run_check "mutation anchors" ckdev-mutate check --anchors-only
 SUBCONSCIOUS_ROOT="${CRED_SUBCONSCIOUS_ROOT-../subconscious}"
 [[ -d "$SUBCONSCIOUS_ROOT" ]] || fail "supervisor checkout not found: $SUBCONSCIOUS_ROOT"
 run_check "inbound contracts" bash scripts/check-inbound-contracts.sh "$SUBCONSCIOUS_ROOT/docs/push-sealed-payload.md"

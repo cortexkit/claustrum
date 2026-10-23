@@ -167,6 +167,9 @@ def main():
         if not members:
             raise RuntimeError("empty workspace; refusing an empty format scope")
         gate.job("workspace format", fmt + ["--", "--check"])
+        # Anchors only, with no build: a stale mutation anchor fails in under a second
+        # here, before the Linux job starts.
+        gate.job("mutation anchors", ["ckdev-mutate", "check", "--anchors-only"])
         if any(p.startswith(("scripts/", ".github/")) for p in paths):
             print(output("python3", "--version").strip(), flush=True)
             gate.job("script contracts", ["python3", "-m", "unittest", "discover", "-s", "scripts/tests", "-v"])

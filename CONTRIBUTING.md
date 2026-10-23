@@ -19,18 +19,32 @@ and a finished implementation is hard to argue with.
 ./scripts/gate.sh
 ```
 
-The gate runs every check CI's test job runs, with the same flags, on your working tree:
-format and clippy (including seam features and a Windows cross type-check), the script
-contracts and scan checks, the Bun install, typecheck, build and hermetic tests, the workspace
-tests, the real-daemon end-to-end tests, and the crash-cut suites. Run it before every push.
+The gate checks your working tree, including uncommitted edits. Format, script contracts
+and repository scans run locally first and fail fast without building test binaries. Then
+one Linux job (`ck motor run`, 8 vCPUs) runs clippy, workspace tests, real-daemon e2e,
+crash cuts, migration/release compatibility, release-artifact/picker assertions and the
+full `ckdev-mutate check` catalogue validation. The Linux job runs concurrently with the
+local Bun install/typecheck/hermetic tests and, on macOS, the default-feature release
+`ck-auth` build whose artifact must remain on the Mac. No cargo check, clippy or test
+runs on the Mac. Each arm reports its duration and counts; the final table includes
+lane wall times and the slowest arms. Run it before every push.
 
 It needs:
 
-- the Rust toolchain, Bun and Python 3;
+- the local Rust formatting toolchain, Bun and Python 3, plus access to `ck motor run`;
+  the Linux runner needs Rust, Python and the installed `ckdev-mutate` tool;
 - a checkout of [`subconscious`](https://github.com/cortexkit/subconscious) beside this
   repository (or `CRED_SUBCONSCIOUS_ROOT` pointing at one), for the real-daemon end-to-end
   tests and the inbound-contract check;
 - `ckdev-mutate`, installed as described in [mutation testing](docs/mutation-testing.md).
+
+The `subconscious` supervisor checkout is passed to the Linux runner with `--sibling`.
+Remote workers copy both checkout snapshots to
+writable scratch trees, preserving dirty content and history, because mutation tooling
+and the supervisor build must not write into the runner's read-only snapshots. Build
+output uses the runner's writable `target` caches. Runner refusal/unreachability, unknown
+outcome, timeout, cancellation and bad arguments all fail the gate; a successful exit
+without test counts or a completion receipt also fails. There is no local-build fallback.
 
 The gate asserts a minimum passed-test count for each suite, so a suite that silently stops
 running fails the gate instead of passing quietly. `cargo test --workspace` on its own is not
@@ -38,8 +52,22 @@ the gate: the real-daemon tests are `#[ignore]` by default and skip unless
 `CRED_REQUIRE_DAEMON=1` is set, and the crash-cut suites compile to nothing without their
 feature flags, printing `running 0 tests ... ok`. Read the counts, not the word `ok`.
 
-A green local gate proves the checks pass on your platform. CI also runs Windows, so path
-rendering, line endings and shell builtins are unverified until CI says so.
+A green gate proves the selected Linux and host lanes, not CI's entire platform matrix.
+The native-store integration tests exercise Linux Secret Service, not macOS Keychain;
+they report UNCHECKED if D-Bus/gnome-keyring is absent. The GNU Windows cross-check is
+also UNCHECKED unless its Rust target and MinGW compiler are installed on the runner.
+Windows-only native/ACL/filesystem checks still run locally when invoked on Windows;
+CI's native Windows leg remains necessary. Signing/hardened runtime and deployed binary
+acceptance remain separate release-builder/operator checks.
+
+`./scripts/fast-check.sh [--base <ref>]` follows the same scheduling rule: local format
+and conditional script contracts first, then one Linux job for diff-scoped clippy/tests
+and the always-on Rust wire/migration checks, in parallel with local TypeScript checks.
+Scope is resolved before submission and passed explicitly, so dirty edits cannot vanish
+when the runner makes its writable copy. Fast-check still omits the full gate's
+feature-gated lint and crash-cut checks, e2e, native stores, mutation catalogue and
+release-artifact checks. Both commands
+print summaries on failure too; an UNCHECKED arm is never presented as a passed arm.
 
 Individual arms you can run without the sibling checkout:
 

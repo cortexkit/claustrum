@@ -22,14 +22,15 @@
 # still diverged, because the e2e arm dropped CI's --test-threads=1. Copy the
 # flags, not just the command.
 #
-# AND EVEN A PERFECT MATCH IS ONE PLATFORM. CI runs ubuntu AND windows; this runs
-# wherever you are. A green gate followed by a red build is therefore EXPECTED for
+# AND EVEN A PERFECT MATCH IS NOT THE CI MATRIX. Rust runs on Linux; only the
+# release artifact that must be placed on a Mac is built there. CI also runs Windows.
+# A green gate followed by a red build is therefore still possible for
 # anything platform-dependent, and has already happened once: the endpoint manifest
 # keyed rows by `str(Path)`, which is identical on posix and backslashed on Windows,
 # so ubuntu passed while windows reported all 29 rows removed and re-added. Nothing
 # runnable here could have caught it.
 #
-# So this gate's claim is bounded: it proves the checks pass ON THIS MACHINE. Treat
+# So this gate's claim is bounded: it proves the selected Linux and host lanes. Treat
 # path rendering, line endings, and shell builtins as unverified until CI says
 # otherwise — and do not let a green run here become the reason to skip reading a
 # red one there.
@@ -38,7 +39,19 @@ set -euo pipefail
 SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 cd "$(dirname "$SCRIPT_PATH")/.."
 BUN="${BUN:-$(command -v bun || true)}"
-[[ -n "$BUN" ]] || { printf 'GATE FAILED: bun not found; set BUN or add bun to PATH\n' >&2; exit 1; }
+if [ "$#" = 0 ]; then
+  exec python3 scripts/gate-driver.py
+fi
+[[ "$#" = 2 && "$1" = --lane ]] || { echo 'usage: scripts/gate.sh [--lane preflight|linux|typescript|release|windows]' >&2; exit 1; }
+LANE="$2"
+
+record_arm() {
+  python3 - "$1" "$2" "$3" "${4:-null}" "${5:-null}" <<'PY'
+import json, sys
+print('CK_GATE_ARM ' + json.dumps(dict(label=sys.argv[1], seconds=int(sys.argv[2]),
+    status=sys.argv[3], passed=json.loads(sys.argv[4]), floor=json.loads(sys.argv[5]))))
+PY
+}
 
 # A FAILURE MUST SURVIVE `| tail -1`.
 #
@@ -52,6 +65,7 @@ BUN="${BUN:-$(command -v bun || true)}"
 # load average at the moment of failure lets a reader tell them apart from the tail
 # alone, without re-running and hoping it reproduces.
 fail() {
+  record_arm "${label:-$1}" "$((SECONDS - ${started:-SECONDS}))" failed
   local load
   load="$(uptime 2>/dev/null | sed 's/.*load averages*: //' || echo unknown)"
   printf '\nGATE FAILED: %s  [load %s]\n' "$1" "$load" >&2
@@ -63,10 +77,14 @@ fail() {
 # Run a command that produces no test counts, failing the gate if it does.
 run_check() {
   local label="$1"; shift
+  local started=$SECONDS
   printf '\n=== %s ===\n' "$label"
   local out
   out="$("$@" 2>&1)" || { printf '%s\n' "$out"; fail "$label"; }
-  printf '%s\n' "$out" | grep '^WARNING:' || true
+  printf '%s\n' "$out"
+  local status=passed
+  [[ "$out" != *CK_GATE_UNCHECKED* ]] || status=unchecked
+  record_arm "$label" "$((SECONDS - started))" "$status"
   printf '  ok\n'
 }
 
@@ -85,6 +103,13 @@ run_check() {
 # The endpoint-host manifest is a population check, which no unit test can be: a
 # per-constant assertion cannot fail when a NEW endpoint appears, and "is this URL
 # asserted somewhere" is satisfied by a test comparing a constant to itself.
+preflight() {
+# Format is metadata-only: it does not compile or launch a test binary on the host.
+FMT_PKGS=$(cargo metadata --no-deps --format-version 1 \
+  | python3 -c 'import json,sys; print(" ".join("-p "+p["name"] for p in json.load(sys.stdin)["packages"]))')
+[ -n "$FMT_PKGS" ] || fail "format (could not derive workspace members -- refusing to run an empty scope)"
+# shellcheck disable=SC2086
+run_check "format" cargo fmt $FMT_PKGS -- --check
 SUBCONSCIOUS_ROOT="${CRED_SUBCONSCIOUS_ROOT-../subconscious}"
 [[ -d "$SUBCONSCIOUS_ROOT" ]] || fail "supervisor checkout not found: $SUBCONSCIOUS_ROOT"
 run_check "inbound contracts" bash scripts/check-inbound-contracts.sh "$SUBCONSCIOUS_ROOT/docs/push-sealed-payload.md"
@@ -96,28 +121,31 @@ run_check "doc status" python3 scripts/check-doc-status.py
 run_check "outside path deps" python3 scripts/check-outside-path-deps.py
 run_check "development binary names" python3 scripts/check-ckdev-execution.py
 run_check "script contracts" python3 -m unittest discover -s scripts/tests -v
+run_check "floor ratchet" assert_floor_not_lowered "$SCRIPT_PATH"
+run_check "CI coverage" check_ci_coverage
+}
+
+mutation_catalogue() {
 # Anchor/name validation mirrors CI. Full replay is the master landing gate and
 # nightly breadth audit, not work repeated on every local push.
 run_check "mutation catalogue" ckdev-mutate check
-# Format workspace members only. Derive the package list from Cargo metadata so
-# new members are included automatically; refuse an empty list rather than let
-# a format command that checks nothing report success.
-FMT_PKGS=$(cargo metadata --no-deps --format-version 1 \
-  | python3 -c 'import json,sys; print(" ".join("-p "+p["name"] for p in json.load(sys.stdin)["packages"]))')
-[ -n "$FMT_PKGS" ] || fail "format (could not derive workspace members -- refusing to run an empty scope)"
-# shellcheck disable=SC2086
-run_check "format" cargo fmt $FMT_PKGS -- --check
+}
 
+typescript() {
+[[ -n "$BUN" ]] || fail "bun not found; set BUN or add bun to PATH"
 run_check "bun frozen install" "$BUN" install --frozen-lockfile
 run_check "bun typecheck" "$BUN" run typecheck
 # test:hermetic builds both TypeScript packages before importing either one.
 run_check "bun tests (hermetic)" "$BUN" run test:hermetic
+}
 
+clippy() {
 run_check "clippy" \
   cargo clippy --locked --workspace --all-targets --features credentials-core/test-support -- -D warnings
 run_check "clippy (seam features)" \
   cargo clippy --locked --workspace --all-targets \
-    --features credentials-core/test-support,kill9-test-seam,rotate-test-seam,login-test-seam,migration-tools,import-prompt-seam,windows-runtime-test-seam -- -D warnings
+     --features credentials-core/test-support,kill9-test-seam,rotate-test-seam,login-test-seam,migration-tools,import-prompt-seam,windows-runtime-test-seam -- -D warnings
+}
 
 # Run a cargo invocation and require at least `min` tests to have PASSED, and that
 # no arm announced a skip.
@@ -132,6 +160,7 @@ run_check "clippy (seam features)" \
 # without --nocapture the notice is invisible here, with it all eight appear.
 run_expect() {
   local min="$1" label="$2"; shift 2
+  local started=$SECONDS
   printf '\n=== %s ===\n' "$label"
 
   # THE SKIP CHECK BELOW DEPENDS ON A FLAG IT DOES NOT CONTROL, so enforce the
@@ -255,6 +284,7 @@ stream and pass the arm without ever seeing it skip."
   if [ "$passed" -lt "$min" ]; then
     fail "$label ran $passed tests, expected at least $min — a suite that shrank is indistinguishable from one that passed"
   fi
+  record_arm "$label" "$((SECONDS - started))" passed "$passed" "$min"
 }
 
 # A FLOOR IS A LOWER BOUND, AND LOWER BOUNDS DO NOT COMPLAIN ABOUT BEING LOWERED.
@@ -313,6 +343,7 @@ assert_floor_not_lowered() {
 
   if ! target_file=$(git show "$target:scripts/gate.sh" 2>/dev/null); then
     GATE_UNCHECKED="${GATE_UNCHECKED:-}floor ratchet (cannot resolve $target) "
+    printf 'CK_GATE_UNCHECKED floor ratchet (cannot resolve %s)\n' "$target"
     printf '\n=== floor ratchet: UNCHECKED ===\n'
     printf 'cannot resolve %s (%s) — no comparison made (this is not a pass)\n' "$target" "$target_sha"
     return
@@ -321,6 +352,7 @@ assert_floor_not_lowered() {
   theirs=$(sed -n 's/^run_expect \([0-9][0-9]*\) "workspace.*/\1/p' <<< "$target_file")
   if [ -z "$theirs" ]; then
     GATE_UNCHECKED="${GATE_UNCHECKED:-}floor ratchet (no floor in $target) "
+    printf 'CK_GATE_UNCHECKED floor ratchet (no floor in %s)\n' "$target"
     printf '\n=== floor ratchet: UNCHECKED ===\n'
     printf 'cannot read a workspace floor from %s (%s) — no comparison made (this is not a pass)\n' "$target" "$target_sha"
     return
@@ -352,10 +384,9 @@ assert_floor_not_lowered() {
 # (platform-specific bodies print a skip line), so the count is the same on macOS,
 # Linux and Windows. `assert_floor_not_lowered` below stops a branch from lowering
 # the floor below its merge target. The history of each raise is in git log.
+linux_tests() {
 run_expect 1150 "workspace unit + integration" \
   cargo test --locked --workspace --features credentials-core/test-support
-
-assert_floor_not_lowered "$SCRIPT_PATH"
 
 case "$(uname -s)" in
   Linux)
@@ -364,17 +395,24 @@ case "$(uname -s)" in
     else
       GATE_UNCHECKED="${GATE_UNCHECKED:-}native store (install dbus and gnome-keyring) "
       printf '\n=== native master-key store: UNCHECKED (requires dbus and gnome-keyring) ===\n'
+      record_arm "native master-key store" 0 unchecked
     fi
     ;;
-  MINGW*|MSYS*|CYGWIN*)
+esac
+}
+
+windows_native() {
+    case "$(uname -s)" in
+      MINGW*|MSYS*|CYGWIN*) ;;
+      *) fail "Windows native lane refuses to compile on this host" ;;
+    esac
     run_expect 2 "native master-key store" env CK_NATIVE_STORE_TESTS=1 \
       cargo test --locked -p credentials-core --test native_store -- --nocapture --test-threads=1
     run_check "Windows key-file ACL mutation proofs" python3 scripts/prove-windows-acl.py
     run_expect 4 "Windows operator filesystem workflows" \
       cargo test --locked -p credentials-module --features windows-runtime-test-seam \
       --test windows_runtime -- --nocapture --test-threads=1
-    ;;
-esac
+}
 
 # THE ONE THING THIS macOS GATE CANNOT OTHERWISE SEE: code that does not COMPILE on Windows.
 #
@@ -394,22 +432,19 @@ esac
 # Skipped, loudly, when the target is not installed: `rustup target add x86_64-pc-windows-gnu`.
 # Silence here would restore exactly the blind spot this arm exists to close.
 #
-# LOCAL ONLY, AND DELIBERATELY SO -- I added the matching ci.yml step first and it was
-# wrong twice over. It failed on the ubuntu runner (ring's build script wants
-# x86_64-w64-mingw32-gcc, which GitHub's image does not carry and this mac has via
-# homebrew), and the reason I gave for adding it did not survive checking: I claimed it
-# would give fork PRs a signal, but the fork-safe job (since removed) ran cargo ZERO
-# times, so it would have given them nothing. CI's own windows runner already compiles this natively -- that
-# is how the defect was caught. The gap was never CI's. It was that this gate could not
-# see a platform the host is not.
-if rustup target list --installed 2>/dev/null | grep -qx x86_64-pc-windows-gnu; then
+# The Linux runner also needs the MinGW compiler for ring. If the compiler or target
+# is missing, report the cross-check as UNCHECKED; there is no local-build fallback.
+windows_cross() {
+if rustup target list --installed 2>/dev/null | grep -qx x86_64-pc-windows-gnu && command -v x86_64-w64-mingw32-gcc >/dev/null; then
   run_check "windows cross type-check" \
     cargo check --locked --target x86_64-pc-windows-gnu --workspace --all-targets
 else
-  GATE_UNCHECKED="${GATE_UNCHECKED:-}windows cross type-check (target not installed) "
-  echo "SKIPPING windows cross type-check: target x86_64-pc-windows-gnu not installed" >&2
-  echo "  install it with: rustup target add x86_64-pc-windows-gnu" >&2
+  GATE_UNCHECKED="${GATE_UNCHECKED:-}windows cross type-check (target or MinGW compiler not installed) "
+  echo "SKIPPING windows cross type-check: requires target x86_64-pc-windows-gnu and x86_64-w64-mingw32-gcc" >&2
+  echo "  install the target with: rustup target add x86_64-pc-windows-gnu, and install MinGW" >&2
+  record_arm "windows cross type-check" 0 unchecked
 fi
+}
 
 # Two independent defences, because each catches what the other misses:
 #   - CRED_REQUIRE_DAEMON=1 turns an unreachable sibling ck-subc into a failure at
@@ -442,6 +477,7 @@ fi
 #
 # Raise this WITH the arm count. A floor that trails is worse than no floor: it
 # reports a bound it is not enforcing, and the gap is invisible from a green run.
+ship_tests() {
 CRED_REQUIRE_DAEMON=1 run_expect 9 "real-daemon e2e (ship gate)" \
   cargo test --locked --workspace --features credentials-core/test-support --test real_daemon_e2e -- \
     --ignored --nocapture --test-threads=1
@@ -481,8 +517,18 @@ run_expect 1 "opencode account handle-write crash cut" \
     -- --nocapture
 # Rebuild the shipped CLI with default features so every later check and the caller use
 # the production release artifact rather than a test-profile seam build.
+release_artifact
+# Picker tests must probe the Linux artifact built in this same lane, not the Mac copy.
+export CK_AUTH_IMPORT_SHIPPED_BINARY="$PWD/target/release/ck-auth"
+release_tests
+}
+
+release_artifact() {
 run_check "release ck-auth (default features)" \
   cargo build --release --locked --offline -p credentials-module --bin ck-auth
+}
+
+release_tests() {
 # Picker tests must probe a separately built default-feature artifact. The test refuses
 # when this export is absent so a seam-enabled CARGO_BIN_EXE cannot impersonate shipping.
 export CK_AUTH_IMPORT_SHIPPED_BINARY="$PWD/target/release/ck-auth"
@@ -506,7 +552,8 @@ run_expect 1 "release artifact (test seams absent)" \
 # would otherwise relink the CLI after this feature-enabled build.
 run_expect 8 "interactive import picker + real-terminal smoke" \
   cargo test --locked --workspace --features credentials-core/test-support,credentials-module/import-prompt-seam \
-    --test import_picker -- --test-threads=1
+     --test import_picker -- --test-threads=1
+}
 
 # PROVE the scope claim rather than asserting it. "Every check CI runs" rots the
 # moment CI grows an arm, and that is exactly how it broke: CI gained an inbound
@@ -520,6 +567,7 @@ run_expect 8 "interactive import picker + real-terminal smoke" \
 # to widen the bound, which is how this check stops checking. That job is gone, but
 # the count stays bound to the job the claim is about, so the next job anyone adds
 # cannot reopen it.
+check_ci_coverage() {
 ci_steps=$(awk '/^  test:/{j=1} /^  [a-z-]+:$/ && !/^  test:/{j=0} j && /^      - name:/{n++} END{print n+0}' \
     .github/workflows/ci.yml)
 # Include conditional OS-specific arms as well as unindented common arms.
@@ -543,6 +591,7 @@ if [ "$((ci_steps - gate_arms))" -gt 5 ]; then
     printf 'deliberately if the new step genuinely cannot run locally.\n' >&2
     exit 1
 fi
+}
 
 # THIS BLOCK USED TO BE THE WINDOWS STORY, AND IT FAILED AS GUIDANCE. It described a
 # manual probe -- extract the helpers into a standalone .rs and rustc it at the msvc
@@ -574,8 +623,28 @@ printf '  (macOS IS unix). Touching platform APIs? See the probe in this file.\n
 
 # An unchecked arm is not a passed arm. Keep the verdict last so `tail -1`
 # cannot hide an omission behind the coverage notes above.
+lane_verdict() {
 if [ -n "${GATE_UNCHECKED:-}" ]; then
+  printf 'CK_GATE_UNCHECKED %s\n' "$GATE_UNCHECKED"
   printf '\nGATE PASSED WITH UNCHECKED ARMS -- %s\n' "$GATE_UNCHECKED"
 else
   printf '\nGATE PASSED -- every local CI check, on this working tree (full mutation replay runs in landing CI)\n'
 fi
+}
+
+case "$LANE" in
+  preflight) preflight ;;
+  typescript) typescript ;;
+  linux)
+    [[ "$(uname -s)" = Linux ]] || fail "Linux lane refuses to compile on this host"
+    clippy
+    linux_tests
+    windows_cross
+    ship_tests
+    mutation_catalogue
+    ;;
+  release) release_artifact ;;
+  windows) windows_native ;;
+  *) fail "unknown lane: $LANE" ;;
+esac
+lane_verdict

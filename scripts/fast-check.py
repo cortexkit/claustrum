@@ -10,6 +10,10 @@ import subprocess
 import sys
 import time
 
+# Importing by path is also used by the script-contract suite.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from gate_runtime import Gate, receipt, remote_command
+
 ROOT = Path(__file__).resolve().parents[1]
 FEATURES = "credentials-core/test-support,credentials-core/migration-tools"
 # Libtest treats these filters as alternatives; print each filter in the command
@@ -79,42 +83,33 @@ def run(label, command, tests=False):
     start = time.monotonic()
     result = subprocess.run(command, cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     print(result.stdout, end="", flush=True)
-    print(f"{label}: {time.monotonic() - start:.2f}s (exit {result.returncode})", flush=True)
+    seconds = time.monotonic() - start
+    print(f"{label}: {seconds:.2f}s (exit {result.returncode})", flush=True)
     if result.returncode:
+        receipt(label, seconds, status="failed")
         raise RuntimeError(f"{label} failed")
+    passed = None
     if tests:
         counts = re.findall(r"^test result: ok\. (\d+) passed|^\s*(\d+) pass$|^Ran (\d+) tests?", result.stdout, re.MULTILINE)
         counts = [int(number) for match in counts for number in match if number]
         if not counts or sum(counts) == 0 or "SKIPPING" in result.stdout:
+            receipt(label, seconds, status="failed")
             raise RuntimeError(f"{label}: no passing tests or a runtime skip; refusing a vacuous pass")
+        passed = sum(counts)
+    receipt(label, seconds, passed, 1 if tests else None)
     return result.stdout
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--base", default="origin/master", help="diff base (default: origin/master); must resolve locally")
-    args = parser.parse_args()
-    os.chdir(ROOT)
-    # Refuse an unknown base instead of guessing a scope that can omit a changed crate.
-    base = output("git", "merge-base", "HEAD", args.base).strip()
-    metadata = json.loads(output("cargo", "metadata", "--no-deps", "--format-version", "1"))
-    crates, paths, members = scope(base, metadata)
-    print(f"FAST CHECK (not the full gate): base {args.base} at {base}", flush=True)
-    print("Changed crates: " + (", ".join(crates) or "none"), flush=True)
+def linux_checks(crates):
+    if sys.platform != "linux":
+        raise RuntimeError("Linux worker refuses to compile on this host")
     for tool in (["cargo", "--version"], ["rustfmt", "--version"], ["cargo", "clippy", "--version"]):
         print(output(*tool).strip(), flush=True)
-    fmt = ["cargo", "fmt"]
-    for package in members:
-        fmt += ["-p", package["name"]]
-    if not members:
-        raise RuntimeError("empty workspace; refusing an empty format scope")
-    run("workspace format", fmt + ["--", "--check"])
     if crates:
         packages = [arg for crate in crates for arg in ("-p", crate)]
         features = ["--features", FEATURES] if {"credentials-core", "credentials-module"} & set(crates) else []
         run("changed-crate clippy", ["cargo", "clippy", "--locked", *packages, *features, "--all-targets", "--", "-D", "warnings"])
         run("changed-crate tests", ["cargo", "test", "--locked", *packages, *features], tests=True)
-    print("SKIPPED unchanged-crate clippy/tests: " + ", ".join(p["name"] for p in members if p["name"] not in crates), flush=True)
     cargo = ["cargo", "test", "--locked", "--workspace", "--features", FEATURES]
     listed = run("cross-seat test registration", cargo + ["--bin", "ck-claustrum", "--", "--list"])
     names = [line.removesuffix(": test") for line in listed.splitlines() if line.endswith(": test")]
@@ -125,6 +120,9 @@ def main():
     run("migration tools", cargo + ["--test", "key_verify_takes_nothing", "--", "--nocapture"], tests=True)
     run("released v0.1.2 migration compatibility", cargo + ["--test", "v012_release_compat", "--", "--ignored", "--nocapture"], tests=True)
     run("Rust consumer wire contract", ["cargo", "test", "--locked", "-p", "cortexkit-claustrum-client", "--lib", "contract_tests::", "--", "--nocapture"], tests=True)
+
+
+def typescript_checks(paths):
     bun = os.environ.get("BUN", "bun")
     print(output(bun, "--version").strip(), flush=True)
     run("Bun frozen install", [bun, "install", "--frozen-lockfile"])
@@ -137,11 +135,55 @@ def main():
         run("changed TypeScript package tests (hermetic)", [bun, "run", "test:hermetic"], tests=True)
     else:
         print("SKIPPED unchanged TypeScript package suites (consumer wire tests ran)", flush=True)
-    if any(p.startswith(("scripts/", ".github/")) for p in paths):
-        print(output("python3", "--version").strip(), flush=True)
-        run("script contracts", ["python3", "-m", "unittest", "discover", "-s", "scripts/tests", "-v"], tests=True)
-    else:
-        print("SKIPPED unchanged script contracts", flush=True)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--base", default="origin/master", help="diff base (default: origin/master); must resolve locally")
+    parser.add_argument("--linux-worker", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--typescript-worker", action="store_true", help=argparse.SUPPRESS)
+    args = parser.parse_args()
+    os.chdir(ROOT)
+    if args.linux_worker:
+        linux_checks(json.loads(os.environ["CK_FAST_PLAN"])["crates"])
+        return
+    if args.typescript_worker:
+        typescript_checks(json.loads(os.environ["CK_FAST_PLAN"])["paths"])
+        return
+    gate = Gate()
+    error = None
+    try:
+        # Scope is resolved locally, before the runner copies the dirty working tree.
+        base = output("git", "merge-base", "HEAD", args.base).strip()
+        metadata = json.loads(output("cargo", "metadata", "--no-deps", "--format-version", "1"))
+        crates, paths, members = scope(base, metadata)
+        print(f"FAST CHECK (not the full gate): base {args.base} at {base}", flush=True)
+        print("Changed crates: " + (", ".join(crates) or "none"), flush=True)
+        print(output("cargo", "--version").strip(), flush=True)
+        print(output("rustfmt", "--version").strip(), flush=True)
+        fmt = ["cargo", "fmt"]
+        for package in members:
+            fmt += ["-p", package["name"]]
+        if not members:
+            raise RuntimeError("empty workspace; refusing an empty format scope")
+        gate.job("workspace format", fmt + ["--", "--check"])
+        if any(p.startswith(("scripts/", ".github/")) for p in paths):
+            print(output("python3", "--version").strip(), flush=True)
+            gate.job("script contracts", ["python3", "-m", "unittest", "discover", "-s", "scripts/tests", "-v"])
+        else:
+            print("SKIPPED unchanged script contracts", flush=True)
+        print("SKIPPED unchanged-crate clippy/tests: " + ", ".join(p["name"] for p in members if p["name"] not in crates), flush=True)
+        plan = dict(crates=crates, paths=sorted(paths))
+        gate.parallel([
+            ("Linux Rust", remote_command("fast", plan), True),
+            ("TypeScript", ["env", "CK_FAST_PLAN=" + json.dumps(plan), "python3", "scripts/fast-check.py", "--typescript-worker"], False),
+        ])
+    except (OSError, subprocess.CalledProcessError, RuntimeError) as caught:
+        error = str(caught)
+    finally:
+        gate.summary()
+    if error:
+        raise RuntimeError(error)
     print("SKIPPED full gate: seam-feature lint/crash cuts, real-daemon e2e, native stores, Windows cross-check, "
           "repository scans, mutation replay and release-artifact probes. Run scripts/gate.sh and CI after live acceptance.", flush=True)
     print("Signing is NOT checked here: release-build.sh still requires pinned identifiers and hardened runtime.", flush=True)

@@ -167,7 +167,7 @@ class ScriptContracts(unittest.TestCase):
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout)
 
     def test_skip_notice_survives_large_output(self):
-        source = shell_function('scripts/gate.sh', 'run_expect')
+        source = 'record_arm() { :; }\n' + shell_function('scripts/gate.sh', 'run_expect')
         large = self.root / 'large'
         large.write_text('SKIPPING arm\n' + 'x' * (2 * 1024 * 1024) + '\ntest result: ok. 1 passed\n')
         result = self.run_shell('fail() { echo "$1"; exit 1; }\n' + source + '\nrun_expect 1 probe cat ' + repr(os.fspath(large)))
@@ -658,8 +658,8 @@ class ScriptContracts(unittest.TestCase):
         start = source.index('if rustup target list')
         block = source[start:source.index('\nfi', start) + 3]
         self.executable('rustup', 'echo aarch64-apple-darwin')
-        summary = source[source.rindex('if [ -n "${GATE_UNCHECKED:-}" ]'):]
-        result = self.run_shell(block + '\n' + summary)
+        summary = shell_function('scripts/gate.sh', 'lane_verdict') + '\nlane_verdict'
+        result = self.run_shell('record_arm() { :; }\n' + block + '\n' + summary)
         self.assertIn('GATE PASSED WITH UNCHECKED ARMS -- windows cross type-check', result.stdout.splitlines()[-1])
         self.assertRegex(source, r"else\s+printf '\\nGATE PASSED --")
 

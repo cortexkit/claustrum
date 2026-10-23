@@ -1,5 +1,19 @@
 # OpenCode Claustrum plugin
 
+## OpenCode 2
+
+The package exports an OpenCode 2 entry at `@cortexkit/opencode-claustrum/opencode-plugin-v2`, built as `dist/opencode2/server.js`. To install it, add the absolute path of the `dist/opencode2` directory to the `plugins` array in your OpenCode 2 config. OpenCode 2 ignores a configured plugin path that is a file.
+
+Enrol each owned provider with `bun run enroll -- --oc2 --provider <provider>` and restart the OpenCode 2 service with `opencode service restart`. OpenCode 2 keeps credentials in its own SQLite store; the V1 enrolment path, which writes `auth.json`, does not enrol credentials for OpenCode 2. See the [OpenCode plugin guide](../../docs/opencode-plugin.md#opencode-2) for fresh xAI enrolment, the request path and limits.
+
+Known limit: this package cannot be installed in OpenCode 2 by package name. OpenCode 2 resolves `<package>/server` first, but this package's `./server` export is the serve library, not a plugin. Install by directory path.
+
+The OpenCode 2 entry substitutes the vault key into the outgoing request in place. HTTP and WebSocket substitution are allowed only in `Authorization`, with header names compared case-insensitively. A placeholder in any other header fails with `CustodyPlacementError`, before any material is resolved. URL placeholders are refused on both paths. Measured OpenCode 2.0.32 redirects strip `Authorization` across origins but forward `x-api-key` and `x-goog-api-key`, so those headers cannot safely carry HTTP custody material. Request bodies are not inspected or substituted.
+
+Before the first substitution, a once-per-process self-test uses two temporary loopback listeners to check all five redirect statuses with the runtime's fetch, then a cross-origin 302 during a real WebSocket upgrade. It verifies that the socket reaches the source and no Authorization reaches the target. It fails closed on leakage, an unexercised probe, timeout or bind failure, within a shared two-second bound. It does not test OpenCode's own transport; each OpenCode version still needs a live redirect check. There is no listener serving provider requests.
+
+HTTP response hooks report 401s and update account state for subsequent requests, including 429 and 402 cooldowns. There is no in-turn retry. A rejected WebSocket handshake produces no 401 report or cooldown because the handshake hook sees no response. The other OpenCode 2 limits are listed in the [guide](../../docs/opencode-plugin.md#opencode-2-limits).
+
 This plugin owns only providers whose live credential path remains OpenCode's generic AI SDK `fetch` seam. It reads the handle file during OpenCode configuration and injects a tombstone API key plus a fetch hook only when the local auth entry is a Claustrum tombstone and the handle file assigns that provider to `opencode-claustrum`. Provider-specific loaders and credential paths need dedicated ownership; the provider allowlist question remains open.
 
 ## Seam boundary

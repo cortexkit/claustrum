@@ -260,3 +260,30 @@ upstream (`serve.test.ts`), freshness policy (`freshness.test.ts`), the enrolmen
 `packages/client/src/tests/`. The Rust side is covered by
 `crates/credentials-module/tests/cli_opencode.rs` and the opencode crash-cut arms in
 `scripts/gate.sh`.
+
+## OpenCode 2
+
+The package exports a separate OpenCode 2 entry, `@cortexkit/opencode-claustrum/opencode-plugin-v2`, built as `dist/opencode2/server.js`. To install it, add the absolute path of the `dist/opencode2` directory to the `plugins` array in your OpenCode 2 config. OpenCode 2 ignores a configured plugin path that is a file (OpenCode 2.0.32 packages/core/src/config/plugin/source.ts:148-154). The directory loader tries `server` before `index` (OpenCode 2.0.32 packages/plugin/src/host.ts:17-43). This entry uses session request hooks and does not replace the OpenCode 1 plugin or its setup.
+
+Enrolment starts from a provider already owned by `opencode-claustrum` in the handle manifest. Run `bun run enroll -- --oc2 --provider <provider>`. For a fresh xAI enrolment, use `bun run enroll -- --oc2 --provider xai --id oauth:xai --main --min-ttl-ms <ms> --token-lifetime-ms <ms> --oc2-method <id>`. OpenCode 2.0.32 uses `device` for xAI OAuth (OpenCode 2.0.32 packages/core/src/plugin/provider/xai.ts:14-15,40-46). `opencode auth export xai` shows the method id an existing entry uses; treat that output as secret.
+
+The command imports or switches the Claustrum tombstone through `opencode auth import` and `opencode auth switch`, rather than writing `auth.json`; OpenCode 2 reads its credentials from its own SQLite credential store after its one-time auth import. The fresh xAI form also checks the vault handle and writes the manifest entry.
+
+Owned requests begin with a provider-bound placeholder. The session `http.request` hook substitutes vault material in place, without changing the destination or opening a serving listener. HTTP material may appear only in `Authorization`. A placeholder in the URL, including percent-decoded URLs, or in any other header fails with `CustodyPlacementError` before material is resolved. Bodies are neither inspected nor substituted; a body placeholder stays a placeholder.
+
+This restriction is deliberate. In measured OpenCode 2.0.32 runs on embedded Bun 1.4.2, cross-origin 301, 302, 303, 307 and 308 redirects stripped `Authorization`, but forwarded `x-api-key` and `x-goog-api-key`. Setting a Request's redirect mode does not protect this integration: OpenCode rebuilds the request and follows redirects in its own client. The native DeepSeek, MiniMax, xAI and OpenAI-compatible drivers use `Authorization`; a driver that puts the placeholder in `x-api-key`, such as Anthropic, is refused on the HTTP path.
+
+Before any owned HTTP or WebSocket hook substitutes, a once-per-process self-test starts two temporary listeners on `127.0.0.1`, makes a cross-origin POST probe for each redirect status, and verifies that every target was reached without `Authorization`. It then sends a WebSocket upgrade to a source that returns a cross-origin 302, checking that the source saw the upgrade and no target request carried Authorization. Both listeners stop when the test ends. A failed check, a bind error or the shared two-second deadline raises `CustodyRedirectUnsafeError`; there is no bypass switch. This checks the runtime's fetch and WebSocket clients, not OpenCode's own redirect handling. A live redirect-carry check is still required for each OpenCode version.
+
+The `http.response` hook correlates the exact outgoing Request with its serving instance. It reports a 401 with the served record version and invalidates that account's cache; 429 responses apply `Retry-After`, and 402 responses apply a one-hour cooldown. It leaves the host's response body untouched. Reloaded instances share request claims and response records, so overlapping hooks substitute only once and feedback goes to the instance that served the request.
+
+### OpenCode 2 limits
+
+- This package cannot be installed in OpenCode 2 by package name. OpenCode 2 resolves `<package>/server` first, but this package's `./server` export is the serve library, not a plugin. Install by the absolute directory path described above.
+- Another plugin that calls `ctx.generate.text` directly for an owned model bypasses session hooks. The placeholder reaches the provider and its request fails with a provider 401. No real key leaves the process; this fails closed.
+- `enroll --oc2` refuses `azure`, `digitalocean`, `github-copilot`, `gitlab`, `modal`, `opencode`, `snowflake-cortex`, `exa`, `firecrawl`, `parallel`, `tavily` and `tinyfish`. OpenCode 2's built-in provider or web-search plugin reads the stored credential outside the request hooks, so replacing it with a tombstone breaks that path. It also refuses API-key placeholders for `openai` and `xai`: OpenCode 2's voice feature reads the stored key for its realtime API outside the hooks. OAuth placeholders for those two providers are allowed.
+- An OAuth placeholder carried over from an OpenCode 1 `auth.json` fails in OpenCode 2 before a plugin hook runs, when core tries to refresh it. The plugin cannot name that error. Run `bun run enroll -- --oc2 --provider <provider>`; enrolment detects and replaces the migrated placeholder.
+- WebSocket credentials are substituted only in the Authorization header, with case-insensitive header names. Placeholders in the URL or other headers are refused. A rejected WebSocket handshake produces no 401 report or cooldown because the handshake hook sees no response.
+- There is no in-turn retry or immediate failover after an HTTP error. The failed request stays failed; subsequent requests select from the available accounts using the updated vault and cooldown state.
+- Plugins in one OpenCode process are not isolated from each other. Another plugin can read the same handle manifest and ask the vault directly, as with OpenCode 1.
+- A running OpenCode 2 service keeps its loaded credentials after enrolment. Run `opencode service restart`; until restarted, it continues using the old credential state.

@@ -85,3 +85,27 @@ export class ReportedCustodyExhaustionError extends CustodyExhaustionError {
     this.accountStates = accountStates;
   }
 }
+
+export class CustodyPlacementError extends Error {
+  override name = "CustodyPlacementError";
+
+  constructor(readonly location: string) {
+    super(`custody placeholder in ${location} refused; HTTP credentials may only be substituted in Authorization`);
+  }
+}
+
+export class CustodyRedirectUnsafeError extends Error {
+  override name = "CustodyRedirectUnsafeError";
+
+  constructor(readonly status: string | number) {
+    super(`custody redirect safety self-test failed: status=${status}; Authorization substitution refused`);
+  }
+}
+
+export class Oc2CredentialError extends Error {
+  override name = "Oc2CredentialError";
+
+  constructor(readonly subcommand: "export" | "import" | "switch" | "logout", readonly exitCode: number | null, reason: "failed" | "timeout" | "output limit" | "invalid export") {
+    super(`OpenCode 2 auth ${subcommand} ${reason} (exit ${exitCode ?? "unknown"})`);
+  }
+}

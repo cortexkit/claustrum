@@ -9,7 +9,7 @@ import sys
 import tempfile
 
 
-def copy_checkout(source, destination):
+def copy_checkout(source, destination, target):
     # Preserve history for mutation tooling, then overlay the actual working tree:
     # cloning alone would silently test HEAD instead of staged/unstaged edits.
     # A local clone validates the source's .git directory, not its worktree root.
@@ -21,8 +21,11 @@ def copy_checkout(source, destination):
     subprocess.run(["git", "-C", str(destination), "read-tree", "HEAD"], check=True)
     shutil.copytree(source, destination, dirs_exist_ok=True,
                     ignore=shutil.ignore_patterns(".git", "target", "node_modules", ".cortexkit", "__pycache__"))
-    # Build output is the runner's writable cache, not part of its read-only tree.
-    (destination / "target").symlink_to(source / "target", target_is_directory=True)
+    # Build output goes to a writable cache outside the read-only snapshot, so it
+    # survives between runs. A sibling snapshot's own target/ is read-only (and may not
+    # exist), so each checkout names its cache directory explicitly.
+    target.mkdir(parents=True, exist_ok=True)
+    (destination / "target").symlink_to(target, target_is_directory=True)
 
 
 def main(argv=None):
@@ -45,10 +48,12 @@ def main(argv=None):
     source = Path.cwd()
     with tempfile.TemporaryDirectory(prefix="claustrum-gate-") as scratch:
         checkout = Path(scratch) / "claustrum"
-        copy_checkout(source, checkout)
+        copy_checkout(source, checkout, source / "target")
         if mode == "full":
             supervisor = Path(scratch) / "subconscious"
-            copy_checkout(sibling, supervisor)
+            # Cached under claustrum's writable target so the supervisor isn't rebuilt
+            # from scratch on every gate run.
+            copy_checkout(sibling, supervisor, source / "target" / "gate-subconscious")
             os.environ["CRED_SUBCONSCIOUS_ROOT"] = str(supervisor)
         else:
             os.environ["CK_FAST_PLAN"] = args.plan

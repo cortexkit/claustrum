@@ -252,9 +252,13 @@ exec "$REAL_PYTHON" "$@"
         git("commit", "-qm", "initial")
         (source / "file").write_text("dirty")
         (source / "untracked").write_text("new")
-        (source / "target").mkdir()
         copy = self.bin / "copy"
-        remote.copy_checkout(source, copy)
+        # The cache lives outside the snapshot and needn't exist yet: a sibling
+        # snapshot carries no writable target/ of its own.
+        cache = self.bin / "cache" / "sibling-target"
+        remote.copy_checkout(source, copy, cache)
+        self.assertTrue(cache.is_dir())
+        self.assertEqual((copy / "target").resolve(), cache.resolve())
         self.assertEqual((copy / "file").read_text(), "dirty")
         self.assertEqual((copy / "untracked").read_text(), "new")
         self.assertTrue((copy / ".git").is_dir())
@@ -294,9 +298,8 @@ exec "$REAL_PYTHON" "$@"
                 (source / "file").write_text(name)
                 run(["git", "-C", str(source), "add", "."], check=True)
                 run(["git", "-C", str(source), "commit", "-qm", "initial"], check=True)
-                (source / "target").mkdir()
                 with patch.object(remote.subprocess, "run", side_effect=clone_as_other_owner):
-                    remote.copy_checkout(source, self.bin / (name + "-copy"))
+                    remote.copy_checkout(source, self.bin / (name + "-copy"), self.bin / (name + "-target"))
         self.assertEqual(config.read_text(), "# Global configuration must remain unchanged.\n")
 
 

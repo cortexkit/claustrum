@@ -26,8 +26,9 @@ crash cuts, migration/release compatibility, release-artifact/picker assertions 
 full `ckdev-mutate check` catalogue validation. The Linux job runs concurrently with the
 local Bun install/typecheck/hermetic tests and, on macOS, the default-feature release
 `ck-auth` build whose artifact must remain on the Mac. No cargo check, clippy or test
-runs on the Mac. Each arm reports its duration and counts; the final table includes
-lane wall times and the slowest arms. Run it before every push.
+runs on the Mac. Every arm reports its duration, and arms with a test-count floor also
+report their counts; the final table includes lane wall times and the slowest arms. Run
+it before every push.
 
 It needs:
 

@@ -28,8 +28,8 @@ requires_core = "0.20.83"
 # e2e tests and read the push-envelope spec for scripts/check-inbound-contracts.sh.
 [workspace.dependencies]
 cortexkit-test-support = "0.1.0"
-subc-protocol = "0.32.5"
-subc-transport = "0.13"
+subc-protocol = "0.33.0"
+subc-transport = "0.14"
 subc-os = "0.1.16"
 
 cortexkit-store = "0.2.4"

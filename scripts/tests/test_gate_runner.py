@@ -236,6 +236,22 @@ exec "$REAL_PYTHON" "$@"
             gate.parallel([("broken", []), ("joined", [])])
         self.assertCountEqual(completed, ["broken", "joined"])
 
+    def test_local_lanes_start_only_after_the_runner_captures_its_snapshot(self):
+        # Local lanes write into the checkout; the runner refuses a checkout that
+        # changes while it captures. So no local lane may start before the runner
+        # prints its job id, which it does only once the snapshot is taken.
+        stamp = ("import sys, time; open(sys.argv[1], 'w').write(repr(time.time()))")
+        remote = [sys.executable, "-c",
+                  "import sys, time; time.sleep(0.6); " + stamp.split('; ', 1)[1].replace('sys.argv[1]', repr(str(self.bin / 'captured')))
+                  + "; print('ck motor run: job_id=x secret-file=y', file=sys.stderr, flush=True); time.sleep(0.3)"]
+        local = [sys.executable, "-c", stamp, str(self.bin / "local-started")]
+        gate = runtime.Gate()
+        with self.assertRaises(RuntimeError):  # the stand-in runner returns no counts
+            gate.parallel([("runner", remote, True), ("local lane", local)])
+        captured = float((self.bin / "captured").read_text())
+        started = float((self.bin / "local-started").read_text())
+        self.assertGreaterEqual(started, captured)
+
     def test_writable_copy_preserves_dirty_content_and_history(self):
         spec = importlib.util.spec_from_file_location("gate_remote", ROOT / "scripts/gate-remote.py")
         assert spec is not None and spec.loader is not None

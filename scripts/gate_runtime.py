@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import threading
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -66,21 +67,52 @@ def validate_remote(code, output, stderr=""):
     return rows
 
 
+CAPTURED_LINE = "ck motor run: job_id="
+
+
+def run_watching_capture(command, captured):
+    """Run a runner job, signalling `captured` once its snapshot has been taken.
+
+    ck motor prints the job id on stderr only after the snapshot is captured and
+    handed off, so local writes after that line can't affect the job. The event is
+    also set when the process ends, so a refusal never leaves local lanes waiting.
+    """
+    process = subprocess.Popen(command, cwd=ROOT, text=True, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE)
+    stderr_lines = []
+
+    def read_stderr():
+        for line in process.stderr:
+            stderr_lines.append(line)
+            if captured is not None and line.startswith(CAPTURED_LINE):
+                captured.set()
+
+    reader = threading.Thread(target=read_stderr, daemon=True)
+    reader.start()
+    stdout = process.stdout.read()
+    process.wait()
+    reader.join()
+    return subprocess.CompletedProcess(command, process.returncode, stdout, "".join(stderr_lines))
+
+
 class Gate:
     def __init__(self):
         self.start = time.monotonic()
         self.rows = []
         self.unchecked = []
 
-    def job(self, label, command, remote=False):
+    def job(self, label, command, remote=False, captured=None):
         start = time.monotonic()
         try:
-            result = subprocess.run(command, cwd=ROOT, text=True, stdout=subprocess.PIPE,
-                                    stderr=subprocess.PIPE)
+            result = run_watching_capture(command, captured) if remote else subprocess.run(
+                command, cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         except OSError as error:
             self.rows.append(dict(label=label, seconds=time.monotonic() - start,
                                   status="failed", where="Linux" if remote else "local"))
             raise RuntimeError(f"{label}: runner could not start: {error}" if remote else str(error)) from error
+        finally:
+            if captured is not None:
+                captured.set()
         # Print whole lanes together; interleaving libtest output would mix arm counts.
         stderr = result.stderr or ""
         output = result.stdout + stderr
@@ -106,8 +138,19 @@ class Gate:
 
     def parallel(self, jobs):
         errors = []
+        remote = [job for job in jobs if len(job) > 2 and job[2]]
+        local = [job for job in jobs if not (len(job) > 2 and job[2])]
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(jobs)) as pool:
-            futures = [pool.submit(self.job, *job) for job in jobs]
+            # Start the runner jobs first and hold the local lanes until each runner has
+            # captured its snapshot. Local lanes create build and package folders in the
+            # checkout, and the runner refuses a checkout whose watched directories
+            # change while it captures ("checkout changed during capture").
+            events = [threading.Event() for _ in remote]
+            futures = [pool.submit(self.job, job[0], job[1], True, event)
+                       for job, event in zip(remote, events)]
+            for event in events:
+                event.wait()
+            futures += [pool.submit(self.job, *job) for job in local]
             for future in concurrent.futures.as_completed(futures):
                 try:
                     future.result()

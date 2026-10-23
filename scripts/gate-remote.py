@@ -2,6 +2,7 @@
 """Run gate workers in writable copies, never mutate the runner's snapshot."""
 import argparse
 import hashlib
+import json
 import os
 from pathlib import Path
 import shutil
@@ -46,6 +47,32 @@ def stable_scratch(source):
     return scratch
 
 
+def forget_binaries_from_another_copy(checkout, target):
+    """Clean the workspace's own build output when the cache was built from a copy elsewhere.
+
+    A stable copy path keeps cached binaries valid from one run to the next, but a
+    cache built while the copy lived somewhere else (an older gate, or a moved temp
+    directory) still holds binaries pointing at that old location, and cargo won't
+    rebuild them because the copied sources keep their old modification times. The
+    cache records which copy path built it; on a mismatch, `cargo clean -p` drops
+    only the workspace members, so dependencies stay cached.
+    """
+    marker = target / "gate-copy-path"
+    if marker.exists() and marker.read_text() == str(checkout):
+        return
+    members = subprocess.run(
+        ["cargo", "metadata", "--no-deps", "--format-version", "1", "--offline"],
+        cwd=checkout, check=True, stdout=subprocess.PIPE, text=True).stdout
+    names = [package["name"] for package in json.loads(members)["packages"]]
+    if not names:
+        raise RuntimeError("no workspace members found to clean")
+    command = ["cargo", "clean"]
+    for name in names:
+        command += ["-p", name]
+    subprocess.run(command, cwd=checkout, check=True)
+    marker.write_text(str(checkout))
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=("full", "fast"))
@@ -67,6 +94,7 @@ def main(argv=None):
     scratch = stable_scratch(source)
     checkout = scratch / "claustrum"
     copy_checkout(source, checkout, source / "target")
+    forget_binaries_from_another_copy(checkout, source / "target")
     if mode == "full":
         supervisor = scratch / "subconscious"
         # Cached under claustrum's writable target so the supervisor isn't rebuilt

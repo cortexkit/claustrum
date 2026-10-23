@@ -179,6 +179,7 @@ exit "$SCENARIO"
 
                 with patch.dict(os.environ, env, clear=True), \
                         patch.object(remote, "copy_checkout") as copy, \
+                        patch.object(remote, "forget_binaries_from_another_copy"), \
                         patch.object(remote.subprocess, "run", side_effect=worker):
                     self.assertEqual(remote.main([mode, *arguments]), 0)
                 self.assertEqual(copy.call_args_list[0].args[0], ROOT)
@@ -281,6 +282,32 @@ exec "$REAL_PYTHON" "$@"
         self.assertEqual(first, second)
         self.assertFalse((second / "leftover").exists())
         self.assertNotEqual(first, other)
+
+    def test_cache_from_another_copy_path_cleans_only_workspace_members(self):
+        spec = importlib.util.spec_from_file_location("gate_remote", ROOT / "scripts/gate-remote.py")
+        assert spec is not None and spec.loader is not None
+        remote = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(remote)
+        target = self.bin / "target"
+        target.mkdir()
+        checkout = self.bin / "copy"
+        calls = []
+
+        def cargo(command, **kwargs):
+            calls.append(command)
+            if command[1] == "metadata":
+                return subprocess.CompletedProcess(command, 0, stdout='{"packages":[{"name":"a"},{"name":"b"}]}')
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch.object(remote.subprocess, "run", side_effect=cargo):
+            (target / "gate-copy-path").write_text("/tmp/an-older-random-copy")
+            remote.forget_binaries_from_another_copy(checkout, target)
+            self.assertIn(["cargo", "clean", "-p", "a", "-p", "b"], calls)
+            self.assertEqual((target / "gate-copy-path").read_text(), str(checkout))
+            calls.clear()
+            # Same copy path as last time: the cached binaries are valid, nothing cleaned.
+            remote.forget_binaries_from_another_copy(checkout, target)
+            self.assertEqual(calls, [])
 
     def test_snapshot_clones_trust_only_each_exact_git_directory(self):
         spec = importlib.util.spec_from_file_location("gate_remote", ROOT / "scripts/gate-remote.py")

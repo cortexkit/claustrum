@@ -39,12 +39,19 @@ It needs:
 - `ckdev-mutate`, installed as described in [mutation testing](docs/mutation-testing.md).
 
 The `subconscious` supervisor checkout is passed to the Linux runner with `--sibling`.
+Its path and the fast-check scope also travel as arguments to the worker, rather than
+environment variables that the runner may filter. A supervisor path absent inside the
+job fails before copying or building anything.
 Remote workers copy both checkout snapshots to
 writable scratch trees, preserving dirty content and history, because mutation tooling
 and the supervisor build must not write into the runner's read-only snapshots. Build
-output uses the runner's writable `target` caches. Runner refusal/unreachability, unknown
+output uses the runner's writable `target` caches. Snapshot clones use command-scoped
+Git trust for each exact source `.git` path; they never change global Git configuration
+or trust all repositories. Runner refusal/unreachability, unknown
 outcome, timeout, cancellation and bad arguments all fail the gate; a successful exit
 without test counts or a completion receipt also fails. There is no local-build fallback.
+Runner failures include the last `ck motor run:` stderr diagnostic in the final failure
+line (or explicitly say none was printed), while retaining the full output in the log.
 
 The gate asserts a minimum passed-test count for each suite, so a suite that silently stops
 running fails the gate instead of passing quietly. `cargo test --workspace` on its own is not

@@ -25,21 +25,25 @@ def receipt(label, seconds, passed=None, floor=None, status="passed"):
 
 def remote_command(mode, plan=None):
     command = ["ck", "motor", "run", "--vcpus", "8", "--cwd", str(ROOT)]
+    arguments = []
     if mode == "full":
         sibling = os.environ.get("CRED_SUBCONSCIOUS_ROOT", "../subconscious")
-        command += ["--sibling", sibling, "--env", "CRED_SUBCONSCIOUS_ROOT=" + sibling]
+        command += ["--sibling", sibling]
+        arguments += ["--sibling", sibling]
     if plan is not None:
-        command += ["--env", "CK_FAST_PLAN=" + json.dumps(plan)]
-    # Nested Cargo invocations must not rediscover a sandbox-incompatible cache wrapper.
-    command += ["--env", "RUSTC_WRAPPER=", "--env", "CARGO_BUILD_RUSTC_WRAPPER=",
-                "--", "python3", "scripts/gate-remote.py", mode]
+        arguments += ["--plan", json.dumps(plan)]
+    # The runner filters environment names; argv preserves both supervisor location
+    # and dirty-tree scope without relying on its environment allowlist.
+    command += ["--", "python3", "scripts/gate-remote.py", mode, *arguments]
     return command
 
 
-def validate_remote(code, output):
+def validate_remote(code, output, stderr=""):
     if code:
         if code in RUNNER_ERRORS:
-            raise RuntimeError(f"runner exit {code}: {RUNNER_ERRORS[code]}")
+            reasons = re.findall(r"^ck motor run:.*$", stderr, re.MULTILINE)
+            reason = reasons[-1] if reasons else "no ck motor run: stderr line was printed"
+            raise RuntimeError(f"runner exit {code}: {RUNNER_ERRORS[code]}; {reason}")
         failures = re.findall(r"^GATE FAILED: (.+)$", output, re.MULTILINE)
         detail = ": " + failures[-1] if failures else ""
         raise RuntimeError(f"remote arm failed (exit {code}){detail}")
@@ -72,26 +76,28 @@ class Gate:
         start = time.monotonic()
         try:
             result = subprocess.run(command, cwd=ROOT, text=True, stdout=subprocess.PIPE,
-                                    stderr=subprocess.STDOUT)
+                                    stderr=subprocess.PIPE)
         except OSError as error:
             self.rows.append(dict(label=label, seconds=time.monotonic() - start,
                                   status="failed", where="Linux" if remote else "local"))
             raise RuntimeError(f"{label}: runner could not start: {error}" if remote else str(error)) from error
         # Print whole lanes together; interleaving libtest output would mix arm counts.
-        print(result.stdout, end="", flush=True)
-        self.unchecked.extend(re.findall(r"^CK_GATE_UNCHECKED (.+)$", result.stdout, re.MULTILINE))
-        for line in result.stdout.splitlines():
+        stderr = result.stderr or ""
+        output = result.stdout + stderr
+        print(output, end="", flush=True)
+        self.unchecked.extend(re.findall(r"^CK_GATE_UNCHECKED (.+)$", output, re.MULTILINE))
+        for line in output.splitlines():
             if line.startswith(PREFIX):
                 row = json.loads(line[len(PREFIX):])
                 row["where"] = "Linux" if remote else "local"
                 self.rows.append(row)
-        has_arms = any(line.startswith(PREFIX) for line in result.stdout.splitlines())
+        has_arms = any(line.startswith(PREFIX) for line in output.splitlines())
         self.rows.append(dict(label=label, seconds=time.monotonic() - start,
                               status="failed" if result.returncode else "passed",
                               where="Linux job" if remote else "local lane" if has_arms else "local"))
         if remote:
             try:
-                validate_remote(result.returncode, result.stdout)
+                validate_remote(result.returncode, output, stderr)
             except (RuntimeError, ValueError, KeyError, TypeError) as error:
                 self.rows[-1]["status"] = "failed"
                 raise RuntimeError(f"{label}: {error}") from error

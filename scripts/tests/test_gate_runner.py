@@ -77,6 +77,25 @@ esac
                 result = self.gate(str(code))
                 self.assertNotEqual(result.returncode, 0, result.stdout)
                 self.assertIn(meaning, result.stdout)
+                self.assertIn("no ck motor run: stderr line was printed", result.stdout)
+
+    def test_runner_failure_summary_keeps_last_stderr_reason(self):
+        self.executable("ck", '''
+echo 'ck motor run: earlier connection warning' >&2
+echo 'ck motor run: refused before start: build server disk full' >&2
+echo 'ck motor run: stdout is not a runner diagnostic'
+exit "$SCENARIO"
+''')
+        for code in runtime.RUNNER_ERRORS:
+            with self.subTest(code=code):
+                result = self.gate(str(code))
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                last = result.stdout.splitlines()[-1]
+                self.assertIn(f"runner exit {code}:", last)
+                self.assertIn("ck motor run: refused before start: build server disk full", last)
+                self.assertNotIn("earlier connection warning", last)
+                self.assertNotIn("stdout is not", last)
+                self.assertIn("earlier connection warning", result.stdout)
 
     def test_remote_no_counts_fails_gate(self):
         result = self.gate("empty")
@@ -112,8 +131,57 @@ esac
         plan = {"crates": ["credentials-core"], "paths": ["crates/credentials-core/src/lib.rs"]}
         command = runtime.remote_command("fast", plan)
         self.assertNotIn("--sibling", command)
-        self.assertIn("CK_FAST_PLAN=" + json.dumps(plan), command)
-        self.assertEqual(command[-3:], ["python3", "scripts/gate-remote.py", "fast"])
+        self.assertNotIn("--env", command)
+        self.assertEqual(command[command.index("--") + 1:],
+                         ["python3", "scripts/gate-remote.py", "fast", "--plan", json.dumps(plan)])
+
+    def test_runner_inputs_use_argv_and_missing_sibling_is_clear(self):
+        sibling = "../supervisor snapshot"
+        with patch.dict(os.environ, CRED_SUBCONSCIOUS_ROOT=sibling):
+            command = runtime.remote_command("full")
+        self.assertNotIn("--env", command)
+        self.assertEqual(command[command.index("--") + 1:],
+                         ["python3", "scripts/gate-remote.py", "full", "--sibling", sibling])
+        self.assertEqual(command[command.index("--sibling") + 1], sibling)
+        self.assertFalse(any("RUSTC_WRAPPER" in argument for argument in command))
+        missing = self.bin / "missing supervisor"
+        result = subprocess.run([sys.executable, "scripts/gate-remote.py", "full", "--sibling", str(missing)],
+                                cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn(f"supervisor snapshot not found inside runner: {missing}", result.stdout)
+        self.assertNotIn("Traceback", result.stdout)
+
+    def test_remote_argv_reaches_workers_without_forwarded_environment(self):
+        spec = importlib.util.spec_from_file_location("gate_remote", ROOT / "scripts/gate-remote.py")
+        assert spec is not None and spec.loader is not None
+        remote = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(remote)
+        sibling = self.bin / "supervisor snapshot"
+        sibling.mkdir()
+        plan = json.dumps(dict(crates=["credentials-core"], paths=["crates/credentials-core/new.rs"]))
+        env = dict(os.environ, RUSTC_WRAPPER="unusable", CARGO_BUILD_RUSTC_WRAPPER="unusable",
+                   CARGO_TARGET_DIR="unusable")
+        env.pop("CRED_SUBCONSCIOUS_ROOT", None)
+        env.pop("CK_FAST_PLAN", None)
+        for mode, arguments in (("full", ["--sibling", str(sibling)]), ("fast", ["--plan", plan])):
+            with self.subTest(mode=mode):
+                def worker(command, cwd):
+                    self.assertEqual(os.environ["RUSTC_WRAPPER"], "")
+                    self.assertEqual(os.environ["CARGO_BUILD_RUSTC_WRAPPER"], "")
+                    self.assertNotIn("CARGO_TARGET_DIR", os.environ)
+                    if mode == "full":
+                        self.assertEqual(Path(os.environ["CRED_SUBCONSCIOUS_ROOT"]), cwd.parent / "subconscious")
+                    else:
+                        self.assertEqual(os.environ["CK_FAST_PLAN"], plan)
+                    return subprocess.CompletedProcess(command, 0)
+
+                with patch.dict(os.environ, env, clear=True), \
+                        patch.object(remote, "copy_checkout") as copy, \
+                        patch.object(remote.subprocess, "run", side_effect=worker):
+                    self.assertEqual(remote.main([mode, *arguments]), 0)
+                self.assertEqual(copy.call_args_list[0].args[0], ROOT)
+                if mode == "full":
+                    self.assertEqual(copy.call_args_list[1].args[0], sibling)
 
     def test_fast_gate_propagates_transport_failure_and_missing_counts(self):
         metadata = dict(packages=[dict(id="core", name="credentials-core",
@@ -190,6 +258,44 @@ exec "$REAL_PYTHON" "$@"
         self.assertTrue((copy / ".git").is_dir())
         subprocess.run(["git", "-C", str(copy), "checkout", "--", "file"], check=True)
         self.assertEqual((source / "file").read_text(), "dirty")
+
+    def test_snapshot_clones_trust_only_each_exact_git_directory(self):
+        spec = importlib.util.spec_from_file_location("gate_remote", ROOT / "scripts/gate-remote.py")
+        assert spec is not None and spec.loader is not None
+        remote = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(remote)
+        run = subprocess.run
+        config = self.bin / "gitconfig"
+        config.write_text("# Global configuration must remain unchanged.\n")
+
+        def clone_as_other_owner(command, **kwargs):
+            if "clone" in command:
+                source = Path(command[-2])
+                # Git's own ownership test switch exercises the real refusal without
+                # requiring chown or access to another user's files.
+                kwargs["env"] = dict(os.environ, GIT_TEST_ASSUME_DIFFERENT_OWNER="1", GIT_CONFIG_COUNT="0")
+                kwargs.update(check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                result = run(command, **kwargs)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(command[:3], ["git", "-c", f"safe.directory={source / '.git'}"])
+                self.assertNotIn("*", " ".join(command))
+                self.assertNotIn("--global", command)
+                return result
+            return run(command, **kwargs)
+
+        with patch.dict(os.environ, GIT_CONFIG_GLOBAL=str(config), GIT_CONFIG_NOSYSTEM="1"):
+            for name in ("claustrum", "subconscious"):
+                source = self.bin / name
+                run(["git", "init", "-q", str(source)], check=True)
+                run(["git", "-C", str(source), "config", "user.email", "test@example.invalid"], check=True)
+                run(["git", "-C", str(source), "config", "user.name", "test"], check=True)
+                (source / "file").write_text(name)
+                run(["git", "-C", str(source), "add", "."], check=True)
+                run(["git", "-C", str(source), "commit", "-qm", "initial"], check=True)
+                (source / "target").mkdir()
+                with patch.object(remote.subprocess, "run", side_effect=clone_as_other_owner):
+                    remote.copy_checkout(source, self.bin / (name + "-copy"))
+        self.assertEqual(config.read_text(), "# Global configuration must remain unchanged.\n")
 
 
 if __name__ == "__main__":

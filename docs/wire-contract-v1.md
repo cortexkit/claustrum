@@ -1010,7 +1010,7 @@ and termination before drain/shutdown.
 
 ## 12. Account worker token (`credential.account_token`)
 
-The vault exchanges this Mac's enrolled account machine key for a short-lived
+The vault exchanges this machine's enrolled account machine key for a short-lived
 worker token. A caller receives a bearer JWT for **one granted audience**, never
 machine signing access. Request (optional fields may be omitted):
 

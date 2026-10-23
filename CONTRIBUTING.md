@@ -24,9 +24,10 @@ and repository scans run locally first and fail fast without building test binar
 one Linux job (`ck motor run`, 8 vCPUs) runs clippy, workspace tests, real-daemon e2e,
 crash cuts, migration/release compatibility, release-artifact/picker assertions and the
 full `ckdev-mutate check` catalogue validation. The Linux job runs concurrently with the
-local Bun install/typecheck/hermetic tests and, on macOS, the default-feature release
-`ck-auth` build whose artifact must remain on the Mac. No cargo check, clippy or test
-runs on the Mac. Every arm reports its duration, and arms with a test-count floor also
+local Bun install/typecheck/hermetic tests and the lanes that only the host itself can
+run: on macOS, the default-feature release `ck-auth` build placed on that machine; on
+Windows, the Windows-native checks. Apart from those, no cargo check, clippy or test
+runs on the host. Every arm reports its duration, and arms with a test-count floor also
 report their counts; the final table includes lane wall times and the slowest arms. Run
 it before every push.
 

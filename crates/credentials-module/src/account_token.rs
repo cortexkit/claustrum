@@ -108,7 +108,7 @@ impl AccountTokens {
     }
 }
 
-/// Where `ck account login` records this Mac's enrollment. It must resolve exactly as
+/// Where `ck account login` records this machine's enrollment. It must resolve exactly as
 /// the account CLI's state path does (a non-empty `XDG_STATE_HOME` first, then
 /// `HOME`), or the vault would look in a different place and refuse a machine that
 /// is enrolled.

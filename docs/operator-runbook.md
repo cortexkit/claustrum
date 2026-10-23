@@ -86,7 +86,7 @@ Exit codes:
 |-----:|---------|------------|
 | 0 | success | — |
 | 3 | the daemon holds the lease and this verb is offline-only | stop the daemon, retry |
-| 4 | master key could not be resolved (locked keychain, absent, or wrong) | unlock the keychain, or check `--key-path` |
+| 4 | master key could not be resolved (OS credential store locked, key absent, or wrong) | unlock the OS credential store (Keychain on macOS, Secret Service on Linux, Credential Manager on Windows), or check `--key-path` |
 | 5 | **indeterminate**: the op reached the daemon but the reply was lost | see below |
 | 1 | usage, IO or other error | read the message |
 

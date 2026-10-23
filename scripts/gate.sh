@@ -23,7 +23,8 @@
 # flags, not just the command.
 #
 # AND EVEN A PERFECT MATCH IS NOT THE CI MATRIX. Rust runs on Linux; only the
-# release artifact that must be placed on a Mac is built there. CI also runs Windows.
+# host-specific lanes (a macOS release artifact, Windows-native checks) run on the
+# host itself. CI also runs Windows.
 # A green gate followed by a red build is therefore still possible for
 # anything platform-dependent, and has already happened once: the endpoint manifest
 # keyed rows by `str(Path)`, which is identical on posix and backslashed on Windows,
@@ -522,7 +523,7 @@ run_expect 1 "opencode account handle-write crash cut" \
 # Rebuild the shipped CLI with default features so every later check and the caller use
 # the production release artifact rather than a test-profile seam build.
 release_artifact
-# Picker tests must probe the Linux artifact built in this same lane, not the Mac copy.
+# Picker tests must probe the Linux artifact built in this same lane, not the host's copy.
 export CK_AUTH_IMPORT_SHIPPED_BINARY="$PWD/target/release/ck-auth"
 release_tests
 }

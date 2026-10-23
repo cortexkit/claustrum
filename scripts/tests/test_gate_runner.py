@@ -133,7 +133,9 @@ exit "$SCENARIO"
         plan = {"crates": ["credentials-core"], "paths": ["crates/credentials-core/src/lib.rs"]}
         command = runtime.remote_command("fast", plan)
         self.assertNotIn("--sibling", command)
-        self.assertNotIn("--net", command[:command.index("--")])
+        # The fast gate also runs the v0.1.2 download arm when credentials-module
+        # changed, so it needs network too.
+        self.assertIn("--net", command[:command.index("--")])
         self.assertNotIn("--env", command)
         self.assertEqual(command[command.index("--") + 1:],
                          ["python3", "scripts/gate-remote.py", "fast", "--plan", json.dumps(plan)])

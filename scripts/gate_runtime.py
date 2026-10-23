@@ -27,13 +27,14 @@ def receipt(label, seconds, passed=None, floor=None, status="passed"):
 def remote_command(mode, plan=None):
     command = ["ck", "motor", "run", "--vcpus", "8", "--cwd", str(ROOT)]
     arguments = []
+    # Runner jobs are offline unless asked. The v0.1.2 compatibility arm downloads
+    # that release once from GitHub (then reuses its verified copy from the build
+    # cache). Both gates can run it: the fast gate does whenever credentials-module
+    # changed. So both jobs need outbound network.
+    command.append("--net")
     if mode == "full":
         sibling = os.environ.get("CRED_SUBCONSCIOUS_ROOT", "../subconscious")
-        # Runner jobs are offline unless asked. The full gate's v0.1.2 compatibility
-        # arm downloads that release once from GitHub (then reuses its verified copy
-        # from the build cache), so the full job needs outbound network. The fast
-        # gate doesn't, and stays offline.
-        command += ["--net", "--sibling", sibling]
+        command += ["--sibling", sibling]
         arguments += ["--sibling", sibling]
     if plan is not None:
         arguments += ["--plan", json.dumps(plan)]

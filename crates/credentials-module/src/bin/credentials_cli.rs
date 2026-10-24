@@ -685,9 +685,10 @@ fn help_verb(verb: &str) -> String {
              Providers: anthropic, openai, xai, google, gmail, antigravity, github-copilot,\n\
              kimi, cursor, devin, snowflake, digitalocean, plus api-key providers\n\
              (zai, openrouter, deepseek, groq, cloudflare-workers-ai, ...) and web-search\n\
-             keys (tavily, kagi, exa, parallel). cloudflare-workers-ai also asks for the\n\
-             account id; use an API token scoped to Workers AI (Read and Edit), never the\n\
-             Global API Key.\n\
+             keys (tavily, kagi, exa, parallel, brave, firecrawl, jina, tinyfish, searxng).\n\
+             SearXNG keys are optional: store one only if your instance requires an API key.\n\
+             cloudflare-workers-ai also asks for the account id; use an API token scoped to\n\
+             Workers AI (Read and Edit), never the Global API Key.\n\
              \n\
              MULTIPLE ACCOUNTS per provider — give each its own labeled id: ck auth login\n\
              --provider anthropic --id oauth:anthropic:work (label freely chosen; each\n\

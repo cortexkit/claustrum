@@ -430,9 +430,12 @@ The catalog seeds five categories: `llm-provider`, `data-warehouse`, `cloud-infr
 `web-search` and `browser-session`. The set is not closed: an operator can assign any valid
 name. The seeds are what a new credential is stamped with at creation:
 
-- Search-only API-key entries are Tavily, Kagi, Exa, Parallel, Brave, Firecrawl, Jina and TinyFish;
-  they are `web-search` and never `llm-provider`. DeepSeek, Ollama Cloud, Perplexity, Synthetic
-  and Z.AI are dual-use API keys, so new records receive both `llm-provider` and `web-search`.
+- Search-only API-key entries are Tavily, Kagi, Exa, Parallel, Brave, Firecrawl, Jina, TinyFish
+  and SearXNG; they are `web-search` and never `llm-provider`. Many SearXNG instances need no key;
+  store `apikey:searxng` only if your instance requires an API key. SearXNG is self-hosted, so
+  login stores the key unchecked; a wrong key shows up on first use.
+  DeepSeek, Ollama Cloud, Perplexity, Synthetic and Z.AI are dual-use API keys, so new records
+  receive both `llm-provider` and `web-search`.
   Kimi for Coding (`apikey:kimi-for-coding`) is a separately managed live credential with no
   catalog row; its categories must be assigned explicitly rather than inferred from the catalog.
 - Login entries are `llm-provider`, except Snowflake (`data-warehouse`), DigitalOcean

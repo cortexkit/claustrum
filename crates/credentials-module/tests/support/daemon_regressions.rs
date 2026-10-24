@@ -350,7 +350,7 @@ fn manifest_advertises_both_operator_entrypoints() {
 async fn admin_route_uses_the_principal_captured_for_the_request() {
     let (surface, _surface_root) = tmp_surface(209);
     let (admin, _store, _root) = tmp_admin(209);
-    admin.record_bind_at(5, 1, subc_protocol::Principal::Direct);
+    admin.record_bind_at(5, 1, subc_protocol::Principal::Direct, "");
     let denied = regression_reply(
         &surface,
         &admin,

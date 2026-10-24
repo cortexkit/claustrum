@@ -1077,6 +1077,7 @@ async fn handle_control_request(
         ModuleControlRequest::RouteBind {
             route_channel,
             epoch,
+            identity,
             principal,
             scope,
             ..
@@ -1118,8 +1119,11 @@ async fn handle_control_request(
             // the route channel, under the newly installed wire epoch. An absent principal stamp
             // records as `Unverified` — never `direct` — so admin ops fail closed on
             // an older daemon. Reads remain anonymous/handle-scoped regardless.
+            // The opener's harness is recorded with it: on a `reserved:callosum` route a
+            // `fed-` harness marks a call forwarded from another computer, which the bind
+            // registry then serves with no principal (see `AdminSurface::principal`).
             let principal = principal.unwrap_or(subc_protocol::Principal::Unverified);
-            admin.record_bind_at(route_channel, epoch, principal);
+            admin.record_bind_at(route_channel, epoch, principal, &identity.harness);
             ModuleControlResponse::RouteBindAck {}
         }
         ModuleControlRequest::HealthCheck {} => {
@@ -3881,7 +3885,7 @@ mod tests {
             .get("error")
             .is_none());
         // Admin authority requires a direct operator connection, not a module grant.
-        admin.record_bind_at(51, 1, deposit_cookie_principal().unwrap());
+        admin.record_bind_at(51, 1, deposit_cookie_principal().unwrap(), "");
         for (method, params) in [
             (OP_ADMIN_CHALLENGE, json!({})),
             (OP_ADMIN_OP, json!({"op_body":"{}","tag_hex":"00"})),
@@ -3894,7 +3898,7 @@ mod tests {
                 .unwrap()
                 .contains("admin_refused"));
         }
-        admin.record_bind_at(51, 1, subc_protocol::Principal::Direct);
+        admin.record_bind_at(51, 1, subc_protocol::Principal::Direct, "");
         let allowed = deposit_cookie_frame(
             &surface,
             &admin,
@@ -4297,6 +4301,311 @@ mod tests {
             .map(|entry| entry.op)
             .collect();
         assert_eq!(grant_ops, ["grant_create", "grant_revoke"]);
+    }
+
+    const FORWARDED_TEST_ID: &str = "apikey:federation-probe";
+
+    /// A scoped rig holding one credential that `reserved:<module_id>` may read.
+    fn granted_scoped_rig(
+        seed: u8,
+        module_id: &str,
+    ) -> (
+        Arc<ReadSurface>,
+        Arc<admin_surface::AdminSurface>,
+        Arc<EncryptedStore>,
+        Arc<RouteEpochs>,
+    ) {
+        let (surface, admin, store) = scoped_rig(seed);
+        store
+            .create(
+                FORWARDED_TEST_ID,
+                &VaultRecord::new_static(CredentialKind::ApiKey, "test", b"key".to_vec(), None),
+            )
+            .expect("create credential");
+        store
+            .create_read_grant_audited(
+                "reserved",
+                module_id,
+                SelectorKind::Exact,
+                FORWARDED_TEST_ID,
+                GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .expect("create grant");
+        (surface, admin, store, Arc::new(RouteEpochs::default()))
+    }
+
+    /// Bind a route through the real `route.bind` control request, so the harness is
+    /// recorded the way the daemon's bind records it rather than through a test seam.
+    async fn bind_reserved_route(
+        surface: &Arc<ReadSurface>,
+        admin: &Arc<admin_surface::AdminSurface>,
+        routes: &Arc<RouteEpochs>,
+        channel: u16,
+        epoch: u32,
+        module_id: &str,
+        harness: &str,
+    ) {
+        let (tx, mut rx) = mpsc::channel::<Frame>(1);
+        let request = ModuleControlRequest::RouteBind {
+            route_channel: channel,
+            epoch,
+            target: subc_protocol::RouteTarget::ToolProvider {
+                module_id: credentials_core::contract::MODULE_ID.to_string(),
+            },
+            identity: subc_protocol::BindIdentity::new("/tmp/p", harness, "s"),
+            principal: Some(subc_protocol::Principal::Reserved {
+                module_id: module_id.to_string(),
+            }),
+            consumer_capabilities: None,
+            role_versions: None,
+            admission_facts: None,
+            scope: None,
+            call_mode: None,
+        };
+        let frame = Frame::build_with_version(
+            PROTOCOL_VERSION,
+            FrameType::Request,
+            control_flags(),
+            0,
+            0,
+            u64::from(channel),
+            serde_json::to_vec(&request).unwrap(),
+        )
+        .unwrap();
+        handle_control_request(frame, &tx, surface, admin, routes)
+            .await
+            .unwrap();
+        let ack = rx.try_recv().expect("the bind is answered");
+        assert_eq!(
+            ack.header.ty,
+            FrameType::Response,
+            "the bind is acknowledged"
+        );
+    }
+
+    /// The exact response-body bytes the route dispatcher writes for one request, for
+    /// byte-for-byte comparison of refusals (decoded JSON would hide a field-order or
+    /// whitespace difference that a consumer could tell apart).
+    async fn scoped_route_reply_bytes(
+        surface: &Arc<ReadSurface>,
+        admin: &Arc<admin_surface::AdminSurface>,
+        channel: u16,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Vec<u8> {
+        let (writer, mut responses) = mpsc::channel(1);
+        let frame = Frame::build_with_version(
+            PROTOCOL_VERSION,
+            FrameType::Request,
+            Flags::new(false, Priority::Interactive, false),
+            channel,
+            1,
+            1,
+            serde_json::to_vec(&json!({ "method": method, "params": params }))
+                .expect("encode request"),
+        )
+        .expect("build request");
+        let principal = admin.principal(channel);
+        handle_read_request(frame, &writer, surface, admin, principal)
+            .await
+            .expect("serve request");
+        responses.recv().await.expect("route response").body
+    }
+
+    async fn get_scoped_bytes(
+        surface: &Arc<ReadSurface>,
+        admin: &Arc<admin_surface::AdminSurface>,
+        channel: u16,
+        credential_id: &str,
+    ) -> Vec<u8> {
+        scoped_route_reply_bytes(
+            surface,
+            admin,
+            channel,
+            OP_GET_SCOPED,
+            json!({ "credential_id": credential_id }),
+        )
+        .await
+    }
+
+    async fn list_scoped_bytes(
+        surface: &Arc<ReadSurface>,
+        admin: &Arc<admin_surface::AdminSurface>,
+        channel: u16,
+    ) -> Vec<u8> {
+        scoped_route_reply_bytes(surface, admin, channel, OP_LIST_SCOPED, json!({})).await
+    }
+
+    /// Assert that `channel` reads the granted credential through both scoped ops.
+    async fn assert_reads_granted_credential(
+        surface: &Arc<ReadSurface>,
+        admin: &Arc<admin_surface::AdminSurface>,
+        channel: u16,
+        why: &str,
+    ) {
+        let get: serde_json::Value = serde_json::from_slice(
+            &get_scoped_bytes(surface, admin, channel, FORWARDED_TEST_ID).await,
+        )
+        .unwrap();
+        assert_eq!(
+            get["result"]["credential_id"],
+            json!(FORWARDED_TEST_ID),
+            "{why}: get_scoped must serve the granted credential, got {get}"
+        );
+        let list: serde_json::Value =
+            serde_json::from_slice(&list_scoped_bytes(surface, admin, channel).await).unwrap();
+        assert!(
+            list["result"].get("error").is_none() && list.to_string().contains(FORWARDED_TEST_ID),
+            "{why}: list_scoped must list the granted credential, got {list}"
+        );
+    }
+
+    /// Assert that `channel` is refused exactly as an unknown caller: `get_scoped` on a
+    /// credential callosum IS granted answers the same bytes as an id that does not
+    /// exist, and `list_scoped` answers the same bytes as a channel with no bind at all.
+    async fn assert_refused_as_unknown(
+        surface: &Arc<ReadSurface>,
+        admin: &Arc<admin_surface::AdminSurface>,
+        channel: u16,
+        why: &str,
+    ) {
+        const UNBOUND_CHANNEL: u16 = 999;
+        assert!(admin.principal(UNBOUND_CHANNEL).is_none());
+        let granted = get_scoped_bytes(surface, admin, channel, FORWARDED_TEST_ID).await;
+        let unknown = get_scoped_bytes(surface, admin, channel, "apikey:does-not-exist").await;
+        assert_scoped_not_found(&serde_json::from_slice(&granted).unwrap());
+        assert_eq!(
+            granted, unknown,
+            "{why}: a granted id must be byte-identical to an unknown id"
+        );
+        let list = list_scoped_bytes(surface, admin, channel).await;
+        assert_scoped_not_found(&serde_json::from_slice(&list).unwrap());
+        assert_eq!(
+            list,
+            list_scoped_bytes(surface, admin, UNBOUND_CHANNEL).await,
+            "{why}: list_scoped must answer as for a caller with no principal"
+        );
+    }
+
+    /// Callosum relays calls from other computers on routes it opens as itself, labelled
+    /// with a `fed-` harness. Until the vault has a federation policy such a call must
+    /// not borrow callosum's own grants. The callosum-self route on the same rig is the
+    /// control: without it, a rig whose grant never matched would pass.
+    #[tokio::test]
+    async fn a_forwarded_call_on_a_callosum_route_is_refused_as_an_unknown_credential() {
+        let (surface, admin, _store, routes) = granted_scoped_rig(180, "callosum");
+        bind_reserved_route(
+            &surface,
+            &admin,
+            &routes,
+            60,
+            1,
+            "callosum",
+            "callosum-self",
+        )
+        .await;
+        assert_reads_granted_credential(&surface, &admin, 60, "callosum-self").await;
+
+        bind_reserved_route(
+            &surface,
+            &admin,
+            &routes,
+            61,
+            1,
+            "callosum",
+            "fed-computer:0123456789abcdef0123456789abcdef",
+        )
+        .await;
+        assert_refused_as_unknown(&surface, &admin, 61, "fed-computer harness").await;
+        assert!(
+            admin.principal(61).is_none(),
+            "the forwarded route must carry no principal into any operation"
+        );
+        // The refusal also matches what the callosum-self route itself gets for an id
+        // that does not exist, so a forwarded caller cannot tell refusal from absence.
+        assert_eq!(
+            get_scoped_bytes(&surface, &admin, 61, FORWARDED_TEST_ID).await,
+            get_scoped_bytes(&surface, &admin, 60, "apikey:does-not-exist").await,
+        );
+    }
+
+    #[tokio::test]
+    async fn every_fed_prefixed_harness_on_a_callosum_route_is_refused() {
+        let (surface, admin, _store, routes) = granted_scoped_rig(181, "callosum");
+        for (channel, harness) in [(62, "fed-phone:x"), (63, "fed-")] {
+            bind_reserved_route(&surface, &admin, &routes, channel, 1, "callosum", harness).await;
+            assert_refused_as_unknown(&surface, &admin, channel, harness).await;
+        }
+    }
+
+    /// Only the `fed-` prefix withdraws callosum's grants. Today's callosum calls, an
+    /// empty harness, and strings that merely look similar keep reading as before.
+    #[tokio::test]
+    async fn callosum_keeps_its_grants_under_any_harness_without_the_fed_prefix() {
+        let (surface, admin, _store, routes) = granted_scoped_rig(182, "callosum");
+        for (channel, harness) in [
+            (64, "callosum-self"),
+            (65, ""),
+            (66, "opencode"),
+            (67, "federated"),
+            (68, "FED-computer:0123456789abcdef0123456789abcdef"),
+        ] {
+            bind_reserved_route(&surface, &admin, &routes, channel, 1, "callosum", harness).await;
+            assert_reads_granted_credential(&surface, &admin, channel, harness).await;
+        }
+    }
+
+    /// The harness is client-supplied, so it is read only on callosum's routes. Any
+    /// other reserved module keeps its grants whatever harness it declares.
+    #[tokio::test]
+    async fn another_reserved_module_ignores_a_fed_harness() {
+        let (surface, admin, _store, routes) = granted_scoped_rig(183, "broca");
+        bind_reserved_route(
+            &surface,
+            &admin,
+            &routes,
+            69,
+            1,
+            "broca",
+            "fed-computer:0123456789abcdef0123456789abcdef",
+        )
+        .await;
+        assert_reads_granted_credential(&surface, &admin, 69, "reserved:broca").await;
+    }
+
+    /// The harness is replaced with the principal on every rebind, so a channel reused
+    /// by callosum for its own calls never inherits the previous bind's `fed-` refusal,
+    /// and a channel rebound for a forwarded call never keeps callosum's grants.
+    #[tokio::test]
+    async fn rebinding_a_callosum_route_replaces_the_recorded_harness() {
+        let (surface, admin, _store, routes) = granted_scoped_rig(184, "callosum");
+        bind_reserved_route(
+            &surface,
+            &admin,
+            &routes,
+            70,
+            1,
+            "callosum",
+            "fed-computer:ab",
+        )
+        .await;
+        assert_refused_as_unknown(&surface, &admin, 70, "first bind, forwarded").await;
+
+        bind_reserved_route(
+            &surface,
+            &admin,
+            &routes,
+            70,
+            2,
+            "callosum",
+            "callosum-self",
+        )
+        .await;
+        assert_reads_granted_credential(&surface, &admin, 70, "rebound as callosum-self").await;
+
+        bind_reserved_route(&surface, &admin, &routes, 70, 3, "callosum", "fed-phone:x").await;
+        assert_refused_as_unknown(&surface, &admin, 70, "rebound as forwarded").await;
     }
 
     #[tokio::test]

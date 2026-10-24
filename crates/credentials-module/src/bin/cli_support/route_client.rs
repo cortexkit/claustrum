@@ -74,7 +74,11 @@ pub async fn open_route(
     //
     // Worth stating once at the only place this crate builds one: every field here is
     // client-supplied and unattested, per the normative comment on the type. Nothing
-    // downstream may authorize on them, and claustrum does not.
+    // downstream may grant authority on them, and claustrum does not. The vault reads one
+    // field, `harness`, and only to withdraw authority: on a route whose principal the
+    // daemon attested as `reserved:callosum`, a harness starting `fed-` marks a call
+    // forwarded from another computer, and the vault serves it with no principal. This
+    // CLI binds as `Direct`, so its harness is never read.
     let identity = BindIdentity::new(project_root, harness, session);
     // Deliberately no `consumer_identity`. The CLI is never a supervised module, and a
     // shell spawned by one inherits that module's SUBC_MODULE_ID and launch nonce;

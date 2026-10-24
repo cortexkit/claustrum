@@ -32,7 +32,7 @@ mod scoped_watch {
 
         fn bind(&self, channel: u16, principal: subc_protocol::Principal) {
             self.routes.install(channel, 1);
-            self.admin.record_bind_at(channel, 1, principal);
+            self.admin.record_bind_at(channel, 1, principal, "");
         }
 
         async fn dispatch(

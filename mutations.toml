@@ -1454,3 +1454,20 @@ target = "--lib"
 expect_red = ["tests::route_open_body_requires_the_launch_nonce_for_the_reserved_principal"]
 only = false
 timeout_s = 600
+
+[[control]]
+id = "callosum-forwarded-harness-refused"
+guards = "a reserved:callosum route bound with a fed- harness (a call forwarded from another computer) gets no principal, so it cannot borrow callosum's own grants"
+file = "crates/credentials-module/src/admin_surface.rs"
+old = "        && harness.starts_with(FORWARDED_HARNESS_PREFIX)"
+new = "        && harness.starts_with(FORWARDED_HARNESS_PREFIX) && false // NON-VACUITY BREAK"
+edits = []
+test_file = "crates/credentials-module/src/main.rs"
+runner = "cargo"
+package = "credentials-module"
+target = "--bin ck-claustrum"
+expect_red = ["tests::a_forwarded_call_on_a_callosum_route_is_refused_as_an_unknown_credential", "tests::every_fed_prefixed_harness_on_a_callosum_route_is_refused", "tests::rebinding_a_callosum_route_replaces_the_recorded_harness"]
+expect_message = "the route frame must carry the complete uniform absence pair"
+only = false
+timeout_s = 600
+build_timeout_s = 3600

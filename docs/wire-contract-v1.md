@@ -192,6 +192,19 @@ module's grants reach. A scoped route without a `flow_id` binds as before. A `ro
 this build cannot decode at all is refused the same way, code `invalid_control_body`, so it
 fails at once instead of waiting out the daemon's bind timeout.
 
+**A call callosum forwards from another computer is refused.** Callosum, the federation
+module, is itself a vault consumer with its own grants. When it relays a call from another
+computer, it opens the route as `reserved:callosum` with a bind-identity `harness` that
+starts `fed-` (for example `fed-computer:<32 hex>`, set from the authenticated peer key).
+On a route whose daemon-attested principal is `reserved:callosum`, such a harness marks a
+forwarded call, and until the vault supports federation it serves that route with no
+principal at all: every scoped op answers the uniform `not_found`, byte-identical to an
+unknown credential, and the admin plane refuses. Like any caller without a principal, it
+still reaches what a bearer secret alone authorizes (a capability handle, an enrollment
+token). Callosum's own calls (any other harness, including an empty one) keep callosum's
+grants, and the harness of every other principal is ignored: it is client-supplied, so the
+vault reads it only to withdraw authority, never to grant it.
+
 **An enrollment token** is the vault's OWN attestation: it minted it, holds only its
 hash, and can revoke it. This is how a host-launched consumer gets a name that grants can
 reach. Present it in the params (`enrollment_token`) on `credential.get_scoped` and

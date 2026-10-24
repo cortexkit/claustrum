@@ -75,8 +75,32 @@ struct Nonce {
 struct BindState {
     epoch: u32,
     principal: Principal,
+    /// The opener's `BindIdentity.harness` for this bind. Client-supplied and
+    /// unattested, so it never grants anything: it is read only to withdraw authority
+    /// (see [`refuses_forwarded_call`]). Lives in the same record as the principal, so a
+    /// rebind or route Goodbye replaces or drops both together.
+    harness: String,
     /// At most one outstanding nonce per bind (issuing a new challenge replaces it).
     nonce: Option<Nonce>,
+}
+
+/// The module id of callosum, the federation module. It is itself a vault consumer
+/// with its own grants, and it also relays calls from other computers.
+const FEDERATION_MODULE_ID: &str = "callosum";
+
+/// The bind-harness prefix callosum sets (from the authenticated peer key) on a route
+/// that carries a call forwarded from another computer, e.g. `fed-computer:<32 hex>`.
+const FORWARDED_HARNESS_PREFIX: &str = "fed-";
+
+/// Whether a bind is callosum relaying another computer's call. The vault has no
+/// federation policy yet, so such a call must not run with callosum's own grants: it
+/// gets no principal at all, the same as an unknown caller. Only callosum's routes are
+/// affected, and only because the daemon attested the principal as `reserved:callosum`;
+/// every other principal's harness is ignored, so no other caller can lose authority
+/// by choosing a harness string.
+fn refuses_forwarded_call(principal: &Principal, harness: &str) -> bool {
+    matches!(principal, Principal::Reserved { module_id } if module_id == FEDERATION_MODULE_ID)
+        && harness.starts_with(FORWARDED_HARNESS_PREFIX)
 }
 
 /// The module admin surface. Holds the engine (for the store + per-id lock), the
@@ -111,9 +135,9 @@ impl AdminSurface {
         }
     }
 
-    /// Replace a channel's principal and nonce on rebind. The wire epoch lets an
+    /// Replace a channel's principal, harness and nonce on rebind. The wire epoch lets an
     /// in-flight request prove it still belongs to this binding before claiming a nonce.
-    pub fn record_bind_at(&self, channel: u16, epoch: u32, principal: Principal) {
+    pub fn record_bind_at(&self, channel: u16, epoch: u32, principal: Principal, harness: &str) {
         let mut binds = self.binds.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(prev) = binds.get(&channel) {
             // Draining the replaced bind's nonce keeps the global counter honest.
@@ -126,6 +150,7 @@ impl AdminSurface {
             BindState {
                 epoch,
                 principal,
+                harness: harness.to_string(),
                 nonce: None,
             },
         );
@@ -133,7 +158,7 @@ impl AdminSurface {
 
     #[cfg(test)]
     pub fn record_bind(&self, channel: u16, principal: Principal) {
-        self.record_bind_at(channel, 0, principal);
+        self.record_bind_at(channel, 0, principal, "");
     }
 
     /// Test seam: backdate this channel's outstanding nonce so the TTL check sees it
@@ -148,12 +173,19 @@ impl AdminSurface {
         }
     }
 
-    /// Snapshot the principal that was stamped on a route bind. The route dispatcher
-    /// captures this before spawning a request so a later channel rebind cannot change
-    /// which caller authorized an already-accepted frame.
+    /// Snapshot the EFFECTIVE principal of a route bind: the daemon-stamped principal,
+    /// or `None` when the bind is callosum forwarding another computer's call. This is
+    /// the one place the request path reads a channel's principal, so that refusal
+    /// covers every operation: `None` is what an unbound or unknown caller has, so the
+    /// scoped surface answers the uniform `not_found` and the admin plane refuses.
+    /// The route dispatcher captures this before spawning a request so a later channel
+    /// rebind cannot change which caller authorized an already-accepted frame.
     pub fn principal(&self, channel: u16) -> Option<Principal> {
         let binds = self.binds.lock().unwrap_or_else(|p| p.into_inner());
-        binds.get(&channel).map(|state| state.principal.clone())
+        binds
+            .get(&channel)
+            .filter(|state| !refuses_forwarded_call(&state.principal, &state.harness))
+            .map(|state| state.principal.clone())
     }
 
     /// Forget a channel's admin state on route Goodbye. Idempotent.
@@ -1236,7 +1268,7 @@ mod tests {
     #[tokio::test]
     async fn admin_requests_require_the_captured_principal_and_current_epoch() {
         let r = rig(201);
-        r.admin.record_bind_at(5, 1, Principal::Direct);
+        r.admin.record_bind_at(5, 1, Principal::Direct, "");
         assert!(matches!(
             r.admin.challenge_as(5, 1, None),
             AdminOutcome::Refused(_)
@@ -1246,7 +1278,7 @@ mod tests {
             r.admin.challenge_as(5, 1, Some(&Principal::Direct)),
             AdminOutcome::Challenge { .. }
         ));
-        r.admin.record_bind_at(5, 2, Principal::Direct);
+        r.admin.record_bind_at(5, 2, Principal::Direct, "");
         assert!(matches!(
             r.admin.challenge_as(5, 1, Some(&Principal::Direct)),
             AdminOutcome::Refused(_)
@@ -1266,7 +1298,7 @@ mod tests {
             r.admin.execute(5, body.as_bytes(), &tag).await,
             AdminOutcome::Ok(_)
         ));
-        r.admin.record_bind_at(5, 3, Principal::Unverified);
+        r.admin.record_bind_at(5, 3, Principal::Unverified, "");
         assert!(matches!(
             r.admin.challenge_as(5, 3, Some(&Principal::Direct)),
             AdminOutcome::Refused(_)

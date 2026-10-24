@@ -146,6 +146,12 @@ retrying the daemon. For an unattended session, arrange an unlocked keyring and 
 session bus before launching the daemon. A missing bus, absent default collection, or
 refused Credential Manager access is a refusal, not permission to choose another backend.
 
+On macOS the keychain write needs the owner's login session, not just their user id. A
+bootstrap run from a plain `sudo` shell or a remote command channel (SSH, a VM tool) fails
+with `SecKeychainItemCreateFromContent ... Write permissions error`. Run it inside that
+user's session instead, for example
+`sudo launchctl asuser "$(id -u <user>)" sudo -u <user> ck auth bootstrap --data-dir "$DATA_DIR"`.
+
 **Operator key file (headless or server):** the key file **must live outside the data
 directory** (co-locating the key with the ciphertext defeats at-rest encryption); the CLI
 refuses a key path inside `--data-dir`.

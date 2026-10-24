@@ -1,0 +1,576 @@
+//! Store APIs for home-vault federation: the settings that govern it, remote records
+//! (rotating logins whose home is another member's vault) and member grants (what
+//! another member's vault may do here).
+//!
+//! Every write here is a fenced transaction that commits its audit row with the
+//! mutation, as everywhere else in the store. The federation settings have no other
+//! writer, so "written only through audited admin ops" holds by construction: the only
+//! callers are `admin_ops::apply` and the federation admin paths built on it.
+
+use super::*;
+use crate::federation::{
+    check_member_id, federation_gate_payload_hash, federation_self_payload_hash,
+    member_grant_payload_hash, remote_membership_payload_hash, MemberGrant, MemberGrantOperation,
+    MemberGrantSelector, NewRemoteRecord, RemoteHomeState, RemoteRecord, MEMBER_MAPPING_SETTING,
+    SELF_MEMBER_SETTING,
+};
+
+/// The longest pairing id stored. Callosum's pairing id is opaque and compared for
+/// equality only, so this bounds a column, not a format.
+const MAX_PAIRING_ID_LEN: usize = 128;
+
+fn read_setting(conn: &rusqlite::Connection, name: &str) -> rusqlite::Result<Option<String>> {
+    if read_schema_version(conn)? < SETTINGS_SCHEMA_VERSION {
+        return Ok(None);
+    }
+    conn.query_row(
+        "SELECT value FROM settings WHERE name = ?1",
+        [name],
+        |row| row.get(0),
+    )
+    .optional()
+}
+
+fn write_setting_tx(tx: &rusqlite::Transaction, name: &str, value: &str) -> rusqlite::Result<()> {
+    tx.execute(
+        "INSERT INTO settings (name, value, updated_at_ms) VALUES (?1, ?2, ?3) \
+         ON CONFLICT(name) DO UPDATE SET value = excluded.value, updated_at_ms = excluded.updated_at_ms",
+        rusqlite::params![name, value, now_ms()],
+    )?;
+    Ok(())
+}
+
+/// A stored gate value other than the two this code writes reads as off: the gate
+/// fails closed, so damage can never switch member mapping on.
+fn gate_from_stored(value: Option<&str>) -> bool {
+    value == Some("true")
+}
+
+fn mint_incarnation() -> Result<String, StoreOpError> {
+    let mut bytes = [0u8; 16];
+    getrandom::getrandom(&mut bytes).map_err(|e| StoreOpError::Encode(format!("csprng: {e}")))?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+fn remote_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RemoteRecord> {
+    let detected_plan: Option<String> = row.get("detected_plan")?;
+    let detected_plan = detected_plan
+        .map(|json| {
+            serde_json::from_str(&json).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })
+        })
+        .transpose()?;
+    let state: String = row.get("last_home_state")?;
+    let last_home_state = RemoteHomeState::from_stored(&state).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            format!("unknown remote home state {state:?}").into(),
+        )
+    })?;
+    Ok(RemoteRecord {
+        credential_id: row.get("credential_id")?,
+        home_member: row.get("home_member")?,
+        incarnation: row.get("incarnation")?,
+        refresh_adapter: row.get("refresh_adapter")?,
+        detected_plan,
+        identity: RecordIdentity {
+            account_id: row.get("account_id")?,
+            email: row.get("email")?,
+            org_name: row.get("org_name")?,
+        },
+        last_home_version: row.get::<_, i64>("last_home_version")? as u64,
+        last_home_state,
+        last_home_error: row.get("last_home_error")?,
+        last_fetch_outcome: row.get("last_fetch_outcome")?,
+        last_fetch_at_ms: row.get("last_fetch_at_ms")?,
+        reported_version: row
+            .get::<_, Option<i64>>("reported_version")?
+            .map(|version| version as u64),
+        created_at_ms: row.get("created_at_ms")?,
+        updated_at_ms: row.get("updated_at_ms")?,
+    })
+}
+
+fn check_member_grant_shape(
+    operation: MemberGrantOperation,
+    selector: &MemberGrantSelector,
+) -> Result<(), StoreOpError> {
+    match (operation, selector) {
+        (MemberGrantOperation::RemoteRead, MemberGrantSelector::Exact(id)) => {
+            if id.is_empty() {
+                return Err(StoreOpError::InvalidCredentialId);
+            }
+            validate_deposit_credential_id(id)
+        }
+        (MemberGrantOperation::RemoteRead, MemberGrantSelector::Category(category)) => {
+            if crate::catalog::valid_category_name(category) {
+                Ok(())
+            } else {
+                Err(StoreOpError::InvalidCategoryName)
+            }
+        }
+        (MemberGrantOperation::TransferDeliver, MemberGrantSelector::None) => Ok(()),
+        (MemberGrantOperation::RemoteRead, MemberGrantSelector::None) => Err(StoreOpError::Encode(
+            "remote_read needs an exact or category selector".into(),
+        )),
+        (MemberGrantOperation::TransferDeliver, _) => Err(StoreOpError::Encode(
+            "transfer_deliver takes no selector".into(),
+        )),
+    }
+}
+
+fn check_pairing_id(pairing_id: &str) -> Result<(), StoreOpError> {
+    if pairing_id.is_empty()
+        || pairing_id.len() > MAX_PAIRING_ID_LEN
+        || !pairing_id.bytes().all(|byte| byte.is_ascii_graphic())
+    {
+        return Err(StoreOpError::Encode(format!(
+            "pairing_id must be 1 to {MAX_PAIRING_ID_LEN} printable ASCII characters"
+        )));
+    }
+    Ok(())
+}
+
+impl EncryptedStore {
+    /// Whether the federation member-mapping gate is on. Read from the store on every
+    /// call, so a change made by the admin op takes effect without a restart. Unset,
+    /// or a store from before federation, reads as off.
+    pub fn federation_member_mapping(&self) -> Result<bool, StoreOpError> {
+        self.store
+            .with_conn(|conn| read_setting(conn, MEMBER_MAPPING_SETTING))
+            .map(|value| gate_from_stored(value.as_deref()))
+            .map_err(StoreOpError::from)
+    }
+
+    /// This vault's own member id, or `None` when it has not been set. Read from the
+    /// store on every call, like the gate.
+    pub fn federation_self_member(&self) -> Result<Option<String>, StoreOpError> {
+        self.store
+            .with_conn(|conn| read_setting(conn, SELF_MEMBER_SETTING))
+            .map_err(StoreOpError::from)
+    }
+
+    /// Switch the member-mapping gate, auditing the change as `ctx.op` (the admin path
+    /// passes `federation_gate_set`) with `payload_hash` over `{value}`. Setting the
+    /// value it already has writes nothing and returns `false`.
+    pub fn set_federation_member_mapping_audited(
+        &self,
+        enabled: bool,
+        ctx: AuditCtx<'_>,
+    ) -> Result<bool, StoreOpError> {
+        let audit_key = self.audit_key.clone();
+        let wanted = if enabled { "true" } else { "false" };
+        self.fenced_write(|tx| {
+            // Compared with the stored text, not the effective value: a damaged row
+            // reads as off, and asking for off then rewrites it to exactly `false`.
+            if read_setting(tx, MEMBER_MAPPING_SETTING)?.as_deref() == Some(wanted) {
+                return Ok(false);
+            }
+            write_setting_tx(tx, MEMBER_MAPPING_SETTING, wanted)?;
+            append_audit_tx(
+                tx,
+                &audit_key,
+                &AuditRecord {
+                    op: ctx.op,
+                    credential_id: None,
+                    payload_hash: Some(federation_gate_payload_hash(enabled)),
+                    actor: ctx.actor.to_string(),
+                    alarm: ctx.alarm,
+                },
+            )?;
+            Ok(true)
+        })
+        .map_err(StoreOpError::from)
+    }
+
+    /// Set this vault's own member id, auditing the change as `ctx.op` (the admin path
+    /// passes `federation_self_set`) with `payload_hash` over `{member}`. Setting the
+    /// value it already has writes nothing and returns `false`.
+    pub fn set_federation_self_member_audited(
+        &self,
+        member: &str,
+        ctx: AuditCtx<'_>,
+    ) -> Result<bool, StoreOpError> {
+        check_member_id(member)?;
+        let audit_key = self.audit_key.clone();
+        self.fenced_write(|tx| {
+            if read_setting(tx, SELF_MEMBER_SETTING)?.as_deref() == Some(member) {
+                return Ok(false);
+            }
+            write_setting_tx(tx, SELF_MEMBER_SETTING, member)?;
+            append_audit_tx(
+                tx,
+                &audit_key,
+                &AuditRecord {
+                    op: ctx.op,
+                    credential_id: None,
+                    payload_hash: Some(federation_self_payload_hash(member)),
+                    actor: ctx.actor.to_string(),
+                    alarm: ctx.alarm,
+                },
+            )?;
+            Ok(true)
+        })
+        .map_err(StoreOpError::from)
+    }
+
+    /// Register a remote record from one validated home reply, with a fresh
+    /// incarnation, and seed this vault's categories for it from that reply.
+    ///
+    /// Refuses an id that already holds a local record
+    /// ([`StoreOpError::CredentialIdIsLocal`], from the id-uniqueness trigger) or a
+    /// remote one ([`StoreOpError::AlreadyExists`]): re-homing is remove, then add.
+    /// Audited `remote_add` with the home member as actor and `payload_hash` over
+    /// `{incarnation}`, in the same transaction as the rows.
+    pub fn remote_add_audited(&self, new: &NewRemoteRecord) -> Result<RemoteRecord, StoreOpError> {
+        if new.credential_id.is_empty() {
+            return Err(StoreOpError::InvalidCredentialId);
+        }
+        validate_deposit_credential_id(&new.credential_id)?;
+        check_member_id(&new.home_member)?;
+        new.identity.validate().map_err(StoreOpError::Encode)?;
+        if new
+            .detected_plan
+            .as_ref()
+            .and_then(|plan| plan.tier.as_deref())
+            .is_some_and(|tier| !crate::plan_tier::valid_plan_tier(tier))
+        {
+            return Err(StoreOpError::InvalidPlanTier);
+        }
+        let categories: BTreeSet<&String> = new.categories.iter().collect();
+        if categories
+            .iter()
+            .any(|category| !crate::catalog::valid_category_name(category))
+        {
+            return Err(StoreOpError::InvalidCategoryName);
+        }
+        let incarnation = mint_incarnation()?;
+        let payload_hash = remote_membership_payload_hash(&incarnation)?;
+        let detected_plan = new
+            .detected_plan
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|e| StoreOpError::Encode(e.to_string()))?;
+        let home_version = i64::try_from(new.home_version)
+            .map_err(|_| StoreOpError::Encode("home record_version out of range".into()))?;
+        let audit_key = self.audit_key.clone();
+        let now = now_ms();
+        let inserted = self.fenced_write(|tx| {
+            let inserted = tx.execute(
+                "INSERT INTO remote_records \
+                 (credential_id, home_member, incarnation, kind, refresh_adapter, detected_plan, \
+                  account_id, email, org_name, last_home_version, last_home_state, \
+                  created_at_ms, updated_at_ms) \
+                 VALUES (?1, ?2, ?3, 'oauth', ?4, ?5, ?6, ?7, ?8, ?9, 'active', ?10, ?10) \
+                 ON CONFLICT(credential_id) DO NOTHING",
+                rusqlite::params![
+                    new.credential_id,
+                    new.home_member,
+                    incarnation,
+                    new.refresh_adapter,
+                    detected_plan,
+                    new.identity.account_id,
+                    new.identity.email,
+                    new.identity.org_name,
+                    home_version,
+                    now,
+                ],
+            )?;
+            if inserted == 0 {
+                return Ok(false);
+            }
+            for category in &categories {
+                tx.execute(
+                    "INSERT INTO remote_record_categories (credential_id, category) VALUES (?1, ?2)",
+                    rusqlite::params![new.credential_id, category],
+                )?;
+            }
+            // New categories change what every category grant naming them reaches.
+            if !categories.is_empty() {
+                bump_grants_generation_tx(tx)?;
+            }
+            append_audit_tx(
+                tx,
+                &audit_key,
+                &AuditRecord {
+                    op: AuditOp::RemoteAdd,
+                    credential_id: Some(new.credential_id.clone()),
+                    payload_hash: Some(payload_hash.clone()),
+                    actor: new.home_member.clone(),
+                    alarm: Some(AlarmReason::AdminWrite),
+                },
+            )?;
+            Ok(true)
+        })?;
+        if !inserted {
+            return Err(StoreOpError::AlreadyExists);
+        }
+        self.remote_record(&new.credential_id)?
+            .ok_or(StoreOpError::NotFound)
+    }
+
+    /// Remove a remote record and every row this vault keeps for it.
+    ///
+    /// The category, provider-id and plan-tier rows are deleted explicitly rather than
+    /// by the foreign-key cascade, because SQLite enforces foreign keys per connection
+    /// and nothing guarantees the setting is on: a re-added id must start with no
+    /// leftover metadata either way. Its `auth_events` rows go too, as for a local
+    /// removal. Audited `remote_remove` with the home member as actor and
+    /// `payload_hash` over the removed `{incarnation}`.
+    pub fn remote_remove_audited(&self, credential_id: &str) -> Result<RemoteRecord, StoreOpError> {
+        let audit_key = self.audit_key.clone();
+        let removed = self.fenced_write(|tx| {
+            let Some(record) = tx
+                .query_row(
+                    "SELECT * FROM remote_records WHERE credential_id = ?1",
+                    [credential_id],
+                    remote_record_from_row,
+                )
+                .optional()?
+            else {
+                return Ok(None);
+            };
+            let payload_hash =
+                remote_membership_payload_hash(&record.incarnation).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        e.to_string().into(),
+                    )
+                })?;
+            let categories = tx.execute(
+                "DELETE FROM remote_record_categories WHERE credential_id = ?1",
+                [credential_id],
+            )?;
+            tx.execute(
+                "DELETE FROM remote_record_provider_ids WHERE credential_id = ?1",
+                [credential_id],
+            )?;
+            tx.execute(
+                "DELETE FROM remote_record_plan_tiers WHERE credential_id = ?1",
+                [credential_id],
+            )?;
+            tx.execute(
+                "DELETE FROM remote_records WHERE credential_id = ?1",
+                [credential_id],
+            )?;
+            tx.execute(
+                "DELETE FROM auth_events WHERE credential_id = ?1",
+                [credential_id],
+            )?;
+            if categories > 0 {
+                bump_grants_generation_tx(tx)?;
+            }
+            append_audit_tx(
+                tx,
+                &audit_key,
+                &AuditRecord {
+                    op: AuditOp::RemoteRemove,
+                    credential_id: Some(credential_id.to_string()),
+                    payload_hash: Some(payload_hash),
+                    actor: record.home_member.clone(),
+                    alarm: Some(AlarmReason::AdminWrite),
+                },
+            )?;
+            Ok(Some(record))
+        })?;
+        removed.ok_or(StoreOpError::NotFound)
+    }
+
+    /// One remote record, or `None` when the id is not one (or the store predates
+    /// federation).
+    pub fn remote_record(&self, credential_id: &str) -> Result<Option<RemoteRecord>, StoreOpError> {
+        self.store
+            .with_conn(|conn| {
+                if read_schema_version(conn)? < FEDERATION_SCHEMA_VERSION {
+                    return Ok(None);
+                }
+                conn.query_row(
+                    "SELECT * FROM remote_records WHERE credential_id = ?1",
+                    [credential_id],
+                    remote_record_from_row,
+                )
+                .optional()
+            })
+            .map_err(StoreOpError::from)
+    }
+
+    /// Every remote record, in id order.
+    pub fn list_remote_records(&self) -> Result<Vec<RemoteRecord>, StoreOpError> {
+        self.store
+            .with_conn(|conn| {
+                if read_schema_version(conn)? < FEDERATION_SCHEMA_VERSION {
+                    return Ok(Vec::new());
+                }
+                let mut stmt =
+                    conn.prepare("SELECT * FROM remote_records ORDER BY credential_id")?;
+                let rows = stmt
+                    .query_map([], remote_record_from_row)?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(rows)
+            })
+            .map_err(StoreOpError::from)
+    }
+
+    /// Grant a member one operation, recording the member's current pairing id.
+    ///
+    /// Re-granting the same (member, operation, selector) replaces the stored pairing
+    /// id; re-granting it unchanged writes nothing and returns `false`. Audited
+    /// `member_grant_create` with the member as actor, the exact selector's id (else
+    /// none) as credential id, and `payload_hash` over `{operation, selector_kind,
+    /// selector, pairing_id}`.
+    pub fn create_member_grant_audited(
+        &self,
+        member_id: &str,
+        operation: MemberGrantOperation,
+        selector: &MemberGrantSelector,
+        pairing_id: &str,
+    ) -> Result<bool, StoreOpError> {
+        check_member_id(member_id)?;
+        check_member_grant_shape(operation, selector)?;
+        check_pairing_id(pairing_id)?;
+        let audit_key = self.audit_key.clone();
+        let now = now_ms();
+        self.fenced_write(|tx| {
+            let changed = tx.execute(
+                "INSERT INTO member_grants \
+                 (member_id, operation, selector_kind, selector, pairing_id, created_at_ms) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+                 ON CONFLICT(member_id, operation, selector_kind, selector) DO UPDATE SET \
+                     pairing_id = excluded.pairing_id, created_at_ms = excluded.created_at_ms \
+                 WHERE member_grants.pairing_id <> excluded.pairing_id",
+                rusqlite::params![
+                    member_id,
+                    operation.as_str(),
+                    selector.kind_str(),
+                    selector.selector_str(),
+                    pairing_id,
+                    now,
+                ],
+            )?;
+            if changed == 0 {
+                return Ok(false);
+            }
+            append_audit_tx(
+                tx,
+                &audit_key,
+                &AuditRecord {
+                    op: AuditOp::MemberGrantCreate,
+                    credential_id: member_grant_audit_target(selector),
+                    payload_hash: Some(member_grant_payload_hash(operation, selector, pairing_id)),
+                    actor: member_id.to_string(),
+                    alarm: Some(AlarmReason::AdminWrite),
+                },
+            )?;
+            Ok(true)
+        })
+        .map_err(StoreOpError::from)
+    }
+
+    /// Revoke one member grant. No pairing lookup is needed: the audit payload carries
+    /// the pairing id the revoked row was stored with. [`StoreOpError::NotFound`] when
+    /// there is no such grant.
+    pub fn revoke_member_grant_audited(
+        &self,
+        member_id: &str,
+        operation: MemberGrantOperation,
+        selector: &MemberGrantSelector,
+    ) -> Result<(), StoreOpError> {
+        check_member_id(member_id)?;
+        check_member_grant_shape(operation, selector)?;
+        let audit_key = self.audit_key.clone();
+        let revoked = self.fenced_write(|tx| {
+            let Some(pairing_id) = tx
+                .query_row(
+                    "DELETE FROM member_grants \
+                     WHERE member_id = ?1 AND operation = ?2 AND selector_kind = ?3 AND selector = ?4 \
+                     RETURNING pairing_id",
+                    rusqlite::params![
+                        member_id,
+                        operation.as_str(),
+                        selector.kind_str(),
+                        selector.selector_str(),
+                    ],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+            else {
+                return Ok(false);
+            };
+            append_audit_tx(
+                tx,
+                &audit_key,
+                &AuditRecord {
+                    op: AuditOp::MemberGrantRevoke,
+                    credential_id: member_grant_audit_target(selector),
+                    payload_hash: Some(member_grant_payload_hash(operation, selector, &pairing_id)),
+                    actor: member_id.to_string(),
+                    alarm: Some(AlarmReason::AdminWrite),
+                },
+            )?;
+            Ok(true)
+        })?;
+        if revoked {
+            Ok(())
+        } else {
+            Err(StoreOpError::NotFound)
+        }
+    }
+
+    /// Every member grant, ordered by member, operation, selector kind and selector.
+    pub fn list_member_grants(&self) -> Result<Vec<MemberGrant>, StoreOpError> {
+        self.store
+            .with_conn(|conn| {
+                if read_schema_version(conn)? < MEMBER_GRANTS_SCHEMA_VERSION {
+                    return Ok(Vec::new());
+                }
+                let mut stmt = conn.prepare(
+                    "SELECT member_id, operation, selector_kind, selector, pairing_id, created_at_ms \
+                     FROM member_grants ORDER BY member_id, operation, selector_kind, selector",
+                )?;
+                let rows = stmt
+                    .query_map([], |row| {
+                        let operation: String = row.get(1)?;
+                        let kind: String = row.get(2)?;
+                        let selector: String = row.get(3)?;
+                        let unknown = |what: String| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                0,
+                                rusqlite::types::Type::Text,
+                                what.into(),
+                            )
+                        };
+                        Ok(MemberGrant {
+                            member_id: row.get(0)?,
+                            operation: MemberGrantOperation::from_stored(&operation).ok_or_else(
+                                || unknown(format!("unknown member grant operation {operation:?}")),
+                            )?,
+                            selector: MemberGrantSelector::from_stored(&kind, selector).ok_or_else(
+                                || unknown(format!("unknown member grant selector kind {kind:?}")),
+                            )?,
+                            pairing_id: row.get(4)?,
+                            created_at_ms: row.get(5)?,
+                        })
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(rows)
+            })
+            .map_err(StoreOpError::from)
+    }
+}
+
+/// The audit row's credential id for a member grant: the id an exact selector names,
+/// else none (a category or no selector names no single credential).
+fn member_grant_audit_target(selector: &MemberGrantSelector) -> Option<String> {
+    match selector {
+        MemberGrantSelector::Exact(id) => Some(id.clone()),
+        MemberGrantSelector::Category(_) | MemberGrantSelector::None => None,
+    }
+}

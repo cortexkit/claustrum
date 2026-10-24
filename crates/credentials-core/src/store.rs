@@ -107,6 +107,27 @@ pub const ENROLLMENT_PROPOSER_SCHEMA_VERSION: u32 = 12;
 /// brings provider ids.
 pub const PROVIDER_ID_SCHEMA_VERSION: u32 = 15;
 
+/// The newest migration a vault release-1 binary carries. Every migration above it
+/// belongs to vault release 2 (home-vault federation), so a release-1 binary meeting a
+/// store at or above [`FEDERATION_SCHEMA_VERSION`] refuses to open it.
+pub const VAULT_RELEASE_1_SCHEMA_VERSION: u32 = 18;
+
+/// The first vault release-2 migration: `remote_records`. Every federation table
+/// arrives at or above it, so a reader that may meet an older store branches on it
+/// before touching any of them.
+pub const FEDERATION_SCHEMA_VERSION: u32 = 19;
+
+/// The migration that added the remote-record category, provider-id and plan-tier
+/// tables. Readers that may meet an older store skip them below it.
+const REMOTE_METADATA_SCHEMA_VERSION: u32 = 20;
+
+/// The migration that added `member_grants`.
+const MEMBER_GRANTS_SCHEMA_VERSION: u32 = 22;
+
+/// The migration that added the `settings` table holding the federation gate and the
+/// vault's own member id. Below it both read as unset.
+const SETTINGS_SCHEMA_VERSION: u32 = 26;
+
 /// The audit ops that DEPOSIT a credential, so the earliest entry carrying one of
 /// them is that credential's birth instant.
 ///
@@ -653,6 +674,190 @@ const MIGRATIONS: &[Migration] = &[
                      DROP TABLE read_grants; \
                      ALTER TABLE read_grants_v18 RENAME TO read_grants;",
     },
+    // Vault release 2 (home-vault federation) starts here. Every table it needs lands
+    // in migrations 19 to 26 together, so a later federation change adds code, never
+    // schema, and a release-1 binary refuses the whole set at once.
+    //
+    // `remote_records`: a rotating login whose home is another member's vault. This
+    // vault only borrows short-lived access tokens for it, so the row holds the home's
+    // non-secret description and B's own view of the last fetch. THERE IS NO PAYLOAD
+    // OR OAUTH COLUMN, by design: a refresh token must never be stored here, and the
+    // access token lives only in memory. `kind` is a one-value CHECK so a future reader
+    // cannot mistake the table for a general record store.
+    //
+    // `incarnation` (32 lowercase hex) is new on every `remote add`, so a delayed reply
+    // fetched for an earlier add of the same id can be recognised and discarded.
+    // `detected_plan` is the home's `DetectedPlan` as JSON. `last_home_state` and
+    // `last_home_error` change only on an authoritative home answer;
+    // `last_fetch_outcome` changes on every fetch, transport failures included.
+    Migration {
+        version: FEDERATION_SCHEMA_VERSION,
+        statements: "CREATE TABLE remote_records (\
+                         credential_id      TEXT PRIMARY KEY, \
+                         home_member        TEXT NOT NULL, \
+                         incarnation        TEXT NOT NULL CHECK (length(incarnation) = 32), \
+                         kind               TEXT NOT NULL CHECK (kind = 'oauth'), \
+                         refresh_adapter    TEXT, \
+                         detected_plan      TEXT, \
+                         account_id         TEXT, \
+                         email              TEXT, \
+                         org_name           TEXT, \
+                         last_home_version  INTEGER NOT NULL, \
+                         last_home_state    TEXT NOT NULL \
+                             CHECK (last_home_state IN ('active','needs_reauth','corrupt')), \
+                         last_home_error    TEXT, \
+                         last_fetch_outcome TEXT, \
+                         last_fetch_at_ms   INTEGER, \
+                         reported_version   INTEGER, \
+                         created_at_ms      INTEGER NOT NULL, \
+                         updated_at_ms      INTEGER NOT NULL\
+                     );",
+    },
+    // The metadata this vault, not the home, owns for a remote record. The tables that
+    // hold the same facts for local records cannot be reused: each has a cascading
+    // foreign key to `credentials`, which a remote id never appears in.
+    Migration {
+        version: REMOTE_METADATA_SCHEMA_VERSION,
+        statements: "CREATE TABLE remote_record_categories (\
+                         credential_id TEXT NOT NULL, \
+                         category TEXT NOT NULL, \
+                         PRIMARY KEY (credential_id, category), \
+                         FOREIGN KEY (credential_id) REFERENCES remote_records(credential_id) ON DELETE CASCADE\
+                     ); \
+                     CREATE TABLE remote_record_provider_ids (\
+                         credential_id TEXT NOT NULL, \
+                         provider_id TEXT NOT NULL, \
+                         PRIMARY KEY (credential_id, provider_id), \
+                         FOREIGN KEY (credential_id) REFERENCES remote_records(credential_id) ON DELETE CASCADE\
+                     ); \
+                     CREATE TABLE remote_record_plan_tiers (\
+                         credential_id TEXT NOT NULL PRIMARY KEY, \
+                         plan_tier TEXT NOT NULL, \
+                         FOREIGN KEY (credential_id) REFERENCES remote_records(credential_id) ON DELETE CASCADE\
+                     );",
+    },
+    // ONE ID, ONE RECORD. An id is either a local record or a remote one, never both:
+    // a scoped read would otherwise have two answers. The check sits in the database
+    // rather than in each creator so every path that inserts a row is covered at once,
+    // including ones written after these triggers. The RAISE messages are matched by
+    // `StoreOpError::from` to name the conflict, so they are part of the contract.
+    Migration {
+        version: 21,
+        statements: "CREATE TRIGGER credentials_id_not_remote_insert \
+                         BEFORE INSERT ON credentials \
+                         WHEN EXISTS (SELECT 1 FROM remote_records WHERE credential_id = NEW.credential_id) \
+                     BEGIN SELECT RAISE(ABORT, 'credential_id_is_remote'); END; \
+                     CREATE TRIGGER credentials_id_not_remote_update \
+                         BEFORE UPDATE OF credential_id ON credentials \
+                         WHEN EXISTS (SELECT 1 FROM remote_records WHERE credential_id = NEW.credential_id) \
+                     BEGIN SELECT RAISE(ABORT, 'credential_id_is_remote'); END; \
+                     CREATE TRIGGER remote_records_id_not_local_insert \
+                         BEFORE INSERT ON remote_records \
+                         WHEN EXISTS (SELECT 1 FROM credentials WHERE credential_id = NEW.credential_id) \
+                     BEGIN SELECT RAISE(ABORT, 'credential_id_is_local'); END; \
+                     CREATE TRIGGER remote_records_id_not_local_update \
+                         BEFORE UPDATE OF credential_id ON remote_records \
+                         WHEN EXISTS (SELECT 1 FROM credentials WHERE credential_id = NEW.credential_id) \
+                     BEGIN SELECT RAISE(ABORT, 'credential_id_is_local'); END;",
+    },
+    // What another member's vault may do here. Kept apart from `read_grants` so no
+    // existing operation can ever be granted to a member, and no member operation to a
+    // module. `pairing_id` is the member's pairing at grant time: a grant counts only
+    // while it equals the member's current one, so a re-pair voids every older grant.
+    // `transfer_deliver` takes no selector, stored as kind `none` with an empty selector.
+    Migration {
+        version: MEMBER_GRANTS_SCHEMA_VERSION,
+        statements: "CREATE TABLE member_grants (\
+                         member_id     TEXT NOT NULL, \
+                         operation     TEXT NOT NULL CHECK (operation IN ('remote_read','transfer_deliver')), \
+                         selector_kind TEXT NOT NULL CHECK (selector_kind IN ('exact','category','none')), \
+                         selector      TEXT NOT NULL, \
+                         pairing_id    TEXT NOT NULL, \
+                         created_at_ms INTEGER NOT NULL, \
+                         CHECK ((operation = 'transfer_deliver') = (selector_kind = 'none')), \
+                         CHECK ((selector_kind = 'none') = (selector = '')), \
+                         PRIMARY KEY (member_id, operation, selector_kind, selector)\
+                     );",
+    },
+    // One row per (member, credential, home record version, digest of the stored
+    // encrypted bytes) the home has issued a token for, so a `remote_issue` audit row is
+    // written once per material rather than once per fetch, also across restarts.
+    Migration {
+        version: 23,
+        statements: "CREATE TABLE remote_issue_seen (\
+                         member_id       TEXT NOT NULL, \
+                         credential_id   TEXT NOT NULL, \
+                         record_version  INTEGER NOT NULL, \
+                         material_digest TEXT NOT NULL, \
+                         seen_at_ms      INTEGER NOT NULL, \
+                         PRIMARY KEY (member_id, credential_id, record_version, material_digest)\
+                     ); \
+                     CREATE INDEX idx_remote_issue_seen_credential ON remote_issue_seen(credential_id);",
+    },
+    // Sealed static-key transfers received from other members. A row is created only
+    // after its envelope opened and its body validated, and it keeps the SEALED bytes
+    // only: nothing here is plaintext. `transfer_id` is the one bound in the
+    // authenticated envelope; `body_hash` is SHA-256(enc || ciphertext), the dedup key
+    // checked before any open. Terminal rows (accepted, rejected, expired) keep their
+    // id and hash forever with the envelope cleared, so a resend answers its stored
+    // state and an accepted transfer can never be imported twice.
+    Migration {
+        version: 24,
+        statements: "CREATE TABLE pending_transfers (\
+                         sender_member  TEXT NOT NULL, \
+                         transfer_id    TEXT NOT NULL CHECK (length(transfer_id) = 32), \
+                         body_hash      TEXT NOT NULL CHECK (length(body_hash) = 64), \
+                         state          TEXT NOT NULL \
+                             CHECK (state IN ('pending','accepted','rejected','expired')), \
+                         credential_id  TEXT NOT NULL, \
+                         kind           TEXT NOT NULL, \
+                         categories     TEXT NOT NULL DEFAULT '', \
+                         size_bytes     INTEGER NOT NULL, \
+                         enc            BLOB, \
+                         ciphertext     BLOB, \
+                         aad            BLOB, \
+                         reject_reason  TEXT, \
+                         received_at_ms INTEGER NOT NULL, \
+                         expires_at_ms  INTEGER NOT NULL, \
+                         decided_at_ms  INTEGER, \
+                         CHECK ((state = 'pending') = (enc IS NOT NULL AND ciphertext IS NOT NULL AND aad IS NOT NULL)), \
+                         PRIMARY KEY (sender_member, transfer_id), \
+                         UNIQUE (sender_member, body_hash)\
+                     ); \
+                     CREATE INDEX idx_pending_transfers_state ON pending_transfers(state);",
+    },
+    // Transfers this vault sent and has not seen a terminal reply for. Each keeps the
+    // one sealed envelope made at `send`, so every retry, including `send --resume`
+    // after a restart, delivers identical bytes. `abandoned` marks rows sealed under a
+    // transfer key this vault has since replaced; they can only fail at the receiver.
+    Migration {
+        version: 25,
+        statements: "CREATE TABLE outgoing_transfers (\
+                         transfer_id      TEXT PRIMARY KEY CHECK (length(transfer_id) = 32), \
+                         receiver_member  TEXT NOT NULL, \
+                         credential_id    TEXT NOT NULL, \
+                         body_hash        TEXT NOT NULL CHECK (length(body_hash) = 64), \
+                         enc              BLOB NOT NULL, \
+                         ciphertext       BLOB NOT NULL, \
+                         aad              BLOB NOT NULL, \
+                         state            TEXT NOT NULL CHECK (state IN ('pending','abandoned')), \
+                         last_reply_code  TEXT, \
+                         created_at_ms    INTEGER NOT NULL, \
+                         expires_at_ms    INTEGER NOT NULL, \
+                         last_attempt_at_ms INTEGER\
+                     );",
+    },
+    // Store-wide settings read on every federation decision, so a change takes effect
+    // without a restart and a whole-store restore brings them back with the data they
+    // govern. Written only by audited admin ops (`EncryptedStore::set_federation_*`).
+    Migration {
+        version: SETTINGS_SCHEMA_VERSION,
+        statements: "CREATE TABLE settings (\
+                         name          TEXT PRIMARY KEY, \
+                         value         TEXT NOT NULL, \
+                         updated_at_ms INTEGER NOT NULL\
+                     );",
+    },
 ];
 
 /// The newest store migration THIS BINARY knows how to apply.
@@ -668,13 +873,13 @@ const MIGRATIONS: &[Migration] = &[
 /// said 6 as well. Both were true when written. Deriving makes the drift impossible
 /// rather than merely discouraged.
 ///
-/// WHAT DECLARING IT BUYS, precisely, because it is easy to overstate: `run_migrations`
-/// SKIPS every migration at or below the store's current version and returns `Ok`, so a
-/// binary older than the store it opens proceeds silently -- there is no store-level
-/// refusal to back this up. Declaring the number does not add one. It makes the
-/// mismatch VISIBLE to a supervisor that compares declared against actual, which is the
-/// right granularity: refusing outright would break binary rollback, and rollback is a
-/// property this project deliberately preserves at every deploy.
+/// WHAT DECLARING IT BUYS, precisely, because it is easy to overstate: a binary older
+/// than the store it opens already REFUSES to open it. [`EncryptedStore::migrate`]
+/// compares the store's recorded version with this number and fails, naming both
+/// versions, before serving anything. Declaring the number adds a second, earlier view
+/// of the same mismatch: a supervisor comparing declared against actual sees it
+/// without starting the binary. Because of that refusal, rolling a binary back past a
+/// migration also means restoring the store snapshot taken before that migration ran.
 pub const fn newest_migration_version() -> u32 {
     let mut newest = 0;
     let mut i = 0;
@@ -1083,6 +1288,14 @@ pub enum StoreOpError {
     Quarantined,
     /// The record is `needs_reauth` and must not be served until re-authenticated.
     NeedsReauth,
+    /// The id is held by a remote record (a login whose home is another member's vault),
+    /// so no local record may be created under it. Remove the remote record first.
+    CredentialIdIsRemote,
+    /// The id is held by a local record, so it cannot be registered as a remote record.
+    /// There is no replace across the two: remove the local record first.
+    CredentialIdIsLocal,
+    /// A member id is not `fed-computer:` followed by 32 lowercase hex characters.
+    InvalidMemberId,
     /// The cipher envelope failed to decode/decrypt. The id has been quarantined.
     Decrypt(EnvelopeError),
     /// The decrypted body failed to parse as a record. The id has been quarantined.
@@ -1175,6 +1388,15 @@ impl std::fmt::Display for StoreOpError {
             }
             StoreOpError::Quarantined => f.write_str("credential is quarantined (corrupt)"),
             StoreOpError::NeedsReauth => f.write_str("credential needs re-authentication"),
+            StoreOpError::CredentialIdIsRemote => f.write_str(
+                "credential_id_is_remote: this id is a remote record served by its home vault; run `ck auth remote remove` before creating a local record under it",
+            ),
+            StoreOpError::CredentialIdIsLocal => f.write_str(
+                "credential_id_is_local: this id already holds a local record; remove it before adding a remote record under the same id",
+            ),
+            StoreOpError::InvalidMemberId => f.write_str(
+                "invalid_member_id: expected fed-computer: followed by 32 lowercase hex characters",
+            ),
             StoreOpError::Decrypt(e) => write!(f, "envelope decrypt failed: {e}"),
             StoreOpError::Corrupt(m) => write!(f, "record body corrupt: {m}"),
             StoreOpError::Fenced {
@@ -1202,6 +1424,9 @@ impl StoreOpError {
             StoreOpError::InvalidPlanTier => Some("invalid_plan_tier"),
             StoreOpError::InvalidProviderId { .. } => Some("invalid_provider_id"),
             StoreOpError::InvalidPrincipal => Some("invalid_principal"),
+            StoreOpError::CredentialIdIsRemote => Some("credential_id_is_remote"),
+            StoreOpError::CredentialIdIsLocal => Some("credential_id_is_local"),
+            StoreOpError::InvalidMemberId => Some("invalid_member_id"),
             _ => None,
         }
     }
@@ -1222,6 +1447,14 @@ impl From<StoreError> for StoreOpError {
                 holder_epoch,
                 db_epoch,
             },
+            // The id-uniqueness triggers abort with these exact messages. Naming the
+            // conflict here covers every creator at once, whichever insert tripped it.
+            StoreError::Backend(message) if message.contains("credential_id_is_remote") => {
+                StoreOpError::CredentialIdIsRemote
+            }
+            StoreError::Backend(message) if message.contains("credential_id_is_local") => {
+                StoreOpError::CredentialIdIsLocal
+            }
             other => StoreOpError::Store(other.to_string()),
         }
     }
@@ -1822,19 +2055,7 @@ impl EncryptedStore {
         target: u32,
     ) -> Result<(), StoreError> {
         let recorded = store.with_conn(read_schema_version)?;
-        let newest = newest_migration_version();
-        if recorded > newest {
-            let who = std::env::current_exe()
-                .ok()
-                .and_then(|path| {
-                    path.file_name()
-                        .map(|name| name.to_string_lossy().into_owned())
-                })
-                .unwrap_or_else(|| "this binary".to_string());
-            return Err(StoreError::Backend(format!(
-                "{who}: store schema {recorded} is newer than this binary's {newest} -- refusing to serve. This binary predates migrations already applied to this vault; one of them rebuilt a table, so writes would fail later rather than now. Roll {who} forward to a binary at or above {recorded}, or restore the store from the backup that matches it. If ck-auth and ck-claustrum were built separately they can carry different chains -- rebuild both from one revision."
-            )));
-        }
+        refuse_store_ahead_of_binary(recorded, newest_migration_version())?;
 
         // Migration 9 reserves lowercase `category:` byte-for-byte. SQLite LIKE is
         // case-insensitive for ASCII by default, so the predicate stays in Rust.
@@ -2986,7 +3207,9 @@ impl EncryptedStore {
                             kind == SelectorKind::Category.as_str() && categories.contains(selector)
                         }),
                         caller_active_grants,
-                        holds_category_selector: grants.iter().any(|(kind, _)| kind == SelectorKind::Category.as_str()),
+                        holds_category_selector: grants
+                            .iter()
+                            .any(|(kind, _)| kind == SelectorKind::Category.as_str()),
                         // A fresh id has no stored categories: authorize the vault-assigned
                         // defaults instead, without looking up any existing credential.
                         id_exists: false,
@@ -3002,18 +3225,21 @@ impl EncryptedStore {
                 let mut covered = grants.iter().any(|(kind, selector)| {
                     kind == SelectorKind::Exact.as_str() && credential_id == selector
                 });
-                let id_exists = conn.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM credentials WHERE credential_id = ?1)",
-                    rusqlite::params![credential_id],
-                    |row| row.get::<_, bool>(0),
-                )?;
+                // A remote record exists here as fully as a local one: local exact and
+                // category grants reach it unchanged, with categories from this vault's
+                // own remote-record set.
+                let tables = metadata_tables_for(conn, credential_id)?;
+                let id_exists = tables.is_some();
 
                 let id_category_count = if !covered && holds_category_selector {
-                    let mut categories_stmt = conn.prepare(
-                        "SELECT category FROM credential_categories WHERE credential_id = ?1 ORDER BY category",
-                    )?;
+                    let mut categories_stmt = conn.prepare(&format!(
+                        "SELECT category FROM {} WHERE credential_id = ?1 ORDER BY category",
+                        tables.unwrap_or(MetadataTables::Local).categories()
+                    ))?;
                     let categories = categories_stmt
-                        .query_map(rusqlite::params![credential_id], |row| row.get::<_, String>(0))?
+                        .query_map(rusqlite::params![credential_id], |row| {
+                            row.get::<_, String>(0)
+                        })?
                         .collect::<rusqlite::Result<Vec<_>>>()?;
                     covered = grants.iter().any(|(kind, selector)| {
                         kind == SelectorKind::Category.as_str()
@@ -3240,14 +3466,22 @@ impl EncryptedStore {
     }
 
     /// Return one credential's sorted category set.
+    ///
+    /// For a remote record this is this vault's own set for it, kept in the remote
+    /// tables.
     pub fn categories(&self, credential_id: &str) -> Result<Vec<String>, StoreOpError> {
         self.store
             .with_conn(|conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT category FROM credential_categories WHERE credential_id = ?1 ORDER BY category",
-                )?;
+                let tables =
+                    metadata_tables_for(conn, credential_id)?.unwrap_or(MetadataTables::Local);
+                let mut stmt = conn.prepare(&format!(
+                    "SELECT category FROM {} WHERE credential_id = ?1 ORDER BY category",
+                    tables.categories()
+                ))?;
                 let categories = stmt
-                    .query_map(rusqlite::params![credential_id], |row| row.get::<_, String>(0))?
+                    .query_map(rusqlite::params![credential_id], |row| {
+                        row.get::<_, String>(0)
+                    })?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
                 Ok(categories)
             })
@@ -3275,19 +3509,19 @@ impl EncryptedStore {
         }
         let audit_key = self.audit_key.clone();
         let outcome = self.fenced_write(|tx| {
-            let exists = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM credentials WHERE credential_id = ?1)",
-                rusqlite::params![credential_id],
-                |row| row.get::<_, bool>(0),
-            )?;
-            if !exists {
+            // A remote record's categories belong to this vault and live in the remote
+            // tables, so the same verb writes whichever family holds the id.
+            let Some(tables) = metadata_tables_for(tx, credential_id)? else {
                 return Ok(None);
-            }
-            let mut stmt = tx.prepare(
-                "SELECT category FROM credential_categories WHERE credential_id = ?1 ORDER BY category",
-            )?;
+            };
+            let mut stmt = tx.prepare(&format!(
+                "SELECT category FROM {} WHERE credential_id = ?1 ORDER BY category",
+                tables.categories()
+            ))?;
             let current = stmt
-                .query_map(rusqlite::params![credential_id], |row| row.get::<_, String>(0))?
+                .query_map(rusqlite::params![credential_id], |row| {
+                    row.get::<_, String>(0)
+                })?
                 .collect::<rusqlite::Result<BTreeSet<_>>>()?;
             drop(stmt);
             let resulting = match mode {
@@ -3299,12 +3533,18 @@ impl EncryptedStore {
                 return Ok(Some(false));
             }
             tx.execute(
-                "DELETE FROM credential_categories WHERE credential_id = ?1",
+                &format!(
+                    "DELETE FROM {} WHERE credential_id = ?1",
+                    tables.categories()
+                ),
                 rusqlite::params![credential_id],
             )?;
             for category in &resulting {
                 tx.execute(
-                    "INSERT INTO credential_categories (credential_id, category) VALUES (?1, ?2)",
+                    &format!(
+                        "INSERT INTO {} (credential_id, category) VALUES (?1, ?2)",
+                        tables.categories()
+                    ),
                     rusqlite::params![credential_id, category],
                 )?;
             }
@@ -3331,9 +3571,20 @@ impl EncryptedStore {
     }
 
     /// One credential's provider ids in ascending byte order.
+    /// For a remote record these are this vault's own ids for it.
     pub fn provider_ids(&self, credential_id: &str) -> Result<Vec<String>, StoreOpError> {
         self.store
             .with_conn(|conn| {
+                if metadata_tables_for(conn, credential_id)? == Some(MetadataTables::Remote) {
+                    let mut stmt = conn.prepare(
+                        "SELECT provider_id FROM remote_record_provider_ids \
+                         WHERE credential_id = ?1 ORDER BY provider_id",
+                    )?;
+                    let ids = stmt
+                        .query_map([credential_id], |row| row.get::<_, String>(0))?
+                        .collect::<rusqlite::Result<Vec<_>>>()?;
+                    return Ok(ids);
+                }
                 provider_ids_from_conn(conn, credential_id, read_schema_version(conn)?)
             })
             .map_err(StoreOpError::from)
@@ -3362,19 +3613,17 @@ impl EncryptedStore {
         crate::provider_ids::check_provider_ids(provider_ids)?;
         let audit_key = self.audit_key.clone();
         let outcome = self.fenced_write(|tx| {
-            let exists = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM credentials WHERE credential_id = ?1)",
-                rusqlite::params![credential_id],
-                |row| row.get::<_, bool>(0),
-            )?;
-            if !exists {
+            let Some(tables) = metadata_tables_for(tx, credential_id)? else {
                 return Ok(Err(StoreOpError::NotFound));
-            }
-            let mut stmt = tx.prepare(
-                "SELECT provider_id FROM credential_provider_ids WHERE credential_id = ?1",
-            )?;
+            };
+            let mut stmt = tx.prepare(&format!(
+                "SELECT provider_id FROM {} WHERE credential_id = ?1",
+                tables.provider_ids()
+            ))?;
             let current = stmt
-                .query_map(rusqlite::params![credential_id], |row| row.get::<_, String>(0))?
+                .query_map(rusqlite::params![credential_id], |row| {
+                    row.get::<_, String>(0)
+                })?
                 .collect::<rusqlite::Result<BTreeSet<_>>>()?;
             drop(stmt);
             let resulting = match mode {
@@ -3394,8 +3643,7 @@ impl EncryptedStore {
                     // whose addition crosses the cap (31 stored + `n1 n2` names `n2`).
                     for id in provider_ids {
                         resulting.insert(id.clone());
-                        if resulting.len() > crate::provider_ids::MAX_PROVIDER_IDS_PER_CREDENTIAL
-                        {
+                        if resulting.len() > crate::provider_ids::MAX_PROVIDER_IDS_PER_CREDENTIAL {
                             return Ok(Err(StoreOpError::InvalidProviderId {
                                 rule: crate::provider_ids::ProviderIdRule::Count,
                                 value: id.clone(),
@@ -3410,12 +3658,18 @@ impl EncryptedStore {
                 return Ok(Ok(resulting));
             }
             tx.execute(
-                "DELETE FROM credential_provider_ids WHERE credential_id = ?1",
+                &format!(
+                    "DELETE FROM {} WHERE credential_id = ?1",
+                    tables.provider_ids()
+                ),
                 rusqlite::params![credential_id],
             )?;
             for id in &resulting {
                 tx.execute(
-                    "INSERT INTO credential_provider_ids (credential_id, provider_id) VALUES (?1, ?2)",
+                    &format!(
+                        "INSERT INTO {} (credential_id, provider_id) VALUES (?1, ?2)",
+                        tables.provider_ids()
+                    ),
                     rusqlite::params![credential_id, id],
                 )?;
             }
@@ -3452,15 +3706,10 @@ impl EncryptedStore {
             return Err(StoreOpError::InvalidPlanTier);
         }
         self.fenced_write(|tx| {
-            let exists: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM credentials WHERE credential_id = ?1)",
-                [credential_id],
-                |row| row.get(0),
-            )?;
-            if !exists {
+            let Some(tables) = metadata_tables_for(tx, credential_id)? else {
                 return Ok(Err(StoreOpError::NotFound));
-            }
-            write_plan_tier_tx(tx, &self.audit_key, credential_id, plan_tier, ctx)?;
+            };
+            write_plan_tier_in_tx(tx, &self.audit_key, tables, credential_id, plan_tier, ctx)?;
             Ok(Ok(plan_tier.map(str::to_owned)))
         })?
     }
@@ -3506,10 +3755,20 @@ impl EncryptedStore {
             // cannot slip past. `set-category` on one credential is deliberately NOT
             // guarded this way: there the operator named the row and the category, and
             // this is the path that silently touches everything.
+            //
+            // A member grant selecting on a category is an active grant in the same sense:
+            // stripping its category would silently cut another member's vault off.
             let granted_categories: BTreeSet<String> = {
-                let mut stmt = tx.prepare(
+                let mut sql = String::from(
                     "SELECT DISTINCT selector FROM read_grants WHERE selector_kind = 'category'",
-                )?;
+                );
+                if read_schema_version(tx)? >= MEMBER_GRANTS_SCHEMA_VERSION {
+                    sql.push_str(
+                        " UNION SELECT DISTINCT selector FROM member_grants \
+                         WHERE selector_kind = 'category'",
+                    );
+                }
+                let mut stmt = tx.prepare(&sql)?;
                 let rows = stmt
                     .query_map([], |row| row.get::<_, String>(0))?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -4567,6 +4826,18 @@ impl EncryptedStore {
                 tx.commit()
             })
             .map_err(StoreOpError::from)
+    }
+
+    /// [`Self::record_scoped_first_use`] for a typed principal, so a caller cannot
+    /// misspell the stored kind. A member (another vault on a federation channel) is
+    /// recorded under its own member id rather than the channel's module.
+    pub fn record_scoped_first_use_by(
+        &self,
+        credential_id: &str,
+        principal: AuthEventPrincipal<'_>,
+        operation: GrantOperation,
+    ) -> Result<(), StoreOpError> {
+        self.record_scoped_first_use(credential_id, principal.kind(), principal.id(), operation)
     }
 
     /// Record that a read served a reported-stale token because the credential's
@@ -6184,17 +6455,44 @@ fn write_plan_tier_tx(
     tier: Option<&str>,
     ctx: AuditCtx<'_>,
 ) -> rusqlite::Result<()> {
-    let old = plan_tier_from_conn(tx, id, read_schema_version(tx)?)?;
+    write_plan_tier_in_tx(tx, audit_key, MetadataTables::Local, id, tier, ctx)
+}
+
+/// Set or clear one id's plan tier in the given table family, auditing only a change.
+fn write_plan_tier_in_tx(
+    tx: &rusqlite::Transaction,
+    audit_key: &[u8; 32],
+    tables: MetadataTables,
+    id: &str,
+    tier: Option<&str>,
+    ctx: AuditCtx<'_>,
+) -> rusqlite::Result<()> {
+    let old = match tables {
+        MetadataTables::Local => plan_tier_from_conn(tx, id, read_schema_version(tx)?)?,
+        MetadataTables::Remote => tx
+            .query_row(
+                "SELECT plan_tier FROM remote_record_plan_tiers WHERE credential_id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()?,
+    };
     if old.as_deref() == tier {
         return Ok(());
     }
     tx.execute(
-        "DELETE FROM credential_plan_tiers WHERE credential_id = ?1",
+        &format!(
+            "DELETE FROM {} WHERE credential_id = ?1",
+            tables.plan_tiers()
+        ),
         [id],
     )?;
     if let Some(tier) = tier {
         tx.execute(
-            "INSERT INTO credential_plan_tiers (credential_id, plan_tier) VALUES (?1, ?2)",
+            &format!(
+                "INSERT INTO {} (credential_id, plan_tier) VALUES (?1, ?2)",
+                tables.plan_tiers()
+            ),
             rusqlite::params![id, tier],
         )?;
     }
@@ -6303,6 +6601,28 @@ fn detected_plans_from_conn(
     Ok(plans)
 }
 
+/// Refuse a store whose recorded schema is newer than the binary's own chain.
+///
+/// `binary_newest` is the newest migration the running binary knows: production
+/// passes [`newest_migration_version`]. It is a parameter so a test can run the exact
+/// check a release-1 binary runs (its newest was [`VAULT_RELEASE_1_SCHEMA_VERSION`])
+/// against a store this binary migrated.
+fn refuse_store_ahead_of_binary(recorded: u32, binary_newest: u32) -> Result<(), StoreError> {
+    if recorded <= binary_newest {
+        return Ok(());
+    }
+    let who = std::env::current_exe()
+        .ok()
+        .and_then(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| "this binary".to_string());
+    Err(StoreError::Backend(format!(
+        "{who}: store schema {recorded} is newer than this binary's {binary_newest} -- refusing to serve. This binary predates migrations already applied to this vault; one of them rebuilt a table, so writes would fail later rather than now. Roll {who} forward to a binary at or above {recorded}, or restore the store from the backup that matches it. If ck-auth and ck-claustrum were built separately they can carry different chains -- rebuild both from one revision."
+    )))
+}
+
 /// Read the vault's recorded schema version from a connection that may be read-only.
 ///
 /// `MAX(version)` over this namespace's rows, or 0 when the namespace has no rows. A
@@ -6349,6 +6669,65 @@ fn bump_grants_generation_tx(tx: &rusqlite::Transaction) -> rusqlite::Result<()>
         [],
     )?;
     Ok(())
+}
+
+/// Which family of tables holds an id's operator metadata (categories, provider ids
+/// and plan tier). A local record's live beside `credentials`; a remote record's live
+/// beside `remote_records`, because the local tables' foreign keys point at
+/// `credentials`, which never holds a remote id.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MetadataTables {
+    Local,
+    Remote,
+}
+
+impl MetadataTables {
+    const fn categories(self) -> &'static str {
+        match self {
+            Self::Local => "credential_categories",
+            Self::Remote => "remote_record_categories",
+        }
+    }
+
+    const fn provider_ids(self) -> &'static str {
+        match self {
+            Self::Local => "credential_provider_ids",
+            Self::Remote => "remote_record_provider_ids",
+        }
+    }
+
+    const fn plan_tiers(self) -> &'static str {
+        match self {
+            Self::Local => "credential_plan_tiers",
+            Self::Remote => "remote_record_plan_tiers",
+        }
+    }
+}
+
+/// Which record table holds `credential_id`, or `None` when neither does. The remote
+/// tables are consulted only on a store that has them, so a reader meeting a store
+/// from before federation sees local records exactly as before.
+fn metadata_tables_for(
+    conn: &rusqlite::Connection,
+    credential_id: &str,
+) -> rusqlite::Result<Option<MetadataTables>> {
+    let local: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM credentials WHERE credential_id = ?1)",
+        [credential_id],
+        |row| row.get(0),
+    )?;
+    if local {
+        return Ok(Some(MetadataTables::Local));
+    }
+    if read_schema_version(conn)? < REMOTE_METADATA_SCHEMA_VERSION {
+        return Ok(None);
+    }
+    let remote: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM remote_records WHERE credential_id = ?1)",
+        [credential_id],
+        |row| row.get(0),
+    )?;
+    Ok(remote.then_some(MetadataTables::Remote))
 }
 
 /// Whether a table of this name exists, so a guard that runs BEFORE the migration
@@ -7335,6 +7714,11 @@ pub enum AuthEventPrincipal<'a> {
     /// Reported by the anthropic-auth seat while auditing the live acceptance, where a
     /// report authorized by `enrolled:acc-probe-consumer` recorded `direct:-`.
     Enrolled(&'a str),
+    /// Another member's vault, named by its member id (`fed-computer:<fp>`), on a
+    /// federation channel. The channel itself is opened by callosum, so without this
+    /// variant such a row would name `reserved:callosum` rather than the member that
+    /// actually made the call.
+    Member(&'a str),
     Unverified,
 }
 
@@ -7344,6 +7728,7 @@ impl<'a> AuthEventPrincipal<'a> {
             Self::Direct => "direct",
             Self::Reserved(_) => "reserved",
             Self::Enrolled(_) => "enrolled",
+            Self::Member(_) => "member",
             Self::Unverified => "unverified",
         }
     }
@@ -7352,6 +7737,7 @@ impl<'a> AuthEventPrincipal<'a> {
         match self {
             Self::Reserved(module_id) => Some(module_id),
             Self::Enrolled(name) => Some(name),
+            Self::Member(member_id) => Some(member_id),
             Self::Direct | Self::Unverified => None,
         }
     }
@@ -11462,7 +11848,7 @@ mod tests {
     fn the_newest_migration_version_is_pinned_because_the_manifest_declares_it() {
         assert_eq!(
             newest_migration_version(),
-            18,
+            26,
             "the newest migration changed. This value is DECLARED in the module manifest \
              as store_schema_version, so a supervisor comparing declared-against-actual \
              sees it. Update the literal, and note the manifest consequence."
@@ -15405,3 +15791,10 @@ mod provider_ids_store_tests;
 #[cfg(test)]
 #[path = "plan_tier_store_tests.rs"]
 mod plan_tier_store_tests;
+
+#[path = "store_federation.rs"]
+mod federation_store;
+
+#[cfg(test)]
+#[path = "store_federation_tests.rs"]
+mod store_federation_tests;

@@ -129,6 +129,34 @@ pub enum AuditOp {
     /// the window. An unrevoked handle is that gap, which is why a mint with no matching
     /// revoke is an unfinished ceremony rather than a harmless leftover.
     Approval,
+    /// The home vault released an access token for one of its rotating logins to another
+    /// member's vault. Written once per (member, credential, record version, stored
+    /// material), never once per fetch. Actor: the member id. `payload_hash`: see
+    /// [`crate::federation::remote_issue_payload_hash`].
+    RemoteIssue,
+    /// This vault committed a sealed static-key transfer to another member, before any
+    /// delivery attempt. Actor: the receiver member id.
+    TransferOut,
+    /// This vault accepted a sealed static-key transfer and created the record. Actor:
+    /// the sender member id.
+    TransferIn,
+    /// A transfer was rejected: on the receiver, a pending transfer (actor: sender); on
+    /// the sender, an outgoing transfer abandoned after a key replacement (actor:
+    /// receiver).
+    TransferReject,
+    /// A member grant (another member's vault may read a token or deliver a transfer)
+    /// was created or its pairing id replaced. Actor: the member id.
+    MemberGrantCreate,
+    /// A member grant was revoked. Actor: the member id.
+    MemberGrantRevoke,
+    /// A remote record was registered. Actor: the home member id.
+    RemoteAdd,
+    /// A remote record was removed. Actor: the home member id.
+    RemoteRemove,
+    /// The federation member-mapping gate was switched on or off.
+    FederationGateSet,
+    /// The vault's own member id was set or changed.
+    FederationSelfSet,
 }
 
 impl AuditOp {
@@ -165,6 +193,16 @@ impl AuditOp {
             AuditOp::EnrollReissue => "enroll.reissue",
             AuditOp::CategoryMigrate => "category.migrate",
             AuditOp::Approval => "approval",
+            AuditOp::RemoteIssue => "remote_issue",
+            AuditOp::TransferOut => "transfer_out",
+            AuditOp::TransferIn => "transfer_in",
+            AuditOp::TransferReject => "transfer_reject",
+            AuditOp::MemberGrantCreate => "member_grant_create",
+            AuditOp::MemberGrantRevoke => "member_grant_revoke",
+            AuditOp::RemoteAdd => "remote_add",
+            AuditOp::RemoteRemove => "remote_remove",
+            AuditOp::FederationGateSet => "federation_gate_set",
+            AuditOp::FederationSelfSet => "federation_self_set",
         }
     }
 }
@@ -692,6 +730,16 @@ mod vocabulary_documentation_tests {
                 AuditOp::EnrollReissue => AuditOp::EnrollReissue.as_str(),
                 AuditOp::CategoryMigrate => AuditOp::CategoryMigrate.as_str(),
                 AuditOp::Approval => AuditOp::Approval.as_str(),
+                AuditOp::RemoteIssue => AuditOp::RemoteIssue.as_str(),
+                AuditOp::TransferOut => AuditOp::TransferOut.as_str(),
+                AuditOp::TransferIn => AuditOp::TransferIn.as_str(),
+                AuditOp::TransferReject => AuditOp::TransferReject.as_str(),
+                AuditOp::MemberGrantCreate => AuditOp::MemberGrantCreate.as_str(),
+                AuditOp::MemberGrantRevoke => AuditOp::MemberGrantRevoke.as_str(),
+                AuditOp::RemoteAdd => AuditOp::RemoteAdd.as_str(),
+                AuditOp::RemoteRemove => AuditOp::RemoteRemove.as_str(),
+                AuditOp::FederationGateSet => AuditOp::FederationGateSet.as_str(),
+                AuditOp::FederationSelfSet => AuditOp::FederationSelfSet.as_str(),
             }
         }
 

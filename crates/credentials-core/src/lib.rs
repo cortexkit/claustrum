@@ -30,6 +30,7 @@ pub mod engine;
 mod engine_tests;
 pub mod enrollment;
 pub mod envelope;
+pub mod federation;
 pub mod google_login;
 pub mod health;
 pub mod http;

@@ -235,6 +235,17 @@ pub enum AdminOpBody {
     /// status` against a RUNNING daemon.
     #[serde(rename = "admin.status")]
     Status { v: u32 },
+    /// Switch the federation member-mapping gate. While it is off, callosum's channel
+    /// keeps the release-1 behaviour; while it is on, another member's vault reaching
+    /// this one is mapped to its member id and only `callosum-self` keeps callosum's
+    /// grants. Read live on every federation decision, so it takes effect at once.
+    #[serde(rename = "admin.federation_gate_set")]
+    FederationGateSet { v: u32, enabled: bool },
+    /// Set this vault's own member id (`fed-computer:<fp>`), which it writes into every
+    /// `requester`, `home`, `sender` and `receiver` field it emits. Peers check those
+    /// against the authenticated caller, so a wrong value fails closed.
+    #[serde(rename = "admin.federation_self_set")]
+    FederationSelfSet { v: u32, member: String },
 }
 
 /// Redacted `Debug`, hand-written rather than derived, and NOT only because of the
@@ -474,6 +485,16 @@ impl std::fmt::Debug for AdminOpBody {
                 .field("approver", approver)
                 .finish(),
             AdminOpBody::Status { v } => f.debug_struct("Status").field("v", v).finish(),
+            AdminOpBody::FederationGateSet { v, enabled } => f
+                .debug_struct("FederationGateSet")
+                .field("v", v)
+                .field("enabled", enabled)
+                .finish(),
+            AdminOpBody::FederationSelfSet { v, member } => f
+                .debug_struct("FederationSelfSet")
+                .field("v", v)
+                .field("member", member)
+                .finish(),
         }
     }
 }
@@ -507,6 +528,8 @@ impl AdminOpBody {
             | AdminOpBody::EnrollDeny { v, .. }
             | AdminOpBody::EnrollRevoke { v, .. }
             | AdminOpBody::EnrollReissue { v, .. }
+            | AdminOpBody::FederationGateSet { v, .. }
+            | AdminOpBody::FederationSelfSet { v, .. }
             | AdminOpBody::Status { v } => *v,
         }
     }
@@ -524,7 +547,9 @@ impl AdminOpBody {
             | AdminOpBody::EnrollApprove { .. }
             | AdminOpBody::EnrollDeny { .. }
             | AdminOpBody::EnrollRevoke { .. }
-            | AdminOpBody::EnrollReissue { .. } => ADMIN_OP_SCHEMA_V2,
+            | AdminOpBody::EnrollReissue { .. }
+            | AdminOpBody::FederationGateSet { .. }
+            | AdminOpBody::FederationSelfSet { .. } => ADMIN_OP_SCHEMA_V2,
             AdminOpBody::Store { .. }
             | AdminOpBody::OperatorSign { .. }
             | AdminOpBody::StoreWithIdentityPolicy { .. }
@@ -593,6 +618,9 @@ impl AdminOpBody {
             | AdminOpBody::EnrollDeny { .. }
             | AdminOpBody::EnrollRevoke { .. }
             | AdminOpBody::EnrollReissue { .. }
+            // Federation settings belong to no credential; the fenced write orders them.
+            | AdminOpBody::FederationGateSet { .. }
+            | AdminOpBody::FederationSelfSet { .. }
             | AdminOpBody::Status { .. } => None,
         }
     }
@@ -998,6 +1026,20 @@ pub fn apply(
             let changed = store
                 .reclassify_audited(force, AuditCtx::route_admin(AuditOp::SetCategory, actor))?;
             Ok(serde_json::json!({ "credentials_reclassified": changed }))
+        }
+        AdminOpBody::FederationGateSet { enabled, .. } => {
+            let changed = store.set_federation_member_mapping_audited(
+                enabled,
+                AuditCtx::route_admin(AuditOp::FederationGateSet, actor),
+            )?;
+            Ok(serde_json::json!({ "member_mapping": enabled, "changed": changed }))
+        }
+        AdminOpBody::FederationSelfSet { member, .. } => {
+            let changed = store.set_federation_self_member_audited(
+                &member,
+                AuditCtx::route_admin(AuditOp::FederationSelfSet, actor),
+            )?;
+            Ok(serde_json::json!({ "self_member": member, "changed": changed }))
         }
         AdminOpBody::Status { .. } => {
             // Status health uses credential lifecycle columns. Each row's detected
@@ -1514,6 +1556,24 @@ mod admin_schema_v2_tests {
                 AdminOpBody::Reclassify {
                     v: v2,
                     force: false,
+                },
+                v2,
+                None,
+            ),
+            (
+                "FederationGateSet",
+                AdminOpBody::FederationGateSet {
+                    v: v2,
+                    enabled: true,
+                },
+                v2,
+                None,
+            ),
+            (
+                "FederationSelfSet",
+                AdminOpBody::FederationSelfSet {
+                    v: v2,
+                    member: "fed-computer:0123456789abcdef0123456789abcdef".into(),
                 },
                 v2,
                 None,

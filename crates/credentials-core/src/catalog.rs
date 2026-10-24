@@ -11,9 +11,9 @@ pub enum CredentialCategory {
     DataWarehouse,
     CloudInfrastructure,
     /// Keys for web search APIs (Tavily, Kagi, Exa, Parallel, Brave, Firecrawl, Jina,
-    /// TinyFish). Kept apart from `llm-provider` for search-only providers: every model
-    /// consumer is granted `llm-provider`, and a search key filed there would reach all
-    /// of them.
+    /// TinyFish, SearXNG). Kept apart from `llm-provider` for search-only providers: every
+    /// model consumer is granted `llm-provider`, and a search key filed there would reach
+    /// all of them.
     WebSearch,
 }
 
@@ -1229,6 +1229,20 @@ pub const API_KEY_PROVIDERS: &[ApiKeyProvider] = &[
         serves: &[],
         account_id_prompt: None,
     },
+    // SearXNG instances are self-hosted; only instances requiring an API key need a stored key.
+    ApiKeyProvider {
+        key: "searxng",
+        display_name: "SearXNG",
+        default_id: "apikey:searxng",
+        dashboard_url: "https://docs.searxng.org/admin/settings/settings.html",
+        placeholder: "API key",
+        validation: KeyValidation::Unvalidated {
+            reason: "SearXNG is self-hosted, so there is no shared endpoint to check a key against; a wrong key shows up on first use",
+        },
+        categories: WEB_SEARCH,
+        serves: &[],
+        account_id_prompt: None,
+    },
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1878,8 +1892,8 @@ mod tests {
     #[test]
     fn both_catalogs_have_exact_owner_supplied_assignments() {
         // 15 original API-key rows, 37 model providers mirrored from oh-my-pi,
-        // Kiro, the Anthropic API key, Inception, Cloudflare Workers AI, and 8 search APIs.
-        assert_eq!(API_KEY_PROVIDERS.len(), 64);
+        // Kiro, the Anthropic API key, Inception, Cloudflare Workers AI, and 9 search APIs.
+        assert_eq!(API_KEY_PROVIDERS.len(), 65);
         assert_eq!(LOGIN_PROVIDERS.len(), 13);
         // Which api-key rows are `llm-provider` and which are `web-search` is pinned by
         // the two category tests below, which also require every row to be listed.
@@ -2019,6 +2033,7 @@ mod tests {
         "firecrawl",
         "jina",
         "tinyfish",
+        "searxng",
     ];
 
     /// Catalogued keys used by both model and web-search consumers.
@@ -2180,6 +2195,7 @@ mod tests {
                 "parallel",
                 "brave",
                 "jina",
+                "searxng",
             ]
         );
     }
@@ -2677,6 +2693,7 @@ mod source_ownership_tests {
                 ("firecrawl", vec![]),
                 ("jina", vec![]),
                 ("tinyfish", vec![]),
+                ("searxng", vec![]),
             ]
         );
         let login: Vec<_> = LOGIN_PROVIDERS

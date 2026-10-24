@@ -123,6 +123,7 @@ crates/credentials-core/src/catalog.rs INLINE_111 api.firecrawl.dev
 crates/credentials-core/src/catalog.rs INLINE_112 jina.ai
 crates/credentials-core/src/catalog.rs INLINE_113 agent.tinyfish.ai
 crates/credentials-core/src/catalog.rs INLINE_114 api.tinyfish.ai
+crates/credentials-core/src/catalog.rs INLINE_115 docs.searxng.org
 crates/credentials-core/src/device_flow.rs INLINE_001 auth.openai.com
 crates/credentials-core/src/device_flow.rs INLINE_002 auth.openai.com
 crates/credentials-core/src/device_flow.rs INLINE_003 auth.openai.com

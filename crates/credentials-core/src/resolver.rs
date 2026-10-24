@@ -1127,7 +1127,8 @@ fn delete_from_keychain(service: &str, account: &str) -> Result<(), MasterKeyErr
 }
 
 /// Write a key file, REPLACING any existing file, `0600` on unix, atomically (write
-/// a temp sibling then rename). Used for a slot write (rotation overwrites `Next`).
+/// a temp sibling then replace the destination with it). Used for a slot write
+/// (rotation overwrites `Next`).
 fn replace_at_operator_path(path: &Path, key: &MasterKey) -> Result<(), MasterKeyError> {
     let hex = encode_hex_key(key);
     let mut tmp = path.to_path_buf().into_os_string();
@@ -1141,23 +1142,28 @@ fn replace_at_operator_path(path: &Path, key: &MasterKey) -> Result<(), MasterKe
     if let Some(parent) = path.parent() {
         subc_os::windows_acl::verify_private_dir(parent).map_err(MasterKeyError::Io)?;
     }
-    std::fs::rename(&tmp, path).map_err(|e| {
+    // The replace must be durable, not just atomic: a power loss after a plain rename
+    // returns can still lose the new directory entry, leaving the slot at its old key
+    // (or empty). `durable_replace` flushes the temp file, then on Unix renames and
+    // fsyncs the parent directory, and on Windows uses MoveFileExW with write-through,
+    // where a directory fsync is not available. A plain rename plus a Unix-only
+    // directory fsync left Windows slot writes without that guarantee.
+    //
+    // Any failure, including the durability step after the rename, is REPORTED rather
+    // than swallowed: this is a master-key slot write, so "the bytes are published but
+    // the publish may not survive a power cut" is exactly the thing a caller must not
+    // be told is a clean success. Removing the temp is best effort and harmless once the
+    // rename has happened, because the temp name no longer exists then.
+    cortexkit_lease::durable_replace(&tmp, path).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
         MasterKeyError::KeyStoreUnwritable(e.to_string())
     })?;
-    // fsync the parent directory so the rename itself is durable: without it, a power
-    // loss after the rename returns can still lose the directory entry, leaving the slot
-    // pointing at the pre-rename state (or nothing). The file bytes were already synced in
-    // write_key_file; this makes the atomic publish of those bytes durable too.
-    //
-    // A failure here is REPORTED rather than swallowed: this is a master-key slot write,
-    // so "the bytes are published but the publish may not survive a power cut" is exactly
-    // the thing a caller must not be told is a clean success.
-    fsync_parent_dir(path).map_err(|e| MasterKeyError::KeyStoreUnwritable(e.to_string()))?;
     Ok(())
 }
 
-/// Fsync a path's parent directory to make a rename/remove durable.
+/// Fsync a path's parent directory to make a remove or a hard-link publish durable.
+/// Replacing a file goes through `cortexkit_lease::durable_replace` instead, which
+/// also covers Windows.
 ///
 /// Directory fsync is genuinely optional on some filesystems, so a "this platform does
 /// not do that" refusal is swallowed: the file bytes were already synced by the caller,
@@ -1187,7 +1193,7 @@ fn fsync_parent_dir(path: &Path) -> Result<(), std::io::Error> {
         let dir = match std::fs::File::open(parent) {
             Ok(dir) => dir,
             // A directory we cannot open for sync is not itself a durability failure of
-            // this write; the bytes are synced and the rename already returned.
+            // this write; the bytes are synced and the remove or link already returned.
             Err(e) if is_unsupported(&e) => return Ok(()),
             Err(e) => return Err(e),
         };
@@ -2080,6 +2086,50 @@ mod tests {
         promote_next(&config).expect("promote 2 idempotent");
         let got = resolve_for_db(&config, k2.key_id()).expect("resolve");
         assert_eq!(got.key_id(), k2.key_id());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Every operator-path slot write replaces the key file with the new key's bytes and
+    /// leaves no `.tmp` sibling, whether the slot was empty or held another key. Staging
+    /// twice replaces `Next`; promoting replaces `Current`. Runs on every OS, so the
+    /// Windows CI job exercises the MoveFileExW write-through replace as well as Unix.
+    #[test]
+    fn slot_writes_replace_the_key_file_and_leave_no_temp_file() {
+        let root = tmp_dir("slot-replace");
+        let config = op_config(&root);
+        let KeySource::OperatorPath { path } = config.source.clone() else {
+            unreachable!("op_config builds an operator-path source")
+        };
+        let mut next_path = path.clone().into_os_string();
+        next_path.push(".next");
+        let names = || {
+            let mut names: Vec<String> = std::fs::read_dir(path.parent().unwrap())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            names
+        };
+
+        let _k1 = bootstrap(&config).expect("bootstrap");
+        let k2 = MasterKey::generate().unwrap();
+        let k3 = MasterKey::generate().unwrap();
+        stage_next(&config, &k2).expect("stage into an empty Next");
+        stage_next(&config, &k3).expect("stage over an existing Next");
+        assert_eq!(
+            std::fs::read_to_string(&next_path).unwrap(),
+            encode_hex_key(&k3).as_str(),
+            "the second stage replaced Next"
+        );
+        assert_eq!(names(), ["master.key", "master.key.next"]);
+
+        promote_next(&config).expect("promote over the existing Current");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            encode_hex_key(&k3).as_str(),
+            "promotion replaced Current"
+        );
+        assert_eq!(names(), ["master.key"], "no temp file is left behind");
         let _ = std::fs::remove_dir_all(&root);
     }
 

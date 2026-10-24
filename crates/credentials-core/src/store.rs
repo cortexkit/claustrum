@@ -5708,30 +5708,29 @@ impl EncryptedStore {
         Ok(self.vault_transfer_key_state()? == Some(RecordState::Active))
     }
 
-    /// Run `work` on the store's connection inside a transaction, refusing first if the
-    /// active transfer key's fence forbids writing to `credential_id`.
+    /// [`Self::fenced_write`], refusing first if the active transfer key's fence forbids
+    /// writing to `credential_id`.
     ///
     /// One helper for the writers that choose their SQL from the credential id (the
     /// state writer and the two report writers): each needs the fence read and the write
     /// in the same transaction, and this keeps that shape in one place instead of three
-    /// copies of a guard that a later edit could drop from one of them.
+    /// copies of a guard that a later edit could drop from one of them. It stays on the
+    /// fenced path on purpose, so these writers still latch a lease handover like every
+    /// other durable mutation.
     fn fenced_write_unless_transfer_key_protected<T>(
         &self,
         credential_id: &str,
-        work: impl FnOnce(&rusqlite::Transaction<'_>) -> rusqlite::Result<T>,
+        work: impl FnOnce(&rusqlite::Transaction) -> rusqlite::Result<T>,
     ) -> Result<T, StoreOpError> {
         let refused = std::cell::Cell::new(false);
-        let outcome = self.store.with_conn(|conn| {
-            let tx = conn.unchecked_transaction()?;
+        let outcome = self.fenced_write(|tx| {
             if crate::federation::is_vault_transfer_id(credential_id)
-                && vault_transfer_key_fence_holds_tx(&tx)?
+                && vault_transfer_key_fence_holds_tx(tx)?
             {
                 refused.set(true);
                 return Err(rusqlite::Error::InvalidQuery);
             }
-            let value = work(&tx)?;
-            tx.commit()?;
-            Ok(value)
+            work(tx)
         });
         match outcome {
             Ok(value) => Ok(value),

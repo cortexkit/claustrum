@@ -933,6 +933,26 @@ pub(crate) struct StaleMark {
     pub(crate) record_written_at_ms: i64,
 }
 
+/// One decrypted read of a credential row: the record, the stale mark observed beside
+/// it, and the digest of the exact encrypted bytes it was decrypted from.
+#[derive(Debug)]
+pub(crate) struct StoredRead {
+    pub(crate) record: VaultRecord,
+    pub(crate) mark: StaleMark,
+    /// Lowercase-hex SHA-256 of the stored envelope bytes this read decrypted.
+    pub(crate) stored_digest_hex: String,
+}
+
+/// Lowercase-hex SHA-256 of arbitrary bytes, the encoding every digest this store and
+/// its callers compare uses.
+pub(crate) fn sha256_hex_of_bytes(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 /// The non-secret metadata of a stored record, readable WITHOUT decrypting (the
 /// plaintext columns). Used by rotation scans, status, and CAS pre-checks.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1296,6 +1316,16 @@ pub enum StoreOpError {
     CredentialIdIsLocal,
     /// A member id is not `fed-computer:` followed by 32 lowercase hex characters.
     InvalidMemberId,
+    /// A grant would reach the vault transfer key (`kem:vault-transfer:*`) with
+    /// anything but the one announce read, or a handle was requested for it. The
+    /// transfer key signs the federation seals, so the only thing it may be granted is
+    /// `credential.public_key`, and no handle may reach it.
+    TransferKeyReserved,
+    /// The vault transfer key is `Active`, so every operation that would change its
+    /// state, payload, identity or kind is refused: the federation peers sealed to it
+    /// could not open anything signed by a replacement. Recovery is an operator
+    /// `ck auth transfer init --replace` once the key is found off `Active`.
+    TransferKeyProtected,
     /// The cipher envelope failed to decode/decrypt. The id has been quarantined.
     Decrypt(EnvelopeError),
     /// The decrypted body failed to parse as a record. The id has been quarantined.
@@ -1397,6 +1427,12 @@ impl std::fmt::Display for StoreOpError {
             StoreOpError::InvalidMemberId => f.write_str(
                 "invalid_member_id: expected fed-computer: followed by 32 lowercase hex characters",
             ),
+            StoreOpError::TransferKeyReserved => f.write_str(
+                "transfer_key_reserved: the vault transfer key admits one grant only, read to reserved:callosum for the public-key announce; it cannot be opened, sealed, signed or listed, and no other credential may take its id",
+            ),
+            StoreOpError::TransferKeyProtected => f.write_str(
+                "transfer_key_protected: the vault transfer key is active, so its record cannot be replaced, re-identified, invalidated, retired, reactivated or removed",
+            ),
             StoreOpError::Decrypt(e) => write!(f, "envelope decrypt failed: {e}"),
             StoreOpError::Corrupt(m) => write!(f, "record body corrupt: {m}"),
             StoreOpError::Fenced {
@@ -1427,6 +1463,8 @@ impl StoreOpError {
             StoreOpError::CredentialIdIsRemote => Some("credential_id_is_remote"),
             StoreOpError::CredentialIdIsLocal => Some("credential_id_is_local"),
             StoreOpError::InvalidMemberId => Some("invalid_member_id"),
+            StoreOpError::TransferKeyReserved => Some("transfer_key_reserved"),
+            StoreOpError::TransferKeyProtected => Some("transfer_key_protected"),
             _ => None,
         }
     }
@@ -3025,6 +3063,17 @@ impl EncryptedStore {
         selector_kind
             .validate_operation(operation)
             .map_err(StoreOpError::Store)?;
+        // The transfer key's one admissible grant is checked before every other grant
+        // rule, so an id under its prefix is refused by that name rather than by
+        // whichever unrelated rule it happens to trip first.
+        if matches!(selector_kind, SelectorKind::Exact) {
+            crate::federation::transfer_key_admits_grant(
+                selector,
+                &format!("{principal_kind}:{principal_id}"),
+                operation,
+            )
+            .map_err(|_| StoreOpError::TransferKeyReserved)?;
+        }
         if !matches!(principal_kind, "reserved" | "enrolled")
             || principal_id.is_empty()
             || principal_id.contains('|')
@@ -3101,6 +3150,19 @@ impl EncryptedStore {
         selector_kind
             .validate_operation(operation)
             .map_err(StoreOpError::Store)?;
+        // Before the closed kind list, it is the transfer key's own fence that answers:
+        // an id under its prefix is refused by that name rather than by whichever
+        // unrelated rule it happens to trip first. Revocation is fenced too, so the
+        // vault and a caller cannot disagree about which grants the key may hold; the
+        // admitted announce read can still be revoked.
+        if matches!(selector_kind, SelectorKind::Exact) {
+            crate::federation::transfer_key_admits_grant(
+                selector,
+                &format!("{principal_kind}:{principal_id}"),
+                operation,
+            )
+            .map_err(|_| StoreOpError::TransferKeyReserved)?;
+        }
         // Same closed kind list as creation. If revocation accepted a NARROWER set than
         // creation, a grant could be created and never revocable through this API -- the
         // asymmetry that turns a reach mistake into a permanent one.
@@ -3966,6 +4028,9 @@ impl EncryptedStore {
         ctx: AuditCtx<'_>,
     ) -> Result<(), StoreOpError> {
         validate_deposit_credential_id(credential_id)?;
+        // A create for the transfer key's id must not slip past the replace fence by
+        // failing first and being retried as a create.
+        self.check_vault_transfer_key_writable(credential_id)?;
         refuse_short_term_bedrock_key(record)?;
         let mut record = normalize_record_identity(record.clone());
         if let Some(derived_account_id) = derived_account_id(&record) {
@@ -4080,6 +4145,10 @@ impl EncryptedStore {
         expected_payload_hash: &[u8; 32],
         ctx: AuditCtx<'_>,
     ) -> Result<(), StoreOpError> {
+        validate_deposit_credential_id(credential_id)?;
+        // A CAS replace at the current version is still a replace: the transfer key's
+        // active record cannot be overwritten under it.
+        self.check_vault_transfer_key_writable(credential_id)?;
         // Read + decrypt the current record to verify the CAS precondition. A
         // decrypt failure here quarantines the id (handled by `get`).
         let current = self.get(credential_id)?;
@@ -4193,6 +4262,7 @@ impl EncryptedStore {
         ctx: AuditCtx<'_>,
     ) -> Result<(), StoreOpError> {
         refuse_short_term_bedrock_key(record)?;
+        self.check_vault_transfer_key_writable(credential_id)?;
         let incoming = normalize_record_identity(record.clone());
         if let (Some(supplied), Some(derived)) = (
             incoming.identity.account_id.as_ref(),
@@ -4347,6 +4417,7 @@ impl EncryptedStore {
     ) -> Result<(), StoreOpError> {
         let identity = identity.normalized();
         identity.validate().map_err(StoreOpError::Encode)?;
+        self.check_vault_transfer_key_writable(credential_id)?;
         let key_id_hex = self.key_id.to_hex();
         let now = now_ms();
         let audit_key = self.audit_key.clone();
@@ -4475,6 +4546,23 @@ impl EncryptedStore {
         &self,
         credential_id: &str,
     ) -> Result<(VaultRecord, StaleMark), StoreOpError> {
+        let read = self.get_with_stale_pending_and_digest(credential_id)?;
+        Ok((read.record, read.mark))
+    }
+
+    /// The same read as [`Self::get_with_stale_pending`], plus the SHA-256 of the exact
+    /// encrypted bytes it decrypted.
+    ///
+    /// The digest is taken from the blob this read already holds, so it describes the
+    /// same row the record came from; nothing is read twice and nothing is recomputed
+    /// from the decrypted record. A caller that must recognise "these stored bytes"
+    /// across a delete and re-create (which restarts `record_version` at 1) can compare
+    /// it, and one that records it as evidence names bytes rather than a number another
+    /// write could reuse.
+    pub(crate) fn get_with_stale_pending_and_digest(
+        &self,
+        credential_id: &str,
+    ) -> Result<StoredRead, StoreOpError> {
         let row = self
             .store
             .with_conn(|c| {
@@ -4503,13 +4591,14 @@ impl EncryptedStore {
             row.ok_or(StoreOpError::NotFound)?;
         let (record, pending) =
             self.decode_record_row(credential_id, version, &state, stale_pending, &blob)?;
-        Ok((
+        Ok(StoredRead {
             record,
-            StaleMark {
+            mark: StaleMark {
                 pending,
                 record_written_at_ms: updated_at_ms,
             },
-        ))
+            stored_digest_hex: sha256_hex_of_bytes(&blob),
+        })
     }
 
     fn decode_record_row(
@@ -4611,7 +4700,7 @@ impl EncryptedStore {
         let now = now_ms();
         let audit_key = self.audit_key.clone();
         let changed = self
-            .fenced_write(|tx| {
+            .fenced_write_unless_transfer_key_protected(credential_id, |tx| {
                 // `state = active` makes this a STATE TRANSITION rather than a
                 // repeatable write, and that is what bounds the audit chain here.
                 //
@@ -4678,7 +4767,7 @@ impl EncryptedStore {
     ) -> Result<bool, StoreOpError> {
         let audit_key = self.audit_key.clone();
         let changed = self
-            .fenced_write(|tx| {
+            .fenced_write_unless_transfer_key_protected(credential_id, |tx| {
                 // A repeated report for the same version has already instructed the
                 // next read to refresh. Treat it as no new state transition so the
                 // append-only audit chain remains bounded; auth_events still records it.
@@ -4914,6 +5003,7 @@ impl EncryptedStore {
         credential_id: &str,
         ctx: AuditCtx<'_>,
     ) -> Result<InvalidateOutcome, StoreOpError> {
+        self.check_vault_transfer_key_writable(credential_id)?;
         let now = now_ms();
         let audit_key = self.audit_key.clone();
         self.fenced_write(|tx| {
@@ -4998,6 +5088,7 @@ impl EncryptedStore {
         credential_id: &str,
         ctx: AuditCtx<'_>,
     ) -> Result<InvalidateOutcome, StoreOpError> {
+        self.check_vault_transfer_key_writable(credential_id)?;
         let now = now_ms();
         let audit_key = self.audit_key.clone();
         self.fenced_write(|tx| {
@@ -5088,6 +5179,7 @@ impl EncryptedStore {
         credential_id: &str,
         ctx: AuditCtx<'_>,
     ) -> Result<usize, StoreOpError> {
+        self.check_vault_transfer_key_writable(credential_id)?;
         let audit_key = self.audit_key.clone();
         let (removed, handles) = self.fenced_write(|tx| {
             // Count before deleting the parent: foreign-key cascades may remove the rows.
@@ -5217,7 +5309,7 @@ impl EncryptedStore {
         expected_version: u64,
     ) -> Result<bool, StoreOpError> {
         let now = now_ms();
-        let changed = self.fenced_write(|tx| {
+        let changed = self.fenced_write_unless_transfer_key_protected(credential_id, |tx| {
             tx.execute(
                 "UPDATE credentials SET state = 'corrupt', updated_at_ms = ?1
                  WHERE credential_id = ?2 AND record_version = ?3",
@@ -5275,6 +5367,15 @@ impl EncryptedStore {
         credential_id: &str,
         ctx: AuditCtx<'_>,
     ) -> Result<bool, StoreOpError> {
+        // Reactivation is the one state op that would put the transfer key back into
+        // service, so it is refused by the fence even when the key is already `Active`
+        // and the transition would change nothing: the answer to "reactivate the transfer
+        // key" must be the named refusal, not a quiet success an operator could read as
+        // their own repair. The off-`Active` recovery is `ck auth transfer init --replace`.
+        self.check_vault_transfer_key_writable(credential_id)?;
+        if crate::federation::is_vault_transfer_id(credential_id) {
+            return Err(StoreOpError::TransferKeyProtected);
+        }
         let now = now_ms();
         let audit_key = self.audit_key.clone();
         self.fenced_write(|tx| {
@@ -5316,9 +5417,12 @@ impl EncryptedStore {
         clear_intent: bool,
         ctx: Option<AuditCtx<'_>>,
     ) -> Result<(), StoreOpError> {
+        // The internal state writer is reachable from the read path (a quarantine), so
+        // the fence sits here too: no path may move the active transfer key's record
+        // off `Active`.
         let now = now_ms();
         let audit_key = self.audit_key.clone();
-        self.fenced_write(|tx| {
+        self.fenced_write_unless_transfer_key_protected(credential_id, |tx| {
             let n = tx.execute(
                 "UPDATE credentials SET state = ?2, updated_at_ms = ?3 \
                  WHERE credential_id = ?1 AND state <> ?2 AND state <> 'corrupt'",
@@ -5576,6 +5680,110 @@ impl EncryptedStore {
 
     // ---- capability handles ---------------------------------------------
 
+    /// The lifecycle state of the vault transfer key (`kem:vault-transfer:*`), or
+    /// `None` when this vault has no such record.
+    ///
+    /// Read WITHOUT decrypting: every fence below asks only whether the key is
+    /// `Active`, and answering that must keep working on a key whose envelope is
+    /// damaged -- the recovery path exists for exactly that state.
+    pub fn vault_transfer_key_state(&self) -> Result<Option<RecordState>, StoreOpError> {
+        self.store
+            .with_conn(|conn| {
+                let state: Option<String> = conn
+                    .query_row(
+                        "SELECT state FROM credentials WHERE credential_id LIKE ?1 \
+                         ORDER BY credential_id LIMIT 1",
+                        [format!("{}%", crate::federation::VAULT_TRANSFER_ID_PREFIX)],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                Ok(state.map(|state| RecordState::from_str(&state)))
+            })
+            .map_err(StoreOpError::from)
+    }
+
+    /// Whether the transfer key is present and `Active`: while it is, every operation
+    /// that would change its record is refused with `transfer_key_protected`.
+    pub(crate) fn refuses_vault_transfer_key_mutation(&self) -> Result<bool, StoreOpError> {
+        Ok(self.vault_transfer_key_state()? == Some(RecordState::Active))
+    }
+
+    /// Run `work` on the store's connection inside a transaction, refusing first if the
+    /// active transfer key's fence forbids writing to `credential_id`.
+    ///
+    /// One helper for the writers that choose their SQL from the credential id (the
+    /// state writer and the two report writers): each needs the fence read and the write
+    /// in the same transaction, and this keeps that shape in one place instead of three
+    /// copies of a guard that a later edit could drop from one of them.
+    fn fenced_write_unless_transfer_key_protected<T>(
+        &self,
+        credential_id: &str,
+        work: impl FnOnce(&rusqlite::Transaction<'_>) -> rusqlite::Result<T>,
+    ) -> Result<T, StoreOpError> {
+        let refused = std::cell::Cell::new(false);
+        let outcome = self.store.with_conn(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            if crate::federation::is_vault_transfer_id(credential_id)
+                && vault_transfer_key_fence_holds_tx(&tx)?
+            {
+                refused.set(true);
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            let value = work(&tx)?;
+            tx.commit()?;
+            Ok(value)
+        });
+        match outcome {
+            Ok(value) => Ok(value),
+            Err(_refusal) if refused.get() => Err(StoreOpError::TransferKeyProtected),
+            Err(error) => Err(StoreOpError::from(error)),
+        }
+    }
+
+    /// Refuse replacing, re-identifying, invalidating, retiring, reactivating or
+    /// removing an id under the transfer-key prefix while the key is `Active`.
+    ///
+    /// The refusal compares the stored state rather than trusting the caller, and it
+    /// admits everything else -- an id that is not a transfer key, and a transfer key
+    /// found off `Active`, which is the state the recovery command repairs.
+    pub(crate) fn check_vault_transfer_key_writable(
+        &self,
+        credential_id: &str,
+    ) -> Result<(), StoreOpError> {
+        if crate::federation::is_vault_transfer_id(credential_id)
+            && self.refuses_vault_transfer_key_mutation()?
+        {
+            return Err(StoreOpError::TransferKeyProtected);
+        }
+        Ok(())
+    }
+
+    /// Test-only: force the transfer key's stored state, bypassing every fence.
+    ///
+    /// The recovery path (`ck auth transfer init --replace`) is admitted only when the
+    /// key is found off `Active`, and no production operation can produce that state --
+    /// that is the point of the fences. A test therefore has no legitimate route to it,
+    /// and this hook exists so one can stand in the damaged store an operator would
+    /// find. It is compiled in only under the test-support feature, so a release binary
+    /// has no way to move a transfer key's state without breaking the envelope it is
+    /// supposed to seal. Returns whether a transfer-key row was updated.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn force_vault_transfer_key_state_for_test(
+        &self,
+        state: RecordState,
+    ) -> Result<bool, StoreOpError> {
+        let changed = self.store.with_conn(|conn| {
+            conn.execute(
+                "UPDATE credentials SET state = ?1 WHERE credential_id LIKE ?2",
+                rusqlite::params![
+                    state.as_str(),
+                    format!("{}%", crate::federation::VAULT_TRANSFER_ID_PREFIX)
+                ],
+            )
+        })?;
+        Ok(changed > 0)
+    }
+
     /// Resolve a raw capability handle to its credential id. Hashes the presented
     /// handle and looks up a NON-revoked row; returns [`StoreOpError::NotFound`]
     /// when the handle is unknown or revoked (the read surface maps that to a
@@ -5616,12 +5824,20 @@ impl EncryptedStore {
     /// Adding a state check here would look like a safety improvement and would break
     /// that: it would make a handle un-mintable exactly when an operator is repairing
     /// a dead credential.
+    ///
+    /// THE TRANSFER KEY IS THE ONE EXCEPTION, and it is a check on the ID rather than
+    /// on the state: a handle on `kem:vault-transfer:*` would let its holder sign
+    /// federation seals as this vault, so minting one is refused with
+    /// `transfer_key_reserved` whatever the key's state.
     pub fn put_handle_hash(
         &self,
         handle_hash_hex: &str,
         credential_id: &str,
         ctx: AuditCtx<'_>,
     ) -> Result<(), StoreOpError> {
+        if crate::federation::is_vault_transfer_id(credential_id) {
+            return Err(StoreOpError::TransferKeyReserved);
+        }
         let now = now_ms();
         let audit_key = self.audit_key.clone();
         self.fenced_write(|tx| {
@@ -6309,6 +6525,27 @@ fn rusqlite_err(msg: &str) -> rusqlite::Error {
         rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISMATCH),
         Some(msg.to_string()),
     )
+}
+
+/// Whether the transfer-key fence holds, read on the connection a writer is about to
+/// write on: true when a record under `kem:vault-transfer:` exists and is `Active`, so
+/// no operation may change it.
+///
+/// On the caller's own connection on purpose. The public accessors open a fresh
+/// connection, and a pre-check read there followed by a write elsewhere would leave a
+/// window in which the key's state could change between the two; a writer that folds
+/// this read into its own transaction has none. A store from before the transfer key
+/// existed has no such row and answers false.
+fn vault_transfer_key_fence_holds_tx(conn: &rusqlite::Connection) -> rusqlite::Result<bool> {
+    let active: Option<String> = conn
+        .query_row(
+            "SELECT state FROM credentials WHERE credential_id LIKE ?1 \
+             ORDER BY credential_id LIMIT 1",
+            [format!("{}%", crate::federation::VAULT_TRANSFER_ID_PREFIX)],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(active.as_deref() == Some(RecordState::Active.as_str()))
 }
 
 /// Lowercase-hex render of a 32-byte hash (the payload hash, for the audit entry).
@@ -15798,3 +16035,11 @@ mod federation_store;
 #[cfg(test)]
 #[path = "store_federation_tests.rs"]
 mod store_federation_tests;
+
+#[cfg(test)]
+#[path = "engine_federation_tests.rs"]
+mod engine_federation_tests;
+
+#[cfg(test)]
+#[path = "transfer_key_fence_tests.rs"]
+mod transfer_key_fence_tests;

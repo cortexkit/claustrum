@@ -30,7 +30,7 @@ use cortexkit_store::{open_sqlite, Isolation, StorageBackend, StorageDescriptor}
 
 /// A stub adapter that counts refresh calls and returns a fixed rotated token, with
 /// a configurable non-mutating check outcome.
-struct StubAdapter {
+pub(super) struct StubAdapter {
     name: String,
     calls: Arc<AtomicUsize>,
     check: Option<Result<ValidityOutcome, ()>>,
@@ -45,7 +45,7 @@ struct StubAdapter {
 }
 
 impl StubAdapter {
-    fn new(name: &str) -> Self {
+    pub(super) fn new(name: &str) -> Self {
         StubAdapter {
             name: name.to_string(),
             calls: Arc::new(AtomicUsize::new(0)),
@@ -129,7 +129,7 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-fn tmp_descriptor() -> (TestTempDir, StorageDescriptor) {
+pub(super) fn tmp_descriptor() -> (TestTempDir, StorageDescriptor) {
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let root = TestTempDir::new(format!(
@@ -149,7 +149,7 @@ fn tmp_descriptor() -> (TestTempDir, StorageDescriptor) {
     (root, descriptor)
 }
 
-fn open_store(descriptor: &StorageDescriptor, seed: u8) -> EncryptedStore {
+pub(super) fn open_store(descriptor: &StorageDescriptor, seed: u8) -> EncryptedStore {
     let store = open_sqlite(descriptor).expect("open");
     EncryptedStore::migrate(&store).expect("migrate");
     EncryptedStore::open(store, MasterKey::from_bytes([seed; MASTER_KEY_LEN])).expect("open vault")
@@ -193,7 +193,10 @@ fn refresh_only_oauth_record() -> VaultRecord {
     )
 }
 
-fn engine(store: EncryptedStore, adapter: StubAdapter) -> (RefreshEngine, Arc<AtomicUsize>) {
+pub(super) fn engine(
+    store: EncryptedStore,
+    adapter: StubAdapter,
+) -> (RefreshEngine, Arc<AtomicUsize>) {
     let calls = adapter.calls.clone();
     let eng = RefreshEngine::new(Arc::new(store), vec![Arc::new(adapter)], Arc::new(NoHttp));
     (eng, calls)
@@ -207,13 +210,13 @@ fn clock_past_report_cooldown() -> Arc<dyn Fn() -> i64 + Send + Sync> {
 }
 
 /// A cooldown clock the test sets to exact instants.
-fn pinned_clock(at: &Arc<AtomicI64>) -> Arc<dyn Fn() -> i64 + Send + Sync> {
+pub(super) fn pinned_clock(at: &Arc<AtomicI64>) -> Arc<dyn Fn() -> i64 + Send + Sync> {
     let at = at.clone();
     Arc::new(move || at.load(Ordering::SeqCst))
 }
 
 /// The consumer report `credential.report_auth_failure` applies for `version`.
-fn report_stale(store: &EncryptedStore, id: &str, version: u64) {
+pub(super) fn report_stale(store: &EncryptedStore, id: &str, version: u64) {
     store
         .mark_stale_if_version_reported(
             id,
@@ -231,7 +234,7 @@ fn report_stale(store: &EncryptedStore, id: &str, version: u64) {
 }
 
 /// When the store wrote the credential's current version.
-fn written_at(store: &EncryptedStore, id: &str) -> i64 {
+pub(super) fn written_at(store: &EncryptedStore, id: &str) -> i64 {
     store
         .get_with_stale_pending(id)
         .expect("read")
@@ -250,7 +253,7 @@ fn deferral_rows(store: &EncryptedStore, id: &str) -> Vec<crate::store::AuthEven
 
 /// An OAuth record whose token is good for another hour, so only a stale report can
 /// make a read refresh it.
-fn unexpired_oauth_record() -> VaultRecord {
+pub(super) fn unexpired_oauth_record() -> VaultRecord {
     let mut record = stale_oauth_record();
     record.oauth.as_mut().expect("oauth").expires_at_ms = Some(now_ms() + 3_600_000);
     record

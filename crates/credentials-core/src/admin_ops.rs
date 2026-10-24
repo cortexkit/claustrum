@@ -632,6 +632,84 @@ impl AdminOpBody {
     pub fn to_bytes(&self) -> Result<Vec<u8>, serde_json::Error> {
         serde_json::to_vec(self)
     }
+
+    /// The variant's own discriminators, for diagnostics (`Store` reports which op it
+    /// refused without nesting the whole body).
+    pub(crate) fn op_name(&self) -> &'static str {
+        match self {
+            AdminOpBody::OperatorSign { .. } => "admin.operator_sign",
+            AdminOpBody::Store { .. } => "admin.store",
+            AdminOpBody::StoreWithIdentityPolicy { .. } => "admin.store_with_identity_policy",
+            AdminOpBody::SetIdentity { .. } => "admin.set_identity",
+            AdminOpBody::Invalidate { .. } => "admin.invalidate",
+            AdminOpBody::Logout { .. } => "admin.logout",
+            AdminOpBody::Reactivate { .. } => "admin.reactivate",
+            AdminOpBody::Remove { .. } => "admin.remove",
+            AdminOpBody::MintHandle { .. } => "admin.mint_handle",
+            AdminOpBody::RevokeHandle { .. } => "admin.revoke_handle",
+            AdminOpBody::RevokeHandleByHash { .. } => "admin.revoke_handle_by_hash",
+            AdminOpBody::RevokeAllHandles { .. } => "admin.revoke_all_handles",
+            AdminOpBody::GrantCreate { .. } => "admin.grant_create",
+            AdminOpBody::GrantRevoke { .. } => "admin.grant_revoke",
+            AdminOpBody::GrantCreateV2 { .. } => "admin.grant_create_v2",
+            AdminOpBody::GrantRevokeV2 { .. } => "admin.grant_revoke_v2",
+            AdminOpBody::EnrollApprove { .. } => "admin.enroll_approve",
+            AdminOpBody::EnrollDeny { .. } => "admin.enroll_deny",
+            AdminOpBody::EnrollRevoke { .. } => "admin.enroll_revoke",
+            AdminOpBody::EnrollReissue { .. } => "admin.enroll_reissue",
+            AdminOpBody::SetCategory { .. } => "admin.set_category",
+            AdminOpBody::SetProviders { .. } => "admin.set_providers",
+            AdminOpBody::SetPlan { .. } => "admin.set_plan",
+            AdminOpBody::Reclassify { .. } => "admin.reclassify",
+            AdminOpBody::Approval { .. } => "admin.approval",
+            AdminOpBody::Status { .. } => "admin.status",
+            AdminOpBody::FederationGateSet { .. } => "admin.federation_gate_set",
+            AdminOpBody::FederationSelfSet { .. } => "admin.federation_self_set",
+        }
+    }
+
+    /// Whether this op needs the running daemon because it awaits an outbound call
+    /// (a peer key lookup, a home fetch, a delivery). Such an op is refused by
+    /// [`apply`] with `federation_requires_daemon` before any write, so the offline
+    /// lease path cannot run it.
+    ///
+    /// The exhaustive match is the forcing function: a new federation op has to say
+    /// here whether `apply` may run it, rather than defaulting to a synchronous
+    /// half-implementation.
+    pub const fn requires_daemon(&self) -> bool {
+        match self {
+            AdminOpBody::Store { .. }
+            | AdminOpBody::OperatorSign { .. }
+            | AdminOpBody::StoreWithIdentityPolicy { .. }
+            | AdminOpBody::SetIdentity { .. }
+            | AdminOpBody::Invalidate { .. }
+            | AdminOpBody::Logout { .. }
+            | AdminOpBody::Reactivate { .. }
+            | AdminOpBody::Remove { .. }
+            | AdminOpBody::MintHandle { .. }
+            | AdminOpBody::RevokeHandle { .. }
+            | AdminOpBody::RevokeHandleByHash { .. }
+            | AdminOpBody::RevokeAllHandles { .. }
+            | AdminOpBody::GrantCreate { .. }
+            | AdminOpBody::GrantRevoke { .. }
+            | AdminOpBody::GrantCreateV2 { .. }
+            | AdminOpBody::GrantRevokeV2 { .. }
+            | AdminOpBody::EnrollApprove { .. }
+            | AdminOpBody::EnrollDeny { .. }
+            | AdminOpBody::EnrollRevoke { .. }
+            | AdminOpBody::EnrollReissue { .. }
+            | AdminOpBody::SetCategory { .. }
+            | AdminOpBody::SetProviders { .. }
+            | AdminOpBody::SetPlan { .. }
+            | AdminOpBody::Reclassify { .. }
+            | AdminOpBody::Approval { .. }
+            | AdminOpBody::Status { .. }
+            // The gate and the self id are store settings: both are pure local writes
+            // and already run through `apply` from the offline lease path.
+            | AdminOpBody::FederationGateSet { .. }
+            | AdminOpBody::FederationSelfSet { .. } => false,
+        }
+    }
 }
 
 /// The audit op an `admin.store` records: login, import, or put/overwrite. A closed
@@ -674,6 +752,18 @@ pub fn apply(
         return Err(StoreOpError::Encode(format!(
             "unsupported admin op schema version/variant pairing {}",
             op.schema_version()
+        )));
+    }
+    // The federation ops that need an awaited outbound call (a peer key lookup, a home
+    // fetch, a delivery) cannot run here: `apply` is synchronous and runs wherever a
+    // caller holds the write lease, including the offline CLI. They are dispatched by
+    // the daemon's federation path instead, and this refusal sits before any match arm
+    // that could write, so the offline path can never run one half-way.
+    if op.requires_daemon() {
+        return Err(StoreOpError::Encode(format!(
+            "federation_requires_daemon: {} needs the running daemon for its outbound \
+             calls and cannot run against a leased store",
+            op.op_name()
         )));
     }
     match op {
@@ -936,6 +1026,18 @@ pub fn apply(
             {
                 return Err(StoreOpError::InvalidCategoryName);
             }
+            // The transfer key's fence answers here, before the store's identical check,
+            // so a grant on it is refused with `transfer_key_reserved` rather than a
+            // generic write error, and the `already_granted` shortcut below can never
+            // swallow it.
+            if selector_kind == SelectorKind::Exact {
+                crate::federation::transfer_key_admits_grant(
+                    &selector,
+                    &format!("{principal_kind}:{principal_id}"),
+                    operation,
+                )
+                .map_err(|_| StoreOpError::TransferKeyReserved)?;
+            }
             let stored_selector = selector;
             // Re-granting an identical row is a no-op, not a failure: setup scripts re-run
             // the same grant, and the store's create-only `AlreadyExists` reads as "the
@@ -972,6 +1074,17 @@ pub fn apply(
                 return Err(StoreOpError::InvalidCategoryName);
             }
             let stored_selector = selector;
+            // The transfer key's fence answers before the store write, so a revoke on it
+            // is refused by that name; the admitted announce read can still be revoked,
+            // which the store's identical check allows.
+            if selector_kind == SelectorKind::Exact {
+                crate::federation::transfer_key_admits_grant(
+                    &stored_selector,
+                    &format!("{principal_kind}:{principal_id}"),
+                    operation,
+                )
+                .map_err(|_| StoreOpError::TransferKeyReserved)?;
+            }
             store.revoke_read_grant_audited(
                 &principal_kind,
                 &principal_id,

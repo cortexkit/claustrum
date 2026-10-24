@@ -289,9 +289,18 @@ pub fn seal_auth_with_ephemeral_ikm(
     )
 }
 
-/// Test-only: an RFC 9180 Auth-mode receiver, so tests can show what `seal_auth`
-/// produced opens for the intended recipient under the sender's public half.
-#[cfg(any(test, feature = "test-support"))]
+/// Open one message sealed by [`seal_auth`]: RFC 9180 Auth mode, where
+/// `sender_public_key` is the sender's static half and `recipient_pem` is our own.
+///
+/// Auth mode is what makes this more than decryption: the sender's static key is bound
+/// into the shared secret, so a message that opens here was produced by the holder of
+/// `sender_public_key` and no one else. The caller must supply that half from a trusted
+/// source (the peer's announced key), never from the request it is validating, or the
+/// guarantee is vacuous.
+///
+/// Deliberately NOT reachable from `credential.open`, the caller-directed base-mode
+/// open: this function opens messages the vault itself asked for, under an `info`
+/// literal the federation code fixes.
 pub fn open_auth(
     recipient_pem: &str,
     sender_public_key: &[u8],

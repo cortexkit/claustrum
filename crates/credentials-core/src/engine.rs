@@ -145,6 +145,19 @@ pub enum EngineError {
 pub struct GetWithRefreshStatus {
     pub record: VaultRecord,
     pub refreshed_for_min_ttl: bool,
+    /// On the engine clock, when a refresh this read wanted becomes allowed: set only
+    /// when the report cooldown held that refresh back. A caller that can only answer
+    /// with durations subtracts engine-clock now to get the time left.
+    pub refresh_deferred_until_ms: Option<i64>,
+    /// Lowercase-hex SHA-256 of the exact encrypted bytes this read served, taken from
+    /// the same row read as `record`.
+    ///
+    /// It identifies one stored VERSION of the material, not just a version number: a
+    /// delete and re-create of the id restarts `record_version` at 1, so a caller that
+    /// must recognise "the same bytes I already accounted for" needs this digest. Read
+    /// beside the record and never recomputed from it, so the two cannot describe
+    /// different rows.
+    pub stored_digest_hex: String,
 }
 
 impl std::fmt::Display for EngineError {
@@ -282,15 +295,18 @@ impl RefreshEngine {
         min_ttl_ms: Option<i64>,
         force_refresh: bool,
     ) -> Result<GetWithRefreshStatus, EngineError> {
-        let (initial, mark) = self.store.get_with_stale_pending(credential_id)?;
-        let stale_pending = mark.pending;
-        if stale_pending && !initial.is_refreshable() {
+        let initial = self
+            .store
+            .get_with_stale_pending_and_digest(credential_id)?;
+        let stale_pending = initial.mark.pending;
+        let initial_version = initial.record.record_version;
+        if stale_pending && !initial.record.is_refreshable() {
             // A stale marker means a consumer already refused this exact token. A
             // non-refreshable record cannot replace it, so defer to the existing
             // version-fenced terminal transition rather than serving it again.
             self.store.invalidate_if_version_reported(
                 credential_id,
-                initial.record_version,
+                initial.record.record_version,
                 AuditCtx::vault(AuditOp::Invalidate),
                 Some(AuthObservation {
                     kind: AuthEventKind::StaleNonrefreshableLatch.as_str(),
@@ -302,18 +318,28 @@ impl RefreshEngine {
             )?;
             // If a concurrent write moved the version, return the replacement rather
             // than incorrectly refusing the record this get did not inspect.
+            let replacement = self
+                .store
+                .get_with_stale_pending_and_digest(credential_id)?;
             return Ok(GetWithRefreshStatus {
-                record: self.store.get(credential_id)?,
+                record: replacement.record,
                 refreshed_for_min_ttl: false,
+                refresh_deferred_until_ms: None,
+                stored_digest_hex: replacement.stored_digest_hex,
             });
         }
+        let record_written_at_ms = initial.mark.record_written_at_ms;
+        let served = initial;
 
-        let refresh_requested_by_min_ttl = self.is_below_min_ttl(&initial, min_ttl_ms);
-        let wants_refresh = force_refresh || stale_pending || self.is_stale(&initial, min_ttl_ms);
-        if !wants_refresh || !initial.is_refreshable() {
+        let refresh_requested_by_min_ttl = self.is_below_min_ttl(&served.record, min_ttl_ms);
+        let wants_refresh =
+            force_refresh || stale_pending || self.is_stale(&served.record, min_ttl_ms);
+        if !wants_refresh || !served.record.is_refreshable() {
             return Ok(GetWithRefreshStatus {
-                record: initial,
+                record: served.record,
                 refreshed_for_min_ttl: false,
+                refresh_deferred_until_ms: None,
+                stored_digest_hex: served.stored_digest_hex,
             });
         }
 
@@ -323,16 +349,22 @@ impl RefreshEngine {
         // window refreshes.
         if stale_pending
             && !force_refresh
-            && !self.is_stale(&initial, min_ttl_ms)
-            && self.within_report_cooldown(mark.record_written_at_ms)
+            && !self.is_stale(&served.record, min_ttl_ms)
+            && self.within_report_cooldown(record_written_at_ms)
         {
             // Best-effort: a diagnostic write must never fail the read it explains.
             let _ = self
                 .store
-                .record_stale_refresh_deferred(credential_id, initial.record_version);
+                .record_stale_refresh_deferred(credential_id, served.record.record_version);
+            // The deferral ends exactly when the cooldown does, computed on the same
+            // clock the cooldown test just ran on, so a caller that reports it as a
+            // duration cannot drift from this read's own decision by clock skew.
+            let deferred_until_ms = record_written_at_ms + REPORT_REFRESH_COOLDOWN_MS;
             return Ok(GetWithRefreshStatus {
-                record: initial,
+                record: served.record,
                 refreshed_for_min_ttl: false,
+                refresh_deferred_until_ms: Some(deferred_until_ms),
+                stored_digest_hex: served.stored_digest_hex,
             });
         }
 
@@ -345,18 +377,26 @@ impl RefreshEngine {
         // without a second one (this is what makes N concurrent gets ⇒ 1 call, and
         // it is correct even under force_refresh). It also means this request has no
         // exchange proof of its own for a later TTL refusal.
-        let (current, _) = self.store.get_with_stale_pending(credential_id)?;
-        if current.record_version != initial.record_version {
+        let current = self
+            .store
+            .get_with_stale_pending_and_digest(credential_id)?;
+        if current.record.record_version != initial_version {
             return Ok(GetWithRefreshStatus {
-                record: current,
+                record: current.record,
                 refreshed_for_min_ttl: false,
+                refresh_deferred_until_ms: None,
+                stored_digest_hex: current.stored_digest_hex,
             });
         }
-
-        self.do_refresh(credential_id, &current).await?;
+        self.do_refresh(credential_id, &current.record).await?;
+        let refreshed = self
+            .store
+            .get_with_stale_pending_and_digest(credential_id)?;
         Ok(GetWithRefreshStatus {
-            record: self.store.get(credential_id)?,
+            record: refreshed.record,
             refreshed_for_min_ttl: refresh_requested_by_min_ttl,
+            refresh_deferred_until_ms: None,
+            stored_digest_hex: refreshed.stored_digest_hex,
         })
     }
 

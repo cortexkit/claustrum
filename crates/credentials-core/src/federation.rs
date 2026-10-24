@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 
 use crate::plan_detection::DetectedPlan;
 use crate::record::RecordIdentity;
-use crate::store::StoreOpError;
+use crate::store::{GrantOperation, StoreOpError};
 
 /// The prefix of every member id.
 pub const MEMBER_ID_PREFIX: &str = "fed-computer:";
@@ -30,6 +30,53 @@ pub const MEMBER_MAPPING_SETTING: &str = "federation.member_mapping";
 
 /// The settings row holding this vault's own member id. Absent means unset.
 pub const SELF_MEMBER_SETTING: &str = "federation.self_member";
+
+/// The credential-id prefix of the vault transfer key: a `KemKey` that signs the
+/// federation seals (token replies, transfer envelopes) and nothing else. Every rule
+/// that keeps it out of ordinary credential reach matches on this prefix rather than
+/// on the exact id, so a second transfer key of another generation is fenced the same
+/// way.
+pub const VAULT_TRANSFER_ID_PREFIX: &str = "kem:vault-transfer:";
+
+/// The one id `ck auth transfer init` creates.
+pub const VAULT_TRANSFER_ID: &str = "kem:vault-transfer:1";
+
+/// The principal that may hold the announce `read` grant on the transfer key: that
+/// grant is how callosum announces the key's public half.
+pub const TRANSFER_ANNOUNCE_PRINCIPAL: &str = "reserved:callosum";
+
+/// True for any id starting [`VAULT_TRANSFER_ID_PREFIX`].
+pub fn is_vault_transfer_id(credential_id: &str) -> bool {
+    credential_id.starts_with(VAULT_TRANSFER_ID_PREFIX)
+}
+
+/// Whether `principal` may hold `operation` on the transfer key `credential_id` at
+/// all. Exactly one grant is admitted: the `read` that `credential.public_key` needs,
+/// to the announce principal. Every other grant is refused with
+/// `transfer_key_reserved`, because a grant of `open`, `seal`, `sign` or `list` over
+/// the transfer key would hand a caller the federation key or let it sign as this
+/// vault. Ids outside the prefix are not this fence's business and pass.
+///
+/// Callers pass the id and the full principal (`reserved:callosum`), which is the form
+/// a grant row and an operator both use. Shared by the store (both grant writers) and
+/// the CLI `grant`/`revoke-grant` verbs, so the refusal text and the admitted case are
+/// defined once.
+pub fn transfer_key_admits_grant(
+    credential_id: &str,
+    principal: &str,
+    operation: GrantOperation,
+) -> Result<(), String> {
+    if !is_vault_transfer_id(credential_id) {
+        return Ok(());
+    }
+    if operation == GrantOperation::Read && principal == TRANSFER_ANNOUNCE_PRINCIPAL {
+        return Ok(());
+    }
+    Err(format!(
+        "transfer_key_reserved: {credential_id} is the vault transfer key; its only \
+         grant is read to {TRANSFER_ANNOUNCE_PRINCIPAL} for the public-key announce"
+    ))
+}
 
 /// True for exactly `fed-computer:` followed by 32 lowercase hex characters.
 pub fn valid_member_id(value: &str) -> bool {

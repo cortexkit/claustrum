@@ -4858,6 +4858,17 @@ fn cmd_grant(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     selector_kind
         .validate_operation(operation)
         .map_err(CliError::Usage)?;
+    // The CLI refuses before it contacts the daemon, so an operator gets the reason as
+    // usage text instead of a daemon refusal, and the same rule is applied here as in
+    // the store: one announce read to callosum, nothing else.
+    if selector_kind == SelectorKind::Exact {
+        credentials_core::federation::transfer_key_admits_grant(
+            &selector,
+            &format!("{principal_kind}:{principal_id}"),
+            operation,
+        )
+        .map_err(CliError::Usage)?;
+    }
     let result = commit_admin(
         global,
         AdminOpBody::GrantCreateV2 {
@@ -4909,6 +4920,14 @@ fn cmd_revoke_grant(global: &GlobalArgs, args: &[String]) -> Result<(), CliError
     selector_kind
         .validate_operation(operation)
         .map_err(CliError::Usage)?;
+    if selector_kind == SelectorKind::Exact {
+        credentials_core::federation::transfer_key_admits_grant(
+            &selector,
+            &format!("{principal_kind}:{principal_id}"),
+            operation,
+        )
+        .map_err(CliError::Usage)?;
+    }
     commit_admin(
         global,
         AdminOpBody::GrantRevokeV2 {

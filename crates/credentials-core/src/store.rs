@@ -680,7 +680,7 @@ const MIGRATIONS: &[Migration] = &[
     //
     // `remote_records`: a rotating login whose home is another member's vault. This
     // vault only borrows short-lived access tokens for it, so the row holds the home's
-    // non-secret description and B's own view of the last fetch. THERE IS NO PAYLOAD
+    // non-secret description and this vault's own view of the last fetch. THERE IS NO PAYLOAD
     // OR OAUTH COLUMN, by design: a refresh token must never be stored here, and the
     // access token lives only in memory. `kind` is a one-value CHECK so a future reader
     // cannot mistake the table for a general record store.

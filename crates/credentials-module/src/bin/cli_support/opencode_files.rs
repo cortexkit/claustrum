@@ -1,7 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fmt,
-    fs::{self, File},
+    fmt, fs,
     io::Write,
     path::{Path, PathBuf},
     sync::{
@@ -14,6 +13,9 @@ use std::{
 
 #[cfg(not(windows))]
 use std::fs::OpenOptions;
+// Only the Windows owner-only reader opens a `File` by name.
+#[cfg(windows)]
+use std::fs::File;
 
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};

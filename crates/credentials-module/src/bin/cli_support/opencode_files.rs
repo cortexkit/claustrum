@@ -659,8 +659,11 @@ fn write_lock_owner(lock: &Path, owner: &ManifestLockOwner) -> Result<(), OpenCo
         #[cfg(windows)]
         subc_os::windows_acl::verify_private_dir(lock)
             .map_err(|source| io_error("verify manifest lock directory", source))?;
-        fs::rename(&temporary, &owner_path)
-            .map_err(|source| io_error("rename manifest lock owner", source))
+        // Publishing the owner record is a replace of a file, so it goes through
+        // `durable_replace`, which survives a power loss on Windows as well as Unix.
+        // The lock directory's own claim and release renames are a separate protocol.
+        cortexkit_lease::durable_replace(&temporary, &owner_path)
+            .map_err(|source| io_error("replace manifest lock owner", source))
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temporary);
@@ -1215,11 +1218,14 @@ where
         #[cfg(windows)]
         subc_os::windows_acl::verify_private_dir(parent)
             .map_err(|source| io_error("verify publication directory", source))?;
-        fs::rename(&temp, path).map_err(|source| OpenCodeFilesError::Io {
-            action: "rename temporary file",
+        // `durable_replace` flushes the temp file, then renames and syncs the parent
+        // directory on Unix, or uses MoveFileExW with write-through on Windows, so the
+        // published file survives a power loss on both. The previous rename plus a
+        // Unix-only directory sync left Windows without that guarantee.
+        cortexkit_lease::durable_replace(&temp, path).map_err(|source| OpenCodeFilesError::Io {
+            action: "replace destination with temporary file",
             source,
         })?;
-        sync_parent_directory(parent)?;
         Ok(())
     })();
     if result.is_err() {
@@ -1615,24 +1621,6 @@ fn current_uid() -> Result<u32, OpenCodeFilesError> {
         .map_err(|source| io_error("determine current uid", source));
     let _ = fs::remove_file(path);
     result
-}
-
-fn sync_parent_directory(parent: &Path) -> Result<(), OpenCodeFilesError> {
-    sync_parent_directory_for_platform(parent, cfg!(unix))
-}
-
-fn sync_parent_directory_for_platform(
-    parent: &Path,
-    supports_directory_open: bool,
-) -> Result<(), OpenCodeFilesError> {
-    if supports_directory_open {
-        File::open(parent)
-            .and_then(|directory| directory.sync_all())
-            .map_err(|source| io_error("sync parent directory", source))?;
-    }
-    // Windows cannot open directories through File::open. The file itself was
-    // synced before publication; do not report a successful rename as a failure.
-    Ok(())
 }
 
 // UNIX ONLY, like every other custody test in this file. The module imports
@@ -2626,13 +2614,6 @@ mod portability_tests {
     use super::*;
 
     #[test]
-    fn platforms_without_directory_open_skip_parent_sync() {
-        assert!(
-            sync_parent_directory_for_platform(Path::new("/does-not-exist/ck-auth"), false).is_ok()
-        );
-    }
-
-    #[test]
     fn windows_directories_use_native_environment() {
         let env = |name: &str| match name {
             "LOCALAPPDATA" => Some("C:/Users/operator/AppData/Local".into()),
@@ -2723,6 +2704,92 @@ mod read_limit_tests {
 
         fs::remove_file(at_limit).unwrap();
         fs::remove_file(over_limit).unwrap();
+    }
+}
+
+/// Both temp-then-replace publishers in this file must leave the destination holding
+/// the new bytes and leave no temporary sibling behind, including when the destination
+/// already existed. Runs on every OS, so the Windows CI job exercises the
+/// `durable_replace` path (MoveFileExW with write-through) as well as Unix.
+#[cfg(test)]
+mod durable_publication_tests {
+    use super::*;
+
+    /// A fresh owner-only directory: 0700 on Unix, a private DACL on Windows.
+    struct PrivateDir(PathBuf);
+    impl PrivateDir {
+        fn new(tag: &str) -> Self {
+            let root = std::env::temp_dir().join(format!("ck-{tag}-{}", random_nonce().unwrap()));
+            fs::create_dir(&root).unwrap();
+            set_mode(&root, 0o700).unwrap();
+            Self(root)
+        }
+    }
+    impl Drop for PrivateDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn names_in(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn auth_file_replacement_publishes_new_bytes_and_leaves_no_temp_file() {
+        let dir = PrivateDir::new("auth-replace");
+        let auth = dir.0.join("auth.json");
+        let first = serde_json::json!({"type": "api", "key": "first-test-key"});
+        let second = serde_json::json!({"type": "api", "key": "second-test-key"});
+
+        write_auth_entry(&auth, "openai", first).unwrap();
+        assert_eq!(
+            names_in(&dir.0),
+            ["auth.json"],
+            "first publish leaves no temp"
+        );
+
+        // The second write replaces an existing file, the case a plain create cannot
+        // cover and the one where a lost replace would resurrect the old credential.
+        write_auth_entry(&auth, "openai", second.clone()).unwrap();
+        let entries = read_auth_entries(&auth).unwrap();
+        assert_eq!(entries.get("openai"), Some(&second));
+        assert_eq!(
+            names_in(&dir.0),
+            ["auth.json"],
+            "replacement leaves no temp"
+        );
+    }
+
+    #[test]
+    fn lock_owner_replacement_publishes_new_owner_and_leaves_no_temp_file() {
+        let dir = PrivateDir::new("owner-replace");
+        let lock = dir.0.join(".lock");
+        fs::create_dir(&lock).unwrap();
+        set_mode(&lock, 0o700).unwrap();
+        let owner = |nonce: &str| ManifestLockOwner {
+            tenant: Value::String(OPENCODE_CLAUSTRUM_TENANT.into()),
+            pid: Value::from(std::process::id()),
+            claimed_at_ms: 1,
+            nonce: nonce.into(),
+        };
+
+        write_lock_owner(&lock, &owner("firstnonce")).unwrap();
+        assert_eq!(names_in(&lock), ["owner"], "first publish leaves no temp");
+
+        // Lease renewal rewrites the owner record in place, so replacing an existing
+        // record must work and must not leave the temporary behind.
+        write_lock_owner(&lock, &owner("secondnonce")).unwrap();
+        assert_eq!(
+            read_lock_owner(&lock.join("owner")).unwrap().nonce,
+            "secondnonce"
+        );
+        assert_eq!(names_in(&lock), ["owner"], "replacement leaves no temp");
     }
 }
 

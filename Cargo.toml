@@ -33,7 +33,9 @@ subc-transport = "0.14"
 subc-os = "0.1.16"
 
 cortexkit-store = "0.2.4"
-cortexkit-lease = "0.1.2"
+# 0.1.4: `durable_replace`, the crash-durable replace every temp-then-rename publish
+# in this workspace goes through (MoveFileExW write-through on Windows).
+cortexkit-lease = "0.1.4"
 cortexkit-store-types = "0.2.2"
 # Cross-binary path identity: resolves a filesystem path to a canonical, platform-
 # normalized id (macOS /var->/private/var, symlinks, Windows verbatim/drive-case)

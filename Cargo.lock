@@ -537,6 +537,7 @@ dependencies = [
  "async-trait",
  "base64",
  "chrono",
+ "cortexkit-lease",
  "cortexkit-log",
  "cortexkit-store",
  "cortexkit-test-support",

@@ -557,10 +557,10 @@ const ENGRAM_CATALOG_JSON: &str = r#"{
 /// Write [`ENGRAM_CATALOG_JSON`] to `<data_dir>/engram-catalog.json` unless the file
 /// already holds exactly those bytes. Returns whether it wrote.
 ///
-/// Owner-only (0600) and atomic: a temp file is written and synced, renamed over the
-/// old one, and the directory is synced, so engram never reads a half-written
-/// descriptor. engram refuses to capture a module whose descriptor fails to parse, so
-/// a torn one would stop the vault being backed up.
+/// Owner-only (0600) and atomic: a temp file is written beside the old one and then
+/// durably replaces it, so engram never reads a half-written descriptor. engram
+/// refuses to capture a module whose descriptor fails to parse, so a torn one would
+/// stop the vault being backed up.
 fn place_engram_catalog(data_dir: &std::path::Path) -> std::io::Result<bool> {
     use std::io::Write as _;
     let path = data_dir.join("engram-catalog.json");
@@ -579,19 +579,10 @@ fn place_engram_catalog(data_dir: &std::path::Path) -> std::io::Result<bool> {
     file.write_all(ENGRAM_CATALOG_JSON.as_bytes())?;
     file.sync_all()?;
     drop(file);
-    std::fs::rename(&tmp, &path)?;
-    // Syncing the directory makes the rename itself durable across a crash. Only unix
-    // can open a directory to sync it; elsewhere the file's own sync is all there is.
-    #[cfg(unix)]
-    match std::fs::File::open(data_dir).and_then(|dir| dir.sync_all()) {
-        Ok(()) => {}
-        Err(error)
-            if matches!(
-                error.kind(),
-                std::io::ErrorKind::Unsupported | std::io::ErrorKind::InvalidInput
-            ) => {}
-        Err(error) => return Err(error),
-    }
+    // `durable_replace` makes the replace survive a power loss on every OS: it flushes
+    // the temp file, then renames and syncs the directory on Unix, or uses MoveFileExW
+    // with write-through on Windows. A plain rename has no such guarantee on Windows.
+    cortexkit_lease::durable_replace(&tmp, &path)?;
     Ok(true)
 }
 
@@ -13833,5 +13824,9 @@ mod engram_catalog_tests {
             "a stale copy is replaced"
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), ENGRAM_CATALOG_JSON);
+        assert!(
+            !dir.join("engram-catalog.json.tmp").exists(),
+            "replacing an existing descriptor leaves no temp file behind"
+        );
     }
 }

@@ -3540,6 +3540,66 @@ mod error_class_tests {
         );
     }
 
+    /// A member reading through the federation home must see the same code and class a
+    /// local consumer sees for the same store or engine failure. The home keeps its own
+    /// copy of the mapping (it is compiled where this module is not), so this pins the
+    /// two together across every arm, the catch-all included.
+    #[test]
+    fn the_federation_home_maps_errors_exactly_as_the_local_read_surface() {
+        use credentials_core::envelope::EnvelopeError;
+        let wire = |code: ReadError| {
+            (
+                serde_json::to_value(code).unwrap().as_str().unwrap().to_string(),
+                serde_json::to_value(code.class())
+                    .unwrap()
+                    .as_str()
+                    .unwrap()
+                    .to_string(),
+            )
+        };
+        let store_errors = || {
+            vec![
+                StoreOpError::NotFound,
+                StoreOpError::NeedsReauth,
+                StoreOpError::Quarantined,
+                StoreOpError::Corrupt("bad".into()),
+                StoreOpError::Decrypt(EnvelopeError::KeyMismatch {
+                    envelope: credentials_core::key::KeyId::from_bytes(
+                        [1; credentials_core::key::KEY_ID_LEN],
+                    ),
+                    key: credentials_core::key::KeyId::from_bytes(
+                        [2; credentials_core::key::KEY_ID_LEN],
+                    ),
+                }),
+                StoreOpError::Decrypt(EnvelopeError::Decrypt),
+                StoreOpError::Store("disk went away".into()),
+                StoreOpError::CasMismatch,
+            ]
+        };
+        for error in store_errors() {
+            assert_eq!(
+                crate::federation::ingress::store_error_wire(&error),
+                wire(map_store_error(&error)),
+                "{error:?}"
+            );
+        }
+        let mut engine_errors: Vec<EngineError> =
+            store_errors().into_iter().map(EngineError::Store).collect();
+        engine_errors.extend([
+            EngineError::UnknownAdapter("gone".into()),
+            EngineError::RefreshFailed(RefreshError::InvalidGrant("dead".into())),
+            EngineError::RefreshFailed(RefreshError::SubscriptionRequired),
+            EngineError::RefreshFailed(RefreshError::Transport("down".into())),
+        ]);
+        for error in engine_errors {
+            assert_eq!(
+                crate::federation::ingress::engine_error_wire(&error),
+                wire(map_engine_error(&error)),
+                "{error:?}"
+            );
+        }
+    }
+
     /// Every ReadError code maps to the contract class the vault produced it as.
     /// This is the vault-side classification table, asserted so a new ReadError arm
     /// cannot ship without a deliberate class decision (match is exhaustive) and an

@@ -4735,6 +4735,606 @@ mod tests {
         assert_refused_as_unknown(&surface, &admin, 70, "rebound as forwarded").await;
     }
 
+    // -----------------------------------------------------------------------------
+    // Federation ingress: the harness mapping through the real dispatcher
+    // -----------------------------------------------------------------------------
+
+    const MEMBER_HARNESS: &str = "fed-computer:0123456789abcdef0123456789abcdef";
+
+    fn set_member_mapping(store: &EncryptedStore, on: bool) {
+        store
+            .set_federation_member_mapping_audited(on, AuditCtx::admin(AuditOp::FederationGateSet))
+            .expect("set the member-mapping gate");
+    }
+
+    /// Mint a handle for `credential_id` as an operator would.
+    fn mint_test_handle(store: &EncryptedStore, credential_id: &str) -> String {
+        let handle = credentials_core::store::mint_handle().expect("mint handle");
+        store
+            .put_handle_hash(
+                &handle.hash,
+                credential_id,
+                AuditCtx::admin(AuditOp::MintHandle),
+            )
+            .expect("bind handle");
+        handle.raw
+    }
+
+    /// One request through `dispatch_route_request`, exactly as the frame loop routes
+    /// it: the frame type and body bytes of the reply.
+    async fn routed_reply(
+        surface: &Arc<ReadSurface>,
+        admin: &Arc<admin_surface::AdminSurface>,
+        channel: u16,
+        method: &str,
+        params: serde_json::Value,
+    ) -> (FrameType, Vec<u8>) {
+        let (writer, mut responses) = mpsc::channel(1);
+        let frame = Frame::build_with_version(
+            PROTOCOL_VERSION,
+            FrameType::Request,
+            Flags::new(false, Priority::Interactive, false),
+            channel,
+            1,
+            1,
+            serde_json::to_vec(&json!({ "method": method, "params": params }))
+                .expect("encode request"),
+        )
+        .expect("build request");
+        let caller = admin.route_caller(channel);
+        dispatch_route_request(frame, &writer, surface, admin, caller)
+            .await
+            .expect("serve request");
+        let reply = responses.recv().await.expect("route response");
+        (reply.header.ty, reply.body)
+    }
+
+    async fn routed_json(
+        surface: &Arc<ReadSurface>,
+        admin: &Arc<admin_surface::AdminSurface>,
+        channel: u16,
+        method: &str,
+        params: serde_json::Value,
+    ) -> serde_json::Value {
+        let (_, body) = routed_reply(surface, admin, channel, method, params).await;
+        serde_json::from_slice(&body).expect("reply JSON")
+    }
+
+    /// The gate-off bearer-read residual, pinned. Release 1 serves a forwarded call on
+    /// callosum's route with no principal, but a handle read still runs: a peer holding
+    /// a valid handle gets exactly what a local holder gets, through the ordinary get
+    /// path and without the access-token projection. The fixture is one the projection
+    /// would refuse (its payload is its refresh token), so the reply proves no
+    /// federation check ran. Compared byte for byte with the same read on a channel
+    /// with no bind at all, which is release 1's handle path.
+    #[tokio::test]
+    async fn with_the_gate_off_a_handle_read_on_a_forwarded_route_equals_release_1() {
+        let (surface, admin, store, routes) = granted_scoped_rig(190, "callosum");
+        let id = "oauth:anthropic:bearer";
+        let mut record = VaultRecord::new_oauth(
+            "opencode",
+            "anthropic",
+            OAuthCredential {
+                access_token: "access-token".to_string().into(),
+                refresh_token: "refresh-token".to_string().into(),
+                expires_at_ms: Some(test_now_ms() + 3_600_000),
+                token_url: "https://token.test".into(),
+                client_id: None,
+                client_secret: None,
+                scopes: vec![],
+            },
+            b"refresh-token".to_vec(),
+        );
+        record.payload = credentials_core::secret::SecretBytes::new(b"refresh-token".to_vec());
+        assert!(federation::ingress::project_access_token(&record).is_none());
+        store.create(id, &record).expect("create");
+        let handle = mint_test_handle(&store, id);
+
+        bind_reserved_route(&surface, &admin, &routes, 80, 1, "callosum", MEMBER_HARNESS).await;
+        let forwarded = routed_reply(&surface, &admin, 80, OP_GET, json!({ "handle": handle })).await;
+        let unbound = routed_reply(&surface, &admin, 998, OP_GET, json!({ "handle": handle })).await;
+        assert_eq!(forwarded.0, FrameType::Response);
+        assert_eq!(forwarded.1, unbound.1, "byte-identical to release 1's handle read");
+        let body: serde_json::Value = serde_json::from_slice(&forwarded.1).unwrap();
+        assert!(body["result"]["payload"].is_array(), "the read is served: {body}");
+        // And the scoped surface still refuses it as an unknown caller.
+        assert_refused_as_unknown(&surface, &admin, 80, "gate off, forwarded").await;
+    }
+
+    #[tokio::test]
+    async fn with_the_gate_on_only_callosum_self_keeps_callosums_grants() {
+        let (surface, admin, store, routes) = granted_scoped_rig(191, "callosum");
+        let handle = mint_test_handle(&store, FORWARDED_TEST_ID);
+        set_member_mapping(&store, true);
+        bind_reserved_route(&surface, &admin, &routes, 81, 1, "callosum", "callosum-self").await;
+        assert_reads_granted_credential(&surface, &admin, 81, "callosum-self, gate on").await;
+
+        // Every other harness on callosum's route is a refused channel: every op,
+        // a valid handle read included, answers the uniform not_found.
+        let not_found = serde_json::to_vec(&uniform_not_found()).unwrap();
+        for (channel, harness) in [
+            (82, ""),
+            (83, "opencode"),
+            (84, "fed-phone:0123456789abcdef0123456789abcdef"),
+            (85, "fed-sim:0123456789abcdef0123456789abcdef"),
+            (86, "fed-unknown:0123456789abcdef0123456789abcdef"),
+            (87, "fed-computer:0123456789ABCDEF0123456789ABCDEF"),
+            (88, "fed-computer:0123"),
+        ] {
+            bind_reserved_route(&surface, &admin, &routes, channel, 1, "callosum", harness).await;
+            assert_eq!(
+                admin.route_caller(channel),
+                federation::RouteCaller::Refused,
+                "{harness:?}"
+            );
+            for (method, params) in [
+                (OP_GET, json!({ "handle": handle })),
+                (OP_GET_SCOPED, json!({ "credential_id": FORWARDED_TEST_ID })),
+                (OP_LIST_SCOPED, json!({})),
+                (federation::ingress::OP_REMOTE_TOKEN, json!({})),
+            ] {
+                let (ty, body) = routed_reply(&surface, &admin, channel, method, params).await;
+                assert_eq!(ty, FrameType::Response);
+                assert_eq!(body, not_found, "{harness:?} {method}");
+            }
+        }
+        // Another reserved module's harness is still ignored.
+        bind_reserved_route(&surface, &admin, &routes, 89, 1, "broca", MEMBER_HARNESS).await;
+        assert!(matches!(
+            admin.route_caller(89),
+            federation::RouteCaller::Principal(Some(_))
+        ));
+    }
+
+    /// A federation channel answers only the three federation ops, and never resolves
+    /// a handle or an enrollment token: an existing op with a valid handle, or a
+    /// `read` row forced for the member's name, returns no secret.
+    #[tokio::test]
+    async fn a_federation_channel_reaches_only_the_federation_ops() {
+        let (surface, admin, store, routes) = granted_scoped_rig(192, "callosum");
+        let handle = mint_test_handle(&store, FORWARDED_TEST_ID);
+        // A read grant forced under the member's own name, as a module principal.
+        store
+            .create_read_grant_audited(
+                "reserved",
+                MEMBER_HARNESS,
+                SelectorKind::Exact,
+                FORWARDED_TEST_ID,
+                GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .ok();
+        set_member_mapping(&store, true);
+        bind_reserved_route(&surface, &admin, &routes, 90, 1, "callosum", MEMBER_HARNESS).await;
+        assert_eq!(
+            admin.route_caller(90),
+            federation::RouteCaller::Member(MEMBER_HARNESS.to_string())
+        );
+        let not_found = serde_json::to_vec(&uniform_not_found()).unwrap();
+        for (method, params) in [
+            (OP_GET, json!({ "handle": handle })),
+            (OP_STATUS, json!({ "handle": handle })),
+            (OP_GET_SCOPED, json!({ "credential_id": FORWARDED_TEST_ID })),
+            (OP_LIST_SCOPED, json!({})),
+            (OP_PUBLIC_KEY, json!({ "credential_id": FORWARDED_TEST_ID })),
+            (OP_ADMIN_CHALLENGE, json!({})),
+        ] {
+            let (ty, body) = routed_reply(&surface, &admin, 90, method, params).await;
+            assert_eq!(ty, FrameType::Response, "{method}");
+            assert_eq!(body, not_found, "{method}: no secret, the uniform not_found");
+        }
+        // A federation op carrying a bearer param is refused as invalid params.
+        for params in [
+            json!({ "aad": "{}", "handle": handle }),
+            json!({ "aad": "{}", "enrollment_token": "ckt_x" }),
+        ] {
+            let (ty, body) = routed_reply(
+                &surface,
+                &admin,
+                90,
+                federation::ingress::OP_REMOTE_TOKEN,
+                params,
+            )
+            .await;
+            assert_eq!(ty, FrameType::Error);
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["code"], "invalid_params", "{body}");
+        }
+    }
+
+    /// The three federation ops answer the uniform not_found on every channel that is
+    /// not a federation channel, whatever the principal holds.
+    #[tokio::test]
+    async fn the_federation_ops_are_not_found_everywhere_else() {
+        let (surface, admin, store, routes) = granted_scoped_rig(193, "callosum");
+        let not_found = serde_json::to_vec(&uniform_not_found()).unwrap();
+        let ops = [
+            federation::ingress::OP_REMOTE_TOKEN,
+            federation::ingress::OP_REPORT_AUTH_FAILURE,
+            federation::ingress::OP_TRANSFER_DELIVER,
+        ];
+        // Gate off: callosum's own route, a forwarded route, another module, direct.
+        bind_reserved_route(&surface, &admin, &routes, 91, 1, "callosum", "callosum-self").await;
+        bind_reserved_route(&surface, &admin, &routes, 92, 1, "callosum", MEMBER_HARNESS).await;
+        bind_reserved_route(&surface, &admin, &routes, 93, 1, "broca", "").await;
+        admin.record_bind_at(94, 1, subc_protocol::Principal::Direct, "");
+        for channel in [91, 92, 93, 94] {
+            for op in ops {
+                let (_, body) = routed_reply(&surface, &admin, channel, op, json!({})).await;
+                assert_eq!(body, not_found, "gate off, channel {channel}, {op}");
+            }
+        }
+        // Gate on: callosum-self, holding read grants covering the id, still gets
+        // not_found for the federation ops.
+        set_member_mapping(&store, true);
+        for op in ops {
+            let params = json!({ "credential_id": FORWARDED_TEST_ID });
+            let (_, body) = routed_reply(&surface, &admin, 91, op, params).await;
+            assert_eq!(body, not_found, "gate on, callosum-self, {op}");
+        }
+    }
+
+    /// The gate is read on every decision: switching it changes the same bound route's
+    /// caller at once, with no restart and no rebind.
+    #[tokio::test]
+    async fn toggling_the_gate_takes_effect_without_a_restart() {
+        let (surface, admin, store, routes) = granted_scoped_rig(194, "callosum");
+        bind_reserved_route(&surface, &admin, &routes, 95, 1, "callosum", "opencode").await;
+        bind_reserved_route(&surface, &admin, &routes, 96, 1, "callosum", MEMBER_HARNESS).await;
+        assert_reads_granted_credential(&surface, &admin, 95, "gate off").await;
+        assert_eq!(
+            admin.route_caller(96),
+            federation::RouteCaller::Principal(None)
+        );
+        set_member_mapping(&store, true);
+        assert_eq!(admin.route_caller(95), federation::RouteCaller::Refused);
+        assert_eq!(
+            admin.route_caller(96),
+            federation::RouteCaller::Member(MEMBER_HARNESS.to_string())
+        );
+        set_member_mapping(&store, false);
+        assert_reads_granted_credential(&surface, &admin, 95, "gate off again").await;
+        assert_eq!(
+            admin.route_caller(96),
+            federation::RouteCaller::Principal(None)
+        );
+    }
+
+    // -----------------------------------------------------------------------------
+    // The transfer-key fence on the read surface
+    // -----------------------------------------------------------------------------
+
+    /// The store fences grants that NAME the transfer key, but nothing stops an
+    /// operator putting the key in a category and granting the category. The read
+    /// surface must still refuse every op but callosum's public-key announce.
+    #[tokio::test]
+    async fn a_category_grant_over_the_transfer_key_reaches_nothing_but_the_announce() {
+        use base64::Engine as _;
+        use credentials_core::federation::VAULT_TRANSFER_ID;
+        let (surface, admin, store, routes) = granted_scoped_rig(195, "broca");
+        let pem = credentials_core::kem::generate_key().expect("transfer key");
+        store
+            .create_audited(
+                VAULT_TRANSFER_ID,
+                &VaultRecord::new_static(CredentialKind::KemKey, "operator", pem.into_bytes(), None),
+                AuditCtx::admin(AuditOp::Put),
+            )
+            .expect("transfer init");
+        store
+            .set_categories_audited(
+                VAULT_TRANSFER_ID,
+                credentials_core::store::SetCategoryMode::Set,
+                &["federation-keys".to_string()],
+                AuditCtx::admin(AuditOp::SetCategory),
+            )
+            .expect("the store lets the key into a category");
+        // The store refuses some operations by category on its own (`seal` names one
+        // KEM key, so it takes only an exact selector); whatever it admits, the read
+        // surface must still refuse. `read` and `list` by category are admitted.
+        let mut admitted = Vec::new();
+        for module in ["broca", "callosum"] {
+            for operation in [
+                GrantOperation::Open,
+                GrantOperation::Seal,
+                GrantOperation::Read,
+                GrantOperation::List,
+            ] {
+                if store
+                    .create_read_grant_audited(
+                        "reserved",
+                        module,
+                        SelectorKind::Category,
+                        "federation-keys",
+                        operation,
+                        AuditCtx::admin(AuditOp::GrantCreate),
+                    )
+                    .is_ok()
+                {
+                    admitted.push((module, operation));
+                }
+            }
+        }
+        for module in ["broca", "callosum"] {
+            assert!(admitted.contains(&(module, GrantOperation::Read)), "{admitted:?}");
+            assert!(admitted.contains(&(module, GrantOperation::List)), "{admitted:?}");
+        }
+        bind_reserved_route(&surface, &admin, &routes, 100, 1, "broca", "").await;
+        bind_reserved_route(&surface, &admin, &routes, 101, 1, "callosum", "callosum-self").await;
+
+        let b64 = base64::engine::general_purpose::STANDARD;
+        for channel in [100u16, 101] {
+            let get = routed_json(
+                &surface,
+                &admin,
+                channel,
+                OP_GET_SCOPED,
+                json!({ "credential_id": VAULT_TRANSFER_ID }),
+            )
+            .await;
+            assert_scoped_not_found(&get);
+            let open = routed_json(
+                &surface,
+                &admin,
+                channel,
+                OP_OPEN,
+                json!({
+                    "credential_id": VAULT_TRANSFER_ID,
+                    "enc_b64": b64.encode([0u8; 32]),
+                    "ciphertext_b64": b64.encode([0u8; 32]),
+                    "info_b64": b64.encode(b"any"),
+                    "aad_b64": "",
+                }),
+            )
+            .await;
+            assert_eq!(open["result"]["error"]["code"], "not_found", "{open}");
+            let seal = routed_json(
+                &surface,
+                &admin,
+                channel,
+                OP_SEAL,
+                json!({
+                    "credential_id": VAULT_TRANSFER_ID,
+                    "recipient_public_key_b64": b64.encode([9u8; 32]),
+                    "plaintext_b64": b64.encode(b"x"),
+                    "info_b64": b64.encode(b"any"),
+                    "aad_b64": "",
+                }),
+            )
+            .await;
+            assert_eq!(seal["result"]["error"]["code"], "not_found", "{seal}");
+            let list = routed_json(&surface, &admin, channel, OP_LIST_SCOPED, json!({})).await;
+            assert!(
+                !list.to_string().contains(VAULT_TRANSFER_ID),
+                "the key is left out of the list: {list}"
+            );
+        }
+        // The announce: public_key answers for callosum only.
+        let broca_key = routed_json(
+            &surface,
+            &admin,
+            100,
+            OP_PUBLIC_KEY,
+            json!({ "credential_id": VAULT_TRANSFER_ID }),
+        )
+        .await;
+        assert_eq!(broca_key["result"]["error"]["code"], "not_found", "{broca_key}");
+        let callosum_key = routed_json(
+            &surface,
+            &admin,
+            101,
+            OP_PUBLIC_KEY,
+            json!({ "credential_id": VAULT_TRANSFER_ID }),
+        )
+        .await;
+        assert_eq!(callosum_key["result"]["algorithm"], "x25519", "{callosum_key}");
+    }
+
+    /// A handle to the transfer key minted before the store refused such handles is
+    /// fenced on every handle arm: get, status and the report arm.
+    #[tokio::test]
+    async fn a_pre_existing_transfer_key_handle_is_not_found_on_every_handle_arm() {
+        use credentials_core::federation::VAULT_TRANSFER_ID;
+        let (surface, store, db_path, _root) = tmp_surface_with_store(196);
+        let pem = credentials_core::kem::generate_key().expect("transfer key");
+        store
+            .create_audited(
+                VAULT_TRANSFER_ID,
+                &VaultRecord::new_static(CredentialKind::KemKey, "operator", pem.into_bytes(), None),
+                AuditCtx::admin(AuditOp::Put),
+            )
+            .expect("transfer init");
+        // The store refuses to mint it now, so the old row is written directly.
+        let handle = credentials_core::store::mint_handle().expect("mint");
+        rusqlite::Connection::open(&db_path)
+            .expect("open db")
+            .execute(
+                "INSERT INTO handles (handle_hash, credential_id, created_at_ms, revoked) \
+                 VALUES (?1, ?2, 0, 0)",
+                rusqlite::params![handle.hash, VAULT_TRANSFER_ID],
+            )
+            .expect("insert a pre-existing handle");
+
+        let unknown = credentials_core::store::mint_handle().expect("mint").raw;
+        let get = serde_json::to_value(surface.get(1, &GetParams {
+            handle: handle.raw.clone(),
+            min_ttl_ms: None,
+            force_refresh: false,
+        }).await)
+        .unwrap();
+        assert_eq!(get["error"]["code"], "not_found", "{get}");
+        let status = |h: String| {
+            let surface = Arc::clone(&surface);
+            async move {
+                let params: StatusParams =
+                    serde_json::from_value(json!({ "handle": h })).unwrap();
+                serde_json::to_value(surface.status(1, None, &params).await).unwrap()
+            }
+        };
+        assert_eq!(
+            status(handle.raw.clone()).await,
+            status(unknown.clone()).await,
+            "status answers as for an unknown handle"
+        );
+        let report: ReportAuthFailureParams = serde_json::from_value(json!({
+            "handle": handle.raw,
+            "provider_status": 401,
+            "record_version": 1,
+        }))
+        .unwrap();
+        assert_eq!(
+            surface.report_auth_failure(1, None, &report).await,
+            Err(read_surface::ReadError::NotFound)
+        );
+        assert_eq!(
+            store.meta(VAULT_TRANSFER_ID).expect("meta").state,
+            RecordState::Active,
+            "the report latched nothing"
+        );
+    }
+
+    // -----------------------------------------------------------------------------
+    // Isolation and the projection's adapter coverage
+    // -----------------------------------------------------------------------------
+
+    /// A federation op whose callosum lookup never answers must not hold up the frame
+    /// loop or the control lane: `handle_frame` returns at once, a ping is answered
+    /// while the op is pending, and the op ends inside the home's budget.
+    #[tokio::test]
+    async fn no_outbound_wait_runs_on_the_frame_loop_or_the_control_lane() {
+        let (surface, admin, store, routes) = granted_scoped_rig(197, "callosum");
+        set_member_mapping(&store, true);
+        bind_reserved_route(&surface, &admin, &routes, 110, 1, "callosum", MEMBER_HARNESS).await;
+        // A subc endpoint that accepts the TCP connection and never completes the
+        // handshake: every outbound call stalls until its own deadline.
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("listener");
+        let root = TestTempDir::new(format!("ck-fed-isolation-{}", std::process::id()));
+        let connection = root.join("subc-connection.json");
+        subc_transport::connection_file::write_atomic(
+            &connection,
+            &subc_transport::ConnectionInfo {
+                schema: subc_transport::connection_file::SCHEMA_VERSION,
+                wire_version: None,
+                endpoints: vec![subc_transport::Endpoint {
+                    host: "127.0.0.1".into(),
+                    port: listener.local_addr().unwrap().port(),
+                }],
+                key: vec![7u8; 32],
+                daemon_id: [3u8; 16],
+                pid: std::process::id(),
+                daemon_ver: "stalled".into(),
+            },
+        )
+        .expect("connection file");
+        assert!(admin
+            .home()
+            .attach_outbound(federation::OutboundClient::for_daemon(&connection, "claustrum", None)));
+
+        let (control_tx, mut control_rx) = mpsc::channel::<Frame>(4);
+        let (route_tx, mut route_rx) = mpsc::channel::<Frame>(4);
+        let egress = Egress {
+            control: control_tx,
+            route: route_tx,
+        };
+        let request = Frame::build_with_version(
+            PROTOCOL_VERSION,
+            FrameType::Request,
+            Flags::new(false, Priority::Interactive, false),
+            110,
+            1,
+            7,
+            serde_json::to_vec(&json!({
+                "method": federation::ingress::OP_REMOTE_TOKEN,
+                "params": { "aad": "{}" },
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let started = std::time::Instant::now();
+        assert!(handle_frame(request, &egress, &surface, &admin, &routes)
+            .await
+            .unwrap());
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(200),
+            "the frame loop moved on at once: {:?}",
+            started.elapsed()
+        );
+        let ping = Frame::build_with_version(
+            PROTOCOL_VERSION,
+            FrameType::Ping,
+            control_flags(),
+            0,
+            0,
+            9,
+            Vec::new(),
+        )
+        .unwrap();
+        assert!(handle_frame(ping, &egress, &surface, &admin, &routes)
+            .await
+            .unwrap());
+        let pong = tokio::time::timeout(std::time::Duration::from_millis(200), control_rx.recv())
+            .await
+            .expect("the control lane answers while the op is pending")
+            .expect("pong");
+        assert_eq!(pong.header.ty, FrameType::Pong);
+        assert!(route_rx.try_recv().is_err(), "the op is still pending");
+
+        let reply = tokio::time::timeout(std::time::Duration::from_secs(3), route_rx.recv())
+            .await
+            .expect("the op ends inside the home's budget")
+            .expect("reply");
+        let body: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+        assert_eq!(body["result"]["error"]["code"], "home_unavailable", "{body}");
+        drop(listener);
+    }
+
+    /// Every adapter the daemon registers is covered by the access-token projection:
+    /// a record whose payload is its own refresh component is refused for each, and
+    /// the canonical shape is served, so a new adapter cannot ship unexamined.
+    #[test]
+    fn the_projection_refuses_a_refresh_component_payload_for_every_registered_adapter() {
+        let adapters = registered_refresh_adapters(String::new());
+        assert!(!adapters.is_empty());
+        for adapter in adapters {
+            let name = adapter.name();
+            let record = |access: &str, refresh: &str, payload: &str| {
+                VaultRecord::new_oauth(
+                    "opencode",
+                    name,
+                    OAuthCredential {
+                        access_token: access.to_string().into(),
+                        refresh_token: refresh.to_string().into(),
+                        expires_at_ms: None,
+                        token_url: "https://token.test".into(),
+                        client_id: None,
+                        client_secret: None,
+                        scopes: vec![],
+                    },
+                    payload.as_bytes().to_vec(),
+                )
+            };
+            assert_eq!(
+                federation::ingress::project_access_token(&record("tok", "ref", "tok")),
+                Some("tok"),
+                "{name}: the canonical shape is served"
+            );
+            assert_eq!(
+                federation::ingress::project_access_token(&record("tok", "ref", "ref")),
+                None,
+                "{name}: a payload that is the refresh token is refused"
+            );
+            assert_eq!(
+                federation::ingress::project_access_token(&record("ref", "ref", "ref")),
+                None,
+                "{name}: an access token equal to the refresh token is refused"
+            );
+            assert_eq!(
+                federation::ingress::project_access_token(&record("seg", "seg|rest", "seg")),
+                None,
+                "{name}: an access token equal to the refresh token's first segment is refused"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn list_scoped_records_list_first_use_even_when_the_caller_also_holds_read() {
         // A principal holding `read` on one credential and `list` on another. When the

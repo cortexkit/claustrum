@@ -16,3 +16,6 @@ mod support;
 
 #[path = "federation/outbound.rs"]
 mod outbound;
+
+#[path = "federation/ingress.rs"]
+mod ingress;

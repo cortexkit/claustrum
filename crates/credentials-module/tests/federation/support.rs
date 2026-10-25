@@ -166,6 +166,10 @@ pub enum Reply {
     Drop,
     /// Reply after this delay. Used with [`Reply::Ok`] for a delayed-in-transit reply.
     Delayed(Duration, Box<Reply>),
+    /// Refuse with an `Error` frame on the request's own route channel, the way the
+    /// target of a route (callosum answering `paired_devices_read`, say) refuses a
+    /// request it received.
+    RouteRefusal(String),
 }
 
 /// The stand-in for callosum, for one test.
@@ -585,12 +589,14 @@ async fn serve_one(
                 params,
             },
         );
-        let reply = state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .replies
-            .get(&(target, method.clone()))
-            .cloned();
+        let reply = {
+            let state = state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            state
+                .replies
+                .get(&(target, method.clone()))
+                .cloned()
+                .or_else(|| callosum_lookup_reply(&state, &method))
+        };
         let Some(reply) = reply else {
             push(
                 &ledger,
@@ -622,6 +628,22 @@ async fn serve_one(
                     },
                 );
                 let reply = error_frame(frame.header.corr, &code, "callosum refused the call");
+                let _ = write_frame(&mut *writer.lock().await, &reply).await;
+            }
+            Reply::RouteRefusal(code) => {
+                push(
+                    &ledger,
+                    Ledger::Refused {
+                        target: ledger_target.clone(),
+                        code: code.clone(),
+                    },
+                );
+                let reply = route_error_frame(
+                    frame.header.channel,
+                    frame.header.epoch,
+                    frame.header.corr,
+                    &code,
+                );
                 let _ = write_frame(&mut *writer.lock().await, &reply).await;
             }
             Reply::Stall => {
@@ -662,6 +684,7 @@ async fn serve_one(
                             );
                             error_frame(corr, &code, "delayed refusal")
                         }
+                        Reply::RouteRefusal(code) => route_error_frame(channel, epoch, corr, &code),
                         _ => error_frame(corr, "fed_bad_call", "a delay wraps a refusal"),
                     };
                     write_frame(&mut *writer.lock().await, &answer).await.ok();
@@ -684,6 +707,71 @@ fn response_on_channel(channel: u16, epoch: u32, corr: u64, body: Value) -> Fram
         serde_json::to_vec(&json!({ "result": body })).expect("json"),
     )
     .expect("frame")
+}
+
+/// An `Error` frame on a route channel: how a route's target refuses a request.
+fn route_error_frame(channel: u16, epoch: u32, corr: u64, code: &str) -> Frame {
+    Frame::build(
+        FrameType::Error,
+        Flags::new(false, Priority::Interactive, false),
+        channel,
+        epoch,
+        corr,
+        serde_json::to_vec(&json!({ "code": code, "message": "refused" })).expect("json"),
+    )
+    .expect("frame")
+}
+
+/// Callosum's own lookups, answered from the pairings and keys a test recorded when
+/// no reply was scripted for them.
+///
+/// SHAPES PENDING CALLO'S VENDORED VECTORS (`paired-devices-vectors-v1.3`), as callosum
+/// master sends them: `paired_devices_read` lists `{class, fingerprint, pairing_id}`
+/// sorted by fingerprint plus the 1.3 `self` member; `peer_keys_read` lists every
+/// admitted peer with its `key_record`.
+fn callosum_lookup_reply(state: &StandInState, method: &str) -> Option<Reply> {
+    match method {
+        "callosum.paired_devices_read" => {
+            let mut devices: Vec<Value> = state
+                .pairings
+                .iter()
+                .filter_map(|(member, pairing)| {
+                    let pairing = pairing.as_ref()?;
+                    let (class, fingerprint) = member.strip_prefix("fed-")?.split_once(':')?;
+                    Some(json!({
+                        "class": class,
+                        "fingerprint": fingerprint,
+                        "pairing_id": pairing,
+                    }))
+                })
+                .collect();
+            devices.sort_by(|a, b| a["fingerprint"].as_str().cmp(&b["fingerprint"].as_str()));
+            Some(Reply::Ok(json!({
+                "devices": devices,
+                "self": { "static_public_key_hex": "ab".repeat(32) },
+            })))
+        }
+        "callosum.peer_keys_read" => {
+            let mut peers: Vec<Value> = state
+                .peer_keys
+                .iter()
+                .filter_map(|(member, key)| {
+                    let (_, fingerprint) = member.split_once(':')?;
+                    Some(json!({
+                        "fingerprint": fingerprint,
+                        "machine_id": format!("machine-{fingerprint}"),
+                        "key_record": { "keys": {
+                            "vault_transfer_x25519": { "pub": key, "version": "1" },
+                        } },
+                        "registry_platform": "linux",
+                    }))
+                })
+                .collect();
+            peers.sort_by(|a, b| a["fingerprint"].as_str().cmp(&b["fingerprint"].as_str()));
+            Some(Reply::Ok(json!({ "peers": peers })))
+        }
+        _ => None,
+    }
 }
 
 fn push(ledger: &Arc<Mutex<Vec<Ledger>>>, row: Ledger) {
@@ -807,4 +895,156 @@ pub fn temp_root(tag: &str) -> TestTempDir {
 pub fn fed_provider_name(member_id: &str) -> String {
     let fingerprint = member_id.strip_prefix("fed-computer:").unwrap_or(member_id);
     format!("fed:{fingerprint}:claustrum")
+}
+
+// ---------------------------------------------------------------------------------
+// An in-process home vault
+// ---------------------------------------------------------------------------------
+
+/// A fake provider for the home's refresh engine: counts upstream calls, mints a
+/// fresh access token each time, and can be made slow.
+pub struct FakeProvider {
+    name: String,
+    calls: Arc<AtomicU64>,
+    delay: Arc<Mutex<Duration>>,
+}
+
+#[async_trait::async_trait]
+impl credentials_core::refresh_adapters::RefreshAdapter for FakeProvider {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    async fn refresh(
+        &self,
+        _credential: &credentials_core::oauth::OAuthCredential,
+        _http: &dyn credentials_core::refresh_adapters::HttpTransport,
+    ) -> Result<
+        credentials_core::refresh_adapters::RefreshedTokens,
+        credentials_core::refresh_adapters::RefreshError,
+    > {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+        let delay = *self.delay.lock().unwrap_or_else(|p| p.into_inner());
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
+        Ok(credentials_core::refresh_adapters::RefreshedTokens {
+            access_token: format!("access-refreshed-{call}").into(),
+            refresh_token: format!("refresh-rotated-{call}").into(),
+            expires_at_ms: Some(wall_ms() + 3_600_000),
+            github_app_permissions: None,
+        })
+    }
+}
+
+/// The home's HTTP transport: never used, because the fake provider makes no request.
+struct NoHttp;
+
+#[async_trait::async_trait]
+impl credentials_core::refresh_adapters::HttpTransport for NoHttp {
+    async fn post(
+        &self,
+        _url: &str,
+        _headers: &[(&str, &str)],
+        _content_type: &str,
+        _body: Vec<u8>,
+    ) -> Result<
+        credentials_core::refresh_adapters::HttpResponse,
+        credentials_core::refresh_adapters::RefreshError,
+    > {
+        Err(credentials_core::refresh_adapters::RefreshError::Transport(
+            "no http in the federation tests".into(),
+        ))
+    }
+
+    async fn get(
+        &self,
+        _url: &str,
+        _headers: &[(&str, &str)],
+    ) -> Result<
+        credentials_core::refresh_adapters::HttpResponse,
+        credentials_core::refresh_adapters::RefreshError,
+    > {
+        Err(credentials_core::refresh_adapters::RefreshError::Transport(
+            "no http in the federation tests".into(),
+        ))
+    }
+}
+
+pub fn wall_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// The adapter names the fake provider registers under: every shape the home tests
+/// serve refreshes through it, so a refresh never leaves the process.
+pub const FAKE_ADAPTERS: [&str; 4] = ["anthropic", "openai", "antigravity", "meta"];
+
+/// A home vault's store and engine, opened in-process over `data_dir`, with the fake
+/// provider standing in for every adapter in [`FAKE_ADAPTERS`].
+pub struct HomeStore {
+    pub store: Arc<credentials_core::store::EncryptedStore>,
+    pub engine: Arc<credentials_core::engine::RefreshEngine>,
+    pub upstream_calls: Arc<AtomicU64>,
+    pub upstream_delay: Arc<Mutex<Duration>>,
+}
+
+impl HomeStore {
+    /// Open (migrating on first use) the store under `data_dir` with a fixed key, so
+    /// opening it again is a restart of the same vault.
+    pub fn open(data_dir: &Path) -> Self {
+        let descriptor = cortexkit_store::StorageDescriptor {
+            module_id: "claustrum".into(),
+            storage_namespace: "federation-home".into(),
+            isolation: cortexkit_store::Isolation::Module,
+            backend: cortexkit_store::StorageBackend::Sqlite {
+                path: data_dir.join("store.db").to_string_lossy().into_owned(),
+            },
+        };
+        let sqlite = cortexkit_store::open_sqlite(&descriptor).expect("open sqlite");
+        credentials_core::store::EncryptedStore::migrate(&sqlite).expect("migrate");
+        let store = Arc::new(
+            credentials_core::store::EncryptedStore::open(
+                sqlite,
+                credentials_core::key::MasterKey::from_bytes([42; 32]),
+            )
+            .expect("open store"),
+        );
+        let upstream_calls = Arc::new(AtomicU64::new(0));
+        let upstream_delay = Arc::new(Mutex::new(Duration::ZERO));
+        let adapters: Vec<Arc<dyn credentials_core::refresh_adapters::RefreshAdapter>> =
+            FAKE_ADAPTERS
+                .iter()
+                .map(|name| {
+                    Arc::new(FakeProvider {
+                        name: name.to_string(),
+                        calls: Arc::clone(&upstream_calls),
+                        delay: Arc::clone(&upstream_delay),
+                    }) as Arc<dyn credentials_core::refresh_adapters::RefreshAdapter>
+                })
+                .collect();
+        let engine = Arc::new(credentials_core::engine::RefreshEngine::new(
+            Arc::clone(&store),
+            adapters,
+            Arc::new(NoHttp),
+        ));
+        Self {
+            store,
+            engine,
+            upstream_calls,
+            upstream_delay,
+        }
+    }
+
+    /// How many times the fake provider was asked to refresh.
+    pub fn upstream_calls(&self) -> u64 {
+        self.upstream_calls.load(Ordering::SeqCst)
+    }
+
+    /// Make every later refresh take `delay`.
+    pub fn slow_upstream(&self, delay: Duration) {
+        *self.upstream_delay.lock().unwrap_or_else(|p| p.into_inner()) = delay;
+    }
 }

@@ -253,6 +253,47 @@ pub struct RemoteRecord {
     pub updated_at_ms: i64,
 }
 
+/// What one conditional write to a remote record did.
+///
+/// Every write after a fetch is conditioned on the record's `incarnation`, so a reply
+/// fetched for an earlier `remote add` of the same id (removed, then added again with
+/// another home) can never land on the new record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteRecordWrite {
+    /// The row changed.
+    Changed,
+    /// The row already held these values, so nothing was written.
+    Unchanged,
+    /// No row has this id and incarnation: the record was removed, or removed and added
+    /// again. The caller must discard the reply it was applying.
+    StaleIncarnation,
+}
+
+/// The home-owned description carried by one validated home reply that this vault
+/// applies as authoritative. Nothing in it is secret: the token in the same reply is
+/// never stored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteHomeSuccess {
+    /// The home's `record_version` in the reply.
+    pub home_version: u64,
+    pub refresh_adapter: Option<String>,
+    pub detected_plan: Option<DetectedPlan>,
+    pub identity: RecordIdentity,
+    /// The reply carried `recheck_in_ms`: the home held back a reported refresh for
+    /// its cooldown, so a forwarded report at this version is still unresolved.
+    pub recheck_pending: bool,
+}
+
+/// One remote record together with this vault's own metadata for it (categories,
+/// provider ids, operator plan tier), read from one snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteInventoryRow {
+    pub record: RemoteRecord,
+    pub categories: Vec<String>,
+    pub provider_ids: Vec<String>,
+    pub plan_tier: Option<String>,
+}
+
 fn sha256_hex_of_json<T: Serialize>(value: &T) -> String {
     let bytes = serde_json::to_vec(value).expect("audit payload objects always serialize");
     let digest = Sha256::digest(bytes);

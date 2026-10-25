@@ -11,9 +11,13 @@ use super::*;
 use crate::federation::{
     check_member_id, federation_gate_payload_hash, federation_self_payload_hash,
     member_grant_payload_hash, remote_membership_payload_hash, MemberGrant, MemberGrantOperation,
-    MemberGrantSelector, NewRemoteRecord, RemoteHomeState, RemoteRecord, MEMBER_MAPPING_SETTING,
-    SELF_MEMBER_SETTING,
+    MemberGrantSelector, NewRemoteRecord, RemoteHomeState, RemoteHomeSuccess, RemoteInventoryRow,
+    RemoteRecord, RemoteRecordWrite, MEMBER_MAPPING_SETTING, SELF_MEMBER_SETTING,
 };
+
+/// The longest fetch-outcome code stored. Outcomes are refusal codes this vault
+/// chose (or `ok`), never text from a peer, so this bounds a column, not a format.
+const MAX_FETCH_OUTCOME_LEN: usize = 64;
 
 /// The longest pairing id stored. Callosum's pairing id is opaque and compared for
 /// equality only, so this bounds a column, not a format.
@@ -123,6 +127,57 @@ fn check_member_grant_shape(
             "transfer_deliver takes no selector".into(),
         )),
     }
+}
+
+/// A fetch outcome or home error is a code: 1 to 64 characters of lowercase ASCII,
+/// digits and `_`. Anything else is refused, so a peer's text can never reach a
+/// plaintext column through these writes.
+fn check_outcome_code(code: &str) -> Result<(), StoreOpError> {
+    if code.is_empty()
+        || code.len() > MAX_FETCH_OUTCOME_LEN
+        || !code
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+    {
+        return Err(StoreOpError::Encode(format!(
+            "a remote outcome code must be 1 to {MAX_FETCH_OUTCOME_LEN} characters of a-z, 0-9 and _"
+        )));
+    }
+    Ok(())
+}
+
+/// The row for (`credential_id`, `incarnation`), or `None` when the record is gone or
+/// was added again under another incarnation.
+fn remote_record_at_incarnation(
+    tx: &rusqlite::Transaction,
+    credential_id: &str,
+    incarnation: &str,
+) -> rusqlite::Result<Option<RemoteRecord>> {
+    tx.query_row(
+        "SELECT * FROM remote_records WHERE credential_id = ?1 AND incarnation = ?2",
+        [credential_id, incarnation],
+        remote_record_from_row,
+    )
+    .optional()
+}
+
+/// After an UPDATE conditioned on id and incarnation changed nothing: was that because
+/// the row already held the values, or because the incarnation no longer matches?
+fn unchanged_or_stale(
+    tx: &rusqlite::Transaction,
+    credential_id: &str,
+    incarnation: &str,
+) -> rusqlite::Result<RemoteRecordWrite> {
+    let exists: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM remote_records WHERE credential_id = ?1 AND incarnation = ?2)",
+        [credential_id, incarnation],
+        |row| row.get(0),
+    )?;
+    Ok(if exists {
+        RemoteRecordWrite::Unchanged
+    } else {
+        RemoteRecordWrite::StaleIncarnation
+    })
 }
 
 fn check_pairing_id(pairing_id: &str) -> Result<(), StoreOpError> {
@@ -417,6 +472,234 @@ impl EncryptedStore {
                 Ok(rows)
             })
             .map_err(StoreOpError::from)
+    }
+
+    /// Every remote record with this vault's own categories, provider ids and operator
+    /// plan tier for it, in id order, all read from one snapshot. This is what a scoped
+    /// listing shows for remote ids: nothing in it came from a home call made now.
+    pub fn remote_inventory(&self) -> Result<Vec<RemoteInventoryRow>, StoreOpError> {
+        self.store
+            .with_conn(|conn| {
+                if read_schema_version(conn)? < REMOTE_METADATA_SCHEMA_VERSION {
+                    return Ok(Vec::new());
+                }
+                let tx = conn.unchecked_transaction()?;
+                let records = {
+                    let mut stmt =
+                        tx.prepare("SELECT * FROM remote_records ORDER BY credential_id")?;
+                    let rows = stmt
+                        .query_map([], remote_record_from_row)?
+                        .collect::<rusqlite::Result<Vec<_>>>()?;
+                    rows
+                };
+                let mut out = Vec::with_capacity(records.len());
+                for record in records {
+                    let id = record.credential_id.as_str();
+                    let categories = {
+                        let mut stmt = tx.prepare(
+                            "SELECT category FROM remote_record_categories \
+                             WHERE credential_id = ?1 ORDER BY category",
+                        )?;
+                        let rows = stmt
+                            .query_map([id], |row| row.get::<_, String>(0))?
+                            .collect::<rusqlite::Result<Vec<_>>>()?;
+                        rows
+                    };
+                    let provider_ids = {
+                        let mut stmt = tx.prepare(
+                            "SELECT provider_id FROM remote_record_provider_ids \
+                             WHERE credential_id = ?1 ORDER BY provider_id",
+                        )?;
+                        let rows = stmt
+                            .query_map([id], |row| row.get::<_, String>(0))?
+                            .collect::<rusqlite::Result<Vec<_>>>()?;
+                        rows
+                    };
+                    let plan_tier = tx
+                        .query_row(
+                            "SELECT plan_tier FROM remote_record_plan_tiers WHERE credential_id = ?1",
+                            [id],
+                            |row| row.get::<_, String>(0),
+                        )
+                        .optional()?;
+                    out.push(RemoteInventoryRow {
+                        record,
+                        categories,
+                        provider_ids,
+                        plan_tier,
+                    });
+                }
+                tx.commit()?;
+                Ok(out)
+            })
+            .map_err(StoreOpError::from)
+    }
+
+    /// Record the result of the latest fetch for a remote record: `outcome` is `ok` or
+    /// the refusal code the fetch answered. Diagnostics only: this never touches
+    /// `last_home_state` or `last_home_error`, so a transport failure cannot overwrite
+    /// what the home last said authoritatively. Writes only when the outcome changes.
+    pub fn remote_record_note_fetch_outcome(
+        &self,
+        credential_id: &str,
+        incarnation: &str,
+        outcome: &str,
+    ) -> Result<RemoteRecordWrite, StoreOpError> {
+        check_outcome_code(outcome)?;
+        let now = now_ms();
+        self.fenced_write(|tx| {
+            let changed = tx.execute(
+                "UPDATE remote_records \
+                 SET last_fetch_outcome = ?3, last_fetch_at_ms = ?4, updated_at_ms = ?4 \
+                 WHERE credential_id = ?1 AND incarnation = ?2 AND last_fetch_outcome IS NOT ?3",
+                rusqlite::params![credential_id, incarnation, outcome, now],
+            )?;
+            if changed > 0 {
+                return Ok(RemoteRecordWrite::Changed);
+            }
+            unchanged_or_stale(tx, credential_id, incarnation)
+        })
+        .map_err(StoreOpError::from)
+    }
+
+    /// Apply one validated home reply as authoritative: the home-owned fields and
+    /// version from the reply, state `active`, no error.
+    ///
+    /// `reported_version` (a forwarded failure report not yet resolved) is kept only
+    /// while the home is still holding that report back: the reply carries
+    /// `recheck_in_ms`, is not a re-create (a version below the stored one means the
+    /// home deleted and re-created the id), and its version is not above the reported
+    /// one. Otherwise it is cleared. Writes only when a stored field changes.
+    pub fn remote_record_apply_success(
+        &self,
+        credential_id: &str,
+        incarnation: &str,
+        success: &RemoteHomeSuccess,
+    ) -> Result<RemoteRecordWrite, StoreOpError> {
+        success.identity.validate().map_err(StoreOpError::Encode)?;
+        if success
+            .detected_plan
+            .as_ref()
+            .and_then(|plan| plan.tier.as_deref())
+            .is_some_and(|tier| !crate::plan_tier::valid_plan_tier(tier))
+        {
+            return Err(StoreOpError::InvalidPlanTier);
+        }
+        let detected_plan = success
+            .detected_plan
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|e| StoreOpError::Encode(e.to_string()))?;
+        let home_version = i64::try_from(success.home_version)
+            .map_err(|_| StoreOpError::Encode("home record_version out of range".into()))?;
+        let now = now_ms();
+        self.fenced_write(|tx| {
+            let Some(current) = remote_record_at_incarnation(tx, credential_id, incarnation)?
+            else {
+                return Ok(RemoteRecordWrite::StaleIncarnation);
+            };
+            let recreated = success.home_version < current.last_home_version;
+            let reported_version = current.reported_version.filter(|reported| {
+                success.recheck_pending && !recreated && success.home_version <= *reported
+            });
+            let unchanged = current.refresh_adapter == success.refresh_adapter
+                && current.detected_plan == success.detected_plan
+                && current.identity == success.identity
+                && current.last_home_version == success.home_version
+                && current.last_home_state == RemoteHomeState::Active
+                && current.last_home_error.is_none()
+                && current.reported_version == reported_version;
+            if unchanged {
+                return Ok(RemoteRecordWrite::Unchanged);
+            }
+            tx.execute(
+                "UPDATE remote_records SET \
+                     refresh_adapter = ?3, detected_plan = ?4, account_id = ?5, email = ?6, \
+                     org_name = ?7, last_home_version = ?8, last_home_state = 'active', \
+                     last_home_error = NULL, reported_version = ?9, updated_at_ms = ?10 \
+                 WHERE credential_id = ?1 AND incarnation = ?2",
+                rusqlite::params![
+                    credential_id,
+                    incarnation,
+                    success.refresh_adapter,
+                    detected_plan,
+                    success.identity.account_id,
+                    success.identity.email,
+                    success.identity.org_name,
+                    home_version,
+                    reported_version.map(|version| version as i64),
+                    now,
+                ],
+            )?;
+            Ok(RemoteRecordWrite::Changed)
+        })
+        .map_err(StoreOpError::from)
+    }
+
+    /// Apply an authoritative home answer that is not a success: the record's state
+    /// becomes `state` (never `active`, which only a served token can establish) with
+    /// `error` as the code behind it, and any unresolved forwarded report is cleared,
+    /// because the home has now answered for the record as a whole. The home-owned
+    /// description is kept. Writes only when a stored field changes.
+    pub fn remote_record_apply_home_state(
+        &self,
+        credential_id: &str,
+        incarnation: &str,
+        state: RemoteHomeState,
+        error: &str,
+    ) -> Result<RemoteRecordWrite, StoreOpError> {
+        if state == RemoteHomeState::Active {
+            return Err(StoreOpError::Encode(
+                "only a served token sets a remote record active".into(),
+            ));
+        }
+        check_outcome_code(error)?;
+        let now = now_ms();
+        self.fenced_write(|tx| {
+            let changed = tx.execute(
+                "UPDATE remote_records \
+                 SET last_home_state = ?3, last_home_error = ?4, reported_version = NULL, \
+                     updated_at_ms = ?5 \
+                 WHERE credential_id = ?1 AND incarnation = ?2 \
+                   AND NOT (last_home_state = ?3 AND last_home_error IS ?4 \
+                            AND reported_version IS NULL)",
+                rusqlite::params![credential_id, incarnation, state.as_str(), error, now],
+            )?;
+            if changed > 0 {
+                return Ok(RemoteRecordWrite::Changed);
+            }
+            unchanged_or_stale(tx, credential_id, incarnation)
+        })
+        .map_err(StoreOpError::from)
+    }
+
+    /// Raise the record's unresolved forwarded-report version to `version`. It never
+    /// moves backwards: the `WHERE` guard leaves a stored version at or above `version`
+    /// alone, so a report delayed in transit cannot lower it. Stored, so it survives a
+    /// restart until a home answer resolves it.
+    pub fn remote_record_raise_reported_version(
+        &self,
+        credential_id: &str,
+        incarnation: &str,
+        version: u64,
+    ) -> Result<RemoteRecordWrite, StoreOpError> {
+        let version = i64::try_from(version)
+            .map_err(|_| StoreOpError::Encode("record_version out of range".into()))?;
+        let now = now_ms();
+        self.fenced_write(|tx| {
+            let changed = tx.execute(
+                "UPDATE remote_records SET reported_version = ?3, updated_at_ms = ?4 \
+                 WHERE credential_id = ?1 AND incarnation = ?2 \
+                   AND (reported_version IS NULL OR reported_version < ?3)",
+                rusqlite::params![credential_id, incarnation, version, now],
+            )?;
+            if changed > 0 {
+                return Ok(RemoteRecordWrite::Changed);
+            }
+            unchanged_or_stale(tx, credential_id, incarnation)
+        })
+        .map_err(StoreOpError::from)
     }
 
     /// Grant a member one operation, recording the member's current pairing id.

@@ -1171,3 +1171,280 @@ fn removing_a_credential_deletes_its_remote_issue_seen_rows() {
         .record_remote_issue_audited(OTHER, ISSUED_ID, version, &digest)
         .unwrap());
 }
+
+// ---------------------------------------------------------------------------------
+// Writes a requester makes after a fetch
+// ---------------------------------------------------------------------------------
+
+fn success_at(version: u64, recheck_pending: bool) -> crate::federation::RemoteHomeSuccess {
+    crate::federation::RemoteHomeSuccess {
+        home_version: version,
+        refresh_adapter: Some("anthropic".to_string()),
+        detected_plan: None,
+        identity: RecordIdentity {
+            account_id: Some(format!("acct-v{version}")),
+            email: None,
+            org_name: None,
+        },
+        recheck_pending,
+    }
+}
+
+/// A reply fetched for an earlier `remote add` of the same id must never land on the
+/// record that replaced it: every post-fetch write names the incarnation it was
+/// fetched under, and a write under an old one changes nothing.
+#[test]
+fn a_write_under_an_old_incarnation_changes_nothing() {
+    use crate::federation::RemoteRecordWrite;
+    let (_root, store) = rig("federation-remote-stale-incarnation", 216);
+    let old = add_remote(&store, "oauth:anthropic");
+    store.remote_remove_audited("oauth:anthropic").unwrap();
+    let new = add_remote(&store, "oauth:anthropic");
+    assert_ne!(old.incarnation, new.incarnation);
+
+    let id = "oauth:anthropic";
+    let stale = old.incarnation.as_str();
+    assert_eq!(
+        store
+            .remote_record_note_fetch_outcome(id, stale, "home_unreachable")
+            .unwrap(),
+        RemoteRecordWrite::StaleIncarnation
+    );
+    assert_eq!(
+        store
+            .remote_record_apply_success(id, stale, &success_at(9, false))
+            .unwrap(),
+        RemoteRecordWrite::StaleIncarnation
+    );
+    assert_eq!(
+        store
+            .remote_record_apply_home_state(id, stale, RemoteHomeState::NeedsReauth, "not_found")
+            .unwrap(),
+        RemoteRecordWrite::StaleIncarnation
+    );
+    assert_eq!(
+        store
+            .remote_record_raise_reported_version(id, stale, 9)
+            .unwrap(),
+        RemoteRecordWrite::StaleIncarnation
+    );
+    assert_eq!(
+        store.remote_record(id).unwrap().unwrap(),
+        new,
+        "the re-added record is untouched by writes under the old incarnation"
+    );
+
+    // A removed id has no incarnation at all.
+    store.remote_remove_audited(id).unwrap();
+    assert_eq!(
+        store
+            .remote_record_note_fetch_outcome(id, &new.incarnation, "ok")
+            .unwrap(),
+        RemoteRecordWrite::StaleIncarnation
+    );
+}
+
+#[test]
+fn a_transport_failure_outcome_leaves_the_authoritative_state_and_error() {
+    use crate::federation::RemoteRecordWrite;
+    let (_root, store) = rig("federation-remote-outcome-only", 217);
+    let record = add_remote(&store, "oauth:anthropic");
+    let (id, inc) = ("oauth:anthropic", record.incarnation.as_str());
+    assert_eq!(
+        store
+            .remote_record_apply_home_state(id, inc, RemoteHomeState::NeedsReauth, "not_found")
+            .unwrap(),
+        RemoteRecordWrite::Changed
+    );
+    assert_eq!(
+        store
+            .remote_record_note_fetch_outcome(id, inc, "home_unreachable")
+            .unwrap(),
+        RemoteRecordWrite::Changed
+    );
+    let after = store.remote_record(id).unwrap().unwrap();
+    assert_eq!(after.last_home_state, RemoteHomeState::NeedsReauth);
+    assert_eq!(after.last_home_error.as_deref(), Some("not_found"));
+    assert_eq!(
+        after.last_fetch_outcome.as_deref(),
+        Some("home_unreachable")
+    );
+    assert_eq!(after.last_home_version, record.last_home_version);
+    assert_eq!(after.identity, record.identity);
+
+    // The same outcome again writes nothing.
+    assert_eq!(
+        store
+            .remote_record_note_fetch_outcome(id, inc, "home_unreachable")
+            .unwrap(),
+        RemoteRecordWrite::Unchanged
+    );
+    // An outcome is a code, never a peer's text.
+    assert!(store
+        .remote_record_note_fetch_outcome(id, inc, "Home said: no")
+        .is_err());
+    // Only a served token makes a record active.
+    assert!(store
+        .remote_record_apply_home_state(id, inc, RemoteHomeState::Active, "ok")
+        .is_err());
+}
+
+#[test]
+fn reported_version_never_moves_backwards() {
+    use crate::federation::RemoteRecordWrite;
+    let (_root, store) = rig("federation-remote-reported", 218);
+    let record = add_remote(&store, "oauth:anthropic");
+    let (id, inc) = ("oauth:anthropic", record.incarnation.as_str());
+    let reported =
+        |store: &EncryptedStore| store.remote_record(id).unwrap().unwrap().reported_version;
+
+    assert_eq!(
+        store
+            .remote_record_raise_reported_version(id, inc, 5)
+            .unwrap(),
+        RemoteRecordWrite::Changed
+    );
+    assert_eq!(
+        store
+            .remote_record_raise_reported_version(id, inc, 3)
+            .unwrap(),
+        RemoteRecordWrite::Unchanged,
+        "a delayed older report does not lower it"
+    );
+    assert_eq!(reported(&store), Some(5));
+    assert_eq!(
+        store
+            .remote_record_raise_reported_version(id, inc, 5)
+            .unwrap(),
+        RemoteRecordWrite::Unchanged
+    );
+    assert_eq!(
+        store
+            .remote_record_raise_reported_version(id, inc, 7)
+            .unwrap(),
+        RemoteRecordWrite::Changed
+    );
+    assert_eq!(reported(&store), Some(7));
+}
+
+/// A success clears an unresolved report unless the home is still holding that report
+/// back (same or lower version, with `recheck_in_ms`); a re-create always clears it.
+#[test]
+fn a_success_resolves_a_report_unless_the_home_is_still_holding_it_back() {
+    use crate::federation::RemoteRecordWrite;
+    let (_root, store) = rig("federation-remote-success", 219);
+    let record = add_remote(&store, "oauth:anthropic");
+    let (id, inc) = ("oauth:anthropic", record.incarnation.as_str());
+    let now = |store: &EncryptedStore| store.remote_record(id).unwrap().unwrap();
+    assert_eq!(record.last_home_version, 4);
+
+    store
+        .remote_record_raise_reported_version(id, inc, 4)
+        .unwrap();
+    assert_eq!(
+        store
+            .remote_record_apply_success(id, inc, &success_at(4, true))
+            .unwrap(),
+        RemoteRecordWrite::Changed
+    );
+    let held = now(&store);
+    assert_eq!(
+        held.reported_version,
+        Some(4),
+        "same version with recheck keeps it"
+    );
+    assert_eq!(held.identity.account_id.as_deref(), Some("acct-v4"));
+    assert_eq!(
+        held.detected_plan, None,
+        "home-owned fields follow the reply"
+    );
+    assert_eq!(
+        store
+            .remote_record_apply_success(id, inc, &success_at(4, true))
+            .unwrap(),
+        RemoteRecordWrite::Unchanged,
+        "an identical reply writes nothing"
+    );
+
+    store
+        .remote_record_apply_success(id, inc, &success_at(4, false))
+        .unwrap();
+    assert_eq!(now(&store).reported_version, None, "no recheck resolves it");
+
+    store
+        .remote_record_raise_reported_version(id, inc, 4)
+        .unwrap();
+    store
+        .remote_record_apply_success(id, inc, &success_at(5, true))
+        .unwrap();
+    assert_eq!(
+        now(&store).reported_version,
+        None,
+        "a newer version resolves it"
+    );
+    assert_eq!(now(&store).last_home_version, 5);
+
+    store
+        .remote_record_raise_reported_version(id, inc, 5)
+        .unwrap();
+    store
+        .remote_record_apply_success(id, inc, &success_at(1, true))
+        .unwrap();
+    let recreated = now(&store);
+    assert_eq!(
+        recreated.reported_version, None,
+        "a home re-create resolves it"
+    );
+    assert_eq!(
+        recreated.last_home_version, 1,
+        "a re-create replaces the version"
+    );
+
+    store
+        .remote_record_apply_home_state(id, inc, RemoteHomeState::NeedsReauth, "needs_reauth")
+        .unwrap();
+    store
+        .remote_record_raise_reported_version(id, inc, 1)
+        .unwrap();
+    store
+        .remote_record_apply_home_state(id, inc, RemoteHomeState::Corrupt, "corrupt")
+        .unwrap();
+    assert_eq!(
+        now(&store).reported_version,
+        None,
+        "an authoritative non-success resolves it"
+    );
+    store
+        .remote_record_apply_success(id, inc, &success_at(2, false))
+        .unwrap();
+    let restored = now(&store);
+    assert_eq!(restored.last_home_state, RemoteHomeState::Active);
+    assert_eq!(restored.last_home_error, None);
+}
+
+#[test]
+fn the_remote_inventory_carries_this_vaults_own_metadata() {
+    let (_root, store) = rig("federation-remote-inventory", 220);
+    add_remote(&store, "oauth:anthropic");
+    store
+        .set_providers_audited(
+            "oauth:anthropic",
+            SetProvidersMode::Set,
+            &["anthropic".into()],
+            AuditCtx::route_admin(AuditOp::SetProviders, ACTOR),
+        )
+        .unwrap();
+    store
+        .set_plan_audited(
+            "oauth:anthropic",
+            Some("max_5x"),
+            AuditCtx::route_admin(AuditOp::SetPlan, ACTOR),
+        )
+        .unwrap();
+    let rows = store.remote_inventory().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].record.credential_id, "oauth:anthropic");
+    assert_eq!(rows[0].categories, vec!["llm-provider".to_string()]);
+    assert_eq!(rows[0].provider_ids, vec!["anthropic".to_string()]);
+    assert_eq!(rows[0].plan_tier.as_deref(), Some("max_5x"));
+}

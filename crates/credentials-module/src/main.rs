@@ -21,6 +21,7 @@
 //! is never served while a crash-left refresh intent is unresolved.
 
 mod admin_surface;
+mod federation;
 mod limiter;
 mod read_surface;
 #[cfg(test)]
@@ -2243,6 +2244,16 @@ impl std::fmt::Display for ModuleError {
 }
 
 impl std::error::Error for ModuleError {}
+
+// The federation test harness compiles the outbound client into a test binary that is
+// not the daemon (`tests/federation.rs`), so the crate needs a library target for that
+// binary to link against. It exports one module and nothing else.
+#[doc(hidden)]
+pub mod probe {
+    pub mod federation {
+        pub use crate::federation::*;
+    }
+}
 
 #[cfg(test)]
 mod tests {

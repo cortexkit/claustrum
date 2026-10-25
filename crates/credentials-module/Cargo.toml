@@ -6,6 +6,13 @@ publish = false
 license = "MIT"
 description = "The claustrum subc module: registers a reserved ManagementSurface, serves the anonymous read surface (credential.get/status/report_auth_failure) over the subc wire, and runs the master-key-gated admin surface (put/import/invalidate/rotate_master_key) off the runtime channel."
 
+# A library whose ONE module is the outbound client, so the federation test binary can
+# link the client without a second copy of the daemon. The daemon target is unchanged;
+# nothing in the crate uses this library.
+[lib]
+name = "claustrum_module_probe"
+path = "src/lib.rs"
+
 # The supervised daemon exe. Named with the fleet-wide `ck-*` prefix (Activity
 # Monitor grouping). The package name stays `credentials-module` while the
 # module_id is `claustrum` — and the module_id is the load-bearing one: it derives
@@ -46,6 +53,7 @@ credentials-core = { path = "../credentials-core" }
 subc-protocol = { workspace = true }
 subc-transport = { workspace = true }
 subc-os = { workspace = true }
+subc-control = { workspace = true }
 cortexkit-store = { workspace = true }
 # `durable_replace`: the engram catalog and the OpenCode file writers replace a file
 # through it so the replace survives a power loss on Windows as well as Unix.

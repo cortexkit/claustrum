@@ -31,6 +31,9 @@ cortexkit-test-support = "0.1.0"
 subc-protocol = "0.33.0"
 subc-transport = "0.14"
 subc-os = "0.1.16"
+# The control-plane request bodies (`route.open` carries the consumer identity).
+# Same release family as subc-protocol, which subc-client-rs pins it alongside.
+subc-control = "0.33.0"
 
 cortexkit-store = "0.2.4"
 # 0.1.4: `durable_replace`, the crash-durable replace every temp-then-rename publish

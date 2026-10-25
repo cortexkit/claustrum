@@ -792,7 +792,17 @@ impl ReadError {
 #[serde(untagged)]
 pub enum GetOutcome {
     Ok(GetResult),
-    Err { error: ErrorBody },
+    Err {
+        error: ErrorBody,
+    },
+    /// A refusal of a read of a remote record (one whose home is another member's
+    /// vault). Its codes include ones only a remote read answers (`home_unreachable`,
+    /// `remote_reply_invalid`, ...) and an optional `remedy_member`, so it carries the
+    /// `{code, class, remedy_member?}` body the remote read built rather than a
+    /// [`ReadError`].
+    RemoteErr {
+        error: serde_json::Value,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -933,6 +943,9 @@ pub struct ReadSurface {
     engine: Arc<RefreshEngine>,
     account_tokens: account_token::AccountTokens,
     pub(crate) watches: crate::watch_scoped::WatchHub,
+    /// Serves the remote records (rotating logins whose home is another member's
+    /// vault). Every op that can see a remote id asks it first.
+    remote: Arc<crate::federation::RemoteReader>,
     limiter: Mutex<FetchLimiter>,
     open_refusals: Mutex<HashMap<u64, (Instant, usize)>>,
     // A PRECOMPUTED health snapshot, refreshed off the probe path on a cadence (see
@@ -1284,10 +1297,15 @@ impl ReadSurface {
         // probe path) so the very first health.check has real data, not a
         // placeholder. The background refresher keeps it fresh thereafter.
         let initial = Self::compute_health(&engine);
+        let remote = Arc::new(crate::federation::RemoteReader::new(
+            Arc::clone(engine.store()),
+            Vec::<String>::new(),
+        ));
         ReadSurface {
             engine,
             account_tokens: account_token::AccountTokens::new(),
             watches: crate::watch_scoped::WatchHub::default(),
+            remote,
             limiter: Mutex::new(limiter),
             open_refusals: Mutex::new(HashMap::new()),
             health: std::sync::Mutex::new(initial),
@@ -1307,6 +1325,21 @@ impl ReadSurface {
             #[cfg(test)]
             seal_ephemeral_ikm_for_test: std::sync::Mutex::new(None),
         }
+    }
+
+    /// Validate remote replies against these refresh adapter names: the ones this
+    /// daemon registers. A home reply naming any other adapter is refused.
+    pub fn with_refresh_adapter_names(mut self, names: impl IntoIterator<Item = String>) -> Self {
+        self.remote = Arc::new(crate::federation::RemoteReader::new(
+            Arc::clone(self.engine.store()),
+            names,
+        ));
+        self
+    }
+
+    /// The remote reader, so the daemon can attach its outbound client at startup.
+    pub fn remote(&self) -> &Arc<crate::federation::RemoteReader> {
+        &self.remote
     }
 
     /// The bus principal is recorded on the event, never used to authorize: a proposal is
@@ -2380,6 +2413,7 @@ impl ReadSurface {
             .store()
             .list_scoped_snapshot(principal_kind, &principal_id)
             .map_err(|_| ReadError::StoreError)?;
+        self.add_remote_rows(&mut snapshot)?;
         // A grant that reaches the transfer key (through a category it was put in)
         // lists nothing for it.
         snapshot.rows.retain(|row| {
@@ -2437,6 +2471,7 @@ impl ReadSurface {
             .store()
             .watch_scoped_snapshot(kind, &id)
             .map_err(|_| ReadError::StoreError)?;
+        self.add_remote_rows(&mut snapshot)?;
         // The same fence as `list_scoped`, so a watch neither shows the transfer key nor
         // fires when only it changes.
         let access = TransferKeyAccess::Scoped {
@@ -2468,6 +2503,132 @@ impl ReadSurface {
         self.engine.store().subscribe_writes()
     }
 
+    /// Add the rows for every remote record the snapshot's grants reach, read from this
+    /// vault's own storage (no home call), and keep the listing in id order as the
+    /// local query returns it.
+    fn add_remote_rows(&self, snapshot: &mut ScopedListSnapshot) -> Result<(), ReadError> {
+        let remote = self
+            .remote
+            .scoped_rows(&snapshot.grants)
+            .map_err(|_| ReadError::StoreError)?;
+        if !remote.is_empty() {
+            snapshot.rows.extend(remote);
+            snapshot
+                .rows
+                .sort_by(|a, b| a.id.as_bytes().cmp(b.id.as_bytes()));
+        }
+        Ok(())
+    }
+
+    /// The remote record a principal-scoped `credential_id` address names, if it is one.
+    /// A store failure reads as "not remote": the local path then fails the same way.
+    fn remote_address(
+        &self,
+        handle: Option<&String>,
+        credential_id: Option<&String>,
+    ) -> Option<credentials_core::federation::RemoteRecord> {
+        match (handle, credential_id) {
+            (None, Some(credential_id)) => self.remote.remote_record(credential_id).ok().flatten(),
+            _ => None,
+        }
+    }
+
+    /// The `credential.status` reply body. A remote record answers from this vault's
+    /// storage (the local fields plus `remote_home` and `last_fetch_outcome`) after the
+    /// same grant check, and its refusal is the same body an uncovered local id gets.
+    /// Everything else is [`Self::status`].
+    pub async fn status_reply(
+        &self,
+        connection_id: u64,
+        principal: Option<&Principal>,
+        params: &StatusParams,
+    ) -> serde_json::Value {
+        if let Some(record) =
+            self.remote_address(params.handle.as_ref(), params.credential_id.as_ref())
+        {
+            let fenced_out = self.engine.store().is_fenced_out();
+            if self
+                .authorize_scoped_as(
+                    principal,
+                    params.enrollment_token.as_deref(),
+                    &record.credential_id,
+                    GrantOperation::Read,
+                )
+                .is_err()
+            {
+                return serde_json::to_value(StatusResult {
+                    ready: false,
+                    last_error_code: Some(ReadError::NotFound),
+                    lease_held: !fenced_out,
+                    credential_id: None,
+                    record_version: None,
+                    stale_pending: None,
+                })
+                .unwrap_or_default();
+            }
+            return crate::federation::remote_read::status_body(&record, fenced_out);
+        }
+        serde_json::to_value(self.status(connection_id, principal, params).await)
+            .unwrap_or_default()
+    }
+
+    /// The `credential.report_auth_failure` reply body. A report on a remote record is
+    /// authorized by the same grant check, then forwarded to its home; the answer's
+    /// codes include ones only a forward produces, so it is built here as a body.
+    /// Everything else is [`Self::report_auth_failure`].
+    pub async fn report_auth_failure_reply(
+        &self,
+        connection_id: u64,
+        principal: Option<&Principal>,
+        params: &ReportAuthFailureParams,
+    ) -> serde_json::Value {
+        let local = |result: Result<(), ReadError>| match result {
+            Ok(()) => serde_json::json!({ "accepted": true }),
+            // The produced error class rides alongside the code, in the same
+            // { code, class } shape get/get_many use: class gives retry policy and code
+            // names the request-specific remedy.
+            Err(code) => serde_json::json!({
+                "accepted": false,
+                "error": ErrorBody { code, class: code.class() },
+            }),
+        };
+        let Some(record) =
+            self.remote_address(params.handle.as_ref(), params.credential_id.as_ref())
+        else {
+            return local(
+                self.report_auth_failure(connection_id, principal, params)
+                    .await,
+            );
+        };
+        if let Err(code) = self.authorize_scoped_as(
+            principal,
+            params.enrollment_token.as_deref(),
+            &record.credential_id,
+            GrantOperation::Read,
+        ) {
+            return local(Err(code));
+        }
+        let resolved = self.scoped_principal(principal, params.enrollment_token.as_deref());
+        let reporter = match resolved.as_ref() {
+            Some((kind, name)) if *kind == "enrolled" => Some(AuthEventPrincipal::Enrolled(name)),
+            _ => Self::observed_principal(principal),
+        };
+        match self
+            .remote
+            .report(
+                &record,
+                params.record_version,
+                params.provider_status,
+                params.reporter_source.as_deref(),
+                reporter,
+            )
+            .await
+        {
+            Ok(()) => serde_json::json!({ "accepted": true }),
+            Err(refusal) => serde_json::json!({ "accepted": false, "error": refusal.body() }),
+        }
+    }
+
     /// Serve a credential-id read after the route layer captures the bind's principal.
     /// An uncovered principal is rejected before the credential lookup, so it cannot
     /// turn this operation into a vault inventory oracle.
@@ -2483,6 +2644,16 @@ impl ReadSurface {
             GrantOperation::Read,
         ) {
             return err(code);
+        }
+        // A remote id is served by its home vault, never from the local store. The
+        // grant check above already covered it, through this vault's own categories.
+        match self.remote.remote_record(&params.credential_id) {
+            Ok(Some(record)) => {
+                let answer = self.remote.get(&record, params.min_ttl_ms).await;
+                return remote_get_outcome(&params.credential_id, answer);
+            }
+            Ok(None) => {}
+            Err(error) => return err(map_store_error(&error)),
         }
 
         match self
@@ -3160,6 +3331,26 @@ fn err(code: ReadError) -> GetOutcome {
         error: ErrorBody {
             code,
             class: code.class(),
+        },
+    }
+}
+
+/// A remote read's answer in the local `get_scoped` shape: a served token is the same
+/// `GetResult` a local read returns, with the caller's id echoed.
+fn remote_get_outcome(credential_id: &str, answer: crate::federation::RemoteAnswer) -> GetOutcome {
+    match answer {
+        crate::federation::RemoteAnswer::Served(get) => GetOutcome::Ok(GetResult {
+            payload: get.payload,
+            expires_at_ms: get.expires_at_ms,
+            record_version: get.record_version,
+            credential_id: Some(credential_id.to_string()),
+            project_id: get.project_id,
+            account_id: get.account_id,
+            email: get.email,
+            org_name: get.org_name,
+        }),
+        crate::federation::RemoteAnswer::Refused(refusal) => GetOutcome::RemoteErr {
+            error: refusal.body(),
         },
     }
 }

@@ -373,13 +373,16 @@ where
     // module id and the launch nonce `ModuleConfig::from_env` already read; the nonce is
     // never read again. It connects lazily on its first call, so building it here costs
     // nothing and a vault that never federates never dials.
-    admin
-        .home()
-        .attach_outbound(federation::OutboundClient::for_daemon(
-            &config.connection_file_path,
-            &config.module_id,
-            config.launch_nonce.as_deref(),
-        ));
+    let outbound = federation::OutboundClient::for_daemon(
+        &config.connection_file_path,
+        &config.module_id,
+        config.launch_nonce.as_deref(),
+    );
+    // One client, two roles: the home side asks callosum about pairings and keys, and
+    // the remote read fetches tokens from other members' vaults. Clones share one
+    // connection and one binding cache.
+    admin.home().attach_outbound(outbound.clone());
+    surface.remote().attach_outbound(outbound);
     // Wire v2: the module-side channel → epoch map (spec §3.3 layer 2).
     let routes = Arc::new(RouteEpochs::default());
 
@@ -706,11 +709,14 @@ async fn build_surface(
 
     let http =
         Arc::new(ReqwestTransport::new().map_err(|e| ModuleError::Message(format!("http: {e}")))?);
-    let engine = Arc::new(RefreshEngine::new(
-        store,
-        registered_refresh_adapters(kimi_device_id),
-        http,
-    ));
+    let adapters = registered_refresh_adapters(kimi_device_id);
+    // A remote record's home names its refresh adapter; this vault lists only one it
+    // registers itself, so the remote read validates against exactly this set.
+    let adapter_names: Vec<String> = adapters
+        .iter()
+        .map(|adapter| adapter.name().to_string())
+        .collect();
+    let engine = Arc::new(RefreshEngine::new(store, adapters, http));
 
     // THE BOOT GATE: resolve every dangling intent before serving any read.
     //
@@ -742,7 +748,8 @@ async fn build_surface(
         admin_key_id,
     );
     Ok((
-        ReadSurface::new(engine, FetchLimiter::new(Caps::default())),
+        ReadSurface::new(engine, FetchLimiter::new(Caps::default()))
+            .with_refresh_adapter_names(adapter_names),
         admin,
     ))
 }
@@ -1649,9 +1656,11 @@ async fn handle_read_request(
             }
         },
         OP_STATUS => match serde_json::from_value::<StatusParams>(request.params) {
-            Ok(p) if p.has_mutually_exclusive_addressing() => {
-                wrap_result(surface.status(connection_id, principal.as_ref(), &p).await)
-            }
+            Ok(p) if p.has_mutually_exclusive_addressing() => wrap_result(
+                surface
+                    .status_reply(connection_id, principal.as_ref(), &p)
+                    .await,
+            ),
             Ok(_) => {
                 return invalid_params(
                     writer,
@@ -1669,19 +1678,11 @@ async fn handle_read_request(
         },
         OP_REPORT_AUTH_FAILURE => {
             match serde_json::from_value::<ReportAuthFailureParams>(request.params) {
-                Ok(p) => match surface
-                    .report_auth_failure(connection_id, principal.as_ref(), &p)
-                    .await
-                {
-                    Ok(()) => wrap_result(json!({ "accepted": true })),
-                    // Carry the produced error class alongside the code, in the same
-                    // { code, class } shape get/get_many use: class gives retry policy and
-                    // code names the request-specific remedy.
-                    Err(code) => wrap_result(json!({
-                        "accepted": false,
-                        "error": read_surface::ErrorBody { code, class: code.class() }
-                    })),
-                },
+                Ok(p) => wrap_result(
+                    surface
+                        .report_auth_failure_reply(connection_id, principal.as_ref(), &p)
+                        .await,
+                ),
                 Err(e) => {
                     return invalid_params(writer, ver, channel, epoch, corr, &e.to_string()).await
                 }
@@ -13665,6 +13666,7 @@ mod tests {
                     {
                         read_surface::GetOutcome::Ok(r) => format!("ok:{}", r.record_version),
                         read_surface::GetOutcome::Err { error } => format!("err:{:?}", error.code),
+                        read_surface::GetOutcome::RemoteErr { error } => format!("err:{error}"),
                     }
                 }
             });

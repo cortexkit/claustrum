@@ -31,3 +31,27 @@ mod admin;
 
 #[path = "fixtures/federation_producer.rs"]
 mod federation_producer;
+
+#[test]
+fn federation_timing_tests_use_signals_or_virtual_time() {
+    // These suites order requests with signals and measure deadlines on Tokio's
+    // paused clock. A wall-clock wait can pass locally and race on a loaded runner.
+    for (path, source) in [
+        (
+            "federation/remote_read.rs",
+            include_str!("federation/remote_read.rs"),
+        ),
+        ("federation/admin.rs", include_str!("federation/admin.rs")),
+    ] {
+        assert!(
+            !source.contains("sleep("),
+            "{path} must wait for a request signal, not sleep"
+        );
+        for line in source.lines().filter(|line| line.contains("std::time::")) {
+            assert_eq!(
+                line, "use std::time::Duration;",
+                "{path} must measure only virtual time"
+            );
+        }
+    }
+}

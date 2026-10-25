@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::json;
 
-use crate::support::{Reply, TwoVaults};
+use crate::support::{Held, Reply, TwoVaults};
 use claustrum_module_probe::federation as fed;
 
 fn consumer_get() -> serde_json::Value {
@@ -34,6 +34,148 @@ async fn call(
     client
         .call(key, route("claustrum", request), deadline)
         .await
+}
+
+#[tokio::test]
+async fn a_channel_zero_open_refusal_keeps_its_code_without_spending_the_deadline() {
+    let root = crate::support::temp_root("outbound-open-refusal");
+    let vaults = TwoVaults::new(&root).await;
+    tokio::time::pause();
+    // TCP runs on the stand-in's thread. Keep virtual time fixed while it answers.
+    let io = tokio::spawn(async {
+        loop {
+            tokio::task::yield_now().await;
+        }
+    });
+    for (code, transient) in [("fed_not_exposed", false), ("fed_partition", true)] {
+        vaults.callosum.refuse_open("claustrum", code);
+        let started = tokio::time::Instant::now();
+        let error = call(
+            &vaults.b.outbound,
+            "refused",
+            consumer_get(),
+            fed::CONSUMER_FACING_DEADLINE,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(&error, fed::OutboundError::Refused { code: actual, .. } if actual == code)
+        );
+        assert_eq!(error.is_transient(), transient);
+        assert_eq!(started.elapsed(), Duration::ZERO);
+    }
+    io.abort();
+}
+
+#[tokio::test]
+async fn a_channel_zero_route_refusal_is_prompt_and_leaves_a_concurrent_route_untouched() {
+    let root = crate::support::temp_root("outbound-route-refusal");
+    let vaults = TwoVaults::new(&root).await;
+    let good = Held::new();
+    let refused = Held::new();
+    vaults
+        .callosum
+        .answer("claustrum", "good", Reply::Hold(good.clone()));
+    vaults
+        .callosum
+        .answer("claustrum", "refused", Reply::Hold(refused.clone()));
+    let client = vaults.b.outbound.clone();
+    let success = tokio::spawn(async move {
+        call(
+            &client,
+            "good-route",
+            json!({ "method": "good" }),
+            fed::CONSUMER_FACING_DEADLINE,
+        )
+        .await
+    });
+    good.arrived().await;
+    let client = vaults.b.outbound.clone();
+    let failure = tokio::spawn(async move {
+        call(
+            &client,
+            "refused-route",
+            json!({ "method": "refused" }),
+            fed::CONSUMER_FACING_DEADLINE,
+        )
+        .await
+    });
+    refused.arrived().await;
+    tokio::time::pause();
+    let started = tokio::time::Instant::now();
+    let io = tokio::spawn(async {
+        loop {
+            tokio::task::yield_now().await;
+        }
+    });
+    refused.release(Reply::Permanent("fed_not_exposed".into()));
+    refused.answered().await;
+    good.release(Reply::Ok(json!({ "untouched": true })));
+    assert_eq!(
+        success.await.unwrap().unwrap(),
+        json!({ "untouched": true })
+    );
+    // The successful reply follows the refusal on the same socket. Its completion
+    // proves the reader has already dispatched (or dropped) that refusal.
+    io.abort();
+    let error = failure.await.unwrap().unwrap_err();
+    assert!(
+        matches!(error, fed::OutboundError::Refused { ref code, .. } if code == "fed_not_exposed"),
+        "{error:?}"
+    );
+    assert_eq!(started.elapsed(), Duration::ZERO);
+}
+
+#[tokio::test]
+async fn an_uncorrelated_channel_zero_error_leaves_every_pending_call_untouched() {
+    let root = crate::support::temp_root("outbound-stray-error");
+    let vaults = TwoVaults::new(&root).await;
+    let first = Held::new();
+    let second = Held::new();
+    vaults
+        .callosum
+        .answer("claustrum", "first", Reply::Hold(first.clone()));
+    vaults
+        .callosum
+        .answer("claustrum", "second", Reply::Hold(second.clone()));
+    vaults
+        .callosum
+        .stray_error_before("second", "fed_not_exposed");
+    let client = vaults.b.outbound.clone();
+    let one = tokio::spawn(async move {
+        call(
+            &client,
+            "first-route",
+            json!({ "method": "first" }),
+            fed::CONSUMER_FACING_DEADLINE,
+        )
+        .await
+    });
+    first.arrived().await;
+    let client = vaults.b.outbound.clone();
+    let two = tokio::spawn(async move {
+        call(
+            &client,
+            "second-route",
+            json!({ "method": "second" }),
+            fed::CONSUMER_FACING_DEADLINE,
+        )
+        .await
+    });
+    second.arrived().await;
+    tokio::time::pause();
+    let started = tokio::time::Instant::now();
+    let io = tokio::spawn(async {
+        loop {
+            tokio::task::yield_now().await;
+        }
+    });
+    first.release(Reply::Ok(json!({ "first": true })));
+    second.release(Reply::Ok(json!({ "second": true })));
+    assert_eq!(one.await.unwrap().unwrap(), json!({ "first": true }));
+    assert_eq!(two.await.unwrap().unwrap(), json!({ "second": true }));
+    assert_eq!(started.elapsed(), Duration::ZERO);
+    io.abort();
 }
 
 #[tokio::test]

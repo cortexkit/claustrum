@@ -9,7 +9,7 @@
 
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use claustrum_module_probe::admin_surface::{AdminOutcome, AdminSurface};
 use claustrum_module_probe::federation::ingress::{OP_REMOTE_TOKEN, OP_TRANSFER_DELIVER};
@@ -381,10 +381,12 @@ async fn member_grant_reads_the_pairing_and_refuses_with_no_row() {
     vaults
         .callosum
         .answer(TARGET_MODULE, PAIRED_DEVICES_READ, Reply::Stall);
-    let started = Instant::now();
+    tokio::time::pause();
+    let started = tokio::time::Instant::now();
     let stalled = refusal(a.run(&grant(&member)).await);
     assert_eq!(stalled, "callosum_unavailable/transient");
     assert!(started.elapsed() < Duration::from_secs(3));
+    tokio::time::resume();
     nothing_written(&a);
 
     // Paired: the grant stores the current pairing id, and a re-pair followed by a
@@ -437,26 +439,46 @@ async fn a_stalled_key_lookup_and_a_stalled_delivery_give_a_definite_reply_insid
     b.put_api_key();
     let receiver = vaults.home_member().to_string();
     let receiver_key = hex(&[7u8; 32]);
-    vaults.callosum.answer(
-        TARGET_MODULE,
-        PEER_KEYS_READ,
-        Reply::Delayed(
-            Duration::from_secs(6),
-            Box::new(Reply::Ok(peer_keys_reply(&receiver, &receiver_key))),
-        ),
-    );
+    let lookup = Held::new();
+    let delivery = Held::new();
     vaults
         .callosum
-        .answer(TARGET_MODULE, OP_TRANSFER_DELIVER, Reply::Stall);
+        .answer(TARGET_MODULE, PEER_KEYS_READ, Reply::Hold(lookup.clone()));
+    vaults.callosum.answer(
+        TARGET_MODULE,
+        OP_TRANSFER_DELIVER,
+        Reply::Hold(delivery.clone()),
+    );
 
-    let started = Instant::now();
-    let report = ok(b
-        .run(&AdminOpBody::TransferSend {
-            v: ADMIN_OP_SCHEMA_V2,
-            credential_id: API_ID.into(),
-            to: receiver.clone(),
-        })
-        .await);
+    let admin = Arc::clone(&b.admin);
+    let to = receiver.clone();
+    let send = tokio::spawn(async move {
+        run_on(
+            &admin,
+            &AdminOpBody::TransferSend {
+                v: ADMIN_OP_SCHEMA_V2,
+                credential_id: API_ID.into(),
+                to,
+            },
+        )
+        .await
+    });
+    lookup.arrived().await;
+    tokio::time::pause();
+    let started = tokio::time::Instant::now();
+    // Keep virtual time from auto-advancing while the released lookup crosses TCP.
+    // Only the test advances it until the delivery has arrived.
+    let io = tokio::spawn(async {
+        loop {
+            tokio::task::yield_now().await;
+        }
+    });
+    tokio::time::advance(Duration::from_secs(6)).await;
+    assert!(!send.is_finished(), "the key lookup is still held");
+    lookup.release(Reply::Ok(peer_keys_reply(&receiver, &receiver_key)));
+    delivery.arrived().await;
+    io.abort();
+    let report = ok(send.await.unwrap());
     let elapsed = started.elapsed();
     assert!(elapsed < Duration::from_secs(15), "took {elapsed:?}");
     assert!(
@@ -482,10 +504,18 @@ async fn a_key_lookup_that_never_answers_commits_nothing_and_answers_inside_15_s
     let b = Vault::open(&vaults.b, None);
     b.install_transfer_key();
     b.put_api_key();
+    claustrum_module_probe::federation::ingress::callosum_lookup(
+        Some(&vaults.b.outbound),
+        PEER_KEYS_READ,
+        tokio::time::Instant::now() + Duration::from_secs(3),
+    )
+    .await
+    .expect("warm the callosum route before pausing time");
     vaults
         .callosum
         .answer(TARGET_MODULE, PEER_KEYS_READ, Reply::Stall);
-    let started = Instant::now();
+    tokio::time::pause();
+    let started = tokio::time::Instant::now();
     let refused = refusal(
         b.run(&AdminOpBody::TransferSend {
             v: ADMIN_OP_SCHEMA_V2,

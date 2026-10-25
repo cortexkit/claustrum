@@ -40,7 +40,7 @@ use credentials_core::federation::{
 use credentials_core::plan_detection::DetectedPlan;
 use credentials_core::record::{CredentialKind, RecordIdentity, VaultRecord};
 use credentials_core::refresh_adapters::RefreshError;
-use credentials_core::store::{AuthEventPrincipal, AuthObservation, StoreOpError};
+use credentials_core::store::{AuthEventPrincipal, AuthObservation, GrantOperation, StoreOpError};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use subc_protocol::Principal;
@@ -884,6 +884,13 @@ impl HomeVault {
             credentials_core::kem::SealError::UnusableKey
             | credentials_core::kem::SealError::Failed => Refusal::SetupIncomplete(self_id.clone()),
         })?;
+        // First use is diagnostic, as on local scoped reads. Record it only after the
+        // issue audit and sealing succeed, so a refused serve cannot look successful.
+        let _ = store.record_scoped_first_use_by(
+            &aad.credential_id,
+            AuthEventPrincipal::Member(member),
+            GrantOperation::Read,
+        );
         let b64 = base64::engine::general_purpose::STANDARD;
         Ok(json!({
             "enc": b64.encode(enc),

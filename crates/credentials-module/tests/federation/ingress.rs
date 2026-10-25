@@ -297,6 +297,87 @@ async fn a_granted_member_gets_the_access_token_sealed_to_its_announced_key() {
 }
 
 #[tokio::test]
+async fn member_first_use_is_recorded_once_per_member_and_credential_only_after_a_serve() {
+    let rig = Rig::new("ingress-member-first-use").await;
+    rig.add_login(TOKEN_ID, "llm-provider");
+    let first_uses = || {
+        rig.store()
+            .recent_auth_events(500)
+            .unwrap()
+            .into_iter()
+            .filter(|row| row.kind == "scoped_first_use")
+            .map(|row| {
+                (
+                    row.credential_id,
+                    row.principal_kind,
+                    row.principal_id,
+                    row.detail,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(rig.fetch(TOKEN_ID).await, not_found());
+    assert!(
+        first_uses().is_empty(),
+        "a refused serve records no first use"
+    );
+    rig.grant_exact(TOKEN_ID);
+    rig.served_token(TOKEN_ID).await;
+    rig.served_token(TOKEN_ID).await;
+    assert_eq!(
+        first_uses(),
+        vec![(
+            TOKEN_ID.into(),
+            Some("member".into()),
+            Some(rig.requester()),
+            Some("read".into())
+        )]
+    );
+
+    let other = "fed-computer:cccccccccccccccccccccccccccccccc";
+    rig.vaults.callosum.set_pairing(other, Some("pair-other"));
+    let (public, _) = credentials_core::kem::public_half(&rig.requester_pem).unwrap();
+    rig.vaults.callosum.announce_peer_key(other, &hex(&public));
+    rig.store()
+        .create_member_grant_audited(
+            other,
+            MemberGrantOperation::RemoteRead,
+            &MemberGrantSelector::Exact(TOKEN_ID.into()),
+            "pair-other",
+        )
+        .unwrap();
+    let aad = rig.aad_as(TOKEN_ID, other, rig.vaults.home_member());
+    for _ in 0..2 {
+        let body = reply(
+            rig.home
+                .serve(other, OP_REMOTE_TOKEN, &json!({ "aad": aad }))
+                .await,
+        );
+        assert!(body.get("enc").is_some(), "expected a sealed token: {body}");
+    }
+    let rows = first_uses();
+    assert_eq!(rows.len(), 2);
+    assert!(rows.contains(&(
+        TOKEN_ID.into(),
+        Some("member".into()),
+        Some(other.into()),
+        Some("read".into())
+    )));
+
+    let second_id = "oauth:anthropic:second";
+    rig.add_login(second_id, "llm-provider");
+    assert_eq!(rig.fetch(second_id).await, not_found());
+    assert_eq!(first_uses().len(), 2);
+    rig.grant_exact(second_id);
+    rig.served_token(second_id).await;
+    assert_eq!(
+        first_uses().len(),
+        3,
+        "a different credential has its own first use"
+    );
+}
+
+#[tokio::test]
 async fn a_reply_opens_only_for_the_aad_it_was_sealed_over() {
     let rig = Rig::new("ingress-aad-binding").await;
     rig.add_login(TOKEN_ID, "llm-provider");

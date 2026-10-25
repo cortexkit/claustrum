@@ -66,7 +66,10 @@ use super::ingress::{
     decode_peer_transfer_key, Lookup, CALLOSUM_MODULE_ID, OP_REMOTE_TOKEN, OP_REPORT_AUTH_FAILURE,
     REMOTE_TOKEN_INFO,
 };
-use super::outbound::{management_surface, OutboundClient, RouteCall, CONSUMER_FACING_DEADLINE};
+use super::outbound::{
+    is_permanent_callosum_class, management_surface, OutboundClient, OutboundError, RouteCall,
+    CONSUMER_FACING_DEADLINE,
+};
 
 /// The skew allowance: a token is treated as expired this long before the home said.
 pub const EXPIRY_SKEW_MS: i64 = 60_000;
@@ -219,6 +222,8 @@ struct Failure {
     refusal: RemoteRefusal,
     effect: Effect,
     diagnostic: Option<String>,
+    /// A control refusal keeps its wire code in status without exposing it to consumers.
+    wire_outcome: Option<String>,
 }
 
 impl Failure {
@@ -227,6 +232,7 @@ impl Failure {
             refusal,
             effect: Effect::OutcomeOnly,
             diagnostic: None,
+            wire_outcome: None,
         }
     }
 
@@ -235,6 +241,7 @@ impl Failure {
             refusal,
             effect: Effect::State(state),
             diagnostic: None,
+            wire_outcome: None,
         }
     }
 
@@ -294,10 +301,13 @@ impl Failure {
 }
 
 /// The code a fetch outcome is stored under in `last_fetch_outcome`.
-fn outcome_code(fetched: &Fetched) -> &'static str {
+fn outcome_code(fetched: &Fetched) -> &str {
     match fetched {
         Fetched::Token(_) => "ok",
-        Fetched::Failed(failure) => failure.refusal.code,
+        Fetched::Failed(failure) => failure
+            .wire_outcome
+            .as_deref()
+            .unwrap_or(failure.refusal.code),
     }
 }
 
@@ -316,12 +326,15 @@ fn diagnostic_code(code: &str) -> &str {
     }
 }
 
-/// True for a callosum refusal class B must never retry: the route is misconfigured.
-fn is_permanent_callosum_class(code: &str) -> bool {
-    matches!(
-        code,
-        "fed_not_exposed" | "fed_unknown_module" | "fed_bad_call"
-    ) || code.starts_with("fed_payload_")
+fn map_outbound_error(error: OutboundError) -> Failure {
+    match error {
+        OutboundError::Refused { code, .. } => {
+            let mut failure = map_frame_code(&code);
+            failure.wire_outcome = Some(diagnostic_code(&code).to_string());
+            failure
+        }
+        OutboundError::Unavailable(_) => Failure::home_unreachable(),
+    }
 }
 
 /// Map the home's `{code, class, remedy_member?}` refusal of a token fetch to this
@@ -1033,7 +1046,7 @@ impl RemoteReader {
                 left,
             )
             .await
-            .map_err(|_| Failure::home_unreachable())?;
+            .map_err(map_outbound_error)?;
         match decode_peer_transfer_key(&body, home) {
             Lookup::Found(key) => Ok(key),
             Lookup::Absent => Err(Failure::home_key_missing(home)),
@@ -1120,7 +1133,7 @@ impl RemoteReader {
                 left,
             )
             .await
-            .map_err(|_| Failure::home_unreachable())?;
+            .map_err(map_outbound_error)?;
         self.classify_reply(&reply, &aad, &pem, &home_key.public, home, &self_id)
     }
 
@@ -1299,7 +1312,7 @@ impl RemoteReader {
                 left,
             )
             .await
-            .map_err(|_| Failure::home_unreachable().refusal)?;
+            .map_err(|error| map_outbound_error(error).refusal)?;
         map_report_reply(&reply, home)
     }
 }

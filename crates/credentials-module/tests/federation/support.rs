@@ -190,6 +190,7 @@ pub struct Held {
 struct HeldInner {
     arrived: tokio::sync::watch::Sender<bool>,
     release: tokio::sync::watch::Sender<Option<Reply>>,
+    answered: tokio::sync::watch::Sender<bool>,
 }
 
 impl std::fmt::Debug for Held {
@@ -210,6 +211,7 @@ impl Held {
             inner: Arc::new(HeldInner {
                 arrived: tokio::sync::watch::channel(false).0,
                 release: tokio::sync::watch::channel(None).0,
+                answered: tokio::sync::watch::channel(false).0,
             }),
         }
     }
@@ -223,6 +225,12 @@ impl Held {
     /// Answer the held request with `reply` (an `Ok` body or a refusal).
     pub fn release(&self, reply: Reply) {
         self.inner.release.send_replace(Some(reply));
+    }
+
+    /// Wait until the released reply has been written to the connection.
+    pub async fn answered(&self) {
+        let mut answered = self.inner.answered.subscribe();
+        let _ = answered.wait_for(|answered| *answered).await;
     }
 
     fn note_arrival(&self) {
@@ -281,6 +289,8 @@ pub fn refusal_class(code: &str) -> &'static str {
 
 #[derive(Debug, Default)]
 struct StandInState {
+    open_refusals: HashMap<String, String>,
+    stray_errors: HashMap<String, String>,
     /// Replies keyed by `(target module, method)`. A method with no entry is refused
     /// as `fed_unknown_module`, so a test cannot accidentally prove a call was
     /// answered.
@@ -296,6 +306,20 @@ struct StandInState {
 }
 
 impl SharedCallosumStandIn {
+    pub fn stray_error_before(&self, method: &str, code: &str) {
+        self.state
+            .lock()
+            .unwrap()
+            .stray_errors
+            .insert(method.into(), code.into());
+    }
+    pub fn refuse_open(&self, target: &str, code: &str) {
+        self.state
+            .lock()
+            .unwrap()
+            .open_refusals
+            .insert(target.into(), code.into());
+    }
     /// Start a stand-in answering on loopback with its own connection file under
     /// `root`.
     pub async fn start(root: &Path) -> Self {
@@ -627,6 +651,19 @@ async fn serve_one(
                         .unwrap_or_else(|poisoned| poisoned.into_inner())
                         .harnesses
                         .push(harness.clone());
+                    let refusal = state.lock().unwrap().open_refusals.get(&target).cloned();
+                    if let Some(code) = refusal {
+                        push(
+                            &ledger,
+                            Ledger::Refused {
+                                target,
+                                code: code.clone(),
+                            },
+                        );
+                        let reply = error_frame(frame.header.corr, &code, "route.open refused");
+                        let _ = write_frame(&mut *writer.lock().await, &reply).await;
+                        continue;
+                    }
                     let channel = next_channel.fetch_add(1, Ordering::Relaxed) as u16;
                     let epoch = 1;
                     open_routes.insert(channel, (target, harness, body.clone()));
@@ -669,6 +706,11 @@ async fn serve_one(
                 params: params.clone(),
             },
         );
+        let stray = state.lock().unwrap().stray_errors.get(&method).cloned();
+        if let Some(code) = stray {
+            let stray = error_frame(u64::MAX, &code, "uncorrelated refusal");
+            let _ = write_frame(&mut *writer.lock().await, &stray).await;
+        }
         let reply = {
             let state = state
                 .lock()
@@ -754,14 +796,16 @@ async fn serve_one(
                 tokio::spawn(async move {
                     let answer = match held.released().await {
                         Some(Reply::Ok(body)) => response_on_channel(channel, epoch, corr, body),
-                        Some(
-                            Reply::RouteRefusal(code)
-                            | Reply::Permanent(code)
-                            | Reply::RetrySafe(code),
-                        ) => route_error_frame(channel, epoch, corr, &code),
+                        Some(Reply::RouteRefusal(code)) => {
+                            route_error_frame(channel, epoch, corr, &code)
+                        }
+                        Some(Reply::Permanent(code) | Reply::RetrySafe(code)) => {
+                            error_frame(corr, &code, "held refusal")
+                        }
                         _ => return,
                     };
                     write_frame(&mut *writer.lock().await, &answer).await.ok();
+                    held.inner.answered.send_replace(true);
                 });
             }
             Reply::Handler(responder) => {
@@ -782,7 +826,7 @@ async fn serve_one(
                         Reply::Ok(body) => response_on_channel(channel, epoch, corr, body),
                         Reply::RouteRefusal(code) => route_error_frame(channel, epoch, corr, &code),
                         Reply::Permanent(code) | Reply::RetrySafe(code) => {
-                            route_error_frame(channel, epoch, corr, &code)
+                            error_frame(corr, &code, "callosum refused the routed request")
                         }
                         // Stall (or anything else): never answered, so only the
                         // caller's deadline ends the call.

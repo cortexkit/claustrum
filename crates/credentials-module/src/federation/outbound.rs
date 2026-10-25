@@ -54,19 +54,25 @@ pub enum OutboundError {
     /// Nothing usable answered in time, or the connection died under the call. The
     /// binding is already dropped; the next call reopens.
     Unavailable(String),
+    /// The daemon or broker answered with a definite refusal, not a timeout.
+    Refused { code: String, message: String },
 }
 
 impl OutboundError {
-    /// True for a failure the caller may retry. Every error this client produces is
-    /// transport-shaped, and none of them says anything about a credential.
+    /// True for transport uncertainty or a retryable control refusal. A route refusal
+    /// says nothing about the credential behind the route.
     pub fn is_transient(&self) -> bool {
-        true
+        match self {
+            Self::Unavailable(_) => true,
+            Self::Refused { code, .. } => !is_permanent_callosum_class(code),
+        }
     }
 
     /// The message a caller may log or return.
     pub fn message(&self) -> &str {
         match self {
             Self::Unavailable(message) => message,
+            Self::Refused { message, .. } => message,
         }
     }
 }
@@ -379,10 +385,7 @@ impl OutboundClient {
                 )
                 .await?;
             if reply.header.ty == FrameType::Error {
-                return Err(failure(OutboundError::Unavailable(format!(
-                    "prelude refused: {}",
-                    error_reason(&reply.body)
-                ))));
+                return Err(failure(control_refusal(&reply.body)));
             }
         }
 
@@ -408,10 +411,7 @@ impl OutboundClient {
                     )
                     .await?;
                 if reply.header.ty == FrameType::Error {
-                    return Err(failure(OutboundError::Unavailable(format!(
-                        "route.open refused: {}",
-                        error_reason(&reply.body)
-                    ))));
+                    return Err(failure(control_refusal(&reply.body)));
                 }
                 let opened = parse_open(&reply.body)?;
                 self.inner
@@ -443,6 +443,9 @@ impl OutboundClient {
                 "request",
             )
             .await?;
+        if reply.header.channel == 0 && reply.header.ty == FrameType::Error {
+            return Err(failure(control_refusal(&reply.body)));
+        }
         let body: Value = serde_json::from_slice(&reply.body)
             .map_err(|error| OutboundError::Unavailable(format!("decode reply: {error}")))?;
         // `call` hands back the reply's `result` member, whatever the channel: one
@@ -570,11 +573,22 @@ where
                 } else {
                     WaiterKey::Route(frame.header.channel, frame.header.corr)
                 };
-                let waiter = link
+                let mut waiters = link
                     .waiters
                     .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .remove(&key);
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let waiter = waiters.remove(&key).or_else(|| {
+                    // A broker can refuse a routed request on channel zero. Correlation
+                    // ids are connection-wide, so only its matching route waiter moves.
+                    if frame.header.channel == 0 && frame.header.ty == FrameType::Error {
+                        let route = waiters.keys().copied().find(|key| {
+                            matches!(key, WaiterKey::Route(_, corr) if *corr == frame.header.corr)
+                        });
+                        route.and_then(|key| waiters.remove(&key))
+                    } else {
+                        None
+                    }
+                });
                 if let Some(waiter) = waiter {
                     let _ = waiter.send(Ok(frame));
                 }
@@ -630,6 +644,25 @@ fn error_reason(body: &[u8]) -> String {
                 .map(String::from)
         })
         .unwrap_or_else(|| "the daemon refused the operation".to_string())
+}
+
+fn control_refusal(body: &[u8]) -> OutboundError {
+    let code = serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|value| value.get("code").and_then(Value::as_str).map(String::from))
+        .unwrap_or_else(|| "unrecognised".into());
+    OutboundError::Refused {
+        code,
+        message: error_reason(body),
+    }
+}
+
+/// Callosum's permanent refusal classes describe a route that cannot be retried.
+pub(super) fn is_permanent_callosum_class(code: &str) -> bool {
+    matches!(
+        code,
+        "fed_not_exposed" | "fed_unknown_module" | "fed_bad_call"
+    ) || code.starts_with("fed_payload_")
 }
 
 fn control_frame(corr: u64, body: &Value) -> Frame {

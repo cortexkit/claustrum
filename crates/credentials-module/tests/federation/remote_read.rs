@@ -15,13 +15,13 @@
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use base64::Engine as _;
 use claustrum_module_probe::federation::ingress::{
     OP_REMOTE_TOKEN, OP_REPORT_AUTH_FAILURE, REMOTE_TOKEN_INFO,
 };
-use claustrum_module_probe::federation::remote_read::status_body;
+use claustrum_module_probe::federation::remote_read::{fed_provider_module, status_body};
 use claustrum_module_probe::federation::{
     HomeAnswer, HomeVault, RemoteAnswer, RemoteGet, RemoteReader, RemoteRefusal,
 };
@@ -96,21 +96,39 @@ enum Step {
     /// An `Error` frame on the route with this code: a home frame error, or a callosum
     /// refusal class.
     Frame(&'static str),
+    /// A broker refusal on channel zero, correlated to the routed request.
+    ControlFrame(&'static str),
     /// Never answered.
     Stall,
 }
 
 #[derive(Clone, Debug)]
 struct Scripted {
-    delay: Duration,
+    gate: Option<Arc<ScriptGate>>,
     step: Step,
+}
+
+#[derive(Debug, Default)]
+struct ScriptGate {
+    arrived: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+impl ScriptGate {
+    async fn arrived(&self) {
+        self.arrived.notified().await;
+    }
+
+    fn release(&self) {
+        self.release.notify_one();
+    }
 }
 
 type Script = Arc<Mutex<VecDeque<Scripted>>>;
 
 fn pop(script: &Script) -> Scripted {
     script.lock().unwrap().pop_front().unwrap_or(Scripted {
-        delay: Duration::ZERO,
+        gate: None,
         step: Step::Forward,
     })
 }
@@ -167,7 +185,10 @@ fn responder(
         let home_pem = home_pem.clone();
         let b_public = b_public.clone();
         Box::pin(async move {
-            tokio::time::sleep(next.delay).await;
+            if let Some(gate) = next.gate {
+                gate.arrived.notify_one();
+                gate.release.notified().await;
+            }
             let aad = params["aad"].as_str().unwrap_or_default().to_string();
             match next.step {
                 Step::Forward => match home.serve(&member, method, &params).await {
@@ -194,6 +215,7 @@ fn responder(
                 )),
                 Step::Body(body) => Reply::Ok(body),
                 Step::Frame(code) => Reply::RouteRefusal(code.into()),
+                Step::ControlFrame(code) => Reply::Permanent(code.into()),
                 Step::Stall => Reply::Stall,
             }
         })
@@ -365,21 +387,26 @@ impl Rig {
     }
 
     fn then(&self, step: Step) {
-        self.after(Duration::ZERO, step);
-    }
-
-    fn after(&self, delay: Duration, step: Step) {
         self.script
             .lock()
             .unwrap()
-            .push_back(Scripted { delay, step });
+            .push_back(Scripted { gate: None, step });
+    }
+
+    fn hold(&self, step: Step) -> Arc<ScriptGate> {
+        let gate = Arc::new(ScriptGate::default());
+        self.script.lock().unwrap().push_back(Scripted {
+            gate: Some(Arc::clone(&gate)),
+            step,
+        });
+        gate
     }
 
     fn report_then(&self, step: Step) {
-        self.report_script.lock().unwrap().push_back(Scripted {
-            delay: Duration::ZERO,
-            step,
-        });
+        self.report_script
+            .lock()
+            .unwrap()
+            .push_back(Scripted { gate: None, step });
     }
 
     /// A login on A in [`CATEGORY`], granted to B by exact id under B's current
@@ -961,7 +988,7 @@ async fn ten_concurrent_reads_make_one_fetch_and_a_larger_demand_starts_its_own(
         TOKEN_ID,
         oauth_record("anthropic", "access-0", "refresh-0", Some(HOUR_MS)),
     );
-    rig.after(Duration::from_millis(400), Step::Forward);
+    let shared = rig.hold(Step::Forward);
     let record = rig.record(TOKEN_ID);
     let reads: Vec<_> = (0..10)
         .map(|_| {
@@ -970,6 +997,8 @@ async fn ten_concurrent_reads_make_one_fetch_and_a_larger_demand_starts_its_own(
             tokio::spawn(async move { reader.get(&record, None).await })
         })
         .collect();
+    shared.arrived().await;
+    shared.release();
     for read in reads {
         assert!(matches!(read.await.unwrap(), RemoteAnswer::Served(_)));
     }
@@ -980,15 +1009,17 @@ async fn ten_concurrent_reads_make_one_fetch_and_a_larger_demand_starts_its_own(
     );
 
     rig.vaults.b.clock.advance(300_000);
-    rig.after(Duration::from_millis(400), Step::Forward);
+    let held = rig.hold(Step::Forward);
     let small = {
         let reader = Arc::clone(&rig.reader);
         let record = record.clone();
         tokio::spawn(async move { reader.get(&record, None).await })
     };
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    held.arrived().await;
     let large = rig.get(TOKEN_ID, Some(600_000)).await;
     assert!(matches!(large, RemoteAnswer::Served(_)));
+    assert!(!small.is_finished(), "the smaller fetch is still held");
+    held.release();
     assert!(matches!(small.await.unwrap(), RemoteAnswer::Served(_)));
     assert_eq!(
         rig.fetches(),
@@ -1147,17 +1178,18 @@ async fn a_delayed_reply_from_the_old_home_after_re_homing_changes_nothing() {
         TOKEN_ID,
         oauth_record("anthropic", "access-0", "refresh-0", Some(HOUR_MS)),
     );
-    rig.after(Duration::from_millis(800), Step::Forward);
+    let held = rig.hold(Step::Forward);
     let old = rig.record(TOKEN_ID);
     let pending = {
         let reader = Arc::clone(&rig.reader);
         let old = old.clone();
         tokio::spawn(async move { reader.get(&old, None).await })
     };
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    held.arrived().await;
     rig.b.store.remote_remove_audited(TOKEN_ID).unwrap();
     let home_c = "fed-computer:cccccccccccccccccccccccccccccccc";
     let readded = rig.add_remote(TOKEN_ID, home_c);
+    held.release();
     let _ = pending.await.unwrap();
 
     let now = rig.record(TOKEN_ID);
@@ -1226,6 +1258,162 @@ async fn the_report_cooldown_holds_back_a_second_refresh_and_releases_it_without
     assert_eq!(rig.served(TOKEN_ID, None).await.record_version, 3);
     assert_eq!(rig.a.upstream_calls(), 2);
     assert_eq!(rig.b_status(TOKEN_ID)["stale_pending"], false);
+}
+
+#[tokio::test]
+async fn a_second_members_report_is_accepted_but_shares_the_credentials_refresh_cooldown() {
+    let rig = Rig::new("remote-two-member-cooldown").await;
+    rig.engine_offset.store(61_000, Ordering::SeqCst);
+    rig.login(
+        TOKEN_ID,
+        oauth_record("anthropic", "access-0", "refresh-0", Some(HOUR_MS)),
+    );
+    rig.served(TOKEN_ID, None).await;
+    rig.report(TOKEN_ID, 1, 401).await.unwrap();
+    assert_eq!(rig.served(TOKEN_ID, None).await.record_version, 2);
+    assert_eq!(rig.a.upstream_calls(), 1);
+
+    let member_y = "fed-computer:cccccccccccccccccccccccccccccccc";
+    let pem_y = credentials_core::kem::generate_key().unwrap();
+    let (public_y, key_id_y) = credentials_core::kem::public_half(&pem_y).unwrap();
+    rig.vaults.callosum.set_pairing(member_y, Some("pair-y"));
+    rig.vaults
+        .callosum
+        .announce_peer_key(member_y, &hex(&public_y));
+    rig.a
+        .store
+        .create_member_grant_audited(
+            member_y,
+            MemberGrantOperation::RemoteRead,
+            &MemberGrantSelector::Exact(TOKEN_ID.into()),
+            "pair-y",
+        )
+        .unwrap();
+    let offset = Arc::clone(&rig.engine_offset);
+    let home = HomeVault::new(Arc::clone(&rig.a.engine))
+        .with_cooldown_clock(Arc::new(move || wall_ms() + offset.load(Ordering::SeqCst)));
+    assert!(home.attach_outbound(rig.vaults.a.outbound.clone()));
+    rig.engine_offset.store(0, Ordering::SeqCst);
+    let accepted = home
+        .serve(
+            member_y,
+            OP_REPORT_AUTH_FAILURE,
+            &json!({
+                "credential_id": TOKEN_ID, "record_version": 2, "provider_status": 403,
+            }),
+        )
+        .await;
+    assert!(
+        matches!(accepted, HomeAnswer::Reply(ref body) if body == &json!({ "accepted": true }))
+    );
+    assert_eq!(
+        rig.a.upstream_calls(),
+        1,
+        "accepting a report does not itself refresh"
+    );
+
+    let aad = json!({ "credential_id": TOKEN_ID, "requester": member_y,
+        "home": rig.home_member(), "nonce": "00112233445566778899aabbccddeeff",
+        "recipient_key_id": key_id_y })
+    .to_string();
+    let fetch_y = || async {
+        let HomeAnswer::Reply(body) = home
+            .serve(member_y, OP_REMOTE_TOKEN, &json!({ "aad": aad }))
+            .await
+        else {
+            panic!("expected a token reply");
+        };
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let (public_a, _) = credentials_core::kem::public_half(&rig.home_pem).unwrap();
+        let plaintext = credentials_core::kem::open_auth(
+            &pem_y,
+            &public_a,
+            &b64.decode(body["enc"].as_str().expect("sealed token"))
+                .unwrap(),
+            &b64.decode(body["ciphertext"].as_str().unwrap()).unwrap(),
+            REMOTE_TOKEN_INFO,
+            aad.as_bytes(),
+        )
+        .unwrap();
+        serde_json::from_slice::<Value>(&plaintext).unwrap()
+    };
+    let deferred = fetch_y().await;
+    assert_eq!(deferred["record_version"], 2);
+    assert!(deferred["recheck_in_ms"].as_i64().is_some_and(|ms| ms > 0));
+    assert_eq!(
+        rig.a.upstream_calls(),
+        1,
+        "Y cannot bypass X's per-credential cooldown"
+    );
+    let events = rig.a.store.recent_auth_events(500).unwrap();
+    assert!(events.iter().any(|row| row.credential_id == TOKEN_ID
+        && row.kind == "consumer_report_stale"
+        && row.principal_kind.as_deref() == Some("member")
+        && row.principal_id.as_deref() == Some(member_y)
+        && row.record_version == Some(2)
+        && row.applied));
+    assert!(events.iter().any(|row| row.credential_id == TOKEN_ID
+        && row.kind == "stale_refresh_deferred"
+        && row.record_version == Some(2)));
+
+    rig.engine_offset.store(61_000, Ordering::SeqCst);
+    let refreshed = fetch_y().await;
+    assert_eq!(refreshed["record_version"], 3);
+    assert!(refreshed.get("recheck_in_ms").is_none());
+    assert_eq!(
+        rig.a.upstream_calls(),
+        2,
+        "the deferred report refreshes without another report"
+    );
+}
+
+#[tokio::test]
+async fn channel_zero_refusals_follow_the_consumer_table_without_waiting() {
+    let rig = Rig::new("remote-open-refusal").await;
+    rig.login(
+        TOKEN_ID,
+        oauth_record("anthropic", "access-0", "refresh-0", Some(HOUR_MS)),
+    );
+    tokio::time::pause();
+    // The stand-in answers over TCP; only an explicit advance may spend the budget.
+    let io = tokio::spawn(async {
+        loop {
+            tokio::task::yield_now().await;
+        }
+    });
+    for at_open in [false, true] {
+        for (wire, expected) in [
+            (
+                "fed_not_exposed",
+                ("federation_setup_invalid", "permanent", None),
+            ),
+            ("fed_partition", ("home_unreachable", "transient", None)),
+        ] {
+            if at_open {
+                rig.vaults
+                    .callosum
+                    .refuse_open(&fed_provider_module(&rig.home_member()), wire);
+            } else {
+                rig.then(Step::ControlFrame(wire));
+            }
+            let before = authoritative(&rig.record(TOKEN_ID));
+            let started = tokio::time::Instant::now();
+            let refusal = rig.refused(TOKEN_ID, None).await;
+            assert_eq!(code(&refusal), expected);
+            assert_eq!(started.elapsed(), Duration::ZERO);
+            assert_eq!(authoritative(&rig.record(TOKEN_ID)), before);
+            assert_eq!(
+                rig.record(TOKEN_ID).last_fetch_outcome.as_deref(),
+                Some(wire)
+            );
+        }
+    }
+    assert_eq!(
+        rig.fetches(),
+        2,
+        "only the data-plane refusals received token requests"
+    );
+    io.abort();
 }
 
 // ---------------------------------------------------------------------------------
@@ -1585,10 +1773,12 @@ async fn report_reply_classes_and_a_non_credential_status_refused_before_forward
         ("federation_setup_invalid", "permanent", None)
     );
     rig.report_then(Step::Stall);
-    let started = Instant::now();
+    tokio::time::pause();
+    let started = tokio::time::Instant::now();
     let refusal = rig.report(TOKEN_ID, 1, 403).await.unwrap_err();
     assert_eq!(code(&refusal), ("home_unreachable", "transient", None));
     assert!(started.elapsed() < Duration::from_millis(2_900));
+    tokio::time::resume();
 
     // The home answered `not_found` (the grant is gone).
     rig.a
@@ -1748,14 +1938,16 @@ async fn a_newer_reply_applied_before_a_delayed_older_one_keeps_version_and_cach
         TOKEN_ID,
         oauth_record("anthropic", "access-0", "refresh-0", Some(HOUR_MS)),
     );
-    rig.after(Duration::from_millis(900), token(1, "version-1"));
+    let held = rig.hold(token(1, "version-1"));
     rig.then(token(2, "version-2"));
     let slow = spawn_get(&rig, TOKEN_ID, None);
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    held.arrived().await;
     assert_eq!(
         rig.served(TOKEN_ID, Some(600_000)).await.payload,
         b"version-2"
     );
+    assert!(!slow.is_finished(), "the older reply is still held");
+    held.release();
     let _ = slow.await.unwrap();
     assert_eq!(rig.record(TOKEN_ID).last_home_version, 2);
     let fetches = rig.fetches();
@@ -1771,15 +1963,15 @@ async fn a_delayed_verdict_still_applies_after_a_later_transient_failure() {
         oauth_record("anthropic", "access-0", "refresh-0", Some(HOUR_MS)),
     );
     rig.served(TOKEN_ID, None).await;
-    rig.after(
-        Duration::from_millis(900),
-        Step::Body(json!({ "error": { "code": "needs_reauth", "class": "auth_required" } })),
-    );
+    let held = rig.hold(Step::Body(
+        json!({ "error": { "code": "needs_reauth", "class": "auth_required" } }),
+    ));
     rig.then(Step::Frame("fed_partition"));
     let slow = spawn_get(&rig, TOKEN_ID, Some(3_550_000));
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    held.arrived().await;
     let transient = rig.refused(TOKEN_ID, Some(3_560_000)).await;
     assert_eq!(transient.code, "home_unreachable");
+    held.release();
     let verdict = slow.await.unwrap();
     assert!(matches!(verdict, RemoteAnswer::Refused(ref r) if r.code == "needs_reauth"));
     let record = rig.record(TOKEN_ID);
@@ -1804,12 +1996,12 @@ async fn no_caller_is_served_a_fetch_started_before_a_verdict() {
         TOKEN_ID,
         oauth_record("anthropic", "access-0", "refresh-0", Some(HOUR_MS)),
     );
-    rig.after(Duration::from_millis(900), token(1, "slow-success"));
+    let held = rig.hold(token(1, "slow-success"));
     rig.then(Step::Body(
         json!({ "error": { "code": "needs_reauth", "class": "auth_required" } }),
     ));
     let slow = spawn_get(&rig, TOKEN_ID, None);
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    held.arrived().await;
     let verdict = rig.refused(TOKEN_ID, Some(600_000)).await;
     assert_eq!(verdict.code, "needs_reauth");
     // A new small-demand read joins no flight: it fetches on its own.
@@ -1818,6 +2010,7 @@ async fn no_caller_is_served_a_fetch_started_before_a_verdict() {
     if let RemoteAnswer::Served(get) = &fresh {
         assert_ne!(get.payload, b"slow-success");
     }
+    held.release();
     match slow.await.unwrap() {
         RemoteAnswer::Refused(refusal) => assert_eq!(refusal.code, "needs_reauth"),
         RemoteAnswer::Served(get) => panic!("served the pre-verdict token: {get:?}"),
@@ -1837,14 +2030,15 @@ async fn a_home_re_create_resets_the_version_and_a_delayed_old_reply_does_not_re
     assert_eq!(rig.record(TOKEN_ID).last_home_version, 5);
     rig.vaults.b.clock.advance(300_000);
 
-    rig.after(Duration::from_millis(900), token(5, "late-version-5"));
+    let held = rig.hold(token(5, "late-version-5"));
     rig.then(token(1, "recreated"));
     let slow = spawn_get(&rig, TOKEN_ID, None);
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    held.arrived().await;
     assert_eq!(
         rig.served(TOKEN_ID, Some(600_000)).await.payload,
         b"recreated"
     );
+    held.release();
     let _ = slow.await.unwrap();
     assert_eq!(rig.record(TOKEN_ID).last_home_version, 1);
     assert_eq!(rig.b_status(TOKEN_ID)["record_version"], 1);

@@ -590,7 +590,9 @@ async fn serve_one(
             },
         );
         let reply = {
-            let state = state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let state = state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             state
                 .replies
                 .get(&(target, method.clone()))
@@ -725,8 +727,8 @@ fn route_error_frame(channel: u16, epoch: u32, corr: u64, code: &str) -> Frame {
 /// Callosum's own lookups, answered from the pairings and keys a test recorded when
 /// no reply was scripted for them.
 ///
-/// SHAPES PENDING CALLO'S VENDORED VECTORS (`paired-devices-vectors-v1.3`), as callosum
-/// master sends them: `paired_devices_read` lists `{class, fingerprint, pairing_id}`
+/// The shapes are callosum's current ones, not yet checked against the vector files
+/// callosum publishes for them (tag `paired-devices-vectors-v1.3`): `paired_devices_read` lists `{class, fingerprint, pairing_id}`
 /// sorted by fingerprint plus the 1.3 `self` member; `peer_keys_read` lists every
 /// admitted peer with its `key_record`.
 fn callosum_lookup_reply(state: &StandInState, method: &str) -> Option<Reply> {
@@ -1022,7 +1024,8 @@ impl HomeStore {
                         name: name.to_string(),
                         calls: Arc::clone(&upstream_calls),
                         delay: Arc::clone(&upstream_delay),
-                    }) as Arc<dyn credentials_core::refresh_adapters::RefreshAdapter>
+                    })
+                        as Arc<dyn credentials_core::refresh_adapters::RefreshAdapter>
                 })
                 .collect();
         let engine = Arc::new(credentials_core::engine::RefreshEngine::new(
@@ -1045,6 +1048,9 @@ impl HomeStore {
 
     /// Make every later refresh take `delay`.
     pub fn slow_upstream(&self, delay: Duration) {
-        *self.upstream_delay.lock().unwrap_or_else(|p| p.into_inner()) = delay;
+        *self
+            .upstream_delay
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = delay;
     }
 }

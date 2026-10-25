@@ -3,8 +3,8 @@
 //!
 //! The requester (B) is played by the test: it builds the token `aad`, calls the home
 //! as the attested harness member, and opens the sealed reply with its own transfer
-//! key, exactly as B's remote read will. Setup uses store APIs: the admin verbs that
-//! wrap them (`transfer init`, `member grant`) arrive with the admin CLI slice.
+//! key, exactly as B's remote read will. Setup calls the store APIs directly: the
+//! `transfer init` and `member grant` admin verbs that will wrap them do not exist yet.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -64,7 +64,10 @@ impl Rig {
         Self::build(tag, None).await
     }
 
-    async fn build(tag: &str, gate: Option<claustrum_module_probe::federation::ingress::IssueAuditGate>) -> Self {
+    async fn build(
+        tag: &str,
+        gate: Option<claustrum_module_probe::federation::ingress::IssueAuditGate>,
+    ) -> Self {
         let root = crate::support::temp_root(tag);
         let vaults = TwoVaults::new(&root).await;
         let home_store = HomeStore::open(&vaults.a.data_dir);
@@ -127,7 +130,10 @@ impl Rig {
     /// Create an Anthropic-shaped rotating login in `category`.
     fn add_login(&self, id: &str, category: &str) {
         self.store()
-            .create(id, &oauth_record("anthropic", "access-0", "refresh-0", None))
+            .create(
+                id,
+                &oauth_record("anthropic", "access-0", "refresh-0", None),
+            )
             .expect("create login");
         self.set_category(id, category);
     }
@@ -269,7 +275,10 @@ async fn a_granted_member_gets_the_access_token_sealed_to_its_announced_key() {
     assert_eq!(token["refresh_adapter"], "anthropic");
     assert_eq!(token["categories"], json!(["llm-provider"]));
     let expires_in = token["expires_in_ms"].as_i64().expect("an expiring token");
-    assert!(expires_in > 3_500_000 && expires_in <= 3_600_000, "{expires_in}");
+    assert!(
+        expires_in > 3_500_000 && expires_in <= 3_600_000,
+        "{expires_in}"
+    );
     for field in token.as_object().expect("object").keys() {
         assert!(
             REPLY_FIELDS.contains(&field.as_str()),
@@ -280,7 +289,11 @@ async fn a_granted_member_gets_the_access_token_sealed_to_its_announced_key() {
         !token.to_string().contains("refresh-0"),
         "the refresh token never leaves the home: {token}"
     );
-    assert_eq!(rig.home_store.upstream_calls(), 0, "a fresh token needs no refresh");
+    assert_eq!(
+        rig.home_store.upstream_calls(),
+        0,
+        "a fresh token needs no refresh"
+    );
 }
 
 #[tokio::test]
@@ -332,14 +345,21 @@ async fn an_upstream_refresh_slower_than_the_home_budget_answers_transient_and_s
     let elapsed = started.elapsed();
     assert_eq!(error_code(&first), "home_unavailable", "{first}");
     assert_eq!(first["error"]["class"], "transient");
-    assert!(elapsed < Duration::from_millis(1_900), "answered inside the budget: {elapsed:?}");
+    assert!(
+        elapsed < Duration::from_millis(1_900),
+        "answered inside the budget: {elapsed:?}"
+    );
 
     // The refresh keeps running to completion and persists the rotated token.
     tokio::time::sleep(Duration::from_millis(1_200)).await;
     rig.home_store.slow_upstream(Duration::ZERO);
     let token = rig.served_token(TOKEN_ID).await;
     assert_eq!(token["payload"], "access-refreshed-1");
-    assert_eq!(rig.home_store.upstream_calls(), 1, "the next read made no upstream call");
+    assert_eq!(
+        rig.home_store.upstream_calls(),
+        1,
+        "the next read made no upstream call"
+    );
 }
 
 // ---------------------------------------------------------------------------------
@@ -354,11 +374,16 @@ async fn no_grant_a_stale_pairing_an_unknown_id_and_an_ungranted_category_are_by
 
     let no_grant = rig.fetch(TOKEN_ID).await;
     let unknown = rig.fetch("oauth:anthropic:missing").await;
-    rig.grant(MemberGrantSelector::Category("llm-provider".into()), PAIRING);
+    rig.grant(
+        MemberGrantSelector::Category("llm-provider".into()),
+        PAIRING,
+    );
     let ungranted_category = rig.fetch("oauth:anthropic:other").await;
     // Unpair and re-pair with the same key: the grant made under the old pairing id no
     // longer counts.
-    rig.vaults.callosum.set_pairing(&rig.requester(), Some("pair-2"));
+    rig.vaults
+        .callosum
+        .set_pairing(&rig.requester(), Some("pair-2"));
     let stale_pairing = rig.fetch(TOKEN_ID).await;
 
     let bytes = |value: &Value| serde_json::to_vec(value).unwrap();
@@ -372,7 +397,10 @@ async fn no_grant_a_stale_pairing_an_unknown_id_and_an_ungranted_category_are_by
     }
 
     // Re-granting under the current pairing restores exactly the selected reach.
-    rig.grant(MemberGrantSelector::Category("llm-provider".into()), "pair-2");
+    rig.grant(
+        MemberGrantSelector::Category("llm-provider".into()),
+        "pair-2",
+    );
     assert_eq!(rig.served_token(TOKEN_ID).await["payload"], "access-0");
     assert_eq!(rig.fetch("oauth:anthropic:other").await, not_found());
 
@@ -405,9 +433,14 @@ async fn after_a_re_pair_only_grants_made_since_count() {
     // Exact grants made under the first pairing.
     rig.grant_exact(TOKEN_ID);
     rig.grant_exact("oauth:anthropic:exact-only");
-    rig.vaults.callosum.set_pairing(&rig.requester(), Some("pair-2"));
+    rig.vaults
+        .callosum
+        .set_pairing(&rig.requester(), Some("pair-2"));
     // Only the category grant is re-made after the re-pair.
-    rig.grant(MemberGrantSelector::Category("llm-provider".into()), "pair-2");
+    rig.grant(
+        MemberGrantSelector::Category("llm-provider".into()),
+        "pair-2",
+    );
 
     assert_eq!(rig.served_token(TOKEN_ID).await["payload"], "access-0");
     assert_eq!(rig.fetch("oauth:anthropic:exact-only").await, not_found());
@@ -466,8 +499,11 @@ async fn a_home_with_no_self_id_answers_setup_incomplete() {
     rig.add_login(TOKEN_ID, "llm-provider");
     rig.grant_exact(TOKEN_ID);
     let conn = rusqlite::Connection::open(rig.vaults.a.data_dir.join("store.db")).unwrap();
-    conn.execute("DELETE FROM settings WHERE name = 'federation.self_member'", [])
-        .unwrap();
+    conn.execute(
+        "DELETE FROM settings WHERE name = 'federation.self_member'",
+        [],
+    )
+    .unwrap();
     let reply = rig.fetch(TOKEN_ID).await;
     assert_eq!(error_code(&reply), "remote_setup_incomplete", "{reply}");
     assert_eq!(reply["error"]["remedy_member"], rig.vaults.home_member());
@@ -513,7 +549,11 @@ async fn an_unpaired_member_is_not_found_and_a_failed_pairing_lookup_is_transien
     let started = Instant::now();
     let reply = rig.fetch(TOKEN_ID).await;
     assert_eq!(error_code(&reply), "home_unavailable", "{reply}");
-    assert!(started.elapsed() < Duration::from_millis(1_800), "{:?}", started.elapsed());
+    assert!(
+        started.elapsed() < Duration::from_millis(1_800),
+        "{:?}",
+        started.elapsed()
+    );
 }
 
 #[tokio::test]
@@ -523,8 +563,17 @@ async fn the_allowlist_bearer_params_and_strict_parsing() {
     rig.grant_exact(TOKEN_ID);
     let aad = rig.aad(TOKEN_ID);
     // Any op outside the allowlist, and the transfer op this build does not serve.
-    for method in ["credential.get", "credential.get_scoped", "admin.op", OP_TRANSFER_DELIVER] {
-        assert_eq!(reply(rig.call(method, json!({})).await), not_found(), "{method}");
+    for method in [
+        "credential.get",
+        "credential.get_scoped",
+        "admin.op",
+        OP_TRANSFER_DELIVER,
+    ] {
+        assert_eq!(
+            reply(rig.call(method, json!({})).await),
+            not_found(),
+            "{method}"
+        );
     }
     // Bearer params are refused before anything else looks at the request.
     for params in [
@@ -532,27 +581,41 @@ async fn the_allowlist_bearer_params_and_strict_parsing() {
         json!({ "aad": aad, "enrollment_token": "t" }),
     ] {
         assert!(
-            matches!(rig.call(OP_REMOTE_TOKEN, params.clone()).await, HomeAnswer::InvalidParams(_)),
+            matches!(
+                rig.call(OP_REMOTE_TOKEN, params.clone()).await,
+                HomeAnswer::InvalidParams(_)
+            ),
             "{params}"
         );
     }
     assert!(matches!(
-        rig.call(OP_REPORT_AUTH_FAILURE, json!({ "handle": "ckh_x" })).await,
+        rig.call(OP_REPORT_AUTH_FAILURE, json!({ "handle": "ckh_x" }))
+            .await,
         HomeAnswer::InvalidParams(_)
     ));
     // A supplied key or recipient cannot redirect the seal: it is an unknown field.
     assert!(matches!(
-        rig.call(OP_REMOTE_TOKEN, json!({ "aad": aad, "recipient_public_key": "00" })).await,
+        rig.call(
+            OP_REMOTE_TOKEN,
+            json!({ "aad": aad, "recipient_public_key": "00" })
+        )
+        .await,
         HomeAnswer::InvalidParams(_)
     ));
     // The aad is parsed strictly.
     for bad in [
-        aad.replace(r#","recipient_key_id""#, r#","extra":"x","recipient_key_id""#),
+        aad.replace(
+            r#","recipient_key_id""#,
+            r#","extra":"x","recipient_key_id""#,
+        ),
         aad.replace(r#""nonce":"00112233445566778899aabbccddeeff","#, ""),
         aad.replace("00112233445566778899aabbccddeeff", "NOTHEX"),
     ] {
         assert!(
-            matches!(rig.call(OP_REMOTE_TOKEN, json!({ "aad": bad })).await, HomeAnswer::InvalidParams(_)),
+            matches!(
+                rig.call(OP_REMOTE_TOKEN, json!({ "aad": bad })).await,
+                HomeAnswer::InvalidParams(_)
+            ),
             "{bad}"
         );
     }
@@ -566,14 +629,11 @@ async fn the_allowlist_bearer_params_and_strict_parsing() {
 async fn ineligible_and_projection_refused_records_are_the_uniform_not_found_with_a_row() {
     let rig = Rig::new("ingress-projection").await;
     let cases: Vec<(&str, VaultRecord)> = vec![
-        (
-            "oauth:anthropic:payload-is-refresh",
-            {
-                let mut r = oauth_record("anthropic", "access-x", "refresh-x", None);
-                r.payload = credentials_core::secret::SecretBytes::new(b"refresh-x".to_vec());
-                r
-            },
-        ),
+        ("oauth:anthropic:payload-is-refresh", {
+            let mut r = oauth_record("anthropic", "access-x", "refresh-x", None);
+            r.payload = credentials_core::secret::SecretBytes::new(b"refresh-x".to_vec());
+            r
+        }),
         (
             "oauth:anthropic:token-is-refresh-segment",
             oauth_record("anthropic", "seg", "seg|project", None),
@@ -625,8 +685,14 @@ async fn ineligible_and_projection_refused_records_are_the_uniform_not_found_wit
 
     // Served: a canonical record and one whose client secret is empty.
     for (id, record) in [
-        ("oauth:anthropic:canonical", oauth_record("anthropic", "tok-a", "ref-a", None)),
-        ("oauth:anthropic:empty-secret", oauth_record("anthropic", "tok-b", "ref-b", Some(""))),
+        (
+            "oauth:anthropic:canonical",
+            oauth_record("anthropic", "tok-a", "ref-a", None),
+        ),
+        (
+            "oauth:anthropic:empty-secret",
+            oauth_record("anthropic", "tok-b", "ref-b", Some("")),
+        ),
     ] {
         rig.store().create(id, &record).expect("create");
         rig.grant_exact(id);
@@ -649,7 +715,11 @@ fn the_projection_serves_only_a_payload_that_is_the_non_refresh_access_token() {
     assert_eq!(project_access_token(&empty), None, "an empty token");
     let mut mismatched = oauth_record("anthropic", "tok", "ref", None);
     mismatched.payload = credentials_core::secret::SecretBytes::new(b"other".to_vec());
-    assert_eq!(project_access_token(&mismatched), None, "payload is not the token");
+    assert_eq!(
+        project_access_token(&mismatched),
+        None,
+        "payload is not the token"
+    );
 }
 
 #[tokio::test]
@@ -696,7 +766,10 @@ async fn a_member_cannot_report_a_static_key_it_reaches_by_category() {
         )
         .unwrap();
     rig.set_category("apikey:shared", "llm-provider");
-    rig.grant(MemberGrantSelector::Category("llm-provider".into()), PAIRING);
+    rig.grant(
+        MemberGrantSelector::Category("llm-provider".into()),
+        PAIRING,
+    );
     let answer = reply(
         rig.call(
             OP_REPORT_AUTH_FAILURE,
@@ -706,7 +779,10 @@ async fn a_member_cannot_report_a_static_key_it_reaches_by_category() {
     );
     assert_eq!(answer["error"], not_found()["error"], "{answer}");
     assert_eq!(answer["accepted"], false);
-    assert!(rig.store().get("apikey:shared").is_ok(), "the key is still served locally");
+    assert!(
+        rig.store().get("apikey:shared").is_ok(),
+        "the key is still served locally"
+    );
 }
 
 #[tokio::test]
@@ -722,12 +798,28 @@ async fn a_report_with_a_non_credential_status_marks_nothing() {
         )
         .await,
     );
-    assert_eq!(error_code(&answer), "report_status_not_credential_death", "{answer}");
-    assert_eq!(stale_and_version(&rig, TOKEN_ID), (0, 1), "no stale mark, same version");
-    assert_eq!(rig.store().read_audit(None).unwrap().len(), chain_before, "no chain row");
+    assert_eq!(
+        error_code(&answer),
+        "report_status_not_credential_death",
+        "{answer}"
+    );
+    assert_eq!(
+        stale_and_version(&rig, TOKEN_ID),
+        (0, 1),
+        "no stale mark, same version"
+    );
+    assert_eq!(
+        rig.store().read_audit(None).unwrap().len(),
+        chain_before,
+        "no chain row"
+    );
     let token = rig.served_token(TOKEN_ID).await;
     assert_eq!(token["payload"], "access-0");
-    assert_eq!(rig.home_store.upstream_calls(), 0, "no upstream refresh followed");
+    assert_eq!(
+        rig.home_store.upstream_calls(),
+        0,
+        "no upstream refresh followed"
+    );
 }
 
 #[tokio::test]
@@ -850,13 +942,19 @@ async fn a_fetch_whose_record_was_re_created_underneath_it_releases_nothing() {
             (rig.fetch(TOKEN_ID).await, started.elapsed())
         })
     };
-    let resume = reached.recv().await.expect("the second fetch reaches the audit point");
+    let resume = reached
+        .recv()
+        .await
+        .expect("the second fetch reaches the audit point");
     // Delete and re-create the id at version 1 with new material.
     rig.store()
         .remove_audited(TOKEN_ID, AuditCtx::admin(AuditOp::Remove))
         .unwrap();
     rig.store()
-        .create(TOKEN_ID, &oauth_record("anthropic", "access-new", "refresh-new", None))
+        .create(
+            TOKEN_ID,
+            &oauth_record("anthropic", "access-new", "refresh-new", None),
+        )
         .unwrap();
     rig.set_category(TOKEN_ID, "llm-provider");
     resume.send(()).unwrap();
@@ -866,7 +964,11 @@ async fn a_fetch_whose_record_was_re_created_underneath_it_releases_nothing() {
         elapsed < Duration::from_millis(1_200),
         "the audit recheck refused it, not the home's deadline: {elapsed:?}"
     );
-    assert_eq!(rig.audit_ops("remote_issue").len(), 1, "the paused fetch wrote nothing");
+    assert_eq!(
+        rig.audit_ops("remote_issue").len(),
+        1,
+        "the paused fetch wrote nothing"
+    );
 
     // The next fetch serves the new material and is audited once more.
     assert_eq!(rig.served_token(TOKEN_ID).await["payload"], "access-new");
@@ -886,7 +988,10 @@ async fn a_refresh_between_the_serving_read_and_the_audit_releases_nothing() {
             (rig.fetch(TOKEN_ID).await, started.elapsed())
         })
     };
-    let resume = reached.recv().await.expect("the fetch reaches the audit point");
+    let resume = reached
+        .recv()
+        .await
+        .expect("the fetch reaches the audit point");
     // A refresh lands in between: the stored material is no longer the one read.
     rig.home_store
         .engine
@@ -902,7 +1007,8 @@ async fn a_refresh_between_the_serving_read_and_the_audit_releases_nothing() {
     assert!(
         rusqlite::Connection::open(rig.vaults.a.data_dir.join("store.db"))
             .unwrap()
-            .query_row("SELECT COUNT(*) FROM remote_issue_seen", [], |row| row.get::<_, i64>(0))
+            .query_row("SELECT COUNT(*) FROM remote_issue_seen", [], |row| row
+                .get::<_, i64>(0))
             .unwrap()
             == 0,
         "no seen row"

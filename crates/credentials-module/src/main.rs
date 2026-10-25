@@ -457,7 +457,7 @@ where
     // reused-dead-connection class cannot occur on it -- there is no requester object
     // here for the defect to live on. That immunity is a property of the current role
     // shape and ends silently the day an outbound wait is moved onto this connection,
-    // with nothing in the diff looking like a connection-lifecycle edit.
+    // in a change that need not look like a connection-lifecycle edit at all.
     loop {
         let Some(frame) = read_frame(read_half)
             .await
@@ -4831,12 +4831,20 @@ mod tests {
         let handle = mint_test_handle(&store, id);
 
         bind_reserved_route(&surface, &admin, &routes, 80, 1, "callosum", MEMBER_HARNESS).await;
-        let forwarded = routed_reply(&surface, &admin, 80, OP_GET, json!({ "handle": handle })).await;
-        let unbound = routed_reply(&surface, &admin, 998, OP_GET, json!({ "handle": handle })).await;
+        let forwarded =
+            routed_reply(&surface, &admin, 80, OP_GET, json!({ "handle": handle })).await;
+        let unbound =
+            routed_reply(&surface, &admin, 998, OP_GET, json!({ "handle": handle })).await;
         assert_eq!(forwarded.0, FrameType::Response);
-        assert_eq!(forwarded.1, unbound.1, "byte-identical to release 1's handle read");
+        assert_eq!(
+            forwarded.1, unbound.1,
+            "byte-identical to release 1's handle read"
+        );
         let body: serde_json::Value = serde_json::from_slice(&forwarded.1).unwrap();
-        assert!(body["result"]["payload"].is_array(), "the read is served: {body}");
+        assert!(
+            body["result"]["payload"].is_array(),
+            "the read is served: {body}"
+        );
         // And the scoped surface still refuses it as an unknown caller.
         assert_refused_as_unknown(&surface, &admin, 80, "gate off, forwarded").await;
     }
@@ -4846,7 +4854,16 @@ mod tests {
         let (surface, admin, store, routes) = granted_scoped_rig(191, "callosum");
         let handle = mint_test_handle(&store, FORWARDED_TEST_ID);
         set_member_mapping(&store, true);
-        bind_reserved_route(&surface, &admin, &routes, 81, 1, "callosum", "callosum-self").await;
+        bind_reserved_route(
+            &surface,
+            &admin,
+            &routes,
+            81,
+            1,
+            "callosum",
+            "callosum-self",
+        )
+        .await;
         assert_reads_granted_credential(&surface, &admin, 81, "callosum-self, gate on").await;
 
         // Every other harness on callosum's route is a refused channel: every op,
@@ -4921,7 +4938,10 @@ mod tests {
         ] {
             let (ty, body) = routed_reply(&surface, &admin, 90, method, params).await;
             assert_eq!(ty, FrameType::Response, "{method}");
-            assert_eq!(body, not_found, "{method}: no secret, the uniform not_found");
+            assert_eq!(
+                body, not_found,
+                "{method}: no secret, the uniform not_found"
+            );
         }
         // A federation op carrying a bearer param is refused as invalid params.
         for params in [
@@ -4954,7 +4974,16 @@ mod tests {
             federation::ingress::OP_TRANSFER_DELIVER,
         ];
         // Gate off: callosum's own route, a forwarded route, another module, direct.
-        bind_reserved_route(&surface, &admin, &routes, 91, 1, "callosum", "callosum-self").await;
+        bind_reserved_route(
+            &surface,
+            &admin,
+            &routes,
+            91,
+            1,
+            "callosum",
+            "callosum-self",
+        )
+        .await;
         bind_reserved_route(&surface, &admin, &routes, 92, 1, "callosum", MEMBER_HARNESS).await;
         bind_reserved_route(&surface, &admin, &routes, 93, 1, "broca", "").await;
         admin.record_bind_at(94, 1, subc_protocol::Principal::Direct, "");
@@ -5016,7 +5045,12 @@ mod tests {
         store
             .create_audited(
                 VAULT_TRANSFER_ID,
-                &VaultRecord::new_static(CredentialKind::KemKey, "operator", pem.into_bytes(), None),
+                &VaultRecord::new_static(
+                    CredentialKind::KemKey,
+                    "operator",
+                    pem.into_bytes(),
+                    None,
+                ),
                 AuditCtx::admin(AuditOp::Put),
             )
             .expect("transfer init");
@@ -5055,11 +5089,26 @@ mod tests {
             }
         }
         for module in ["broca", "callosum"] {
-            assert!(admitted.contains(&(module, GrantOperation::Read)), "{admitted:?}");
-            assert!(admitted.contains(&(module, GrantOperation::List)), "{admitted:?}");
+            assert!(
+                admitted.contains(&(module, GrantOperation::Read)),
+                "{admitted:?}"
+            );
+            assert!(
+                admitted.contains(&(module, GrantOperation::List)),
+                "{admitted:?}"
+            );
         }
         bind_reserved_route(&surface, &admin, &routes, 100, 1, "broca", "").await;
-        bind_reserved_route(&surface, &admin, &routes, 101, 1, "callosum", "callosum-self").await;
+        bind_reserved_route(
+            &surface,
+            &admin,
+            &routes,
+            101,
+            1,
+            "callosum",
+            "callosum-self",
+        )
+        .await;
 
         let b64 = base64::engine::general_purpose::STANDARD;
         for channel in [100u16, 101] {
@@ -5117,7 +5166,10 @@ mod tests {
             json!({ "credential_id": VAULT_TRANSFER_ID }),
         )
         .await;
-        assert_eq!(broca_key["result"]["error"]["code"], "not_found", "{broca_key}");
+        assert_eq!(
+            broca_key["result"]["error"]["code"], "not_found",
+            "{broca_key}"
+        );
         let callosum_key = routed_json(
             &surface,
             &admin,
@@ -5126,7 +5178,10 @@ mod tests {
             json!({ "credential_id": VAULT_TRANSFER_ID }),
         )
         .await;
-        assert_eq!(callosum_key["result"]["algorithm"], "x25519", "{callosum_key}");
+        assert_eq!(
+            callosum_key["result"]["algorithm"], "x25519",
+            "{callosum_key}"
+        );
     }
 
     /// A handle to the transfer key minted before the store refused such handles is
@@ -5139,7 +5194,12 @@ mod tests {
         store
             .create_audited(
                 VAULT_TRANSFER_ID,
-                &VaultRecord::new_static(CredentialKind::KemKey, "operator", pem.into_bytes(), None),
+                &VaultRecord::new_static(
+                    CredentialKind::KemKey,
+                    "operator",
+                    pem.into_bytes(),
+                    None,
+                ),
                 AuditCtx::admin(AuditOp::Put),
             )
             .expect("transfer init");
@@ -5155,18 +5215,24 @@ mod tests {
             .expect("insert a pre-existing handle");
 
         let unknown = credentials_core::store::mint_handle().expect("mint").raw;
-        let get = serde_json::to_value(surface.get(1, &GetParams {
-            handle: handle.raw.clone(),
-            min_ttl_ms: None,
-            force_refresh: false,
-        }).await)
+        let get = serde_json::to_value(
+            surface
+                .get(
+                    1,
+                    &GetParams {
+                        handle: handle.raw.clone(),
+                        min_ttl_ms: None,
+                        force_refresh: false,
+                    },
+                )
+                .await,
+        )
         .unwrap();
         assert_eq!(get["error"]["code"], "not_found", "{get}");
         let status = |h: String| {
             let surface = Arc::clone(&surface);
             async move {
-                let params: StatusParams =
-                    serde_json::from_value(json!({ "handle": h })).unwrap();
+                let params: StatusParams = serde_json::from_value(json!({ "handle": h })).unwrap();
                 serde_json::to_value(surface.status(1, None, &params).await).unwrap()
             }
         };
@@ -5203,7 +5269,16 @@ mod tests {
     async fn no_outbound_wait_runs_on_the_frame_loop_or_the_control_lane() {
         let (surface, admin, store, routes) = granted_scoped_rig(197, "callosum");
         set_member_mapping(&store, true);
-        bind_reserved_route(&surface, &admin, &routes, 110, 1, "callosum", MEMBER_HARNESS).await;
+        bind_reserved_route(
+            &surface,
+            &admin,
+            &routes,
+            110,
+            1,
+            "callosum",
+            MEMBER_HARNESS,
+        )
+        .await;
         // A subc endpoint that accepts the TCP connection and never completes the
         // handshake: every outbound call stalls until its own deadline.
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("listener");
@@ -5227,7 +5302,11 @@ mod tests {
         .expect("connection file");
         assert!(admin
             .home()
-            .attach_outbound(federation::OutboundClient::for_daemon(&connection, "claustrum", None)));
+            .attach_outbound(federation::OutboundClient::for_daemon(
+                &connection,
+                "claustrum",
+                None
+            )));
 
         let (control_tx, mut control_rx) = mpsc::channel::<Frame>(4);
         let (route_tx, mut route_rx) = mpsc::channel::<Frame>(4);
@@ -5283,7 +5362,10 @@ mod tests {
             .expect("the op ends inside the home's budget")
             .expect("reply");
         let body: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
-        assert_eq!(body["result"]["error"]["code"], "home_unavailable", "{body}");
+        assert_eq!(
+            body["result"]["error"]["code"], "home_unavailable",
+            "{body}"
+        );
         drop(listener);
     }
 

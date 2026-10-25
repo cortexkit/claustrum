@@ -1203,8 +1203,9 @@ enum TransferKeyAccess<'a> {
 /// THE TRANSFER-KEY FENCE: true when `credential_id` is a vault transfer key
 /// (`kem:vault-transfer:*`) and this access may not reach it.
 ///
-/// The transfer key seals and opens every federation message, so a caller that could
-/// `open` or `seal` with it under its own `info` could forge or read them, and one that
+/// The transfer key seals and opens the sealed federation payloads (token replies and
+/// transfer envelopes), so a caller that could `open` or `seal` with it under its own
+/// `info` could read or forge them, and one that
 /// could report it failed would latch a non-refreshable `kem:` id `needs_reauth`. The
 /// store already refuses every grant on it except callosum's announce `read`, and every
 /// handle; this fence is the read surface's half, for a grant or handle that exists
@@ -3549,7 +3550,11 @@ mod error_class_tests {
         use credentials_core::envelope::EnvelopeError;
         let wire = |code: ReadError| {
             (
-                serde_json::to_value(code).unwrap().as_str().unwrap().to_string(),
+                serde_json::to_value(code)
+                    .unwrap()
+                    .as_str()
+                    .unwrap()
+                    .to_string(),
                 serde_json::to_value(code.class())
                     .unwrap()
                     .as_str()

@@ -71,8 +71,8 @@ pub const CALLOSUM_MODULE_ID: &str = "callosum";
 /// grants once the member-mapping gate is on.
 pub const CALLOSUM_SELF_HARNESS: &str = "callosum-self";
 
-/// Every harness callosum sets on a relayed call starts with this. In no release and
-/// no gate state does such a harness resolve to callosum's own grants.
+/// Every harness callosum sets on a relayed call starts with this, and such a harness
+/// never resolves to callosum's own grants, whatever the gate says.
 const FORWARDED_HARNESS_PREFIX: &str = "fed-";
 
 /// Callosum's route key in the outbound client's binding cache.
@@ -229,8 +229,10 @@ fn refusal_code<'a>(body: &'a Value, reply_member: &str) -> Option<&'a str> {
 
 /// Decode a `callosum.paired_devices_read` reply into `member_id`'s current pairing id.
 ///
-/// SHAPE PENDING CALLO'S VENDORED VECTORS (`paired-devices-vectors-v1.3`), taken from
-/// callosum master as relayed: `{"devices":[{"class","fingerprint","pairing_id"}]}`,
+/// The reply shape is callosum's current one, not yet checked against the vector
+/// files callosum publishes for it (tag `paired-devices-vectors-v1.3`); once those
+/// are vendored, the tests below should read them. The shape:
+/// `{"devices":[{"class","fingerprint","pairing_id"}]}`,
 /// sorted by fingerprint, with an optional top-level `self` (version 1.3) that this
 /// decoder ignores. A device carries no member id: it is `fed-<class>:<fingerprint>`,
 /// so only a device of class `computer` can be a member. An unpaired member is simply
@@ -279,8 +281,9 @@ pub fn decode_paired_devices(body: &Value, member_id: &str) -> Lookup<String> {
 /// Decode a `callosum.peer_keys_read` reply into `member_id`'s announced
 /// `vault_transfer_x25519` key.
 ///
-/// SHAPE PENDING CALLO'S VENDORED VECTORS (`paired-devices-vectors-v1.3`), taken from
-/// callosum master as relayed: `{"peers":[{"fingerprint", "key_record":{"keys":
+/// The reply shape is callosum's current one, not yet checked against the vector
+/// files callosum publishes for it (tag `paired-devices-vectors-v1.3`). The shape:
+/// `{"peers":[{"fingerprint", "key_record":{"keys":
 /// {"vault_transfer_x25519":{"pub":"<hex>","version":"<n>"}}}}]}`, every admitted
 /// peer, no filter, `machine_id`/`key_record`/`registry_platform` optional. The entry
 /// carries no class: the caller must already know from `paired_devices_read` that this
@@ -721,7 +724,8 @@ impl HomeVault {
         }
     }
 
-    /// `federation.remote_token`, steps 2 to 12 in the spec's order.
+    /// `federation.remote_token`: the numbered checks below run in order and the first
+    /// refusal ends the call. Step 1, the op allowlist, already ran in [`Self::serve`].
     async fn remote_token(
         &self,
         member: &str,
@@ -812,7 +816,8 @@ impl HomeVault {
         }))
     }
 
-    /// `federation.report_auth_failure`: steps 2, 7 and 8, then the status check, then
+    /// `federation.report_auth_failure`: the same pairing, grant and eligibility checks
+    /// as `federation.remote_token` (its steps 2, 7 and 8), then the status check, then
     /// the version-fenced stale mark. The store function checks no status itself, so
     /// the check here is what keeps a member from driving the stale latch with a
     /// status that is not credential death.
@@ -1110,9 +1115,9 @@ impl HomeVault {
 
 #[cfg(test)]
 mod tests {
-    //! The two callosum decoders, fed literal bodies in the shapes callosum master
-    //! sends. PENDING CALLO'S VENDORED VECTORS (`paired-devices-vectors-v1.3`): when
-    //! those land, these bodies are replaced by the vector files.
+    //! The two callosum decoders, fed literal bodies in the shapes callosum sends today.
+    //! Callosum publishes vector files for these replies (tag
+    //! `paired-devices-vectors-v1.3`); once vendored, they replace these literals.
 
     use super::*;
 

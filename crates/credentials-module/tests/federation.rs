@@ -25,3 +25,6 @@ mod remote_read;
 
 #[path = "federation/transfer.rs"]
 mod transfer;
+
+#[path = "federation/admin.rs"]
+mod admin;

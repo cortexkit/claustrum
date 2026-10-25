@@ -610,17 +610,52 @@ fn b_decrypted_holds(store: &credentials_core::store::EncryptedStore, needle: &s
     })
 }
 
-/// Whether any file in `dir` (the store, its `-wal` and `-shm`, anything else) holds
-/// `needle` in plaintext.
+/// Whether any file in `dir` that can carry record content (the store, its `-wal`,
+/// anything else) holds `needle` in plaintext.
+///
+/// Two files are skipped because they carry no record content and, while the store is
+/// open, are byte-range locked on Windows, so reading them fails there with
+/// ERROR_LOCK_VIOLATION: the writer lease (`*.lease`, the writer epoch) and SQLite's
+/// `-shm` (the WAL index: page numbers and lock slots, never page data). Every other
+/// read error still fails the test, and the scan asserts it read `store.db`, so the skip
+/// can never hide the file the content lives in.
 fn dir_holds(dir: &std::path::Path, needle: &str) -> bool {
-    std::fs::read_dir(dir).unwrap().any(|entry| {
+    let mut read_store = false;
+    let mut found = false;
+    for entry in std::fs::read_dir(dir).unwrap() {
         let path = entry.unwrap().path();
-        path.is_file()
-            && std::fs::read(&path)
-                .unwrap()
-                .windows(needle.len())
-                .any(|window| window == needle.as_bytes())
-    })
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        if !path.is_file() || name.ends_with(".lease") || name.ends_with("-shm") {
+            continue;
+        }
+        read_store |= name == "store.db";
+        found |= std::fs::read(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()))
+            .windows(needle.len())
+            .any(|window| window == needle.as_bytes());
+    }
+    assert!(read_store, "the scan must read {}/store.db", dir.display());
+    found
+}
+
+/// Control for the custody scan: it finds plaintext in the store and the WAL, and its
+/// skip covers only the lease and `-shm` files.
+#[test]
+fn the_custody_scan_finds_plaintext_in_the_store_and_wal_but_skips_only_lease_and_shm() {
+    let dir = credentials_core::test_support::TestTempDir::new(format!(
+        "ck-fed-custody-scan-{}",
+        std::process::id()
+    ));
+    let root = dir.path();
+    std::fs::write(root.join("store.db"), b"page bytes").unwrap();
+    std::fs::write(root.join("store.db-shm"), b"needle-in-shm").unwrap();
+    std::fs::write(root.join("ab12.lease"), b"needle-in-lease").unwrap();
+    assert!(!dir_holds(root, "needle-in-shm"));
+    assert!(!dir_holds(root, "needle-in-lease"));
+    std::fs::write(root.join("store.db-wal"), b"..needle-in-wal..").unwrap();
+    assert!(dir_holds(root, "needle-in-wal"));
+    std::fs::write(root.join("store.db"), b"..needle-in-store..").unwrap();
+    assert!(dir_holds(root, "needle-in-store"));
 }
 
 // ---------------------------------------------------------------------------------

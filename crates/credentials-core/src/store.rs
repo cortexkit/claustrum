@@ -4699,55 +4699,54 @@ impl EncryptedStore {
     ) -> Result<bool, StoreOpError> {
         let now = now_ms();
         let audit_key = self.audit_key.clone();
-        let changed = self
-            .fenced_write_unless_transfer_key_protected(credential_id, |tx| {
-                // `state = active` makes this a STATE TRANSITION rather than a
-                // repeatable write, and that is what bounds the audit chain here.
-                //
-                // The version guard alone does not: invalidating does not bump
-                // record_version, so a consumer reporting the same version twice
-                // matched twice, and every match appends to a chain that is
-                // append-only by design and must never be trimmed. Measured before
-                // this guard existed: eight identical reports produced eight
-                // `report_auth_failure` entries, seven of which changed nothing --
-                // the credential was already `needs_reauth` after the first.
-                //
-                // With the clause, a repeat matches zero rows and audits nothing,
-                // while the FIRST report still audits exactly as before. The
-                // diagnostic record of the repeats is not lost: `auth_events` records
-                // every report either way, which is what that table is for, and it is
-                // bounded per credential where the chain cannot be.
-                let n = tx.execute(
-                    "UPDATE credentials SET state = ?2, updated_at_ms = ?3 \
+        let changed = self.fenced_write_unless_transfer_key_protected(credential_id, |tx| {
+            // `state = active` makes this a STATE TRANSITION rather than a
+            // repeatable write, and that is what bounds the audit chain here.
+            //
+            // The version guard alone does not: invalidating does not bump
+            // record_version, so a consumer reporting the same version twice
+            // matched twice, and every match appends to a chain that is
+            // append-only by design and must never be trimmed. Measured before
+            // this guard existed: eight identical reports produced eight
+            // `report_auth_failure` entries, seven of which changed nothing --
+            // the credential was already `needs_reauth` after the first.
+            //
+            // With the clause, a repeat matches zero rows and audits nothing,
+            // while the FIRST report still audits exactly as before. The
+            // diagnostic record of the repeats is not lost: `auth_events` records
+            // every report either way, which is what that table is for, and it is
+            // bounded per credential where the chain cannot be.
+            let n = tx.execute(
+                "UPDATE credentials SET state = ?2, updated_at_ms = ?3 \
                  WHERE credential_id = ?1 AND record_version = ?4 AND state = 'active'",
-                    rusqlite::params![
-                        credential_id,
-                        RecordState::NeedsReauth.as_str(),
-                        now,
-                        expected_version as i64
-                    ],
+                rusqlite::params![
+                    credential_id,
+                    RecordState::NeedsReauth.as_str(),
+                    now,
+                    expected_version as i64
+                ],
+            )?;
+            if let Some(obs) = observation {
+                append_auth_event_tx(tx, credential_id, &obs, Some(expected_version), n > 0)?;
+            }
+            if n > 0 {
+                // Same version still current: this is an authoritative revoke, so clear
+                // any dangling intent and audit it, exactly like invalidate_audited.
+                clear_intent_tx(tx, credential_id)?;
+                append_audit_tx(
+                    tx,
+                    &audit_key,
+                    &AuditRecord {
+                        op: ctx.op,
+                        credential_id: Some(credential_id.to_string()),
+                        payload_hash: None,
+                        actor: ctx.actor.to_string(),
+                        alarm: ctx.alarm,
+                    },
                 )?;
-                if let Some(obs) = observation {
-                    append_auth_event_tx(tx, credential_id, &obs, Some(expected_version), n > 0)?;
-                }
-                if n > 0 {
-                    // Same version still current: this is an authoritative revoke, so clear
-                    // any dangling intent and audit it, exactly like invalidate_audited.
-                    clear_intent_tx(tx, credential_id)?;
-                    append_audit_tx(
-                        tx,
-                        &audit_key,
-                        &AuditRecord {
-                            op: ctx.op,
-                            credential_id: Some(credential_id.to_string()),
-                            payload_hash: None,
-                            actor: ctx.actor.to_string(),
-                            alarm: ctx.alarm,
-                        },
-                    )?;
-                }
-                Ok(n)
-            })?;
+            }
+            Ok(n)
+        })?;
         Ok(changed > 0)
     }
 
@@ -4765,38 +4764,37 @@ impl EncryptedStore {
         observation: AuthObservation<'_>,
     ) -> Result<bool, StoreOpError> {
         let audit_key = self.audit_key.clone();
-        let changed = self
-            .fenced_write_unless_transfer_key_protected(credential_id, |tx| {
-                // A repeated report for the same version has already instructed the
-                // next read to refresh. Treat it as no new state transition so the
-                // append-only audit chain remains bounded; auth_events still records it.
-                let n = tx.execute(
-                    "UPDATE credentials SET stale_pending = 1 \
+        let changed = self.fenced_write_unless_transfer_key_protected(credential_id, |tx| {
+            // A repeated report for the same version has already instructed the
+            // next read to refresh. Treat it as no new state transition so the
+            // append-only audit chain remains bounded; auth_events still records it.
+            let n = tx.execute(
+                "UPDATE credentials SET stale_pending = 1 \
                      WHERE credential_id = ?1 AND record_version = ?2 AND stale_pending = 0",
-                    rusqlite::params![credential_id, expected_version as i64],
-                )?;
-                append_auth_event_tx(
+                rusqlite::params![credential_id, expected_version as i64],
+            )?;
+            append_auth_event_tx(
+                tx,
+                credential_id,
+                &observation,
+                Some(expected_version),
+                n > 0,
+            )?;
+            if n > 0 {
+                append_audit_tx(
                     tx,
-                    credential_id,
-                    &observation,
-                    Some(expected_version),
-                    n > 0,
+                    &audit_key,
+                    &AuditRecord {
+                        op: ctx.op,
+                        credential_id: Some(credential_id.to_string()),
+                        payload_hash: None,
+                        actor: ctx.actor.to_string(),
+                        alarm: ctx.alarm,
+                    },
                 )?;
-                if n > 0 {
-                    append_audit_tx(
-                        tx,
-                        &audit_key,
-                        &AuditRecord {
-                            op: ctx.op,
-                            credential_id: Some(credential_id.to_string()),
-                            payload_hash: None,
-                            actor: ctx.actor.to_string(),
-                            alarm: ctx.alarm,
-                        },
-                    )?;
-                }
-                Ok(n)
-            })?;
+            }
+            Ok(n)
+        })?;
         Ok(changed > 0)
     }
 

@@ -551,7 +551,8 @@ impl EncryptedStore {
         check_member_id(member_id)?;
         let version = i64::try_from(record_version)
             .map_err(|_| StoreOpError::Encode("record_version out of range".into()))?;
-        let payload_hash = crate::federation::remote_issue_payload_hash(credential_id, record_version);
+        let payload_hash =
+            crate::federation::remote_issue_payload_hash(credential_id, record_version);
         let audit_key = self.audit_key.clone();
         let now = now_ms();
         let recorded = self.fenced_write(|tx| {

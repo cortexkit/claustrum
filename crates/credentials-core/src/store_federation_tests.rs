@@ -1143,7 +1143,9 @@ fn a_remote_issue_is_audited_once_per_material_across_a_reopen() {
 fn removing_a_credential_deletes_its_remote_issue_seen_rows() {
     let (_root, store) = rig("federation-issue-remove", 215);
     store.create(ISSUED_ID, &oauth_record()).expect("create");
-    store.create("oauth:anthropic:kept", &oauth_record()).expect("create");
+    store
+        .create("oauth:anthropic:kept", &oauth_record())
+        .expect("create");
     for id in [ISSUED_ID, "oauth:anthropic:kept"] {
         let (version, digest) = served(&store, id);
         store

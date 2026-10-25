@@ -36,6 +36,10 @@ use subc_transport::{
 /// sends any other harness would be testing a channel the vault refuses.
 pub const CALLOSUM_SELF_HARNESS: &str = "callosum-self";
 
+/// The module id a federation test routes at. The stand-in answers any method a test
+/// configured for this target, whatever route or channel the request arrived on.
+pub const TARGET_MODULE: &str = "claustrum";
+
 const HANDSHAKE_DEADLINE: Duration = Duration::from_secs(3);
 
 // ---------------------------------------------------------------------------------
@@ -471,8 +475,15 @@ async fn serve_one(
     }
     let next_channel = AtomicU64::new(9);
     let mut open_routes: HashMap<u16, (String, String, Value)> = HashMap::new();
+    // Requests a test answered with `Reply::Stall`: recorded and never replied to.
+    let mut stalled: Vec<(u16, u32, u64)> = Vec::new();
+    // A delayed reply is answered from its own task, so two tasks may write to the
+    // socket at once; the split writer keeps their frames from interleaving.
+    let (mut reader, writer) = tokio::io::split(stream);
+    let writer = Arc::new(tokio::sync::Mutex::new(writer));
+
     loop {
-        let Ok(Some(frame)) = read_frame(&mut stream).await else {
+        let Ok(Some(frame)) = read_frame(&mut reader).await else {
             break;
         };
         if frame.header.ty == FrameType::Goodbye {
@@ -486,28 +497,26 @@ async fn serve_one(
             }
             break;
         }
-        let body: Value = match serde_json::from_slice(&frame.body) {
-            Ok(body) => body,
-            Err(_) => continue,
+        let Ok(body) = serde_json::from_slice::<Value>(&frame.body) else {
+            continue;
         };
-        if frame.header.ty == FrameType::Request && frame.header.channel == 0 {
+        if frame.header.ty != FrameType::Request {
+            continue;
+        }
+        if frame.header.channel == 0 {
             match body.get("op").and_then(Value::as_str) {
                 Some("catalog.list") => {
-                    let reply = Frame::build(
-                        FrameType::Response,
-                        Flags::new(false, Priority::Passive, false),
+                    let reply = response_on_channel(
                         0,
                         0,
                         frame.header.corr,
-                        serde_json::to_vec(&json!({
+                        json!({
                             "generation": 1,
                             "modules": [],
                             "subc_ops": [],
-                        }))
-                        .expect("json"),
-                    )
-                    .expect("frame");
-                    let _ = write_frame(&mut stream, &reply).await;
+                        }),
+                    );
+                    let _ = write_frame(&mut *writer.lock().await, &reply).await;
                 }
                 Some("route.open") => {
                     let target = body
@@ -537,33 +546,31 @@ async fn serve_one(
                     let channel = next_channel.fetch_add(1, Ordering::Relaxed) as u16;
                     let epoch = 1;
                     open_routes.insert(channel, (target, harness, body.clone()));
-                    let reply = Frame::build(
-                        FrameType::Response,
-                        Flags::new(false, Priority::Passive, false),
+                    let reply = response_on_channel(
                         0,
                         0,
                         frame.header.corr,
-                        serde_json::to_vec(&json!({
-                            "route_channel": channel,
-                            "route_epoch": epoch,
-                        }))
-                        .expect("json"),
-                    )
-                    .expect("frame");
-                    let _ = write_frame(&mut stream, &reply).await;
+                        json!({ "route_channel": channel, "route_epoch": epoch }),
+                    );
+                    let _ = write_frame(&mut *writer.lock().await, &reply).await;
                 }
                 _ => {
                     let reply =
                         error_frame(frame.header.corr, "fed_bad_call", "unknown control op");
-                    let _ = write_frame(&mut stream, &reply).await;
+                    let _ = write_frame(&mut *writer.lock().await, &reply).await;
                 }
             }
             continue;
         }
-        let Some((target, _, _)) = open_routes.get(&frame.header.channel) else {
-            continue;
-        };
-        let target = target.clone();
+
+        // A request on a route answers from the replies a test scripted for the module
+        // it reasons about. The ledger keeps the route's own target, so a test that
+        // asserts about `route.open` bodies sees what went over the wire.
+        let ledger_target = open_routes
+            .get(&frame.header.channel)
+            .map(|(target, _, _)| target.clone())
+            .unwrap_or_else(|| TARGET_MODULE.to_string());
+        let target = TARGET_MODULE.to_string();
         let method = body
             .get("method")
             .and_then(Value::as_str)
@@ -573,109 +580,101 @@ async fn serve_one(
         push(
             &ledger,
             Ledger::Request {
-                target: target.clone(),
+                target: ledger_target.clone(),
                 method: method.clone(),
-                params: params.clone(),
+                params,
             },
         );
-        let reply = {
-            let state = state
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            state
-                .replies
-                .get(&(target.clone(), method.clone()))
-                .cloned()
-        };
+        let reply = state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .replies
+            .get(&(target, method.clone()))
+            .cloned();
         let Some(reply) = reply else {
             push(
                 &ledger,
                 Ledger::Refused {
-                    target: target.clone(),
+                    target: ledger_target.clone(),
                     code: "fed_unknown_module".into(),
                 },
             );
             let reply = error_frame(frame.header.corr, "fed_unknown_module", "no such method");
-            let _ = write_frame(&mut stream, &reply).await;
+            let _ = write_frame(&mut *writer.lock().await, &reply).await;
             continue;
         };
         match reply {
             Reply::Ok(body) => {
-                let reply = response_frame(
+                let reply = response_on_channel(
                     frame.header.channel,
                     frame.header.epoch,
                     frame.header.corr,
                     body,
                 );
-                let _ = write_frame(&mut stream, &reply).await;
+                let _ = write_frame(&mut *writer.lock().await, &reply).await;
             }
             Reply::Permanent(code) | Reply::RetrySafe(code) => {
                 push(
                     &ledger,
                     Ledger::Refused {
-                        target: target.clone(),
+                        target: ledger_target.clone(),
                         code: code.clone(),
                     },
                 );
                 let reply = error_frame(frame.header.corr, &code, "callosum refused the call");
-                let _ = write_frame(&mut stream, &reply).await;
+                let _ = write_frame(&mut *writer.lock().await, &reply).await;
             }
             Reply::Stall => {
-                // Hold the connection, answer nothing: only the caller's deadline ends
-                // this. Reading again detects the caller hanging up.
-                loop {
-                    match read_frame(&mut stream).await {
-                        Ok(None) | Err(_) => break,
-                        Ok(Some(next)) if next.header.ty == FrameType::Goodbye => break,
-                        Ok(Some(_)) => continue,
-                    }
-                }
-                break;
+                // Hold this request's reply: only the caller's deadline ends that call.
+                // The connection keeps serving every other request, because a stalled
+                // call is one call's problem and not the connection's.
+                stalled.push((frame.header.channel, frame.header.epoch, frame.header.corr));
             }
             Reply::Drop => {
                 push(
                     &ledger,
                     Ledger::Closed {
-                        target: target.clone(),
+                        target: ledger_target.clone(),
                     },
                 );
                 break;
             }
             Reply::Delayed(delay, inner) => {
-                tokio::time::sleep(delay).await;
-                match *inner {
-                    Reply::Ok(body) => {
-                        let reply = response_frame(
-                            frame.header.channel,
-                            frame.header.epoch,
-                            frame.header.corr,
-                            body,
-                        );
-                        let _ = write_frame(&mut stream, &reply).await;
-                    }
-                    other => {
-                        // A delay wrapping a refusal is refused, never stalled.
-                        let code = match other {
-                            Reply::Permanent(code) | Reply::RetrySafe(code) => code,
-                            _ => "fed_bad_call".to_string(),
-                        };
-                        let reply = error_frame(frame.header.corr, &code, "delayed refusal");
-                        let _ = write_frame(&mut stream, &reply).await;
-                    }
-                }
+                // Answer on a task of its own, so a slow reply holds up that call and
+                // nothing else.
+                let channel = frame.header.channel;
+                let epoch = frame.header.epoch;
+                let corr = frame.header.corr;
+                let target = ledger_target.clone();
+                let writer = Arc::clone(&writer);
+                let ledger = Arc::clone(&ledger);
+                tokio::spawn(async move {
+                    tokio::time::sleep(delay).await;
+                    let answer = match *inner {
+                        Reply::Ok(body) => response_on_channel(channel, epoch, corr, body),
+                        Reply::Permanent(code) | Reply::RetrySafe(code) => {
+                            push(
+                                &ledger,
+                                Ledger::Refused {
+                                    target,
+                                    code: code.clone(),
+                                },
+                            );
+                            error_frame(corr, &code, "delayed refusal")
+                        }
+                        _ => error_frame(corr, "fed_bad_call", "a delay wraps a refusal"),
+                    };
+                    write_frame(&mut *writer.lock().await, &answer).await.ok();
+                });
             }
         }
     }
+    // Nothing replies to a held request once the connection is gone.
+    stalled.clear();
 }
 
-fn push(ledger: &Arc<Mutex<Vec<Ledger>>>, row: Ledger) {
-    ledger
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .push(row);
-}
-
-fn response_frame(channel: u16, epoch: u32, corr: u64, body: Value) -> Frame {
+/// A `Response` frame carrying `body` as `{"result": body}`.
+fn response_on_channel(channel: u16, epoch: u32, corr: u64, body: Value) -> Frame {
     Frame::build(
         FrameType::Response,
         Flags::new(false, Priority::Interactive, false),
@@ -685,6 +684,13 @@ fn response_frame(channel: u16, epoch: u32, corr: u64, body: Value) -> Frame {
         serde_json::to_vec(&json!({ "result": body })).expect("json"),
     )
     .expect("frame")
+}
+
+fn push(ledger: &Arc<Mutex<Vec<Ledger>>>, row: Ledger) {
+    ledger
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .push(row);
 }
 
 fn error_frame(corr: u64, code: &str, message: &str) -> Frame {

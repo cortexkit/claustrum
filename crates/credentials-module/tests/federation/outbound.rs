@@ -285,3 +285,192 @@ fn the_only_way_to_call_the_peer_takes_a_deadline() {
     }
     takes_deadline(|client, key, call, deadline| Box::pin(client.call(key, call, deadline)));
 }
+
+// ---------------------------------------------------------------------------------
+// Multiplexing: one connection carries many calls, and one slow or failing call must
+// not decide another call's outcome.
+// ---------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_slow_admin_call_does_not_delay_a_consumer_call_on_the_same_connection() {
+    let root = crate::support::temp_root("outbound-mux-admin");
+    let vaults = TwoVaults::new(&root).await;
+    let home = vaults.home_member().to_string();
+    // An admin-class call the stand-in holds for 5 s, well past a consumer's budget.
+    vaults.callosum.answer(
+        "claustrum",
+        "callosum.peer_keys_read",
+        Reply::Delayed(
+            Duration::from_secs(5),
+            Box::new(Reply::Ok(json!({ "keys": [] }))),
+        ),
+    );
+    vaults.callosum.answer(
+        "claustrum",
+        "credential.get_scoped",
+        Reply::Ok(json!({ "payload": "tok" })),
+    );
+
+    let admin = {
+        let client = vaults.b.outbound.clone();
+        let home = home.clone();
+        tokio::spawn(async move {
+            call(
+                &client,
+                &home,
+                json!({ "method": "callosum.peer_keys_read", "params": {} }),
+                fed::ADMIN_OP_BUDGET,
+            )
+            .await
+        })
+    };
+    // Let the admin call reach the stand-in and start holding the connection's reply.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let started = Instant::now();
+    call(
+        &vaults.b.outbound,
+        &home,
+        consumer_get(),
+        fed::CONSUMER_FACING_DEADLINE,
+    )
+    .await
+    .expect("a consumer call still succeeds while an admin call is in flight");
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_millis(1_000),
+        "the consumer call waited on the admin call: {elapsed:?}"
+    );
+
+    admin
+        .await
+        .expect("admin task joined")
+        .expect("the admin call eventually gets its own reply");
+}
+
+#[tokio::test]
+async fn two_concurrent_consumer_calls_on_different_routes_both_succeed() {
+    let root = crate::support::temp_root("outbound-mux-two-routes");
+    let vaults = TwoVaults::new(&root).await;
+    let home = vaults.home_member().to_string();
+
+    // Both calls open their own route and answer after a delay that overlaps the other,
+    // so neither can finish before the second one has started.
+    vaults.callosum.answer(
+        "claustrum",
+        "credential.get_scoped",
+        Reply::Delayed(
+            Duration::from_millis(400),
+            Box::new(Reply::Ok(json!({ "payload": "tok" }))),
+        ),
+    );
+
+    let started = Instant::now();
+    let first = call(
+        &vaults.b.outbound,
+        &home,
+        consumer_get(),
+        fed::CONSUMER_FACING_DEADLINE,
+    );
+    let second = call(
+        &vaults.b.outbound,
+        "fed-computer:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        consumer_get(),
+        fed::CONSUMER_FACING_DEADLINE,
+    );
+    let (a, b) = tokio::join!(first, second);
+    a.expect("the first route answers");
+    b.expect("the second route answers");
+    // Two 400 ms replies served one after the other would take 800 ms; overlapping them
+    // keeps the pair inside one reply's delay plus scheduling slack.
+    assert!(
+        started.elapsed() < Duration::from_millis(750),
+        "the two calls serialized: {:?}",
+        started.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn a_call_that_misses_its_deadline_leaves_a_concurrent_call_unharmed() {
+    let root = crate::support::temp_root("outbound-mux-deadline");
+    let vaults = TwoVaults::new(&root).await;
+    let home = vaults.home_member().to_string();
+    // The stand-in holds this method for 2 s: longer than the consumer deadline the
+    // first call is given, short enough that the second call, given a roomy budget,
+    // gets its answer afterwards.
+    vaults.callosum.answer(
+        "claustrum",
+        "credential.get_scoped",
+        Reply::Delayed(
+            Duration::from_secs(2),
+            Box::new(Reply::Ok(json!({ "payload": "tok" }))),
+        ),
+    );
+
+    let impatient = call(
+        &vaults.b.outbound,
+        &home,
+        consumer_get(),
+        Duration::from_millis(300),
+    );
+    // Same route, so the second call joins the same connection and binding.
+    let patient = call(
+        &vaults.b.outbound,
+        &home,
+        consumer_get(),
+        Duration::from_secs(4),
+    );
+    let (impatient, patient) = tokio::join!(impatient, patient);
+    assert!(
+        impatient.is_err(),
+        "the call with a 300 ms budget cannot get a 2 s reply"
+    );
+    patient.expect("the call with a 4 s budget gets its reply on the same connection");
+}
+
+#[tokio::test]
+async fn a_dead_connection_fails_every_pending_call_and_the_next_call_succeeds() {
+    let root = crate::support::temp_root("outbound-mux-dead");
+    let vaults = TwoVaults::new(&root).await;
+    let home = vaults.home_member().to_string();
+    vaults
+        .callosum
+        .answer("claustrum", "credential.get_scoped", Reply::Drop);
+
+    let one = call(
+        &vaults.b.outbound,
+        &home,
+        consumer_get(),
+        fed::CONSUMER_FACING_DEADLINE,
+    );
+    let two = call(
+        &vaults.b.outbound,
+        "fed-computer:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        consumer_get(),
+        fed::CONSUMER_FACING_DEADLINE,
+    );
+    let (one, two) = tokio::join!(one, two);
+    let one = one.expect_err("a dropped connection fails the first call");
+    let two = two.expect_err("a dropped connection fails the second call");
+    assert!(one.is_transient() && two.is_transient());
+    assert!(
+        one.message().contains("closed") || one.message().contains("failed"),
+        "the message says the connection died: {}",
+        one.message()
+    );
+
+    vaults.callosum.forget_answers();
+    vaults.callosum.answer(
+        "claustrum",
+        "credential.get_scoped",
+        Reply::Ok(json!({ "payload": "tok" })),
+    );
+    call(
+        &vaults.b.outbound,
+        &home,
+        consumer_get(),
+        fed::CONSUMER_FACING_DEADLINE,
+    )
+    .await
+    .expect("the next call dials a fresh connection and succeeds");
+}

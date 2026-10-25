@@ -958,9 +958,15 @@ fn ineligible_bodies() -> Vec<Value> {
     let mut with_oauth = body(API_ID, "oauth", b"access-token");
     with_oauth["oauth"] = json!({ "refresh_token": "refresh" });
     bodies.push(with_oauth);
+    // An allowed kind carrying a refresh adapter or OAuth material. The body format has
+    // no field for either, so these are refused at parse (unknown field); the
+    // eligibility check never sees them.
     let mut with_adapter = body(API_ID, "api_key", b"sk");
     with_adapter["refresh_adapter"] = json!("anthropic");
     bodies.push(with_adapter);
+    let mut api_key_with_oauth = body(API_ID, "api_key", b"sk");
+    api_key_with_oauth["oauth"] = json!({ "access_token": "a", "refresh_token": "r" });
+    bodies.push(api_key_with_oauth);
     bodies.push(body(API_ID, "signing_key", b"pem"));
     bodies.push(body(API_ID, "kem_key", b"pem"));
     let mut cookie = body(API_ID, "cookie", b"session=abc");
@@ -1541,4 +1547,136 @@ async fn a_send_with_a_slow_key_lookup_and_a_stalled_delivery_answers_inside_the
     assert_eq!(refused_code(&sent.reply), "home_unreachable");
     assert!(sent.row_kept);
     assert_eq!(rig.deliveries().len(), 1);
+}
+
+/// An `ApiKey` record (an allowed kind) that carries a refresh adapter or an OAuth
+/// struct can mint or refresh credentials, as a GitHub App or Meta-style record does.
+/// `send` refuses both as `oauth` and writes nothing: no outgoing row, no audit row,
+/// no delivery.
+#[tokio::test]
+async fn send_refuses_an_allowed_kind_carrying_a_refresh_adapter_or_oauth_material() {
+    let rig = Rig::new("transfer-send-allowed-kind-oauth").await;
+    let store = rig.a.store();
+    let mut with_adapter =
+        VaultRecord::new_static(CredentialKind::ApiKey, "operator", b"sk-app".to_vec(), None);
+    with_adapter.refresh_adapter = Some("github_app".to_string());
+    let mut with_oauth = VaultRecord::new_static(
+        CredentialKind::ApiKey,
+        "operator",
+        b"sk-meta".to_vec(),
+        None,
+    );
+    with_oauth.oauth = Some(credentials_core::oauth::OAuthCredential {
+        access_token: "access".to_string().into(),
+        refresh_token: "refresh".to_string().into(),
+        expires_at_ms: None,
+        token_url: "https://token.test/oauth".into(),
+        client_id: None,
+        client_secret: None,
+        scopes: vec![],
+    });
+    store
+        .create("apikey:github-app", &with_adapter)
+        .expect("store the adapter record");
+    store
+        .create("apikey:meta", &with_oauth)
+        .expect("store the oauth record");
+    assert!(store
+        .get("apikey:github-app")
+        .unwrap()
+        .refresh_adapter
+        .is_some());
+    assert!(store.get("apikey:meta").unwrap().oauth.is_some());
+
+    for id in ["apikey:github-app", "apikey:meta"] {
+        let refused = rig.a.transfers.send(id, &rig.b.member).await.unwrap_err();
+        assert_eq!(refused.code, "transfer_ineligible", "{id}");
+        assert_eq!(refused.reason, Some("oauth"), "{id}");
+    }
+    assert!(store.list_outgoing_transfers().unwrap().is_empty());
+    assert_eq!(audit_count(store, AuditOp::TransferOut), 0);
+    assert!(rig.deliveries().is_empty());
+    assert!(rig.b.incoming().is_empty());
+}
+
+/// A sender that is not A, as callosum would name it.
+fn filler_sender(index: u32) -> String {
+    format!("fed-computer:{:032x}", 0xf111_0000u64 + u64::from(index))
+}
+
+/// Record `count` pending transfers from `sender` straight through the store: queue
+/// filler for the total cap, from members that never deliver anything themselves.
+fn fill_pending(store: &EncryptedStore, sender: &str, count: u32) {
+    for index in 0..count {
+        let inserted = store
+            .insert_incoming_transfer(&credentials_core::federation::NewIncomingTransfer {
+                sender_member: sender.to_string(),
+                transfer_id: tid(500 + index),
+                credential_id: API_ID.to_string(),
+                kind: "api_key".to_string(),
+                categories: vec![],
+                size_bytes: 1,
+                sealed: credentials_core::federation::SealedTransfer {
+                    enc: format!("{sender}-{index}-enc").into_bytes(),
+                    ciphertext: format!("{sender}-{index}-ct").into_bytes(),
+                    aad: b"{}".to_vec(),
+                },
+                received_at_ms: wall_ms(),
+            })
+            .unwrap();
+        assert_eq!(
+            inserted,
+            credentials_core::federation::IncomingInsert::Inserted
+        );
+    }
+}
+
+/// The total cap: with 64 pending across other senders, a delivery from A (which has
+/// none pending) is `transfer_queue_full` with no row.
+#[tokio::test]
+async fn sixty_four_pending_in_total_fill_the_queue_for_every_sender() {
+    let rig = Rig::new("transfer-total-cap").await;
+    for sender in 0..8 {
+        fill_pending(rig.b.store(), &filler_sender(sender), 8);
+    }
+    assert_eq!(rig.b.pending(), 64);
+    let params = rig
+        .a
+        .hand_seal(&rig.b, &tid(1), API_ID, &body(API_ID, "api_key", b"sk"));
+    assert_eq!(
+        rig.serve_b(&rig.a.member, &params).await,
+        "transfer_queue_full"
+    );
+    assert_eq!(rig.b.pending(), 64);
+    assert!(rig
+        .b
+        .store()
+        .incoming_transfer(&rig.a.member, &tid(1))
+        .unwrap()
+        .is_none());
+}
+
+/// Starting from 63 pending in total, two concurrent distinct deliveries from two
+/// senders add exactly one row.
+#[tokio::test]
+async fn from_sixty_three_in_total_two_concurrent_deliveries_add_one_row() {
+    let rig = Rig::new("transfer-total-cap-race").await;
+    let (_c_fixture, c) = rig.vault_c();
+    for sender in 0..7 {
+        fill_pending(rig.b.store(), &filler_sender(sender), 8);
+    }
+    fill_pending(rig.b.store(), &filler_sender(7), 7);
+    assert_eq!(rig.b.pending(), 63);
+    let from_a = rig
+        .a
+        .hand_seal(&rig.b, &tid(1), API_ID, &body(API_ID, "api_key", b"from-a"));
+    let from_c = rig.c_seal(&c, &tid(2), "apikey:groq", b"from-c");
+    let (one, two) = tokio::join!(
+        rig.serve_b(&rig.a.member, &from_a),
+        rig.serve_b(&c.member, &from_c)
+    );
+    let mut answers = vec![one, two];
+    answers.sort();
+    assert_eq!(answers, vec!["pending", "transfer_queue_full"]);
+    assert_eq!(rig.b.pending(), 64);
 }

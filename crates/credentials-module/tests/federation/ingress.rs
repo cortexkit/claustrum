@@ -562,7 +562,9 @@ async fn the_allowlist_bearer_params_and_strict_parsing() {
     rig.add_login(TOKEN_ID, "llm-provider");
     rig.grant_exact(TOKEN_ID);
     let aad = rig.aad(TOKEN_ID);
-    // Any op outside the allowlist, and the transfer op this build does not serve.
+    // Any op outside the allowlist answers not_found. So does a transfer delivery from
+    // this member: it holds no transfer_deliver grant, and the grant check runs before
+    // the params are read.
     for method in [
         "credential.get",
         "credential.get_scoped",

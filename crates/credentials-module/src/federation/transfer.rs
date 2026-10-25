@@ -1422,3 +1422,104 @@ impl Transfers {
             })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The kinds a transfer may carry, each without OAuth material.
+    const ALLOWED: [CredentialKind; 4] = [
+        CredentialKind::ApiKey,
+        CredentialKind::Dsn,
+        CredentialKind::Cookie,
+        CredentialKind::Opaque,
+    ];
+
+    #[test]
+    fn every_allowed_kind_passes_without_oauth_material() {
+        for kind in ALLOWED {
+            assert_eq!(
+                transfer_eligibility(kind, false, false, None),
+                Ok(()),
+                "{kind:?}"
+            );
+        }
+    }
+
+    /// The kind alone never admits a record: an allowed kind carrying an OAuth struct
+    /// or a refresh adapter can mint or refresh credentials, so it must never leave.
+    #[test]
+    fn an_allowed_kind_with_an_oauth_struct_or_a_refresh_adapter_is_refused() {
+        for kind in ALLOWED {
+            assert_eq!(
+                transfer_eligibility(kind, true, false, None),
+                Err(Ineligible::Oauth),
+                "{kind:?} with an OAuth struct"
+            );
+            assert_eq!(
+                transfer_eligibility(kind, false, true, None),
+                Err(Ineligible::Oauth),
+                "{kind:?} with a refresh adapter"
+            );
+            assert_eq!(
+                transfer_eligibility(kind, true, true, None),
+                Err(Ineligible::Oauth),
+                "{kind:?} with both"
+            );
+        }
+    }
+
+    #[test]
+    fn logins_vault_held_keys_and_expiring_cookies_are_refused() {
+        assert_eq!(
+            transfer_eligibility(CredentialKind::Oauth, false, false, None),
+            Err(Ineligible::Oauth)
+        );
+        assert_eq!(
+            transfer_eligibility(CredentialKind::SigningKey, false, false, None),
+            Err(Ineligible::SigningKey)
+        );
+        assert_eq!(
+            transfer_eligibility(CredentialKind::KemKey, false, false, None),
+            Err(Ineligible::KemKey)
+        );
+        assert_eq!(
+            transfer_eligibility(CredentialKind::Cookie, false, false, Some(1)),
+            Err(Ineligible::CookieExpiry)
+        );
+        // An expiry on another allowed kind is fine.
+        assert_eq!(
+            transfer_eligibility(CredentialKind::ApiKey, false, false, Some(1)),
+            Ok(())
+        );
+    }
+
+    /// The body has no field for OAuth material or a refresh adapter: a body that
+    /// carries either is refused at parse, before eligibility is even asked.
+    #[test]
+    fn the_body_format_cannot_carry_oauth_material_or_an_adapter() {
+        let base = json!({
+            "version": 1,
+            "credential_id": "apikey:openai",
+            "kind": "api_key",
+            "payload": "c2s=",
+            "categories": [],
+            "identity": {},
+            "provider_ids": [],
+            "detected_plan": null,
+            "expires_at_ms": null,
+        });
+        assert!(serde_json::from_value::<TransferBody>(base.clone()).is_ok());
+        for (field, value) in [
+            ("refresh_adapter", json!("github_app")),
+            ("oauth", json!({ "refresh_token": "r" })),
+        ] {
+            let mut body = base.clone();
+            body[field] = value;
+            assert!(
+                serde_json::from_value::<TransferBody>(body).is_err(),
+                "{field} must be refused"
+            );
+        }
+    }
+}

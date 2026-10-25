@@ -22,3 +22,6 @@ mod ingress;
 
 #[path = "federation/remote_read.rs"]
 mod remote_read;
+
+#[path = "federation/transfer.rs"]
+mod transfer;

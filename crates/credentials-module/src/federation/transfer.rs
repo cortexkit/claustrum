@@ -754,11 +754,20 @@ async fn deliver_inner(
         }
         Err(refusal) => return Err(refusal.into()),
     };
-    if store
+    if let Some(existing) = store
         .incoming_transfer(member, &aad.transfer_id)
         .map_err(|_| TransferRefusal::store_error())?
-        .is_some()
     {
+        // The dedup above already answered these bytes if they were recorded, so an
+        // entry here is another envelope under the same id: a conflict. The one
+        // exception is a concurrent identical delivery that recorded these same bytes
+        // after this one's dedup lookup; that entry is still pending, and this
+        // delivery answers it as the dedup would have.
+        if existing.body_hash == sealed.body_hash()
+            && existing.state == IncomingTransferState::Pending
+        {
+            return Ok(existing.state);
+        }
         return Err(TransferRefusal::conflict().into());
     }
 

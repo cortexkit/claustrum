@@ -702,9 +702,18 @@ impl HomeVault {
                     OP_REPORT_AUTH_FAILURE => {
                         self.report_auth_failure(member, params, budget).await
                     }
-                    // Sealed transfers are not served by this build yet: the op is on
-                    // the allowlist so a delivery is refused like an unknown id, never
-                    // dispatched anywhere else.
+                    // A sealed transfer delivery runs its own order of checks, under
+                    // the same member mapping and the same budget as the other ops.
+                    OP_TRANSFER_DELIVER => super::transfer::deliver(
+                        self.engine.store(),
+                        self.callosum.get(),
+                        member,
+                        params,
+                        super::transfer::wall_now_ms(),
+                        budget,
+                    )
+                    .await
+                    .map_err(Refusal::InvalidParams),
                     _ => Err(Refusal::NotFound),
                 }
             };

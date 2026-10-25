@@ -1322,10 +1322,7 @@ impl RemoteReader {
                 .filter(|grant| match grant.selector_kind {
                     SelectorKind::Exact => grant.selector == record.credential_id,
                     SelectorKind::Audience => false,
-                    SelectorKind::Category => entry
-                        .categories
-                        .iter()
-                        .any(|category| *category == grant.selector),
+                    SelectorKind::Category => entry.categories.contains(&grant.selector),
                 })
                 .map(|grant| grant.operation)
                 .collect();

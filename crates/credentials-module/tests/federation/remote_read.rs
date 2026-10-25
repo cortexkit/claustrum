@@ -9,8 +9,8 @@
 //! a frame-level error or a stall). So every fetch crosses a real route, is sealed by
 //! one vault and opened by the other.
 //!
-//! Setup uses the store APIs directly: the `transfer init`, `member grant` and
-//! `remote add` admin verbs that will wrap them are built in other slices.
+//! Setup uses the store APIs directly; these tests do not exercise the admin verbs
+//! that will call them (`transfer init`, `member grant` and `remote add`).
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -1236,6 +1236,14 @@ fn assert_effect(rig: &Rig, id: &str, state: &str, last_error: Value, why: &str)
     assert_eq!(row_state, state, "{why}: list state");
 }
 
+/// One consumer-table row: the home's answer, B's expected `(code, class, remedy)`,
+/// and `Some((state, error))` when the row sets a state.
+type TableRow = (
+    Step,
+    (&'static str, &'static str, Option<String>),
+    Option<(&'static str, &'static str)>,
+);
+
 #[tokio::test]
 async fn every_consumer_table_row_answers_and_stores_its_effect() {
     let rig = Rig::new("remote-table").await;
@@ -1249,7 +1257,7 @@ async fn every_consumer_table_row_answers_and_stores_its_effect() {
     let error = |code: &str, class: &str| json!({ "error": { "code": code, "class": class } });
 
     // (step, (code, class, remedy), Some((state, error)) when the row sets a state)
-    let rows: Vec<(Step, (&str, &str, Option<String>), Option<(&str, &str)>)> = vec![
+    let rows: Vec<TableRow> = vec![
         (
             Step::Body(error("corrupt", "permanent")),
             ("corrupt", "permanent", None),

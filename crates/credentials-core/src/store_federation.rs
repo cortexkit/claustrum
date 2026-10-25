@@ -524,6 +524,76 @@ impl EncryptedStore {
         }
     }
 
+    /// Record that this vault, as home, is about to release a token for `credential_id`
+    /// to `member`, writing one `remote_issue` audit row per (member, credential, home
+    /// `record_version`, material).
+    ///
+    /// `material_digest` is the SHA-256 of the stored encrypted bytes the serving read
+    /// decrypted (`GetWithRefreshStatus::stored_digest_hex`). The transaction re-reads
+    /// the row and requires both the version and the digest of its encrypted bytes to
+    /// still match. If the record was deleted, re-created, rewritten or refreshed after
+    /// the serving read, nothing is written and [`StoreOpError::CasMismatch`] is
+    /// returned: the caller must not release the token it read, because the audit row
+    /// would name material that is no longer the stored one.
+    ///
+    /// The seen row and the audit row commit together, so the audit row is written once
+    /// per material, across restarts and retried fetches: returns `true` when this call
+    /// wrote them, `false` when the tuple was already recorded. The digest is part of
+    /// the key because a delete and re-create restarts `record_version` at 1, and the
+    /// new material must be audited although its version number repeats.
+    pub fn record_remote_issue_audited(
+        &self,
+        member_id: &str,
+        credential_id: &str,
+        record_version: u64,
+        material_digest: &str,
+    ) -> Result<bool, StoreOpError> {
+        check_member_id(member_id)?;
+        let version = i64::try_from(record_version)
+            .map_err(|_| StoreOpError::Encode("record_version out of range".into()))?;
+        let payload_hash = crate::federation::remote_issue_payload_hash(credential_id, record_version);
+        let audit_key = self.audit_key.clone();
+        let now = now_ms();
+        let recorded = self.fenced_write(|tx| {
+            let current = tx
+                .query_row(
+                    "SELECT record_version, envelope FROM credentials WHERE credential_id = ?1",
+                    [credential_id],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)),
+                )
+                .optional()?;
+            let unchanged = current.is_some_and(|(stored_version, envelope)| {
+                stored_version == version && sha256_hex_of_bytes(&envelope) == material_digest
+            });
+            if !unchanged {
+                return Ok(None);
+            }
+            let inserted = tx.execute(
+                "INSERT INTO remote_issue_seen \
+                 (member_id, credential_id, record_version, material_digest, seen_at_ms) \
+                 VALUES (?1, ?2, ?3, ?4, ?5) \
+                 ON CONFLICT(member_id, credential_id, record_version, material_digest) DO NOTHING",
+                rusqlite::params![member_id, credential_id, version, material_digest, now],
+            )?;
+            if inserted == 0 {
+                return Ok(Some(false));
+            }
+            append_audit_tx(
+                tx,
+                &audit_key,
+                &AuditRecord {
+                    op: AuditOp::RemoteIssue,
+                    credential_id: Some(credential_id.to_string()),
+                    payload_hash: Some(payload_hash.clone()),
+                    actor: member_id.to_string(),
+                    alarm: None,
+                },
+            )?;
+            Ok(Some(true))
+        })?;
+        recorded.ok_or(StoreOpError::CasMismatch)
+    }
+
     /// Every member grant, ordered by member, operation, selector kind and selector.
     pub fn list_member_grants(&self) -> Result<Vec<MemberGrant>, StoreOpError> {
         self.store

@@ -1026,3 +1026,146 @@ fn first_use_names_a_member_principal_by_its_member_id() {
         .unwrap();
     assert_eq!(principal, ("member".to_string(), OTHER.to_string()));
 }
+
+// ---------------------------------------------------------------------------------
+// remote_issue: one audit row per (member, credential, version, material)
+// ---------------------------------------------------------------------------------
+
+const ISSUED_ID: &str = "oauth:anthropic:issued";
+
+fn seen_rows(store: &EncryptedStore, id: &str) -> i64 {
+    store
+        .with_raw_conn(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM remote_issue_seen WHERE credential_id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+        })
+        .unwrap()
+}
+
+/// The version and stored-bytes digest a serving read would hand the issuer.
+fn served(store: &EncryptedStore, id: &str) -> (u64, String) {
+    let read = store.get_with_stale_pending_and_digest(id).expect("read");
+    (read.record.record_version, read.stored_digest_hex)
+}
+
+#[test]
+fn a_remote_issue_whose_version_or_material_changed_writes_nothing() {
+    let (_root, store) = rig("federation-issue-mismatch", 213);
+    store.create(ISSUED_ID, &oauth_record()).expect("create");
+    let (version, digest) = served(&store, ISSUED_ID);
+
+    // The version moved on since the serving read.
+    let wrong_version = store.record_remote_issue_audited(OTHER, ISSUED_ID, version + 1, &digest);
+    assert!(
+        matches!(wrong_version, Err(StoreOpError::CasMismatch)),
+        "a version mismatch releases nothing: {wrong_version:?}"
+    );
+    // Same version number, different stored bytes: the shape of a delete and re-create.
+    let other_digest = "0".repeat(64);
+    let wrong_material =
+        store.record_remote_issue_audited(OTHER, ISSUED_ID, version, &other_digest);
+    assert!(
+        matches!(wrong_material, Err(StoreOpError::CasMismatch)),
+        "a digest mismatch releases nothing: {wrong_material:?}"
+    );
+    // A record that no longer exists.
+    let gone = store.record_remote_issue_audited(OTHER, "oauth:anthropic:gone", 1, &digest);
+    assert!(matches!(gone, Err(StoreOpError::CasMismatch)), "{gone:?}");
+
+    assert_eq!(seen_rows(&store, ISSUED_ID), 0, "no seen row on a mismatch");
+    assert!(
+        audit_rows(&store, AuditOp::RemoteIssue).is_empty(),
+        "no audit row on a mismatch"
+    );
+
+    // The control: the matching tuple does record, so the refusals above were the
+    // check and not a broken writer.
+    assert!(store
+        .record_remote_issue_audited(OTHER, ISSUED_ID, version, &digest)
+        .unwrap());
+    assert_eq!(seen_rows(&store, ISSUED_ID), 1);
+}
+
+#[test]
+fn a_remote_issue_is_audited_once_per_material_across_a_reopen() {
+    let (root, store) = rig("federation-issue-once", 214);
+    store.create(ISSUED_ID, &oauth_record()).expect("create");
+    let (version, digest) = served(&store, ISSUED_ID);
+
+    assert!(store
+        .record_remote_issue_audited(OTHER, ISSUED_ID, version, &digest)
+        .unwrap());
+    assert!(
+        !store
+            .record_remote_issue_audited(OTHER, ISSUED_ID, version, &digest)
+            .unwrap(),
+        "a repeat of the same tuple writes nothing"
+    );
+    let rows = audit_rows(&store, AuditOp::RemoteIssue);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].credential_id.as_deref(), Some(ISSUED_ID));
+    assert_eq!(rows[0].actor, OTHER);
+    assert_eq!(
+        rows[0].payload_hash.as_deref(),
+        Some(crate::federation::remote_issue_payload_hash(ISSUED_ID, version).as_str())
+    );
+    // Another member is a separate tuple.
+    assert!(store
+        .record_remote_issue_audited(HOME, ISSUED_ID, version, &digest)
+        .unwrap());
+    drop(store);
+
+    let descriptor = cortexkit_store::StorageDescriptor {
+        module_id: "claustrum".into(),
+        storage_namespace: "taxonomy-federation-issue-once".into(),
+        isolation: cortexkit_store::Isolation::Module,
+        backend: cortexkit_store::StorageBackend::Sqlite {
+            path: root.join("store.db").to_string_lossy().into_owned(),
+        },
+    };
+    let sqlite = cortexkit_store::open_sqlite(&descriptor).expect("reopen sqlite");
+    let store =
+        EncryptedStore::open(sqlite, MasterKey::from_bytes([214; 32])).expect("reopen store");
+    assert!(
+        !store
+            .record_remote_issue_audited(OTHER, ISSUED_ID, version, &digest)
+            .unwrap(),
+        "a restart appends nothing"
+    );
+    assert_eq!(audit_rows(&store, AuditOp::RemoteIssue).len(), 2);
+    assert!(store.verify_audit_chain().is_ok());
+}
+
+#[test]
+fn removing_a_credential_deletes_its_remote_issue_seen_rows() {
+    let (_root, store) = rig("federation-issue-remove", 215);
+    store.create(ISSUED_ID, &oauth_record()).expect("create");
+    store.create("oauth:anthropic:kept", &oauth_record()).expect("create");
+    for id in [ISSUED_ID, "oauth:anthropic:kept"] {
+        let (version, digest) = served(&store, id);
+        store
+            .record_remote_issue_audited(OTHER, id, version, &digest)
+            .unwrap();
+    }
+    assert_eq!(seen_rows(&store, ISSUED_ID), 1);
+
+    store
+        .remove_audited(ISSUED_ID, AuditCtx::admin(AuditOp::Remove))
+        .expect("remove");
+    assert_eq!(seen_rows(&store, ISSUED_ID), 0, "the removed id's rows go");
+    assert_eq!(
+        seen_rows(&store, "oauth:anthropic:kept"),
+        1,
+        "another credential's rows stay"
+    );
+
+    // A re-created record restarts at version 1 and is audited afresh.
+    store.create(ISSUED_ID, &oauth_record()).expect("re-create");
+    let (version, digest) = served(&store, ISSUED_ID);
+    assert!(store
+        .record_remote_issue_audited(OTHER, ISSUED_ID, version, &digest)
+        .unwrap());
+}

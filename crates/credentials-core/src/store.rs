@@ -5250,6 +5250,17 @@ impl EncryptedStore {
                     "DELETE FROM auth_events WHERE credential_id = ?1",
                     rusqlite::params![credential_id],
                 )?;
+                // The record of which materials were issued to members goes with the
+                // material. A later credential under this id restarts at version 1, and
+                // its first issue to a member must be audited, not matched against the
+                // removed record's rows. The `remote_issue` audit rows themselves stay
+                // in the chain. Migration 23 added the table.
+                if read_schema_version(tx)? >= 23 {
+                    tx.execute(
+                        "DELETE FROM remote_issue_seen WHERE credential_id = ?1",
+                        rusqlite::params![credential_id],
+                    )?;
+                }
                 append_audit_tx(
                     tx,
                     &audit_key,

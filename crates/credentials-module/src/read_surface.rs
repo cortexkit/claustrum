@@ -1176,6 +1176,56 @@ fn meets_min_ttl(record: &credentials_core::record::VaultRecord, min_ttl_ms: i64
         .unwrap_or(true)
 }
 
+/// How a scoped call uses the credential it names, as far as the transfer-key fence
+/// cares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransferKeyUse {
+    /// Every op except the announce.
+    Ordinary,
+    /// `credential.public_key`: the read callosum makes to announce the key's public
+    /// half.
+    PublicKeyAnnounce,
+}
+
+/// How a call reached a credential id, for the transfer-key fence.
+#[derive(Debug, Clone, Copy)]
+enum TransferKeyAccess<'a> {
+    /// Through a capability handle.
+    Handle,
+    /// Through a scoped op, as the resolved principal `kind:id`.
+    Scoped {
+        kind: &'a str,
+        id: &'a str,
+        usage: TransferKeyUse,
+    },
+}
+
+/// THE TRANSFER-KEY FENCE: true when `credential_id` is a vault transfer key
+/// (`kem:vault-transfer:*`) and this access may not reach it.
+///
+/// The transfer key seals and opens every federation message, so a caller that could
+/// `open` or `seal` with it under its own `info` could forge or read them, and one that
+/// could report it failed would latch a non-refreshable `kem:` id `needs_reauth`. The
+/// store already refuses every grant on it except callosum's announce `read`, and every
+/// handle; this fence is the read surface's half, for a grant or handle that exists
+/// anyway (a handle minted before the fence, a category grant over a category the key
+/// was later put in). Exactly one access passes: `credential.public_key` by
+/// `reserved:callosum`. Everything else answers the uniform `not_found` or leaves the
+/// key out of a list.
+fn transfer_key_fenced(credential_id: &str, access: TransferKeyAccess<'_>) -> bool {
+    if !credentials_core::federation::is_vault_transfer_id(credential_id) {
+        return false;
+    }
+    !matches!(
+        access,
+        TransferKeyAccess::Scoped {
+            kind: "reserved",
+            id: "callosum",
+            usage: TransferKeyUse::PublicKeyAnnounce,
+        }
+    )
+}
+
 fn classify_scoped_coverage(coverage: ScopedCoverage) -> Option<ScopedReadRefusal> {
     match coverage {
         ScopedCoverage {
@@ -1320,6 +1370,7 @@ impl ReadSurface {
                 params.enrollment_token.as_deref(),
                 authorization.into(),
                 GrantOperation::Sign,
+                TransferKeyUse::Ordinary,
             )
             .await?;
 
@@ -1453,6 +1504,7 @@ impl ReadSurface {
                 params.enrollment_token.as_deref(),
                 KeyAddress::Scoped(&params.credential_id),
                 GrantOperation::Open,
+                TransferKeyUse::Ordinary,
             )
             .await
         {
@@ -1707,6 +1759,7 @@ impl ReadSurface {
                 params.enrollment_token.as_deref(),
                 authorization.into(),
                 GrantOperation::Read,
+                TransferKeyUse::PublicKeyAnnounce,
             )
             .await?;
 
@@ -1775,6 +1828,11 @@ impl ReadSurface {
         self.check_limiter(connection_id, &params.handle).await;
 
         let credential_id = match self.engine.store().resolve_handle(&params.handle) {
+            // A handle to the transfer key minted before the fence existed is refused
+            // exactly as an unknown handle.
+            Ok(id) if transfer_key_fenced(&id, TransferKeyAccess::Handle) => {
+                return err(ReadError::NotFound)
+            }
             Ok(id) => id,
             // Unknown or revoked handle → uniform not_found.
             Err(StoreOpError::NotFound) => return err(ReadError::NotFound),
@@ -2068,11 +2126,15 @@ impl ReadSurface {
         enrollment_token: Option<&str>,
         address: KeyAddress<'_>,
         operation: GrantOperation,
+        usage: TransferKeyUse,
     ) -> Result<ResolvedKeyAddress, ReadError> {
         match address {
             KeyAddress::Handle(handle) => {
                 self.check_limiter(connection_id, handle).await;
                 match self.engine.store().resolve_handle(handle) {
+                    Ok(id) if transfer_key_fenced(&id, TransferKeyAccess::Handle) => {
+                        Err(ReadError::NotFound)
+                    }
                     Ok(id) => Ok(ResolvedKeyAddress {
                         credential_id: id,
                         principal: None,
@@ -2082,11 +2144,12 @@ impl ReadSurface {
                 }
             }
             KeyAddress::Scoped(credential_id) => {
-                let resolved_principal = self.authorize_scoped_as(
+                let resolved_principal = self.authorize_scoped_for(
                     principal,
                     enrollment_token,
                     credential_id,
                     operation,
+                    usage,
                 )?;
                 Ok(ResolvedKeyAddress {
                     credential_id: credential_id.to_string(),
@@ -2154,6 +2217,26 @@ impl ReadSurface {
         credential_id: &str,
         operation: GrantOperation,
     ) -> Result<(&'static str, String), ReadError> {
+        self.authorize_scoped_for(
+            principal,
+            enrollment_token,
+            credential_id,
+            operation,
+            TransferKeyUse::Ordinary,
+        )
+    }
+
+    /// [`Self::authorize_scoped_as`] for a caller that names how it uses the key, which
+    /// only matters to the transfer-key fence: `credential.public_key` is the one op
+    /// that may reach the vault transfer key, and only for callosum's announce.
+    fn authorize_scoped_for(
+        &self,
+        principal: Option<&Principal>,
+        enrollment_token: Option<&str>,
+        credential_id: &str,
+        operation: GrantOperation,
+        usage: TransferKeyUse,
+    ) -> Result<(&'static str, String), ReadError> {
         let Some((kind, id)) = self.scoped_principal(principal, enrollment_token) else {
             self.record_scoped_refusal(
                 principal,
@@ -2166,6 +2249,21 @@ impl ReadSurface {
             );
             return Err(ReadError::NotFound);
         };
+        // The fence runs on the RESOLVED principal, before any grant is consulted, so
+        // a grant row that reaches the transfer key (exact, or through a category the
+        // key was put in) authorizes nothing, and an enrollment token cannot pass as
+        // callosum.
+        if transfer_key_fenced(
+            credential_id,
+            TransferKeyAccess::Scoped {
+                kind,
+                id: &id,
+                usage,
+            },
+        ) {
+            self.record_scoped_refusal(principal, credential_id, ScopedReadRefusal::NoGrant);
+            return Err(ReadError::NotFound);
+        }
         let coverage =
             self.engine
                 .store()
@@ -2276,11 +2374,23 @@ impl ReadSurface {
         // `list_scoped`, and the two resolve their principal through the same helper --
         // so reading either one in isolation shows correct code. Found by the consumer
         // that would have hit it, before they wrote a line against it.
-        let snapshot = self
+        let mut snapshot = self
             .engine
             .store()
             .list_scoped_snapshot(principal_kind, &principal_id)
             .map_err(|_| ReadError::StoreError)?;
+        // A grant that reaches the transfer key (through a category it was put in)
+        // lists nothing for it.
+        snapshot.rows.retain(|row| {
+            !transfer_key_fenced(
+                &row.id,
+                TransferKeyAccess::Scoped {
+                    kind: principal_kind,
+                    id: &principal_id,
+                    usage: TransferKeyUse::Ordinary,
+                },
+            )
+        });
         let first_use_operations = list_scoped_first_use_operations(&snapshot.rows);
         let result = project_list_scoped(snapshot);
         // RECORD THE SUCCESS, because this op's SILENCE WAS INDISTINGUISHABLE FROM ITS
@@ -2321,11 +2431,22 @@ impl ReadSurface {
         else {
             return Err(ReadError::NotFound);
         };
-        let (snapshot, mut keys) = self
+        let (mut snapshot, mut keys) = self
             .engine
             .store()
             .watch_scoped_snapshot(kind, &id)
             .map_err(|_| ReadError::StoreError)?;
+        // The same fence as `list_scoped`, so a watch neither shows the transfer key nor
+        // fires when only it changes.
+        let access = TransferKeyAccess::Scoped {
+            kind,
+            id: &id,
+            usage: TransferKeyUse::Ordinary,
+        };
+        snapshot
+            .rows
+            .retain(|row| !transfer_key_fenced(&row.id, access));
+        keys.retain(|(credential_id, _)| !transfer_key_fenced(credential_id, access));
         let view = project_list_scoped(snapshot).view;
         keys.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
         let mut input = b"claustrum.watch_scoped.keys.v1".to_vec();
@@ -2485,6 +2606,9 @@ impl ReadSurface {
                 // anomaly.
                 self.check_limiter(connection_id, handle).await;
                 match self.engine.store().resolve_handle(handle) {
+                    Ok(id) if transfer_key_fenced(&id, TransferKeyAccess::Handle) => {
+                        return Err(ReadError::NotFound)
+                    }
                     Ok(id) => (id, false),
                     Err(StoreOpError::NotFound) => return Err(ReadError::NotFound),
                     Err(e) => return Err(map_store_error(&e)),
@@ -2759,7 +2883,13 @@ impl ReadSurface {
             (Some(handle), None) => {
                 // Rate-limit the handle probe before resolution (enumeration-sweep guard).
                 self.check_limiter(connection_id, handle).await;
-                let resolved = self.engine.store().resolve_handle(handle);
+                let resolved = self.engine.store().resolve_handle(handle).and_then(|id| {
+                    if transfer_key_fenced(&id, TransferKeyAccess::Handle) {
+                        Err(StoreOpError::NotFound)
+                    } else {
+                        Ok(id)
+                    }
+                });
                 let credential_id = match resolved {
                     Ok(id) => id,
                     Err(error) => {

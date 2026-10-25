@@ -368,6 +368,18 @@ where
     let (surface, admin) = build_surface(&ack, &config.module_id).await?;
     let surface = Arc::new(surface);
     let admin = Arc::new(admin);
+    // The outbound client: this vault's own connection to subc for calls it makes as a
+    // consumer (callosum's pairing and key lookups, a peer vault). Built once, from the
+    // module id and the launch nonce `ModuleConfig::from_env` already read; the nonce is
+    // never read again. It connects lazily on its first call, so building it here costs
+    // nothing and a vault that never federates never dials.
+    admin
+        .home()
+        .attach_outbound(federation::OutboundClient::for_daemon(
+            &config.connection_file_path,
+            &config.module_id,
+            config.launch_nonce.as_deref(),
+        ));
     // Wire v2: the module-side channel → epoch map (spec §3.3 layer 2).
     let routes = Arc::new(RouteEpochs::default());
 
@@ -438,11 +450,14 @@ where
     // Do NOT add a redundant liveness probe here on the strength of the paragraph
     // above; the supervisor's already fires and a second one would only add a way to
     // disagree. What WOULD justify revisiting: this daemon acquiring an outbound
-    // request that awaits a reply. Today it is purely reactive after HELLO, which is
-    // why the reused-dead-connection class cannot occur here at all -- there is no
-    // requester object for the defect to live on. That immunity is a property of the
-    // current role shape and ends silently the day the role changes, with nothing in
-    // the diff looking like a connection-lifecycle edit.
+    // request that awaits a reply ON THIS CONNECTION. It now makes outbound calls for
+    // federation, but over its own connection (`federation::OutboundClient`), which
+    // carries its own deadlines and drops a dead link so the next call redials. THIS
+    // connection is still purely reactive after HELLO, which is why the
+    // reused-dead-connection class cannot occur on it -- there is no requester object
+    // here for the defect to live on. That immunity is a property of the current role
+    // shape and ends silently the day an outbound wait is moved onto this connection,
+    // with nothing in the diff looking like a connection-lifecycle edit.
     loop {
         let Some(frame) = read_frame(read_half)
             .await
@@ -1017,20 +1032,26 @@ async fn handle_frame(
             let surface = Arc::clone(surface);
             let admin = Arc::clone(admin);
             // The epoch check above accepted this frame under the current bind. Snapshot
-            // that bind's principal before spawning so a later route reuse cannot lend
+            // who that bind speaks for before spawning so a later route reuse cannot lend
             // its new principal to an already-accepted request.
-            let principal = admin.principal(frame.header.channel);
+            let caller = admin.route_caller(frame.header.channel);
             // Register subscriptions before reading the next ingress frame, so a
             // following CANCEL or route close cannot race ahead of registration.
             // Opening only spawns the SQLite work; it never waits on the reactor.
-            if serde_json::from_slice::<ReadRequest>(&frame.body)
-                .is_ok_and(|request| request.method == OP_WATCH_SCOPED)
-            {
-                handle_read_request(frame, &route, &surface, &admin, principal).await?;
-                return Ok(true);
+            if let federation::RouteCaller::Principal(principal) = &caller {
+                if serde_json::from_slice::<ReadRequest>(&frame.body)
+                    .is_ok_and(|request| request.method == OP_WATCH_SCOPED)
+                {
+                    let principal = principal.clone();
+                    handle_read_request(frame, &route, &surface, &admin, principal).await?;
+                    return Ok(true);
+                }
             }
+            // Everything else runs on its own task, including a federation op, whose
+            // callosum lookups and refresh wait on the outbound client: no outbound
+            // wait ever runs on this frame loop or the control lane.
             tokio::spawn(async move {
-                let _ = handle_read_request(frame, &route, &surface, &admin, principal).await;
+                let _ = dispatch_route_request(frame, &route, &surface, &admin, caller).await;
             });
             Ok(true)
         }
@@ -1261,6 +1282,101 @@ struct AdminOpParams {
     /// the outer envelope can perturb the authenticated bytes.
     op_body: String,
     tag_hex: String,
+}
+
+/// Serve one data-plane request according to who its bind speaks for.
+///
+/// The one dispatch hook for federation: a federation channel reaches only the three
+/// federation ops (`federation::HomeVault::serve` enforces the closed allowlist), a
+/// refused channel answers every op with the uniform `not_found`, and every other
+/// channel is the read surface as before, where the federation ops answer the uniform
+/// `not_found` whatever grants the principal holds.
+async fn dispatch_route_request(
+    frame: Frame,
+    writer: &mpsc::Sender<Frame>,
+    surface: &Arc<ReadSurface>,
+    admin: &Arc<admin_surface::AdminSurface>,
+    caller: federation::RouteCaller,
+) -> Result<(), ModuleError> {
+    let header = frame.header;
+    let method = serde_json::from_slice::<ReadRequest>(&frame.body).ok();
+    match caller {
+        federation::RouteCaller::Principal(principal) => {
+            if method
+                .as_ref()
+                .is_some_and(|request| federation::is_federation_op(&request.method))
+            {
+                return send_route_result(writer, header, uniform_not_found()).await;
+            }
+            handle_read_request(frame, writer, surface, admin, principal).await
+        }
+        federation::RouteCaller::Refused => {
+            send_route_result(writer, header, uniform_not_found()).await
+        }
+        federation::RouteCaller::Member(member) => {
+            let Some(request) = method else {
+                return send_route_error(
+                    writer,
+                    header.ver,
+                    header.channel,
+                    header.epoch,
+                    header.corr,
+                    "invalid_request",
+                    "request body not decodable",
+                )
+                .await;
+            };
+            match admin
+                .home()
+                .serve(&member, &request.method, &request.params)
+                .await
+            {
+                federation::HomeAnswer::Reply(reply) => {
+                    send_route_result(writer, header, wrap_result(reply)).await
+                }
+                federation::HomeAnswer::InvalidParams(detail) => {
+                    invalid_params(
+                        writer,
+                        header.ver,
+                        header.channel,
+                        header.epoch,
+                        header.corr,
+                        &detail,
+                    )
+                    .await
+                }
+            }
+        }
+    }
+}
+
+/// The uniform `not_found` reply body, the same value a scoped read answers for an
+/// unknown or ungranted id.
+fn uniform_not_found() -> serde_json::Value {
+    let code = read_surface::ReadError::NotFound;
+    wrap_result(json!({
+        "error": read_surface::ErrorBody { code, class: code.class() }
+    }))
+}
+
+/// Answer one route request with an ordinary `Response` frame carrying `body`.
+async fn send_route_result(
+    writer: &mpsc::Sender<Frame>,
+    header: subc_protocol::EnvelopeHeader,
+    body: serde_json::Value,
+) -> Result<(), ModuleError> {
+    let body = serde_json::to_vec(&body).map_err(ModuleError::Json)?;
+    let response = Frame::build_with_version(
+        header.ver,
+        FrameType::Response,
+        Flags::new(false, Priority::Interactive, false),
+        header.channel,
+        header.epoch,
+        header.corr,
+        body,
+    )
+    .map_err(|e| ModuleError::Message(e.to_string()))?;
+    send(writer, response).await
 }
 
 /// Each binding has separate counters even when a late task outlives Goodbye.

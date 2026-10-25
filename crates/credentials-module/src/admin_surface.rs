@@ -75,37 +75,19 @@ struct Nonce {
 struct BindState {
     epoch: u32,
     principal: Principal,
-    /// The opener's `BindIdentity.harness` for this bind. Client-supplied and
-    /// unattested, so it never grants anything: it is read only to withdraw authority
-    /// (see [`refuses_forwarded_call`]). Lives in the same record as the principal, so a
-    /// rebind or route Goodbye replaces or drops both together.
+    /// The opener's `BindIdentity.harness` for this bind. Read only on callosum's routes
+    /// and only by the federation ingress mapping (`federation::map_route_caller`).
+    /// Lives in the same record as the principal, so a rebind or route Goodbye replaces
+    /// or drops both together.
     harness: String,
     /// At most one outstanding nonce per bind (issuing a new challenge replaces it).
     nonce: Option<Nonce>,
 }
 
-/// The module id of callosum, the federation module. It is itself a vault consumer
-/// with its own grants, and it also relays calls from other computers.
-const FEDERATION_MODULE_ID: &str = "callosum";
-
-/// The bind-harness prefix callosum sets (from the authenticated peer key) on a route
-/// that carries a call forwarded from another computer, e.g. `fed-computer:<32 hex>`.
-const FORWARDED_HARNESS_PREFIX: &str = "fed-";
-
-/// Whether a bind is callosum relaying another computer's call. The vault has no
-/// federation policy yet, so such a call must not run with callosum's own grants: it
-/// gets no principal at all, the same as an unknown caller. Only callosum's routes are
-/// affected, and only because the daemon attested the principal as `reserved:callosum`;
-/// every other principal's harness is ignored, so no other caller can lose authority
-/// by choosing a harness string.
-fn refuses_forwarded_call(principal: &Principal, harness: &str) -> bool {
-    matches!(principal, Principal::Reserved { module_id } if module_id == FEDERATION_MODULE_ID)
-        && harness.starts_with(FORWARDED_HARNESS_PREFIX)
-}
-
 /// The module admin surface. Holds the engine (for the store + per-id lock), the
 /// admin MAC key (derived from the master key), and the vault identity — plus the
-/// per-bind registry and a global outstanding-nonce counter.
+/// per-bind registry, a global outstanding-nonce counter, and this vault's federation
+/// home, which answers the calls a federation channel carries.
 pub struct AdminSurface {
     engine: Arc<RefreshEngine>,
     mac_key: AdminMacKey,
@@ -113,6 +95,7 @@ pub struct AdminSurface {
     key_id: KeyId,
     binds: Mutex<HashMap<u16, BindState>>,
     outstanding_nonces: AtomicU64,
+    home: crate::federation::HomeVault,
 }
 
 /// The actor recorded in the audit trail for a route-driven admin write.
@@ -126,6 +109,7 @@ impl AdminSurface {
         key_id: KeyId,
     ) -> Self {
         AdminSurface {
+            home: crate::federation::HomeVault::new(Arc::clone(&engine)),
             engine,
             mac_key,
             vault_id,
@@ -173,19 +157,51 @@ impl AdminSurface {
         }
     }
 
-    /// Snapshot the EFFECTIVE principal of a route bind: the daemon-stamped principal,
-    /// or `None` when the bind is callosum forwarding another computer's call. This is
-    /// the one place the request path reads a channel's principal, so that refusal
-    /// covers every operation: `None` is what an unbound or unknown caller has, so the
-    /// scoped surface answers the uniform `not_found` and the admin plane refuses.
+    /// Snapshot who a route bind speaks for, through the federation ingress mapping
+    /// (`federation::map_route_caller`). This is the one place the request path reads a
+    /// channel's principal and harness, so the mapping covers every operation. With the
+    /// member-mapping gate off the answer is vault release 1's: callosum relaying
+    /// another computer's call (a `fed-` harness) gets no principal. The gate is read
+    /// from the store on each call, and only for callosum's routes, so turning it on or
+    /// off takes effect without a restart.
+    ///
     /// The route dispatcher captures this before spawning a request so a later channel
-    /// rebind cannot change which caller authorized an already-accepted frame.
+    /// rebind cannot change which caller authorized an already-accepted frame. An
+    /// unbound channel speaks for no one.
+    pub fn route_caller(&self, channel: u16) -> crate::federation::RouteCaller {
+        let bound = {
+            let binds = self.binds.lock().unwrap_or_else(|p| p.into_inner());
+            binds
+                .get(&channel)
+                .map(|state| (state.principal.clone(), state.harness.clone()))
+        };
+        let Some((principal, harness)) = bound else {
+            return crate::federation::RouteCaller::Principal(None);
+        };
+        let gate = if crate::federation::ingress::is_callosum(&principal) {
+            crate::federation::MappingGate::from_store(
+                self.engine.store().federation_member_mapping(),
+            )
+        } else {
+            // Not read for anyone else: their harness is ignored in every gate state.
+            crate::federation::MappingGate::Off
+        };
+        crate::federation::map_route_caller(&principal, &harness, gate)
+    }
+
+    /// The EFFECTIVE principal of a route bind: what [`Self::route_caller`] lends the
+    /// read surface and the admin plane. `None` is what an unbound or unknown caller
+    /// has, so the scoped surface answers the uniform `not_found` and the admin plane
+    /// refuses; a federation or refused channel also has `None`. The request path takes
+    /// the whole [`Self::route_caller`] instead, so only tests read this projection.
+    #[cfg(test)]
     pub fn principal(&self, channel: u16) -> Option<Principal> {
-        let binds = self.binds.lock().unwrap_or_else(|p| p.into_inner());
-        binds
-            .get(&channel)
-            .filter(|state| !refuses_forwarded_call(&state.principal, &state.harness))
-            .map(|state| state.principal.clone())
+        self.route_caller(channel).principal()
+    }
+
+    /// This vault as a federation home: what a federation channel's calls reach.
+    pub fn home(&self) -> &crate::federation::HomeVault {
+        &self.home
     }
 
     /// Forget a channel's admin state on route Goodbye. Idempotent.

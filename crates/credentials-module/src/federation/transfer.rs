@@ -931,6 +931,55 @@ pub enum AcceptReport {
     AlreadyDecided(IncomingTransferState),
 }
 
+/// What [`Transfers::send_prepare`] found: the receiver's announced key and the budget
+/// the rest of the send shares. Holds no secret: the record is read again, under its
+/// admin lock, by [`Transfers::send_commit`].
+#[derive(Debug, Clone)]
+pub struct SendPlan {
+    credential_id: String,
+    to: String,
+    receiver_key: PeerKey,
+    budget: tokio::time::Instant,
+}
+
+impl SendPlan {
+    /// The credential being sent: the record whose admin lock the commit runs under.
+    pub fn credential_id(&self) -> &str {
+        &self.credential_id
+    }
+
+    /// When this send's one outbound budget runs out.
+    pub fn budget(&self) -> tokio::time::Instant {
+        self.budget
+    }
+}
+
+/// What [`Transfers::accept_prepare`] found.
+#[derive(Debug, Clone)]
+pub enum AcceptStep {
+    /// The transfer was already decided; there is nothing to commit.
+    Decided(AcceptReport),
+    /// The pending row and its sender's announced key, ready for
+    /// [`Transfers::accept_commit`].
+    Ready(AcceptPlan),
+}
+
+/// A pending transfer ready to be opened and committed.
+#[derive(Debug, Clone)]
+pub struct AcceptPlan {
+    row: IncomingTransfer,
+    sender_key: PeerKey,
+    replace: bool,
+}
+
+impl AcceptPlan {
+    /// The record id the transfer creates, as recorded on its pending row from the
+    /// authenticated envelope: the admin lock the commit runs under.
+    pub fn credential_id(&self) -> &str {
+        &self.row.credential_id
+    }
+}
+
 /// A wall clock in milliseconds since the epoch.
 pub type TransferClock = Arc<dyn Fn() -> i64 + Send + Sync>;
 
@@ -1037,23 +1086,62 @@ impl Transfers {
     /// `transfer_out` together, and only then delivers. A delivery that fails or runs
     /// out of budget still reports the committed row, which `--resume` redelivers.
     pub async fn send(&self, credential_id: &str, to: &str) -> Result<SendReport, TransferRefusal> {
+        let plan = self.send_prepare(credential_id, to).await?;
+        let row = self.send_commit(&plan)?;
+        Ok(self.send_deliver(&row, &plan).await)
+    }
+
+    /// `send`'s outbound pre-step: check the request and this vault's own setup, refuse
+    /// a record that may not leave, and look up the receiver's announced key (none:
+    /// `remote_setup_incomplete`, naming the receiver; a failed lookup:
+    /// `callosum_unavailable`). Writes nothing. The returned plan carries the key and
+    /// the one budget every later step of this send shares.
+    pub async fn send_prepare(
+        &self,
+        credential_id: &str,
+        to: &str,
+    ) -> Result<SendPlan, TransferRefusal> {
         if !valid_member_id(to) || credential_id.is_empty() {
             return Err(TransferRefusal::invalid_params());
         }
         let budget = tokio::time::Instant::now() + self.budget;
-        let now = self.now();
-        let _ = self.store.expire_outgoing_transfers(now);
-        let own = match own_key(&self.store) {
-            Ok(Ok(own)) => own,
+        let _ = self.store.expire_outgoing_transfers(self.now());
+        match own_key(&self.store) {
+            Ok(Ok(_)) => {}
             Ok(Err(self_id)) => return Err(TransferRefusal::transfer_key_missing(self_id)),
             Err(_) => return Err(TransferRefusal::store_error()),
-        };
-        let body = self.outgoing_body(credential_id)?;
+        }
+        // Refused before the lookup, so an ineligible record costs no outbound call.
+        // The commit step reads the record again and builds the body it seals.
+        self.outgoing_body(credential_id)?;
         let receiver_key = match peer_key(self.outbound.get(), to, budget).await {
             Lookup::Found(key) => key,
             Lookup::Absent => return Err(TransferRefusal::setup_incomplete(Some(to.to_string()))),
             Lookup::Unavailable => return Err(TransferRefusal::callosum_unavailable()),
         };
+        Ok(SendPlan {
+            credential_id: credential_id.to_string(),
+            to: to.to_string(),
+            receiver_key,
+            budget,
+        })
+    }
+
+    /// `send`'s store commit, synchronous so a caller can run it under the record's
+    /// admin lock: read the record, build and seal the body once under a fresh
+    /// transfer id, and commit the outgoing row with its `transfer_out` row in one
+    /// transaction. A failed commit keeps neither, and nothing may be delivered then.
+    pub fn send_commit(&self, plan: &SendPlan) -> Result<OutgoingTransfer, TransferRefusal> {
+        let own = match own_key(&self.store) {
+            Ok(Ok(own)) => own,
+            Ok(Err(self_id)) => return Err(TransferRefusal::transfer_key_missing(self_id)),
+            Err(_) => return Err(TransferRefusal::store_error()),
+        };
+        let credential_id = plan.credential_id.as_str();
+        let to = plan.to.as_str();
+        let receiver_key = &plan.receiver_key;
+        let now = self.now();
+        let body = self.outgoing_body(credential_id)?;
         let transfer_id = random_transfer_id().ok_or_else(TransferRefusal::store_error)?;
         let aad = serde_json::to_string(&TransferAad {
             transfer_id: transfer_id.clone(),
@@ -1083,8 +1171,7 @@ impl Transfers {
         })?;
         let fault = self.commit_fault.clone();
         let fault_hook = move || fault.as_ref().is_some_and(|fault| fault());
-        let row = self
-            .store
+        self.store
             .commit_outgoing_transfer_audited(
                 &NewOutgoingTransfer {
                     transfer_id,
@@ -1099,8 +1186,15 @@ impl Transfers {
                 },
                 Some(&fault_hook),
             )
-            .map_err(|_| TransferRefusal::store_error())?;
-        Ok(self.deliver_row(&row, budget).await)
+            .map_err(|_| TransferRefusal::store_error())
+    }
+
+    /// `send`'s outbound post-step, run only after [`Self::send_commit`] returned the
+    /// committed row: deliver it within what is left of the plan's budget and apply the
+    /// sender's action for the reply. A delivery that fails or runs out of budget still
+    /// reports the committed row, which `--resume` redelivers.
+    pub async fn send_deliver(&self, row: &OutgoingTransfer, plan: &SendPlan) -> SendReport {
+        self.deliver_row(row, plan.budget).await
     }
 
     /// `ck auth transfer send --resume <transfer-id>`: redeliver the stored envelope,
@@ -1289,6 +1383,22 @@ impl Transfers {
         from: &str,
         replace: bool,
     ) -> Result<AcceptReport, TransferRefusal> {
+        match self.accept_prepare(transfer_id, from, replace).await? {
+            AcceptStep::Decided(report) => Ok(report),
+            AcceptStep::Ready(plan) => self.accept_commit(&plan),
+        }
+    }
+
+    /// `accept`'s outbound pre-step: find the pending row and look up its STORED
+    /// sender's announced key. A failed lookup is `callosum_unavailable` (transient):
+    /// the row stays pending and nothing is written. A transfer already decided needs
+    /// no lookup and is answered here.
+    pub async fn accept_prepare(
+        &self,
+        transfer_id: &str,
+        from: &str,
+        replace: bool,
+    ) -> Result<AcceptStep, TransferRefusal> {
         if !is_lower_hex_16_bytes(transfer_id) || !valid_member_id(from) {
             return Err(TransferRefusal::invalid_params());
         }
@@ -1302,16 +1412,16 @@ impl Transfers {
             .map_err(|_| TransferRefusal::store_error())?
             .ok_or_else(TransferRefusal::not_found)?;
         if row.state != IncomingTransferState::Pending {
-            return Ok(AcceptReport::AlreadyDecided(row.state));
+            return Ok(AcceptStep::Decided(AcceptReport::AlreadyDecided(row.state)));
         }
-        let Some(sealed) = row.sealed.clone() else {
+        if row.sealed.is_none() {
             return Err(TransferRefusal::store_error());
-        };
-        let own = match own_key(&self.store) {
-            Ok(Ok(own)) => own,
+        }
+        match own_key(&self.store) {
+            Ok(Ok(_)) => {}
             Ok(Err(self_id)) => return Err(TransferRefusal::transfer_key_missing(self_id)),
             Err(_) => return Err(TransferRefusal::store_error()),
-        };
+        }
         let sender_key = match peer_key(self.outbound.get(), &row.sender_member, budget).await {
             Lookup::Found(key) => key,
             Lookup::Absent => {
@@ -1321,6 +1431,31 @@ impl Transfers {
             }
             Lookup::Unavailable => return Err(TransferRefusal::callosum_unavailable()),
         };
+        Ok(AcceptStep::Ready(AcceptPlan {
+            row,
+            sender_key,
+            replace,
+        }))
+    }
+
+    /// `accept`'s store commit, synchronous so a caller can run it under the admin lock
+    /// of [`AcceptPlan::credential_id`]: open the envelope again against the key the
+    /// pre-step obtained and validate the body again. An envelope that does not open
+    /// marks the row rejected (`remote_seal_invalid`, with a `transfer_reject` row), and
+    /// so does a body that fails validation. Otherwise the record, its categories, its
+    /// provider ids, the accepted marker and `transfer_in` commit in one transaction.
+    pub fn accept_commit(&self, plan: &AcceptPlan) -> Result<AcceptReport, TransferRefusal> {
+        let row = &plan.row;
+        let replace = plan.replace;
+        let Some(sealed) = row.sealed.clone() else {
+            return Err(TransferRefusal::store_error());
+        };
+        let own = match own_key(&self.store) {
+            Ok(Ok(own)) => own,
+            Ok(Err(self_id)) => return Err(TransferRefusal::transfer_key_missing(self_id)),
+            Err(_) => return Err(TransferRefusal::store_error()),
+        };
+        let sender_key = &plan.sender_key;
         let (aad, valid) = match open_transfer(
             &own,
             &row.sender_member,

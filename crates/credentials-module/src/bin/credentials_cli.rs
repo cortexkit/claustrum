@@ -376,6 +376,10 @@ fn run_args(mut args: Vec<String>) -> Result<(), CliError> {
         "events" => cmd_events(&global, &args),
         "usable" => cmd_usable(&global),
         "verify-audit" => cmd_verify_audit(&global),
+        "transfer" => cli_support::federation_cli::cmd_transfer(&global, &args),
+        "remote" => cli_support::federation_cli::cmd_remote(&global, &args),
+        "member" => cli_support::federation_cli::cmd_member(&global, &args),
+        "federation" => cli_support::federation_cli::cmd_federation(&global, &args),
         other => Err(CliError::Usage(format!(
             "unknown verb '{other}'\n\n{}",
             usage_short()
@@ -490,6 +494,9 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
         ],
         "audit" => &["--limit"],
         "events" => &["--limit"],
+        "transfer" => &["--self", "--id", "--to", "--resume", "--from"],
+        "remote" => &["--id", "--home"],
+        "member" => &["--member", "--operation", "--id", "--category"],
         // bootstrap / rotate-master-key / verify-audit take no per-command flags.
         _ => &[],
     };
@@ -504,6 +511,7 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
         "reclassify" => &["--from-registry", "--force"],
         "login" => &["--replace", "--no-listener", "--no-browser", "--device"],
         "migrate-opencode" => &["--dry-run", "--replace", "--force-shape"],
+        "transfer" => &["--replace"],
         _ => &[],
     };
     let mut i = if matches!(command, "set-identity" | "set-category")
@@ -526,10 +534,18 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
         let subcommands: &[&str] = match command {
             "opencode-account" => &["add", "remove", "list"],
             "enroll" => &["list", "approve", "deny", "revoke", "reissue"],
+            "transfer" => &["init", "send", "receive", "accept", "reject"],
+            "remote" => &["add", "remove", "list"],
+            "member" => &["grant", "revoke", "list"],
+            "federation" => &["self", "mapping"],
             _ => &[],
         };
+        // `transfer accept|reject <transfer-id>` and `federation self <member>` /
+        // `federation mapping on|off` take one positional value, which the verb itself
+        // checks.
         if subcommands.contains(&arg.as_str())
-            || (command == "set-providers" && !arg.starts_with("--"))
+            || (matches!(command, "set-providers" | "transfer" | "federation")
+                && !arg.starts_with("--"))
         {
             i += 1;
             continue;
@@ -593,6 +609,10 @@ fn usage_short() -> String {
        events              why credentials failed to authenticate\n\
        usable              which credentials can still serve or refresh\n\
        verify-audit        verify the audit-chain integrity\n\
+       transfer            send, receive, accept or reject a sealed static-key transfer\n\
+       remote              register or remove a login homed in another member's vault\n\
+       member              grant another member's vault remote reads or deliveries\n\
+       federation          set this vault's member id or the member-mapping gate\n\
        rotate-master-key   rotate the vault master key (offline)\n\
        bootstrap           initialize a new vault (offline)\n\
      \n\
@@ -792,6 +812,73 @@ fn help_verb(verb: &str) -> String {
              file; the previous token stops working the moment it is minted.\n\
              list is read-only and takes no lease. awaiting-poll means admitted but never\n\
              collected, which is a stalled handover rather than a live consumer."
+        }
+        "transfer" => {
+            "ck auth transfer init --self <member> | --replace\n\
+             \x20             send --id <credential> --to <member> | --resume <transfer-id>\n\
+             \x20             receive\n\
+             \x20             accept <transfer-id> --from <member> [--replace]\n\
+             \x20             reject <transfer-id> --from <member>\n\
+             \n\
+             \x20 --self <member>      this vault's own member id (fed-computer:<32 hex>)\n\
+             \x20 --replace            init: replace a transfer key found off active;\n\
+             \x20                      accept: replace an existing record of the same kind\n\
+             \x20 --id <credential>    the static key to send\n\
+             \x20 --to <member>        the receiving member\n\
+             \x20 --resume <id>        deliver a stored transfer again, byte for byte\n\
+             \x20 --from <member>      the sending member (transfer ids are per sender)\n\
+             \n\
+             NOTES\n\
+             Moves an api key, DSN, cookie or opaque secret to another member's vault,\n\
+             sealed to a key only that vault holds. Rotating logins never move this way.\n\
+             init creates the transfer key and records the self id; callosum must agree\n\
+             that the id is this computer's. send, --resume, accept and init need the\n\
+             running daemon (they make outbound calls) and are refused offline with\n\
+             federation_requires_daemon. A send that cannot be delivered is kept for\n\
+             --resume. Nothing is created on the receiver until its operator accepts."
+        }
+        "remote" => {
+            "ck auth remote add --id <credential> --home <member>\n\
+             \x20           remove --id <credential>\n\
+             \x20           list\n\
+             \n\
+             \x20 --id <credential>    the login's id, the same on both vaults\n\
+             \x20 --home <member>      the member whose vault holds the login\n\
+             \n\
+             NOTES\n\
+             A remote record serves a rotating login held by another member's vault: this\n\
+             vault fetches short-lived access tokens from it and never stores a token.\n\
+             add fetches once from the home (it needs the running daemon) and copies the\n\
+             account identity, adapter and plan. It refuses an id held by a local record.\n\
+             Re-homing is remove, then add."
+        }
+        "member" => {
+            "ck auth member grant|revoke --member <member> --operation remote_read\n\
+             \x20                    (--id <credential> | --category <name>)\n\
+             \x20 member grant|revoke --member <member> --operation transfer_deliver\n\
+             \x20 member list\n\
+             \n\
+             \x20 --member <member>    the other member (fed-computer:<32 hex>)\n\
+             \x20 --operation <op>     remote_read (fetch access tokens for a login homed\n\
+             \x20                      here) or transfer_deliver (send transfers here)\n\
+             \x20 --id <credential>    remote_read on one credential\n\
+             \x20 --category <name>    remote_read on every credential in a category\n\
+             \n\
+             NOTES\n\
+             A grant records the member's current pairing id and counts only while that\n\
+             pairing lasts: after a re-pair, grant again. grant needs the running daemon\n\
+             (it asks callosum for the pairing) and is refused for an unpaired member\n\
+             (member_not_paired). revoke needs no lookup."
+        }
+        "federation" => {
+            "ck auth federation self <member>\n\
+             \x20 federation mapping on|off\n\
+             \n\
+             NOTES\n\
+             self changes this vault's member id. It needs the running daemon: callosum\n\
+             computes this computer's id from its own key, and an id that differs, or one\n\
+             that cannot be checked, is refused. mapping switches the member-mapping gate;\n\
+             it takes effect at once, without a restart."
         }
         "mint-kem-key" => {
             "ck auth mint-kem-key --id kem:<name> [--replace]\n\

@@ -23,16 +23,21 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use credentials_core::admin_auth::{AdminMacKey, TranscriptParts, ADMIN_NONCE_LEN, VAULT_ID_LEN};
 use credentials_core::admin_ops::AdminOpBody;
 #[cfg(test)]
 use credentials_core::admin_ops::ADMIN_OP_SCHEMA_V1;
+use credentials_core::audit::{AuditCtx, AuditOp};
 use credentials_core::engine::RefreshEngine;
+use credentials_core::federation::{
+    valid_member_id, MemberGrantOperation, MemberGrantSelector, VAULT_TRANSFER_ID,
+};
 use credentials_core::key::KeyId;
-use credentials_core::store::StoreOpError;
+use credentials_core::record::{CredentialKind, VaultRecord};
+use credentials_core::store::{EncryptedStore, GrantOperation, SelectorKind, StoreOpError};
 use subc_protocol::Principal;
 
 /// Challenge TTL. Long enough for a CLI to resolve the keychain key and MAC the op;
@@ -96,6 +101,15 @@ pub struct AdminSurface {
     binds: Mutex<HashMap<u16, BindState>>,
     outstanding_nonces: AtomicU64,
     home: crate::federation::HomeVault,
+    /// This vault's transfer admin ops (send, resume, accept). They share the home's
+    /// outbound client, attached at startup.
+    transfers: crate::federation::Transfers,
+    /// The daemon's own remote reader, so `remote add` fetches and validates exactly as
+    /// a consumer read does (same adapter set, same reply type). Attached at startup.
+    remote: OnceLock<Arc<crate::federation::RemoteReader>>,
+    /// The one budget each federation admin op's outbound calls share. Only tests
+    /// shorten it.
+    federation_budget: Duration,
 }
 
 /// The actor recorded in the audit trail for a route-driven admin write.
@@ -110,6 +124,9 @@ impl AdminSurface {
     ) -> Self {
         AdminSurface {
             home: crate::federation::HomeVault::new(Arc::clone(&engine)),
+            transfers: crate::federation::Transfers::new(Arc::clone(engine.store())),
+            remote: OnceLock::new(),
+            federation_budget: crate::federation::ADMIN_OP_BUDGET,
             engine,
             mac_key,
             vault_id,
@@ -202,6 +219,24 @@ impl AdminSurface {
     /// This vault as a federation home: what a federation channel's calls reach.
     pub fn home(&self) -> &crate::federation::HomeVault {
         &self.home
+    }
+
+    /// Attach the daemon's remote reader, which `remote add` fetches through. Only the
+    /// first call takes effect; returns whether this one did.
+    pub fn attach_remote_reader(&self, reader: Arc<crate::federation::RemoteReader>) -> bool {
+        self.remote.set(reader).is_ok()
+    }
+
+    /// Give every federation admin op `budget` for its outbound calls instead of
+    /// [`crate::federation::ADMIN_OP_BUDGET`]. A test seam with no production caller,
+    /// reached by the integration tests through the test-only library, so the daemon
+    /// binary itself never calls it.
+    #[allow(dead_code)]
+    pub fn with_federation_budget(mut self, budget: Duration) -> Self {
+        self.transfers =
+            crate::federation::Transfers::new(Arc::clone(self.engine.store())).with_budget(budget);
+        self.federation_budget = budget;
+        self
     }
 
     /// Forget a channel's admin state on route Goodbye. Idempotent.
@@ -362,6 +397,11 @@ impl AdminSurface {
                 op.schema_version()
             ));
         }
+        // The federation ops that await outbound calls never reach `apply`, which is
+        // synchronous and refuses them; they run in three stages here instead.
+        if op.requires_daemon() {
+            return self.dispatch_federation(op).await;
+        }
         // Apply through the SHARED core applier so the online and offline admin paths
         // can never diverge in what an op does. A credential-scoped op runs under the
         // engine's per-credential single-flight lock (same lock a refresh holds), so
@@ -385,10 +425,422 @@ impl AdminSurface {
     }
 }
 
+// ---------------------------------------------------------------------------------
+// The federation admin hook
+// ---------------------------------------------------------------------------------
+
+/// The callosum method whose reply names this computer (`self`) and every paired
+/// member's current pairing id.
+const PAIRED_DEVICES_READ: &str = "callosum.paired_devices_read";
+
+impl AdminSurface {
+    /// The transfer ops, with the outbound client the home was given at startup. The
+    /// attach takes effect once; later calls find it already set.
+    fn transfers(&self) -> &crate::federation::Transfers {
+        if let Some(client) = self.home.outbound() {
+            let _ = self.transfers.attach_outbound(client.clone());
+        }
+        &self.transfers
+    }
+
+    /// Run `commit` under `credential_id`'s admin lock, the lock a refresh of that
+    /// record holds. `commit` is synchronous, so no lock is ever held across an
+    /// outbound await. Waiting for the lock counts against the op's `budget`: a lock
+    /// not obtained in time commits nothing and answers `admin_lock_busy` (transient).
+    async fn locked<T>(
+        &self,
+        credential_id: &str,
+        budget: tokio::time::Instant,
+        commit: impl FnOnce(&EncryptedStore) -> Result<T, StoreOpError>,
+    ) -> Result<T, AdminOutcome> {
+        match tokio::time::timeout_at(budget, self.engine.with_admin_lock(credential_id, commit))
+            .await
+        {
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(error)) => Err(store_err(error)),
+            Err(_) => Err(refused("admin_lock_busy", "transient", None)),
+        }
+    }
+
+    /// The admin ops that await outbound calls, each in three stages: an outbound
+    /// pre-step (a key or pairing lookup, a home fetch), then one store commit, under
+    /// the record's admin lock where the op writes a record, then an outbound post-step
+    /// (a send's delivery, only after its commit). Every outbound call of one op shares
+    /// one budget, so the CLI, which waits 15 s for this reply, always gets a definite
+    /// answer.
+    async fn dispatch_federation(&self, op: AdminOpBody) -> AdminOutcome {
+        let budget = tokio::time::Instant::now() + self.federation_budget;
+        let store = self.engine.store();
+        match op {
+            AdminOpBody::FederationSelfSet { member, .. } => {
+                if let Err(refusal) = self.check_self_member(&member, budget).await {
+                    return refusal;
+                }
+                match store.set_federation_self_member_audited(
+                    &member,
+                    AuditCtx::route_admin(AuditOp::FederationSelfSet, ROUTE_ADMIN_ACTOR),
+                ) {
+                    Ok(changed) => AdminOutcome::Ok(
+                        serde_json::json!({ "self_member": member, "changed": changed }),
+                    ),
+                    Err(error) => store_err(error),
+                }
+            }
+            AdminOpBody::TransferInit { self_member, .. } => {
+                if let Err(refusal) = self.check_self_member(&self_member, budget).await {
+                    return refusal;
+                }
+                match self
+                    .locked(VAULT_TRANSFER_ID, budget, |store| {
+                        init_transfer_key(store, &self_member, ROUTE_ADMIN_ACTOR)
+                    })
+                    .await
+                {
+                    Ok(reply) => AdminOutcome::Ok(reply),
+                    Err(refusal) => refusal,
+                }
+            }
+            AdminOpBody::TransferSend {
+                credential_id, to, ..
+            } => {
+                let transfers = self.transfers();
+                let plan = match transfers.send_prepare(&credential_id, &to).await {
+                    Ok(plan) => plan,
+                    Err(refusal) => return transfer_refused(&refusal),
+                };
+                let row = match self
+                    .locked(plan.credential_id(), plan.budget(), |_| {
+                        Ok(transfers.send_commit(&plan))
+                    })
+                    .await
+                {
+                    Ok(Ok(row)) => row,
+                    Ok(Err(refusal)) => return transfer_refused(&refusal),
+                    Err(refusal) => return refusal,
+                };
+                AdminOutcome::Ok(send_report(&transfers.send_deliver(&row, &plan).await))
+            }
+            AdminOpBody::TransferResume { transfer_id, .. } => {
+                match self.transfers().resume(&transfer_id).await {
+                    Ok(report) => AdminOutcome::Ok(send_report(&report)),
+                    Err(refusal) => transfer_refused(&refusal),
+                }
+            }
+            AdminOpBody::TransferAccept {
+                transfer_id,
+                from,
+                replace,
+                ..
+            } => {
+                let transfers = self.transfers();
+                let plan = match transfers.accept_prepare(&transfer_id, &from, replace).await {
+                    Ok(crate::federation::AcceptStep::Decided(report)) => {
+                        return AdminOutcome::Ok(accept_report(&report))
+                    }
+                    Ok(crate::federation::AcceptStep::Ready(plan)) => plan,
+                    Err(refusal) => return transfer_refused(&refusal),
+                };
+                match self
+                    .locked(plan.credential_id(), budget, |_| {
+                        Ok(transfers.accept_commit(&plan))
+                    })
+                    .await
+                {
+                    Ok(Ok(report)) => AdminOutcome::Ok(accept_report(&report)),
+                    Ok(Err(refusal)) => transfer_refused(&refusal),
+                    Err(refusal) => refusal,
+                }
+            }
+            AdminOpBody::RemoteAdd {
+                credential_id,
+                home,
+                ..
+            } => {
+                if !valid_member_id(&home) {
+                    return store_err(StoreOpError::InvalidMemberId);
+                }
+                // Refused before the home fetch, so a conflicting id costs no outbound
+                // call. The store's id-uniqueness triggers decide again at the commit.
+                match store.meta(&credential_id) {
+                    Ok(_) => return store_err(StoreOpError::CredentialIdIsLocal),
+                    Err(StoreOpError::NotFound) => {}
+                    Err(error) => return store_err(error),
+                }
+                match store.remote_record(&credential_id) {
+                    Ok(None) => {}
+                    Ok(Some(_)) => return store_err(StoreOpError::AlreadyExists),
+                    Err(error) => return store_err(error),
+                }
+                let Some(reader) = self.remote.get() else {
+                    return refused("home_unreachable", "transient", None);
+                };
+                let new = match reader.fetch_for_add(&credential_id, &home, budget).await {
+                    Ok(new) => new,
+                    Err(refusal) => {
+                        return refused(
+                            refusal.code,
+                            refusal.class,
+                            refusal.remedy_member.as_deref(),
+                        )
+                    }
+                };
+                match self
+                    .locked(&credential_id, budget, |store| {
+                        store.remote_add_audited(&new)
+                    })
+                    .await
+                {
+                    Ok(record) => AdminOutcome::Ok(serde_json::json!({
+                        "credential_id": record.credential_id,
+                        "home": record.home_member,
+                        "incarnation": record.incarnation,
+                        "last_home_version": record.last_home_version,
+                        "refresh_adapter": record.refresh_adapter,
+                        "categories": new.categories,
+                    })),
+                    Err(refusal) => refusal,
+                }
+            }
+            AdminOpBody::MemberGrant {
+                member,
+                operation,
+                selector,
+                ..
+            } => {
+                if !valid_member_id(&member) {
+                    return store_err(StoreOpError::InvalidMemberId);
+                }
+                if let Err(why) = member_grant_shape(operation, &selector) {
+                    return refused("invalid_params", "permanent", None).with_detail(why);
+                }
+                let body = crate::federation::callosum_lookup(
+                    self.home.outbound(),
+                    PAIRED_DEVICES_READ,
+                    budget,
+                )
+                .await;
+                let pairing_id = match body
+                    .map(|body| crate::federation::decode_paired_devices(&body, &member))
+                {
+                    Some(crate::federation::Lookup::Found(pairing_id)) => pairing_id,
+                    Some(crate::federation::Lookup::Absent) => {
+                        return refused("member_not_paired", "permanent", Some(&member))
+                    }
+                    Some(crate::federation::Lookup::Unavailable) | None => {
+                        return refused("callosum_unavailable", "transient", None)
+                    }
+                };
+                match store.create_member_grant_audited(&member, operation, &selector, &pairing_id)
+                {
+                    Ok(changed) => AdminOutcome::Ok(serde_json::json!({
+                        "member": member,
+                        "operation": operation.as_str(),
+                        "selector_kind": selector.kind_str(),
+                        "selector": selector.selector_str(),
+                        "pairing_id": pairing_id,
+                        "changed": changed,
+                    })),
+                    Err(error) => store_err(error),
+                }
+            }
+            // `requires_daemon` sent only the ops above here; anything else is a
+            // mismatch between that table and this match, and is refused unrun.
+            other => AdminOutcome::Refused(format!(
+                "internal: {} has no federation admin path",
+                other.op_name()
+            )),
+        }
+    }
+
+    /// Refuse `typed` unless it is the member id callosum computes for this computer
+    /// from its own static key. An id that cannot be checked (a callosum older than
+    /// 1.3 sends no `self`) is refused too, never accepted unchecked.
+    async fn check_self_member(
+        &self,
+        typed: &str,
+        budget: tokio::time::Instant,
+    ) -> Result<(), AdminOutcome> {
+        if !valid_member_id(typed) {
+            return Err(store_err(StoreOpError::InvalidMemberId));
+        }
+        let body =
+            crate::federation::callosum_lookup(self.home.outbound(), PAIRED_DEVICES_READ, budget)
+                .await;
+        match body.map(|body| crate::federation::decode_self_member(&body)) {
+            Some(crate::federation::Lookup::Found(actual)) if actual == typed => Ok(()),
+            Some(crate::federation::Lookup::Found(actual)) => Err(AdminOutcome::Refused(format!(
+                "self_member_mismatch/permanent: the id given is {typed}, but callosum computes \
+                 {actual} for this computer from its own static key"
+            ))),
+            Some(crate::federation::Lookup::Absent) => Err(AdminOutcome::Refused(
+                "self_member_unchecked/permanent: callosum's paired_devices_read reply has no \
+                 `self` key (callosum is older than 1.3), so this computer's member id cannot \
+                 be checked; upgrade callosum and run the command again"
+                    .to_string(),
+            )),
+            Some(crate::federation::Lookup::Unavailable) | None => {
+                Err(refused("callosum_unavailable", "transient", None))
+            }
+        }
+    }
+}
+
+/// `transfer init --self`: create the transfer key when this vault has none, grant
+/// callosum the one announce read on it (so callosum can publish its public half), and
+/// set the self id. An existing key is kept: replacing it is `transfer init --replace`.
+fn init_transfer_key(
+    store: &EncryptedStore,
+    self_member: &str,
+    actor: &str,
+) -> Result<serde_json::Value, StoreOpError> {
+    let created = match store.meta(VAULT_TRANSFER_ID) {
+        Ok(_) => false,
+        Err(StoreOpError::NotFound) => {
+            let pem = credentials_core::kem::generate_key().map_err(|e| {
+                StoreOpError::Encode(format!("transfer key generation failed: {e}"))
+            })?;
+            store.create_audited(
+                VAULT_TRANSFER_ID,
+                &VaultRecord::new_static(
+                    CredentialKind::KemKey,
+                    "operator",
+                    pem.into_bytes(),
+                    None,
+                ),
+                AuditCtx::route_admin(AuditOp::Put, actor),
+            )?;
+            true
+        }
+        Err(error) => return Err(error),
+    };
+    match store.create_read_grant_audited(
+        "reserved",
+        "callosum",
+        SelectorKind::Exact,
+        VAULT_TRANSFER_ID,
+        GrantOperation::Read,
+        AuditCtx::route_admin(AuditOp::GrantCreate, actor),
+    ) {
+        Ok(()) | Err(StoreOpError::AlreadyExists) => {}
+        Err(error) => return Err(error),
+    }
+    let changed = store.set_federation_self_member_audited(
+        self_member,
+        AuditCtx::route_admin(AuditOp::FederationSelfSet, actor),
+    )?;
+    Ok(serde_json::json!({
+        "transfer_key": if created { "created" } else { "existing" },
+        "self_member": self_member,
+        "self_changed": changed,
+    }))
+}
+
+/// The selector a member grant operation takes: `remote_read` an exact id or a valid
+/// category, `transfer_deliver` none. Checked before the pairing lookup, so a
+/// malformed grant costs no outbound call; the store checks again when it writes.
+fn member_grant_shape(
+    operation: MemberGrantOperation,
+    selector: &MemberGrantSelector,
+) -> Result<(), &'static str> {
+    match (operation, selector) {
+        (MemberGrantOperation::RemoteRead, MemberGrantSelector::Exact(id)) if !id.is_empty() => {
+            Ok(())
+        }
+        (MemberGrantOperation::RemoteRead, MemberGrantSelector::Category(category))
+            if credentials_core::catalog::valid_category_name(category) =>
+        {
+            Ok(())
+        }
+        (MemberGrantOperation::RemoteRead, _) => {
+            Err("remote_read needs an exact credential id or a valid category")
+        }
+        (MemberGrantOperation::TransferDeliver, MemberGrantSelector::None) => Ok(()),
+        (MemberGrantOperation::TransferDeliver, _) => Err("transfer_deliver takes no selector"),
+    }
+}
+
+/// A refusal in the `code/class` shape the admin route answers with, naming the member
+/// whose operator must fix it when there is one.
+fn refused(code: &str, class: &str, remedy_member: Option<&str>) -> AdminOutcome {
+    match remedy_member {
+        Some(member) => AdminOutcome::Refused(format!("{code}/{class}: remedy_member={member}")),
+        None => AdminOutcome::Refused(format!("{code}/{class}")),
+    }
+}
+
+impl AdminOutcome {
+    /// Append `detail` to a refusal's text; any other outcome is returned unchanged.
+    fn with_detail(self, detail: &str) -> Self {
+        match self {
+            AdminOutcome::Refused(text) => AdminOutcome::Refused(format!("{text}: {detail}")),
+            other => other,
+        }
+    }
+}
+
+fn transfer_refused(refusal: &crate::federation::TransferRefusal) -> AdminOutcome {
+    let outcome = refused(
+        refusal.code,
+        refusal.class,
+        refusal.remedy_member.as_deref(),
+    );
+    match refusal.reason {
+        Some(reason) => outcome.with_detail(&format!("reason={reason}")),
+        None => outcome,
+    }
+}
+
+/// A send's or resume's report: the committed row and the receiver's reply to this
+/// attempt. A transient reply keeps the row for `--resume`.
+fn send_report(report: &crate::federation::SendReport) -> serde_json::Value {
+    let class = match &report.reply {
+        crate::federation::DeliveryReply::Refused { class, .. } => Some(class.as_str()),
+        crate::federation::DeliveryReply::State(_) => None,
+    };
+    serde_json::json!({
+        "transfer_id": report.transfer_id,
+        "credential_id": report.credential_id,
+        "receiver": report.receiver,
+        "reply": report.reply.code(),
+        "reply_class": class,
+        "row_kept": report.row_kept,
+    })
+}
+
+fn accept_report(report: &crate::federation::AcceptReport) -> serde_json::Value {
+    match report {
+        crate::federation::AcceptReport::Accepted {
+            credential_id,
+            record_version,
+        } => serde_json::json!({
+            "state": "accepted",
+            "credential_id": credential_id,
+            "record_version": record_version,
+        }),
+        crate::federation::AcceptReport::AlreadyDecided(state) => serde_json::json!({
+            "state": state.as_str(),
+            "already_decided": true,
+        }),
+    }
+}
+
 /// Map a store error to a non-secret refusal. Admin ops are authenticated, so a bit
 /// more detail than the anonymous read surface is acceptable (the caller holds the
 /// master key), but never secret material.
 fn store_err(e: StoreOpError) -> AdminOutcome {
+    // Refusals `apply` names with their own code (`<code>: <why>`) keep it in front,
+    // as `<code>/permanent: <why>`, instead of reading as an encoding failure.
+    if let StoreOpError::Encode(message) = &e {
+        for code in [
+            credentials_core::admin_ops::FEDERATION_REQUIRES_DAEMON,
+            credentials_core::admin_ops::REMOTE_RECORD_CODE,
+            "invalid_params",
+        ] {
+            if let Some(why) = message.strip_prefix(code).and_then(|m| m.strip_prefix(':')) {
+                return AdminOutcome::Refused(format!("{code}/permanent:{why}"));
+            }
+        }
+    }
     // A provider-id refusal keeps its labelled rule and value. The bare `code/class` below
     // would drop them, and the operator then could not tell which id broke which rule. The
     // full Display is the same string the CLI's offline path prints, so both paths agree.

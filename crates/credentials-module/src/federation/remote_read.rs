@@ -49,8 +49,8 @@ use std::time::Duration;
 use base64::Engine as _;
 use credentials_core::audit::{AuthEventKind, ReporterSource};
 use credentials_core::federation::{
-    valid_member_id, RemoteHomeState, RemoteHomeSuccess, RemoteRecord, RemoteRecordWrite,
-    MEMBER_ID_PREFIX, VAULT_TRANSFER_ID,
+    valid_member_id, NewRemoteRecord, RemoteHomeState, RemoteHomeSuccess, RemoteRecord,
+    RemoteRecordWrite, MEMBER_ID_PREFIX, VAULT_TRANSFER_ID,
 };
 use credentials_core::plan_detection::DetectedPlan;
 use credentials_core::record::{CredentialKind, RecordIdentity, RecordState};
@@ -431,9 +431,8 @@ struct WireTokenReply {
     account_id: Option<String>,
     #[serde(default)]
     identity: RecordIdentity,
-    // Used only to seed `remote add`; a read ignores it.
+    // Seeds the B-owned category set once, at `remote add`; a read ignores it.
     #[serde(default)]
-    #[allow(dead_code)]
     categories: Vec<String>,
     #[serde(default)]
     refresh_adapter: Option<String>,
@@ -451,6 +450,8 @@ struct TokenReply {
     project_id: Option<String>,
     account_id: Option<String>,
     identity: RecordIdentity,
+    /// The home's categories, kept only to seed `remote add`.
+    categories: Vec<String>,
     refresh_adapter: Option<String>,
     detected_plan: Option<DetectedPlan>,
 }
@@ -523,6 +524,7 @@ fn validate_reply(
         project_id: reply.project_id,
         account_id: reply.account_id,
         identity: reply.identity,
+        categories: reply.categories,
         refresh_adapter: reply.refresh_adapter,
         detected_plan: reply.detected_plan,
     })
@@ -1045,25 +1047,57 @@ impl RemoteReader {
         demand: i64,
         budget: tokio::time::Instant,
     ) -> Fetched {
-        match self.fetch_inner(record, demand, budget).await {
+        match self
+            .fetch_inner(&record.credential_id, &record.home_member, demand, budget)
+            .await
+        {
             Ok(reply) => Fetched::Token(Arc::new(reply)),
             Err(failure) => Fetched::Failed(failure),
         }
     }
 
+    /// `remote add`'s one home fetch, for an id this vault does not hold yet: the same
+    /// request, opening and reply validation a read makes, against `home`'s announced
+    /// key, within `budget`. Writes nothing (no record, no outcome, no diagnostic); the
+    /// caller stores the returned description only once it has it. The token in the
+    /// reply is dropped here and never leaves this function.
+    pub async fn fetch_for_add(
+        &self,
+        credential_id: &str,
+        home: &str,
+        budget: tokio::time::Instant,
+    ) -> Result<NewRemoteRecord, RemoteRefusal> {
+        if credential_id.is_empty() || !valid_member_id(home) {
+            return Err(RemoteRefusal::new("invalid_params", "permanent"));
+        }
+        let reply = self
+            .fetch_inner(credential_id, home, home_demand(None), budget)
+            .await
+            .map_err(|failure| failure.refusal)?;
+        Ok(NewRemoteRecord {
+            credential_id: credential_id.to_string(),
+            home_member: home.to_string(),
+            refresh_adapter: reply.refresh_adapter.clone(),
+            detected_plan: reply.detected_plan.clone(),
+            identity: reply.identity.clone(),
+            home_version: reply.record_version,
+            categories: reply.categories.clone(),
+        })
+    }
+
     async fn fetch_inner(
         &self,
-        record: &RemoteRecord,
+        credential_id: &str,
+        home: &str,
         demand: i64,
         budget: tokio::time::Instant,
     ) -> Result<TokenReply, Failure> {
         let (self_id, pem, key_id) = self.own_setup()?;
         let client = self.outbound.get().ok_or_else(Failure::home_unreachable)?;
-        let home = record.home_member.as_str();
         let home_key = self.home_key(client, home, budget).await?;
         let nonce = random_nonce().ok_or_else(Failure::store_error)?;
         let aad = serde_json::to_string(&TokenAad {
-            credential_id: &record.credential_id,
+            credential_id,
             requester: &self_id,
             home,
             nonce: &nonce,
@@ -1389,6 +1423,7 @@ mod tests {
             project_id: None,
             account_id: None,
             identity: RecordIdentity::default(),
+            categories: Vec::new(),
             refresh_adapter: Some("anthropic".into()),
             detected_plan: None,
         }

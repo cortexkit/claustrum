@@ -330,6 +330,65 @@ pub fn decode_peer_transfer_key(body: &Value, member_id: &str) -> Lookup<PeerKey
     }
 }
 
+/// The member id callosum gives the computer whose Noise static key is `public`:
+/// `fed-computer:` followed by the hex of the first 16 bytes of SHA-256 over the key.
+pub fn member_id_for_static_key(public: &[u8; 32]) -> String {
+    let digest = ring::digest::digest(&ring::digest::SHA256, public);
+    let fingerprint: String = digest.as_ref()[..16]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!("{MEMBER_ID_PREFIX}{fingerprint}")
+}
+
+/// This computer's own member id, from the top-level `self` member a version 1.3
+/// `callosum.paired_devices_read` reply carries:
+/// `"self":{"static_public_key_hex":"<64 lowercase hex>"}`.
+///
+/// `Absent` when the reply has no usable `self` (a callosum older than 1.3, or a key
+/// that is not exactly 64 lowercase hex): the id cannot be checked, and a caller must
+/// refuse rather than accept a typed id unchecked. `Unavailable` for any callosum
+/// refusal, which says nothing about this computer's id.
+pub fn decode_self_member(body: &Value) -> Lookup<String> {
+    if refusal_code(body, "devices").is_some() {
+        return Lookup::Unavailable;
+    }
+    body.get("self")
+        .and_then(|own| own.get("static_public_key_hex"))
+        .and_then(Value::as_str)
+        .and_then(decode_x25519_hex)
+        .map_or(Lookup::Absent, |public| {
+            Lookup::Found(member_id_for_static_key(&public))
+        })
+}
+
+/// One call to callosum's management surface (`method`, no params) through `client`,
+/// within what is left of `budget`. `None` for no client, no time left or no answer,
+/// all of which a caller treats as transient. A callosum refusal comes back as the
+/// value, for the decoders above to classify.
+pub async fn callosum_lookup(
+    client: Option<&OutboundClient>,
+    method: &str,
+    budget: tokio::time::Instant,
+) -> Option<Value> {
+    let client = client?;
+    let left = budget
+        .checked_duration_since(tokio::time::Instant::now())
+        .filter(|left| !left.is_zero())?;
+    client
+        .call(
+            CALLOSUM_ROUTE_KEY,
+            RouteCall {
+                target: management_surface(CALLOSUM_MODULE_ID),
+                prelude: None,
+                request: json!({ "method": method, "params": {} }),
+            },
+            left,
+        )
+        .await
+        .ok()
+}
+
 /// Exactly 64 lowercase hex characters, as 32 bytes.
 fn decode_x25519_hex(value: &str) -> Option<[u8; 32]> {
     if !credentials_core::federation::is_lower_hex_sha256(value) {
@@ -681,6 +740,13 @@ impl HomeVault {
         self.callosum.get().is_some()
     }
 
+    /// The outbound client attached at startup, shared with this vault's admin ops
+    /// (they make their own callosum lookups and deliveries with it). It reaches no
+    /// part of [`Self::serve`]: a federation op still goes through every check there.
+    pub fn outbound(&self) -> Option<&OutboundClient> {
+        self.callosum.get()
+    }
+
     /// Answer one federation op from `member`, the attested harness member of a
     /// federation channel. `method` outside the allowlist answers the uniform
     /// `not_found`; the whole op runs inside the home's 1.5 s budget, and running past
@@ -919,20 +985,7 @@ impl HomeVault {
     /// One callosum call within what is left of the home's budget. `None` for no
     /// client, no time or no answer, all of which are transient for the caller.
     async fn callosum_call(&self, method: &str, budget: tokio::time::Instant) -> Option<Value> {
-        let client = self.callosum.get()?;
-        let left = budget.checked_duration_since(tokio::time::Instant::now())?;
-        client
-            .call(
-                CALLOSUM_ROUTE_KEY,
-                RouteCall {
-                    target: management_surface(CALLOSUM_MODULE_ID),
-                    prelude: None,
-                    request: json!({ "method": method, "params": {} }),
-                },
-                left,
-            )
-            .await
-            .ok()
+        callosum_lookup(self.callosum.get(), method, budget).await
     }
 
     /// Step 5's transfer key: the stored `kem:vault-transfer:1`, readable (so `Active`)

@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::audit::AuditRecord;
 use crate::audit::{AuditCtx, AuditOp};
+use crate::federation::{MemberGrantOperation, MemberGrantSelector};
 use crate::record::{CredentialKind, RecordIdentity, VaultRecord};
 use crate::store::{
     mint_handle, EncryptedStore, GrantOperation, ReadGrant, RecordMeta, SelectorKind,
@@ -244,8 +245,86 @@ pub enum AdminOpBody {
     /// Set this vault's own member id (`fed-computer:<fp>`), which it writes into every
     /// `requester`, `home`, `sender` and `receiver` field it emits. Peers check those
     /// against the authenticated caller, so a wrong value fails closed.
+    ///
+    /// Runs only on the live daemon: it first asks callosum which member id this
+    /// computer has and refuses a typed id that differs, so a mistyped id can never
+    /// be stored.
     #[serde(rename = "admin.federation_self_set")]
     FederationSelfSet { v: u32, member: String },
+    /// `ck auth transfer init --self <member>`: create this vault's transfer key
+    /// (`kem:vault-transfer:1`) when it has none, grant callosum the one announce read on
+    /// it, and set the self id. Daemon-only, for the same self-id check as
+    /// [`AdminOpBody::FederationSelfSet`].
+    #[serde(rename = "admin.transfer_init")]
+    TransferInit { v: u32, self_member: String },
+    /// `ck auth transfer init --replace`: replace a transfer key found off `Active`,
+    /// rejecting every pending incoming transfer and abandoning every outgoing one.
+    #[serde(rename = "admin.transfer_recover")]
+    TransferRecover { v: u32 },
+    /// `ck auth transfer send --id <credential> --to <member>`. Daemon-only: it looks up
+    /// the receiver's announced key and delivers the sealed envelope.
+    #[serde(rename = "admin.transfer_send")]
+    TransferSend {
+        v: u32,
+        credential_id: String,
+        to: String,
+    },
+    /// `ck auth transfer send --resume <transfer-id>`: redeliver a stored envelope.
+    #[serde(rename = "admin.transfer_resume")]
+    TransferResume { v: u32, transfer_id: String },
+    /// `ck auth transfer receive`: the transfers waiting for this operator.
+    #[serde(rename = "admin.transfer_receive")]
+    TransferReceive { v: u32 },
+    /// `ck auth transfer accept <transfer-id> --from <member> [--replace]`. Daemon-only:
+    /// it looks up the sender's announced key to open the envelope again.
+    #[serde(rename = "admin.transfer_accept")]
+    TransferAccept {
+        v: u32,
+        transfer_id: String,
+        from: String,
+        replace: bool,
+    },
+    /// `ck auth transfer reject <transfer-id> --from <member>`.
+    #[serde(rename = "admin.transfer_reject")]
+    TransferReject {
+        v: u32,
+        transfer_id: String,
+        from: String,
+    },
+    /// `ck auth remote add --id <id> --home <member>`. Daemon-only: it fetches the
+    /// home's description of the login once and stores that, never the token.
+    #[serde(rename = "admin.remote_add")]
+    RemoteAdd {
+        v: u32,
+        credential_id: String,
+        home: String,
+    },
+    /// `ck auth remote remove --id <id>`.
+    #[serde(rename = "admin.remote_remove")]
+    RemoteRemove { v: u32, credential_id: String },
+    /// `ck auth remote list`.
+    #[serde(rename = "admin.remote_list")]
+    RemoteList { v: u32 },
+    /// `ck auth member grant`. Daemon-only: it records the member's current pairing id,
+    /// which only callosum knows.
+    #[serde(rename = "admin.member_grant")]
+    MemberGrant {
+        v: u32,
+        member: String,
+        operation: MemberGrantOperation,
+        selector: MemberGrantSelector,
+    },
+    /// `ck auth member revoke`. Needs no lookup.
+    #[serde(rename = "admin.member_revoke")]
+    MemberRevoke {
+        v: u32,
+        member: String,
+        operation: MemberGrantOperation,
+        selector: MemberGrantSelector,
+    },
+    /// `ck auth member list`.
+    #[serde(rename = "admin.member_list")]
+    MemberList { v: u32 },
 }
 
 /// Redacted `Debug`, hand-written rather than derived, and NOT only because of the
@@ -495,6 +574,97 @@ impl std::fmt::Debug for AdminOpBody {
                 .field("v", v)
                 .field("member", member)
                 .finish(),
+            // None of the federation admin ops carries secret material: member ids,
+            // credential ids and transfer ids are all non-secret.
+            AdminOpBody::TransferInit { v, self_member } => f
+                .debug_struct("TransferInit")
+                .field("v", v)
+                .field("self_member", self_member)
+                .finish(),
+            AdminOpBody::TransferRecover { v } => {
+                f.debug_struct("TransferRecover").field("v", v).finish()
+            }
+            AdminOpBody::TransferSend {
+                v,
+                credential_id,
+                to,
+            } => f
+                .debug_struct("TransferSend")
+                .field("v", v)
+                .field("credential_id", credential_id)
+                .field("to", to)
+                .finish(),
+            AdminOpBody::TransferResume { v, transfer_id } => f
+                .debug_struct("TransferResume")
+                .field("v", v)
+                .field("transfer_id", transfer_id)
+                .finish(),
+            AdminOpBody::TransferReceive { v } => {
+                f.debug_struct("TransferReceive").field("v", v).finish()
+            }
+            AdminOpBody::TransferAccept {
+                v,
+                transfer_id,
+                from,
+                replace,
+            } => f
+                .debug_struct("TransferAccept")
+                .field("v", v)
+                .field("transfer_id", transfer_id)
+                .field("from", from)
+                .field("replace", replace)
+                .finish(),
+            AdminOpBody::TransferReject {
+                v,
+                transfer_id,
+                from,
+            } => f
+                .debug_struct("TransferReject")
+                .field("v", v)
+                .field("transfer_id", transfer_id)
+                .field("from", from)
+                .finish(),
+            AdminOpBody::RemoteAdd {
+                v,
+                credential_id,
+                home,
+            } => f
+                .debug_struct("RemoteAdd")
+                .field("v", v)
+                .field("credential_id", credential_id)
+                .field("home", home)
+                .finish(),
+            AdminOpBody::RemoteRemove { v, credential_id } => f
+                .debug_struct("RemoteRemove")
+                .field("v", v)
+                .field("credential_id", credential_id)
+                .finish(),
+            AdminOpBody::RemoteList { v } => f.debug_struct("RemoteList").field("v", v).finish(),
+            AdminOpBody::MemberGrant {
+                v,
+                member,
+                operation,
+                selector,
+            } => f
+                .debug_struct("MemberGrant")
+                .field("v", v)
+                .field("member", member)
+                .field("operation", operation)
+                .field("selector", selector)
+                .finish(),
+            AdminOpBody::MemberRevoke {
+                v,
+                member,
+                operation,
+                selector,
+            } => f
+                .debug_struct("MemberRevoke")
+                .field("v", v)
+                .field("member", member)
+                .field("operation", operation)
+                .field("selector", selector)
+                .finish(),
+            AdminOpBody::MemberList { v } => f.debug_struct("MemberList").field("v", v).finish(),
         }
     }
 }
@@ -530,6 +700,19 @@ impl AdminOpBody {
             | AdminOpBody::EnrollReissue { v, .. }
             | AdminOpBody::FederationGateSet { v, .. }
             | AdminOpBody::FederationSelfSet { v, .. }
+            | AdminOpBody::TransferInit { v, .. }
+            | AdminOpBody::TransferRecover { v }
+            | AdminOpBody::TransferSend { v, .. }
+            | AdminOpBody::TransferResume { v, .. }
+            | AdminOpBody::TransferReceive { v }
+            | AdminOpBody::TransferAccept { v, .. }
+            | AdminOpBody::TransferReject { v, .. }
+            | AdminOpBody::RemoteAdd { v, .. }
+            | AdminOpBody::RemoteRemove { v, .. }
+            | AdminOpBody::RemoteList { v }
+            | AdminOpBody::MemberGrant { v, .. }
+            | AdminOpBody::MemberRevoke { v, .. }
+            | AdminOpBody::MemberList { v }
             | AdminOpBody::Status { v } => *v,
         }
     }
@@ -549,7 +732,20 @@ impl AdminOpBody {
             | AdminOpBody::EnrollRevoke { .. }
             | AdminOpBody::EnrollReissue { .. }
             | AdminOpBody::FederationGateSet { .. }
-            | AdminOpBody::FederationSelfSet { .. } => ADMIN_OP_SCHEMA_V2,
+            | AdminOpBody::FederationSelfSet { .. }
+            | AdminOpBody::TransferInit { .. }
+            | AdminOpBody::TransferRecover { .. }
+            | AdminOpBody::TransferSend { .. }
+            | AdminOpBody::TransferResume { .. }
+            | AdminOpBody::TransferReceive { .. }
+            | AdminOpBody::TransferAccept { .. }
+            | AdminOpBody::TransferReject { .. }
+            | AdminOpBody::RemoteAdd { .. }
+            | AdminOpBody::RemoteRemove { .. }
+            | AdminOpBody::RemoteList { .. }
+            | AdminOpBody::MemberGrant { .. }
+            | AdminOpBody::MemberRevoke { .. }
+            | AdminOpBody::MemberList { .. } => ADMIN_OP_SCHEMA_V2,
             AdminOpBody::Store { .. }
             | AdminOpBody::OperatorSign { .. }
             | AdminOpBody::StoreWithIdentityPolicy { .. }
@@ -603,7 +799,22 @@ impl AdminOpBody {
             | AdminOpBody::SetPlan { credential_id: id, .. }
             | AdminOpBody::SetProviders {
                 credential_id: id, ..
+            }
+            // A send serializes against other admin writes to the record it seals, and
+            // a remote add or remove against other writes to the id it claims.
+            | AdminOpBody::TransferSend {
+                credential_id: id, ..
+            }
+            | AdminOpBody::RemoteAdd {
+                credential_id: id, ..
+            }
+            | AdminOpBody::RemoteRemove {
+                credential_id: id, ..
             } => Some(id),
+            // Creating or replacing the transfer key writes that one record.
+            AdminOpBody::TransferInit { .. } | AdminOpBody::TransferRecover { .. } => {
+                Some(crate::federation::VAULT_TRANSFER_ID)
+            }
             AdminOpBody::RevokeHandle { .. }
             | AdminOpBody::RevokeHandleByHash { .. }
             | AdminOpBody::GrantCreate { .. }
@@ -621,6 +832,17 @@ impl AdminOpBody {
             // Federation settings belong to no credential; the fenced write orders them.
             | AdminOpBody::FederationGateSet { .. }
             | AdminOpBody::FederationSelfSet { .. }
+            // A resume, receive, reject, list or member grant writes no credential
+            // record. An accept's record id is known only from its stored pending row,
+            // so the daemon's federation path takes that lock itself.
+            | AdminOpBody::TransferResume { .. }
+            | AdminOpBody::TransferReceive { .. }
+            | AdminOpBody::TransferAccept { .. }
+            | AdminOpBody::TransferReject { .. }
+            | AdminOpBody::RemoteList { .. }
+            | AdminOpBody::MemberGrant { .. }
+            | AdminOpBody::MemberRevoke { .. }
+            | AdminOpBody::MemberList { .. }
             | AdminOpBody::Status { .. } => None,
         }
     }
@@ -635,7 +857,7 @@ impl AdminOpBody {
 
     /// The variant's own discriminators, for diagnostics (`Store` reports which op it
     /// refused without nesting the whole body).
-    pub(crate) fn op_name(&self) -> &'static str {
+    pub fn op_name(&self) -> &'static str {
         match self {
             AdminOpBody::OperatorSign { .. } => "admin.operator_sign",
             AdminOpBody::Store { .. } => "admin.store",
@@ -665,6 +887,19 @@ impl AdminOpBody {
             AdminOpBody::Status { .. } => "admin.status",
             AdminOpBody::FederationGateSet { .. } => "admin.federation_gate_set",
             AdminOpBody::FederationSelfSet { .. } => "admin.federation_self_set",
+            AdminOpBody::TransferInit { .. } => "admin.transfer_init",
+            AdminOpBody::TransferRecover { .. } => "admin.transfer_recover",
+            AdminOpBody::TransferSend { .. } => "admin.transfer_send",
+            AdminOpBody::TransferResume { .. } => "admin.transfer_resume",
+            AdminOpBody::TransferReceive { .. } => "admin.transfer_receive",
+            AdminOpBody::TransferAccept { .. } => "admin.transfer_accept",
+            AdminOpBody::TransferReject { .. } => "admin.transfer_reject",
+            AdminOpBody::RemoteAdd { .. } => "admin.remote_add",
+            AdminOpBody::RemoteRemove { .. } => "admin.remote_remove",
+            AdminOpBody::RemoteList { .. } => "admin.remote_list",
+            AdminOpBody::MemberGrant { .. } => "admin.member_grant",
+            AdminOpBody::MemberRevoke { .. } => "admin.member_revoke",
+            AdminOpBody::MemberList { .. } => "admin.member_list",
         }
     }
 
@@ -704,10 +939,28 @@ impl AdminOpBody {
             | AdminOpBody::Reclassify { .. }
             | AdminOpBody::Approval { .. }
             | AdminOpBody::Status { .. }
-            // The gate and the self id are store settings: both are pure local writes
-            // and already run through `apply` from the offline lease path.
+            // The gate is a store setting: a pure local write, run through `apply`
+            // from the offline lease path too.
             | AdminOpBody::FederationGateSet { .. }
-            | AdminOpBody::FederationSelfSet { .. } => false,
+            // Local reads and writes with no outbound call.
+            | AdminOpBody::TransferRecover { .. }
+            | AdminOpBody::TransferReceive { .. }
+            | AdminOpBody::TransferReject { .. }
+            | AdminOpBody::RemoteRemove { .. }
+            | AdminOpBody::RemoteList { .. }
+            | AdminOpBody::MemberRevoke { .. }
+            | AdminOpBody::MemberList { .. } => false,
+            // The self id is checked against the member id callosum computes for this
+            // computer; a send and an accept look up a peer's announced key, a send and
+            // a resume deliver, a remote add fetches from the home, and a member grant
+            // reads the member's current pairing id.
+            AdminOpBody::FederationSelfSet { .. }
+            | AdminOpBody::TransferInit { .. }
+            | AdminOpBody::TransferSend { .. }
+            | AdminOpBody::TransferResume { .. }
+            | AdminOpBody::TransferAccept { .. }
+            | AdminOpBody::RemoteAdd { .. }
+            | AdminOpBody::MemberGrant { .. } => true,
         }
     }
 }
@@ -760,11 +1013,7 @@ pub fn apply(
     // the daemon's federation path instead, and this refusal sits before any match arm
     // that could write, so the offline path can never run one half-way.
     if op.requires_daemon() {
-        return Err(StoreOpError::Encode(format!(
-            "federation_requires_daemon: {} needs the running daemon for its outbound \
-             calls and cannot run against a leased store",
-            op.op_name()
-        )));
+        return Err(requires_daemon_refusal(&op));
     }
     match op {
         AdminOpBody::OperatorSign {
@@ -975,6 +1224,15 @@ pub fn apply(
             }))
         }
         AdminOpBody::MintHandle { id, .. } => {
+            // A remote record has no local material for a handle to reach: its token is
+            // fetched from its home on each read. Named, so the operator is not told the
+            // id they can see in `remote list` does not exist.
+            if store.remote_record(&id)?.is_some() {
+                return Err(StoreOpError::Encode(format!(
+                    "{REMOTE_RECORD_CODE}: {id} is a remote record served by its home vault; \
+                     a capability handle cannot be minted for it"
+                )));
+            }
             // The credential must exist before a handle is minted for it (the handles
             // table has no FK, so this guard is the check). meta() is a no-decrypt
             // plaintext read, so it works on any lifecycle state.
@@ -1147,12 +1405,87 @@ pub fn apply(
             )?;
             Ok(serde_json::json!({ "member_mapping": enabled, "changed": changed }))
         }
-        AdminOpBody::FederationSelfSet { member, .. } => {
-            let changed = store.set_federation_self_member_audited(
-                &member,
-                AuditCtx::route_admin(AuditOp::FederationSelfSet, actor),
+        // Refused above, before any write: these need the daemon's outbound calls.
+        op @ (AdminOpBody::FederationSelfSet { .. }
+        | AdminOpBody::TransferInit { .. }
+        | AdminOpBody::TransferSend { .. }
+        | AdminOpBody::TransferResume { .. }
+        | AdminOpBody::TransferAccept { .. }
+        | AdminOpBody::RemoteAdd { .. }
+        | AdminOpBody::MemberGrant { .. }) => Err(requires_daemon_refusal(&op)),
+        AdminOpBody::TransferRecover { .. } => recover_transfer_key(store, actor),
+        AdminOpBody::TransferReceive { .. } => {
+            store.expire_incoming_transfers(wall_now_ms())?;
+            let pending: Vec<serde_json::Value> = store
+                .list_incoming_transfers()?
+                .into_iter()
+                .filter(|row| row.state == crate::federation::IncomingTransferState::Pending)
+                .map(|row| {
+                    serde_json::json!({
+                        "transfer_id": row.transfer_id,
+                        "sender": row.sender_member,
+                        "credential_id": row.credential_id,
+                        "kind": row.kind,
+                        "categories": row.categories,
+                        "size_bytes": row.size_bytes,
+                        "received_at_ms": row.received_at_ms,
+                        "expires_at_ms": row.expires_at_ms,
+                    })
+                })
+                .collect();
+            Ok(serde_json::json!({ "pending": pending }))
+        }
+        AdminOpBody::TransferReject {
+            transfer_id, from, ..
+        } => {
+            crate::federation::check_member_id(&from)?;
+            check_transfer_id(&transfer_id)?;
+            let state = store.reject_incoming_transfer_audited(
+                &from,
+                &transfer_id,
+                crate::federation::REJECT_BY_OPERATOR,
             )?;
-            Ok(serde_json::json!({ "self_member": member, "changed": changed }))
+            Ok(serde_json::json!({ "transfer_id": transfer_id, "state": state.as_str() }))
+        }
+        AdminOpBody::RemoteRemove { credential_id, .. } => {
+            let removed = store.remote_remove_audited(&credential_id)?;
+            Ok(serde_json::json!({
+                "removed": true,
+                "credential_id": removed.credential_id,
+                "home": removed.home_member,
+                "incarnation": removed.incarnation,
+            }))
+        }
+        AdminOpBody::RemoteList { .. } => {
+            let records: Vec<serde_json::Value> = store
+                .list_remote_records()?
+                .into_iter()
+                .map(|record| {
+                    serde_json::json!({
+                        "credential_id": record.credential_id,
+                        "home": record.home_member,
+                        "incarnation": record.incarnation,
+                        "last_home_version": record.last_home_version,
+                        "last_home_state": record.last_home_state.as_str(),
+                        "last_home_error": record.last_home_error,
+                        "last_fetch_outcome": record.last_fetch_outcome,
+                    })
+                })
+                .collect();
+            Ok(serde_json::json!({ "remote_records": records }))
+        }
+        AdminOpBody::MemberRevoke {
+            member,
+            operation,
+            selector,
+            ..
+        } => {
+            store.revoke_member_grant_audited(&member, operation, &selector)?;
+            Ok(serde_json::json!({ "revoked": true }))
+        }
+        AdminOpBody::MemberList { .. } => {
+            let grants = store.list_member_grants()?;
+            Ok(serde_json::json!({ "member_grants": grants }))
         }
         AdminOpBody::Status { .. } => {
             // Status health uses credential lifecycle columns. Each row's detected
@@ -1169,6 +1502,84 @@ pub fn apply(
             Ok(result)
         }
     }
+}
+
+/// The refusal code [`apply`] answers for an op that needs the running daemon's
+/// outbound calls (see [`AdminOpBody::requires_daemon`]).
+pub const FEDERATION_REQUIRES_DAEMON: &str = "federation_requires_daemon";
+
+/// The refusal code for minting a capability handle on a remote record.
+pub const REMOTE_RECORD_CODE: &str = "remote_record";
+
+fn requires_daemon_refusal(op: &AdminOpBody) -> StoreOpError {
+    StoreOpError::Encode(format!(
+        "{FEDERATION_REQUIRES_DAEMON}: {} needs the running daemon for its outbound \
+         calls and cannot run against a leased store; run it with the daemon up \
+         (--subc <connection-file>)",
+        op.op_name()
+    ))
+}
+
+/// A transfer id is 32 lowercase hex characters.
+fn check_transfer_id(transfer_id: &str) -> Result<(), StoreOpError> {
+    if crate::federation::is_lower_hex_16_bytes(transfer_id) {
+        Ok(())
+    } else {
+        Err(StoreOpError::Encode(
+            "invalid_params: a transfer id is 32 lowercase hex characters".into(),
+        ))
+    }
+}
+
+fn wall_now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// `transfer init --replace`: a fresh transfer key in place of one found off `Active`,
+/// settling every transfer sealed under the old key in the same transaction. The reply
+/// lists those transfers so the operator can send each credential again.
+fn recover_transfer_key(
+    store: &EncryptedStore,
+    actor: &str,
+) -> Result<serde_json::Value, StoreOpError> {
+    let pem = crate::kem::generate_key()
+        .map_err(|e| StoreOpError::Encode(format!("transfer key generation failed: {e}")))?;
+    let record =
+        VaultRecord::new_static(CredentialKind::KemKey, "operator", pem.into_bytes(), None);
+    let recovery = store.recover_vault_transfer_key_audited(
+        &record,
+        AuditCtx::route_admin(AuditOp::Overwrite, actor),
+    )?;
+    let rejected: Vec<serde_json::Value> = recovery
+        .rejected_incoming
+        .iter()
+        .map(|row| {
+            serde_json::json!({
+                "transfer_id": row.transfer_id,
+                "sender": row.sender_member,
+                "credential_id": row.credential_id,
+            })
+        })
+        .collect();
+    let abandoned: Vec<serde_json::Value> = recovery
+        .abandoned_outgoing
+        .iter()
+        .map(|row| {
+            serde_json::json!({
+                "transfer_id": row.transfer_id,
+                "receiver": row.receiver_member,
+                "credential_id": row.credential_id,
+            })
+        })
+        .collect();
+    Ok(serde_json::json!({
+        "replaced": true,
+        "rejected_incoming": rejected,
+        "abandoned_outgoing": abandoned,
+    }))
 }
 
 /// Build the status report shared by the authenticated route and lease-free CLI fallback.
@@ -1691,6 +2102,110 @@ mod admin_schema_v2_tests {
                 v2,
                 None,
             ),
+            (
+                "TransferInit",
+                AdminOpBody::TransferInit {
+                    v: v2,
+                    self_member: "fed-computer:0123456789abcdef0123456789abcdef".into(),
+                },
+                v2,
+                Some(crate::federation::VAULT_TRANSFER_ID),
+            ),
+            (
+                "TransferRecover",
+                AdminOpBody::TransferRecover { v: v2 },
+                v2,
+                Some(crate::federation::VAULT_TRANSFER_ID),
+            ),
+            (
+                "TransferSend",
+                AdminOpBody::TransferSend {
+                    v: v2,
+                    credential_id: "id".into(),
+                    to: "fed-computer:0123456789abcdef0123456789abcdef".into(),
+                },
+                v2,
+                Some("id"),
+            ),
+            (
+                "TransferResume",
+                AdminOpBody::TransferResume {
+                    v: v2,
+                    transfer_id: "00".repeat(16),
+                },
+                v2,
+                None,
+            ),
+            (
+                "TransferReceive",
+                AdminOpBody::TransferReceive { v: v2 },
+                v2,
+                None,
+            ),
+            (
+                "TransferAccept",
+                AdminOpBody::TransferAccept {
+                    v: v2,
+                    transfer_id: "00".repeat(16),
+                    from: "fed-computer:0123456789abcdef0123456789abcdef".into(),
+                    replace: false,
+                },
+                v2,
+                None,
+            ),
+            (
+                "TransferReject",
+                AdminOpBody::TransferReject {
+                    v: v2,
+                    transfer_id: "00".repeat(16),
+                    from: "fed-computer:0123456789abcdef0123456789abcdef".into(),
+                },
+                v2,
+                None,
+            ),
+            (
+                "RemoteAdd",
+                AdminOpBody::RemoteAdd {
+                    v: v2,
+                    credential_id: "id".into(),
+                    home: "fed-computer:0123456789abcdef0123456789abcdef".into(),
+                },
+                v2,
+                Some("id"),
+            ),
+            (
+                "RemoteRemove",
+                AdminOpBody::RemoteRemove {
+                    v: v2,
+                    credential_id: "id".into(),
+                },
+                v2,
+                Some("id"),
+            ),
+            ("RemoteList", AdminOpBody::RemoteList { v: v2 }, v2, None),
+            (
+                "MemberGrant",
+                AdminOpBody::MemberGrant {
+                    v: v2,
+                    member: "fed-computer:0123456789abcdef0123456789abcdef".into(),
+                    operation: MemberGrantOperation::TransferDeliver,
+                    selector: MemberGrantSelector::None,
+                },
+                v2,
+                None,
+            ),
+            (
+                "MemberRevoke",
+                AdminOpBody::MemberRevoke {
+                    v: v2,
+                    member: "fed-computer:0123456789abcdef0123456789abcdef".into(),
+                    operation: MemberGrantOperation::RemoteRead,
+                    selector: MemberGrantSelector::Category("llm-provider".into()),
+                },
+                v2,
+                None,
+            ),
+            ("MemberList", AdminOpBody::MemberList { v: v2 }, v2, None),
         ];
         for (name, op, version, lock) in variants {
             assert_eq!(op.schema_version(), version, "{name} schema field");
@@ -1953,5 +2468,67 @@ mod operator_sign_tests {
         let rendered = format!("{op:?}");
         assert!(!rendered.contains("c2VjcmV0"));
         assert!(rendered.contains("<redacted>"));
+    }
+}
+
+#[cfg(test)]
+mod remote_record_handle_tests {
+    use super::*;
+    use crate::federation::NewRemoteRecord;
+    use crate::key::MasterKey;
+    use crate::test_support::TestTempDir;
+    use cortexkit_store::{open_sqlite, Isolation, StorageBackend, StorageDescriptor};
+
+    fn vault() -> (TestTempDir, EncryptedStore) {
+        let root = TestTempDir::new(format!("remote-record-handle-{}", std::process::id()));
+        let descriptor = StorageDescriptor {
+            module_id: "cortexkit-credentials".into(),
+            storage_namespace: "default".into(),
+            isolation: Isolation::Module,
+            backend: StorageBackend::Sqlite {
+                path: root.join("store.db").to_string_lossy().into_owned(),
+            },
+        };
+        let sqlite = open_sqlite(&descriptor).unwrap();
+        EncryptedStore::migrate(&sqlite).unwrap();
+        let store = EncryptedStore::open(sqlite, MasterKey::from_bytes([0x62; 32])).unwrap();
+        (root, store)
+    }
+
+    /// A remote record's token is fetched from its home on each read, so no handle may
+    /// reach it: minting one is refused by name and writes no handle and no audit row.
+    #[test]
+    fn minting_a_handle_for_a_remote_record_is_refused_as_remote_record() {
+        let (_root, store) = vault();
+        let id = "oauth:anthropic:remote";
+        store
+            .remote_add_audited(&NewRemoteRecord {
+                credential_id: id.into(),
+                home_member: "fed-computer:0123456789abcdef0123456789abcdef".into(),
+                refresh_adapter: Some("anthropic".into()),
+                detected_plan: None,
+                identity: RecordIdentity::default(),
+                home_version: 1,
+                categories: vec![],
+            })
+            .unwrap();
+        let audit_before = store.read_audit(None).unwrap().len();
+        let refused = apply(
+            &store,
+            AdminOpBody::MintHandle {
+                v: ADMIN_OP_SCHEMA_V1,
+                id: id.into(),
+            },
+            "offline-cli",
+        );
+        match refused {
+            Err(StoreOpError::Encode(message)) => {
+                assert!(message.starts_with(REMOTE_RECORD_CODE), "{message}")
+            }
+            other => panic!("expected the remote_record refusal, got {other:?}"),
+        }
+        // A minted handle writes a `mint_handle` audit row in the same transaction, so
+        // an unchanged chain also proves no handle row was stored.
+        assert_eq!(store.read_audit(None).unwrap().len(), audit_before);
     }
 }

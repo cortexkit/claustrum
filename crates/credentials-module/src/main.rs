@@ -383,6 +383,9 @@ where
     // connection and one binding cache.
     admin.home().attach_outbound(outbound.clone());
     surface.remote().attach_outbound(outbound);
+    // `remote add` fetches through this same reader, so it validates a home reply
+    // against exactly the adapter set and reply type a consumer read uses.
+    admin.attach_remote_reader(Arc::clone(surface.remote()));
     // Wire v2: the module-side channel → epoch map (spec §3.3 layer 2).
     let routes = Arc::new(RouteEpochs::default());
 

@@ -933,13 +933,31 @@ fn gate_and_self_id_are_read_live_and_written_only_through_audited_admin_ops() {
         Some(federation_gate_payload_hash(false).as_str())
     );
 
-    let refused = apply(
-        &store,
-        AdminOpBody::FederationSelfSet {
-            v: ADMIN_OP_SCHEMA_V2,
-            member: "fed-computer:NOTHEX".into(),
-        },
-        ACTOR,
+    // The self id is set only on the live daemon, which first checks it against the id
+    // callosum computes for this computer. `apply` (the offline lease path) refuses the
+    // op before writing anything, valid id or not.
+    for member in ["fed-computer:NOTHEX", HOME] {
+        let refused = apply(
+            &store,
+            AdminOpBody::FederationSelfSet {
+                v: ADMIN_OP_SCHEMA_V2,
+                member: member.into(),
+            },
+            ACTOR,
+        );
+        assert!(
+            matches!(&refused, Err(StoreOpError::Encode(message))
+                if message.starts_with(crate::admin_ops::FEDERATION_REQUIRES_DAEMON)),
+            "{refused:?}"
+        );
+    }
+    assert_eq!(store.federation_self_member().unwrap(), None);
+    assert!(audit_rows(&store, AuditOp::FederationSelfSet).is_empty());
+
+    // The store write the daemon makes after that check validates and audits.
+    let refused = store.set_federation_self_member_audited(
+        "fed-computer:NOTHEX",
+        AuditCtx::route_admin(AuditOp::FederationSelfSet, ACTOR),
     );
     assert!(
         matches!(refused, Err(StoreOpError::InvalidMemberId)),
@@ -949,15 +967,12 @@ fn gate_and_self_id_are_read_live_and_written_only_through_audited_admin_ops() {
     assert!(audit_rows(&store, AuditOp::FederationSelfSet).is_empty());
 
     for member in [HOME, OTHER] {
-        apply(
-            &store,
-            AdminOpBody::FederationSelfSet {
-                v: ADMIN_OP_SCHEMA_V2,
-                member: member.into(),
-            },
-            ACTOR,
-        )
-        .unwrap();
+        store
+            .set_federation_self_member_audited(
+                member,
+                AuditCtx::route_admin(AuditOp::FederationSelfSet, ACTOR),
+            )
+            .unwrap();
         assert_eq!(
             store.federation_self_member().unwrap().as_deref(),
             Some(member)

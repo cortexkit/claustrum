@@ -56,8 +56,8 @@ build_timeout_s = 3600
 id = "stale-report-forces-refresh"
 guards = "consumer stale marker forces refresh and invalid-grant terminal latch"
 file = "crates/credentials-core/src/engine.rs"
-old = "        let wants_refresh = force_refresh || stale_pending || self.is_stale(&initial, min_ttl_ms);"
-new = "        let wants_refresh = force_refresh || self.is_stale(&initial, min_ttl_ms); // NON-VACUITY BREAK"
+old = "            force_refresh || stale_pending || self.is_stale(&served.record, min_ttl_ms);"
+new = "            force_refresh || self.is_stale(&served.record, min_ttl_ms); // NON-VACUITY BREAK"
 edits = []
 test_file = "crates/credentials-core/src/engine_tests.rs"
 runner = "cargo"
@@ -405,11 +405,17 @@ file = "crates/credentials-module/src/read_surface.rs"
 old = """
         if let Err(code) = self.authorize_scoped_as(
             principal,
-            params.enrollment_token.as_deref(),"""
+            params.enrollment_token.as_deref(),
+            &params.credential_id,
+            GrantOperation::Read,
+        ) {"""
 new = """
         if let Err(code) = self.authorize_scoped_as(
             principal,
-            None, // NON-VACUITY BREAK"""
+            None, // NON-VACUITY BREAK
+            &params.credential_id,
+            GrantOperation::Read,
+        ) {"""
 edits = []
 test_file = "crates/credentials-module/src/main.rs"
 runner = "cargo"
@@ -464,8 +470,8 @@ build_timeout_s = 3600
 id = "store-ahead-refuses-migration"
 guards = "binary refuses store schema newer than its shipped migrations"
 file = "crates/credentials-core/src/store.rs"
-old = "if recorded > newest {"
-new = "if false { // NON-VACUITY BREAK"
+old = "if recorded <= binary_newest {"
+new = "if true { // NON-VACUITY BREAK"
 edits = []
 test_file = "crates/credentials-core/src/store.rs"
 runner = "cargo"
@@ -504,12 +510,18 @@ file = "crates/credentials-module/src/read_surface.rs"
 old = """
         if let Err(code) = self.authorize_scoped_as(
             principal,
-            params.enrollment_token.as_deref(),"""
+            params.enrollment_token.as_deref(),
+            &params.credential_id,
+            GrantOperation::Read,
+        ) {"""
 new = """
         eprintln!("{:?}", params.enrollment_token); // NON-VACUITY BREAK
         if let Err(code) = self.authorize_scoped_as(
             principal,
-            params.enrollment_token.as_deref(),"""
+            params.enrollment_token.as_deref(),
+            &params.credential_id,
+            GrantOperation::Read,
+        ) {"""
 edits = []
 test_file = "crates/credentials-module/src/main.rs"
 runner = "cargo"
@@ -1458,9 +1470,9 @@ timeout_s = 600
 [[control]]
 id = "callosum-forwarded-harness-refused"
 guards = "a reserved:callosum route bound with a fed- harness (a call forwarded from another computer) gets no principal, so it cannot borrow callosum's own grants"
-file = "crates/credentials-module/src/admin_surface.rs"
-old = "        && harness.starts_with(FORWARDED_HARNESS_PREFIX)"
-new = "        && harness.starts_with(FORWARDED_HARNESS_PREFIX) && false // NON-VACUITY BREAK"
+file = "crates/credentials-module/src/federation/ingress.rs"
+old = "        MappingGate::Off if harness.starts_with(FORWARDED_HARNESS_PREFIX) => {"
+new = "        MappingGate::Off if harness.starts_with(FORWARDED_HARNESS_PREFIX) && false => { // NON-VACUITY BREAK"
 edits = []
 test_file = "crates/credentials-module/src/main.rs"
 runner = "cargo"

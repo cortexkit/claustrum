@@ -961,7 +961,7 @@ pub enum AcceptStep {
     Decided(AcceptReport),
     /// The pending row and its sender's announced key, ready for
     /// [`Transfers::accept_commit`].
-    Ready(AcceptPlan),
+    Ready(Box<AcceptPlan>),
 }
 
 /// A pending transfer ready to be opened and committed.
@@ -1431,11 +1431,11 @@ impl Transfers {
             }
             Lookup::Unavailable => return Err(TransferRefusal::callosum_unavailable()),
         };
-        Ok(AcceptStep::Ready(AcceptPlan {
+        Ok(AcceptStep::Ready(Box::new(AcceptPlan {
             row,
             sender_key,
             replace,
-        }))
+        })))
     }
 
     /// `accept`'s store commit, synchronous so a caller can run it under the admin lock

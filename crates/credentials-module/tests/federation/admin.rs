@@ -115,7 +115,12 @@ impl Vault {
         self.store()
             .create_audited(
                 VAULT_TRANSFER_ID,
-                &VaultRecord::new_static(CredentialKind::KemKey, "operator", pem.into_bytes(), None),
+                &VaultRecord::new_static(
+                    CredentialKind::KemKey,
+                    "operator",
+                    pem.into_bytes(),
+                    None,
+                ),
                 AuditCtx::admin(AuditOp::Put),
             )
             .unwrap();
@@ -132,7 +137,12 @@ impl Vault {
         self.store()
             .create(
                 API_ID,
-                &VaultRecord::new_static(CredentialKind::ApiKey, "operator", b"sk-test".to_vec(), None),
+                &VaultRecord::new_static(
+                    CredentialKind::ApiKey,
+                    "operator",
+                    b"sk-test".to_vec(),
+                    None,
+                ),
             )
             .unwrap();
     }
@@ -246,8 +256,14 @@ async fn transfer_init_and_federation_self_check_the_id_against_callosums_self_k
         self_member: member.to_string(),
     };
     let mismatch = refusal(b.run(&init(&typo)).await);
-    assert!(mismatch.starts_with("self_member_mismatch/permanent"), "{mismatch}");
-    assert!(mismatch.contains(&typo) && mismatch.contains(&actual), "{mismatch}");
+    assert!(
+        mismatch.starts_with("self_member_mismatch/permanent"),
+        "{mismatch}"
+    );
+    assert!(
+        mismatch.contains(&typo) && mismatch.contains(&actual),
+        "{mismatch}"
+    );
     assert!(b.store().meta(VAULT_TRANSFER_ID).is_err());
     assert_eq!(b.store().federation_self_member().unwrap(), None);
 
@@ -278,8 +294,14 @@ async fn transfer_init_and_federation_self_check_the_id_against_callosums_self_k
     };
     let self_rows = audit_count(b.store(), AuditOp::FederationSelfSet);
     let mismatch = refusal(b.run(&set_self(&typo)).await);
-    assert!(mismatch.starts_with("self_member_mismatch/permanent"), "{mismatch}");
-    assert_eq!(audit_count(b.store(), AuditOp::FederationSelfSet), self_rows);
+    assert!(
+        mismatch.starts_with("self_member_mismatch/permanent"),
+        "{mismatch}"
+    );
+    assert_eq!(
+        audit_count(b.store(), AuditOp::FederationSelfSet),
+        self_rows
+    );
 
     // A callosum older than 1.3 sends no `self`: the id cannot be checked, so it is
     // refused rather than accepted unchecked.
@@ -289,10 +311,19 @@ async fn transfer_init_and_federation_self_check_the_id_against_callosums_self_k
         Reply::Ok(json!({ "devices": [] })),
     );
     let unchecked = refusal(b.run(&set_self(&actual)).await);
-    assert!(unchecked.starts_with("self_member_unchecked/permanent"), "{unchecked}");
-    assert_eq!(audit_count(b.store(), AuditOp::FederationSelfSet), self_rows);
+    assert!(
+        unchecked.starts_with("self_member_unchecked/permanent"),
+        "{unchecked}"
+    );
+    assert_eq!(
+        audit_count(b.store(), AuditOp::FederationSelfSet),
+        self_rows
+    );
     let unchecked = refusal(b.run(&init(&actual)).await);
-    assert!(unchecked.starts_with("self_member_unchecked/permanent"), "{unchecked}");
+    assert!(
+        unchecked.starts_with("self_member_unchecked/permanent"),
+        "{unchecked}"
+    );
 }
 
 // ---------------------------------------------------------------------------------
@@ -320,7 +351,10 @@ async fn member_grant_reads_the_pairing_and_refuses_with_no_row() {
         assert_eq!(audit_count(a.store(), AuditOp::MemberGrantCreate), 0);
     };
 
-    for bad in ["fed-computer:XYZ", "fed-phone:11223344556677889900112233445566"] {
+    for bad in [
+        "fed-computer:XYZ",
+        "fed-phone:11223344556677889900112233445566",
+    ] {
         let refused = refusal(a.run(&grant(bad)).await);
         assert!(refused.starts_with("invalid_member_id"), "{refused}");
     }
@@ -328,7 +362,10 @@ async fn member_grant_reads_the_pairing_and_refuses_with_no_row() {
     nothing_written(&a);
 
     let unpaired = refusal(a.run(&grant(&member)).await);
-    assert!(unpaired.starts_with("member_not_paired/permanent"), "{unpaired}");
+    assert!(
+        unpaired.starts_with("member_not_paired/permanent"),
+        "{unpaired}"
+    );
     nothing_written(&a);
 
     vaults.callosum.answer(
@@ -365,8 +402,8 @@ async fn member_grant_reads_the_pairing_and_refuses_with_no_row() {
         .read_audit(None)
         .unwrap()
         .into_iter()
-        .filter(|entry| entry.op == AuditOp::MemberGrantCreate.as_str())
-        .last()
+        .rev()
+        .find(|entry| entry.op == AuditOp::MemberGrantCreate.as_str())
         .unwrap();
     assert_eq!(
         last.payload_hash.as_deref(),
@@ -564,7 +601,10 @@ async fn send_and_accept_run_through_the_admin_hook() {
         })
         .await);
     assert_eq!(report["reply"], "pending", "{report}");
-    assert!(b.store().meta(API_ID).is_err(), "nothing exists before accept");
+    assert!(
+        b.store().meta(API_ID).is_err(),
+        "nothing exists before accept"
+    );
 
     let receive = ok(b
         .run(&AdminOpBody::TransferReceive {
@@ -586,7 +626,10 @@ async fn send_and_accept_run_through_the_admin_hook() {
     assert_eq!(accepted["state"], "accepted");
     assert_eq!(accepted["credential_id"], API_ID);
     assert_eq!(b.store().get(API_ID).unwrap().payload.expose(), b"sk-test");
-    assert_eq!(b.store().categories(API_ID).unwrap(), vec![CATEGORY.to_string()]);
+    assert_eq!(
+        b.store().categories(API_ID).unwrap(),
+        vec![CATEGORY.to_string()]
+    );
     assert_eq!(audit_count(b.store(), AuditOp::TransferIn), 1);
 
     let again = ok(b.run(&accept).await);
@@ -617,7 +660,14 @@ fn login_record() -> VaultRecord {
 
 /// A as home of an Anthropic-shaped login granted to B, with both transfer keys
 /// announced, and A's home answering B's token fetches through the stand-in.
-async fn remote_rig(tag: &str) -> (credentials_core::test_support::TestTempDir, TwoVaults, Vault, Vault) {
+async fn remote_rig(
+    tag: &str,
+) -> (
+    credentials_core::test_support::TestTempDir,
+    TwoVaults,
+    Vault,
+    Vault,
+) {
     let root = crate::support::temp_root(tag);
     let vaults = TwoVaults::new(&root).await;
     let a = Vault::open(&vaults.a, Some(Duration::from_secs(4)));
@@ -684,7 +734,10 @@ async fn remote_add_stores_the_home_description_and_refuses_an_unregistered_adap
         admin
     });
     let refused = refusal(run_on(&narrow, &add).await);
-    assert!(refused.starts_with("remote_reply_invalid/permanent"), "{refused}");
+    assert!(
+        refused.starts_with("remote_reply_invalid/permanent"),
+        "{refused}"
+    );
     assert!(b.store().list_remote_records().unwrap().is_empty());
     assert_eq!(audit_count(b.store(), AuditOp::RemoteAdd), 0);
 
@@ -696,7 +749,10 @@ async fn remote_add_stores_the_home_description_and_refuses_an_unregistered_adap
     let records = b.store().list_remote_records().unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].refresh_adapter.as_deref(), Some("anthropic"));
-    assert_eq!(b.store().remote_inventory().unwrap()[0].categories, vec![CATEGORY.to_string()]);
+    assert_eq!(
+        b.store().remote_inventory().unwrap()[0].categories,
+        vec![CATEGORY.to_string()]
+    );
     assert_eq!(audit_count(b.store(), AuditOp::RemoteAdd), 1);
 
     let mint = refusal(
@@ -795,7 +851,10 @@ async fn offline_runs_of_the_outbound_admin_ops_answer_federation_requires_daemo
         let name = format!("{op:?}");
         match credentials_core::admin_ops::apply(store, op, "offline-cli") {
             Err(credentials_core::store::StoreOpError::Encode(message)) => {
-                assert!(message.starts_with(FEDERATION_REQUIRES_DAEMON), "{name}: {message}")
+                assert!(
+                    message.starts_with(FEDERATION_REQUIRES_DAEMON),
+                    "{name}: {message}"
+                )
             }
             other => panic!("{name} was not refused as federation_requires_daemon: {other:?}"),
         }

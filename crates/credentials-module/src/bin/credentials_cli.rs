@@ -609,10 +609,10 @@ fn usage_short() -> String {
        events              why credentials failed to authenticate\n\
        usable              which credentials can still serve or refresh\n\
        verify-audit        verify the audit-chain integrity\n\
-       transfer            send, receive, accept or reject a sealed static-key transfer\n\
-       remote              register or remove a login homed in another member's vault\n\
-       member              grant another member's vault remote reads or deliveries\n\
-       federation          set this vault's member id or the member-mapping gate\n\
+       transfer            send, receive, accept or reject a sealed key transfer\n\
+       remote              add or remove a login homed in another vault\n\
+       member              grant another vault remote reads or deliveries\n\
+       federation          set this vault's member id or the mapping gate\n\
        rotate-master-key   rotate the vault master key (offline)\n\
        bootstrap           initialize a new vault (offline)\n\
      \n\

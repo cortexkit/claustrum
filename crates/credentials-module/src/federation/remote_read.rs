@@ -431,7 +431,8 @@ struct WireTokenReply {
     account_id: Option<String>,
     #[serde(default)]
     identity: RecordIdentity,
-    // Seeds the B-owned category set once, at `remote add`; a read ignores it.
+    // Seeds this vault's own category set for the id once, at `remote add`; a read
+    // ignores it.
     #[serde(default)]
     categories: Vec<String>,
     #[serde(default)]

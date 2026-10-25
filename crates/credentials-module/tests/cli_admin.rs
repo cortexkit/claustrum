@@ -5023,10 +5023,11 @@ fn every_verb_help_uses_a_flags_table_and_notes_layout() {
         .map(|line| line.split_whitespace().next().expect("verb"))
         .collect();
     // This is an anti-narrowing floor for the rendered verb-table scan, not a
-    // budget for verbs. It includes the operator signing verb.
+    // budget for verbs. It includes the operator signing verb and the four
+    // federation verbs (transfer, remote, member, federation).
     assert_eq!(
         verbs.len(),
-        34,
+        38,
         "the rendered verb-table scan narrowed; sign is a public verb"
     );
     assert!(accepted_help_flags("login").contains(&"--no-browser".to_string()));

@@ -398,7 +398,8 @@ impl AdminSurface {
             ));
         }
         // The federation ops that await outbound calls never reach `apply`, which is
-        // synchronous and refuses them; they run in three stages here instead.
+        // synchronous and refuses them; the asynchronous federation dispatch below runs
+        // them instead.
         if op.requires_daemon() {
             return self.dispatch_federation(op).await;
         }
@@ -462,12 +463,13 @@ impl AdminSurface {
         }
     }
 
-    /// The admin ops that await outbound calls, each in three stages: an outbound
-    /// pre-step (a key or pairing lookup, a home fetch), then one store commit, under
-    /// the record's admin lock where the op writes a record, then an outbound post-step
-    /// (a send's delivery, only after its commit). Every outbound call of one op shares
-    /// one budget, so the CLI, which waits 15 s for this reply, always gets a definite
-    /// answer.
+    /// The admin ops that await outbound calls. Each runs only the stages it needs, in
+    /// this order: an outbound pre-step (a key or pairing lookup, a home fetch), then one
+    /// synchronous store commit, under the record's admin lock where the op writes a
+    /// record, then an outbound post-step (a send's delivery, only after its commit). A
+    /// send has all three; a resume only redelivers. Every outbound call of one op
+    /// shares one budget, so the CLI, which waits 15 s for this reply, always gets a
+    /// definite answer.
     async fn dispatch_federation(&self, op: AdminOpBody) -> AdminOutcome {
         let budget = tokio::time::Instant::now() + self.federation_budget;
         let store = self.engine.store();

@@ -1137,9 +1137,10 @@ impl EncryptedStore {
     /// redelivers byte for byte, and a failure here leaves neither row and sends
     /// nothing.
     ///
-    /// `fault_after_insert` is a test seam with no production caller: when it returns
-    /// true, the transaction fails between the row insert and the audit write, which is
-    /// how a test proves the two cannot commit apart.
+    /// `fault_after_insert` is a test seam: when it returns true, the transaction fails
+    /// between the row insert and the audit write, which is how a test proves the two
+    /// cannot commit apart. Production passes `None`, or (from `Transfers::send`) a hook
+    /// that returns false unless a test configured a fault.
     pub fn commit_outgoing_transfer_audited(
         &self,
         new: &NewOutgoingTransfer,

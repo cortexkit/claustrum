@@ -266,6 +266,8 @@ enum Step {
     ForwardThenDrop,
     /// The receiver is never reached: callosum refuses with this class.
     Unreachable(&'static str),
+    /// The delivery is never answered.
+    Stall,
 }
 
 type Script = Arc<Mutex<VecDeque<Step>>>;
@@ -278,6 +280,7 @@ fn deliver_responder(home: Arc<HomeVault>, sender: String, script: Script) -> Re
         Box::pin(async move {
             match step {
                 Step::Unreachable(code) => Reply::RouteRefusal(code.into()),
+                Step::Stall => Reply::Stall,
                 Step::Forward | Step::ForwardThenDrop => {
                     let reply = match home.serve(&sender, OP_TRANSFER_DELIVER, &params).await {
                         HomeAnswer::Reply(body) => Reply::Ok(body),
@@ -550,9 +553,9 @@ async fn an_api_key_sent_a_to_b_exists_on_b_only_after_accept() {
     assert!(rig.b.store().verify_audit_chain().is_ok());
 }
 
-/// R6: an accepted envelope delivered again as a new delivery is answered from the
-/// dedup on (sender, body hash) before anything is opened: `accepted`, with no pending
-/// row, no record change and no second `transfer_in`.
+/// Dedup runs before open: an accepted envelope delivered again as a new delivery is
+/// answered from the dedup on (sender, body hash) before anything is opened:
+/// `accepted`, with no pending row, no record change and no second `transfer_in`.
 #[tokio::test]
 async fn replaying_an_accepted_envelope_as_a_new_delivery_answers_accepted_and_writes_nothing() {
     let rig = Rig::new("transfer-replay").await;
@@ -599,8 +602,8 @@ async fn a_same_hash_resend_after_the_grant_is_revoked_answers_not_found() {
         .is_none());
 }
 
-/// R7: a fault between the outgoing insert and the `transfer_out` write leaves
-/// neither, and nothing is delivered.
+/// Send commits before delivery: a fault between the outgoing insert and the
+/// `transfer_out` write leaves neither, and nothing is delivered.
 #[tokio::test]
 async fn a_fault_between_the_outgoing_insert_and_transfer_out_sends_nothing() {
     let rig = Rig::new("transfer-commit-fault").await;
@@ -617,9 +620,9 @@ async fn a_fault_between_the_outgoing_insert_and_transfer_out_sends_nothing() {
     assert!(rig.b.incoming().is_empty());
 }
 
-/// R7: a crash after the commit and before delivery, then `--resume`: exactly one
-/// `transfer_out`, one pending row on the receiver, and the bytes delivered are the
-/// ones committed.
+/// Send commits before delivery: a crash after the commit and before delivery, then
+/// `--resume`: exactly one `transfer_out`, one pending row on the receiver, and the
+/// bytes delivered are the ones committed.
 #[tokio::test]
 async fn a_crash_after_the_commit_then_resume_yields_one_transfer_out_and_one_pending_row() {
     let rig = Rig::new("transfer-crash").await;
@@ -1494,4 +1497,48 @@ async fn an_accepted_resend_still_answers_accepted_after_either_sides_key_change
         .announce_peer_key(&rig.b.member, &hex(&rig.b.public));
     assert_eq!(rig.serve_b(&rig.a.member, &envelope).await, "accepted");
     assert_eq!(audit_count(rig.b.store(), AuditOp::TransferIn), 1);
+}
+
+/// One admin budget covers every outbound call a `send` makes: with the key lookup
+/// slow and the delivery stalled, the operator still gets a definite reply well inside
+/// the CLI's 15 s wait, and the committed row is kept for `--resume`.
+#[tokio::test]
+async fn a_send_with_a_slow_key_lookup_and_a_stalled_delivery_answers_inside_the_admin_budget() {
+    let rig = Rig::new("transfer-admin-budget").await;
+    rig.api_key_on_a(API_ID, b"sk-budget");
+    let fingerprint = rig
+        .b
+        .member
+        .strip_prefix("fed-computer:")
+        .unwrap()
+        .to_string();
+    let peers = json!({ "peers": [{
+        "fingerprint": fingerprint,
+        "key_record": { "keys": {
+            "vault_transfer_x25519": { "pub": hex(&rig.b.public), "version": "1" },
+        } },
+    }] });
+    rig.vaults.callosum.answer(
+        crate::support::TARGET_MODULE,
+        "callosum.peer_keys_read",
+        Reply::Delayed(Duration::from_secs(4), Box::new(Reply::Ok(peers))),
+    );
+    rig.then(Step::Stall);
+    // The production budget, not the rig's shortened one.
+    let sender = Transfers::new(Arc::clone(&rig.a.home_store.store));
+    assert!(sender.attach_outbound(rig.vaults.a.outbound.clone()));
+    let started = std::time::Instant::now();
+    let sent = sender
+        .send(API_ID, &rig.b.member)
+        .await
+        .expect("a definite reply");
+    let elapsed = started.elapsed();
+    assert!(elapsed < Duration::from_secs(15), "{elapsed:?}");
+    assert!(
+        elapsed >= Duration::from_secs(4),
+        "the lookup really was slow: {elapsed:?}"
+    );
+    assert_eq!(refused_code(&sent.reply), "home_unreachable");
+    assert!(sent.row_kept);
+    assert_eq!(rig.deliveries().len(), 1);
 }

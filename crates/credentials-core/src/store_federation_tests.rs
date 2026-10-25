@@ -1572,8 +1572,8 @@ fn a_crash_after_the_outgoing_commit_leaves_the_identical_bytes_for_resume() {
     assert!(store.verify_audit_chain().is_ok());
 }
 
-/// R7: the outgoing row and `transfer_out` commit together or not at all. A fault
-/// between the two leaves neither, so nothing is ever sent for it.
+/// Send commits before delivery: the outgoing row and `transfer_out` commit together or
+/// not at all. A fault between the two leaves neither, so nothing is ever sent for it.
 #[test]
 fn a_fault_between_the_outgoing_row_and_transfer_out_leaves_neither() {
     let (_root, store) = rig("federation-outgoing-fault", 232);

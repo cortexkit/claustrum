@@ -1448,3 +1448,394 @@ fn the_remote_inventory_carries_this_vaults_own_metadata() {
     assert_eq!(rows[0].provider_ids, vec!["anthropic".to_string()]);
     assert_eq!(rows[0].plan_tier.as_deref(), Some("max_5x"));
 }
+
+// ---------------------------------------------------------------------------------
+// Sealed static-key transfers
+// ---------------------------------------------------------------------------------
+
+const TRANSFER_ID: &str = "0123456789abcdef0123456789abcdef";
+const TRANSFER_ID_2: &str = "fedcba9876543210fedcba9876543210";
+
+fn sealed(tag: u8) -> crate::federation::SealedTransfer {
+    crate::federation::SealedTransfer {
+        enc: vec![tag; 32],
+        ciphertext: vec![tag.wrapping_add(1); 48],
+        aad: format!("{{\"tag\":{tag}}}").into_bytes(),
+    }
+}
+
+fn reopen(root: &crate::test_support::TestTempDir, label: &str, seed: u8) -> EncryptedStore {
+    let descriptor = cortexkit_store::StorageDescriptor {
+        module_id: "claustrum".into(),
+        storage_namespace: format!("taxonomy-{label}"),
+        isolation: cortexkit_store::Isolation::Module,
+        backend: cortexkit_store::StorageBackend::Sqlite {
+            path: root.join("store.db").to_string_lossy().into_owned(),
+        },
+    };
+    let sqlite = cortexkit_store::open_sqlite(&descriptor).expect("reopen sqlite");
+    EncryptedStore::open(sqlite, MasterKey::from_bytes([seed; 32])).expect("reopen store")
+}
+
+fn new_outgoing(transfer_id: &str, tag: u8) -> crate::federation::NewOutgoingTransfer {
+    crate::federation::NewOutgoingTransfer {
+        transfer_id: transfer_id.to_string(),
+        receiver_member: OTHER.to_string(),
+        credential_id: "apikey:openai".to_string(),
+        sealed: sealed(tag),
+        created_at_ms: 1_000,
+    }
+}
+
+fn new_incoming(
+    sender: &str,
+    transfer_id: &str,
+    tag: u8,
+) -> crate::federation::NewIncomingTransfer {
+    crate::federation::NewIncomingTransfer {
+        sender_member: sender.to_string(),
+        transfer_id: transfer_id.to_string(),
+        credential_id: "apikey:openai".to_string(),
+        kind: "api_key".to_string(),
+        categories: vec!["llm-provider".to_string()],
+        size_bytes: 100,
+        sealed: sealed(tag),
+        received_at_ms: 1_000,
+    }
+}
+
+/// A distinct 32-hex transfer id per index.
+fn transfer_id(index: u8) -> String {
+    format!("{:032x}", 0x1000 + u32::from(index))
+}
+
+fn acceptance(
+    transfer_id: &str,
+    tag: u8,
+    provider_ids: Vec<String>,
+) -> crate::federation::TransferAcceptance {
+    let mut record = api_record();
+    record.source = "transfer".to_string();
+    crate::federation::TransferAcceptance {
+        sender_member: HOME.to_string(),
+        transfer_id: transfer_id.to_string(),
+        body_hash: sealed(tag).body_hash(),
+        credential_id: "apikey:openai".to_string(),
+        record,
+        categories: vec!["ops-secrets".to_string()],
+        provider_ids,
+        replace: false,
+    }
+}
+
+/// A crash between the outgoing commit and the delivery: the reopened store still holds
+/// the row with exactly the sealed bytes committed, so `--resume` re-sends them, and
+/// exactly one `transfer_out` row records the send.
+#[test]
+fn a_crash_after_the_outgoing_commit_leaves_the_identical_bytes_for_resume() {
+    let label = "federation-outgoing-crash";
+    let (root, store) = rig(label, 231);
+    let committed = store
+        .commit_outgoing_transfer_audited(&new_outgoing(TRANSFER_ID, 5), None)
+        .expect("commit");
+    drop(store);
+
+    let store = reopen(&root, label, 231);
+    let row = store
+        .outgoing_transfer(TRANSFER_ID)
+        .unwrap()
+        .expect("the committed row survives the crash");
+    assert_eq!(
+        row.sealed,
+        sealed(5),
+        "resume must find the exact sealed bytes"
+    );
+    assert_eq!(row.body_hash, sealed(5).body_hash());
+    assert_eq!(row, committed);
+    assert_eq!(row.state, crate::federation::OutgoingTransferState::Pending);
+    assert_eq!(
+        row.expires_at_ms,
+        1_000 + crate::federation::TRANSFER_RETENTION_MS
+    );
+    let out = audit_rows(&store, AuditOp::TransferOut);
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].credential_id.as_deref(), Some("apikey:openai"));
+    assert_eq!(out[0].actor, OTHER, "transfer_out names the receiver");
+    assert_eq!(
+        out[0].payload_hash.as_deref(),
+        Some(
+            crate::federation::transfer_payload_hash(TRANSFER_ID, &sealed(5).body_hash())
+                .unwrap()
+                .as_str()
+        )
+    );
+    assert!(store.verify_audit_chain().is_ok());
+}
+
+/// R7: the outgoing row and `transfer_out` commit together or not at all. A fault
+/// between the two leaves neither, so nothing is ever sent for it.
+#[test]
+fn a_fault_between_the_outgoing_row_and_transfer_out_leaves_neither() {
+    let (_root, store) = rig("federation-outgoing-fault", 232);
+    let fault = || true;
+    let result =
+        store.commit_outgoing_transfer_audited(&new_outgoing(TRANSFER_ID, 6), Some(&fault));
+    assert!(
+        result.is_err(),
+        "the injected fault fails the commit: {result:?}"
+    );
+    assert!(store.outgoing_transfer(TRANSFER_ID).unwrap().is_none());
+    assert!(store.list_outgoing_transfers().unwrap().is_empty());
+    assert!(audit_rows(&store, AuditOp::TransferOut).is_empty());
+}
+
+/// Accept writes the record, categories, provider ids, the accepted marker and
+/// `transfer_in` in one transaction: a refusal part-way (here a provider id the rules
+/// refuse, checked after the record is written) leaves no record, no categories, no
+/// provider ids, the transfer still pending with its sealed bytes, and no audit row.
+#[test]
+fn an_accept_that_fails_part_way_writes_nothing() {
+    let (_root, store) = rig("federation-accept-partway", 233);
+    assert_eq!(
+        store
+            .insert_incoming_transfer(&new_incoming(HOME, TRANSFER_ID, 7))
+            .unwrap(),
+        crate::federation::IncomingInsert::Inserted
+    );
+    let result =
+        store.accept_incoming_transfer_audited(&acceptance(TRANSFER_ID, 7, vec!["Bad Id".into()]));
+    assert!(
+        matches!(result, Err(StoreOpError::InvalidProviderId { .. })),
+        "{result:?}"
+    );
+    assert_eq!(local_rows(&store, "apikey:openai"), 0, "no record survives");
+    assert!(store.categories("apikey:openai").unwrap().is_empty());
+    assert!(store.provider_ids("apikey:openai").unwrap().is_empty());
+    let row = store.incoming_transfer(HOME, TRANSFER_ID).unwrap().unwrap();
+    assert_eq!(row.state, crate::federation::IncomingTransferState::Pending);
+    assert_eq!(row.sealed, Some(sealed(7)));
+    assert!(audit_rows(&store, AuditOp::TransferIn).is_empty());
+
+    // The same accept with valid provider ids writes all of it at once.
+    let outcome = store
+        .accept_incoming_transfer_audited(&acceptance(TRANSFER_ID, 7, vec!["openai".into()]))
+        .unwrap();
+    assert_eq!(
+        outcome,
+        crate::federation::TransferAcceptOutcome::Accepted { record_version: 1 }
+    );
+    assert_eq!(local_rows(&store, "apikey:openai"), 1);
+    assert_eq!(
+        store.categories("apikey:openai").unwrap(),
+        vec!["ops-secrets".to_string()],
+        "the body's categories replace the catalog defaults"
+    );
+    assert_eq!(store.provider_ids("apikey:openai").unwrap(), vec!["openai"]);
+    let row = store.incoming_transfer(HOME, TRANSFER_ID).unwrap().unwrap();
+    assert_eq!(
+        row.state,
+        crate::federation::IncomingTransferState::Accepted
+    );
+    assert!(
+        row.sealed.is_none(),
+        "an accepted row keeps no sealed bytes"
+    );
+    let record = store.get("apikey:openai").unwrap();
+    assert_eq!(record.source, "transfer");
+    let created_by: String = store
+        .with_raw_conn(|conn| {
+            conn.query_row(
+                "SELECT created_by FROM credentials WHERE credential_id = 'apikey:openai'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(created_by, "operator");
+    let rows = audit_rows(&store, AuditOp::TransferIn);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].actor, HOME, "transfer_in names the sender");
+    // A second accept of the same transfer writes nothing more.
+    assert_eq!(
+        store
+            .accept_incoming_transfer_audited(&acceptance(TRANSFER_ID, 7, vec!["openai".into()]))
+            .unwrap(),
+        crate::federation::TransferAcceptOutcome::AlreadyDecided(
+            crate::federation::IncomingTransferState::Accepted
+        )
+    );
+    assert_eq!(audit_rows(&store, AuditOp::TransferIn).len(), 1);
+    assert!(store.verify_audit_chain().is_ok());
+}
+
+/// The dedup recheck runs before the queue bounds: with the sender's queue full, the
+/// same bytes again answer their stored state and write nothing, while a different
+/// transfer is refused as queue-full.
+#[test]
+fn a_duplicate_is_answered_before_the_queue_full_check() {
+    let (_root, store) = rig("federation-dedup-before-queue", 234);
+    for index in 0..crate::federation::TRANSFER_PENDING_PER_SENDER_CAP as u8 {
+        assert_eq!(
+            store
+                .insert_incoming_transfer(&new_incoming(HOME, &transfer_id(index), 10 + index))
+                .unwrap(),
+            crate::federation::IncomingInsert::Inserted
+        );
+    }
+    let counts = store.pending_transfer_counts(HOME).unwrap();
+    assert_eq!(counts.from_sender, 8);
+    assert!(counts.full());
+
+    let duplicate = store
+        .insert_incoming_transfer(&new_incoming(HOME, &transfer_id(0), 10))
+        .unwrap();
+    assert_eq!(
+        duplicate,
+        crate::federation::IncomingInsert::Known(crate::federation::IncomingTransferState::Pending)
+    );
+    let fresh = store
+        .insert_incoming_transfer(&new_incoming(HOME, &transfer_id(50), 90))
+        .unwrap();
+    assert_eq!(fresh, crate::federation::IncomingInsert::QueueFull);
+    assert_eq!(store.list_incoming_transfers().unwrap().len(), 8);
+
+    // Another sender has its own queue; an id reused with other bytes is a conflict.
+    assert_eq!(
+        store
+            .insert_incoming_transfer(&new_incoming(OTHER, &transfer_id(0), 10))
+            .unwrap(),
+        crate::federation::IncomingInsert::Inserted
+    );
+    assert_eq!(
+        store
+            .insert_incoming_transfer(&new_incoming(OTHER, &transfer_id(0), 99))
+            .unwrap(),
+        crate::federation::IncomingInsert::Conflict
+    );
+}
+
+/// Expiry drops the sealed bytes and keeps the id and hash as expired; a decided row
+/// is untouched.
+#[test]
+fn expiry_keeps_the_id_and_hash_but_drops_the_envelope() {
+    let (_root, store) = rig("federation-expiry", 235);
+    store
+        .insert_incoming_transfer(&new_incoming(HOME, TRANSFER_ID, 20))
+        .unwrap();
+    store
+        .insert_incoming_transfer(&new_incoming(HOME, TRANSFER_ID_2, 21))
+        .unwrap();
+    store
+        .reject_incoming_transfer_audited(HOME, TRANSFER_ID_2, "rejected_by_operator")
+        .unwrap();
+    let later = 1_000 + crate::federation::TRANSFER_RETENTION_MS;
+    assert_eq!(store.expire_incoming_transfers(later - 1).unwrap(), 0);
+    assert_eq!(store.expire_incoming_transfers(later).unwrap(), 1);
+    let row = store
+        .incoming_transfer_by_hash(HOME, &sealed(20).body_hash())
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.state, crate::federation::IncomingTransferState::Expired);
+    assert!(row.sealed.is_none());
+    let rejected = store
+        .incoming_transfer(HOME, TRANSFER_ID_2)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        rejected.state,
+        crate::federation::IncomingTransferState::Rejected
+    );
+    assert_eq!(
+        rejected.reject_reason.as_deref(),
+        Some("rejected_by_operator")
+    );
+    assert_eq!(audit_rows(&store, AuditOp::TransferReject).len(), 1);
+}
+
+/// Recovery is refused while the transfer key is `Active`; once it is found off
+/// `Active`, one transaction replaces it, rejects every pending transfer and abandons
+/// every outgoing one, with one `transfer_reject` row each.
+#[test]
+fn transfer_key_recovery_rejects_pending_and_abandons_outgoing_in_one_transaction() {
+    let (_root, store) = rig("federation-key-recovery", 236);
+    let old_pem = crate::kem::generate_key().unwrap();
+    store
+        .create_audited(
+            crate::federation::VAULT_TRANSFER_ID,
+            &VaultRecord::new_static(
+                CredentialKind::KemKey,
+                "operator",
+                old_pem.into_bytes(),
+                None,
+            ),
+            AuditCtx::admin(AuditOp::Put),
+        )
+        .unwrap();
+    store
+        .insert_incoming_transfer(&new_incoming(HOME, TRANSFER_ID, 30))
+        .unwrap();
+    store
+        .insert_incoming_transfer(&new_incoming(OTHER, TRANSFER_ID, 31))
+        .unwrap();
+    store
+        .commit_outgoing_transfer_audited(&new_outgoing(TRANSFER_ID_2, 32), None)
+        .unwrap();
+    let new_key = VaultRecord::new_static(
+        CredentialKind::KemKey,
+        "operator",
+        crate::kem::generate_key().unwrap().into_bytes(),
+        None,
+    );
+
+    let refused =
+        store.recover_vault_transfer_key_audited(&new_key, AuditCtx::admin(AuditOp::Overwrite));
+    assert!(
+        matches!(refused, Err(StoreOpError::TransferKeyProtected)),
+        "{refused:?}"
+    );
+    assert!(audit_rows(&store, AuditOp::TransferReject).is_empty());
+
+    assert!(store
+        .force_vault_transfer_key_state_for_test(RecordState::NeedsReauth)
+        .unwrap());
+    let recovery = store
+        .recover_vault_transfer_key_audited(&new_key, AuditCtx::admin(AuditOp::Overwrite))
+        .expect("recovery is admitted off Active");
+    assert_eq!(recovery.rejected_incoming.len(), 2);
+    assert_eq!(
+        recovery.abandoned_outgoing,
+        vec![crate::federation::RecoveredOutgoing {
+            transfer_id: TRANSFER_ID_2.to_string(),
+            credential_id: "apikey:openai".to_string(),
+            receiver_member: OTHER.to_string(),
+        }]
+    );
+    assert_eq!(
+        store.vault_transfer_key_state().unwrap(),
+        Some(RecordState::Active)
+    );
+    let key = store.get(crate::federation::VAULT_TRANSFER_ID).unwrap();
+    assert_eq!(key.payload.expose(), new_key.payload.expose());
+    for sender in [HOME, OTHER] {
+        let row = store
+            .incoming_transfer(sender, TRANSFER_ID)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            row.state,
+            crate::federation::IncomingTransferState::Rejected
+        );
+        assert_eq!(row.reject_reason.as_deref(), Some("remote_seal_invalid"));
+    }
+    let outgoing = store.outgoing_transfer(TRANSFER_ID_2).unwrap().unwrap();
+    assert_eq!(
+        outgoing.state,
+        crate::federation::OutgoingTransferState::Abandoned
+    );
+    let rejects = audit_rows(&store, AuditOp::TransferReject);
+    assert_eq!(rejects.len(), 3);
+    let mut actors: Vec<&str> = rejects.iter().map(|row| row.actor.as_str()).collect();
+    actors.sort();
+    assert_eq!(actors, vec![HOME, OTHER, OTHER]);
+    assert!(store.verify_audit_chain().is_ok());
+}

@@ -51,6 +51,7 @@ TEST_ONLY_FILES = {
     "engine_tests.rs",
     "plan_detection_tests.rs",
     "provider_ids_store_tests.rs",
+    "store_federation_tests.rs",
     "kill9_refresh_helper.rs",
     "rotate_cut_helper.rs",
     "login_cut_helper.rs",

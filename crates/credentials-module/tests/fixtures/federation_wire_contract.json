@@ -1,0 +1,526 @@
+{
+  "home": {
+    "cases": [
+      {
+        "adapter": "anthropic",
+        "cooldown_plaintext": {
+          "account_id": "fixture-anthropic-account",
+          "categories": [
+            "llm-provider"
+          ],
+          "expires_in_ms": 3600000,
+          "identity": {
+            "account_id": "fixture-anthropic-account",
+            "email": "fixture@example.invalid",
+            "org_name": "Fixture Team"
+          },
+          "payload": "fixture-anthropic-access-not-a-secret",
+          "recheck_in_ms": 60000,
+          "record_version": 1,
+          "refresh_adapter": "anthropic"
+        },
+        "plaintext": {
+          "account_id": "fixture-anthropic-account",
+          "categories": [
+            "llm-provider"
+          ],
+          "expires_in_ms": 3600000,
+          "identity": {
+            "account_id": "fixture-anthropic-account",
+            "email": "fixture@example.invalid",
+            "org_name": "Fixture Team"
+          },
+          "payload": "fixture-anthropic-access-not-a-secret",
+          "record_version": 1,
+          "refresh_adapter": "anthropic"
+        },
+        "refused_report": {
+          "result": {
+            "accepted": false,
+            "error": {
+              "class": "permanent",
+              "code": "report_status_not_credential_death"
+            }
+          }
+        },
+        "report": {
+          "result": {
+            "accepted": true
+          }
+        },
+        "report_request": {
+          "method": "federation.report_auth_failure",
+          "params": {
+            "credential_id": "oauth:anthropic:fixture",
+            "provider_status": 401,
+            "record_version": 1,
+            "reporter_source": "direct"
+          }
+        },
+        "request": {
+          "method": "federation.remote_token",
+          "params": {
+            "aad": "{\"credential_id\":\"oauth:anthropic:fixture\",\"requester\":\"fed-computer:11223344556677889900112233445566\",\"home\":\"fed-computer:aa11bb22cc33dd44ee55ff6600112233\",\"nonce\":\"00112233445566778899aabbccddeeff\",\"recipient_key_id\":\"cfa570c653bd212b\"}",
+            "min_ttl_ms": 62500
+          }
+        }
+      },
+      {
+        "adapter": "antigravity",
+        "cooldown_plaintext": {
+          "account_id": "fixture-antigravity-account",
+          "categories": [
+            "llm-provider"
+          ],
+          "identity": {
+            "account_id": "fixture-antigravity-account",
+            "email": "fixture@example.invalid",
+            "org_name": "Fixture Team"
+          },
+          "payload": "fixture-antigravity-access-not-a-secret",
+          "project_id": "fixture-managed-project",
+          "recheck_in_ms": 60000,
+          "record_version": 1,
+          "refresh_adapter": "antigravity"
+        },
+        "plaintext": {
+          "account_id": "fixture-antigravity-account",
+          "categories": [
+            "llm-provider"
+          ],
+          "identity": {
+            "account_id": "fixture-antigravity-account",
+            "email": "fixture@example.invalid",
+            "org_name": "Fixture Team"
+          },
+          "payload": "fixture-antigravity-access-not-a-secret",
+          "project_id": "fixture-managed-project",
+          "record_version": 1,
+          "refresh_adapter": "antigravity"
+        },
+        "refused_report": {
+          "result": {
+            "accepted": false,
+            "error": {
+              "class": "permanent",
+              "code": "report_status_not_credential_death"
+            }
+          }
+        },
+        "report": {
+          "result": {
+            "accepted": true
+          }
+        },
+        "report_request": {
+          "method": "federation.report_auth_failure",
+          "params": {
+            "credential_id": "oauth:antigravity:fixture",
+            "provider_status": 401,
+            "record_version": 1,
+            "reporter_source": "direct"
+          }
+        },
+        "request": {
+          "method": "federation.remote_token",
+          "params": {
+            "aad": "{\"credential_id\":\"oauth:antigravity:fixture\",\"requester\":\"fed-computer:11223344556677889900112233445566\",\"home\":\"fed-computer:aa11bb22cc33dd44ee55ff6600112233\",\"nonce\":\"00112233445566778899aabbccddeeff\",\"recipient_key_id\":\"cfa570c653bd212b\"}",
+            "min_ttl_ms": 62500
+          }
+        }
+      }
+    ],
+    "not_found": {
+      "result": {
+        "error": {
+          "class": "permanent",
+          "code": "not_found"
+        }
+      }
+    }
+  },
+  "transfer": {
+    "aad": "{\"transfer_id\":\"00112233445566778899aabbccddeeff\",\"credential_id\":\"apikey:fixture\",\"sender\":\"fed-computer:aa11bb22cc33dd44ee55ff6600112233\",\"receiver\":\"fed-computer:11223344556677889900112233445566\",\"recipient_key_id\":\"cfa570c653bd212b\"}",
+    "accepted": {
+      "result": {
+        "state": "accepted"
+      }
+    },
+    "errors": [
+      {
+        "keep_outgoing": true,
+        "reply": {
+          "result": {
+            "error": {
+              "class": "transient",
+              "code": "transfer_queue_full"
+            }
+          }
+        }
+      },
+      {
+        "keep_outgoing": true,
+        "reply": {
+          "result": {
+            "error": {
+              "class": "transient",
+              "code": "callosum_unavailable"
+            }
+          }
+        }
+      },
+      {
+        "keep_outgoing": true,
+        "reply": {
+          "result": {
+            "error": {
+              "class": "transient",
+              "code": "home_unavailable"
+            }
+          }
+        }
+      },
+      {
+        "keep_outgoing": true,
+        "reply": {
+          "result": {
+            "error": {
+              "class": "transient",
+              "code": "home_unreachable"
+            }
+          }
+        }
+      },
+      {
+        "keep_outgoing": false,
+        "reply": {
+          "result": {
+            "error": {
+              "class": "permanent",
+              "code": "transfer_expired"
+            }
+          }
+        }
+      },
+      {
+        "keep_outgoing": false,
+        "reply": {
+          "result": {
+            "error": {
+              "class": "permanent",
+              "code": "remote_seal_invalid"
+            }
+          }
+        }
+      },
+      {
+        "keep_outgoing": false,
+        "reply": {
+          "result": {
+            "error": {
+              "class": "permanent",
+              "code": "transfer_conflict"
+            }
+          }
+        }
+      },
+      {
+        "keep_outgoing": false,
+        "reply": {
+          "result": {
+            "error": {
+              "class": "permanent",
+              "code": "transfer_too_large"
+            }
+          }
+        }
+      },
+      {
+        "keep_outgoing": false,
+        "reply": {
+          "result": {
+            "error": {
+              "class": "permanent",
+              "code": "transfer_body_invalid"
+            }
+          }
+        }
+      },
+      {
+        "keep_outgoing": false,
+        "reply": {
+          "result": {
+            "error": {
+              "class": "permanent",
+              "code": "federation_setup_invalid"
+            }
+          }
+        }
+      },
+      {
+        "keep_outgoing": false,
+        "reply": {
+          "result": {
+            "error": {
+              "class": "permanent",
+              "code": "not_found"
+            }
+          }
+        }
+      }
+    ],
+    "method": "federation.transfer_deliver",
+    "param_fields": [
+      "aad",
+      "ciphertext",
+      "enc"
+    ],
+    "pending": {
+      "result": {
+        "state": "pending"
+      }
+    },
+    "plaintext": {
+      "categories": [
+        "llm-provider"
+      ],
+      "credential_id": "apikey:fixture",
+      "detected_plan": null,
+      "expires_at_ms": null,
+      "identity": {},
+      "kind": "api_key",
+      "payload": "Zml4dHVyZS1hcGkta2V5LW5vdC1hLXNlY3JldA==",
+      "provider_ids": [],
+      "version": 1
+    },
+    "rejected": {
+      "result": {
+        "state": "rejected"
+      }
+    },
+    "sender_actions": [
+      {
+        "code": "pending",
+        "keep_outgoing": true
+      },
+      {
+        "code": "accepted",
+        "keep_outgoing": false
+      },
+      {
+        "code": "rejected",
+        "keep_outgoing": false
+      }
+    ]
+  },
+  "clients": {
+    "cases": [
+      {
+        "adapter": "anthropic",
+        "get": {
+          "result": {
+            "account_id": "fixture-anthropic-account",
+            "credential_id": "oauth:anthropic:fixture",
+            "email": "fixture@example.invalid",
+            "expires_at_ms": null,
+            "org_name": "Fixture Team",
+            "payload": [
+              102,
+              105,
+              120,
+              116,
+              117,
+              114,
+              101,
+              45,
+              97,
+              110,
+              116,
+              104,
+              114,
+              111,
+              112,
+              105,
+              99,
+              45,
+              97,
+              99,
+              99,
+              101,
+              115,
+              115,
+              45,
+              110,
+              111,
+              116,
+              45,
+              97,
+              45,
+              115,
+              101,
+              99,
+              114,
+              101,
+              116
+            ],
+            "record_version": 1
+          }
+        },
+        "status": {
+          "result": {
+            "credential_id": "oauth:anthropic:fixture",
+            "last_error_code": null,
+            "last_fetch_outcome": "ok",
+            "lease_held": true,
+            "ready": true,
+            "record_version": 1,
+            "remote_home": "fed-computer:aa11bb22cc33dd44ee55ff6600112233",
+            "stale_pending": false
+          }
+        }
+      },
+      {
+        "adapter": "antigravity",
+        "get": {
+          "result": {
+            "account_id": "fixture-antigravity-account",
+            "credential_id": "oauth:antigravity:fixture",
+            "email": "fixture@example.invalid",
+            "expires_at_ms": null,
+            "org_name": "Fixture Team",
+            "payload": [
+              102,
+              105,
+              120,
+              116,
+              117,
+              114,
+              101,
+              45,
+              97,
+              110,
+              116,
+              105,
+              103,
+              114,
+              97,
+              118,
+              105,
+              116,
+              121,
+              45,
+              97,
+              99,
+              99,
+              101,
+              115,
+              115,
+              45,
+              110,
+              111,
+              116,
+              45,
+              97,
+              45,
+              115,
+              101,
+              99,
+              114,
+              101,
+              116
+            ],
+            "project_id": "fixture-managed-project",
+            "record_version": 1
+          }
+        },
+        "status": {
+          "result": {
+            "credential_id": "oauth:antigravity:fixture",
+            "last_error_code": null,
+            "last_fetch_outcome": "ok",
+            "lease_held": true,
+            "ready": true,
+            "record_version": 1,
+            "remote_home": "fed-computer:aa11bb22cc33dd44ee55ff6600112233",
+            "stale_pending": false
+          }
+        }
+      }
+    ],
+    "inventory": {
+      "result": {
+        "credentials": [
+          {
+            "account_id": "fixture-anthropic-account",
+            "auth_method": "oauth",
+            "categories": [
+              "llm-provider"
+            ],
+            "email": "fixture@example.invalid",
+            "id": "oauth:anthropic:fixture",
+            "operations": [
+              "read"
+            ],
+            "org_name": "Fixture Team",
+            "provider_ids": [],
+            "record_version": 1,
+            "refresh_adapter": "anthropic",
+            "serves": [
+              "anthropic"
+            ],
+            "state": "active",
+            "type": "oauth"
+          },
+          {
+            "account_id": "fixture-antigravity-account",
+            "auth_method": "antigravity",
+            "categories": [
+              "llm-provider"
+            ],
+            "email": "fixture@example.invalid",
+            "id": "oauth:antigravity:fixture",
+            "operations": [
+              "read"
+            ],
+            "org_name": "Fixture Team",
+            "provider_ids": [],
+            "record_version": 1,
+            "refresh_adapter": "antigravity",
+            "serves": [],
+            "state": "active",
+            "type": "oauth"
+          }
+        ],
+        "grant_tuples": [
+          {
+            "operation": "read",
+            "selector": "oauth:anthropic:fixture",
+            "selector_kind": "exact"
+          },
+          {
+            "operation": "read",
+            "selector": "oauth:antigravity:fixture",
+            "selector_kind": "exact"
+          }
+        ],
+        "grants": 2,
+        "view": "gRECeJo1V/OtnToSbW4H4UUIbXvzDtvCxS4dffY6/wE="
+      }
+    },
+    "refusal": {
+      "result": {
+        "error": {
+          "class": "permanent",
+          "code": "remote_setup_incomplete",
+          "remedy_member": "fed-computer:aa11bb22cc33dd44ee55ff6600112233"
+        }
+      }
+    }
+  },
+  "sealed_sample": {
+    "result": {
+      "ciphertext": "ocgxqTRV4IEISLqupnaoKkwjElEM6bf1VMS34u9/NZxD3Nw9lVLI1iNj9UEnMeFzL0ySIXI3xUNYYYD3H3+ecSakMSNkvzkUcK1ogCzSgJI7ch69tfEZIDriDd5DxBjSi6HMiPbjP9DU8I8akrLZJI5BhVSmQJDHL3Nwy489u1/rW9s0ag7HZcs6hWjwRjcxyOPpr3/pSaQ8A+H9nKtpdZy82A7Ioy8njqpN0ST+0Qc5+uOc7xWfxLMNCePDhX+9nKoW+WbXnIufiJGLX1wgl6BhL1tNE3GygD/tuufuDUO6iM+IkHHpqMTap/sRhzOojvKVmSpP+86p9us5kDRtNSfuXfoluBD6Wcxzn41dLxDOKNfj60+vyshKnyp5dnF73vFhoTq54zDSv0kK2gaTGvQzdiqtXBkZbEibm79GkEb+lMpQKw==",
+      "enc": "XA3jIr6UyXVmdqgkeWK/wnRG1xehXLYfiOywt5pWZTA="
+    }
+  }
+}

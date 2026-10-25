@@ -2378,6 +2378,7 @@ pub mod probe {
 #[cfg(test)]
 mod tests {
     include!("watch_scoped_tests.rs");
+    include!("../tests/fixtures/federation_read_producer.rs");
     #[test]
     fn daemon_uses_shared_record_and_key_path_override_rules() {
         use credentials_core::resolver::KeySource;

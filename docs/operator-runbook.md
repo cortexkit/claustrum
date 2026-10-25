@@ -512,6 +512,13 @@ There are three ways a consumer reaches a credential. Pick by what the consumer 
 
 ### Capability handles
 
+Handles and enrollment tokens are vault-local bearer secrets: never pass them to a peer
+vault. With federation mapping on, a federation channel rejects either parameter before
+resolving it. Turning mapping off restores release-1 bearer-scoped reads, even when the
+forwarded `fed-` principal itself is refused; those reads do not apply the access-token
+projection. Gate-off rollback therefore does not make leaked local handles or tokens safe.
+Remote records have no handles; local consumers use their own vault's scoped grants.
+
 ```sh
 ck auth mint-handle --id oauth:anthropic
 ```
@@ -830,9 +837,26 @@ These values come from the closed `AuditOp` enum and name the mutation or chain 
 | `category.migrate` | Record migration 10's audited category backfill. |
 | `approval` | Record an approver's approval of the exact artifact bytes identified by a hash. |
 | `seal` | Record one `credential.seal` (auth-mode HPKE under a vault-held KEM key) before its ciphertext is returned; `payload_hash` is the SHA-256 of the plaintext. |
+| `remote_issue` | The home issued an access token to a member; durable dedup bounds this to one row per member, credential, home version and encrypted material. |
+| `transfer_out` | Commit a sealed outgoing transfer before delivery; resuming it adds no second row. |
+| `transfer_in` | Accept a sealed transfer and create or replace the local static credential atomically. |
+| `transfer_reject` | Reject a pending transfer, or abandon an outgoing envelope after replacing its sender key. |
+| `member_grant_create` | Grant `remote_read` or `transfer_deliver` to a member at its current pairing id. |
+| `member_grant_revoke` | Revoke a member grant. |
+| `remote_add` | Create a remote record with a new incarnation, without persisting its access token. |
+| `remote_remove` | Remove a remote record and its local metadata. |
+| `federation_gate_set` | Change the live federation member-mapping setting. |
+| `federation_self_set` | Set the vault's own canonical member id. |
 
 The `set_category`, `set_providers`, `deposit_cookie_create` and `deposit_cookie_replace` ops
 and their target formats are specified in [the wire contract](wire-contract-v1.md).
+
+Federation chain rows keep the existing HMAC-chain format. Their actors and payload hashes
+are specified in [the federation wire contract](wire-contract-v1.md#14-federation-between-computer-vaults).
+For `remote_issue` and forwarded `report_auth_failure`, the actor is the authenticated
+member (`fed-computer:<32 lowercase hex>`), never `reserved:callosum`. Transfer actors name
+the counterpart: receiver on `transfer_out`, sender on `transfer_in`, and sender on a
+receiver-side rejection or receiver on an abandoned outgoing row.
 
 #### `audit_log.alarm`
 
@@ -895,9 +919,16 @@ CAN THE PATH THAT WOULD HAVE WRITTEN THIS ROW COMPLETE WITHOUT WRITING IT?
 `auth_events` is written unconditionally on a consumer report, so a missing row there is a
 statement: the report did not arrive. The attributed `audit_log` row is written only when the
 version gate passes, so its absence is a silence: it is missing for every `applied=no`
-report, which are exactly the reports worth tracing. `auth_events.principal_kind` is always
-NULL on consumer reports. A write-on-success path makes absence meaningful; a
+report, which are exactly the reports worth tracing. Local consumer reports record the
+observed principal when present (`direct`, `reserved`, `unverified` or `enrolled`), or NULL
+when none is observed; home-side forwarded reports identify their member. A write-on-success path makes absence meaningful; a
 write-on-transition path does not, and no row count tells you which you are looking at.
+
+**Member principal.** Federation diagnostics use principal kind `member` and the canonical
+`fed-computer:<32 lowercase hex>` id for member refusals and forwarded reports.
+Do not attribute those rows to the `reserved:callosum` transport principal. Requester-side
+diagnostics can name remote credential ids even though those ids have no local credential
+row; `auth_events` has no credential foreign key.
 
 #### `auth_events.reporter_source`
 
@@ -1045,6 +1076,10 @@ that was live then (including ones revoked since, because revocation lives in th
 table), its open refresh intents, and older key versions. Revoke the handles that should stay
 dead rather than deleting rows, and re-check keys other machines remember
 ([section 11](#keys-other-machines-see-rotate-with---replace)).
+
+**Never run a restored copy alongside the live home vault.** The matching master key makes
+the backup a complete credential copy, including rotating refresh tokens and federation
+settings; concurrent refreshes can revoke the login on both copies.
 
 **Other backup tools reach this data too.** On macOS, Time Machine includes
 `~/.local/share/cortexkit/claustrum` unless excluded, and a Time Machine restore of the data
@@ -1282,6 +1317,46 @@ forward.
 
 To roll back a binary: place the rollback copy by rename exactly as above, restart the module,
 and run `scripts/accept-deploy.sh` against the rev you rolled back to.
+
+### Federation setup and recovery
+
+Keep each rotating login on one home vault A. On each computer, obtain its own canonical
+member id from callosum (`fed-computer:<32 lowercase hex>`), pair the computers and run
+`ck auth transfer init --self <own-member>`. Callosum announces that vault's transfer
+public key. A mistaken self id is repaired with `ck auth federation self <own-member>`;
+do not replace a healthy transfer key to change the self id.
+
+Deploy in producer-first order: release-1 harness recording, callosum's `callosum-self`,
+then release 2 with a pre-migration snapshot and mapping off. Only after the deployed
+supervisor guarantees the authenticated harness and callosum derives it from the computer
+peer should the operator run `ck auth federation mapping on`, then expose claustrum to
+computer peers. Gate changes take effect without restart. Gate-off rollback restores the
+bearer-secret boundary described under capability handles, not a safe way to share tokens.
+An older binary cannot open the migrated store; roll forward or restore the snapshot
+with the older binary, losing subsequent writes.
+
+On A, authorize B with
+`ck auth member grant --member <B> --operation remote_read --id <login-id>` (or
+`--category <category>`). On B, run `ck auth remote add --id <login-id> --home <A>`.
+B's modules need their own local read grants. `ck auth remote list` shows home/version/
+fetch outcome; `remote remove --id <id>` removes it. Re-homing is remove then add.
+After a re-pair or trust-backup restore, re-grant: old pairing-bound grants do not apply.
+Repair a home login on A, then poll B's `get_scoped`; remote status alone cannot observe
+the repair. A cached access token can remain usable for at most 300 s after grant revocation.
+
+For a static credential, B grants A `transfer_deliver` without a selector. A runs
+`ck auth transfer send --id <id> --to <B>`. B inspects `ck auth transfer receive` and runs
+`ck auth transfer accept <transfer-id> --from <A>` or `reject <transfer-id> --from <A>`.
+Nothing becomes a credential on B before accept. A uses
+`ck auth transfer send --resume <transfer-id>` after uncertainty or to learn acceptance;
+it resends identical sealed bytes. Do not create a new send merely because an acknowledgement
+was lost. Transfers are operator-approved copies, not ongoing synchronization.
+
+Outbound admin operations require the running daemon (`federation_requires_daemon` offline).
+If a transfer key is damaged and found off `active`, use `ck auth transfer init --replace`.
+An active key is protected. Recovery rejects pending rows and abandons that vault's outgoing
+rows, printing their ids; abandoned rows cannot resume. Use fresh sends with fresh transfer
+ids. An already accepted identical envelope still deduplicates after either key changes.
 
 ### Account worker-token grants
 

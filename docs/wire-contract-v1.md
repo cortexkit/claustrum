@@ -642,7 +642,9 @@ remain valid audit-chain strings and are never rewritten.
 
 ## 4. `credential.status` — the cursor surface
 
-`status` answers without minting anything. It is the surface to poll.
+`status` answers without minting anything. It is the surface to poll for a local record.
+For a remote record it reports B's stored observation only: poll `get_scoped` to observe a
+repair at the home (§14).
 
 A store failure while resolving a handle or reading its metadata reports the same
 transient `last_error_code` as the other handle reads (`refresh_failed` for an
@@ -688,7 +690,8 @@ an explicit `null` rather than omitted.
 state verdict. So `ck auth reactivate` — the repair for a credential wrongly marked dead
 — moves `ready` false→true **without** bumping `record_version`, because no material
 changed. A consumer polling only the version cursor will hold a repaired credential dead
-indefinitely. **Poll `status`, join on `record_version`, decide on `ready`.**
+indefinitely. **For local records, poll `status`; use `record_version` as the material
+cursor and `ready` as the serving verdict.**
 
 **`status` is a cursor, `get` is the authority.** They can legitimately disagree:
 `ready` is computed from stored state without decrypting, while `get` also gates on the
@@ -1173,3 +1176,324 @@ ck auth revoke-grant --principal reserved:prefrontal-core --selector-kind exact 
 
 The grant operation arrives with store migration 18. A binary older than that
 migration cannot read a store that holds a `seal` grant's operation name.
+
+
+## 14. Federation between computer vaults
+
+A rotating OAuth login stays on one **home** vault A. Vault B keeps a remote record and
+fetches only an access token; it never stores the token in its database or receives an
+OAuth struct or refresh token. Static credentials instead use an explicitly accepted sealed
+transfer. There is no automatic credential synchronization and no remote-record chaining.
+
+### Channel identity and harness mapping
+
+The canonical member id is `fed-computer:<fp>`, where `<fp>` is 32 lowercase hex characters
+(the first 16 bytes of SHA-256 of the member's Noise static public key). The matching route
+is `fed:<fp>:claustrum`. The vault's outbound client opens it as `reserved:claustrum`.
+Callosum must derive the forwarded harness from the authenticated computer peer, not request
+params. Both modules must be reserved in the supervisor configuration. Member mapping must
+remain off until the deployed supervisor guarantees that the forwarded harness comes
+unchanged from the authenticated opener, and callosum derives it from the authenticated
+computer peer rather than request params.
+
+On inbound `reserved:callosum` channels the live `federation.member_mapping` setting controls
+this mapping:
+
+| Harness | Gate off (release-1 behavior) | Gate on |
+|---|---|---|
+| exactly `callosum-self` | ordinary callosum grants | ordinary callosum grants |
+| `fed-computer:<32 lowercase hex>` | refused principal | federation member channel |
+| any other `fed-` harness, including phone/sim/unknown or malformed hex | refused | refused |
+| empty or any other harness | ordinary callosum grants | refused |
+
+A harness starting `fed-` never inherits callosum's grants. Other principals' harnesses are
+ignored; direct, enrolled and unattested callers cannot become members. Refused channels
+answer uniform `not_found`. Only a federation member channel can invoke these operations:
+
+| Method | Kind | Purpose |
+|---|---|---|
+| `federation.remote_token` | Query | Fetch an Auth-sealed access-token projection; callosum must not persist query replies. |
+| `federation.report_auth_failure` | Mutate | Forward a version-checked 401/403 report to the home. |
+| `federation.transfer_deliver` | Mutate | Deliver an Auth-sealed static credential for operator acceptance. |
+
+Every other op on that channel is `not_found` before dispatch. `handle` or
+`enrollment_token` params are `invalid_params`, never resolved. The three federation ops
+on any non-federation channel (including `callosum-self`, a granted reserved module, or
+any channel with the gate off) are `not_found`.
+
+Handles and enrollment tokens are **vault-local bearer secrets**, not member identities.
+With the gate off, release-1 bearer-scoped reads remain possible even on a refused `fed-`
+principal; that rollback boundary does not apply the access-token projection. Do not send
+handles or enrollment tokens to another vault.
+
+### Auth-mode HPKE and exact aad bytes
+
+Both purposes use RFC 9180 Auth mode and the existing X25519/HKDF-SHA256/ChaCha20Poly1305
+suite. Each vault uses its own `kem:vault-transfer:1` key; peer keys come only from
+`callosum.peer_keys_read` for the role-fixed peer, never from a key or member supplied in
+params. This key is not a transport key. `credential.open`/`seal` cannot use it. Its only
+scoped grant is the announce `read` to `reserved:callosum` for `credential.public_key`;
+handles cannot be minted and active-key mutation is protected.
+
+| Purpose | `info` (UTF-8 bytes) | aad JSON fields, in serialization order |
+|---|---|---|
+| Token reply | `cortexkit/claustrum/remote-token/v1` | `credential_id`, `requester`, `home`, `nonce`, `recipient_key_id` |
+| Transfer | `cortexkit/claustrum/transfer/v1` | `transfer_id`, `credential_id`, `sender`, `receiver`, `recipient_key_id` |
+
+The requester (token) or sender (transfer) serializes the aad exactly once, as compact JSON
+in the listed order, and transmits those bytes. `nonce` (fresh per fetch) and `transfer_id`
+are 16 random bytes encoded as 32 lowercase hex characters. Members fill their own role
+from their stored self id. Unknown or missing aad fields are refused. The peer validates
+every field and authenticates the **received bytes**, never a rebuilt JSON object. A token
+reply is opened only for the requested id and nonce; a transfer is opened only for the
+attested sender, this receiver and its current key id. Cross-purpose, cross-id and replayed
+nonce envelopes do not open. The plaintext limit is 64 KiB.
+
+### `federation.remote_token`
+
+Request: `{"method":"federation.remote_token","params":{"aad":"<exact JSON string>","min_ttl_ms":62500}}`.
+`aad` is required; `min_ttl_ms` is an optional signed 64-bit integer in milliseconds.
+After the current-pairing check succeeds, unknown params or malformed aad produce an
+`invalid_params` Error frame, not a classified credential refusal; earlier pairing failures
+take precedence. Success is `{"result":{"enc":"<standard base64>","ciphertext":"<standard base64>"}}`;
+`enc` is the 32-byte encapsulation, and ciphertext is the Auth-sealed JSON plaintext below.
+Refusal is `{"result":{"error":{"code":"…","class":"…","remedy_member":"…"}}}`,
+with `remedy_member` omitted unless a member-specific remedy applies.
+
+The home checks current pairing, strict aad, requester equality with the harness, its own
+self id and active transfer key, `aad.home`, a current-pairing `remote_read` member grant,
+local refreshable-record eligibility, and the requester's announced transfer key, in that
+order. No grant, stale pairing, unknown/ungranted id, ineligible record and projection
+refusal are indistinguishable `not_found`. An authorized `needs_reauth` record keeps
+answering `needs_reauth` on subsequent reads, rather than degrading to `not_found`.
+
+After the normal local get/refresh the home requires a nonempty `oauth.access_token`
+equal to `payload` and unequal to every nonempty refresh component (including packed-token
+segments, client secret and Meta session identity/refresh tokens). It then audits issuance
+before sealing. The opened reply contains only:
+
+| Field | Meaning |
+|---|---|
+| `payload` | Access token, never a refresh component. |
+| `expires_in_ms` | Optional remaining lifetime on the home clock at seal time; absent for no expiry. |
+| `recheck_in_ms` | Optional time until a stale-marked refresh deferred by the 60 s cooldown can run. |
+| `record_version` | Home material version. |
+| `project_id`, `account_id` | Optional local-get projections (including Antigravity project and token-derived account). |
+| `identity` | Stored inventory identity: optional `account_id`, `email`, `org_name`; distinct from the get projection. |
+| `categories` | Home categories, used only to seed remote add. |
+| `refresh_adapter` | Optional adapter-name string. |
+| `detected_plan` | Optional object `{tier, raw, observed_at_ms}`; tier/raw may be null. |
+
+B validates payload, identity, detected tier and its own adapter registry before applying
+anything. Its ordinary `get_scoped` reply echoes `credential_id`, uses local get fields
+(including `expires_at_ms`, `project_id`, `account_id`, `email`, `org_name`) and never exposes
+the sealed envelope to an application. Inventory rows retain local shapes: kind `oauth`,
+home version/identity/adapter and derived `auth_method`, with B-owned categories, provider
+ids and operator tier. No capability handle is available for a remote id.
+
+B forwards caller `min_ttl_ms` (negative or absent means zero) plus 62,500 ms, saturating at
+`i64::MAX`. A cached token must have conservative lifetime
+`expires_in_ms - 60,000 - monotonic_elapsed_since_fetch_start` positive and at least the
+caller's demand. The time origin is fetch-task start, before setup, peer-key lookup and
+request transmission; using that earlier origin errs on the side of shorter validity.
+Cache residence is at most 300 s from that origin, shortened by
+`recheck_in_ms` when present. There is no cross-machine wall-clock comparison; consumer
+`expires_at_ms` is B's wall clock at that origin plus `expires_in_ms`. A fresh but insufficient
+reply is `ttl_unsatisfiable` after one home fetch. A still-servable cached token works during
+a partition; no-expiry tokens are still bounded by the 300 s residence cap.
+
+B's forwarded read/report has a 2.5 s end-to-end budget including route open and flight
+wait; the home has 1.5 s including lookups/refresh. A timed-out refresh continues detached
+and persists rotated material; the next read can use it. Route failure/deadline drops the
+binding so the next call can reconnect. Outbound admin work shares one 10 s budget per op.
+
+### Remote verdicts and recovery
+
+Refusals use the ordinary `result.error` body `{code, class}` with optional
+`remedy_member` alongside them. It names the member requiring operator action, never free
+text. An Error frame is transport/protocol failure, not a credential-state verdict (§1a).
+Every fetch records `last_fetch_outcome`; only authoritative outcomes change list `state`
+and status `last_error_code`:
+
+| Outcome | B's error / class | Stored effect |
+|---|---|---|
+| home `not_found` | `not_found` / permanent | `needs_reauth` |
+| home `needs_reauth` | `needs_reauth` / auth_required, `remedy_member` = home | `needs_reauth` |
+| home `corrupt` | `corrupt` / permanent | `corrupt` |
+| home `refresh_failed`, `vault_locked`, `store_error` | same / transient | outcome only |
+| home `refresh_unsupported` | same / permanent | outcome only |
+| home `ttl_unsatisfiable` | same / context_overflow | outcome only |
+| home setup absent or requester self id/key mismatched | `remote_setup_incomplete` / permanent, `remedy_member` = home or requester respectively | `needs_reauth` |
+| home pairing lookup failed, refresh budget spent, or home Error frame | `home_unavailable` / transient | outcome only |
+| unreachable, deadline, partition, retry-safe or outcome-unknown callosum failure | `home_unreachable` / transient | outcome only |
+| permanent callosum failure | `federation_setup_invalid` / permanent | outcome only |
+| B cannot open reply (aad/key/info mismatch) | `remote_seal_invalid` / permanent | `needs_reauth` |
+| opened reply fails validation | `remote_reply_invalid` / permanent | outcome only; one diagnostic; stored home fields and cache unchanged |
+| B lacks self id or active transfer key | `transfer_key_missing` / permanent, `remedy_member` = B when its self id is known (otherwise omitted) | outcome only |
+| B lacks home's announced key | `remote_setup_incomplete` / permanent, `remedy_member` = home | outcome only |
+
+Success stores `active`, clears the home error and updates home-owned fields. Non-active
+authoritative outcomes drop the cache; transient failures and invalid replies do not undo
+a prior home verdict. Categories, provider ids and operator tiers remain B-owned after add.
+A remove/re-add starts a new incarnation; delayed replies from the old home cannot apply.
+
+Remote `credential.status` adds `remote_home` and `last_fetch_outcome`. `record_version`
+is the last observed home version; `ready` is true only for `active` when B is not fenced;
+`last_error_code` is the last authoritative home error, surviving partitions and restarts;
+`stale_pending` reflects B's durable reported-version mark. Status and list/watch make no
+home call. **Poll `get_scoped` to observe a home repair**, not status. Reads while the home
+is still `needs_reauth` fail fast without upstream refresh. The first successful read
+restores active/ready. A home re-create may reset the version downward; treat it as a reset.
+
+**Client reach:** remote status is reachable through the Rust client's `status_scoped`
+only for a reserved principal. The Rust client sends no enrollment token. The TS client's
+`statusCredential` accepts only a handle and remote ids have none: TS and enrolled consumers
+have no remote status API in this release and recover by polling `get_scoped`. Existing
+client decoders accept optional remote additions; neither client promises to expose them all.
+The Rust resolver's structured error keeps the class-derived `code()` (for example
+`credential_permanent`) and includes the wire refusal code in its safe display message;
+the TS error's `code` is the wire code. Neither currently exposes `remedy_member` as a typed field.
+
+### Forwarded reports
+
+Request: `{"method":"federation.report_auth_failure","params":{"credential_id":"oauth:anthropic:fixture","record_version":1,"provider_status":401,"reporter_source":"direct"}}`.
+The id is a string, version an unsigned integer, status a 16-bit unsigned integer;
+`reporter_source` is an optional string using the ordinary report vocabulary (§5).
+Success is `{"result":{"accepted":true}}`; home refusal is
+`{"result":{"accepted":false,"error":{"code":"…","class":"…"}}}`.
+After the current-pairing check succeeds, malformed/unknown params produce an
+`invalid_params` Error frame; earlier pairing refusals take precedence.
+
+B accepts only 401/403, evicts a matching-version cache entry (never a newer version),
+bumps its flight generation and durably records the largest reported version **before**
+forwarding. The home rechecks pairing/grant/eligibility and refuses any other status with
+`report_status_not_credential_death` / permanent, without marking stale or refreshing.
+
+| Forward outcome | Consumer result |
+|---|---|
+| home accepted | success |
+| home `not_found` | `not_found` / permanent |
+| permanent callosum class | `federation_setup_invalid` / permanent |
+| retry-safe/outcome-unknown transport, unreachable or deadline | `home_unreachable` / transient |
+
+A same-version token returned during the per-credential 60 s refresh cooldown carries
+`recheck_in_ms`; B keeps `stale_pending` and refetches when it elapses, without a second
+report. An applied success above the reported version, one without `recheck_in_ms`, a home
+re-create or an authoritative non-success clears the mark. Transient outcomes leave it.
+
+### Transfers: delivery, body v1 and sender action
+
+Request: `{"method":"federation.transfer_deliver","params":{"enc":"<standard base64>","ciphertext":"<standard base64>","aad":"<exact JSON string>"}}`.
+All three string fields are required; no extra params or outer transfer id are allowed.
+Success is `{"result":{"state":"pending"}}`, `accepted` or `rejected`. Errors use
+`{"result":{"error":{"code":"…","class":"…"}}}` with optional `remedy_member`;
+After pairing and grant checks succeed, malformed envelope fields produce an
+`invalid_params` Error frame without a class; those earlier refusals take precedence.
+The version-1 sealed plaintext
+has this complete closed schema (including closed nested identity/plan objects):
+
+| Field | Type / encoding |
+|---|---|
+| `version` | JSON integer, exactly `1`. |
+| `credential_id` | Valid nonempty store id string equal to aad's id. |
+| `kind` | Snake-case kind string: eligible values `api_key`, `dsn`, `cookie`, `opaque`. |
+| `payload` | Nonempty bytes encoded as standard base64. |
+| `categories` | Array of validated category strings. |
+| `identity` | Object with optional string `account_id`, `email`, `org_name`. |
+| `provider_ids` | Array of validated provider-id strings. |
+| `detected_plan` | Object `{tier, raw, observed_at_ms}` or null; tier/raw optional nullable strings, observation time signed integer milliseconds. |
+| `expires_at_ms` | Signed integer milliseconds or null; must be null/absent for Cookie. |
+
+Only `ApiKey`, `Dsn`, `Cookie` and `Opaque` records with neither OAuth data nor adapter are
+eligible. A Cookie with `expires_at_ms` is refused. OAuth (rotating or not), signing/KEM
+keys, handles and remote records cannot be transferred. Unknown body fields are refused;
+identity, id, tier, categories and provider ids are validated at delivery **and** accept.
+
+The sender fixes one transfer id and one envelope. Its outgoing row and `transfer_out`
+audit commit atomically **before** delivery. Resume resends identical bytes, never re-seals
+and never writes a second outgoing audit. The receiver first checks current pairing and
+`transfer_deliver` grant, then deduplicates by (attested sender, SHA-256(`enc || ciphertext`))
+before opening or checking ciphertext-size and queue bounds (the aad-size cap is checked
+first). Identical bytes return their stored state even after key
+replacement, expiry or a full queue. Grant revocation still refuses a resend. New transfers
+are limited to 8 pending per sender and 64 total. The authenticated `aad.transfer_id` is the
+only transfer id; no separate outer id is accepted. A different body under the same sender
+and id is `transfer_conflict`.
+
+| Delivery result | Sender action |
+|---|---|
+| `{state:"pending"}` | Keep outgoing row; operator accepts/rejects on receiver, then resume. |
+| `{state:"accepted"}` or `{state:"rejected"}` | Delete outgoing row. |
+| `transfer_queue_full`, `callosum_unavailable`, `home_unavailable`, `home_unreachable` / transient, or a generic home Error frame | Keep row; resume identical envelope. Permanent callosum Error frames map to `federation_setup_invalid` below. |
+| `transfer_expired` / permanent | Delete row. |
+| `remote_seal_invalid`, `transfer_conflict`, `transfer_too_large`, `transfer_body_invalid`, `federation_setup_invalid`, `not_found` / permanent | Delete row; repair setup or run a fresh send if appropriate. |
+| Any other refusal code, including `remote_setup_incomplete` or `store_error` | Keep row for identical resume; only the terminal codes above delete it, not a permanent class by itself. |
+
+The sender also discards outgoing rows at 7 days. Unaccepted pending bodies expire at
+7 days, while accepted/rejected/expired ids and hashes remain for dedup. Delivery creates
+no credential. Accept requires `--from` because transfer ids are unique per sender;
+it reopens against the stored sender's currently announced key, then commits record,
+body categories (not catalog defaults), provider ids, accepted marker and `transfer_in`
+in one transaction. Receiver assigns version, state and source `transfer`. Key-lookup
+failure keeps pending with no rejection audit; a confirmed opening failure rejects it.
+Replacing a damaged non-active transfer key rejects pending envelopes and abandons outgoing
+envelopes; active replacement is protected. Abandoned resume sends nothing: use a fresh id.
+
+### Callosum refusal classes and additional admin refusals
+
+| Callosum class | Codes | Vault mapping |
+|---|---|---|
+| permanent | `fed_not_exposed`, `fed_unknown_module`, `fed_bad_call`, every `fed_payload_…` | `federation_setup_invalid` / permanent; never retry unchanged |
+| retry-safe | `fed_busy`, `fed_ledger_full`, `fed_target_unavailable`, `fed_internal` without `[effect:…]`, unknown provider | `home_unreachable` / transient |
+| outcome-unknown | `fed_partition`, `fed_deadline`, `fed_shutdown`, any `[effect:…]` suffix | `home_unreachable` / transient; transfer dedup makes identical retry safe |
+
+The effect suffix takes precedence. The 90 s callosum reconnect grace does not extend the
+vault's shorter deadlines. Token queries and version-gated reports are safe under uncertain
+outcomes; transfers rely on durable dedup.
+
+`invalid_params` is a protocol Error-frame code with no credential class, including for
+malformed federation params/member/aad and forbidden bearers. Master-key admin helpers
+can also return `invalid_params` / permanent in their separate admin refusal body; that
+does not turn the protocol Error into a classified read verdict.
+
+| Additional refusal code | Class | Meaning |
+|---|---|---|
+| `transfer_key_reserved` | permanent | A forbidden grant or handle on a transfer-key id. |
+| `transfer_key_protected` | permanent | Mutation or replacement of an active transfer key. |
+| `remote_record` | permanent | A handle or local-only action requested for a remote record. |
+| `member_not_paired` | permanent | Member grant attempted without a current pairing. |
+| `callosum_unavailable` | transient | Required admin/transfer pairing or key lookup failed. |
+| `federation_requires_daemon` | permanent | Outbound admin op attempted through the synchronous offline path; no write. |
+| `transfer_body_invalid` | permanent | Ineligible or invalid transfer body. |
+| `transfer_ineligible` | permanent | Send refused an ineligible kind/OAuth payload/adapter; optional `reason` describes the eligibility failure. |
+| `transfer_gone` | permanent | Resume names an outgoing row no longer stored. |
+| `transfer_abandoned` | permanent | Resume names an envelope abandoned when its sender key was replaced; send afresh. |
+| `credential_exists` | permanent | Accept would replace an existing local id without `--replace`. |
+| `credential_id_is_remote` | permanent | Accept would collide with a remote id; local/remote replacement is not implicit. |
+| `transfer_replace_refused` | permanent | Accept replacement is not an eligible static record of the same kind. |
+| `transfer_too_large` | permanent | Body exceeds 64 KiB plaintext bound. |
+| `transfer_queue_full` | transient | Receiver's pending queue bound reached. |
+| `transfer_conflict` | permanent | Existing sender/id with a different body hash. |
+| `transfer_expired` | permanent | Identical resend of an expired transfer. |
+
+### Federation audit targets
+
+The HMAC chain format is unchanged. `payload_hash` is SHA-256 of compact JSON with fields
+in the following order; ids/incarnations are lowercase 32-hex, body hashes lowercase 64-hex,
+versions JSON numbers, and reasons refusal codes.
+
+| Audit op | Credential target | Actor | Hash object |
+|---|---|---|---|
+| `remote_issue` | id | member | `{credential_id, record_version}` |
+| `transfer_out` / `transfer_in` | id | receiver / sender | `{transfer_id, body_hash}` |
+| `transfer_reject` | id | sender on receiver, receiver on abandoned outgoing | `{transfer_id, reason}` |
+| `member_grant_create` / `member_grant_revoke` | exact selector id, otherwise none | member | `{operation, selector_kind, selector, pairing_id}` |
+| `remote_add` / `remote_remove` | id | home | `{incarnation}` |
+| `federation_gate_set` | none | admin | `{value}` |
+| `federation_self_set` | none | admin | `{member}` |
+
+Issuance dedup and audit commit before token release, keyed by member/id/version/encrypted
+material digest, so retries/restarts add no row but a recreated id at version 1 is audited
+again. Forwarded reports retain the existing `report_auth_failure` hash format and member
+actor: every report adds diagnostics, at most the first state-changing report at a version
+adds a chain row. B records only diagnostics for its forward.

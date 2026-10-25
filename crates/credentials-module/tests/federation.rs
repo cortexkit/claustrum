@@ -28,3 +28,6 @@ mod transfer;
 
 #[path = "federation/admin.rs"]
 mod admin;
+
+#[path = "fixtures/federation_producer.rs"]
+mod federation_producer;

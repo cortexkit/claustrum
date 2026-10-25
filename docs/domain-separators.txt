@@ -23,3 +23,5 @@ crates/credentials-core/src/envelope.rs cortexkit-credentials/envelope-aad/v1 co
 crates/credentials-core/src/key.rs cortexkit-credentials/key-id/v1 cortexkit-credentials/key-id/v1
 crates/credentials-core/src/store.rs cortexkit-credentials/handle/v1 cortexkit-credentials/handle/v1
 crates/credentials-core/src/store.rs cortexkit-credentials/refresh-token-hash/v1 cortexkit-credentials/refresh-token-hash/v1
+crates/credentials-module/src/federation/ingress.rs cortexkit/claustrum/remote-token/v1 cortexkit/claustrum/remote-token/v1
+crates/credentials-module/src/federation/transfer.rs cortexkit/claustrum/transfer/v1 cortexkit/claustrum/transfer/v1

@@ -1198,6 +1198,12 @@ enum TransferKeyUse {
     /// `credential.public_key`: the read callosum makes to announce the key's public
     /// half.
     PublicKeyAnnounce,
+    /// `credential.status`, and the held-key half of `auth.watch_scoped`: callosum's
+    /// announce read brackets `public_key` with two status reads and returns the key only
+    /// when their `record_version`s agree, and it re-reads only when its watch's held-key
+    /// digest moves. Without these two, callosum can never pick up a new or rotated
+    /// transfer key while it runs. Neither carries key material.
+    AnnounceVersion,
 }
 
 /// How a call reached a credential id, for the transfer-key fence.
@@ -1223,9 +1229,10 @@ enum TransferKeyAccess<'a> {
 /// store already refuses every grant on it except callosum's announce `read`, and every
 /// handle; this fence is the read surface's half, for a grant or handle that exists
 /// anyway (a handle minted before the fence, a category grant over a category the key
-/// was later put in). Exactly one access passes: `credential.public_key` by
-/// `reserved:callosum`. Everything else answers the uniform `not_found` or leaves the
-/// key out of a list.
+/// was later put in). Only callosum's announce passes, as `reserved:callosum`:
+/// `credential.public_key`, plus the `credential.status` and watch held-key digest that
+/// tell it which version to read (see [`TransferKeyUse::AnnounceVersion`]). Everything
+/// else answers the uniform `not_found` or leaves the key out of a list.
 fn transfer_key_fenced(credential_id: &str, access: TransferKeyAccess<'_>) -> bool {
     if !credentials_core::federation::is_vault_transfer_id(credential_id) {
         return false;
@@ -1235,7 +1242,7 @@ fn transfer_key_fenced(credential_id: &str, access: TransferKeyAccess<'_>) -> bo
         TransferKeyAccess::Scoped {
             kind: "reserved",
             id: "callosum",
-            usage: TransferKeyUse::PublicKeyAnnounce,
+            usage: TransferKeyUse::PublicKeyAnnounce | TransferKeyUse::AnnounceVersion,
         }
     )
 }
@@ -2472,17 +2479,24 @@ impl ReadSurface {
             .watch_scoped_snapshot(kind, &id)
             .map_err(|_| ReadError::StoreError)?;
         self.add_remote_rows(&mut snapshot)?;
-        // The same fence as `list_scoped`, so a watch neither shows the transfer key nor
-        // fires when only it changes.
-        let access = TransferKeyAccess::Scoped {
+        // The rows take the same fence as `list_scoped`, so no watcher's view shows the
+        // transfer key. The held-key digest admits it for callosum alone, so a new or
+        // rotated transfer key moves callosum's digest and it re-reads the key to announce
+        // it; every other watcher's digest stays blind to it.
+        let rows_access = TransferKeyAccess::Scoped {
             kind,
             id: &id,
             usage: TransferKeyUse::Ordinary,
         };
+        let keys_access = TransferKeyAccess::Scoped {
+            kind,
+            id: &id,
+            usage: TransferKeyUse::AnnounceVersion,
+        };
         snapshot
             .rows
-            .retain(|row| !transfer_key_fenced(&row.id, access));
-        keys.retain(|(credential_id, _)| !transfer_key_fenced(credential_id, access));
+            .retain(|row| !transfer_key_fenced(&row.id, rows_access));
+        keys.retain(|(credential_id, _)| !transfer_key_fenced(credential_id, keys_access));
         let view = project_list_scoped(snapshot).view;
         keys.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
         let mut input = b"claustrum.watch_scoped.keys.v1".to_vec();
@@ -3080,11 +3094,12 @@ impl ReadSurface {
                 // body as a credential that does not exist -- indistinguishable from the
                 // enumeration guard doing its job.
                 if self
-                    .authorize_scoped_as(
+                    .authorize_scoped_for(
                         principal,
                         params.enrollment_token.as_deref(),
                         credential_id,
                         GrantOperation::Read,
+                        TransferKeyUse::AnnounceVersion,
                     )
                     .is_err()
                 {

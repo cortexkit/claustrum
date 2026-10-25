@@ -5376,6 +5376,37 @@ mod tests {
             callosum_key["result"]["algorithm"], "x25519",
             "{callosum_key}"
         );
+        // Callosum brackets that read with `credential.status` to pin the version, so
+        // status must answer callosum too, and still answer no one else.
+        let broca_status = routed_json(
+            &surface,
+            &admin,
+            100,
+            OP_STATUS,
+            json!({ "credential_id": VAULT_TRANSFER_ID }),
+        )
+        .await;
+        assert_eq!(broca_status["result"]["ready"], false, "{broca_status}");
+        assert!(
+            broca_status["result"]["record_version"].is_null(),
+            "{broca_status}"
+        );
+        let callosum_status = routed_json(
+            &surface,
+            &admin,
+            101,
+            OP_STATUS,
+            json!({ "credential_id": VAULT_TRANSFER_ID }),
+        )
+        .await;
+        assert_eq!(
+            callosum_status["result"]["ready"], true,
+            "{callosum_status}"
+        );
+        assert_eq!(
+            callosum_status["result"]["record_version"], 1,
+            "{callosum_status}"
+        );
     }
 
     /// A handle to the transfer key minted before the store refused such handles is

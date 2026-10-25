@@ -386,6 +386,37 @@ mod scoped_watch {
         rig.quiet().await;
     }
 
+    /// Callosum re-reads the transfer key to announce it only when its watch's held-key
+    /// digest moves, so granting it the key must move that digest. Any other watcher's
+    /// digest stays blind to the transfer key.
+    #[tokio::test]
+    async fn the_transfer_key_moves_callosums_keys_and_no_one_elses() {
+        use credentials_core::federation::VAULT_TRANSFER_ID;
+        let mut rig = Rig::new();
+        let pem = credentials_core::kem::generate_key().expect("transfer key");
+        rig.store
+            .create_audited(
+                VAULT_TRANSFER_ID,
+                &VaultRecord::new_static(CredentialKind::KemKey, "operator", pem.into_bytes(), None),
+                AuditCtx::admin(AuditOp::Put),
+            )
+            .expect("transfer init");
+        rig.bind(1, reserved("callosum"));
+        rig.bind(2, reserved("broca"));
+        rig.open(1, 11, json!({})).await;
+        let callosum_before = rig.notice(1, 11, 1).await;
+        rig.open(2, 21, json!({})).await;
+        let broca_before = rig.notice(2, 21, 1).await;
+
+        grant_for(&rig.store, "callosum", VAULT_TRANSFER_ID, GrantOperation::Read);
+        // The view moves too, because callosum's grant list gained a row. The held-key
+        // digest is what callosum acts on, so that digest must move.
+        let callosum_after = rig.notice(1, 11, 2).await;
+        assert_ne!(callosum_before["keys"], callosum_after["keys"]);
+        rig.quiet().await;
+        assert_eq!(broca_before["seq"], 1);
+    }
+
     #[tokio::test]
     async fn watch_scoped_identical_signing_replacement_moves_keys() {
         let mut rig = Rig::new();

@@ -29,6 +29,9 @@ mod transfer;
 #[path = "federation/admin.rs"]
 mod admin;
 
+#[path = "federation/callosum_vectors.rs"]
+mod callosum_vectors;
+
 #[path = "fixtures/federation_producer.rs"]
 mod federation_producer;
 

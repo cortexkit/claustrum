@@ -93,3 +93,5 @@ libc = "0.2"
 # the on-the-wire malicious-client conformance test can assert the durable alarm
 # rows its adversarial traffic raised actually landed.
 rusqlite = { workspace = true }
+# Checks the SHA-256 pins on vendored fixtures from other repositories.
+sha2 = { workspace = true }

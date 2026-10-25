@@ -1,0 +1,101 @@
+{
+  "caller": "reserved:occipital",
+  "cases": [
+    {
+      "name": "empty",
+      "reply": {
+        "devices": [],
+        "self": {
+          "static_public_key_hex": "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a"
+        }
+      },
+      "request": {
+        "method": "callosum.paired_devices_read",
+        "params": {}
+      }
+    },
+    {
+      "name": "all_classes",
+      "peers": [
+        {
+          "public_key_hex": "0101010101010101010101010101010101010101010101010101010101010101"
+        },
+        {
+          "public_key_hex": "0202020202020202020202020202020202020202020202020202020202020202"
+        },
+        {
+          "public_key_hex": "0303030303030303030303030303030303030303030303030303030303030303"
+        },
+        {
+          "public_key_hex": "0404040404040404040404040404040404040404040404040404040404040404"
+        }
+      ],
+      "reply": {
+        "devices": [
+          {
+            "class": "computer",
+            "fingerprint": "648aa5c579fb30f38af744d97d6ec840",
+            "pairing_id": "11111111-2222-4333-8444-555555555555:3"
+          },
+          {
+            "class": "phone",
+            "fingerprint": "72cd6e8422c407fb6d098690f1130b7d",
+            "pairing_id": "11111111-2222-4333-8444-555555555555:1"
+          },
+          {
+            "class": "sim",
+            "fingerprint": "75877bb41d393b5fb8455ce60ecd8dda",
+            "pairing_id": "11111111-2222-4333-8444-555555555555:2"
+          },
+          {
+            "class": "unknown",
+            "fingerprint": "9f4fb68f3e1dac82202f9aa581ce0bbf",
+            "pairing_id": "11111111-2222-4333-8444-555555555555:4"
+          }
+        ],
+        "self": {
+          "static_public_key_hex": "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a"
+        }
+      },
+      "request": {
+        "method": "callosum.paired_devices_read",
+        "params": {}
+      }
+    },
+    {
+      "name": "wrong_caller",
+      "reply": {
+        "code": "fed_not_authorized",
+        "message": "callosum.paired_devices_read requires reserved:occipital or reserved:claustrum"
+      },
+      "request": {
+        "method": "callosum.paired_devices_read",
+        "params": {}
+      }
+    },
+    {
+      "name": "nonempty_params",
+      "reply": {
+        "code": "fed_bad_request",
+        "message": "callosum.paired_devices_read requires empty object params"
+      },
+      "request": {
+        "method": "callosum.paired_devices_read",
+        "params": {
+          "extra": 1
+        }
+      }
+    },
+    {
+      "name": "missing_params",
+      "reply": {
+        "code": "fed_bad_request",
+        "message": "callosum.paired_devices_read requires empty object params"
+      },
+      "request": {
+        "method": "callosum.paired_devices_read"
+      }
+    }
+  ],
+  "version": 1
+}

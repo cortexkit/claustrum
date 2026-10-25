@@ -1,0 +1,192 @@
+{
+  "cases": [
+    {
+      "caller": "reserved:claustrum",
+      "name": "empty",
+      "peers": [],
+      "reply": {
+        "peers": []
+      },
+      "request": {
+        "method": "callosum.peer_keys_read",
+        "params": {}
+      }
+    },
+    {
+      "caller": "reserved:claustrum",
+      "name": "all_optional_fields",
+      "peers": [
+        {
+          "key_record": {
+            "keys": {
+              "msgsig_ed25519": {
+                "pub": "bb02",
+                "version": "5"
+              },
+              "seal_x25519": {
+                "pub": "aa01",
+                "version": "2"
+              },
+              "vault_transfer_x25519": {
+                "pub": "cc03",
+                "version": "3"
+              }
+            }
+          },
+          "machine_id": "853ecdb6e1681c3dc8c1c578d14c23a2",
+          "public_key_hex": "0101010101010101010101010101010101010101010101010101010101010101",
+          "registry_platform": "ios"
+        }
+      ],
+      "reply": {
+        "peers": [
+          {
+            "fingerprint": "72cd6e8422c407fb6d098690f1130b7d",
+            "key_record": {
+              "keys": {
+                "msgsig_ed25519": {
+                  "pub": "bb02",
+                  "version": "5"
+                },
+                "seal_x25519": {
+                  "pub": "aa01",
+                  "version": "2"
+                },
+                "vault_transfer_x25519": {
+                  "pub": "cc03",
+                  "version": "3"
+                }
+              }
+            },
+            "machine_id": "853ecdb6e1681c3dc8c1c578d14c23a2",
+            "registry_platform": "ios"
+          }
+        ]
+      },
+      "request": {
+        "method": "callosum.peer_keys_read",
+        "params": {}
+      }
+    },
+    {
+      "caller": "reserved:occipital",
+      "name": "non_vault_filters_transfer",
+      "peers": [
+        {
+          "key_record": {
+            "keys": {
+              "msgsig_ed25519": {
+                "pub": "bb02",
+                "version": "5"
+              },
+              "seal_x25519": {
+                "pub": "aa01",
+                "version": "2"
+              },
+              "vault_transfer_x25519": {
+                "pub": "cc03",
+                "version": "3"
+              }
+            }
+          },
+          "machine_id": "853ecdb6e1681c3dc8c1c578d14c23a2",
+          "public_key_hex": "0101010101010101010101010101010101010101010101010101010101010101",
+          "registry_platform": "ios"
+        }
+      ],
+      "reply": {
+        "peers": [
+          {
+            "fingerprint": "72cd6e8422c407fb6d098690f1130b7d",
+            "key_record": {
+              "keys": {
+                "msgsig_ed25519": {
+                  "pub": "bb02",
+                  "version": "5"
+                },
+                "seal_x25519": {
+                  "pub": "aa01",
+                  "version": "2"
+                }
+              }
+            },
+            "machine_id": "853ecdb6e1681c3dc8c1c578d14c23a2",
+            "registry_platform": "ios"
+          }
+        ]
+      },
+      "request": {
+        "method": "callosum.peer_keys_read",
+        "params": {}
+      }
+    },
+    {
+      "caller": "reserved:occipital",
+      "name": "non_vault_omits_empty_record",
+      "peers": [
+        {
+          "key_record": {
+            "keys": {
+              "vault_transfer_x25519": {
+                "pub": "cc03",
+                "version": "3"
+              }
+            }
+          },
+          "machine_id": "853ecdb6e1681c3dc8c1c578d14c23a2",
+          "public_key_hex": "0101010101010101010101010101010101010101010101010101010101010101",
+          "registry_platform": "ios"
+        }
+      ],
+      "reply": {
+        "peers": [
+          {
+            "fingerprint": "72cd6e8422c407fb6d098690f1130b7d",
+            "machine_id": "853ecdb6e1681c3dc8c1c578d14c23a2",
+            "registry_platform": "ios"
+          }
+        ]
+      },
+      "request": {
+        "method": "callosum.peer_keys_read",
+        "params": {}
+      }
+    },
+    {
+      "caller": "reserved:claustrum",
+      "name": "no_optional_fields",
+      "peers": [
+        {
+          "key_record": null,
+          "machine_id": null,
+          "public_key_hex": "0101010101010101010101010101010101010101010101010101010101010101",
+          "registry_platform": null
+        }
+      ],
+      "reply": {
+        "peers": [
+          {
+            "fingerprint": "72cd6e8422c407fb6d098690f1130b7d"
+          }
+        ]
+      },
+      "request": {
+        "method": "callosum.peer_keys_read",
+        "params": {}
+      }
+    },
+    {
+      "caller": "reserved:claustrum",
+      "name": "fed_not_ready",
+      "reply": {
+        "code": "fed_not_ready",
+        "message": "peer runtimes are not ready yet"
+      },
+      "request": {
+        "method": "callosum.peer_keys_read",
+        "params": {}
+      }
+    }
+  ],
+  "version": 1
+}

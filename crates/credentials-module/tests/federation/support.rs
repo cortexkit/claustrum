@@ -270,7 +270,8 @@ impl Held {
         self.inner.release.send_replace(Some(reply));
     }
 
-    /// Wait until the released reply has been written to the connection.
+    /// Wait until the released reply is being sent: signalled just before the stand-in
+    /// writes it, so a call can never resolve from this reply before the signal.
     pub async fn answered(&self) {
         let mut answered = self.inner.answered.subscribe();
         let _ = answered.wait_for(|answered| *answered).await;
@@ -290,7 +291,7 @@ impl Held {
         tokio::select! {
             biased;
             () = self.answered() => {}
-            _ = call => panic!("call completed before the held reply was written"),
+            _ = call => panic!("call completed before the held reply was sent"),
         }
     }
 
@@ -958,10 +959,14 @@ fn hold_reply(
             }
             _ => return,
         };
+        // Signal before writing, not after: once the frame is on the wire the client can
+        // resolve the call before this task runs again, and `answered_before` would then
+        // read a call this reply completed as one that completed without it. A call that
+        // finishes before this signal therefore really did finish some other way.
+        held.inner.answered.send_replace(true);
         write_frame(&mut *writer.lock().await, &answer)
             .await
             .expect("write held reply");
-        held.inner.answered.send_replace(true);
     });
 }
 

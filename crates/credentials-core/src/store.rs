@@ -4747,8 +4747,7 @@ impl EncryptedStore {
                     )?;
                 }
                 Ok(n)
-            })
-            .map_err(StoreOpError::from)?;
+            })?;
         Ok(changed > 0)
     }
 
@@ -4797,8 +4796,7 @@ impl EncryptedStore {
                     )?;
                 }
                 Ok(n)
-            })
-            .map_err(StoreOpError::from)?;
+            })?;
         Ok(changed > 0)
     }
 
@@ -5450,7 +5448,6 @@ impl EncryptedStore {
             }
             Ok(())
         })
-        .map_err(StoreOpError::from)
     }
 
     // ---- refresh intent log (crash-safe rotation) -----------------------

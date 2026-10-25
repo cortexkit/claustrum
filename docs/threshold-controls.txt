@@ -62,6 +62,14 @@ MAX_PROVIDER_IDS_PER_CREDENTIAL crates/credentials-core/src/provider_ids.rs the_
 MAX_PLAN_TIER_LEN crates/credentials-core/src/plan_tier.rs plan_tiers_check_syntax_not_a_pricing_vocabulary
 ASSUMED_KEY_FRESHNESS_LIMIT_MS crates/credentials-core/src/refresh_adapters/meta.rs meta_assumed_key_expiry_is_fresh_one_tick_before_24h_and_expired_at_24h
 REPORT_REFRESH_COOLDOWN_MS crates/credentials-core/src/engine.rs report_cooldown_holds_one_ms_before_the_boundary_and_refreshes_at_and_past_it
+# Cache residence has an exclusive cutoff: 299,999 ms is kept; 300,000 and 300,001 ms are not.
+CACHE_RESIDENCE_CAP_MS crates/credentials-module/src/federation/remote_read.rs residence_is_capped_at_300_s_and_by_recheck_in_ms
+MAX_DIAGNOSTIC_CODE_LEN crates/credentials-module/src/federation/remote_read.rs diagnostic_codes_keep_48_bytes_and_replace_one_byte_over
+MAX_FETCH_OUTCOME_LEN crates/credentials-core/src/store_federation.rs fetch_outcomes_accept_64_bytes_and_refuse_one_byte_over_without_writes
+MAX_PAIRING_ID_LEN crates/credentials-core/src/store_federation.rs pairing_ids_accept_128_bytes_and_refuse_one_byte_over_without_writes
+MAX_REPLY_CODE_LEN crates/credentials-module/src/federation/transfer.rs reply_codes_keep_48_bytes_and_replace_one_byte_over
+TRANSFER_PENDING_PER_SENDER_CAP crates/credentials-core/src/federation.rs a_duplicate_is_answered_before_the_queue_full_check
+TRANSFER_PENDING_TOTAL_CAP crates/credentials-core/src/federation.rs the_total_queue_keeps_64_transfers_and_refuses_the_65th_without_eviction
 
 # Explicitly unchecked thresholds. These are known gaps, not coverage claims.
 # New constants still fail unless deliberately recorded in a reviewed change.

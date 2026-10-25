@@ -798,6 +798,37 @@ fn reclassify_force_refuses_to_strip_a_category_a_member_grant_reaches() {
 }
 
 #[test]
+fn pairing_ids_accept_128_bytes_and_refuse_one_byte_over_without_writes() {
+    let (_root, store) = rig("federation-pairing-id-boundary", 237);
+    let selector = MemberGrantSelector::Exact("oauth:anthropic".into());
+    let at_cap = "p".repeat(128);
+    assert!(store
+        .create_member_grant_audited(OTHER, MemberGrantOperation::RemoteRead, &selector, &at_cap)
+        .unwrap());
+    let grants = store.list_member_grants().unwrap();
+    assert_eq!(grants.len(), 1);
+    assert_eq!(grants[0].pairing_id, at_cap);
+    let audit = audit_rows(&store, AuditOp::MemberGrantCreate);
+    assert_eq!(audit.len(), 1);
+
+    let refused = store.create_member_grant_audited(
+        OTHER,
+        MemberGrantOperation::RemoteRead,
+        &selector,
+        &format!("{at_cap}p"),
+    );
+    assert!(
+        matches!(refused, Err(StoreOpError::Encode(_))),
+        "{refused:?}"
+    );
+    assert_eq!(store.list_member_grants().unwrap(), grants);
+    assert_eq!(
+        audit_rows(&store, AuditOp::MemberGrantCreate).len(),
+        audit.len()
+    );
+}
+
+#[test]
 fn member_grants_are_audited_with_the_member_and_the_stored_pairing_id() {
     let (_root, store) = rig("federation-member-grants", 208);
     let exact = MemberGrantSelector::Exact("oauth:anthropic".into());
@@ -1190,6 +1221,44 @@ fn removing_a_credential_deletes_its_remote_issue_seen_rows() {
 // ---------------------------------------------------------------------------------
 // Writes a requester makes after a fetch
 // ---------------------------------------------------------------------------------
+
+#[test]
+fn fetch_outcomes_accept_64_bytes_and_refuse_one_byte_over_without_writes() {
+    use crate::federation::RemoteRecordWrite;
+    let (_root, store) = rig("federation-fetch-outcome-boundary", 238);
+    let record = add_remote(&store, "oauth:anthropic");
+    let (id, inc) = ("oauth:anthropic", record.incarnation.as_str());
+    let at_cap = "a".repeat(64);
+    assert_eq!(
+        store
+            .remote_record_note_fetch_outcome(id, inc, &at_cap)
+            .unwrap(),
+        RemoteRecordWrite::Changed
+    );
+    assert_eq!(
+        store
+            .remote_record_apply_home_state(id, inc, RemoteHomeState::NeedsReauth, &at_cap)
+            .unwrap(),
+        RemoteRecordWrite::Changed
+    );
+    let kept = store.remote_record(id).unwrap().unwrap();
+    assert_eq!(kept.last_fetch_outcome.as_deref(), Some(at_cap.as_str()));
+    assert_eq!(kept.last_home_error.as_deref(), Some(at_cap.as_str()));
+
+    let over_cap = format!("{at_cap}a");
+    let refused = store.remote_record_note_fetch_outcome(id, inc, &over_cap);
+    assert!(
+        matches!(refused, Err(StoreOpError::Encode(_))),
+        "{refused:?}"
+    );
+    let refused =
+        store.remote_record_apply_home_state(id, inc, RemoteHomeState::Corrupt, &over_cap);
+    assert!(
+        matches!(refused, Err(StoreOpError::Encode(_))),
+        "{refused:?}"
+    );
+    assert_eq!(store.remote_record(id).unwrap().unwrap(), kept);
+}
 
 fn success_at(version: u64, recheck_pending: bool) -> crate::federation::RemoteHomeSuccess {
     crate::federation::RemoteHomeSuccess {
@@ -1727,6 +1796,36 @@ fn a_duplicate_is_answered_before_the_queue_full_check() {
             .unwrap(),
         crate::federation::IncomingInsert::Conflict
     );
+}
+
+#[test]
+fn the_total_queue_keeps_64_transfers_and_refuses_the_65th_without_eviction() {
+    let (_root, store) = rig("federation-total-queue-boundary", 239);
+    // One transfer per sender keeps the per-sender cap from masking the total cap.
+    for index in 0..64u8 {
+        let sender = format!("fed-computer:{index:032x}");
+        assert_eq!(
+            store
+                .insert_incoming_transfer(&new_incoming(&sender, &transfer_id(index), index))
+                .unwrap(),
+            crate::federation::IncomingInsert::Inserted,
+            "transfer {} is admitted",
+            index + 1
+        );
+    }
+    let kept = store.list_incoming_transfers().unwrap();
+    assert_eq!(kept.len(), 64);
+    let counts = store.pending_transfer_counts(HOME).unwrap();
+    assert_eq!(counts.total, 64);
+    assert_eq!(counts.from_sender, 0);
+    assert!(counts.full());
+    assert_eq!(
+        store
+            .insert_incoming_transfer(&new_incoming(HOME, &transfer_id(64), 64))
+            .unwrap(),
+        crate::federation::IncomingInsert::QueueFull
+    );
+    assert_eq!(store.list_incoming_transfers().unwrap(), kept);
 }
 
 /// Expiry drops the sealed bytes and keeps the id and hash as expired; a decided row

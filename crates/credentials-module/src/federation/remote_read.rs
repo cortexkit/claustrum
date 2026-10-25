@@ -1465,10 +1465,22 @@ mod tests {
         };
         assert!(entry(None).resident(10_000 + 299_999));
         assert!(!entry(None).resident(10_000 + 300_000));
+        assert!(!entry(None).resident(10_000 + 300_001));
+        assert!(entry(Some(300_000)).resident(10_000 + 299_999));
+        assert!(!entry(Some(300_000)).resident(10_000 + 300_000));
+        assert!(entry(Some(300_001)).resident(10_000 + 299_999));
+        assert!(!entry(Some(300_001)).resident(10_000 + 300_000));
         assert!(entry(Some(40_000)).resident(10_000 + 39_999));
         assert!(!entry(Some(40_000)).resident(10_000 + 40_000));
         assert!(!entry(Some(900_000)).resident(10_000 + 300_000));
         assert!(!entry(Some(0)).resident(10_000));
+    }
+
+    #[test]
+    fn diagnostic_codes_keep_48_bytes_and_replace_one_byte_over() {
+        let at_cap = "a".repeat(48);
+        assert_eq!(diagnostic_code(&at_cap), at_cap);
+        assert_eq!(diagnostic_code(&format!("{at_cap}a")), "unrecognised");
     }
 
     const HOME: &str = "fed-computer:aa11bb22cc33dd44ee55ff6600112233";

@@ -1562,6 +1562,15 @@ impl Transfers {
 mod tests {
     use super::*;
 
+    #[test]
+    fn reply_codes_keep_48_bytes_and_replace_one_byte_over() {
+        let at_cap = "a".repeat(48);
+        let classify =
+            |code: &str| classify_delivery(&json!({"error": {"code": code, "class": "transient"}}));
+        assert_eq!(classify(&at_cap).code(), at_cap);
+        assert_eq!(classify(&format!("{at_cap}a")).code(), "unrecognised");
+    }
+
     /// The kinds a transfer may carry, each without OAuth material.
     const ALLOWED: [CredentialKind; 4] = [
         CredentialKind::ApiKey,

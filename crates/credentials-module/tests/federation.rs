@@ -19,3 +19,6 @@ mod outbound;
 
 #[path = "federation/ingress.rs"]
 mod ingress;
+
+#[path = "federation/remote_read.rs"]
+mod remote_read;

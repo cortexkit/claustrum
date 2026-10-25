@@ -81,6 +81,12 @@ pub const HOME_DEMAND_MARGIN_MS: i64 = EXPIRY_SKEW_MS + 2_500;
 /// be served from here.
 pub const CACHE_RESIDENCE_CAP_MS: u64 = 300_000;
 
+/// How much earlier than its leader's deadline a fetch gives up. The fetch then
+/// records its own outcome and publishes it before any waiter's deadline fires, so a
+/// call that runs out of time still leaves `last_fetch_outcome` saying why, and a read
+/// arriving right after never joins a fetch that is about to fail.
+const FLIGHT_PUBLISH_MARGIN: Duration = Duration::from_millis(50);
+
 /// The outbound client's binding-cache key for callosum. The same key the home side
 /// uses, so both reuse one route to callosum.
 const CALLOSUM_ROUTE_KEY: &str = "callosum";
@@ -775,12 +781,13 @@ impl RemoteReader {
                     });
                     // The fetch runs on its own task so a caller that goes away does
                     // not cancel it for everyone who joined.
+                    let flight_budget = budget.checked_sub(FLIGHT_PUBLISH_MARGIN).unwrap_or(budget);
                     tokio::spawn(Arc::clone(self).run_flight(
                         record.clone(),
                         seq,
                         generation,
                         demand,
-                        budget,
+                        flight_budget,
                         publish,
                     ));
                     done

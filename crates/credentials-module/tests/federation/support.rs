@@ -170,6 +170,23 @@ pub enum Reply {
     /// target of a route (callosum answering `paired_devices_read`, say) refuses a
     /// request it received.
     RouteRefusal(String),
+    /// Compute the reply from the request's params, on a task of its own. This is how
+    /// a test puts a real home vault behind the stand-in: the handler calls the home
+    /// and returns what it answered, so the requester's fetch crosses a real route.
+    Handler(Responder),
+}
+
+/// The future a [`Responder`] returns.
+pub type ResponderFuture = std::pin::Pin<Box<dyn std::future::Future<Output = Reply> + Send>>;
+
+/// A reply computed from a request's params. See [`Reply::Handler`].
+#[derive(Clone)]
+pub struct Responder(pub Arc<dyn Fn(Value) -> ResponderFuture + Send + Sync>);
+
+impl std::fmt::Debug for Responder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Responder(..)")
+    }
 }
 
 /// The stand-in for callosum, for one test.
@@ -586,7 +603,7 @@ async fn serve_one(
             Ledger::Request {
                 target: ledger_target.clone(),
                 method: method.clone(),
-                params,
+                params: params.clone(),
             },
         );
         let reply = {
@@ -662,6 +679,33 @@ async fn serve_one(
                     },
                 );
                 break;
+            }
+            Reply::Handler(responder) => {
+                // The handler may take as long as the home it stands for; answering
+                // from a task of its own keeps every other request on this
+                // connection moving meanwhile.
+                let channel = frame.header.channel;
+                let epoch = frame.header.epoch;
+                let corr = frame.header.corr;
+                let writer = Arc::clone(&writer);
+                tokio::spawn(async move {
+                    let mut reply = (responder.0)(params).await;
+                    if let Reply::Delayed(delay, inner) = reply {
+                        tokio::time::sleep(delay).await;
+                        reply = *inner;
+                    }
+                    let answer = match reply {
+                        Reply::Ok(body) => response_on_channel(channel, epoch, corr, body),
+                        Reply::RouteRefusal(code) => route_error_frame(channel, epoch, corr, &code),
+                        Reply::Permanent(code) | Reply::RetrySafe(code) => {
+                            route_error_frame(channel, epoch, corr, &code)
+                        }
+                        // Stall (or anything else): never answered, so only the
+                        // caller's deadline ends the call.
+                        _ => return,
+                    };
+                    write_frame(&mut *writer.lock().await, &answer).await.ok();
+                });
             }
             Reply::Delayed(delay, inner) => {
                 // Answer on a task of its own, so a slow reply holds up that call and
@@ -997,6 +1041,19 @@ impl HomeStore {
     /// Open (migrating on first use) the store under `data_dir` with a fixed key, so
     /// opening it again is a restart of the same vault.
     pub fn open(data_dir: &Path) -> Self {
+        Self::open_inner(data_dir, None)
+    }
+
+    /// [`Self::open`] with the refresh engine on `clock` instead of the machine's, so a
+    /// test can move the home's report cooldown without moving anything else.
+    pub fn open_with_engine_clock(
+        data_dir: &Path,
+        clock: Arc<dyn Fn() -> i64 + Send + Sync>,
+    ) -> Self {
+        Self::open_inner(data_dir, Some(clock))
+    }
+
+    fn open_inner(data_dir: &Path, clock: Option<Arc<dyn Fn() -> i64 + Send + Sync>>) -> Self {
         let descriptor = cortexkit_store::StorageDescriptor {
             module_id: "claustrum".into(),
             storage_namespace: "federation-home".into(),
@@ -1028,11 +1085,15 @@ impl HomeStore {
                         as Arc<dyn credentials_core::refresh_adapters::RefreshAdapter>
                 })
                 .collect();
-        let engine = Arc::new(credentials_core::engine::RefreshEngine::new(
+        let mut engine = credentials_core::engine::RefreshEngine::new(
             Arc::clone(&store),
             adapters,
             Arc::new(NoHttp),
-        ));
+        );
+        if let Some(clock) = clock {
+            engine = engine.with_clock(clock);
+        }
+        let engine = Arc::new(engine);
         Self {
             store,
             engine,

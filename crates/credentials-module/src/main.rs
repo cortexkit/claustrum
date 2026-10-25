@@ -3142,6 +3142,183 @@ mod tests {
         serde_json::from_slice(&frame.body).unwrap()
     }
 
+    /// Every scoped op that can see a remote id routes it to the remote read after the
+    /// ordinary grant check: a covered caller gets the remote read's answer (here
+    /// `transfer_key_missing`, because this vault has no federation setup), an uncovered one
+    /// gets the same bytes as for an unknown local id, and the key-shaped ops answer
+    /// the uniform `not_found`.
+    #[tokio::test]
+    async fn scoped_ops_route_a_remote_id_to_the_remote_read_after_the_grant_check() {
+        const REMOTE_ID: &str = "oauth:anthropic:remote";
+        let (surface, admin, store) = deposit_cookie_rig(227);
+        store
+            .remote_add_audited(&credentials_core::federation::NewRemoteRecord {
+                credential_id: REMOTE_ID.into(),
+                home_member: "fed-computer:aa11bb22cc33dd44ee55ff6600112233".into(),
+                refresh_adapter: Some("anthropic".into()),
+                detected_plan: None,
+                identity: credentials_core::record::RecordIdentity {
+                    account_id: Some("acct-1".into()),
+                    email: None,
+                    org_name: None,
+                },
+                home_version: 3,
+                categories: vec!["llm-provider".into()],
+            })
+            .unwrap();
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "cerebellum",
+                SelectorKind::Category,
+                "llm-provider",
+                GrantOperation::Read,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .unwrap();
+        let granted = deposit_cookie_principal();
+        let stranger = Some(subc_protocol::Principal::Reserved {
+            module_id: "stranger".into(),
+        });
+        let call = |principal: Option<subc_protocol::Principal>, method: &str, params| {
+            let surface = Arc::clone(&surface);
+            let admin = Arc::clone(&admin);
+            let method = method.to_string();
+            async move {
+                deposit_cookie_body(
+                    &deposit_cookie_frame(&surface, &admin, principal, &method, params).await,
+                )
+            }
+        };
+
+        // get_scoped: the remote read answers a covered caller.
+        let got = call(
+            granted.clone(),
+            OP_GET_SCOPED,
+            json!({ "credential_id": REMOTE_ID }),
+        )
+        .await;
+        assert_eq!(
+            got["result"]["error"],
+            json!({ "code": "transfer_key_missing", "class": "permanent" }),
+            "this vault has no self id or transfer key, so the remote read says so"
+        );
+        let unknown = call(
+            granted.clone(),
+            OP_GET_SCOPED,
+            json!({ "credential_id": "oauth:anthropic:nowhere" }),
+        )
+        .await;
+        let uncovered = call(
+            stranger.clone(),
+            OP_GET_SCOPED,
+            json!({ "credential_id": REMOTE_ID }),
+        )
+        .await;
+        assert_eq!(uncovered, unknown, "an uncovered remote id is the uniform not_found");
+
+        // status: this vault's storage, plus the remote fields.
+        let status = call(
+            granted.clone(),
+            OP_STATUS,
+            json!({ "credential_id": REMOTE_ID }),
+        )
+        .await;
+        assert_eq!(
+            status["result"],
+            json!({
+                "ready": true,
+                "last_error_code": null,
+                "lease_held": true,
+                "credential_id": REMOTE_ID,
+                "record_version": 3,
+                "stale_pending": false,
+                "remote_home": "fed-computer:aa11bb22cc33dd44ee55ff6600112233",
+                "last_fetch_outcome": "transfer_key_missing",
+            })
+        );
+        let unknown_status = call(
+            granted.clone(),
+            OP_STATUS,
+            json!({ "credential_id": "oauth:anthropic:nowhere" }),
+        )
+        .await;
+        let uncovered_status = call(
+            stranger.clone(),
+            OP_STATUS,
+            json!({ "credential_id": REMOTE_ID }),
+        )
+        .await;
+        assert_eq!(uncovered_status, unknown_status);
+
+        // report: refused before forwarding unless 401/403, then forwarded.
+        let report = |status: u16| {
+            json!({ "credential_id": REMOTE_ID, "provider_status": status, "record_version": 3 })
+        };
+        let refused = call(granted.clone(), OP_REPORT_AUTH_FAILURE, report(500)).await;
+        assert_eq!(
+            refused["result"],
+            json!({ "accepted": false, "error": {
+                "code": "report_status_not_credential_death", "class": "permanent" } })
+        );
+        assert_eq!(store.remote_record(REMOTE_ID).unwrap().unwrap().reported_version, None);
+        let forwarded = call(granted.clone(), OP_REPORT_AUTH_FAILURE, report(401)).await;
+        assert_eq!(
+            forwarded["result"]["error"],
+            json!({ "code": "home_unreachable", "class": "transient" })
+        );
+        assert_eq!(
+            store.remote_record(REMOTE_ID).unwrap().unwrap().reported_version,
+            Some(3),
+            "the report is recorded before it is forwarded"
+        );
+        let uncovered_report = call(stranger.clone(), OP_REPORT_AUTH_FAILURE, report(401)).await;
+        assert_eq!(
+            uncovered_report["result"],
+            json!({ "accepted": false, "error": { "code": "not_found", "class": "permanent" } })
+        );
+
+        // list_scoped: the remote id is listed from this vault's storage.
+        let list = call(granted.clone(), OP_LIST_SCOPED, json!({})).await;
+        let rows = list["result"]["credentials"].as_array().unwrap();
+        let row = rows
+            .iter()
+            .find(|row| row["id"] == REMOTE_ID)
+            .expect("the remote id is listed");
+        assert_eq!(row["record_version"], 3);
+        assert_eq!(row["state"], "active");
+        assert_eq!(row["refresh_adapter"], "anthropic");
+        assert_eq!(row["account_id"], "acct-1");
+        let stranger_list = call(stranger.clone(), OP_LIST_SCOPED, json!({})).await;
+        assert!(!stranger_list.to_string().contains(REMOTE_ID));
+
+        // The key-shaped ops answer the uniform not_found for a remote id, even for a
+        // caller whose grant covers it.
+        store
+            .create_read_grant_audited(
+                "reserved",
+                "cerebellum",
+                SelectorKind::Exact,
+                REMOTE_ID,
+                GrantOperation::Sign,
+                AuditCtx::admin(AuditOp::GrantCreate),
+            )
+            .unwrap();
+        for (method, params) in [
+            (
+                OP_SIGN,
+                json!({ "credential_id": REMOTE_ID, "payload_b64": "aGk=" }),
+            ),
+            (OP_PUBLIC_KEY, json!({ "credential_id": REMOTE_ID })),
+        ] {
+            let answer = call(granted.clone(), method, params).await;
+            assert_eq!(
+                answer["result"]["error"]["code"], "not_found",
+                "{method}: {answer}"
+            );
+        }
+    }
+
     fn deposit_cookie_counts(store: &DepositCookieTestStore) -> (i64, i64, i64, i64) {
         store.with_raw_conn(|conn| conn.query_row("SELECT (SELECT count(*) FROM credentials), (SELECT count(*) FROM credential_categories), (SELECT count(*) FROM audit_log), (SELECT count(*) FROM auth_events WHERE kind='scoped_first_use')", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))).unwrap()
     }

@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::json;
 
-use crate::support::{Held, Reply, TwoVaults};
+use crate::support::{resolved_before_deadline, Held, Reply, TwoVaults};
 use claustrum_module_probe::federation as fed;
 
 fn consumer_get() -> serde_json::Value {
@@ -40,31 +40,31 @@ async fn call(
 async fn a_channel_zero_open_refusal_keeps_its_code_without_spending_the_deadline() {
     let root = crate::support::temp_root("outbound-open-refusal");
     let vaults = TwoVaults::new(&root).await;
-    tokio::time::pause();
-    // TCP runs on the stand-in's thread. Keep virtual time fixed while it answers.
-    let io = tokio::spawn(async {
-        loop {
-            tokio::task::yield_now().await;
-        }
-    });
     for (code, transient) in [("fed_not_exposed", false), ("fed_partition", true)] {
-        vaults.callosum.refuse_open("claustrum", code);
-        let started = tokio::time::Instant::now();
-        let error = call(
-            &vaults.b.outbound,
-            "refused",
-            consumer_get(),
-            fed::CONSUMER_FACING_DEADLINE,
-        )
-        .await
-        .unwrap_err();
+        let held = Held::new();
+        vaults.callosum.hold_open("claustrum", held.clone());
+        let client = vaults.b.outbound.clone();
+        let mut request = tokio::spawn(async move {
+            call(
+                &client,
+                "refused",
+                consumer_get(),
+                fed::CONSUMER_FACING_DEADLINE,
+            )
+            .await
+        });
+        held.arrived_before(&mut request).await;
+        held.release(Reply::Permanent(code.into()));
+        held.answered_before(&mut request).await;
+        vaults.callosum.reply_fence(&vaults.b.outbound).await;
+        tokio::time::pause();
+        let error = resolved_before_deadline(request).await.unwrap_err();
+        tokio::time::resume();
         assert!(
             matches!(&error, fed::OutboundError::Refused { code: actual, .. } if actual == code)
         );
         assert_eq!(error.is_transient(), transient);
-        assert_eq!(started.elapsed(), Duration::ZERO);
     }
-    io.abort();
 }
 
 #[tokio::test]
@@ -80,7 +80,7 @@ async fn a_channel_zero_route_refusal_is_prompt_and_leaves_a_concurrent_route_un
         .callosum
         .answer("claustrum", "refused", Reply::Hold(refused.clone()));
     let client = vaults.b.outbound.clone();
-    let success = tokio::spawn(async move {
+    let mut success = tokio::spawn(async move {
         call(
             &client,
             "good-route",
@@ -89,9 +89,9 @@ async fn a_channel_zero_route_refusal_is_prompt_and_leaves_a_concurrent_route_un
         )
         .await
     });
-    good.arrived().await;
+    good.arrived_before(&mut success).await;
     let client = vaults.b.outbound.clone();
-    let failure = tokio::spawn(async move {
+    let mut failure = tokio::spawn(async move {
         call(
             &client,
             "refused-route",
@@ -100,30 +100,22 @@ async fn a_channel_zero_route_refusal_is_prompt_and_leaves_a_concurrent_route_un
         )
         .await
     });
-    refused.arrived().await;
-    tokio::time::pause();
-    let started = tokio::time::Instant::now();
-    let io = tokio::spawn(async {
-        loop {
-            tokio::task::yield_now().await;
-        }
-    });
+    refused.arrived_before(&mut failure).await;
     refused.release(Reply::Permanent("fed_not_exposed".into()));
-    refused.answered().await;
+    refused.answered_before(&mut failure).await;
     good.release(Reply::Ok(json!({ "untouched": true })));
+    good.answered_before(&mut success).await;
+    vaults.callosum.reply_fence(&vaults.b.outbound).await;
+    tokio::time::pause();
+    let error = resolved_before_deadline(failure).await.unwrap_err();
     assert_eq!(
-        success.await.unwrap().unwrap(),
+        resolved_before_deadline(success).await.unwrap(),
         json!({ "untouched": true })
     );
-    // The successful reply follows the refusal on the same socket. Its completion
-    // proves the reader has already dispatched (or dropped) that refusal.
-    io.abort();
-    let error = failure.await.unwrap().unwrap_err();
     assert!(
         matches!(error, fed::OutboundError::Refused { ref code, .. } if code == "fed_not_exposed"),
         "{error:?}"
     );
-    assert_eq!(started.elapsed(), Duration::ZERO);
 }
 
 #[tokio::test]
@@ -142,7 +134,7 @@ async fn an_uncorrelated_channel_zero_error_leaves_every_pending_call_untouched(
         .callosum
         .stray_error_before("second", "fed_not_exposed");
     let client = vaults.b.outbound.clone();
-    let one = tokio::spawn(async move {
+    let mut one = tokio::spawn(async move {
         call(
             &client,
             "first-route",
@@ -151,9 +143,9 @@ async fn an_uncorrelated_channel_zero_error_leaves_every_pending_call_untouched(
         )
         .await
     });
-    first.arrived().await;
+    first.arrived_before(&mut one).await;
     let client = vaults.b.outbound.clone();
-    let two = tokio::spawn(async move {
+    let mut two = tokio::spawn(async move {
         call(
             &client,
             "second-route",
@@ -162,20 +154,21 @@ async fn an_uncorrelated_channel_zero_error_leaves_every_pending_call_untouched(
         )
         .await
     });
-    second.arrived().await;
-    tokio::time::pause();
-    let started = tokio::time::Instant::now();
-    let io = tokio::spawn(async {
-        loop {
-            tokio::task::yield_now().await;
-        }
-    });
+    second.arrived_before(&mut two).await;
     first.release(Reply::Ok(json!({ "first": true })));
     second.release(Reply::Ok(json!({ "second": true })));
-    assert_eq!(one.await.unwrap().unwrap(), json!({ "first": true }));
-    assert_eq!(two.await.unwrap().unwrap(), json!({ "second": true }));
-    assert_eq!(started.elapsed(), Duration::ZERO);
-    io.abort();
+    first.answered_before(&mut one).await;
+    second.answered_before(&mut two).await;
+    vaults.callosum.reply_fence(&vaults.b.outbound).await;
+    tokio::time::pause();
+    assert_eq!(
+        resolved_before_deadline(one).await.unwrap(),
+        json!({ "first": true })
+    );
+    assert_eq!(
+        resolved_before_deadline(two).await.unwrap(),
+        json!({ "second": true })
+    );
 }
 
 #[tokio::test]

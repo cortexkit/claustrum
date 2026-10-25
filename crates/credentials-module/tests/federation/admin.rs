@@ -30,8 +30,8 @@ use serde_json::{json, Value};
 use subc_protocol::Principal;
 
 use crate::support::{
-    wall_ms, Held, HomeStore, Reply, Responder, TwoVaults, VaultFixture, FAKE_ADAPTERS,
-    TARGET_MODULE,
+    poll_once, resolved_after_advance, wall_ms, Held, HomeStore, Reply, Responder, TwoVaults,
+    VaultFixture, FAKE_ADAPTERS, TARGET_MODULE,
 };
 
 const PAIRED_DEVICES_READ: &str = "callosum.paired_devices_read";
@@ -152,6 +152,11 @@ impl Vault {
     /// MAC over the exact op bytes, then the op.
     async fn run(&self, op: &AdminOpBody) -> AdminOutcome {
         run_on(&self.admin, op).await
+    }
+
+    fn spawn(&self, op: AdminOpBody) -> tokio::task::JoinHandle<AdminOutcome> {
+        let admin = Arc::clone(&self.admin);
+        tokio::spawn(async move { run_on(&admin, &op).await })
     }
 }
 
@@ -378,14 +383,18 @@ async fn member_grant_reads_the_pairing_and_refuses_with_no_row() {
     assert_eq!(unavailable, "callosum_unavailable/transient");
     nothing_written(&a);
 
-    vaults
-        .callosum
-        .answer(TARGET_MODULE, PAIRED_DEVICES_READ, Reply::Stall);
+    let lookup = Held::new();
+    vaults.callosum.answer(
+        TARGET_MODULE,
+        PAIRED_DEVICES_READ,
+        Reply::Hold(lookup.clone()),
+    );
+    let mut call = a.spawn(grant(&member));
+    lookup.arrived_before(&mut call).await;
+    assert!(poll_once(&mut call).await.is_none());
     tokio::time::pause();
-    let started = tokio::time::Instant::now();
-    let stalled = refusal(a.run(&grant(&member)).await);
+    let stalled = refusal(resolved_after_advance(call, Duration::from_millis(801)).await);
     assert_eq!(stalled, "callosum_unavailable/transient");
-    assert!(started.elapsed() < Duration::from_secs(3));
     tokio::time::resume();
     nothing_written(&a);
 
@@ -452,7 +461,7 @@ async fn a_stalled_key_lookup_and_a_stalled_delivery_give_a_definite_reply_insid
 
     let admin = Arc::clone(&b.admin);
     let to = receiver.clone();
-    let send = tokio::spawn(async move {
+    let mut send = tokio::spawn(async move {
         run_on(
             &admin,
             &AdminOpBody::TransferSend {
@@ -463,28 +472,19 @@ async fn a_stalled_key_lookup_and_a_stalled_delivery_give_a_definite_reply_insid
         )
         .await
     });
-    lookup.arrived().await;
+    lookup.arrived_before(&mut send).await;
     tokio::time::pause();
-    let started = tokio::time::Instant::now();
-    // Keep virtual time from auto-advancing while the released lookup crosses TCP.
-    // Only the test advances it until the delivery has arrived.
-    let io = tokio::spawn(async {
-        loop {
-            tokio::task::yield_now().await;
-        }
-    });
     tokio::time::advance(Duration::from_secs(6)).await;
     assert!(!send.is_finished(), "the key lookup is still held");
+    tokio::time::resume();
     lookup.release(Reply::Ok(peer_keys_reply(&receiver, &receiver_key)));
-    delivery.arrived().await;
-    io.abort();
-    let report = ok(send.await.unwrap());
-    let elapsed = started.elapsed();
-    assert!(elapsed < Duration::from_secs(15), "took {elapsed:?}");
+    delivery.arrived_before(&mut send).await;
     assert!(
-        elapsed >= Duration::from_secs(6),
-        "the delayed lookup did run: {elapsed:?}"
+        poll_once(&mut send).await.is_none(),
+        "the delivery is still held"
     );
+    tokio::time::pause();
+    let report = ok(resolved_after_advance(send, Duration::from_millis(4_001)).await);
     assert!(vaults.callosum.saw_method(OP_TRANSFER_DELIVER));
     assert_eq!(report["reply"], "home_unreachable");
     assert_eq!(report["reply_class"], "transient");
@@ -504,44 +504,23 @@ async fn a_key_lookup_that_never_answers_commits_nothing_and_answers_inside_15_s
     let b = Vault::open(&vaults.b, None);
     b.install_transfer_key();
     b.put_api_key();
-    claustrum_module_probe::federation::ingress::callosum_lookup(
-        Some(&vaults.b.outbound),
-        PEER_KEYS_READ,
-        tokio::time::Instant::now() + Duration::from_secs(3),
-    )
-    .await
-    .expect("warm the callosum route before pausing time");
+    let lookup = Held::new();
     vaults
         .callosum
-        .answer(TARGET_MODULE, PEER_KEYS_READ, Reply::Stall);
+        .answer(TARGET_MODULE, PEER_KEYS_READ, Reply::Hold(lookup.clone()));
+    let mut call = b.spawn(AdminOpBody::TransferSend {
+        v: ADMIN_OP_SCHEMA_V2,
+        credential_id: API_ID.into(),
+        to: vaults.home_member().into(),
+    });
+    lookup.arrived_before(&mut call).await;
+    assert!(poll_once(&mut call).await.is_none());
     tokio::time::pause();
-    let started = tokio::time::Instant::now();
-    let refused = refusal(
-        b.run(&AdminOpBody::TransferSend {
-            v: ADMIN_OP_SCHEMA_V2,
-            credential_id: API_ID.into(),
-            to: vaults.home_member().into(),
-        })
-        .await,
-    );
-    assert!(started.elapsed() < Duration::from_secs(15));
+    let refused = refusal(resolved_after_advance(call, Duration::from_millis(10_001)).await);
     assert_eq!(refused, "callosum_unavailable/transient");
     assert!(b.store().list_outgoing_transfers().unwrap().is_empty());
     assert_eq!(audit_count(b.store(), AuditOp::TransferOut), 0);
     assert!(!vaults.callosum.saw_method(OP_TRANSFER_DELIVER));
-}
-
-/// Poll `future` exactly once: `Some` with its output when it completed without
-/// waiting for anything, `None` when it had to wait.
-async fn poll_once<F: std::future::Future>(future: F) -> Option<F::Output> {
-    let mut future = std::pin::pin!(future);
-    std::future::poll_fn(|cx| {
-        std::task::Poll::Ready(match future.as_mut().poll(cx) {
-            std::task::Poll::Ready(output) => Some(output),
-            std::task::Poll::Pending => None,
-        })
-    })
-    .await
 }
 
 /// The record's admin lock is held only around the send's synchronous commit. While

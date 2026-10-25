@@ -24,6 +24,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use claustrum_module_probe::federation::{OutboundClient, RouteCall, CONSUMER_FACING_DEADLINE};
 use credentials_core::test_support::TestTempDir;
 use serde_json::{json, Value};
 use subc_protocol::{Flags, Frame, FrameType, Priority};
@@ -41,6 +42,48 @@ pub const CALLOSUM_SELF_HARNESS: &str = "callosum-self";
 pub const TARGET_MODULE: &str = "claustrum";
 
 const HANDSHAKE_DEADLINE: Duration = Duration::from_secs(3);
+
+/// Poll without waiting, so an unresolved call is evidence rather than a hung test.
+pub async fn poll_once<F: std::future::Future>(future: F) -> Option<F::Output> {
+    let mut future = std::pin::pin!(future);
+    std::future::poll_fn(|cx| {
+        std::task::Poll::Ready(match future.as_mut().poll(cx) {
+            std::task::Poll::Ready(output) => Some(output),
+            std::task::Poll::Pending => None,
+        })
+    })
+    .await
+}
+
+/// The reply fence has already let the reader dispatch the answer. Save the
+/// non-blocking result before spending the budget, then advance explicitly even
+/// when delivery regresses. Never await the possibly broken call after pausing.
+pub async fn resolved_before_deadline<T: std::fmt::Debug>(
+    mut call: tokio::task::JoinHandle<T>,
+) -> T {
+    let before = poll_once(&mut call).await;
+    tokio::time::advance(CONSUMER_FACING_DEADLINE + Duration::from_millis(1)).await;
+    tokio::task::yield_now().await;
+    let after = if before.is_none() {
+        poll_once(&mut call).await
+    } else {
+        None
+    };
+    call.abort();
+    before.unwrap_or_else(|| panic!("call had not resolved before the explicit deadline advance; after advance: {after:?}"))
+        .expect("call panicked")
+}
+
+/// Drive a held call past its budget and inspect it without an unbounded await.
+pub async fn resolved_after_advance<T>(mut call: tokio::task::JoinHandle<T>, by: Duration) -> T {
+    tokio::time::advance(by).await;
+    tokio::task::yield_now().await;
+    let result = poll_once(&mut call).await;
+    call.abort();
+    result
+        .expect("call still pending after the explicit deadline advance")
+        .expect("call panicked")
+}
 
 // ---------------------------------------------------------------------------------
 // Fake clocks
@@ -233,6 +276,24 @@ impl Held {
         let _ = answered.wait_for(|answered| *answered).await;
     }
 
+    /// Setup runs before pausing time: an early failure must not leave the test
+    /// waiting for a request that can no longer arrive.
+    pub async fn arrived_before<T>(&self, call: &mut tokio::task::JoinHandle<T>) {
+        tokio::select! {
+            biased;
+            () = self.arrived() => {}
+            _ = call => panic!("call completed before the held request arrived"),
+        }
+    }
+
+    pub async fn answered_before<T>(&self, call: &mut tokio::task::JoinHandle<T>) {
+        tokio::select! {
+            biased;
+            () = self.answered() => {}
+            _ = call => panic!("call completed before the held reply was written"),
+        }
+    }
+
     fn note_arrival(&self) {
         self.inner.arrived.send_replace(true);
     }
@@ -289,7 +350,7 @@ pub fn refusal_class(code: &str) -> &'static str {
 
 #[derive(Debug, Default)]
 struct StandInState {
-    open_refusals: HashMap<String, String>,
+    held_opens: HashMap<String, Held>,
     stray_errors: HashMap<String, String>,
     /// Replies keyed by `(target module, method)`. A method with no entry is refused
     /// as `fed_unknown_module`, so a test cannot accidentally prove a call was
@@ -313,12 +374,34 @@ impl SharedCallosumStandIn {
             .stray_errors
             .insert(method.into(), code.into());
     }
-    pub fn refuse_open(&self, target: &str, code: &str) {
+    pub fn hold_open(&self, target: &str, held: Held) {
         self.state
             .lock()
             .unwrap()
-            .open_refusals
-            .insert(target.into(), code.into());
+            .held_opens
+            .insert(target.into(), held);
+    }
+
+    /// A successful round trip on the same connection orders the reader after all
+    /// previously written frames. Run this setup with time unpaused, so a broken
+    /// round trip can still end at its own deadline instead of pinning virtual time.
+    pub async fn reply_fence(&self, client: &OutboundClient) {
+        self.answer(TARGET_MODULE, "test.reply_fence", Reply::Ok(Value::Null));
+        client
+            .call(
+                "test-reply-fence",
+                RouteCall {
+                    target: subc_protocol::RouteTarget::ManagementSurface {
+                        module_id: "test-fence".into(),
+                    },
+                    prelude: None,
+                    request: json!({ "method": "test.reply_fence" }),
+                },
+                CONSUMER_FACING_DEADLINE,
+            )
+            .await
+            .expect("the reader must reach the reply fence");
+        tokio::task::yield_now().await;
     }
     /// Start a stand-in answering on loopback with its own connection file under
     /// `root`.
@@ -651,17 +734,15 @@ async fn serve_one(
                         .unwrap_or_else(|poisoned| poisoned.into_inner())
                         .harnesses
                         .push(harness.clone());
-                    let refusal = state.lock().unwrap().open_refusals.get(&target).cloned();
-                    if let Some(code) = refusal {
-                        push(
-                            &ledger,
-                            Ledger::Refused {
-                                target,
-                                code: code.clone(),
-                            },
+                    let held = state.lock().unwrap().held_opens.get(&target).cloned();
+                    if let Some(held) = held {
+                        hold_reply(
+                            held,
+                            frame.header.channel,
+                            frame.header.epoch,
+                            frame.header.corr,
+                            Arc::clone(&writer),
                         );
-                        let reply = error_frame(frame.header.corr, &code, "route.open refused");
-                        let _ = write_frame(&mut *writer.lock().await, &reply).await;
                         continue;
                     }
                     let channel = next_channel.fetch_add(1, Ordering::Relaxed) as u16;
@@ -786,27 +867,13 @@ async fn serve_one(
                 break;
             }
             Reply::Hold(held) => {
-                // Answered from a task of its own once the test releases it, so the
-                // connection keeps serving every other request meanwhile.
-                held.note_arrival();
-                let channel = frame.header.channel;
-                let epoch = frame.header.epoch;
-                let corr = frame.header.corr;
-                let writer = Arc::clone(&writer);
-                tokio::spawn(async move {
-                    let answer = match held.released().await {
-                        Some(Reply::Ok(body)) => response_on_channel(channel, epoch, corr, body),
-                        Some(Reply::RouteRefusal(code)) => {
-                            route_error_frame(channel, epoch, corr, &code)
-                        }
-                        Some(Reply::Permanent(code) | Reply::RetrySafe(code)) => {
-                            error_frame(corr, &code, "held refusal")
-                        }
-                        _ => return,
-                    };
-                    write_frame(&mut *writer.lock().await, &answer).await.ok();
-                    held.inner.answered.send_replace(true);
-                });
+                hold_reply(
+                    held,
+                    frame.header.channel,
+                    frame.header.epoch,
+                    frame.header.corr,
+                    Arc::clone(&writer),
+                );
             }
             Reply::Handler(responder) => {
                 // The handler may take as long as the home it stands for; answering
@@ -823,6 +890,10 @@ async fn serve_one(
                         reply = *inner;
                     }
                     let answer = match reply {
+                        Reply::Hold(held) => {
+                            hold_reply(held, channel, epoch, corr, writer);
+                            return;
+                        }
                         Reply::Ok(body) => response_on_channel(channel, epoch, corr, body),
                         Reply::RouteRefusal(code) => route_error_frame(channel, epoch, corr, &code),
                         Reply::Permanent(code) | Reply::RetrySafe(code) => {
@@ -868,6 +939,30 @@ async fn serve_one(
     }
     // Nothing replies to a held request once the connection is gone.
     stalled.clear();
+}
+
+fn hold_reply(
+    held: Held,
+    channel: u16,
+    epoch: u32,
+    corr: u64,
+    writer: Arc<tokio::sync::Mutex<tokio::io::WriteHalf<tokio::net::TcpStream>>>,
+) {
+    held.note_arrival();
+    tokio::spawn(async move {
+        let answer = match held.released().await {
+            Some(Reply::Ok(body)) => response_on_channel(channel, epoch, corr, body),
+            Some(Reply::RouteRefusal(code)) => route_error_frame(channel, epoch, corr, &code),
+            Some(Reply::Permanent(code) | Reply::RetrySafe(code)) => {
+                error_frame(corr, &code, "held refusal")
+            }
+            _ => return,
+        };
+        write_frame(&mut *writer.lock().await, &answer)
+            .await
+            .expect("write held reply");
+        held.inner.answered.send_replace(true);
+    });
 }
 
 /// A `Response` frame carrying `body` as `{"result": body}`.

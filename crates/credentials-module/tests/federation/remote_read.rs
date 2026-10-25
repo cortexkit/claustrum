@@ -37,7 +37,10 @@ use credentials_core::store::{
 };
 use serde_json::{json, Value};
 
-use crate::support::{wall_ms, HomeStore, Ledger, Reply, Responder, TwoVaults, FAKE_ADAPTERS};
+use crate::support::{
+    poll_once, resolved_after_advance, resolved_before_deadline, wall_ms, Held, HomeStore, Ledger,
+    Reply, Responder, TwoVaults, FAKE_ADAPTERS,
+};
 
 const PAIRING: &str = "pair-1";
 const TOKEN_ID: &str = "oauth:anthropic:work";
@@ -96,10 +99,10 @@ enum Step {
     /// An `Error` frame on the route with this code: a home frame error, or a callosum
     /// refusal class.
     Frame(&'static str),
-    /// A broker refusal on channel zero, correlated to the routed request.
-    ControlFrame(&'static str),
     /// Never answered.
     Stall,
+    /// Signal receipt and let the test decide whether to send a reply.
+    Held(Held),
 }
 
 #[derive(Clone, Debug)]
@@ -215,8 +218,8 @@ fn responder(
                 )),
                 Step::Body(body) => Reply::Ok(body),
                 Step::Frame(code) => Reply::RouteRefusal(code.into()),
-                Step::ControlFrame(code) => Reply::Permanent(code.into()),
                 Step::Stall => Reply::Stall,
+                Step::Held(held) => Reply::Hold(held),
             }
         })
     }))
@@ -1132,17 +1135,19 @@ async fn a_cold_read_with_stalled_discovery_is_a_structured_transient_inside_the
         Reply::Hold(discovery.clone()),
     );
 
+    let mut read = spawn_get(&rig, TOKEN_ID, None);
+    discovery.arrived_before(&mut read).await;
+    assert!(poll_once(&mut read).await.is_none());
     tokio::time::pause();
-    let started = tokio::time::Instant::now();
-    let refusal = rig.refused(TOKEN_ID, None).await;
-    let virtual_elapsed = started.elapsed();
-    discovery.arrived().await;
+    let answer = resolved_after_advance(
+        read,
+        claustrum_module_probe::federation::CONSUMER_FACING_DEADLINE + Duration::from_millis(1),
+    )
+    .await;
+    let RemoteAnswer::Refused(refusal) = answer else {
+        panic!("expected discovery timeout");
+    };
     assert_eq!(code(&refusal), ("home_unreachable", "transient", None));
-    assert!(
-        virtual_elapsed <= claustrum_module_probe::federation::CONSUMER_FACING_DEADLINE,
-        "the answer arrives inside the 2.5 s budget, measured on the paused clock: \
-         {virtual_elapsed:?}"
-    );
     assert_eq!(rig.fetches(), fetches, "no token fetch was sent");
 }
 
@@ -1374,13 +1379,6 @@ async fn channel_zero_refusals_follow_the_consumer_table_without_waiting() {
         TOKEN_ID,
         oauth_record("anthropic", "access-0", "refresh-0", Some(HOUR_MS)),
     );
-    tokio::time::pause();
-    // The stand-in answers over TCP; only an explicit advance may spend the budget.
-    let io = tokio::spawn(async {
-        loop {
-            tokio::task::yield_now().await;
-        }
-    });
     for at_open in [false, true] {
         for (wire, expected) in [
             (
@@ -1389,18 +1387,34 @@ async fn channel_zero_refusals_follow_the_consumer_table_without_waiting() {
             ),
             ("fed_partition", ("home_unreachable", "transient", None)),
         ] {
+            let held = Held::new();
             if at_open {
                 rig.vaults
                     .callosum
-                    .refuse_open(&fed_provider_module(&rig.home_member()), wire);
+                    .hold_open(&fed_provider_module(&rig.home_member()), held.clone());
             } else {
-                rig.then(Step::ControlFrame(wire));
+                rig.vaults.callosum.answer(
+                    crate::support::TARGET_MODULE,
+                    OP_REMOTE_TOKEN,
+                    Reply::Hold(held.clone()),
+                );
             }
             let before = authoritative(&rig.record(TOKEN_ID));
-            let started = tokio::time::Instant::now();
-            let refusal = rig.refused(TOKEN_ID, None).await;
+            let mut read = spawn_get(&rig, TOKEN_ID, None);
+            held.arrived_before(&mut read).await;
+            held.release(Reply::Permanent(wire.into()));
+            held.answered_before(&mut read).await;
+            rig.vaults
+                .callosum
+                .reply_fence(&rig.vaults.b.outbound)
+                .await;
+            tokio::time::pause();
+            let answer = resolved_before_deadline(read).await;
+            tokio::time::resume();
+            let RemoteAnswer::Refused(refusal) = answer else {
+                panic!("expected a mapped refusal");
+            };
             assert_eq!(code(&refusal), expected);
-            assert_eq!(started.elapsed(), Duration::ZERO);
             assert_eq!(authoritative(&rig.record(TOKEN_ID)), before);
             assert_eq!(
                 rig.record(TOKEN_ID).last_fetch_outcome.as_deref(),
@@ -1413,7 +1427,6 @@ async fn channel_zero_refusals_follow_the_consumer_table_without_waiting() {
         2,
         "only the data-plane refusals received token requests"
     );
-    io.abort();
 }
 
 // ---------------------------------------------------------------------------------
@@ -1772,12 +1785,22 @@ async fn report_reply_classes_and_a_non_credential_status_refused_before_forward
         code(&refusal),
         ("federation_setup_invalid", "permanent", None)
     );
-    rig.report_then(Step::Stall);
+    let stalled = Held::new();
+    rig.report_then(Step::Held(stalled.clone()));
+    let record = rig.record(TOKEN_ID);
+    let reader = Arc::clone(&rig.reader);
+    let mut report =
+        tokio::spawn(async move { reader.report(&record, 1, 403, Some("direct"), None).await });
+    stalled.arrived_before(&mut report).await;
+    assert!(poll_once(&mut report).await.is_none());
     tokio::time::pause();
-    let started = tokio::time::Instant::now();
-    let refusal = rig.report(TOKEN_ID, 1, 403).await.unwrap_err();
+    let refusal = resolved_after_advance(
+        report,
+        claustrum_module_probe::federation::CONSUMER_FACING_DEADLINE + Duration::from_millis(1),
+    )
+    .await
+    .unwrap_err();
     assert_eq!(code(&refusal), ("home_unreachable", "transient", None));
-    assert!(started.elapsed() < Duration::from_millis(2_900));
     tokio::time::resume();
 
     // The home answered `not_found` (the grant is gone).

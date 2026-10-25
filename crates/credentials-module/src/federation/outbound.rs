@@ -1,14 +1,14 @@
 //! The vault's outbound client: the one place this daemon is a *consumer* of subc
 //! instead of a provider.
 //!
-//! B's vault calls a home vault (or asks callosum about a peer) on the management
-//! surface. It does that over its own authenticated connection to subc, never over
-//! the inbound connection the supervisor holds open to this module: the inbound frame
-//! loop is read by one task and answered on two egress lanes that deliberately serve
-//! health replies first, so a request initiated there could not wait without either
-//! blocking the health probe or inventing a third lane. Each call therefore runs on a
-//! spawned task that awaits its own connection's reply, matched by correlation id, and
-//! the caller's deadline is the only thing that bounds the wait.
+//! The consuming vault calls the vault that homes a credential (or asks callosum about
+//! a peer) on the management surface. It does that over its own authenticated
+//! connection to subc, never over the inbound connection the supervisor holds open to
+//! this module: the inbound frame loop is read by one task and answered on two egress
+//! lanes that deliberately serve health replies first, so a request initiated there
+//! could not wait without either blocking the health probe or inventing a third lane.
+//! Each call therefore awaits its own connection's reply, and the caller's deadline is
+//! the only thing that bounds the wait.
 //!
 //! Every call carries a deadline, and each one is below the deadline of whoever waits
 //! on it: the Rust consumer client gives up on a `get_scoped` reply after 3 s
@@ -62,11 +62,6 @@ impl OutboundError {
     pub fn is_transient(&self) -> bool {
         true
     }
-
-    /// A stable code for logs and stored fetch outcomes.
-    pub fn code(&self) -> &'static str {
-        "home_unreachable"
-    }
 }
 
 /// One request to make on a route.
@@ -103,10 +98,10 @@ struct Inner {
     connection_file: std::path::PathBuf,
     consumer_identity: Option<ConsumerIdentity>,
     /// Serializes work on the shared connection: the handshake, `route.open`,
-    /// prelude calls, and the reply waits. Holding it for the whole op on the daemon
-    /// is correct but head-of-line-blocks; callers that must not wait on each other
-    /// (the admin path and the inbound read path) do, and each still holds it for
-    /// only its own deadline.
+    /// prelude calls, and the reply waits. One connection carries one reply stream,
+    /// so two exchanges must not interleave on it. A caller that cannot take the lock
+    /// before its own deadline fails as a missed deadline instead of waiting, which is
+    /// what keeps a slow admin op from becoming an open-ended wait for a consumer read.
     connection: AsyncMutex<Option<TcpStream>>,
     bindings: Mutex<HashMap<String, Binding>>,
     next_corr: std::sync::atomic::AtomicU64,

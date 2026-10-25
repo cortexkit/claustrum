@@ -1,8 +1,10 @@
 //! Federation: the vault as a member of a set of machines, each with its own vault.
 //!
-//! The campaign's other files land in their own slices; this module holds what the
-//! outbound client needs and re-exports them from here, so every entry point names
-//! `federation::*` and the module keeps one layout whatever order the slices merge in.
+//! The federation work is split by surface: the outbound client calls a peer vault,
+//! the ingress side answers a peer's call, the remote read serves this vault's
+//! consumers from a home vault, and transfers move static keys. Only the outbound
+//! client exists so far; the rest are added here as they are built, so every entry
+//! point is reached as `federation::*`.
 
 pub mod outbound;
 

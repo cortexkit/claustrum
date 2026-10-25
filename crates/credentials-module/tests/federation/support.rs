@@ -31,9 +31,9 @@ use subc_transport::{
     authenticate_server, connection_file, read_frame, write_frame, ConnectionInfo, Endpoint,
 };
 
-/// The one harness callosum builds for its own calls, quoted from the federation spec's
-/// harness mapping. A stand-in that sends anything else is testing a channel release 1
-/// refuses.
+/// The harness callosum stamps on its own calls, the only one a vault treats as
+/// callosum rather than as a forwarded call from another computer. A stand-in that
+/// sends any other harness would be testing a channel the vault refuses.
 pub const CALLOSUM_SELF_HARNESS: &str = "callosum-self";
 
 const HANDSHAKE_DEADLINE: Duration = Duration::from_secs(3);

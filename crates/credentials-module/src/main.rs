@@ -8835,6 +8835,10 @@ mod tests {
 
         let (admin, _admin_store, _admin_root) = tmp_admin(7);
         let routes = Arc::new(RouteEpochs::default());
+        // The probe judges refresher liveness on the real clock. Setup above can take
+        // longer than the stale limit on a loaded runner, which would report Failing
+        // for a reason this test is not about.
+        surface.pin_fresh_refresher_for_test();
         handle_control_request(frame, &tx, &surface, &admin, &routes)
             .await
             .unwrap();
@@ -8962,7 +8966,9 @@ mod tests {
     #[tokio::test]
     async fn a_stalled_refresher_fails_the_probe_closed() {
         let (surface, _surface_root) = tmp_surface(13);
-        // Fresh snapshot: healthy store, refresher just ran → not Failing.
+        // Fresh snapshot: healthy store, refresher just ran → not Failing. Pinned so a
+        // slow setup cannot trip the gate before the test backdates it on purpose.
+        surface.pin_fresh_refresher_for_test();
         let fresh = surface.health_snapshot();
         assert_ne!(
             fresh.status,

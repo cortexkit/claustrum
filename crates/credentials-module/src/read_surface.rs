@@ -3207,6 +3207,16 @@ impl ReadSurface {
             Instant::now() - HEALTH_STALE_LIMIT * 2;
     }
 
+    /// Test seam: stamp the last refresh in the future so the probe reads it as just
+    /// completed however long the test's own setup took. `Instant::elapsed` saturates
+    /// at zero, so the liveness gate cannot trip. Without this, a test asserting a
+    /// non-`Failing` status is a race against the stale limit on a loaded CI runner.
+    #[cfg(test)]
+    pub(crate) fn pin_fresh_refresher_for_test(&self) {
+        *self.last_refresh.lock().unwrap_or_else(|p| p.into_inner()) =
+            Instant::now() + Duration::from_secs(24 * 60 * 60);
+    }
+
     /// Recompute the domain health from the store and store it as the new cached
     /// snapshot. Called OFF the probe path — at boot and on the background cadence —
     /// so the live store reads here never block a health.check reply. Stamps the

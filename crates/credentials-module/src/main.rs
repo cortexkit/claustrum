@@ -3215,7 +3215,10 @@ mod tests {
             json!({ "credential_id": REMOTE_ID }),
         )
         .await;
-        assert_eq!(uncovered, unknown, "an uncovered remote id is the uniform not_found");
+        assert_eq!(
+            uncovered, unknown,
+            "an uncovered remote id is the uniform not_found"
+        );
 
         // status: this vault's storage, plus the remote fields.
         let status = call(
@@ -3252,23 +3255,32 @@ mod tests {
         assert_eq!(uncovered_status, unknown_status);
 
         // report: refused before forwarding unless 401/403, then forwarded.
-        let report = |status: u16| {
-            json!({ "credential_id": REMOTE_ID, "provider_status": status, "record_version": 3 })
-        };
+        let report = |status: u16| json!({ "credential_id": REMOTE_ID, "provider_status": status, "record_version": 3 });
         let refused = call(granted.clone(), OP_REPORT_AUTH_FAILURE, report(500)).await;
         assert_eq!(
             refused["result"],
             json!({ "accepted": false, "error": {
                 "code": "report_status_not_credential_death", "class": "permanent" } })
         );
-        assert_eq!(store.remote_record(REMOTE_ID).unwrap().unwrap().reported_version, None);
+        assert_eq!(
+            store
+                .remote_record(REMOTE_ID)
+                .unwrap()
+                .unwrap()
+                .reported_version,
+            None
+        );
         let forwarded = call(granted.clone(), OP_REPORT_AUTH_FAILURE, report(401)).await;
         assert_eq!(
             forwarded["result"]["error"],
             json!({ "code": "home_unreachable", "class": "transient" })
         );
         assert_eq!(
-            store.remote_record(REMOTE_ID).unwrap().unwrap().reported_version,
+            store
+                .remote_record(REMOTE_ID)
+                .unwrap()
+                .unwrap()
+                .reported_version,
             Some(3),
             "the report is recorded before it is forwarded"
         );

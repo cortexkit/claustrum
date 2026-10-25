@@ -1074,27 +1074,45 @@ async fn a_cached_token_is_served_through_a_partition() {
     assert_eq!(rig.served(TOKEN_ID, None).await.payload, b"access-0");
 }
 
+/// A cold read whose discovery (the home's announced-key lookup) never answers ends as a
+/// structured `transient` refusal inside the 2.5 s consumer-facing budget, below the
+/// consumer client's 3 s reply wait. The budget is checked on tokio's paused clock: the
+/// read runs in virtual time, so the build machine's load cannot move the result.
 #[tokio::test]
 async fn a_cold_read_with_stalled_discovery_is_a_structured_transient_inside_the_budget() {
     let rig = Rig::new("remote-stalled-discovery").await;
+    // A second login, read once on the real clock, so the connection and the route to
+    // callosum are already open: the cold read below starts at discovery.
+    const WARM_ID: &str = "oauth:anthropic:warm";
+    rig.login(
+        WARM_ID,
+        oauth_record("anthropic", "access-warm", "refresh-warm", Some(HOUR_MS)),
+    );
     rig.login(
         TOKEN_ID,
         oauth_record("anthropic", "access-0", "refresh-0", Some(HOUR_MS)),
     );
+    rig.served(WARM_ID, None).await;
+    let fetches = rig.fetches();
+    let discovery = crate::support::Held::new();
     rig.vaults.callosum.answer(
         crate::support::TARGET_MODULE,
         "callosum.peer_keys_read",
-        Reply::Stall,
+        Reply::Hold(discovery.clone()),
     );
-    let started = Instant::now();
+
+    tokio::time::pause();
+    let started = tokio::time::Instant::now();
     let refusal = rig.refused(TOKEN_ID, None).await;
-    let elapsed = started.elapsed();
+    let virtual_elapsed = started.elapsed();
+    discovery.arrived().await;
     assert_eq!(code(&refusal), ("home_unreachable", "transient", None));
     assert!(
-        elapsed < Duration::from_millis(2_900),
-        "the answer arrives inside the 2.5 s budget, below the consumer's 3 s: {elapsed:?}"
+        virtual_elapsed <= claustrum_module_probe::federation::CONSUMER_FACING_DEADLINE,
+        "the answer arrives inside the 2.5 s budget, measured on the paused clock: \
+         {virtual_elapsed:?}"
     );
-    assert_eq!(rig.fetches(), 0);
+    assert_eq!(rig.fetches(), fetches, "no token fetch was sent");
 }
 
 #[tokio::test]

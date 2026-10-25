@@ -174,6 +174,69 @@ pub enum Reply {
     /// a test puts a real home vault behind the stand-in: the handler calls the home
     /// and returns what it answered, so the requester's fetch crosses a real route.
     Handler(Responder),
+    /// Accept the request, signal [`Held::arrived`], and answer only when the test
+    /// calls [`Held::release`]. This is how a test orders its steps against an
+    /// outstanding call without sleeping: it knows the call is in flight, and it
+    /// decides when it ends.
+    Hold(Held),
+}
+
+/// A request the stand-in holds until the test releases it. See [`Reply::Hold`].
+#[derive(Clone)]
+pub struct Held {
+    inner: Arc<HeldInner>,
+}
+
+struct HeldInner {
+    arrived: tokio::sync::watch::Sender<bool>,
+    release: tokio::sync::watch::Sender<Option<Reply>>,
+}
+
+impl std::fmt::Debug for Held {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Held(..)")
+    }
+}
+
+impl Default for Held {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Held {
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(HeldInner {
+                arrived: tokio::sync::watch::channel(false).0,
+                release: tokio::sync::watch::channel(None).0,
+            }),
+        }
+    }
+
+    /// Wait until the stand-in has received the held request.
+    pub async fn arrived(&self) {
+        let mut arrived = self.inner.arrived.subscribe();
+        let _ = arrived.wait_for(|arrived| *arrived).await;
+    }
+
+    /// Answer the held request with `reply` (an `Ok` body or a refusal).
+    pub fn release(&self, reply: Reply) {
+        self.inner.release.send_replace(Some(reply));
+    }
+
+    fn note_arrival(&self) {
+        self.inner.arrived.send_replace(true);
+    }
+
+    async fn released(&self) -> Option<Reply> {
+        let mut release = self.inner.release.subscribe();
+        release
+            .wait_for(Option::is_some)
+            .await
+            .ok()
+            .and_then(|reply| reply.clone())
+    }
 }
 
 /// The future a [`Responder`] returns.
@@ -679,6 +742,27 @@ async fn serve_one(
                     },
                 );
                 break;
+            }
+            Reply::Hold(held) => {
+                // Answered from a task of its own once the test releases it, so the
+                // connection keeps serving every other request meanwhile.
+                held.note_arrival();
+                let channel = frame.header.channel;
+                let epoch = frame.header.epoch;
+                let corr = frame.header.corr;
+                let writer = Arc::clone(&writer);
+                tokio::spawn(async move {
+                    let answer = match held.released().await {
+                        Some(Reply::Ok(body)) => response_on_channel(channel, epoch, corr, body),
+                        Some(
+                            Reply::RouteRefusal(code)
+                            | Reply::Permanent(code)
+                            | Reply::RetrySafe(code),
+                        ) => route_error_frame(channel, epoch, corr, &code),
+                        _ => return,
+                    };
+                    write_frame(&mut *writer.lock().await, &answer).await.ok();
+                });
             }
             Reply::Handler(responder) => {
                 // The handler may take as long as the home it stands for; answering

@@ -84,6 +84,9 @@ rustix = { version = "1.1.4", features = ["process"] }
 subc-os = { workspace = true, features = ["test-support"] }
 cortexkit-test-support = { workspace = true }
 credentials-core = { path = "../credentials-core", features = ["test-support"] }
+# `test-util` gives the federation tests a paused clock, so a deadline is checked in
+# virtual time rather than against the build machine's load.
+tokio = { workspace = true, features = ["test-util"] }
 # Unix PTY smoke coverage drives dialoguer's real terminal adapter under the gate.
 libc = "0.2"
 # Read the audit_log directly (after stopping the daemon to release the lease) so

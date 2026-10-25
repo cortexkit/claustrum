@@ -30,7 +30,8 @@ use serde_json::{json, Value};
 use subc_protocol::Principal;
 
 use crate::support::{
-    wall_ms, HomeStore, Reply, Responder, TwoVaults, VaultFixture, FAKE_ADAPTERS, TARGET_MODULE,
+    wall_ms, Held, HomeStore, Reply, Responder, TwoVaults, VaultFixture, FAKE_ADAPTERS,
+    TARGET_MODULE,
 };
 
 const PAIRED_DEVICES_READ: &str = "callosum.paired_devices_read";
@@ -500,37 +501,53 @@ async fn a_key_lookup_that_never_answers_commits_nothing_and_answers_inside_15_s
     assert!(!vaults.callosum.saw_method(OP_TRANSFER_DELIVER));
 }
 
-/// The record's admin lock is held only around the send's synchronous commit: while
-/// the key lookup and then the delivery are outstanding, another admin write to the
-/// same credential (which takes that lock) finishes at once.
+/// Poll `future` exactly once: `Some` with its output when it completed without
+/// waiting for anything, `None` when it had to wait.
+async fn poll_once<F: std::future::Future>(future: F) -> Option<F::Output> {
+    let mut future = std::pin::pin!(future);
+    std::future::poll_fn(|cx| {
+        std::task::Poll::Ready(match future.as_mut().poll(cx) {
+            std::task::Poll::Ready(output) => Some(output),
+            std::task::Poll::Pending => None,
+        })
+    })
+    .await
+}
+
+/// The record's admin lock is held only around the send's synchronous commit. While
+/// the stand-in holds the key lookup, and again (after the commit) while it holds the
+/// delivery, another admin write to the same credential takes that lock and finishes
+/// on its first poll, without waiting, and the send is still outstanding.
 #[tokio::test]
 async fn the_admin_lock_is_not_held_across_an_outbound_await() {
     let root = crate::support::temp_root("admin-lock");
     let vaults = TwoVaults::new(&root).await;
-    let b = Vault::open(&vaults.b, Some(Duration::from_secs(4)));
+    // A 10-minute budget, far longer than this test needs to release each held call, so
+    // the test decides when each call ends, not the budget.
+    let b = Vault::open(&vaults.b, Some(Duration::from_secs(600)));
     b.install_transfer_key();
     b.put_api_key();
     let receiver = vaults.home_member().to_string();
-    vaults.callosum.answer(
-        TARGET_MODULE,
-        PEER_KEYS_READ,
-        Reply::Delayed(
-            Duration::from_millis(1_500),
-            Box::new(Reply::Ok(peer_keys_reply(&receiver, &hex(&[7u8; 32])))),
-        ),
-    );
+    let lookup = Held::new();
+    let delivery = Held::new();
     vaults
         .callosum
-        .answer(TARGET_MODULE, OP_TRANSFER_DELIVER, Reply::Stall);
+        .answer(TARGET_MODULE, PEER_KEYS_READ, Reply::Hold(lookup.clone()));
+    vaults.callosum.answer(
+        TARGET_MODULE,
+        OP_TRANSFER_DELIVER,
+        Reply::Hold(delivery.clone()),
+    );
 
     let admin = Arc::clone(&b.admin);
+    let to = receiver.clone();
     let send = tokio::spawn(async move {
         run_on(
             &admin,
             &AdminOpBody::TransferSend {
                 v: ADMIN_OP_SCHEMA_V2,
                 credential_id: API_ID.into(),
-                to: receiver,
+                to,
             },
         )
         .await
@@ -542,23 +559,37 @@ async fn the_admin_lock_is_not_held_across_an_outbound_await() {
         categories: vec![category.into()],
     };
 
-    // During the key lookup.
-    tokio::time::sleep(Duration::from_millis(400)).await;
-    let started = Instant::now();
-    ok(b.run(&set_category(CATEGORY)).await);
-    assert!(started.elapsed() < Duration::from_millis(500));
-    assert!(!send.is_finished(), "the lookup is still outstanding");
+    // The send is waiting on its key lookup.
+    lookup.arrived().await;
+    let during_lookup = poll_once(run_on(&b.admin, &set_category(CATEGORY))).await;
+    assert!(
+        during_lookup.is_some(),
+        "an admin write to the record waited while the send's key lookup was outstanding"
+    );
+    ok(during_lookup.unwrap());
+    assert!(!send.is_finished(), "the send waits for its key lookup");
+    assert!(b.store().list_outgoing_transfers().unwrap().is_empty());
 
-    // During the delivery, after the commit.
-    tokio::time::sleep(Duration::from_millis(1_600)).await;
+    // Release the lookup: the send commits, then waits on its delivery.
+    lookup.release(Reply::Ok(peer_keys_reply(&receiver, &hex(&[7u8; 32]))));
+    delivery.arrived().await;
     assert_eq!(b.store().list_outgoing_transfers().unwrap().len(), 1);
-    let started = Instant::now();
-    ok(b.run(&set_category("search")).await);
-    assert!(started.elapsed() < Duration::from_millis(500));
-    assert!(!send.is_finished(), "the delivery is still outstanding");
+    let during_delivery = poll_once(run_on(&b.admin, &set_category("search"))).await;
+    assert!(
+        during_delivery.is_some(),
+        "an admin write to the record waited while the send's delivery was outstanding"
+    );
+    ok(during_delivery.unwrap());
+    assert!(!send.is_finished(), "the send waits for its delivery");
 
+    delivery.release(Reply::Ok(json!({ "state": "pending" })));
     let report = ok(send.await.unwrap());
+    assert_eq!(report["reply"], "pending");
     assert_eq!(report["row_kept"], true);
+    let categories = b.store().categories(API_ID).unwrap();
+    assert!(
+        categories.contains(&CATEGORY.to_string()) && categories.contains(&"search".to_string())
+    );
 }
 
 /// A send from A and the accept on B, both through the admin hook: the record exists

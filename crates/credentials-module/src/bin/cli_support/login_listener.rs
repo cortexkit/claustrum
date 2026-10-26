@@ -13,10 +13,8 @@
 //!   host:port the registered redirect already uses, so the provider's exact-match
 //!   still holds. We do not invent a new redirect.
 //! - One-shot: it accepts exactly one request, then closes. Bound to loopback only.
-//! - Paste-back stays the fallback: if the bind fails (port busy, headless, a
-//!   non-loopback redirect) or no request arrives before the timeout, the caller
-//!   falls back to reading the pasted callback from stdin. So this is a convenience
-//!   over the paste path, never a new requirement.
+//! - Paste-back remains available while listening. A browser on another device
+//!   cannot reach this socket, so the listener is a convenience, not a requirement.
 //! - State is validated by the SAME downstream code that validates a pasted
 //!   callback (the exchange checks `state` before any network call); this listener
 //!   only transports the callback, it does not authorize anything.
@@ -25,12 +23,7 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::time::Duration;
 
-/// How long to wait for the browser redirect before giving up and falling back to
-/// paste. Generous: the operator may need to sign in and approve.
-///
-/// Public because the wait is also something the OPERATOR is told about: the banner
-/// printed while this runs names the seconds, and it reads them from here so the
-/// promise and the timeout cannot drift apart.
+/// How long to keep the browser callback socket open. Pasting need not wait for it.
 pub const LISTEN_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// The loopback bind address for a provider's redirect URI, if the redirect is a
@@ -119,6 +112,13 @@ pub struct CallbackListener {
 }
 
 impl CallbackListener {
+    /// Convert the code listener for cancellation-safe concurrent callback input.
+    /// Dropping the async listener closes the socket without waiting for a browser.
+    pub fn into_async(self) -> std::io::Result<tokio::net::TcpListener> {
+        self.listener.set_nonblocking(true)?;
+        tokio::net::TcpListener::from_std(self.listener)
+    }
+
     /// Return the actual bound address, including an ephemeral port when requested.
     pub fn local_addr(&self) -> std::io::Result<std::net::SocketAddr> {
         self.listener.local_addr()
@@ -140,6 +140,43 @@ impl CallbackListener {
             CaptureMode::Fragment => wait_for_fragment(&self.listener),
         }
     }
+}
+
+/// Receive one code callback without blocking pasted input, even if an HTTP client
+/// connects and sends only part of a request. The caller validates code and state.
+pub async fn receive_code(listener: &tokio::net::TcpListener) -> Option<String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let (mut stream, _) = listener.accept().await.ok()?;
+    let query = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut request = Vec::new();
+        let mut chunk = [0; 1024];
+        loop {
+            let n = stream.read(&mut chunk).await.ok()?;
+            if n == 0 {
+                return None;
+            }
+            request.extend_from_slice(&chunk[..n]);
+            if request.len() > 16 * 1024 {
+                return None;
+            }
+            if request.windows(4).any(|w| w == b"\r\n\r\n") {
+                let text = std::str::from_utf8(&request).ok()?;
+                let mut parts = text.lines().next()?.split_whitespace();
+                return callback_query(parts.next()?, parts.next()?);
+            }
+        }
+    })
+    .await
+    .ok()
+    .flatten();
+    let response = browser_response(query.is_some());
+    let _ = tokio::time::timeout(
+        Duration::from_secs(1),
+        stream.write_all(response.as_bytes()),
+    )
+    .await;
+    query
 }
 
 /// Fragment mode needs two browser connections: the first GET receives a page that
@@ -275,6 +312,10 @@ fn accept_with_timeout(listener: &TcpListener, timeout: Duration) -> Option<TcpS
 /// may end in the middle of the request line.
 fn read_callback_query(stream: &mut TcpStream) -> Option<String> {
     let (method, target, _) = read_http_request(stream)?;
+    callback_query(&method, &target)
+}
+
+fn callback_query(method: &str, target: &str) -> Option<String> {
     if method != "GET" {
         return None;
     }
@@ -292,6 +333,11 @@ fn read_callback_query(stream: &mut TcpStream) -> Option<String> {
 /// result instead of a raw connection or a hanging request. Styled (dark, centered
 /// card) because this page is the visible end of every login; no external loads.
 fn write_browser_response(stream: &mut TcpStream, ok: bool) {
+    let _ = stream.write_all(browser_response(ok).as_bytes());
+    let _ = stream.flush();
+}
+
+fn browser_response(ok: bool) -> String {
     let (title, detail, mark) = if ok {
         (
             "Authentication successful",
@@ -316,14 +362,12 @@ fn write_browser_response(stream: &mut TcpStream, ok: bool) {
          <div class=\"card\"><div class=\"mark\">{mark}</div><h1>{title}</h1><p>{detail}</p></div>\
          </body></html>"
     );
-    let response = format!(
+    format!(
         "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\
          Content-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n{}",
         body.len(),
         body
-    );
-    let _ = stream.write_all(response.as_bytes());
-    let _ = stream.flush();
+    )
 }
 
 #[cfg(test)]

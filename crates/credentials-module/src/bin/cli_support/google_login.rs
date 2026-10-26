@@ -7,7 +7,7 @@ use credentials_core::google_login::{
     self as google, GoogleLoginProvider, AUTHORIZE_URL, TOKEN_URL,
 };
 use credentials_core::oauth_login::{
-    build_authorize_url_google, exchange_authorization_code_google, generate_state, parse_callback,
+    build_authorize_url_google, exchange_authorization_code_google, generate_state,
 };
 use credentials_core::record::{RecordIdentity, VaultRecord};
 
@@ -95,6 +95,7 @@ pub fn cmd_login(
         )));
     }
 
+    let approve_on = super::browser_login::approve_on(args)?;
     let replace = has_flag(args, "--replace") || replace_override;
     let preflighted_key = preflight_login(
         global,
@@ -106,20 +107,30 @@ pub fn cmd_login(
     )?;
 
     let state = generate_state().map_err(|error| CliError::Io(format!("csprng: {error}")))?;
+    let (authorize_endpoint, token_endpoint, redirect_uri) =
+        (AUTHORIZE_URL, TOKEN_URL, wire.redirect_uri());
+    #[cfg(all(debug_assertions, feature = "test-support"))]
+    let (authorize_endpoint, token_endpoint, redirect_uri) = (
+        super::browser_login::test_endpoint("authorize_url", authorize_endpoint),
+        super::browser_login::test_endpoint("token_url", token_endpoint),
+        super::browser_login::test_endpoint("redirect_uri", redirect_uri),
+    );
     let authorize_url = build_authorize_url_google(
-        AUTHORIZE_URL,
+        authorize_endpoint,
         &client_id,
-        wire.redirect_uri(),
+        redirect_uri,
         wire.scopes(),
         &state,
         google::AUTHORIZE_EXTRA_PARAMS,
     )
     .map_err(|error| CliError::Io(format!("building authorize url: {error}")))?;
 
-    let listener = if super::paste_only(args) {
+    let listener = if approve_on == super::browser_login::ApproveOn::Other
+        || has_flag(args, "--no-listener")
+    {
         None
     } else {
-        super::login_listener::loopback_bind_addr(wire.redirect_uri())
+        super::login_listener::loopback_bind_addr(redirect_uri)
             .and_then(|address| super::login_listener::capture_callback(&address))
     };
 
@@ -127,50 +138,22 @@ pub fn cmd_login(
     println!();
     println!("  {authorize_url}");
     println!();
-    let _ = super::open_in_browser(args, &authorize_url);
-
-    let captured = match listener {
-        Some(listener) => {
-            println!("Approve in a browser on this machine — if it can reach this listener, the login completes here automatically.");
-            let callback = listener.wait();
-            if callback.is_some() {
-                println!("Browser redirect received — completing the login, nothing to paste.");
-            }
-            callback
-        }
-        None => None,
-    };
-    let raw_callback = match captured {
-        Some(callback) => callback,
-        None => {
-            let port = match wire {
-                GoogleLoginProvider::Gemini => 8085,
-                GoogleLoginProvider::Antigravity => 51121,
-                GoogleLoginProvider::Gmail => 8086,
-            };
-            println!(
-                "The browser may show a connection-refused page at 127.0.0.1:{port}; that is expected.\n\
-                 Copy the FULL URL from the browser's address bar and paste it here, then Enter:"
-            );
-            let mut pasted = String::new();
-            std::io::stdin()
-                .read_line(&mut pasted)
-                .map_err(|error| CliError::Io(format!("reading pasted code: {error}")))?;
-            pasted
-        }
-    };
-    let callback = parse_callback(&raw_callback)
-        .ok_or_else(|| CliError::Usage("could not parse the login callback".to_string()))?;
+    super::browser_login::choose_and_present(args, approve_on, &authorize_url)?;
+    let callback = super::tokio_block_on(super::browser_login::read_callback(
+        listener,
+        "Copy the full callback URL from the browser's address bar and paste it here, then Enter:",
+        &state,
+    ))?;
 
     let http = credentials_core::http::ReqwestTransport::new()
         .map_err(|error| CliError::Io(error.to_string()))?;
     let now_ms = chrono::Utc::now().timestamp_millis();
     let tokens = super::tokio_block_on(exchange_authorization_code_google(
         &http,
-        TOKEN_URL,
+        token_endpoint,
         &client_id,
         client_secret.expose(),
-        wire.redirect_uri(),
+        redirect_uri,
         &callback,
         &state,
         now_ms,

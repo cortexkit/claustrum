@@ -6975,3 +6975,104 @@ fn a_put_secret_releases_to_an_agent_and_operator_revoke_removes_the_grant() {
     assert!(ops.grants.is_empty(), "{ops:?}");
     assert_eq!(ops.state, "active");
 }
+
+/// Store a flow grant for `name` on the operator's own store file.
+///
+/// The phone-approval ceremony lives in the module's contract tests; here the subject is
+/// what `ck auth secret` prints and revokes, so the row is written directly.
+fn add_flow_grant(data_dir: &std::path::Path, grant_id: &str, name: &str, install: &str) {
+    let path = data_dir.join("store.db");
+    let incarnation = credentials_core::store::list_agent_secrets_read_only(&path)
+        .unwrap()
+        .unwrap()
+        .secrets
+        .into_iter()
+        .find(|secret| secret.name == name)
+        .expect("the secret exists before its grant")
+        .incarnation;
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute(
+        "INSERT INTO secret_flow_grants (grant_id,secret_name,incarnation,flow_id,flow_version,flow_code_hash,flow_install_id,methods,granted_at_ms,envelope_sha256) VALUES (?1,?2,?3,'daily-fetch',7,?4,?5,'[\"GET\"]',10,?6)",
+        rusqlite::params![grant_id, name, incarnation, "0".repeat(64), install, "0".repeat(64)],
+    )
+    .unwrap();
+}
+
+#[test]
+fn secret_list_and_grants_name_a_flow_holder_and_revoke_removes_one_grant() {
+    let vault = GrantCliVault::new("secret-flow-holder");
+    vault.bootstrap();
+    let file = material_file(&vault.root, 0o600, MATERIAL_CANARY);
+    let put = vault.run(&[
+        "secret",
+        "put",
+        "ops-key",
+        "--kind",
+        "api-key",
+        "--host",
+        "x.test",
+        "--material-file",
+        file.to_str().unwrap(),
+    ]);
+    assert!(
+        put.status.success(),
+        "{}",
+        String::from_utf8_lossy(&put.stderr)
+    );
+    add_flow_grant(&vault.data_dir, "flow-grant-a", "ops-key", "install-A");
+    add_flow_grant(&vault.data_dir, "flow-grant-b", "ops-key", "install-B");
+    let holder = "flow:daily-fetch@7/install-A";
+
+    let list = vault.run(&["secret", "list"]);
+    assert!(
+        list.status.success(),
+        "{}",
+        String::from_utf8_lossy(&list.stderr)
+    );
+    let text = String::from_utf8_lossy(&list.stdout).to_string();
+    let line = text
+        .lines()
+        .find(|line| line.contains("grant flow-grant-a"))
+        .unwrap_or_else(|| panic!("flow grant row missing from:\n{text}"));
+    assert_eq!(
+        line.split_whitespace().collect::<Vec<_>>(),
+        ["grant", "flow-grant-a", holder, "version", "methods=GET"],
+        "{text}"
+    );
+    // A site login has no methods, so its row stops at the duration.
+    assert!(text.contains("grant flow-grant-b flow:daily-fetch@7/install-B version methods=GET"));
+
+    let grants = vault.run(&["secret", "grants"]);
+    assert!(grants.status.success());
+    let grants = String::from_utf8_lossy(&grants.stdout).to_string();
+    assert!(
+        grants.contains(&format!("flow-grant-a secret|ops-key {holder} version")),
+        "{grants}"
+    );
+    // A flow grant never expires, and the line still names every field an agent grant
+    // does, so an operator reading either row reads the same columns.
+    assert!(grants.contains("expiry=none"), "{grants}");
+
+    // Revoking one grant by id, the operator's single-grant path, leaves the other.
+    let revoke = vault.run(&["secret", "revoke", "--grant-id", "flow-grant-a"]);
+    assert!(
+        revoke.status.success(),
+        "{}",
+        String::from_utf8_lossy(&revoke.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&revoke.stdout).trim(),
+        "revoked grant flow-grant-a"
+    );
+    let listing = agent_secret_listing(&vault.data_dir);
+    let ids: Vec<String> = listing.secrets[0]
+        .flow_grants
+        .iter()
+        .map(|grant| grant.grant_id.clone())
+        .collect();
+    assert_eq!(ids, ["flow-grant-b"]);
+    let list = vault.run(&["secret", "list"]);
+    let text = String::from_utf8_lossy(&list.stdout).to_string();
+    assert!(!text.contains("flow-grant-a"), "{text}");
+    assert!(text.contains("flow:daily-fetch@7/install-B"), "{text}");
+}

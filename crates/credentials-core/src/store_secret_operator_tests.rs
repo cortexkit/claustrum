@@ -593,3 +593,6 @@ fn read_only_listing_says_a_pre_migration_store_has_no_agent_secret_tables() {
 
 #[path = "store_secret_flow_schema_tests.rs"]
 mod flow_schema_tests;
+
+#[path = "store_secret_listing_tests.rs"]
+mod listing_tests;

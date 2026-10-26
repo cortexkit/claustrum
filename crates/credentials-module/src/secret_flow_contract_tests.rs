@@ -586,3 +586,190 @@ async fn secret_flow_install_errors_and_closed_shapes_do_not_create_pending_rows
     request["methods"] = json!(["GET", "POST"]);
     assert_eq!(sf_request(&flow, &request), pending);
 }
+
+/// A second install of the same flow version: its grants differ only in `install_id`.
+fn sf_other_install() -> serde_json::Value {
+    let mut install = sf_install(false);
+    install["flow"]["install_id"] = json!("install-B");
+    install
+}
+
+async fn sf_approve(flow: &SecretFlow, request: &serde_json::Value) {
+    let reply = sf_request(flow, request);
+    assert_eq!(reply["status"], "approval_required", "{reply}");
+    let approved = flow.approve(&reply, "version", false).await;
+    assert_eq!(approved["results"][0]["outcome"], "granted", "{approved}");
+}
+
+#[tokio::test]
+async fn secret_flow_grants_list_with_flow_holders_and_revoke_one_at_a_time() {
+    let seed = 223;
+    let flow = SecretFlow::new(seed).await;
+    flow.deposit_both().await;
+    sf_approve(&flow, &sf_install(false)).await;
+    sf_approve(&flow, &sf_other_install()).await;
+    sf_approve(&flow, &sf_install(true)).await;
+    let key = MasterKey::from_bytes([seed; MASTER_KEY_LEN]);
+    let mac = credentials_core::admin_auth::AdminMacKey::derive(&key);
+    let engine = Arc::new(RefreshEngine::new(
+        Arc::clone(&flow.store),
+        Vec::new(),
+        Arc::new(crate::test_support::NoHttp),
+    ));
+    let db = flow._root.join("store.db");
+    let vault_id = credentials_core::vault_id_for(db.parent().unwrap()).unwrap();
+    let admin =
+        admin_surface::AdminSurface::new(engine, mac, vault_id.clone(), key.key_id());
+
+    // The provider surface: one row per installed version, no expiry, no agent, and the
+    // approved methods only where the secret has methods at all.
+    let listed = admin
+        .serve_permissions("permissions.list", &json!({}), "test")
+        .unwrap();
+    let rows = listed["grants"].as_array().unwrap();
+    assert_eq!(rows.len(), 3, "{listed}");
+    for row in rows {
+        assert_eq!(row["holder"]["kind"], "flow");
+        assert_eq!(row["holder"]["flow_id"], "daily-fetch");
+        assert_eq!(row["holder"]["flow_version"], 7);
+        assert!(row.get("expires_at_ms").is_none(), "{row}");
+        assert!(row.get("agent_id").is_none(), "{row}");
+        if row["scope"] == "api_key" {
+            assert_eq!(row["methods"], json!(["GET"]), "{row}");
+        } else {
+            assert!(row.get("methods").is_none(), "{row}");
+        }
+    }
+    let installs: Vec<&str> = rows
+        .iter()
+        .map(|row| row["holder"]["flow_install_id"].as_str().unwrap())
+        .collect();
+    assert!(installs.contains(&"install-A") && installs.contains(&"install-B"));
+    // An agent-filtered listing never contains a flow grant, and it is the only reason
+    // the two installs are distinguishable here: they share flow id and version.
+    assert_eq!(
+        admin
+            .serve_permissions("permissions.list", &json!({"agent_id":"agent-A"}), "test")
+            .unwrap(),
+        json!({"grants":[]})
+    );
+    let ids: std::collections::BTreeSet<&str> = rows
+        .iter()
+        .map(|row| row["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids.len(), 3, "{listed}");
+
+    // The phone surface: the same grants under the secret, with `flow` and duration
+    // `version` in place of an asking scope and coverage.
+    let phone = flow.phone("secret.list", json!({})).await;
+    let key_secret = phone["secrets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|secret| secret["kind"] == "agent_api_key")
+        .unwrap();
+    let flow_rows = key_secret["flow_grants"].as_array().unwrap();
+    assert_eq!(flow_rows.len(), 2, "{phone}");
+    for row in flow_rows {
+        assert_eq!(row["duration"], "version");
+        assert_eq!(row["flow"]["flow_id"], "daily-fetch");
+        assert_eq!(row["flow"]["version"], 7);
+        assert_eq!(row["methods"], json!(["GET"]), "{row}");
+        assert!(
+            row.get("scope").is_none() && row.get("coverage").is_none(),
+            "{row}"
+        );
+        assert!(row.get("expires_at_ms").is_none(), "{row}");
+        assert!(row.get("agent_id").is_none(), "{row}");
+    }
+    let login_secret = phone["secrets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|secret| secret["kind"] == "site_login")
+        .unwrap();
+    let login_row = &login_secret["flow_grants"][0];
+    assert_eq!(login_row["duration"], "version");
+    assert_eq!(login_row["flow"]["install_id"], "install-A");
+    assert!(login_row.get("methods").is_none(), "{login_row}");
+
+    // Revoking one of two grants that share flow id and version leaves the other install
+    // releasing, and the login's own grant untouched. Both revokes go through the
+    // operator's single-grant delete by id.
+    let listed = admin
+        .serve_permissions("permissions.list", &json!({}), "test")
+        .unwrap();
+    let rows = listed["grants"].as_array().unwrap();
+    let id_of = |install: &str, scope: &str| -> String {
+        rows.iter()
+            .find(|row| row["holder"]["flow_install_id"] == install && row["scope"] == scope)
+            .map(|row| row["id"].as_str().unwrap().to_owned())
+            .unwrap_or_else(|| panic!("no {scope} grant for {install}"))
+    };
+    let (api_a, api_b, login_a) = (
+        id_of("install-A", "api_key"),
+        id_of("install-B", "api_key"),
+        id_of("install-A", "site_login"),
+    );
+    // Revoke over a bind whose principal is the operator: only a direct bind may run an
+    // admin op, and the path is the same MAC-authenticated one `ck auth secret revoke`
+    // takes through the daemon.
+    admin.record_bind(7, subc_protocol::Principal::Direct);
+    let revoke = |id: String| {
+        let body = serde_json::to_vec(&json!({"op":"permissions.revoke","v":1,"id":id})).unwrap();
+        let admin_surface::AdminOutcome::Challenge { nonce_hex, .. } = admin.challenge(7) else {
+            panic!("challenge refused");
+        };
+        let nonce: [u8; credentials_core::admin_auth::ADMIN_NONCE_LEN] =
+            sc_unhex(&nonce_hex).try_into().expect("nonce length");
+        let tag = sc_hex(
+            &credentials_core::admin_auth::AdminMacKey::derive(&key).sign(
+                &credentials_core::admin_auth::TranscriptParts {
+                    vault_id: &vault_id,
+                    key_id: key.key_id(),
+                    nonce: &nonce,
+                    op_body: &body,
+                },
+            ),
+        );
+        (body, tag)
+    };
+    let (body, tag) = revoke(api_a);
+    assert!(
+        matches!(
+            admin.execute(7, &body, &tag).await,
+            admin_surface::AdminOutcome::Ok(_)
+        ),
+        "the operator's MAC-authenticated revoke is served"
+    );
+    // Only the other install's grant survives, so a run stamped with it still releases
+    // while one stamped with the revoked install is refused.
+    let mut other_install = sf_run(false);
+    other_install["stamp"]["attributes"]["flow_install_id"] = json!("install-B");
+    assert_eq!(
+        flow.use_secret("basal", &other_install)["status"],
+        "released"
+    );
+    sf_refusal(&flow, &sf_run(false), "flow_no_grant");
+    // The same single-grant delete, this time for the login's grant.
+    let (body, tag) = revoke(login_a);
+    assert!(
+        matches!(
+            admin.execute(7, &body, &tag).await,
+            admin_surface::AdminOutcome::Ok(_)
+        ),
+        "the operator's MAC-authenticated revoke is served"
+    );
+    sf_refusal(&flow, &sf_run(true), "flow_no_grant");
+    // The other install's API-key grant is the only one left, and revoking the login's
+    // never touched it.
+    assert_eq!(
+        flow.use_secret("basal", &other_install)["status"],
+        "released"
+    );
+    let remaining = admin
+        .serve_permissions("permissions.list", &json!({}), "test")
+        .unwrap();
+    assert_eq!(remaining["grants"].as_array().unwrap().len(), 1, "{remaining}");
+    assert_eq!(remaining["grants"][0]["id"], json!(api_b));
+}

@@ -344,7 +344,13 @@ fn run_args(mut args: Vec<String>) -> Result<(), CliError> {
     // word, so `secret_cli::guard_args` is the only check that can judge the invocation:
     // it knows the verb being run and lists the flags that verb takes.
     if command == "secret" {
-        cli_support::secret_cli::guard_args(&args)?;
+        // `guard_args` reads the same `secret <verb> ...` shape the base check does, so the
+        // verb name goes back in front of its operands. It is the ONLY argument check for
+        // this verb: the generic one cannot judge a flag whose value may be any word.
+        let mut secret_args = Vec::with_capacity(args.len() + 1);
+        secret_args.push(command.clone());
+        secret_args.extend(args.iter().cloned());
+        cli_support::secret_cli::guard_args(&secret_args)?;
     }
 
     match command.as_str() {
@@ -426,6 +432,12 @@ fn hoist_leading_global_flags(args: &mut Vec<String>) {
 /// that silent drop means a typo'd invocation runs the real mutation. This makes a
 /// bad flag a hard usage error before any keychain or lease access.
 fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
+    // `ck auth secret` keeps its flags per sub-verb, and a flag's value may be any word, so
+    // the generic scan below cannot judge it. `secret_cli` does, against the table for the
+    // verb actually named, and that is the only argument check that runs for this verb.
+    if command == "secret" {
+        return cli_support::secret_cli::guard_args(args);
+    }
     // The per-command flags that TAKE a value. `--data-dir` / `--key-path` are global
     // and already removed by parse_global before this runs.
     let value_flags: &[&str] = match command {
@@ -528,13 +540,6 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
     } else {
         0
     };
-    // `secret put` and `secret delete` take a positional secret name; a name never
-    // starts with `--`, so the flag scan below can still refuse a stray flag.
-    if matches!(command, "secret put" | "secret delete")
-        && args.first().is_some_and(|arg| !arg.starts_with("--"))
-    {
-        i = 1;
-    }
     while i < args.len() {
         let arg = &args[i];
         // VERBS WITH POSITIONAL SUBCOMMANDS must name them here, or this check eats the
@@ -552,12 +557,10 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
             "remote" => &["add", "remove", "list"],
             "member" => &["grant", "revoke", "list"],
             "federation" => &["self", "mapping"],
-            // Each secret verb is its own entry: one shared subcommand list for the verb
-            // would let `secret list` accept `--host` and `secret put` accept `--grant-id`,
-            // and the per-verb pages advertise narrower shapes than that.
-            // Every secret verb name, so none is eaten here. Its FLAGS are checked by
-            // `secret_cli::guard_args`, which knows which sub-verb is running: this table
-            // is keyed on the command name alone and cannot tell a flag's verb.
+            // Every secret verb name and its one positional action, so none is eaten
+            // here. `secret`'s FLAGS are checked by `secret_cli::guard_args` instead: this
+            // table is keyed on the command name alone and could not say which sub-verb a
+            // flag belongs to.
             "secret" => &[
                 "put",
                 "list",
@@ -569,24 +572,13 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
                 "off",
                 "status",
             ],
-            // Written only so the accept-list reader in the CLI tests can see the flags;
-            // the parser that enforces them is `secret_cli::guard_args`.
-            "secret put" => &[
-                "--kind",
-                "--name",
-                "--host",
-                "--path-prefix",
-                "--location",
-                "--origin",
-                "--material-file",
-            ],
             _ => &[],
         };
         // `transfer accept|reject <transfer-id>` and `federation self <member>` take one
-        // positional value, which the verb itself checks. For `secret` this pass cannot
-        // judge anything: every flag and every value after it looks like a plain word, and
-        // which flags a verb takes is known to `secret_cli` alone. Its per-verb check runs
-        // right after this one and is the only check that decides a secret invocation.
+        // positional value, which the verb itself checks.
+        // `secret` is handed entirely to its own guard below: a name may be positional, a
+        // flag's value may be any word, and which flags a verb takes is known there alone.
+        // Judging any token here would only guess at that.
         if command == "secret" {
             i += 1;
             continue;
@@ -607,23 +599,9 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
             i += 2;
             continue;
         }
-        // For `secret` the token in a flag position may be a secret that reached the
-        // command line by mistake, and this function does not know which sub-verb is
-        // running. The position is reported and never the token, so a secret is not
-        // repeated into the terminal or any captured transcript. The page is asked for by
-        // the plain verb name: it is a lookup, and a compound name would miss every arm.
-        let description = if command == "secret" {
-            format!("unexpected argument at position {}", i + 1)
-        } else {
-            format!("unexpected argument '{arg}'")
-        };
-        let page = help_verb(if command == "secret" {
-            "secret"
-        } else {
-            command
-        });
         return Err(CliError::Usage(format!(
-            "{description} for '{command}'\n\n{page}",
+            "unexpected argument '{arg}' for '{command}'\n\n{}",
+            help_verb(command)
         )));
     }
     Ok(())

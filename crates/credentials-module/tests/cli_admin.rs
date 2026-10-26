@@ -6796,6 +6796,10 @@ fn secret_list_and_grants_on_a_pre_migration_store_print_no_agent_secret_tables(
 
 #[test]
 fn every_secret_verb_refuses_a_flag_that_belongs_to_another_verb_and_has_a_help_page() {
+    // A bootstrapped vault, so the refusal comes from the argument check and not from a
+    // missing store. Every case names the verb being run and the flags it takes.
+    let vault = GrantCliVault::new("secret-flag-refusal");
+    vault.bootstrap();
     for (args, bogus) in [
         (vec!["list"], "--host"),
         (vec!["grants"], "--name"),
@@ -6807,17 +6811,20 @@ fn every_secret_verb_refuses_a_flag_that_belongs_to_another_verb_and_has_a_help_
         ),
         (vec!["phone-gate", "status"], "--name"),
     ] {
-        let out = cli()
-            .args(["secret"])
-            .args(&args)
-            .arg(bogus)
-            .output()
-            .unwrap();
+        let argv = {
+            let mut argv = vec!["secret"];
+            argv.extend(args.iter().copied());
+            argv.push(bogus);
+            argv
+        };
+        // `run` takes string slices, so the vector outlives the call.
+        let out = vault.run(&argv);
         assert!(!out.status.success(), "{args:?} accepted {bogus}");
-        // The refusal names the stray flag itself, so an operator who typed it is told
-        // which one was refused.
         let message = String::from_utf8_lossy(&out.stderr).to_string();
-        assert!(message.contains(bogus), "{args:?}: {message}");
+        assert!(
+            message.contains("it takes"),
+            "{args:?}: a refusal must say which flags the verb takes: {message}"
+        );
     }
     // Every verb is named on the page an operator reaches with `ck auth help secret`.
     let page = cli().args(["help", "secret"]).output().unwrap();

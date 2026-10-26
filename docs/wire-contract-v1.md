@@ -192,18 +192,13 @@ module's grants reach. A scoped route without a `flow_id` binds as before. A `ro
 this build cannot decode at all is refused the same way, code `invalid_control_body`, so it
 fails at once instead of waiting out the daemon's bind timeout.
 
-**A call callosum forwards from another computer is refused.** Callosum, the federation
-module, is itself a vault consumer with its own grants. When it relays a call from another
-computer, it opens the route as `reserved:callosum` with a bind-identity `harness` that
-starts `fed-` (for example `fed-computer:<32 hex>`, set from the authenticated peer key).
-On a route whose daemon-attested principal is `reserved:callosum`, such a harness marks a
-forwarded call, and until the vault supports federation it serves that route with no
-principal at all. Without an enrollment token, every scoped op answers the uniform
-`not_found`, byte-identical to an unknown credential, and the admin plane refuses. Like any
-caller without a principal, it still reaches what a bearer secret alone authorizes: a
-capability handle, or an enrollment token presented in the params. Callosum's own calls (any other harness, including an empty one) keep callosum's
-grants, and the harness of every other principal is ignored: it is client-supplied, so the
-vault reads it only to withdraw authority, never to grant it.
+**Callosum-forwarded channels are isolated.** On `reserved:callosum` only, a harness
+derived from the authenticated peer can select a federation member channel (§14) or a
+phone channel (§15). Neither borrows callosum's grants. Both refuse bearer params
+(`handle`, `enrollment_token`) with an `invalid_params` Error frame. With the member gate
+off, the older behavior remains: a `fed-` harness has no principal but can still use a
+vault-local bearer secret on credential operations. A phone setting off or unreadable
+never enables phone operations. Other principals' harnesses are ignored.
 
 **An enrollment token** is the vault's OWN attestation: it minted it, holds only its
 hash, and can revoke it. This is how a host-launched consumer gets a name that grants can
@@ -1203,7 +1198,8 @@ this mapping:
 |---|---|---|
 | exactly `callosum-self` | ordinary callosum grants | ordinary callosum grants |
 | `fed-computer:<32 lowercase hex>` | refused principal | federation member channel |
-| any other `fed-` harness, including phone/sim/unknown or malformed hex | refused | refused |
+| exactly `fed-phone:<32 lowercase hex>` | no principal; legacy bearer behavior | phone channel only if `secret.phone_mapping` is also on; otherwise refused |
+| any other `fed-` harness, including sim/unknown or malformed hex | refused | refused |
 | empty or any other harness | ordinary callosum grants | refused |
 
 A harness starting `fed-` never inherits callosum's grants. Other principals' harnesses are
@@ -1225,6 +1221,10 @@ Handles and enrollment tokens are **vault-local bearer secrets**, not member ide
 With the gate off, release-1 bearer-scoped reads remain possible even on a refused `fed-`
 principal; that rollback boundary does not apply the access-token projection. Do not send
 handles or enrollment tokens to another vault.
+
+The phone setting defaults off and must stay off until callosum derives `fed-phone:`
+from the authenticated phone peer on **every call**, never from request params. An
+unreadable member gate never enables phone mapping, even when the phone setting is on.
 
 ### Auth-mode HPKE and exact aad bytes
 
@@ -1497,3 +1497,154 @@ material digest, so retries/restarts add no row but a recreated id at version 1 
 again. Forwarded reports retain the existing `report_auth_failure` hash format and member
 actor: every report adds diagnostics, at most the first state-changing report at a version
 adds a chain row. B records only diagnostics for its forward.
+
+## 15. Agent secrets: phone channel
+
+Agent secrets are separate from credentials and cannot be addressed by credential ids,
+handles, scoped lists, federation reads or transfers. The reserved `kem:secret-deposit:*`
+namespace is inaccessible through every credential operation, even with a seeded grant.
+
+### Gates and caller matrix
+
+`ck auth secret phone-gate on|off` sends `admin.secret_phone_gate_set {"v":2,"enabled":true|false}`
+through the admin-MAC route online or the leased offline applier. `status` reads the same
+persisted settings without changing them and prints `member mapping on|off|unreadable` and
+`phone setting on|off|unreadable`. An absent phone setting means off. A Direct caller without
+the MAC cannot change it. The phone setting never changes the member gate.
+
+For each member gate On/Off/Unreadable × phone setting On/Off/Unreadable:
+
+| Caller | Seven phone ops | Credential handle/scoped reads |
+|---|---|---|
+| callosum, exactly `fed-phone:<32 lowercase hex>`, both gates On | served through phone preflight | uniform `not_found` Response |
+| same, member gate Off, any phone setting | uniform `not_found` Response | legacy no-principal bearer behavior (§14) |
+| same, any other gate combination | uniform `not_found` Response | uniform `not_found` Response |
+| callosum, malformed `fed-phone:`, `fed-computer:` or other `fed-` | uniform `not_found` Response | unchanged §14 mapping |
+| callosum-self, AFT, Cerebellum, Cingulate, Direct with or without admin MAC, any other principal | uniform `not_found` Response | unchanged credential authorization |
+
+The seven operations are `secret.phone_keys_register`, `secret.deposit_keys`,
+`secret.deposit`, `secret.approve`, `secret.list`, `secret.delete`, `secret.revoke_grant`.
+On a mapped phone channel, bearer params are `invalid_params` Error frames, even on an
+otherwise refused method. All other methods answer uniform `not_found`, except
+`permissions.list` and `permissions.revoke`, which answer an Error frame with code
+`permissions_operator_required`, message `permissions operations need reserved:cingulate or the local operator's direct route`, and no class.
+
+### Ordered phone preflight and transaction admission
+
+1. Check exact request keys, grammar and sizes. Grammar faults use `invalid_params`
+   Error frames with no class, fixed content-free messages. Other exceeded limits use
+   `limit_exceeded` result errors.
+2. Except for `deposit_keys`, perform an uncached `callosum.paired_devices_read` lookup
+   for `fed-phone:<fp>`. No answer/transient refusal gives `pairing_unavailable`; an absent
+   device gives `phone_not_registered`. Persist each answered pairing/absence observation
+   with its lookup time. `ck auth secret phone-gate status` performs no pairing lookup.
+3. Except for `deposit_keys` and registration, require keys under the current
+   `(fingerprint, pairing_id)`, otherwise `phone_not_registered`.
+4. Run operation checks and mutation in one serializing store write transaction. The
+   1,500 ms `PHONE_OP_DEADLINE` applies until transaction admission. At or after the
+   deadline, store only the answered observation and answer `pairing_unavailable`.
+   An admitted transaction is never cancelled and returns its commit result.
+
+Storage and audit failures answer `store_error` and roll back mutations. Until their
+approval implementation is installed, approve, both delete forms and revoke finish this
+same preflight but answer `secret_op_unavailable`; they never create grants or delete rows.
+
+### Request and response examples
+
+Examples show the unwrapped result; transport responses wrap it in `result`.
+All base64url is strict, unpadded and rejects nonzero trailing bits. Names are 1–64 ASCII
+bytes `[A-Za-z0-9][A-Za-z0-9._-]*`; refused grammar is `invalid_params`, 65 bytes is
+`limit_exceeded`. Deposit ids are canonical 26-character Crockford ULIDs.
+
+`secret.phone_keys_register` has exactly `{deposit_pub, approval_pub}`: 64 lowercase hex
+characters for X25519, 130 for an on-curve uncompressed SEC1 P-256 key. Registration is
+create-only per pairing. Identical retries answer `{"status":"already_stored"}`; new
+registration answers `{"status":"stored"}`. Different keys give `phone_key_conflict`, no
+chain row, and one best-effort `secret_use_refusal` diagnostic under `secret-phone|<fp>`
+with principal kind `phone`, id `fed-phone:<fp>`, detail `phone_key_conflict`.
+
+`secret.deposit_keys {}` →
+```json
+{"member_id":"fed-computer:22222222222222222222222222222222","keys":[{"state":"current","key_id":"0123456789abcdef","pub":"1111111111111111111111111111111111111111111111111111111111111111"}]}
+```
+No `next` key is returned. Missing member id, inactive/non-KEM/undecodable deposit key gives
+`secret_setup_incomplete` without replacing the key.
+
+API-key `secret.deposit` request (location is mandatory):
+```json
+{"deposit_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","member_id":"fed-computer:22222222222222222222222222222222","name":"github","kind":"agent_api_key","host":"api.github.com","path_prefix":"/repos/a","location":"header:X-Api-Key","enc_b64url":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","ciphertext_b64url":"AA"}
+```
+Login deposit uses exactly `{deposit_id, member_id, name, kind:"site_login", origin,
+enc_b64url, ciphertext_b64url}`, for example origin `https://example.com`. It has no host,
+path-prefix or location keys. Responses are exactly
+`{"status":"stored","incarnation":"0123456789abcdef0123456789abcdef"}` or
+`{"status":"already_stored"}`. Ciphertext is at most 16,384 bytes. HPKE Auth uses the
+registered phone deposit key and info `cortexkit/claustrum/secret-deposit/v1`.
+
+Deposit transaction order: validate local key/self member; consult permanent deposit-id
+tombstone; require current member and open rebuilt AAD; validate plaintext; refuse any
+existing name, corrupt included; store encrypted record and tombstone atomically. A
+matching digest/current member/live incarnation answers `already_stored`, otherwise a
+used deposit id gives `deposit_conflict`. A new id for an existing name gives `name_exists`.
+Invalid plaintext writes no tombstone, so a corrected ciphertext may reuse the id.
+
+Every binary field below is prefixed by its u64 little-endian byte length. Text is UTF-8
+without normalization; absent optional fields are zero length. In order:
+
+* AAD: `ck-secret-deposit-aad/v1`, deposit_id, member_id, name, kind, then host,
+  path_prefix-or-empty, location (API key), or origin (login).
+* Plaintext: `ck-secret-deposit-plaintext/v1`, then key bytes, or username, password,
+  otpauth URI-or-empty.
+* Sealed body: `ck-secret-sealed-body/v1`, kind, scope fields as above, plaintext fields.
+* Deposit digest: SHA-256 over framed deposit_id, enc, ciphertext, rebuilt AAD, no tag.
+
+The shared deposit/operator material validator refuses malformed framing/UTF-8/otpauth
+without echoing content. Username ≤256 bytes, password ≤1,024, API key ≤8,192. TOTP accepts
+SHA1/SHA256/SHA512, digits 6 or 8, period 15–120 inclusive (default 30); HOTP is refused.
+Header names are RFC 9110 tokens ≤64 bytes. `Host`, `Cookie`, `Content-Length` and
+`Authorization` are refused in every ASCII case; `header:X-Api-Key` is accepted.
+
+`secret.list {}` returns metadata and live grants, never material:
+```json
+{"secrets":[{"name":"github","kind":"agent_api_key","incarnation":"0123456789abcdef0123456789abcdef","state":"active","host":"api.github.com","path_prefix":"/repos/a","location":"authorization_bearer","grants":[{"grant_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","scope":{"owner":"prefrontal-core","kind":"head","ref":"agent-a"},"coverage":"scope","duration":"permanent"}]}]}
+```
+Login rows replace host/path_prefix/location with origin. State may be `corrupt`.
+Non-permanent grants include `expires_at_ms`; `last_use_ms` is included only when set.
+Expired grants are swept only after current-pairing registration passes, with one
+`secret_grant_expire` chain row per removal.
+
+Preflight for later mutations: `secret.approve {envelope_b64url, signature_b64url,
+card_ref?}`, signed `secret.delete {envelope_b64url, signature_b64url}`, name-only
+`secret.delete {name}`, and `secret.revoke_grant {grant_id}`. Card refs are 1–64 ASCII
+graphic bytes; 65 bytes is `invalid_params`. `grant_id` is a canonical ULID.
+
+### Secret codes
+
+These are result error bodies `{"error":{"code":"…","class":"…"}}`, except
+`invalid_params`, which remains a transport Error without a class.
+
+| Code | Class |
+|---|---|
+| `approval_invalid` | `permanent` |
+| `phone_not_registered` | `permanent` |
+| `phone_key_conflict` | `permanent` |
+| `deposit_conflict` | `permanent` |
+| `name_exists` | `permanent` |
+| `secret_setup_incomplete` | `permanent` |
+| `pairing_unavailable` | `transient` |
+| `pending_limit` | `transient` |
+| `limit_exceeded` | `context_overflow` |
+| `secret_op_unavailable` | `transient` |
+| `permissions_operator_required` | none; transport Error as above |
+
+### Phone transition audit
+
+Payload hashes use SHA-256 of the ordered length-prefixed fields above, never plaintext
+material or its digest. Vault-global rows have no target.
+
+| Op | Actor | Target | Payload fields |
+|---|---|---|---|
+| `secret_phone_gate_set` | offline-cli or route-admin | none | enabled (`true`/`false`) |
+| `secret_phone_register` | fed-phone:<fp> | secret-phone\|<fp> | pairing_id, raw deposit_pub, raw approval_pub |
+| `secret_store` | fed-phone:<fp> | secret\|<name> | kind, incarnation, scope fields, deposit_id |
+| `secret_grant_expire` | vault | secret\|<name> | grant_id, incarnation, expires_at_ms (u64 LE) |

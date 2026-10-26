@@ -14,6 +14,80 @@ pub const USE_ENVELOPE_TAG: &[u8] = b"ck-secret-use-envelope/v1";
 pub const MAX_SECRET_NAME_BYTES: usize = 64;
 pub const SECRET_RECORD_VERSION: u64 = 1;
 
+#[path = "agent_secret_validation.rs"]
+mod validation;
+pub use validation::{validate_material, validate_scope};
+
+pub fn validate_phone_approval_key(bytes: &[u8]) -> Result<(), ValidationError> {
+    if bytes.len() != 65 || bytes.first() != Some(&4) {
+        return Err(ValidationError::InvalidParams);
+    }
+    p256::PublicKey::from_sec1_bytes(bytes).map_err(|_| ValidationError::InvalidParams)?;
+    Ok(())
+}
+
+/// Stable refusal vocabulary shared by the phone transport and its store transaction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SecretError {
+    InvalidParams,
+    LimitExceeded,
+    NotFound,
+    PairingUnavailable,
+    PhoneNotRegistered,
+    PhoneKeyConflict,
+    DepositConflict,
+    NameExists,
+    SecretSetupIncomplete,
+    ApprovalInvalid,
+    PendingLimit,
+    StoreError,
+    SecretOpUnavailable,
+}
+
+impl SecretError {
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::InvalidParams => "invalid_params",
+            Self::LimitExceeded => "limit_exceeded",
+            Self::NotFound => "not_found",
+            Self::PairingUnavailable => "pairing_unavailable",
+            Self::PhoneNotRegistered => "phone_not_registered",
+            Self::PhoneKeyConflict => "phone_key_conflict",
+            Self::DepositConflict => "deposit_conflict",
+            Self::NameExists => "name_exists",
+            Self::SecretSetupIncomplete => "secret_setup_incomplete",
+            Self::ApprovalInvalid => "approval_invalid",
+            Self::PendingLimit => "pending_limit",
+            Self::StoreError => "store_error",
+            Self::SecretOpUnavailable => "secret_op_unavailable",
+        }
+    }
+
+    pub const fn class(self) -> &'static str {
+        match self {
+            Self::LimitExceeded => "context_overflow",
+            Self::PairingUnavailable
+            | Self::PendingLimit
+            | Self::StoreError
+            | Self::SecretOpUnavailable => "transient",
+            _ => "permanent",
+        }
+    }
+
+    pub fn body(self) -> serde_json::Value {
+        serde_json::json!({"error":{"code":self.code(),"class":self.class()}})
+    }
+}
+
+impl From<ValidationError> for SecretError {
+    fn from(value: ValidationError) -> Self {
+        match value {
+            ValidationError::InvalidParams => Self::InvalidParams,
+            ValidationError::LimitExceeded => Self::LimitExceeded,
+        }
+    }
+}
+
 pub fn is_deposit_key(id: &str) -> bool {
     id.starts_with(DEPOSIT_KEY_PREFIX)
 }

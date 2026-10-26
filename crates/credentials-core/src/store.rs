@@ -8008,6 +8008,8 @@ pub enum AuthEventPrincipal<'a> {
     /// variant such a row would name `reserved:callosum` rather than the member that
     /// actually made the call.
     Member(&'a str),
+    /// An authenticated phone channel, including its `fed-phone:` prefix.
+    Phone(&'a str),
     Unverified,
 }
 
@@ -8018,6 +8020,7 @@ impl<'a> AuthEventPrincipal<'a> {
             Self::Reserved(_) => "reserved",
             Self::Enrolled(_) => "enrolled",
             Self::Member(_) => "member",
+            Self::Phone(_) => "phone",
             Self::Unverified => "unverified",
         }
     }
@@ -8027,6 +8030,7 @@ impl<'a> AuthEventPrincipal<'a> {
             Self::Reserved(module_id) => Some(module_id),
             Self::Enrolled(name) => Some(name),
             Self::Member(member_id) => Some(member_id),
+            Self::Phone(phone_id) => Some(phone_id),
             Self::Direct | Self::Unverified => None,
         }
     }
@@ -16098,4 +16102,6 @@ mod transfer_key_fence_tests;
 
 #[path = "store_agent_secrets.rs"]
 mod store_agent_secrets;
-pub use store_agent_secrets::SecretDepositPublicKey;
+pub use store_agent_secrets::{
+    secret_phone_gate_status_read_only, PhoneDeposit, PhoneOperation, SecretDepositPublicKey,
+};

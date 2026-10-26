@@ -1,6 +1,10 @@
 use super::*;
 use crate::agent_secret::{self, DEPOSIT_KEY_ID};
 
+#[path = "store_secret_phone.rs"]
+mod phone;
+pub use phone::{secret_phone_gate_status_read_only, PhoneDeposit, PhoneOperation};
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SecretDepositPublicKey {
     pub key_id: String,
@@ -37,16 +41,29 @@ impl EncryptedStore {
     }
 
     fn secret_deposit_record(&self) -> Result<VaultRecord, StoreOpError> {
-        let stored = self
-            .store
-            .with_conn(|conn| {
-                conn.query_row(
+        self.store
+            .with_conn(|conn| Ok(self.secret_deposit_record_conn(conn)))
+            .map_err(StoreOpError::from)?
+    }
+
+    fn secret_deposit_record_conn(
+        &self,
+        conn: &rusqlite::Connection,
+    ) -> Result<VaultRecord, StoreOpError> {
+        let stored = conn
+            .query_row(
                 "SELECT state, record_version, envelope FROM credentials WHERE credential_id = ?1",
                 [DEPOSIT_KEY_ID],
-                |r| Ok((r.get::<_, String>(0)?, r.get::<_, u64>(1)?, r.get::<_, Vec<u8>>(2)?)),
-            ).optional()
-            })
-            .map_err(StoreOpError::from)?;
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, u64>(1)?,
+                        r.get::<_, Vec<u8>>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|e| StoreOpError::Store(e.to_string()))?;
         let Some((state, version, blob)) = stored else {
             return Err(StoreOpError::SecretSetupIncomplete);
         };

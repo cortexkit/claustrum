@@ -29,6 +29,11 @@ pub const GENESIS_MAC: &str = "genesis";
 pub enum AuditOp {
     /// Daemon bootstrap generated the reserved HPKE deposit receiver.
     SecretDepositKeyCreate,
+    SecretPhoneGateSet,
+    SecretPhoneRegister,
+    SecretStore,
+    SecretGrantExpire,
+
     /// A module creates a cookie row, recording itself as the immutable creator.
     DepositCookieCreate,
     /// A module replaces a cookie whose recorded creator matches that module.
@@ -166,6 +171,11 @@ impl AuditOp {
     pub fn as_str(self) -> &'static str {
         match self {
             AuditOp::SecretDepositKeyCreate => "secret_deposit_key_create",
+            AuditOp::SecretPhoneGateSet => "secret_phone_gate_set",
+            AuditOp::SecretPhoneRegister => "secret_phone_register",
+            AuditOp::SecretStore => "secret_store",
+            AuditOp::SecretGrantExpire => "secret_grant_expire",
+
             AuditOp::DepositCookieCreate => "deposit_cookie_create",
             AuditOp::DepositCookieReplace => "deposit_cookie_replace",
             AuditOp::Put => "put",
@@ -217,6 +227,8 @@ impl AuditOp {
 /// separate, prunable diagnostics table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthEventKind {
+    /// A secret operation refusal, including create-only phone-key conflicts.
+    SecretUseRefusal,
     /// A provider refresh attempt failed without producing a committed replacement.
     RefreshFailed,
     /// A stale report on a non-refreshable credential was latched as `needs_reauth`.
@@ -296,6 +308,7 @@ impl AuthEventKind {
     /// The stable storage string for this authentication diagnostic kind.
     pub fn as_str(self) -> &'static str {
         match self {
+            AuthEventKind::SecretUseRefusal => "secret_use_refusal",
             AuthEventKind::RefreshFailed => "refresh_failed",
             AuthEventKind::StaleNonrefreshableLatch => "stale_nonrefreshable_latch",
             AuthEventKind::ConsumerReportStale => "consumer_report_stale",
@@ -704,6 +717,11 @@ mod vocabulary_documentation_tests {
         fn value(op: AuditOp) -> &'static str {
             match op {
                 AuditOp::SecretDepositKeyCreate => AuditOp::SecretDepositKeyCreate.as_str(),
+                AuditOp::SecretPhoneGateSet => AuditOp::SecretPhoneGateSet.as_str(),
+                AuditOp::SecretPhoneRegister => AuditOp::SecretPhoneRegister.as_str(),
+                AuditOp::SecretStore => AuditOp::SecretStore.as_str(),
+                AuditOp::SecretGrantExpire => AuditOp::SecretGrantExpire.as_str(),
+
                 AuditOp::DepositCookieCreate => AuditOp::DepositCookieCreate.as_str(),
                 AuditOp::DepositCookieReplace => AuditOp::DepositCookieReplace.as_str(),
                 AuditOp::Put => AuditOp::Put.as_str(),
@@ -834,6 +852,7 @@ mod vocabulary_documentation_tests {
         fn value(kind: AuthEventKind) -> &'static str {
             match kind {
                 AuthEventKind::RefreshFailed => AuthEventKind::RefreshFailed.as_str(),
+                AuthEventKind::SecretUseRefusal => AuthEventKind::SecretUseRefusal.as_str(),
                 AuthEventKind::StaleNonrefreshableLatch => {
                     AuthEventKind::StaleNonrefreshableLatch.as_str()
                 }

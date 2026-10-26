@@ -126,6 +126,8 @@ pub enum RouteCaller {
     /// A federation channel: callosum relaying a call from `member`. Only the
     /// federation ops answer, and only with the member's own grants.
     Member(String),
+    /// A callosum-authenticated phone, isolated from credential and federation reads.
+    Phone(String),
     /// A refused channel: every op, handle reads included, answers the uniform
     /// `not_found`.
     Refused,
@@ -138,7 +140,7 @@ impl RouteCaller {
     pub fn principal(&self) -> Option<Principal> {
         match self {
             Self::Principal(principal) => principal.clone(),
-            Self::Member(_) | Self::Refused => None,
+            Self::Member(_) | Self::Phone(_) | Self::Refused => None,
         }
     }
 }
@@ -157,10 +159,30 @@ pub fn is_callosum(principal: &Principal) -> bool {
 /// choosing a string. `direct`, unverified and absent principals never map to a
 /// member.
 pub fn map_route_caller(principal: &Principal, harness: &str, gate: MappingGate) -> RouteCaller {
+    map_route_caller_with_phone(principal, harness, gate, MappingGate::Off)
+}
+
+pub fn map_route_caller_with_phone(
+    principal: &Principal,
+    harness: &str,
+    gate: MappingGate,
+    phone_gate: MappingGate,
+) -> RouteCaller {
     if !is_callosum(principal) {
         return RouteCaller::Principal(Some(principal.clone()));
     }
     let keeps_grants = RouteCaller::Principal(Some(principal.clone()));
+    if gate == MappingGate::On && phone_gate == MappingGate::On {
+        if let Some(fp) = harness.strip_prefix("fed-phone:") {
+            if fp.len() == 32
+                && fp
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            {
+                return RouteCaller::Phone(fp.to_owned());
+            }
+        }
+    }
     match gate {
         // Vault release 1, unchanged: a relayed call gets no principal (handle reads
         // still run, which is the documented gate-off residual), and every other

@@ -1539,3 +1539,101 @@ expect_message = "a secret table with a missing audit key is a corrupt vault"
 only = false
 timeout_s = 600
 build_timeout_s = 3600
+
+[[control]]
+id = "secret-phone-deposit-current-member"
+guards = "deposit must bind the current member id"
+file = "crates/credentials-core/src/store_secret_phone.rs"
+old = "if d.member_id != member {"
+new = "if false && d.member_id != member {"
+edits = []
+test_file = "crates/credentials-core/src/store_secret_phone_tests.rs"
+runner = "cargo"
+package = "credentials-core"
+target = "--lib"
+features = ["test-support"]
+expect_red = ["store::store_agent_secrets::phone::tests::phone_deposit_rebuilds_aad_and_checks_current_member_before_replay"]
+only = false
+timeout_s = 300
+build_timeout_s = 900
+
+
+[[control]]
+id = "secret-phone-op-allowlist"
+guards = "phone channels expose only seven operations"
+file = "crates/credentials-module/src/secret_phone.rs"
+old = "if !is_phone_op(method) {"
+new = "if false && !is_phone_op(method) {"
+edits = []
+test_file = "crates/credentials-module/src/secret_phone_tests.rs"
+runner = "cargo"
+package = "credentials-module"
+target = "--lib"
+features = ["credentials-core/test-support"]
+expect_red = ["claustrum_module_probe::secret_phone::tests::phone_allowlist_and_bearers_fail_before_lookup"]
+only = false
+timeout_s = 300
+build_timeout_s = 900
+
+
+[[control]]
+id = "secret-phone-refuses-bearers"
+guards = "phone channels refuse bearer params before lookup"
+file = "crates/credentials-module/src/secret_phone.rs"
+old = """
+if federation::carries_bearer(params) {
+        return answer(Err(SecretError::InvalidParams));
+    }"""
+new = """
+if federation::carries_bearer(params) {
+        return answer(Ok(serde_json::json!({"status":"stored"})));
+    }"""
+edits = []
+test_file = "crates/credentials-module/src/secret_phone_tests.rs"
+runner = "cargo"
+package = "credentials-module"
+target = "--lib"
+features = ["credentials-core/test-support"]
+expect_red = ["claustrum_module_probe::secret_phone::tests::phone_allowlist_and_bearers_fail_before_lookup"]
+only = false
+timeout_s = 300
+build_timeout_s = 900
+
+
+[[control]]
+id = "secret-phone-both-mapping-gates"
+guards = "only authenticated callosum phones with both gates on map to Phone"
+file = "crates/credentials-module/src/federation/ingress.rs"
+old = "if gate == MappingGate::On && phone_gate == MappingGate::On {"
+new = "if gate == MappingGate::On {"
+edits = []
+test_file = "crates/credentials-module/src/secret_phone_tests.rs"
+runner = "cargo"
+package = "credentials-module"
+target = "--lib"
+features = ["credentials-core/test-support"]
+expect_red = ["claustrum_module_probe::secret_phone::tests::phone_mapping_requires_both_gates_and_exact_authenticated_harness"]
+only = false
+timeout_s = 300
+build_timeout_s = 900
+
+
+[[control]]
+id = "secret-phone-output-scan-includes-source"
+guards = "daemon output scanner reads phone source and refuses material-bearing output sites"
+file = "crates/credentials-module/src/secret_phone.rs"
+old = "//! The isolated phone channel: grammar, an uncached pairing lookup, then one write."
+new = """
+//! The isolated phone channel: grammar, an uncached pairing lookup, then one write.
+#[allow(dead_code)]
+fn planted_output(secret: &credentials_core::secret::Secret<String>) { eprintln!("{}", secret.expose()); }"""
+edits = []
+test_file = "crates/credentials-module/src/main.rs"
+runner = "cargo"
+package = "credentials-module"
+target = "--bin ck-claustrum"
+features = ["credentials-core/test-support"]
+expect_red = ["tests::every_daemon_output_site_is_enumerated"]
+only = false
+timeout_s = 300
+build_timeout_s = 900

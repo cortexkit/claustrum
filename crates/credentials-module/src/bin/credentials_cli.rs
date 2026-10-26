@@ -380,6 +380,7 @@ fn run_args(mut args: Vec<String>) -> Result<(), CliError> {
         "remote" => cli_support::federation_cli::cmd_remote(&global, &args),
         "member" => cli_support::federation_cli::cmd_member(&global, &args),
         "federation" => cli_support::federation_cli::cmd_federation(&global, &args),
+        "secret" => cli_support::secret_cli::cmd_secret(&global, &args),
         other => Err(CliError::Usage(format!(
             "unknown verb '{other}'\n\n{}",
             usage_short()
@@ -538,6 +539,7 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
             "remote" => &["add", "remove", "list"],
             "member" => &["grant", "revoke", "list"],
             "federation" => &["self", "mapping"],
+            "secret" => &["phone-gate", "on", "off", "status"],
             _ => &[],
         };
         // `transfer accept|reject <transfer-id>` and `federation self <member>` /
@@ -612,7 +614,8 @@ fn usage_short() -> String {
        transfer            send, receive, accept or reject a sealed key transfer\n\
        remote              add or remove a login homed in another vault\n\
        member              grant another vault remote reads or deliveries\n\
-       federation          set this vault's member id or the mapping gate\n\
+        federation          set this vault's member id or the mapping gate\n\
+        secret              control the agent-secret phone gate\n\
        rotate-master-key   rotate the vault master key (offline)\n\
        bootstrap           initialize a new vault (offline)\n\
      \n\
@@ -641,6 +644,13 @@ fn usage_short() -> String {
 /// An unknown verb falls back to the short table.
 fn help_verb(verb: &str) -> String {
     let body = match verb {
+        "secret" => {
+            "ck auth secret phone-gate on|off|status\n\nNOTES\n\
+             On/off uses the admin MAC online or the offline lease.\n\
+             Status reads the persisted member and phone gates.\n\
+             Keep the phone setting off until callosum derives the forwarded harness\n\
+             from the authenticated phone peer on every call."
+        }
         "set-plan" => {
             "ck auth set-plan --id <credential-id> (--tier <id> | --clear)\n\
              \n\

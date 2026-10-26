@@ -924,6 +924,8 @@ fn the_manifest_shows_no_read_surface_op_can_trigger_a_send() {
         "watch_scoped_tests.rs",
         "account_token.rs",
         "account_token_tests.rs",
+        "secret_phone.rs",
+        "secret_phone_tests.rs",
         "test_support.rs",
         "federation/ingress.rs",
         "federation/outbound.rs",

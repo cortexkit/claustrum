@@ -24,6 +24,7 @@ mod admin_surface;
 mod federation;
 mod limiter;
 mod read_surface;
+mod secret_phone;
 #[cfg(test)]
 mod test_support;
 mod watch_scoped;
@@ -1315,10 +1316,10 @@ async fn dispatch_route_request(
     let method = serde_json::from_slice::<ReadRequest>(&frame.body).ok();
     match caller {
         federation::RouteCaller::Principal(principal) => {
-            if method
-                .as_ref()
-                .is_some_and(|request| federation::is_federation_op(&request.method))
-            {
+            if method.as_ref().is_some_and(|request| {
+                federation::is_federation_op(&request.method)
+                    || secret_phone::is_phone_op(&request.method)
+            }) {
                 return send_route_result(writer, header, uniform_not_found()).await;
             }
             handle_read_request(frame, writer, surface, admin, principal).await
@@ -1348,6 +1349,39 @@ async fn dispatch_route_request(
                     send_route_result(writer, header, wrap_result(reply)).await
                 }
                 federation::HomeAnswer::InvalidParams(detail) => {
+                    invalid_params(
+                        writer,
+                        header.ver,
+                        header.channel,
+                        header.epoch,
+                        header.corr,
+                        &detail,
+                    )
+                    .await
+                }
+            }
+        }
+        federation::RouteCaller::Phone(fingerprint) => {
+            let Some(request) = method else {
+                return invalid_params(
+                    writer,
+                    header.ver,
+                    header.channel,
+                    header.epoch,
+                    header.corr,
+                    "invalid secret request",
+                )
+                .await;
+            };
+            match admin
+                .serve_phone(&fingerprint, &request.method, &request.params)
+                .await
+            {
+                secret_phone::PhoneAnswer::Reply(reply) => {
+                    send_route_result(writer, header, wrap_result(reply)).await
+                }
+                secret_phone::PhoneAnswer::PermissionsOperatorRequired => send_route_error(writer,header.ver,header.channel,header.epoch,header.corr,"permissions_operator_required","permissions operations need reserved:cingulate or the local operator's direct route").await,
+                secret_phone::PhoneAnswer::InvalidParams(detail) => {
                     invalid_params(
                         writer,
                         header.ver,
@@ -4995,6 +5029,93 @@ mod tests {
     ) -> serde_json::Value {
         let (_, body) = routed_reply(surface, admin, channel, method, params).await;
         serde_json::from_slice(&body).expect("reply JSON")
+    }
+
+    #[tokio::test]
+    async fn phone_dispatch_isolated_from_bearers_and_requires_both_live_gates() {
+        let (surface, admin, store) = scoped_rig(93);
+        let fp = "11111111111111111111111111111111";
+        admin.record_bind_at(
+            90,
+            1,
+            subc_protocol::Principal::Reserved {
+                module_id: "callosum".into(),
+            },
+            &format!("fed-phone:{fp}"),
+        );
+        admin.record_bind_at(
+            91,
+            1,
+            subc_protocol::Principal::Direct,
+            &format!("fed-phone:{fp}"),
+        );
+        let refused = serde_json::to_vec(&uniform_not_found()).unwrap();
+        for member in [false, true] {
+            for phone in [false, true] {
+                set_member_mapping(&store, member);
+                store
+                    .set_secret_phone_mapping_audited(
+                        phone,
+                        AuditCtx::admin(AuditOp::SecretPhoneGateSet),
+                    )
+                    .unwrap();
+                for op in secret_phone::PHONE_OPS {
+                    assert_eq!(
+                        routed_reply(&surface, &admin, 91, op, json!({})).await,
+                        (FrameType::Response, refused.clone())
+                    );
+                    let response =
+                        routed_reply(&surface, &admin, 90, op, json!({"handle":"ckh_bearer"}))
+                            .await;
+                    if member && phone {
+                        assert_eq!(response.0, FrameType::Error);
+                        let body: serde_json::Value = serde_json::from_slice(&response.1).unwrap();
+                        assert_eq!(body["code"], "invalid_params");
+                        assert!(body.get("class").is_none());
+                    } else {
+                        assert_eq!(response, (FrameType::Response, refused.clone()));
+                    }
+                }
+                if member && phone {
+                    assert_eq!(
+                        admin.route_caller(90),
+                        federation::RouteCaller::Phone(fp.into())
+                    );
+                    for op in [
+                        OP_GET,
+                        OP_GET_SCOPED,
+                        OP_LIST_SCOPED,
+                        OP_WATCH_SCOPED,
+                        federation::ingress::OP_REMOTE_TOKEN,
+                    ] {
+                        assert_eq!(
+                            routed_reply(&surface, &admin, 90, op, json!({})).await,
+                            (FrameType::Response, refused.clone())
+                        );
+                    }
+                    for op in ["permissions.list", "permissions.revoke"] {
+                        let response = routed_reply(&surface, &admin, 90, op, json!({})).await;
+                        assert_eq!(response.0, FrameType::Error);
+                        let body: serde_json::Value = serde_json::from_slice(&response.1).unwrap();
+                        assert_eq!(body["code"], "permissions_operator_required");
+                        assert!(body.get("class").is_none());
+                    }
+                }
+            }
+        }
+        assert!(matches!(
+            admin
+                .execute_as(
+                    91,
+                    1,
+                    Some(&subc_protocol::Principal::Direct),
+                    br#"{"op":"admin.secret_phone_gate_set","v":2,"enabled":false}"#,
+                    &"00".repeat(32)
+                )
+                .await,
+            admin_surface::AdminOutcome::Refused(_)
+        ));
+        assert!(store.secret_phone_mapping().unwrap());
     }
 
     /// The gate-off bearer-read residual, pinned. Release 1 serves a forwarded call on
@@ -15224,6 +15345,7 @@ mod tests {
             include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/limiter.rs")),
             include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/watch_scoped.rs")),
             include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/account_token.rs")),
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/secret_phone.rs")),
         ];
         let count = |shape: &str| -> usize {
             let pattern = format!("{shape}{}", "!(");

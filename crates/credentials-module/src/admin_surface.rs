@@ -116,6 +116,21 @@ pub struct AdminSurface {
 const ROUTE_ADMIN_ACTOR: &str = "route-admin";
 
 impl AdminSurface {
+    pub async fn serve_phone(
+        &self,
+        fingerprint: &str,
+        method: &str,
+        params: &serde_json::Value,
+    ) -> crate::secret_phone::PhoneAnswer {
+        crate::secret_phone::serve(
+            Arc::clone(self.engine.store()),
+            self.home.outbound(),
+            fingerprint,
+            method,
+            params,
+        )
+        .await
+    }
     pub fn new(
         engine: Arc<RefreshEngine>,
         mac_key: AdminMacKey,
@@ -195,15 +210,30 @@ impl AdminSurface {
         let Some((principal, harness)) = bound else {
             return crate::federation::RouteCaller::Principal(None);
         };
-        let gate = if crate::federation::ingress::is_callosum(&principal) {
-            crate::federation::MappingGate::from_store(
-                self.engine.store().federation_member_mapping(),
-            )
+        use crate::federation::MappingGate;
+        let (gate, phone_gate) = if crate::federation::ingress::is_callosum(&principal) {
+            match self.engine.store().secret_phone_mapping_gates() {
+                Ok((member, phone)) => (
+                    if member {
+                        MappingGate::On
+                    } else {
+                        MappingGate::Off
+                    },
+                    match phone {
+                        Some(true) => MappingGate::On,
+                        Some(false) => MappingGate::Off,
+                        None => MappingGate::Unreadable,
+                    },
+                ),
+                Err(_) => (MappingGate::Unreadable, MappingGate::Unreadable),
+            }
         } else {
             // Not read for anyone else: their harness is ignored in every gate state.
-            crate::federation::MappingGate::Off
+            (MappingGate::Off, MappingGate::Off)
         };
-        crate::federation::map_route_caller(&principal, &harness, gate)
+        crate::federation::ingress::map_route_caller_with_phone(
+            &principal, &harness, gate, phone_gate,
+        )
     }
 
     /// The EFFECTIVE principal of a route bind: what [`Self::route_caller`] lends the

@@ -5024,10 +5024,10 @@ fn every_verb_help_uses_a_flags_table_and_notes_layout() {
         .collect();
     // This is an anti-narrowing floor for the rendered verb-table scan, not a
     // budget for verbs. It includes the operator signing verb and the four
-    // federation verbs (transfer, remote, member, federation).
+    // federation verbs (transfer, remote, member, federation), and secret controls.
     assert_eq!(
         verbs.len(),
-        38,
+        39,
         "the rendered verb-table scan narrowed; sign is a public verb"
     );
     assert!(accepted_help_flags("login").contains(&"--no-browser".to_string()));
@@ -6035,6 +6035,75 @@ fn provider_cli_live_count_refusal_and_deposit_add_order_use_the_route() {
     assert_eq!(
         String::from_utf8_lossy(&offline.stderr),
         "error: invalid_provider_id/permanent: rule=count value=extra\n"
+    );
+}
+
+#[test]
+fn phone_gate_cli_persists_online_and_offline_and_status_reads_both_gates() {
+    if std::env::var_os(CLI_BIN_ENV).is_some() {
+        return;
+    }
+    let vault = GrantCliVault::new("phone-gate");
+    vault.bootstrap();
+    let status = vault.run(&["secret", "phone-gate", "status"]);
+    assert!(
+        status.status.success(),
+        "{}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&status.stdout),
+        "member mapping off\nphone setting off\n"
+    );
+    assert!(vault.run(&["secret", "phone-gate", "on"]).status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&vault.run(&["secret", "phone-gate", "status"]).stdout),
+        "member mapping off\nphone setting on\n"
+    );
+    assert!(vault.run(&["secret", "phone-gate", "off"]).status.success());
+    let peer = ProviderRoutePeer::start(&vault);
+    let run = |args: &[&str]| {
+        cli()
+            .args(args)
+            .arg("--data-dir")
+            .arg(&vault.data_dir)
+            .arg("--key-path")
+            .arg(&vault.key_path)
+            .arg("--subc")
+            .arg(&peer.connection)
+            .env("CORTEXKIT_TEST_BYPASS_VALIDATION", "1")
+            .output()
+            .unwrap()
+    };
+    let on = run(&["secret", "phone-gate", "on"]);
+    assert!(
+        on.status.success(),
+        "{}",
+        String::from_utf8_lossy(&on.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&run(&["secret", "phone-gate", "status"]).stdout),
+        "member mapping off\nphone setting on\n"
+    );
+    assert_eq!(
+        peer.observed
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|v| v["op"] == "admin.secret_phone_gate_set")
+            .count(),
+        1
+    );
+    let off = run(&["secret", "phone-gate", "off"]);
+    assert!(
+        off.status.success(),
+        "{}",
+        String::from_utf8_lossy(&off.stderr)
+    );
+    drop(peer);
+    assert_eq!(
+        String::from_utf8_lossy(&vault.run(&["secret", "phone-gate", "status"]).stdout),
+        "member mapping off\nphone setting off\n"
     );
 }
 

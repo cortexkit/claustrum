@@ -242,6 +242,8 @@ pub enum AdminOpBody {
     /// grants. Read live on every federation decision, so it takes effect at once.
     #[serde(rename = "admin.federation_gate_set")]
     FederationGateSet { v: u32, enabled: bool },
+    #[serde(rename = "admin.secret_phone_gate_set")]
+    SecretPhoneGateSet { v: u32, enabled: bool },
     /// Set this vault's own member id (`fed-computer:<fp>`), which it writes into every
     /// `requester`, `home`, `sender` and `receiver` field it emits. Peers check those
     /// against the authenticated caller, so a wrong value fails closed.
@@ -564,6 +566,11 @@ impl std::fmt::Debug for AdminOpBody {
                 .field("approver", approver)
                 .finish(),
             AdminOpBody::Status { v } => f.debug_struct("Status").field("v", v).finish(),
+            AdminOpBody::SecretPhoneGateSet { v, enabled } => f
+                .debug_struct("SecretPhoneGateSet")
+                .field("v", v)
+                .field("enabled", enabled)
+                .finish(),
             AdminOpBody::FederationGateSet { v, enabled } => f
                 .debug_struct("FederationGateSet")
                 .field("v", v)
@@ -699,6 +706,7 @@ impl AdminOpBody {
             | AdminOpBody::EnrollRevoke { v, .. }
             | AdminOpBody::EnrollReissue { v, .. }
             | AdminOpBody::FederationGateSet { v, .. }
+            | AdminOpBody::SecretPhoneGateSet { v, .. }
             | AdminOpBody::FederationSelfSet { v, .. }
             | AdminOpBody::TransferInit { v, .. }
             | AdminOpBody::TransferRecover { v }
@@ -732,6 +740,7 @@ impl AdminOpBody {
             | AdminOpBody::EnrollRevoke { .. }
             | AdminOpBody::EnrollReissue { .. }
             | AdminOpBody::FederationGateSet { .. }
+            | AdminOpBody::SecretPhoneGateSet { .. }
             | AdminOpBody::FederationSelfSet { .. }
             | AdminOpBody::TransferInit { .. }
             | AdminOpBody::TransferRecover { .. }
@@ -831,6 +840,7 @@ impl AdminOpBody {
             | AdminOpBody::EnrollReissue { .. }
             // Federation settings belong to no credential; the fenced write orders them.
             | AdminOpBody::FederationGateSet { .. }
+            | AdminOpBody::SecretPhoneGateSet { .. }
             | AdminOpBody::FederationSelfSet { .. }
             // A resume, receive, reject, list or member grant writes no credential
             // record. An accept's record id is known only from its stored pending row,
@@ -886,6 +896,7 @@ impl AdminOpBody {
             AdminOpBody::Approval { .. } => "admin.approval",
             AdminOpBody::Status { .. } => "admin.status",
             AdminOpBody::FederationGateSet { .. } => "admin.federation_gate_set",
+            AdminOpBody::SecretPhoneGateSet { .. } => "admin.secret_phone_gate_set",
             AdminOpBody::FederationSelfSet { .. } => "admin.federation_self_set",
             AdminOpBody::TransferInit { .. } => "admin.transfer_init",
             AdminOpBody::TransferRecover { .. } => "admin.transfer_recover",
@@ -942,6 +953,7 @@ impl AdminOpBody {
             // The gate is a store setting: a pure local write, run through `apply`
             // from the offline lease path too.
             | AdminOpBody::FederationGateSet { .. }
+            | AdminOpBody::SecretPhoneGateSet { .. }
             // Local reads and writes with no outbound call.
             | AdminOpBody::TransferRecover { .. }
             | AdminOpBody::TransferReceive { .. }
@@ -1397,6 +1409,13 @@ pub fn apply(
             let changed = store
                 .reclassify_audited(force, AuditCtx::route_admin(AuditOp::SetCategory, actor))?;
             Ok(serde_json::json!({ "credentials_reclassified": changed }))
+        }
+        AdminOpBody::SecretPhoneGateSet { enabled, .. } => {
+            let changed = store.set_secret_phone_mapping_audited(
+                enabled,
+                AuditCtx::route_admin(AuditOp::SecretPhoneGateSet, actor),
+            )?;
+            Ok(serde_json::json!({"phone_mapping": enabled, "changed": changed}))
         }
         AdminOpBody::FederationGateSet { enabled, .. } => {
             let changed = store.set_federation_member_mapping_audited(
@@ -2087,6 +2106,15 @@ mod admin_schema_v2_tests {
             (
                 "FederationGateSet",
                 AdminOpBody::FederationGateSet {
+                    v: v2,
+                    enabled: true,
+                },
+                v2,
+                None,
+            ),
+            (
+                "SecretPhoneGateSet",
+                AdminOpBody::SecretPhoneGateSet {
                     v: v2,
                     enabled: true,
                 },

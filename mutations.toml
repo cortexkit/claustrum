@@ -1483,3 +1483,59 @@ expect_message = "the route frame must carry the complete uniform absence pair"
 only = false
 timeout_s = 600
 build_timeout_s = 3600
+
+[[control]]
+id = "secret-deposit-key-fence"
+guards = "The reserved secret deposit receiver is unreachable through credential ops, handles and list/watch views"
+file = "crates/credentials-core/src/agent_secret.rs"
+old = "id.starts_with(DEPOSIT_KEY_PREFIX)"
+new = 'id.starts_with("kem:deposit-fence-disabled:")'
+edits = []
+test_file = "crates/credentials-module/src/main.rs"
+runner = "cargo"
+package = "credentials-module"
+target = "--bin ck-claustrum"
+features = ["credentials-core/test-support"]
+expect_red = ["tests::deposit_key_is_not_found_on_credential_ops_and_absent_from_list_and_watch"]
+expect_message = "neither rows nor held-key digest reveal the deposit key"
+only = false
+timeout_s = 600
+build_timeout_s = 3600
+
+
+[[control]]
+id = "secret-incarnation-binding"
+guards = "Agent secret envelopes are authenticated to the current incarnation, not just the reusable name"
+file = "crates/credentials-core/src/agent_secret.rs"
+old = 'Ok(format!("secret|{kind}|{incarnation}|{name}"))'
+new = 'Ok(format!("secret|{kind}|0123456789abcdef0123456789abcdef|{name}"))'
+edits = []
+test_file = "crates/credentials-core/src/agent_secret_tests.rs"
+runner = "cargo"
+package = "credentials-core"
+target = "--lib"
+features = ["test-support"]
+expect_red = ["agent_secret::tests::sealing_binds_name_incarnation_kind_and_scope_before_material"]
+expect_message = "a different incarnation must not open a sealed secret"
+only = false
+timeout_s = 600
+build_timeout_s = 3600
+
+
+[[control]]
+id = "secret-audit-key-bootstrap-fails-closed"
+guards = "Any of the six secret tables makes a missing audit key corruption rather than a fresh vault"
+file = "crates/credentials-core/src/store.rs"
+old = "read_schema_version(c)? >= AGENT_SECRET_SCHEMA_VERSION"
+new = "false && read_schema_version(c)? >= AGENT_SECRET_SCHEMA_VERSION"
+edits = []
+test_file = "crates/credentials-core/src/store_agent_secret_tests.rs"
+runner = "cargo"
+package = "credentials-core"
+target = "--lib"
+features = ["test-support"]
+expect_red = ["store::store_agent_secrets::tests::every_secret_table_blocks_audit_key_regeneration"]
+expect_message = "a secret table with a missing audit key is a corrupt vault"
+only = false
+timeout_s = 600
+build_timeout_s = 3600

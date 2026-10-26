@@ -1234,6 +1234,10 @@ enum TransferKeyAccess<'a> {
 /// tell it which version to read (see [`TransferKeyUse::AnnounceVersion`]). Everything
 /// else answers the uniform `not_found` or leaves the key out of a list.
 fn transfer_key_fenced(credential_id: &str, access: TransferKeyAccess<'_>) -> bool {
+    // Deposit keys have no announce exception: only the secret deposit receiver uses them.
+    if credentials_core::agent_secret::is_deposit_key(credential_id) {
+        return true;
+    }
     if !credentials_core::federation::is_vault_transfer_id(credential_id) {
         return false;
     }

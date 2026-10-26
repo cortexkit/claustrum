@@ -472,7 +472,7 @@ fn envelope_audit(
 /// name and kind. `methods` describes how an API key may be used, so a site login, which
 /// has no method at all, omits the key rather than sending an empty list.
 fn flow_permission_rows(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<Value>> {
-    conn.prepare("SELECT g.grant_id,g.flow_id,g.flow_version,g.flow_install_id,s.name,s.kind,s.host,s.path_prefix,COALESCE(s.origin,''),g.methods,g.granted_at_ms,g.card_ref,g.envelope_sha256 FROM secret_flow_grants g JOIN agent_secrets s ON s.incarnation=g.incarnation AND s.name=g.secret_name ORDER BY g.grant_id")?
+    conn.prepare("SELECT g.grant_id,g.flow_id,g.flow_version,g.flow_install_id,s.name,s.kind,s.host,s.path_prefix,COALESCE(s.origin,''),g.methods,g.granted_at_ms,g.card_ref FROM secret_flow_grants g JOIN agent_secrets s ON s.incarnation=g.incarnation AND s.name=g.secret_name ORDER BY g.grant_id")?
         .query_map([], |r| {
             let name: String = r.get(4)?;
             let kind: String = r.get(5)?;
@@ -508,9 +508,6 @@ fn flow_permission_rows(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<Val
             if let Some(card) = r.get::<_,Option<String>>(11)? {
                 row["card_ref"] = json!(card);
             }
-            // The digest of the signed envelope this grant came from, which the phone's
-            // store keeps to prove which approval created the grant.
-            row["envelope_sha256"] = json!(r.get::<_,String>(12)?);
             Ok(row)
         })?
         .collect()

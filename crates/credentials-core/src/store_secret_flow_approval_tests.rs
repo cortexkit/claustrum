@@ -267,7 +267,21 @@ fn secret_flow_approval_consumes_once_and_binds_grant_audit_to_exact_envelope() 
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
-    let rows: Vec<(String, String, u64, String, String, Option<String>, String, String, i64, String)> = store.store.with_conn(|c| {
+    // name, flow id, version, code hash, install id, methods, envelope digest, audit
+    // payload hash, granted at, card ref.
+    type GrantRow = (
+        String,
+        String,
+        u64,
+        String,
+        String,
+        Option<String>,
+        String,
+        String,
+        i64,
+        String,
+    );
+    let rows: Vec<GrantRow> = store.store.with_conn(|c| {
         let mut query = c.prepare("SELECT g.secret_name,g.flow_id,g.flow_version,g.flow_code_hash,g.flow_install_id,g.methods,g.envelope_sha256,a.payload_hash,g.granted_at_ms,g.card_ref FROM secret_flow_grants g JOIN audit_log a ON a.op='secret_grant_create' AND a.credential_id='secret|'||g.secret_name ORDER BY g.secret_name")?;
         let rows = query.query_map([], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?,r.get(8)?,r.get(9)?)))?;
         rows.collect()

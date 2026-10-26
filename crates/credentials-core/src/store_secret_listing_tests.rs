@@ -175,72 +175,24 @@ fn seed_agent_grant(store: &EncryptedStore, grant_id: &str, name: &str, agent: O
         .unwrap();
 }
 
+/// permissions/v1 has a closed holder set and the phone decodes rows strictly, so a flow
+/// row could drop the whole page. Until the contract gains a flow holder, flow grants
+/// stay out of `permissions.list`, filtered or not, while agent grants keep their shape.
 #[test]
-fn permissions_list_names_each_flow_holder_and_omits_it_for_an_agent_filter() {
+fn permissions_list_leaves_flow_grants_out_until_the_contract_has_a_flow_holder() {
     let (_root, store) = rig("flow-permissions-list", 91);
     seed_secret(&store, "key", INC, false);
     seed_secret(&store, "login", LOGIN_INC, true);
     seed_agent_grant(&store, "agent-grant", "key", Some("agent-A"));
-    for (grant_id, name, install) in [
-        ("flow-a", "key", "install-A"),
-        ("flow-b", "key", "install-B"),
-    ] {
-        seed_flow_grant(&store, grant_id, name, install);
+    seed_flow_grant(&store, "flow-a", "key", "install-A");
+    seed_flow_grant(&store, "flow-b", "login", "install-B");
+    for filter in [None, Some("agent-A")] {
+        let listed = store.secret_permissions_list(filter, NOW).unwrap();
+        let rows = listed["grants"].as_array().unwrap();
+        assert_eq!(rows.len(), 1, "{listed}");
+        assert_eq!(rows[0]["id"], "agent-grant");
+        assert_eq!(rows[0]["holder"]["kind"], "agent");
     }
-    let listed = store.secret_permissions_list(None, NOW).unwrap();
-    let rows = listed["grants"].as_array().unwrap();
-    let flow_rows: Vec<&Value> = rows
-        .iter()
-        .filter(|row| row["holder"]["kind"] == "flow")
-        .collect();
-    assert_eq!(flow_rows.len(), 2, "{listed}");
-    for (row, install) in flow_rows.iter().zip(["install-A", "install-B"]) {
-        assert_eq!(
-            row["holder"],
-            json!({"kind":"flow","flow_id":"daily-fetch","flow_version":7,"flow_install_id":install})
-        );
-        assert_eq!(row["methods"], json!(["GET"]));
-        assert_eq!(row["scope"], "api_key");
-        assert_eq!(row["subject_label"], "key");
-        // A flow grant has no wall-clock expiry and belongs to no agent.
-        assert!(row.get("expires_at_ms").is_none(), "{row}");
-        assert!(row.get("agent_id").is_none(), "{row}");
-        assert_eq!(row["card_ref"], "flow-card");
-    }
-    assert_ne!(flow_rows[0]["id"], flow_rows[1]["id"]);
-    // The agent grant keeps exactly the shape it had, and the agent filter excludes flow
-    // grants outright: they belong to an installed version, never to an agent.
-    let filtered = store.secret_permissions_list(Some("agent-A"), NOW).unwrap();
-    assert_eq!(
-        filtered["grants"].as_array().unwrap().len(),
-        1,
-        "{filtered}"
-    );
-    assert_eq!(filtered["grants"][0]["holder"]["kind"], "agent");
-}
-
-#[test]
-fn permissions_list_omits_methods_for_a_flow_site_login() {
-    let (_root, store) = rig("flow-permissions-login", 92);
-    seed_secret(&store, "login", INC, true);
-    store
-        .store
-        .with_conn(|conn| {
-            conn.execute(
-                "INSERT INTO secret_flow_grants (grant_id,secret_name,incarnation,flow_id,flow_version,flow_code_hash,flow_install_id,methods,granted_at_ms,envelope_sha256) VALUES ('flow-login','login',?1,'daily-fetch',7,?2,'install-A',NULL,10,'digest')",
-                rusqlite::params![INC, CODE_HASH],
-            )?;
-            Ok(())
-        })
-        .unwrap();
-    let listed = store.secret_permissions_list(None, NOW).unwrap();
-    let row = &listed["grants"][0];
-    assert_eq!(row["scope"], "site_login");
-    assert_eq!(
-        row["holder"],
-        json!({"kind":"flow","flow_id":"daily-fetch","flow_version":7,"flow_install_id":"install-A"})
-    );
-    assert!(row.get("methods").is_none(), "{row}");
 }
 
 #[test]

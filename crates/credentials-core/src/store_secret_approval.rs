@@ -21,6 +21,11 @@ struct Pending {
     digest: String,
     expiry: i64,
     consumed: bool,
+    flow_id: Option<String>,
+    flow_version: Option<u64>,
+    flow_code_hash: Option<String>,
+    flow_install_id: Option<String>,
+    methods: Option<String>,
 }
 
 impl EncryptedStore {
@@ -157,7 +162,7 @@ impl EncryptedStore {
         delete: bool,
         now: i64,
     ) -> rusqlite::Result<bool> {
-        let pending = tx.query_row("SELECT request_kind,secret_name,incarnation,member_id,mapped_owner,mapped_kind,mapped_ref,mapped_epoch,coverage,agent_id,statement_bytes,statement_sha256,request_expires_at_ms,consumed FROM secret_pending_requests WHERE request_id=?1",[&item.request_id],|r| Ok(Pending {kind:r.get(0)?,name:r.get(1)?,incarnation:r.get(2)?,member:r.get(3)?,owner:r.get(4)?,scope_kind:r.get(5)?,scope_ref:r.get(6)?,epoch:r.get(7)?,coverage:r.get(8)?,agent_id:r.get(9)?,bytes:r.get(10)?,digest:r.get(11)?,expiry:r.get(12)?,consumed:r.get(13)?})).optional()?;
+        let pending = tx.query_row("SELECT request_kind,secret_name,incarnation,member_id,mapped_owner,mapped_kind,mapped_ref,mapped_epoch,coverage,agent_id,statement_bytes,statement_sha256,request_expires_at_ms,consumed,flow_id,flow_version,flow_code_hash,flow_install_id,methods FROM secret_pending_requests WHERE request_id=?1",[&item.request_id],|r| Ok(Pending {kind:r.get(0)?,name:r.get(1)?,incarnation:r.get(2)?,member:r.get(3)?,owner:r.get(4)?,scope_kind:r.get(5)?,scope_ref:r.get(6)?,epoch:r.get(7)?,coverage:r.get(8)?,agent_id:r.get(9)?,bytes:r.get(10)?,digest:r.get(11)?,expiry:r.get(12)?,consumed:r.get(13)?,flow_id:r.get(14)?,flow_version:r.get(15)?,flow_code_hash:r.get(16)?,flow_install_id:r.get(17)?,methods:r.get(18)?})).optional()?;
         let Some(p) = pending else {
             return Ok(false);
         };
@@ -188,7 +193,7 @@ impl EncryptedStore {
             "once" => issued.checked_add(600_000),
             "hour" => issued.checked_add(3_600_000),
             "session" => issued.checked_add(86_400_000),
-            "permanent" => Some(0),
+            "permanent" | "version" => Some(0),
             "none" if delete => Some(p.expiry),
             _ => None,
         };
@@ -233,17 +238,27 @@ impl EncryptedStore {
             return Ok(true);
         }
         if state != "active"
-            || statement["v"] != "ck-secret-use-statement/v1"
             || !statement["durations"]
                 .as_array()
                 .is_some_and(|d| d.iter().any(|v| v == &e.duration))
-            || statement["scope"]
-                != json!({"owner":p.owner,"kind":p.scope_kind,"ref":p.scope_ref,"epoch":p.epoch})
-            || statement["coverage"] != json!(p.coverage)
-            || !matches!(p.scope_kind.as_deref(), Some("head" | "worker"))
-            || !matches!(p.coverage.as_deref(), Some("scope" | "agent_and_workers"))
-            || (p.coverage.as_deref() == Some("agent_and_workers")
-                && (e.duration != "permanent" || p.scope_kind.as_deref() != Some("head")))
+        {
+            return Ok(false);
+        }
+        let flow_item = p.flow_id.is_some()
+            || p.flow_version.is_some()
+            || p.flow_code_hash.is_some()
+            || p.flow_install_id.is_some()
+            || p.methods.is_some();
+        if !flow_item
+            && (e.duration == "version"
+                || statement["v"] != "ck-secret-use-statement/v1"
+                || statement["scope"]
+                    != json!({"owner":p.owner,"kind":p.scope_kind,"ref":p.scope_ref,"epoch":p.epoch})
+                || statement["coverage"] != json!(p.coverage)
+                || !matches!(p.scope_kind.as_deref(), Some("head" | "worker"))
+                || !matches!(p.coverage.as_deref(), Some("scope" | "agent_and_workers"))
+                || (p.coverage.as_deref() == Some("agent_and_workers")
+                    && (e.duration != "permanent" || p.scope_kind.as_deref() != Some("head"))))
         {
             return Ok(false);
         }
@@ -266,6 +281,19 @@ impl EncryptedStore {
         if agent_secret::open(&self.key, &p.incarnation, &p.name, &scope, &blob).is_err() {
             self.approval_quarantine(tx, &p)?;
             return Ok(false);
+        }
+        if flow_item {
+            return self.secret_flow_approval_item_tx(
+                tx,
+                item,
+                e,
+                &p,
+                &scope,
+                &actor,
+                envelope_hash,
+                card_ref,
+                now,
+            );
         }
         let sealed_use = match &scope {
             agent_secret::SecretScope::ApiKey {
@@ -293,6 +321,88 @@ impl EncryptedStore {
             AuditOp::SecretGrantCreate,
             &p.name,
             &actor,
+            envelope_hash,
+        )?;
+        Ok(true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn secret_flow_approval_item_tx(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        item: &ApprovalItem,
+        e: &ApprovalEnvelope,
+        p: &Pending,
+        scope: &agent_secret::SecretScope,
+        actor: &str,
+        envelope_hash: &str,
+        card_ref: Option<&str>,
+        now: i64,
+    ) -> rusqlite::Result<bool> {
+        if e.duration != "version"
+            || p.owner.is_some()
+            || p.scope_kind.is_some()
+            || p.scope_ref.is_some()
+            || p.epoch.is_some()
+            || p.coverage.is_some()
+            || p.agent_id.is_some()
+        {
+            return Ok(false);
+        }
+        let (Some(flow_id), Some(version), Some(code_hash), Some(install_id)) = (
+            &p.flow_id,
+            p.flow_version,
+            &p.flow_code_hash,
+            &p.flow_install_id,
+        ) else {
+            return Ok(false);
+        };
+        let flow = agent_secret::FlowIdentity {
+            flow_id: flow_id.clone(),
+            version,
+            code_hash: code_hash.clone(),
+            install_id: install_id.clone(),
+        };
+        let methods: Option<Vec<String>> =
+            match p.methods.as_deref().map(serde_json::from_str).transpose() {
+                Ok(methods) => methods,
+                Err(_) => return Ok(false),
+            };
+        if let Some(methods) = &methods {
+            if agent_secret::sorted_flow_methods(methods).as_ref() != Ok(methods) {
+                return Ok(false);
+            }
+        }
+        let expected = match agent_secret::flow_approval_statement(
+            &item.request_id,
+            &p.member,
+            &p.incarnation,
+            &p.name,
+            &flow,
+            scope,
+            methods.as_deref(),
+            p.expiry,
+        ) {
+            Ok(statement) => statement,
+            Err(_) => return Ok(false),
+        };
+        // Rebuild from the pending identity and sealed secret scope, never from signed claims.
+        if serde_json::to_vec(&expected).ok().as_deref() != Some(p.bytes.as_slice()) {
+            return Ok(false);
+        }
+        let id = agent_secret::request_id(now)
+            .map_err(|_| rusqlite_err("grant id generation failed"))?;
+        tx.execute(
+            "UPDATE secret_pending_requests SET consumed=1 WHERE request_id=?1",
+            [&item.request_id],
+        )?;
+        tx.execute("INSERT INTO secret_flow_grants (grant_id,secret_name,incarnation,flow_id,flow_version,flow_code_hash,flow_install_id,methods,granted_at_ms,envelope_sha256,card_ref) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",rusqlite::params![id,p.name,p.incarnation,flow.flow_id,flow.version,flow.code_hash,flow.install_id,p.methods,now,envelope_hash,card_ref])?;
+        envelope_audit(
+            tx,
+            &self.audit_key,
+            AuditOp::SecretGrantCreate,
+            &p.name,
+            actor,
             envelope_hash,
         )?;
         Ok(true)

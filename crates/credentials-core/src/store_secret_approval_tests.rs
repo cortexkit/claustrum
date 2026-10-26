@@ -3,6 +3,9 @@ use crate::store::PhoneOperation;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use p256::ecdsa::{signature::Signer, Signature, SigningKey};
 
+#[path = "store_secret_flow_approval_tests.rs"]
+mod flow_tests;
+
 const FP: &str = "11111111111111111111111111111111";
 const UNKNOWN: &str = "00000000000000000000000000";
 fn signer() -> SigningKey {

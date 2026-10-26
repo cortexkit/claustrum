@@ -30,6 +30,81 @@ pub fn approval_statement(
     json!({"v":"ck-secret-use-statement/v1","request_id":id,"member_id":member,"scope":{"owner":call.scope.owner,"kind":call.scope.kind,"ref":call.scope.scope_ref,"epoch":call.scope.epoch},"agent_id":call.agent_id,"coverage":call.coverage,"secret":{"name":call.name,"kind":scope.kind(),"incarnation":incarnation},"use":use_scope,"durations":if call.coverage=="agent_and_workers" {vec!["permanent"]}else{vec!["once","hour","session","permanent"]},"request_expires_at_ms":expiry})
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct FlowIdentity {
+    pub flow_id: String,
+    pub version: u64,
+    pub code_hash: String,
+    pub install_id: String,
+}
+
+impl FlowIdentity {
+    pub fn validate(&self) -> Result<(), super::ValidationError> {
+        if self.flow_id.is_empty()
+            || !(1..=MAX_SECRET_JSON_INTEGER).contains(&self.version)
+            || self.code_hash.len() != 64
+            || !self
+                .code_hash
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            || !(1..=256).contains(&self.install_id.len())
+            || !self.install_id.bytes().all(|b| (0x20..=0x7e).contains(&b))
+        {
+            return Err(super::ValidationError::InvalidParams);
+        }
+        Ok(())
+    }
+}
+
+pub fn sorted_flow_methods(methods: &[String]) -> Result<Vec<String>, super::ValidationError> {
+    if methods.is_empty()
+        || methods
+            .iter()
+            .any(|m| !(1..=16).contains(&m.len()) || !m.bytes().all(|b| b.is_ascii_uppercase()))
+    {
+        return Err(super::ValidationError::InvalidParams);
+    }
+    let mut sorted = methods.to_vec();
+    sorted.sort();
+    if sorted.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(super::ValidationError::InvalidParams);
+    }
+    Ok(sorted)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn flow_approval_statement(
+    id: &str,
+    member: &str,
+    incarnation: &str,
+    name: &str,
+    flow: &FlowIdentity,
+    scope: &super::SecretScope,
+    methods: Option<&[String]>,
+    expiry: i64,
+) -> Result<serde_json::Value, super::ValidationError> {
+    use serde_json::json;
+    flow.validate()?;
+    let use_scope = match (scope, methods) {
+        (
+            super::SecretScope::ApiKey {
+                host,
+                path_prefix,
+                location,
+            },
+            Some(methods),
+        ) => {
+            json!({"host":host,"path_prefix":path_prefix.as_deref().unwrap_or(""),"location":location,"methods":sorted_flow_methods(methods)?})
+        }
+        (super::SecretScope::SiteLogin { origin }, None) => json!({"origin":origin}),
+        _ => return Err(super::ValidationError::InvalidParams),
+    };
+    Ok(
+        json!({"v":"ck-secret-flow-statement/v1","request_id":id,"member_id":member,"flow":flow,"secret":{"name":name,"kind":scope.kind(),"incarnation":incarnation},"use":use_scope,"durations":["version"],"request_expires_at_ms":expiry}),
+    )
+}
+
 pub fn delete_statement(
     id: &str,
     member: &str,
@@ -88,8 +163,10 @@ impl ApprovalEnvelope {
             || !matches!(envelope.decision.as_str(), "allow" | "delete")
             || !matches!(
                 envelope.duration.as_str(),
-                "once" | "hour" | "session" | "permanent" | "none"
+                "once" | "hour" | "session" | "permanent" | "none" | "version"
             )
+            || (envelope.duration == "version"
+                && (envelope.decision != "allow" || envelope.grant_expires_at_ms != 0))
             || envelope.items.iter().any(|item| {
                 item.request_id.len() != 26
                     || item.request_id.as_bytes()[0] > b'7'

@@ -3545,10 +3545,18 @@ mod error_class_tests {
             1,
             "the table must pin exactly one malformed-encoding verdict"
         );
-        assert!(
-            !doc.contains("| `invalid_params` |"),
-            "invalid_params is a transport Error, not an in-result code"
-        );
+        // A code table may list invalid_params (the agent-secrets table does, to show
+        // its full refusal set), but only as a transport Error. A row presenting it as
+        // an in-result code with a class would tell consumers to branch on it there.
+        for row in doc
+            .lines()
+            .filter(|line| line.starts_with("| `invalid_params` |"))
+        {
+            assert!(
+                row.contains("transport Error"),
+                "invalid_params is a transport Error, not an in-result code: {row}"
+            );
+        }
         // And the reverse: a class the doc names that the enum no longer emits would be
         // a consumer branching on something that can never arrive.
         for candidate in [

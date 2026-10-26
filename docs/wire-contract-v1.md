@@ -1935,8 +1935,8 @@ that the name, kind and target it supplied exist; that is the one accepted discl
 The approval statement, the delete statement and the envelope are RFC 8785 (JCS)
 canonical JSON, carried as unpadded base64url. All integers are JSON numbers no larger
 than 2^53 − 1; there are no floats; strings are UTF-8. Their `v` field is their domain
-tag, registered in `docs/domain-separators.txt`. The examples below are the pinned CKIOS
-vectors (`crates/credentials-core/tests/vectors/secret-approval-v1.json`), decoded.
+tag, registered in `docs/domain-separators.txt`. The examples below are the pinned phone-app
+test vectors (`crates/credentials-core/tests/vectors/secret-approval-v1.json`), decoded.
 
 Approval statement, exactly `{v, request_id, member_id, scope: {owner, kind, ref, epoch},
 agent_id, coverage, secret: {name, kind, incarnation}, use, durations,

@@ -790,8 +790,8 @@ async fn secret_revoke_grant_request_and_result_key_sets_match_the_contract() {
     assert_secret_reply_matches("revoke_grant.result", &again);
 }
 
-/// The signed byte layouts in §15 are the pinned CKIOS vectors, byte for byte, and the
-/// statement the vault really issues has the golden statement's key set.
+/// The signed byte layouts in §15 equal the pinned phone-app (iOS) test vectors byte for
+/// byte, and the statement the vault really issues has the golden statement's key set.
 #[tokio::test]
 async fn secret_statement_and_envelope_key_sets_match_the_contract_and_the_pinned_vectors() {
     assert_secret_golden_shape(
@@ -1196,24 +1196,23 @@ async fn secret_caller_gate_and_op_matrix_matches_the_wire_contract() {
                         (Arc::clone(&surface), Arc::clone(&admin), caller.clone());
                     async move { sc_dispatch(&surface, &admin, caller, method, params).await }
                 };
-                let check_refusal =
-                    |cell: SecretCell, answer: &(FrameType, Vec<u8>), column: &str| match cell {
-                        SecretCell::NotFound => assert_eq!(answer, &not_found, "{at} {column}"),
-                        SecretCell::OperatorRequired => {
-                            assert_eq!(answer.0, FrameType::Error, "{at} {column}");
-                            let body: serde_json::Value =
-                                serde_json::from_slice(&answer.1).unwrap();
-                            assert_eq!(body, operator_required, "{at} {column}");
-                        }
-                        SecretCell::InvalidParams => {
-                            assert_eq!(answer.0, FrameType::Error, "{at} {column}");
-                            let body: serde_json::Value =
-                                serde_json::from_slice(&answer.1).unwrap();
-                            assert_eq!(body["code"], "invalid_params", "{at} {column}");
-                            assert!(body.get("class").is_none(), "{at} {column}");
-                        }
-                        SecretCell::Served => unreachable!(),
-                    };
+                let check_refusal = |cell: SecretCell,
+                                     answer: &(FrameType, Vec<u8>),
+                                     column: &str| match cell {
+                    SecretCell::NotFound => assert_eq!(answer, &not_found, "{at} {column}"),
+                    SecretCell::OperatorRequired => {
+                        assert_eq!(answer.0, FrameType::Error, "{at} {column}");
+                        let body: serde_json::Value = serde_json::from_slice(&answer.1).unwrap();
+                        assert_eq!(body, operator_required, "{at} {column}");
+                    }
+                    SecretCell::InvalidParams => {
+                        assert_eq!(answer.0, FrameType::Error, "{at} {column}");
+                        let body: serde_json::Value = serde_json::from_slice(&answer.1).unwrap();
+                        assert_eq!(body["code"], "invalid_params", "{at} {column}");
+                        assert!(body.get("class").is_none(), "{at} {column}");
+                    }
+                    SecretCell::Served => unreachable!(),
+                };
 
                 // Seven phone ops.
                 for op in crate::secret_phone::PHONE_OPS {

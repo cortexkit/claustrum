@@ -71,5 +71,7 @@ MAX_REPLY_CODE_LEN crates/credentials-module/src/federation/transfer.rs reply_co
 TRANSFER_PENDING_PER_SENDER_CAP crates/credentials-core/src/federation.rs a_duplicate_is_answered_before_the_queue_full_check
 TRANSFER_PENDING_TOTAL_CAP crates/credentials-core/src/federation.rs the_total_queue_keeps_64_transfers_and_refuses_the_65th_without_eviction
 
+MAX_SECRET_NAME_BYTES crates/credentials-core/src/agent_secret.rs names_accept_64_bytes_and_refuse_65_and_forbidden_bytes
+
 # Explicitly unchecked thresholds. These are known gaps, not coverage claims.
 # New constants still fail unless deliberately recorded in a reviewed change.

@@ -16,6 +16,7 @@
 
 pub mod admin_auth;
 pub mod admin_ops;
+pub mod agent_secret;
 pub mod apns;
 pub mod apns_submit;
 pub mod audit;

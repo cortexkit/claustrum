@@ -128,6 +128,9 @@ const MEMBER_GRANTS_SCHEMA_VERSION: u32 = 22;
 /// vault's own member id. Below it both read as unset.
 const SETTINGS_SCHEMA_VERSION: u32 = 26;
 
+/// Agent-secret storage is independent of the credential and federation tables.
+pub const AGENT_SECRET_SCHEMA_VERSION: u32 = 27;
+
 /// The audit ops that DEPOSIT a credential, so the earliest entry carrying one of
 /// them is that credential's birth instant.
 ///
@@ -858,6 +861,10 @@ const MIGRATIONS: &[Migration] = &[
                          updated_at_ms INTEGER NOT NULL\
                      );",
     },
+    Migration {
+        version: AGENT_SECRET_SCHEMA_VERSION,
+        statements: include_str!("agent_secrets.sql"),
+    },
 ];
 
 /// The newest store migration THIS BINARY knows how to apply.
@@ -1326,6 +1333,9 @@ pub enum StoreOpError {
     /// could not open anything signed by a replacement. Recovery is an operator
     /// `ck auth transfer init --replace` once the key is found off `Active`.
     TransferKeyProtected,
+    /// The reserved deposit key is absent, inactive, or undecodable. Bootstrap leaves
+    /// an existing key untouched so deposits fail closed; no recovery command exists.
+    SecretSetupIncomplete,
     /// The cipher envelope failed to decode/decrypt. The id has been quarantined.
     Decrypt(EnvelopeError),
     /// The decrypted body failed to parse as a record. The id has been quarantined.
@@ -1372,6 +1382,7 @@ enum IdentityPolicyOverwriteOutcome {
 impl std::fmt::Display for StoreOpError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            StoreOpError::SecretSetupIncomplete => f.write_str("secret_setup_incomplete"),
             StoreOpError::NotFound => f.write_str("credential not found"),
             StoreOpError::AlreadyExists => {
                 f.write_str("credential already exists (create-only; use a CAS overwrite)")
@@ -1455,6 +1466,7 @@ impl StoreOpError {
     /// Stable refusal code for taxonomy inputs that must never be retried unchanged.
     pub fn wire_code(&self) -> Option<&'static str> {
         match self {
+            StoreOpError::SecretSetupIncomplete => Some("secret_setup_incomplete"),
             StoreOpError::InvalidCredentialId => Some("invalid_credential_id"),
             StoreOpError::InvalidCategoryName => Some("invalid_category_name"),
             StoreOpError::InvalidPlanTier => Some("invalid_plan_tier"),
@@ -3067,6 +3079,9 @@ impl EncryptedStore {
         // rule, so an id under its prefix is refused by that name rather than by
         // whichever unrelated rule it happens to trip first.
         if matches!(selector_kind, SelectorKind::Exact) {
+            if crate::agent_secret::is_deposit_key(selector) {
+                return Err(StoreOpError::NotFound);
+            }
             crate::federation::transfer_key_admits_grant(
                 selector,
                 &format!("{principal_kind}:{principal_id}"),
@@ -3239,6 +3254,9 @@ impl EncryptedStore {
         credential_id: &str,
         operation: GrantOperation,
     ) -> Result<ScopedCoverage, StoreOpError> {
+        if crate::agent_secret::is_deposit_key(credential_id) {
+            return Err(StoreOpError::NotFound);
+        }
         self.store
             .with_conn(|conn| {
                 let mut stmt = conn.prepare(
@@ -3397,12 +3415,14 @@ impl EncryptedStore {
             .with_conn(|conn| {
                 let tx = conn.unchecked_transaction()?;
                 let schema_version = read_schema_version(&tx)?;
-                let grants = read_grants_from_conn(
+                let mut grants = read_grants_from_conn(
                     &tx,
                     Some(principal_kind),
                     Some(principal_id),
                     schema_version,
                 )?;
+                grants.retain(|grant| grant.selector_kind != SelectorKind::Exact
+                    || !crate::agent_secret::is_deposit_key(&grant.selector));
                 after_grants()?;
                 let mut stmt = tx.prepare(&format!(
                     "SELECT credential_id, record_version, state, envelope, \
@@ -3431,6 +3451,9 @@ impl EncryptedStore {
                 for (id, record_version, state, envelope_bytes, categories, provider_ids, plan_tier) in
                     candidates
                 {
+                    if crate::agent_secret::is_deposit_key(&id) {
+                        continue;
+                    }
                     let operations: BTreeSet<GrantOperation> = grants
                         .iter()
                         .filter(|grant| grant.operation != GrantOperation::Deposit)
@@ -5730,8 +5753,9 @@ impl EncryptedStore {
     ) -> Result<T, StoreOpError> {
         let refused = std::cell::Cell::new(false);
         let outcome = self.fenced_write(|tx| {
-            if crate::federation::is_vault_transfer_id(credential_id)
-                && vault_transfer_key_fence_holds_tx(tx)?
+            if store_agent_secrets::deposit_key_write_protected(tx, credential_id)?
+                || crate::federation::is_vault_transfer_id(credential_id)
+                    && vault_transfer_key_fence_holds_tx(tx)?
             {
                 refused.set(true);
                 return Err(rusqlite::Error::InvalidQuery);
@@ -5755,6 +5779,13 @@ impl EncryptedStore {
         &self,
         credential_id: &str,
     ) -> Result<(), StoreOpError> {
+        if self
+            .store
+            .with_conn(|conn| store_agent_secrets::deposit_key_write_protected(conn, credential_id))
+            .map_err(StoreOpError::from)?
+        {
+            return Err(StoreOpError::NotFound);
+        }
         if crate::federation::is_vault_transfer_id(credential_id)
             && self.refuses_vault_transfer_key_mutation()?
         {
@@ -5810,6 +5841,7 @@ impl EncryptedStore {
                 })
             })
             .map_err(StoreOpError::from)?
+            .filter(|id| !crate::agent_secret::is_deposit_key(id))
             .ok_or(StoreOpError::NotFound)
     }
 
@@ -5840,6 +5872,9 @@ impl EncryptedStore {
         credential_id: &str,
         ctx: AuditCtx<'_>,
     ) -> Result<(), StoreOpError> {
+        if crate::agent_secret::is_deposit_key(credential_id) {
+            return Err(StoreOpError::NotFound);
+        }
         if crate::federation::is_vault_transfer_id(credential_id) {
             return Err(StoreOpError::TransferKeyReserved);
         }
@@ -6219,6 +6254,10 @@ impl EncryptedStore {
                     )?;
                 }
 
+                quarantined.extend(store_agent_secrets::rotate_agent_secrets_tx(
+                    tx, old_key, &new_key,
+                )?);
+
                 // Re-seal the audit-key secret row under the new key.
                 tx.execute(
                     "UPDATE vault_secrets SET envelope = ?2, key_id = ?3 WHERE name = ?1",
@@ -6490,12 +6529,20 @@ fn load_or_create_audit_key(
     // No audit-key row. Only a brand-new (empty) vault may create one.
     let non_empty: bool = store
         .with_conn(|c| {
-            c.query_row(
-                "SELECT EXISTS(SELECT 1 FROM credentials) OR EXISTS(SELECT 1 FROM audit_log)",
-                [],
-                |r| r.get::<_, i64>(0),
-            )
-            .map(|v| v != 0)
+            // Before the agent-secret migration, only the legacy tables can hold data.
+            let query = if read_schema_version(c)? >= AGENT_SECRET_SCHEMA_VERSION {
+                "SELECT EXISTS(SELECT 1 FROM credentials) OR EXISTS(SELECT 1 FROM audit_log) \
+                 OR EXISTS(SELECT 1 FROM agent_secrets) \
+                 OR EXISTS(SELECT 1 FROM secret_phone_keys) \
+                 OR EXISTS(SELECT 1 FROM secret_phone_observations) \
+                 OR EXISTS(SELECT 1 FROM secret_pending_requests) \
+                 OR EXISTS(SELECT 1 FROM secret_grants) \
+                 OR EXISTS(SELECT 1 FROM secret_deposit_tombstones)"
+            } else {
+                "SELECT EXISTS(SELECT 1 FROM credentials) OR EXISTS(SELECT 1 FROM audit_log)"
+            };
+            c.query_row(query, [], |r| r.get::<_, i64>(0))
+                .map(|v| v != 0)
         })
         .map_err(StoreOpError::from)?;
     if non_empty {
@@ -12090,7 +12137,7 @@ mod tests {
     fn the_newest_migration_version_is_pinned_because_the_manifest_declares_it() {
         assert_eq!(
             newest_migration_version(),
-            26,
+            27,
             "the newest migration changed. This value is DECLARED in the module manifest \
              as store_schema_version, so a supervisor comparing declared-against-actual \
              sees it. Update the literal, and note the manifest consequence."
@@ -16048,3 +16095,7 @@ mod engine_federation_tests;
 #[cfg(test)]
 #[path = "transfer_key_fence_tests.rs"]
 mod transfer_key_fence_tests;
+
+#[path = "store_agent_secrets.rs"]
+mod store_agent_secrets;
+pub use store_agent_secrets::SecretDepositPublicKey;

@@ -27,6 +27,8 @@ pub const GENESIS_MAC: &str = "genesis";
 /// every record-version change and an unexplained bump is a detectable gap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuditOp {
+    /// Daemon bootstrap generated the reserved HPKE deposit receiver.
+    SecretDepositKeyCreate,
     /// A module creates a cookie row, recording itself as the immutable creator.
     DepositCookieCreate,
     /// A module replaces a cookie whose recorded creator matches that module.
@@ -163,6 +165,7 @@ impl AuditOp {
     /// The stable wire/storage string for this op.
     pub fn as_str(self) -> &'static str {
         match self {
+            AuditOp::SecretDepositKeyCreate => "secret_deposit_key_create",
             AuditOp::DepositCookieCreate => "deposit_cookie_create",
             AuditOp::DepositCookieReplace => "deposit_cookie_replace",
             AuditOp::Put => "put",
@@ -700,6 +703,7 @@ mod vocabulary_documentation_tests {
 
         fn value(op: AuditOp) -> &'static str {
             match op {
+                AuditOp::SecretDepositKeyCreate => AuditOp::SecretDepositKeyCreate.as_str(),
                 AuditOp::DepositCookieCreate => AuditOp::DepositCookieCreate.as_str(),
                 AuditOp::DepositCookieReplace => AuditOp::DepositCookieReplace.as_str(),
                 AuditOp::Put => AuditOp::Put.as_str(),

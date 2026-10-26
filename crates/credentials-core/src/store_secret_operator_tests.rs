@@ -590,3 +590,6 @@ fn read_only_listing_says_a_pre_migration_store_has_no_agent_secret_tables() {
     drop(sqlite);
     assert_eq!(list_agent_secrets_read_only(&path).unwrap(), None);
 }
+
+#[path = "store_secret_flow_schema_tests.rs"]
+mod flow_schema_tests;

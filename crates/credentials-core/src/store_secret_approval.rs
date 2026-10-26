@@ -204,7 +204,11 @@ impl EncryptedStore {
             if e.duration != "none" || statement["v"] != "ck-secret-delete-statement/v1" {
                 return Ok(false);
             }
-            for table in ["secret_grants", "secret_pending_requests"] {
+            for table in [
+                "secret_grants",
+                "secret_flow_grants",
+                "secret_pending_requests",
+            ] {
                 tx.execute(
                     &format!("DELETE FROM {table} WHERE incarnation=?1"),
                     [&p.incarnation],
@@ -353,7 +357,32 @@ pub(super) fn revoke(
 ) -> rusqlite::Result<Value> {
     let row: Option<(String,String)> = tx.query_row("SELECT secret_name,incarnation FROM secret_grants WHERE grant_id=?1 AND (duration='permanent' OR expires_at_ms>?2)",rusqlite::params![id,now],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
     let Some((name, incarnation)) = row else {
-        return Ok(json!({"outcome":"not_found"}));
+        let flow: Option<(String, String, String, u64)> = tx
+            .query_row(
+                "SELECT secret_name,incarnation,flow_id,flow_version FROM secret_flow_grants WHERE grant_id=?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()?;
+        let Some((name, incarnation, flow_id, flow_version)) = flow else {
+            return Ok(json!({"outcome":"not_found"}));
+        };
+        let flow_version = flow_version.to_string();
+        tx.execute("DELETE FROM secret_flow_grants WHERE grant_id=?1", [id])?;
+        phone::audit(
+            tx,
+            key,
+            AuditOp::SecretGrantRevoke,
+            Some(format!("secret|{name}")),
+            actor,
+            &[
+                id.as_bytes(),
+                incarnation.as_bytes(),
+                flow_id.as_bytes(),
+                flow_version.as_bytes(),
+            ],
+        )?;
+        return Ok(json!({"outcome":"revoked"}));
     };
     tx.execute("DELETE FROM secret_grants WHERE grant_id=?1", [id])?;
     phone::audit(

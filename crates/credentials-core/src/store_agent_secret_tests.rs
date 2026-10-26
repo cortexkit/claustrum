@@ -26,9 +26,9 @@ fn insert_secret(store: &EncryptedStore, name: &str, incarnation: &str) {
 }
 
 #[test]
-fn migration_27_creates_exactly_six_secret_tables() {
+fn secret_migrations_create_exactly_seven_secret_tables() {
     let (_root, store) = rig("secret-schema", 50);
-    assert_eq!(newest_migration_version(), 27);
+    assert_eq!(newest_migration_version(), 28);
     let tables = store.store.with_conn(|conn| {
         let mut stmt = conn.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND (name = 'agent_secrets' OR name LIKE 'secret_%') ORDER BY name")?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
@@ -39,6 +39,7 @@ fn migration_27_creates_exactly_six_secret_tables() {
         [
             "agent_secrets",
             "secret_deposit_tombstones",
+            "secret_flow_grants",
             "secret_grants",
             "secret_pending_requests",
             "secret_phone_keys",
@@ -63,6 +64,7 @@ fn every_secret_table_blocks_audit_key_regeneration() {
         "INSERT INTO secret_pending_requests (request_id, request_kind, secret_name, incarnation, member_id, statement_bytes, statement_sha256, request_expires_at_ms) VALUES ('req', 'delete', 'Example', 'inc', 'member', x'00', 'hash', 0)",
         "INSERT INTO secret_grants (grant_id, secret_name, incarnation, scope_owner, scope_kind, scope_ref, coverage, duration, expires_at_ms, granted_at_ms, envelope_sha256) VALUES ('grant', 'Example', 'inc', 'owner', 'head', 'ref', 'scope', 'once', 0, 0, 'hash')",
         "INSERT INTO secret_deposit_tombstones VALUES ('id', 'digest', 'member', 'inc')",
+        "INSERT INTO secret_flow_grants (grant_id,secret_name,incarnation,flow_id,flow_version,flow_code_hash,flow_install_id,granted_at_ms,envelope_sha256) VALUES ('flow-grant','Example','inc','flow',1,'hash','install',0,'hash')",
     ];
     for (i, insert) in inserts.iter().enumerate() {
         let (_root, store) = rig(&format!("secret-audit-{i}"), 51);

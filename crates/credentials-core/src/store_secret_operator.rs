@@ -108,7 +108,11 @@ impl EncryptedStore {
             let Some((kind, incarnation)) = row else {
                 return Ok(Err(SecretError::NotFound));
             };
-            for table in ["secret_grants", "secret_pending_requests"] {
+            for table in [
+                "secret_grants",
+                "secret_flow_grants",
+                "secret_pending_requests",
+            ] {
                 tx.execute(
                     &format!("DELETE FROM {table} WHERE incarnation=?1"),
                     [&incarnation],
@@ -198,13 +202,17 @@ pub fn list_agent_secret_grants_read_only(
         .secrets
         .into_iter()
         .flat_map(|secret| {
-            secret.grants.into_iter().map(move |grant| {
-                (
-                    grant.grant_id,
-                    secret.name.clone(),
-                    grant.expires_at_ms.unwrap_or(0),
+            secret
+                .grants
+                .into_iter()
+                .map(|grant| (grant.grant_id, grant.expires_at_ms.unwrap_or(0)))
+                .chain(
+                    secret
+                        .flow_grants
+                        .into_iter()
+                        .map(|grant| (grant.grant_id, 0)),
                 )
-            })
+                .map(move |(id, expiry)| (id, secret.name.clone(), expiry))
         })
         .collect())
 }
@@ -225,6 +233,8 @@ pub struct OperatorSecretRow {
     pub location: Option<String>,
     pub origin: Option<String>,
     pub grants: Vec<OperatorGrantRow>,
+    /// Flow holders are separate because they have no agent scope or coverage.
+    pub flow_grants: Vec<OperatorFlowGrantRow>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -238,6 +248,20 @@ pub struct OperatorGrantRow {
     /// Absent for a permanent grant, which has no expiry to report.
     pub expires_at_ms: Option<i64>,
     pub last_use_ms: Option<i64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OperatorFlowGrantRow {
+    pub grant_id: String,
+    pub flow_id: String,
+    pub flow_version: u64,
+    pub flow_code_hash: String,
+    pub flow_install_id: String,
+    /// Sorted HTTP methods for an API key; absent for a site login.
+    pub methods: Option<Vec<String>>,
+    pub granted_at_ms: i64,
+    pub last_use_ms: Option<i64>,
+    pub card_ref: Option<String>,
 }
 
 /// One registered phone and how current its keys are.
@@ -278,7 +302,8 @@ pub fn list_agent_secrets_read_only(
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
     )
     .map_err(map)?;
-    if read_schema_version(&conn).map_err(map)? < AGENT_SECRET_SCHEMA_VERSION {
+    let schema_version = read_schema_version(&conn).map_err(map)?;
+    if schema_version < AGENT_SECRET_SCHEMA_VERSION {
         return Ok(None);
     }
     let mut secrets = conn
@@ -295,6 +320,7 @@ pub fn list_agent_secrets_read_only(
                 location: r.get(6)?,
                 origin: r.get(7)?,
                 grants: Vec::new(),
+                flow_grants: Vec::new(),
             })
         })
         .map_err(map)?
@@ -320,6 +346,33 @@ pub fn list_agent_secrets_read_only(
             .map_err(map)?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(map)?;
+        if schema_version >= FLOW_SECRET_SCHEMA_VERSION {
+            secret.flow_grants = conn
+                .prepare("SELECT grant_id,flow_id,flow_version,flow_code_hash,flow_install_id,methods,granted_at_ms,last_use_ms,card_ref FROM secret_flow_grants WHERE incarnation=?1 ORDER BY grant_id")
+                .map_err(map)?
+                .query_map([&secret.incarnation], |r| {
+                    let methods: Option<String> = r.get(5)?;
+                    let methods = methods
+                        .map(|json| serde_json::from_str(&json).map_err(|e| {
+                            rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, Box::new(e))
+                        }))
+                        .transpose()?;
+                    Ok(OperatorFlowGrantRow {
+                        grant_id: r.get(0)?,
+                        flow_id: r.get(1)?,
+                        flow_version: r.get(2)?,
+                        flow_code_hash: r.get(3)?,
+                        flow_install_id: r.get(4)?,
+                        methods,
+                        granted_at_ms: r.get(6)?,
+                        last_use_ms: r.get(7)?,
+                        card_ref: r.get(8)?,
+                    })
+                })
+                .map_err(map)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(map)?;
+        }
     }
     let phones = conn
         .prepare(

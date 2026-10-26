@@ -131,6 +131,9 @@ const SETTINGS_SCHEMA_VERSION: u32 = 26;
 /// Agent-secret storage is independent of the credential and federation tables.
 pub const AGENT_SECRET_SCHEMA_VERSION: u32 = 27;
 
+/// Flow grants have their own holder and never satisfy an agent-session request.
+pub const FLOW_SECRET_SCHEMA_VERSION: u32 = 28;
+
 /// The audit ops that DEPOSIT a credential, so the earliest entry carrying one of
 /// them is that credential's birth instant.
 ///
@@ -864,6 +867,10 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         version: AGENT_SECRET_SCHEMA_VERSION,
         statements: include_str!("agent_secrets.sql"),
+    },
+    Migration {
+        version: FLOW_SECRET_SCHEMA_VERSION,
+        statements: include_str!("flow_secrets.sql"),
     },
 ];
 
@@ -6538,7 +6545,12 @@ fn load_or_create_audit_key(
     let non_empty: bool = store
         .with_conn(|c| {
             // Before the agent-secret migration, only the legacy tables can hold data.
-            let query = if read_schema_version(c)? >= AGENT_SECRET_SCHEMA_VERSION {
+            let schema_version = read_schema_version(c)?;
+            let flow_non_empty = schema_version >= FLOW_SECRET_SCHEMA_VERSION
+                && c.query_row("SELECT EXISTS(SELECT 1 FROM secret_flow_grants)", [], |r| {
+                    r.get::<_, bool>(0)
+                })?;
+            let query = if schema_version >= AGENT_SECRET_SCHEMA_VERSION {
                 "SELECT EXISTS(SELECT 1 FROM credentials) OR EXISTS(SELECT 1 FROM audit_log) \
                  OR EXISTS(SELECT 1 FROM agent_secrets) \
                  OR EXISTS(SELECT 1 FROM secret_phone_keys) \
@@ -6550,7 +6562,7 @@ fn load_or_create_audit_key(
                 "SELECT EXISTS(SELECT 1 FROM credentials) OR EXISTS(SELECT 1 FROM audit_log)"
             };
             c.query_row(query, [], |r| r.get::<_, i64>(0))
-                .map(|v| v != 0)
+                .map(|v| v != 0 || flow_non_empty)
         })
         .map_err(StoreOpError::from)?;
     if non_empty {
@@ -12174,7 +12186,7 @@ mod tests {
     fn the_newest_migration_version_is_pinned_because_the_manifest_declares_it() {
         assert_eq!(
             newest_migration_version(),
-            27,
+            28,
             "the newest migration changed. This value is DECLARED in the module manifest \
              as store_schema_version, so a supervisor comparing declared-against-actual \
              sees it. Update the literal, and note the manifest consequence."
@@ -16138,8 +16150,8 @@ mod transfer_key_fence_tests;
 mod store_agent_secrets;
 /// Operator writes for agent secrets and the lease-free `ck auth secret` listing.
 pub use store_agent_secrets::{
-    list_agent_secret_grants_read_only, list_agent_secrets_read_only, OperatorGrantRow,
-    OperatorPhoneRow, OperatorSecretListing, OperatorSecretRow,
+    list_agent_secret_grants_read_only, list_agent_secrets_read_only, OperatorFlowGrantRow,
+    OperatorGrantRow, OperatorPhoneRow, OperatorSecretListing, OperatorSecretRow,
 };
 pub use store_agent_secrets::{
     secret_phone_gate_status_read_only, PhoneDeposit, PhoneOperation, SecretDepositPublicKey,

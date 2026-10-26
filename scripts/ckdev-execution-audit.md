@@ -58,7 +58,7 @@ on the next line after a wrapped call, direct aliases, raw TS spawns, shell/inli
 workflow spawns, arbitrary Rust env overrides and Python path bindings. Escaped
 multiline Rust strings and lifetimes have explicit lexical controls.
 
-`ckdev-mutate prove` appended two caught catalogue rows:
+Reverting the fence twice, once per control, reddened exactly one test each:
 
 | Row | Exact expected red test | Observed |
 |---|---|---|
@@ -67,14 +67,11 @@ multiline Rust strings and lifetimes have explicit lexical controls.
 
 The first direct-spawn proof initially survived: the lexer mishandled a
 backslash-newline in an existing Rust message, swallowing the following code.
-The lexer was fixed and given multiline/lifetime controls; the identical mutant
-then reddened the repository fence. The survivor is retained in
-`target/mutations/ckdev-direct-spawn.json`, with successful reports in
-`target/mutations/ckdev-direct-spawn-caught.json` and
-`target/mutations/ckdev-matcher-caught.json`. Each proof staged the live files,
-started with an empty unstaged diff, printed a one-file `2 +-` mutation stat,
-and restored via `git checkout -- <path> && touch <path>` to an empty unstaged
-diff. No runtime production binary was executed by these source-scan mutants.
+The lexer was fixed and given multiline/lifetime controls; the identical edit
+then reddened the repository fence. Each run staged the live files, started
+with an empty unstaged diff, printed a one-file `2 +-` mutation stat, and
+restored via `git checkout -- <path> && touch <path>` to an empty unstaged
+diff. No runtime production binary was executed by these source-scan edits.
 
 ## Measured execution
 
@@ -139,7 +136,7 @@ The final 70-sample run also observed these external images:
 
 ## Gates
 
-Cargo 1.99.0, rustc 1.99.0, Python 3.9.6, Bun 1.4.2, ckdev-mutate 0.8.0.
+Cargo 1.99.0, rustc 1.99.0, Python 3.9.6, Bun 1.4.2.
 
 The first full gate failed at
 `multi_account_restore_refuses_before_reading_or_revoking_material` during
@@ -151,15 +148,15 @@ Logs: `target/ckdev-gate.log`, `target/ckdev-gate-recheck.log`.
 Final full gate verdict:
 
 ```text
-GATE PASSED -- every local CI check, on this working tree (full mutation replay runs in landing CI)
+GATE PASSED -- every local CI check, on this working tree
 ```
 
 The final setup diagnostic was additionally checked with a nonexistent explicit
 supervisor override and without `CRED_REQUIRE_DAEMON`/`CI`: the one selected
 real-daemon test rejected it by naming `CRED_SUBCONSCIOUS_ROOT` and refusing
 fallback. The full nine-test target then passed with the valid isolated checkout.
-The final matcher refinements passed all 56 Python tests and both catalogue rows
-replayed as CAUGHT. An actual release `ck-auth` was executed via the shell helper
+The final matcher refinements passed all 56 Python tests and both fence controls
+reddened exactly their named test. An actual release `ck-auth` was executed via the shell helper
 as `ckdev-auth`; three checks verified its filename, `--version` execution and
 unchanged original-artifact hash. Bash syntax checking covered four modified
 shell files. No production placement or live-vault operation was attempted.

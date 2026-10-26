@@ -1170,7 +1170,7 @@ HEAD. It skips `real_daemon_e2e` and `cli_admin` tests against the staged binari
 optional substitute for a source test. `build-info.txt` records `fast_path`,
 `on_origin_master`, the observed `origin_master` SHA, and whether the fetch succeeded. An
 unresolved remote is recorded as `unknown`, not as an ancestry pass. Without `--fast`, the
-existing branch/ancestry guards, catalogue check and staged-artifact suites remain. Published
+existing branch/ancestry guards and staged-artifact suites remain. Published
 releases still use the guarded release workflow; the fast lane is not a public release path.
 
 Default and fast builds refuse on a dirty tree, stamp the source revision into both binaries, sign each with its
@@ -1254,7 +1254,7 @@ After `accept-deploy.sh` and the live probe pass, run the full checks and fix fo
 
 ```sh
 ./scripts/gate.sh
-# Land through the train so Linux/Windows CI and the full mutation replay run too.
+# Land through the train so the Linux and Windows CI legs run too.
 ./scripts/train-push.sh
 ```
 

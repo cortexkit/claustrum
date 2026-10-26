@@ -10,7 +10,7 @@ def main():
     error = None
     try:
         gate.job("preflight", ["bash", "scripts/gate.sh", "--lane", "preflight"])
-        jobs = [("Linux Rust + mutation catalogue", remote_command("full"), True),
+        jobs = [("Linux Rust", remote_command("full"), True),
                 ("TypeScript", ["bash", "scripts/gate.sh", "--lane", "typescript"], False)]
         if platform.system() == "Darwin":
             jobs.append(("host release artifact", ["bash", "scripts/gate.sh", "--lane", "release"], False))
@@ -28,7 +28,7 @@ def main():
     if gate.unchecked:
         print("GATE PASSED WITH UNCHECKED ARMS -- " + "; ".join(gate.unchecked))
     else:
-        print("GATE PASSED -- Linux checks and host artifact, full mutation replay remains in landing CI")
+        print("GATE PASSED -- Linux checks and host artifact")
     return 0
 
 

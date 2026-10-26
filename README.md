@@ -63,14 +63,14 @@ checks; public client releases are unchanged.
 
 The full gate runs everything CI tests locally, with the feature flags and expected counts.
 It also runs the real-daemon end-to-end tests and the inbound-contract check, which need a
-checkout of [`subconscious`](https://github.com/cortexkit/subconscious) beside this repository,
-and `ckdev-mutate` installed (see [mutation testing](docs/mutation-testing.md)):
+checkout of [`subconscious`](https://github.com/cortexkit/subconscious) beside this repository:
 
 ```sh
 ./scripts/gate.sh
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for what the gate checks and how to commit.
+A bug fix ships with a test that fails without the fix.
 
 ## Install and operate
 

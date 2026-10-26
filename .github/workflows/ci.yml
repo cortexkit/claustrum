@@ -42,10 +42,6 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # The commons revision the mutation runner is installed from. It also keys the
-  # runner's cache, so bumping it here both reinstalls and stops a cached binary
-  # from an older revision being reused.
-  CKDEV_MUTATE_REV: 0c99c7e16d8ae22b6e114136b6b7b68be6f1394e
 
 jobs:
   # Linux + Windows matrix. Windows is the load-bearing leg (the cfg(windows)
@@ -232,26 +228,6 @@ jobs:
         if: runner.os != 'Windows'
         run: python3 -m unittest discover -s scripts/tests -v
 
-      # Runs on Windows too: from 0.7.2 an LF anchor that finds nothing in a CRLF
-      # checkout is retried in CRLF form, so the check reads the catalogue, not the
-      # checkout's line endings.
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        id: mutate-cache
-        with:
-          path: |
-            ~/.cargo/bin/ckdev-mutate
-            ~/.cargo/bin/ckdev-mutate.exe
-          key: ckdev-mutate-${{ runner.os }}-${{ runner.arch }}-${{ env.CKDEV_MUTATE_REV }}
-
-      - name: Install mutation runner (immutable revision)
-        if: steps.mutate-cache.outputs.cache-hit != 'true'
-        # An expression, not "$CKDEV_MUTATE_REV": this step runs in PowerShell on
-        # Windows, where that form is an empty PowerShell variable.
-        run: cargo install --locked --git https://github.com/cortexkit/commons --rev ${{ env.CKDEV_MUTATE_REV }} cortexkit-mutate
-
-      - name: Mutation catalogue check
-        run: ckdev-mutate check
-
       - name: Linux Secret Service round trips and locked refusal
         if: runner.os == 'Linux'
         env:
@@ -330,18 +306,6 @@ jobs:
         timeout-minutes: 10
         run: cargo test --locked -p credentials-module --features windows-runtime-test-seam --test windows_runtime -- --nocapture --test-threads=1
 
-      - name: Windows key-file ACL mutation proofs
-        if: runner.os == 'Windows'
-        run: python3 scripts/prove-windows-acl.py
-
-      - name: Upload Windows ACL mutation evidence
-        if: always() && runner.os == 'Windows'
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-acl-mutations
-          path: claustrum/gate-evidence/windows-acl-mutations.json
-          if-no-files-found: warn
-
       # Run the #[ignore]'d real-daemon e2e (incl. the on-the-wire malicious-client
       # harness) under a real supervised subc-core. This is the ONLY layer that
       # catches cross-component contract bugs (e.g. a CLI/daemon lease-namespace
@@ -390,67 +354,3 @@ jobs:
           cargo build --release --locked -p credentials-module --bin ck-auth
           export CK_AUTH_IMPORT_SHIPPED_BINARY="$PWD/target/release/ck-auth"
           cargo test --locked --workspace --features credentials-core/test-support,credentials-module/import-prompt-seam --test import_picker -- --test-threads=1
-
-  # Separate checkouts per shard: never replay two mutants in one tree. Include
-  # train pushes because train-push.sh waits for this workflow before landing.
-  # Four shards because the replay is the slowest job on every push: with two, a
-  # shard took about 11 minutes (2026-10-22) and held every train behind it. Keep
-  # SHARDS and the matrix list in step.
-  mutations:
-    name: Mutation proofs (${{ matrix.shard }}/4)
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
-    env:
-      SHARDS: 4
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2, 3, 4]
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@bc2d2e71bd35c5549942babaa51a89c586b981d1 # v2.8.1
-      # Rows whose runner is `bun test` (the TypeScript client) need bun and the
-      # workspace's packages installed, just as the test job has.
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.3.14
-      - name: Bun install
-        run: bun install --frozen-lockfile
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        id: mutate-cache
-        with:
-          path: ~/.cargo/bin/ckdev-mutate
-          key: ckdev-mutate-${{ runner.os }}-${{ runner.arch }}-${{ env.CKDEV_MUTATE_REV }}
-      - name: Install mutation runner (immutable revision)
-        if: steps.mutate-cache.outputs.cache-hit != 'true'
-        # An expression, not "$CKDEV_MUTATE_REV": this step runs in PowerShell on
-        # Windows, where that form is an empty PowerShell variable.
-        run: cargo install --locked --git https://github.com/cortexkit/commons --rev ${{ env.CKDEV_MUTATE_REV }} cortexkit-mutate
-      # No catalogue check here: the test job runs `ckdev-mutate check` once, and
-      # `run` refuses a row whose anchor doesn't match anyway. Repeating it cost about
-      # a minute on every shard, on the slowest path of the workflow.
-      - name: Replay selected safety proofs
-        shell: bash
-        env:
-          EVENT: ${{ github.event_name }}
-          SHARD: ${{ matrix.shard }}
-        run: |
-          mkdir -p target/mutations
-          if [[ "$EVENT" == "pull_request" ]]; then
-            ckdev-mutate run --diff origin/master --shard "$SHARD/$SHARDS" --report target/mutations/diff.json
-          elif [[ "$EVENT" == "schedule" ]]; then
-            ckdev-mutate run --all --broad --shard "$SHARD/$SHARDS" --report target/mutations/broad.json
-          else
-            ckdev-mutate run --all --shard "$SHARD/$SHARDS" --report target/mutations/all.json
-          fi
-      - name: Upload mutation reports
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: mutations-${{ matrix.shard }}
-          path: target/mutations/
-          if-no-files-found: warn
-

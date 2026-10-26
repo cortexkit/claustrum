@@ -22,8 +22,8 @@ and a finished implementation is hard to argue with.
 The gate checks your working tree, including uncommitted edits. Format, script contracts
 and repository scans run locally first and fail fast without building test binaries. Then
 one Linux job (`ck motor run`, 8 vCPUs) runs clippy, workspace tests, real-daemon e2e,
-crash cuts, migration/release compatibility, release-artifact/picker assertions and the
-full `ckdev-mutate check` catalogue validation. The Linux job runs concurrently with the
+crash cuts, migration/release compatibility and release-artifact/picker assertions. The
+Linux job runs concurrently with the
 local Bun install/typecheck/hermetic tests and the lanes that only the host itself can
 run: on macOS, the default-feature release `ck-auth` build placed on that machine; on
 Windows, the Windows-native checks. Apart from those, no cargo check, clippy or test
@@ -34,19 +34,18 @@ it before every push.
 It needs:
 
 - the local Rust formatting toolchain, Bun and Python 3, plus access to `ck motor run`;
-  the Linux runner needs Rust, Python and the installed `ckdev-mutate` tool;
+  the Linux runner needs Rust and Python;
 - a checkout of [`subconscious`](https://github.com/cortexkit/subconscious) beside this
   repository (or `CRED_SUBCONSCIOUS_ROOT` pointing at one), for the real-daemon end-to-end
-  tests and the inbound-contract check;
-- `ckdev-mutate`, installed as described in [mutation testing](docs/mutation-testing.md).
+  tests and the inbound-contract check.
 
 The `subconscious` supervisor checkout is passed to the Linux runner with `--sibling`.
 Its path and the fast-check scope also travel as arguments to the worker, rather than
 environment variables that the runner may filter. A supervisor path absent inside the
 job fails before copying or building anything.
 Remote workers copy both checkout snapshots to
-writable scratch trees, preserving dirty content and history, because mutation tooling
-and the supervisor build must not write into the runner's read-only snapshots. Build
+writable scratch trees, preserving dirty content and history, because the checks and the
+supervisor build must not write into the runner's read-only snapshots. Build
 output uses the runner's writable `target` caches. Snapshot clones use command-scoped
 Git trust for each exact source `.git` path; they never change global Git configuration
 or trust all repositories. Runner refusal/unreachability, unknown
@@ -74,8 +73,8 @@ and conditional script contracts first, then one Linux job for diff-scoped clipp
 and the always-on Rust wire/migration checks, in parallel with local TypeScript checks.
 Scope is resolved before submission and passed explicitly, so dirty edits cannot vanish
 when the runner makes its writable copy. Fast-check still omits the full gate's
-feature-gated lint and crash-cut checks, e2e, native stores, mutation catalogue and
-release-artifact checks. Both commands
+feature-gated lint and crash-cut checks, e2e, native stores and release-artifact checks.
+Both commands
 print summaries on failure too; an UNCHECKED arm is never presented as a passed arm.
 
 Individual arms you can run without the sibling checkout:
@@ -102,10 +101,11 @@ bun run build && bun test packages
 | an operator verb | `crates/credentials-module/src/bin/credentials_cli.rs` and `src/bin/cli_support/`; document it in [`docs/operator-runbook.md`](docs/operator-runbook.md) |
 | a new audit op, alarm reason or auth-event kind | the enum in `crates/credentials-core/src/audit.rs`, and its row in the operator runbook's vocabulary tables (tests enforce this) |
 | client decoders | `crates/claustrum-client` and `packages/client`, tested against the producer's fixtures |
-| a guarded safety property | a row in [`mutations.toml`](mutations.toml), proved with `ckdev-mutate prove` |
 
 Public docs in `docs/` describe the code as it is now. Design history, measurements and
 incident notes do not belong there.
+
+A bug fix ships with a test that fails without the fix.
 
 ### Development executable names
 

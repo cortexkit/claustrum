@@ -12,8 +12,9 @@ import tempfile
 
 
 def copy_checkout(source, destination, target):
-    # Preserve history for mutation tooling, then overlay the actual working tree:
-    # cloning alone would silently test HEAD instead of staged/unstaged edits.
+    # Copy the history with the working tree: the worker carries out its own git
+    # operations (the floor ratchet compares against a merge target), and cloning
+    # alone would silently test HEAD instead of staged/unstaged edits.
     # A local clone validates the source's .git directory, not its worktree root.
     # Snapshot ownership differs from the job user; trust only that exact path,
     # for this command, without widening or changing the user's Git configuration.

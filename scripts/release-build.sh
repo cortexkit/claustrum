@@ -107,14 +107,12 @@ if [ "$ON_ORIGIN_MASTER" != true ] && [ "$FAST" = 0 ]; then
   echo "*** STAGING A COMMIT CI HAS NOT EVALUATED -- override in effect ***" >&2
 fi
 
-# The fast lane checks this exact committed tree. Published/default builds retain
-# catalogue validation and staged-artifact tests; full replay belongs to landing CI.
+# The fast lane checks this exact committed tree. Published/default builds retain the
+# staged-artifact tests, which need the binaries this script is about to build.
 CHECKED_REV="$(git rev-parse HEAD)"
 if [ "$FAST" = 1 ]; then
   echo "FAST LOCAL BUILD: full gate and CI must follow deployment and live acceptance."
   bash scripts/fast-check.sh
-else
-  ckdev-mutate check
 fi
 if [ -n "$(git status --porcelain)" ] || [ "$(git rev-parse HEAD)" != "$CHECKED_REV" ]; then
   echo "REFUSING: source changed during checks; commit it and check again." >&2

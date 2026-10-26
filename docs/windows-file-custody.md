@@ -45,16 +45,10 @@ grants. CLI wrappers also test protected credential / handle / lock publications
 and unsafe credential / handle refusal. All five tests are registered on every
 OS; non-Windows bodies print explicit skip lines.
 
-`scripts/prove-windows-acl.py` runs in CI's Windows job against the real OS. It
-first requires all three core tests green, then independently skips key-file
-verification and bypasses private key creation. Each mutant must redden exactly
-its named test and leave the other two green. It stages the live source before
-mutation, records the non-empty diff, restores from that index and records the
-empty restored diff. CI uploads `gate-evidence/windows-acl-mutations.json` outside
-the Cargo build directory. Local Windows GNU clippy proves compilation only:
-Windows behaviour and both red mutation observations are proven only by CI's
-Windows job. On macOS and Linux, the registered tests only print skip lines and
-return successfully without executing their Windows bodies; those passes do not
+CI's Windows job runs the three core tests against the real OS. Local Windows GNU
+clippy proves compilation only: Windows behaviour is proven only by CI's Windows
+job. On macOS and Linux, the registered tests only print skip lines and return
+successfully without executing their Windows bodies; those passes do not
 demonstrate DACL behaviour.
 
 `credentials-module/tests/windows_runtime.rs` drives the real `ck-auth` in an

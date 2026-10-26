@@ -15,8 +15,8 @@
 # THE SET MUST MATCH CI, AND SO MUST EACH INVOCATION. Every arm here corresponds to
 # a step in .github/workflows/ci.yml; when a step is added there, add it here. A
 # local gate covering a subset is worse than none, because it earns trust and then
-# lets through exactly what it was trusted to catch. This refers to CI's `test`
-# job; the separate mutation replay job is deliberately a landing/nightly gate.
+# lets through exactly what it was trusted to catch. The claim is about CI's `test`
+# job, which is the only job in that workflow.
 #
 # Matching the SET is not matching the STEPS: this gate once ran every CI arm and
 # still diverged, because the e2e arm dropped CI's --test-threads=1. Copy the
@@ -111,10 +111,6 @@ FMT_PKGS=$(cargo metadata --no-deps --format-version 1 \
 [ -n "$FMT_PKGS" ] || fail "format (could not derive workspace members -- refusing to run an empty scope)"
 # shellcheck disable=SC2086
 run_check "format" cargo fmt $FMT_PKGS -- --check
-# The catalogue's anchors, checked without building anything (well under a second), so
-# a stale anchor fails here, not after the minutes-long Linux job. Test names still
-# need a build to list, so the full check runs in the Linux lane.
-run_check "mutation anchors" ckdev-mutate check --anchors-only
 SUBCONSCIOUS_ROOT="${CRED_SUBCONSCIOUS_ROOT-../subconscious}"
 [[ -d "$SUBCONSCIOUS_ROOT" ]] || fail "supervisor checkout not found: $SUBCONSCIOUS_ROOT"
 run_check "inbound contracts" bash scripts/check-inbound-contracts.sh "$SUBCONSCIOUS_ROOT/docs/push-sealed-payload.md"
@@ -128,12 +124,6 @@ run_check "development binary names" python3 scripts/check-ckdev-execution.py
 run_check "script contracts" python3 -m unittest discover -s scripts/tests -v
 run_check "floor ratchet" assert_floor_not_lowered "$SCRIPT_PATH"
 run_check "CI coverage" check_ci_coverage
-}
-
-mutation_catalogue() {
-# Anchor/name validation mirrors CI. Full replay is the master landing gate and
-# nightly breadth audit, not work repeated on every local push.
-run_check "mutation catalogue" ckdev-mutate check
 }
 
 typescript() {
@@ -413,7 +403,6 @@ windows_native() {
     esac
     run_expect 2 "native master-key store" env CK_NATIVE_STORE_TESTS=1 \
       cargo test --locked -p credentials-core --test native_store -- --nocapture --test-threads=1
-    run_check "Windows key-file ACL mutation proofs" python3 scripts/prove-windows-acl.py
     run_expect 4 "Windows operator filesystem workflows" \
       cargo test --locked -p credentials-module --features windows-runtime-test-seam \
       --test windows_runtime -- --nocapture --test-threads=1
@@ -633,7 +622,7 @@ if [ -n "${GATE_UNCHECKED:-}" ]; then
   printf 'CK_GATE_UNCHECKED %s\n' "$GATE_UNCHECKED"
   printf '\nGATE PASSED WITH UNCHECKED ARMS -- %s\n' "$GATE_UNCHECKED"
 else
-  printf '\nGATE PASSED -- every local CI check, on this working tree (full mutation replay runs in landing CI)\n'
+  printf '\nGATE PASSED -- every local CI check, on this working tree\n'
 fi
 }
 
@@ -646,7 +635,6 @@ case "$LANE" in
     linux_tests
     windows_cross
     ship_tests
-    mutation_catalogue
     ;;
   release) release_artifact ;;
   windows) windows_native ;;

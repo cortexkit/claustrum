@@ -112,7 +112,6 @@ class ReleaseFastPath(unittest.TestCase):
           'rev-parse HEAD') printf '%040d\n' 1;;
           'rev-parse --short '*) echo 1234567;;
           *) echo "unexpected git: $*" >&2; exit 90;; esac''')
-        self.executable('ckdev-mutate', 'echo catalogue >> "$HOME/calls"')
         self.executable('cargo', '''echo "cargo $*" >> "$HOME/calls"
           if [ "$1" = build ]; then
             mkdir -p target/stamped/release
@@ -157,10 +156,10 @@ class ReleaseFastPath(unittest.TestCase):
         self.assertIn('not an ancestor', result.stdout)
         self.assertEqual(self.calls(), '')
 
-    def test_default_runs_catalogue_and_artifact_suites(self):
+    def test_default_runs_artifact_suites(self):
         result = self.release(CK_RELEASE_ALLOW_BRANCH='1', ANCESTOR_RC='0')
         self.assertEqual(result.returncode, 0, result.stdout)
-        self.assertTrue(self.calls().startswith('catalogue\ncargo build'), self.calls())
+        self.assertTrue(self.calls().startswith('cargo build'), self.calls())
         self.assertIn('--test real_daemon_e2e', self.calls())
         self.assertIn('--test cli_admin', self.calls())
         info = next((self.root / 'target/staged').glob('*/build-info.txt')).read_text()

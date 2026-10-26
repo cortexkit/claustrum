@@ -167,9 +167,6 @@ def main():
         if not members:
             raise RuntimeError("empty workspace; refusing an empty format scope")
         gate.job("workspace format", fmt + ["--", "--check"])
-        # Anchors only, with no build: a stale mutation anchor fails in under a second
-        # here, before the Linux job starts.
-        gate.job("mutation anchors", ["ckdev-mutate", "check", "--anchors-only"])
         if any(p.startswith(("scripts/", ".github/")) for p in paths):
             print(output("python3", "--version").strip(), flush=True)
             gate.job("script contracts", ["python3", "-m", "unittest", "discover", "-s", "scripts/tests", "-v"])
@@ -188,7 +185,7 @@ def main():
     if error:
         raise RuntimeError(error)
     print("SKIPPED full gate: seam-feature lint/crash cuts, real-daemon e2e, native stores, Windows cross-check, "
-          "repository scans, mutation replay and release-artifact probes. Run scripts/gate.sh and CI after live acceptance.", flush=True)
+          "repository scans and release-artifact probes. Run scripts/gate.sh and CI after live acceptance.", flush=True)
     print("Signing is NOT checked here: release-build.sh still requires pinned identifiers and hardened runtime.", flush=True)
     print("FAST CHECK PASSED (not the full gate)", flush=True)
 

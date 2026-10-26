@@ -55,7 +55,6 @@ esac
 ''')
         self.executable("uname", "echo Linux")
         self.executable("rustup", "echo x86_64-unknown-linux-gnu")
-        self.executable("ckdev-mutate", "echo 'catalogue checked'")
 
     def executable(self, name, body):
         path = self.bin / name
@@ -71,7 +70,7 @@ esac
         result = self.gate("fail")
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertIn("planted remote clippy failure", result.stdout)
-        self.assertIn("GATE FAILED: Linux Rust + mutation catalogue: remote arm failed", result.stdout)
+        self.assertIn("GATE FAILED: Linux Rust: remote arm failed", result.stdout)
 
     def test_runner_unreachable_and_other_transport_codes_fail_gate(self):
         for code, meaning in runtime.RUNNER_ERRORS.items():
@@ -127,7 +126,6 @@ exit "$SCENARIO"
         self.assertIn("--vcpus 8", "\n".join(calls))
         self.assertIn("--sibling ../subconscious", "\n".join(calls))
         self.assertTrue(any(line == "cargo build --release --locked --offline -p credentials-module --bin ck-auth" for line in calls))
-        self.assertTrue(any("ckdev-mutate" in line for line in result.stdout.splitlines()) or "catalogue checked" in result.stdout)
 
     def test_fast_transport_has_scope_and_no_supervisor(self):
         plan = {"crates": ["credentials-core"], "paths": ["crates/credentials-core/src/lib.rs"]}

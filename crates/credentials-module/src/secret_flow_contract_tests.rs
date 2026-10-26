@@ -602,7 +602,7 @@ async fn sf_approve(flow: &SecretFlow, request: &serde_json::Value) {
 }
 
 #[tokio::test]
-async fn secret_flow_grants_list_with_flow_holders_and_revoke_one_at_a_time() {
+async fn secret_flow_grants_list_on_the_phone_and_revoke_one_at_a_time() {
     let seed = 223;
     let flow = SecretFlow::new(seed).await;
     flow.deposit_both().await;
@@ -619,47 +619,20 @@ async fn secret_flow_grants_list_with_flow_holders_and_revoke_one_at_a_time() {
     let db = flow._root.join("store.db");
     let vault_id = credentials_core::vault_id_for(db.parent().unwrap()).unwrap();
     let admin =
-        admin_surface::AdminSurface::new(engine, mac, vault_id.clone(), key.key_id());
+        admin_surface::AdminSurface::new(engine, mac, vault_id, key.key_id());
 
-    // The provider surface: one row per installed version, no expiry, no agent, and the
-    // approved methods only where the secret has methods at all.
-    let listed = admin
-        .serve_permissions("permissions.list", &json!({}), "test")
-        .unwrap();
-    let rows = listed["grants"].as_array().unwrap();
-    assert_eq!(rows.len(), 3, "{listed}");
-    for row in rows {
-        assert_eq!(row["holder"]["kind"], "flow");
-        assert_eq!(row["holder"]["flow_id"], "daily-fetch");
-        assert_eq!(row["holder"]["flow_version"], 7);
-        assert!(row.get("expires_at_ms").is_none(), "{row}");
-        assert!(row.get("agent_id").is_none(), "{row}");
-        if row["scope"] == "api_key" {
-            assert_eq!(row["methods"], json!(["GET"]), "{row}");
-        } else {
-            assert!(row.get("methods").is_none(), "{row}");
-        }
+    // Flow grants stay out of the provider surface until permissions/v1 has a flow holder:
+    // the phone decodes those rows strictly and would show one as held by the user.
+    for filter in [json!({}), json!({"agent_id":"agent-A"})] {
+        assert_eq!(
+            admin
+                .serve_permissions("permissions.list", &filter, "test")
+                .unwrap(),
+            json!({"grants":[]})
+        );
     }
-    let installs: Vec<&str> = rows
-        .iter()
-        .map(|row| row["holder"]["flow_install_id"].as_str().unwrap())
-        .collect();
-    assert!(installs.contains(&"install-A") && installs.contains(&"install-B"));
-    // An agent-filtered listing never contains a flow grant, and it is the only reason
-    // the two installs are distinguishable here: they share flow id and version.
-    assert_eq!(
-        admin
-            .serve_permissions("permissions.list", &json!({"agent_id":"agent-A"}), "test")
-            .unwrap(),
-        json!({"grants":[]})
-    );
-    let ids: std::collections::BTreeSet<&str> = rows
-        .iter()
-        .map(|row| row["id"].as_str().unwrap())
-        .collect();
-    assert_eq!(ids.len(), 3, "{listed}");
 
-    // The phone surface: the same grants under the secret, with `flow` and duration
+    // The phone surface lists the grants under each secret, with `flow` and duration
     // `version` in place of an asking scope and coverage.
     let phone = flow.phone("secret.list", json!({})).await;
     let key_secret = phone["secrets"]
@@ -696,20 +669,28 @@ async fn secret_flow_grants_list_with_flow_holders_and_revoke_one_at_a_time() {
     // Revoking one of two grants that share flow id and version leaves the other install
     // releasing, and the login's own grant untouched. Both revokes go through the
     // operator's single-grant delete by id.
-    let listed = admin
-        .serve_permissions("permissions.list", &json!({}), "test")
-        .unwrap();
-    let rows = listed["grants"].as_array().unwrap();
-    let id_of = |install: &str, scope: &str| -> String {
-        rows.iter()
-            .find(|row| row["holder"]["flow_install_id"] == install && row["scope"] == scope)
-            .map(|row| row["id"].as_str().unwrap().to_owned())
-            .unwrap_or_else(|| panic!("no {scope} grant for {install}"))
+    let id_of = |install: &str, kind: &str| -> String {
+        phone["secrets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|secret| secret["kind"] == kind)
+            .flat_map(|secret| secret["flow_grants"].as_array().unwrap())
+            .find(|row| row["flow"]["install_id"] == install)
+            .map(|row| row["grant_id"].as_str().unwrap().to_owned())
+            .unwrap_or_else(|| panic!("no {kind} grant for {install}"))
     };
     let (api_a, api_b, login_a) = (
-        id_of("install-A", "api_key"),
-        id_of("install-B", "api_key"),
+        id_of("install-A", "agent_api_key"),
+        id_of("install-B", "agent_api_key"),
         id_of("install-A", "site_login"),
+    );
+    assert_eq!(
+        [&api_a, &api_b, &login_a]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        3
     );
     // Revoke over a bind whose principal is the operator: only a direct bind may run an
     // admin op, and the path is the same MAC-authenticated one `ck auth secret revoke`
@@ -767,9 +748,13 @@ async fn secret_flow_grants_list_with_flow_holders_and_revoke_one_at_a_time() {
         flow.use_secret("basal", &other_install)["status"],
         "released"
     );
-    let remaining = admin
-        .serve_permissions("permissions.list", &json!({}), "test")
-        .unwrap();
-    assert_eq!(remaining["grants"].as_array().unwrap().len(), 1, "{remaining}");
-    assert_eq!(remaining["grants"][0]["id"], json!(api_b));
+    let remaining = flow.phone("secret.list", json!({})).await;
+    let left: Vec<&str> = remaining["secrets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|secret| secret["flow_grants"].as_array().unwrap())
+        .map(|row| row["grant_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(left, [api_b.as_str()], "{remaining}");
 }

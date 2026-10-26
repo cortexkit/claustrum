@@ -131,6 +131,27 @@ impl EncryptedStore {
             Err(_) => None,
         };
         let hash = phone::hex(&payload_hash(bytes));
+        // A resend of an envelope this phone already had applied answers with the reply
+        // the first call produced. Its requests are consumed by then, so re-running the
+        // items would report every one as refused and hide a grant that exists. The
+        // signature was verified above, so only the phone can reach a stored reply.
+        tx.execute(
+            "DELETE FROM secret_approval_replies WHERE expires_at_ms<=?1",
+            [now],
+        )?;
+        let stored: Option<String> = tx
+            .query_row(
+                "SELECT reply FROM secret_approval_replies WHERE envelope_sha256=?1 AND fingerprint=?2 AND delete_op=?3",
+                rusqlite::params![hash, fingerprint, delete],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(stored) = stored {
+            return match serde_json::from_str(&stored) {
+                Ok(reply) => Ok(Ok(reply)),
+                Err(_) => Err(rusqlite_err("stored approval reply is unreadable")),
+            };
+        }
         let mut results = Vec::with_capacity(envelope.items.len());
         for item in &envelope.items {
             let accepted = self.secret_approval_item_tx(
@@ -150,7 +171,16 @@ impl EncryptedStore {
                 json!({"request_id":item.request_id,"outcome":"refused","code":"approval_invalid"})
             });
         }
-        Ok(Ok(json!({"results":results})))
+        let reply = json!({"results":results});
+        // Stored for as long as the envelope's issue time stays inside the skew window,
+        // which is the longest a resend of these bytes could still be applied.
+        let expires_at_ms =
+            (envelope.issued_at_ms as i64).saturating_add(SECRET_ISSUE_SKEW_LIMIT_MS);
+        tx.execute(
+            "INSERT INTO secret_approval_replies (envelope_sha256,fingerprint,delete_op,reply,expires_at_ms) VALUES (?1,?2,?3,?4,?5)",
+            rusqlite::params![hash, fingerprint, delete, reply.to_string(), expires_at_ms],
+        )?;
+        Ok(Ok(reply))
     }
 
     #[allow(clippy::too_many_arguments)]

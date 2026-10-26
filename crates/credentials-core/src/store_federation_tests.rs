@@ -126,7 +126,7 @@ fn release_2_migrations_follow_release_1_and_keep_existing_rows_and_grants() {
         .copied()
         .filter(|version| *version > VAULT_RELEASE_1_SCHEMA_VERSION)
         .collect();
-    assert_eq!(release_2, (19..=27).collect::<Vec<_>>());
+    assert_eq!(release_2, (19..=28).collect::<Vec<_>>());
     assert_eq!(*versions.last().unwrap(), newest_migration_version());
 
     let (_root, sqlite) = sqlite("federation-migrate", 190);

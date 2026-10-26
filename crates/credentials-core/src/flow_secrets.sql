@@ -19,3 +19,14 @@ ALTER TABLE secret_pending_requests ADD COLUMN flow_version INTEGER
 ALTER TABLE secret_pending_requests ADD COLUMN flow_code_hash TEXT;
 ALTER TABLE secret_pending_requests ADD COLUMN flow_install_id TEXT;
 ALTER TABLE secret_pending_requests ADD COLUMN methods TEXT;
+
+-- The reply to each accepted approval or delete envelope, so an exact resend after a
+-- lost reply learns the real outcome instead of reading the consumed requests as
+-- refused. Kept only while the envelope's issue time is inside the skew window, after
+-- which the envelope could not be applied anyway.
+CREATE TABLE secret_approval_replies (
+    envelope_sha256 TEXT NOT NULL, fingerprint TEXT NOT NULL,
+    delete_op INTEGER NOT NULL CHECK (delete_op IN (0, 1)),
+    reply TEXT NOT NULL, expires_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (envelope_sha256, fingerprint, delete_op)
+);

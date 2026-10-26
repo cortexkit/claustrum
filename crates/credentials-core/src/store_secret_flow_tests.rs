@@ -321,10 +321,12 @@ fn secret_flow_install_approval_releases_three_runs_and_audits_exact_hashes() {
         ),
         0
     );
+    // An exact resend learns the first reply instead of reading the consumed request as refused.
     assert_eq!(
         phone(&store, &signed_bytes(bytes, false), NOW).unwrap(),
-        json!({"results":[refused(&r)]})
+        json!({"results":[granted(&r)]})
     );
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM secret_flow_grants"), 1);
     assert_eq!(store.verify_audit_chain().unwrap(), None);
 }
 

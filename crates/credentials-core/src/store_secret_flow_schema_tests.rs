@@ -6,7 +6,12 @@ const INC: &str = "00000000000000000000000000000001";
 const CODE_HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 fn old_store(version: u32) -> (crate::test_support::TestTempDir, SqliteStore) {
-    let root = crate::test_support::TestTempDir::new("flow-schema");
+    // Each caller migrates to a different version, so the version keeps tests that run in
+    // parallel out of each other's directory; the pid keeps separate runs apart.
+    let root = crate::test_support::TestTempDir::new(format!(
+        "flow-schema-{version}-{}",
+        std::process::id()
+    ));
     let sqlite = open_sqlite(&StorageDescriptor {
         module_id: "claustrum".into(),
         storage_namespace: "flow-schema".into(),

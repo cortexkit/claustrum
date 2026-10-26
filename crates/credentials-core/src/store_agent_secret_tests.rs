@@ -26,7 +26,7 @@ fn insert_secret(store: &EncryptedStore, name: &str, incarnation: &str) {
 }
 
 #[test]
-fn secret_migrations_create_exactly_seven_secret_tables() {
+fn secret_migrations_create_exactly_eight_secret_tables() {
     let (_root, store) = rig("secret-schema", 50);
     assert_eq!(newest_migration_version(), 28);
     let tables = store.store.with_conn(|conn| {
@@ -38,6 +38,7 @@ fn secret_migrations_create_exactly_seven_secret_tables() {
         tables,
         [
             "agent_secrets",
+            "secret_approval_replies",
             "secret_deposit_tombstones",
             "secret_flow_grants",
             "secret_grants",

@@ -127,21 +127,86 @@ fn secret_approval_request_is_single_use_even_when_commits_race() {
         .into_iter()
         .map(|h| h.join().unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(
-        replies
-            .iter()
-            .filter(|v| v["results"][0]["outcome"] == "granted")
-            .count(),
-        1
-    );
-    assert_eq!(
-        replies
-            .iter()
-            .filter(|v| v["results"][0]["outcome"] == "refused")
-            .count(),
-        1
-    );
+    // The same envelope sent twice at once is one decision: the later commit answers
+    // with the earlier one's reply, and only one grant exists.
+    assert_eq!(replies[0], json!({"results":[granted(&r)]}));
+    assert_eq!(replies[1], replies[0]);
     assert_eq!(count(&store, "SELECT COUNT(*) FROM secret_grants"), 1);
+}
+
+#[test]
+fn secret_approval_resend_of_an_applied_envelope_answers_with_its_first_reply() {
+    let (_root, store, r) = approval_setup("approve-resend");
+    let e = envelope(vec![item(&r)], "hour", NOW);
+    let bytes = serde_json::to_vec(&e).unwrap();
+    let first = phone(&store, &signed_bytes(bytes.clone(), false), NOW).unwrap();
+    assert_eq!(first, json!({"results":[granted(&r)]}));
+    // The reply was lost; the phone resends the exact bytes with a fresh signature (P-256
+    // signatures are not deterministic). It learns the grant instead of a refusal.
+    let resent = phone(&store, &signed_bytes(bytes.clone(), false), NOW + 1_000).unwrap();
+    assert_eq!(resent, first);
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM secret_grants"), 1);
+    assert_eq!(
+        count(
+            &store,
+            "SELECT COUNT(*) FROM audit_log WHERE op='secret_grant_create'"
+        ),
+        1
+    );
+    // A different envelope for the same consumed request is still refused.
+    let other = envelope(vec![item(&r)], "once", NOW);
+    assert_eq!(
+        phone(&store, &signed(&other, false), NOW + 2_000).unwrap(),
+        json!({"results":[refused(&r)]})
+    );
+    // A bad signature over the same bytes never reaches the stored reply.
+    let PhoneOperation::Approve {
+        envelope, card_ref, ..
+    } = signed_bytes(bytes.clone(), false)
+    else {
+        unreachable!()
+    };
+    let other_signature: Signature = signer().sign(b"something else");
+    let forged = other_signature.to_der().as_bytes().to_vec();
+    assert!(phone(
+        &store,
+        &PhoneOperation::Approve {
+            envelope,
+            signature: forged,
+            card_ref
+        },
+        NOW + 3_000
+    )
+    .is_err());
+}
+
+#[test]
+fn secret_approval_stored_reply_ends_with_the_skew_window() {
+    let (_root, store, r) = approval_setup("approve-resend-late");
+    let e = envelope(vec![item(&r)], "hour", NOW);
+    let bytes = serde_json::to_vec(&e).unwrap();
+    phone(&store, &signed_bytes(bytes.clone(), false), NOW).unwrap();
+    // Past the skew window the envelope could not be applied anyway, so the stored reply
+    // is gone and the resend reads the consumed request as refused.
+    let late = NOW + crate::agent_secret::SECRET_ISSUE_SKEW_LIMIT_MS;
+    assert_eq!(
+        phone(&store, &signed_bytes(bytes.clone(), false), late).unwrap(),
+        json!({"results":[refused(&r)]})
+    );
+    assert_eq!(
+        count(&store, "SELECT COUNT(*) FROM secret_approval_replies"),
+        1,
+        "the late resend stores its own reply"
+    );
+    // Just inside the window, the stored reply still answers.
+    let (_root2, store2, r2) = approval_setup("approve-resend-edge");
+    let e2 = envelope(vec![item(&r2)], "hour", NOW);
+    let bytes2 = serde_json::to_vec(&e2).unwrap();
+    phone(&store2, &signed_bytes(bytes2.clone(), false), NOW).unwrap();
+    assert_eq!(
+        phone(&store2, &signed_bytes(bytes2, false), late - 1).unwrap(),
+        json!({"results":[granted(&r2)]})
+    );
 }
 
 #[test]
@@ -628,20 +693,9 @@ fn secret_delete_is_signed_reusable_uncapped_and_removes_corrupt_records() {
         .into_iter()
         .map(|h| h.join().unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(
-        answers
-            .iter()
-            .filter(|v| v["results"][0]["outcome"] == "granted")
-            .count(),
-        1
-    );
-    assert_eq!(
-        answers
-            .iter()
-            .filter(|v| v["results"][0]["outcome"] == "refused")
-            .count(),
-        1
-    );
+    // The same signed delete sent twice at once is one decision: both learn the delete.
+    assert_eq!(answers[0]["results"][0]["outcome"], "granted");
+    assert_eq!(answers[1], answers[0]);
     assert_eq!(count(&store, "SELECT COUNT(*) FROM agent_secrets"), 0);
     assert_eq!(count(&store, "SELECT COUNT(*) FROM secret_grants"), 0);
     assert_eq!(

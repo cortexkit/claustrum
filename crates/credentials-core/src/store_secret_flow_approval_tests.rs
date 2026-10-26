@@ -315,9 +315,10 @@ fn secret_flow_approval_consumes_once_and_binds_grant_audit_to_exact_envelope() 
             ),
         ]
     );
+    // An exact resend is the same decision: it learns the first reply and grants nothing new.
     assert_eq!(
         phone(&store, &signed(&e, false), NOW).unwrap(),
-        json!({"results":[refused(&requests[0]),refused(&requests[1])]})
+        json!({"results":[granted(&requests[0]),granted(&requests[1])]})
     );
     assert_eq!(count(&store, "SELECT COUNT(*) FROM secret_flow_grants"), 2);
     assert_eq!(

@@ -508,8 +508,8 @@ fn flow_permission_rows(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<Val
             if let Some(card) = r.get::<_,Option<String>>(11)? {
                 row["card_ref"] = json!(card);
             }
-            // Revocation by id needs the same digest an agent grant carries, so an
-            // operator can recognize a signed grant without re-reading the envelope.
+            // The digest of the signed envelope this grant came from, which the phone's
+            // store keeps to prove which approval created the grant.
             row["envelope_sha256"] = json!(r.get::<_,String>(12)?);
             Ok(row)
         })?

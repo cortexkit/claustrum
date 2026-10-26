@@ -106,6 +106,16 @@ pub enum MasterKeyError {
     /// wrong key was supplied, while this means the right key is absent from the store
     /// (restore it from backup, or recover the vault). Maps to the wire `vault_locked`.
     NoSlotMatchesDb { expected: KeyId },
+    /// EVERY key slot came back empty, so no key was even visible to compare.
+    ///
+    /// Split from [`MasterKeyError::NoSlotMatchesDb`] because the likely cause differs.
+    /// With the macOS keychain backend (`keychain: true`), a `ck auth` run from a shell
+    /// outside the owner's login session (plain `sudo -u`, a VM tool's exec) gets "not
+    /// found" from the login keychain even though the key is there and the daemon reads
+    /// it fine. Reporting that as "no slot holds the key" sent an operator looking for a
+    /// wrong or lost key. With a key file it means the file is absent. Maps to the wire
+    /// `vault_locked`, like its sibling.
+    NoKeyVisible { expected: KeyId, keychain: bool },
     /// The operator key path resolves to a directory under the data tree, which
     /// is forbidden (a single backup would leak both ciphertext and key).
     KeyPathUnderDataDir { key_dir: PathBuf, data_dir: PathBuf },
@@ -161,6 +171,7 @@ impl MasterKeyError {
                 | MasterKeyError::NativeStoreUnavailable { .. }
                 | MasterKeyError::KeyMismatch { .. }
                 | MasterKeyError::NoSlotMatchesDb { .. }
+                | MasterKeyError::NoKeyVisible { .. }
         )
     }
 }
@@ -204,6 +215,29 @@ impl std::fmt::Display for MasterKeyError {
             MasterKeyError::NoSlotMatchesDb { expected } => write!(
                 f,
                 "no master key slot holds the key this vault is sealed under ({})",
+                expected.to_hex()
+            ),
+            MasterKeyError::NoKeyVisible {
+                expected,
+                keychain: true,
+            } => write!(
+                f,
+                "no master key is visible to this process (the vault is sealed under {})\n  \
+                 every keychain slot came back empty; this is usually a shell outside \
+                 the owner's login session (plain `sudo -u`, a VM tool's exec), which cannot \
+                 see the login keychain; run it inside that session, for example \
+                 `sudo launchctl asuser \"$(id -u <user>)\" sudo -u <user> ck auth ...`",
+                expected.to_hex()
+            ),
+            MasterKeyError::NoKeyVisible {
+                expected,
+                keychain: false,
+            } => write!(
+                f,
+                "no master key is visible to this process (the vault is sealed under {})\n  \
+                 every key slot came back empty; check that the configured key source \
+                 (its key file, or the OS credential store entry) is present and readable \
+                 by this user",
                 expected.to_hex()
             ),
             MasterKeyError::KeyPathUnderDataDir { key_dir, data_dir } => write!(
@@ -522,17 +556,25 @@ pub fn resolve_for_db(
     // error and keep going; only surface it if NO slot matches (so a genuinely locked
     // store still fails closed as locked, not as a misleading wrong-key).
     let mut load_err: Option<MasterKeyError> = None;
+    let mut any_key = false;
     for slot in [KeySlot::Current, KeySlot::Next] {
         match backend.load_slot(&config.data_dir, slot) {
             Ok(Some(key)) if key.key_id() == db_key_id => {
                 source_record::record_migration(config)?;
                 return Ok(key);
             }
-            Ok(_) => {}
+            Ok(Some(_)) => any_key = true,
+            Ok(None) => {}
             Err(e) => {
                 load_err.get_or_insert(e);
             }
         }
+    }
+    if load_err.is_none() && !any_key {
+        return Err(MasterKeyError::NoKeyVisible {
+            expected: db_key_id,
+            keychain: matches!(config.source, KeySource::Keychain),
+        });
     }
     // No slot's key matches the database's recorded fingerprint. If a slot could not be
     // read at all, surface that (e.g. `VaultLocked` stays a clean back-off signal);
@@ -1826,6 +1868,57 @@ mod tests {
             .unwrap()
             .is_none());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn resolve_for_db_with_every_slot_empty_says_no_key_is_visible() {
+        // This rig uses an operator key file and neither slot's file exists, so every slot
+        // loads empty: the same "nothing visible" outcome a macOS shell outside the
+        // owner's login session gets from the keychain. It must not read as "no slot holds
+        // the key", which sent an operator hunting for a lost key on a healthy vault. The
+        // keychain wording is pinned by the next test.
+        let root = tmp_dir("slot-empty");
+        let config = op_config(&root);
+        let sealed_under = MasterKey::generate().unwrap();
+        match resolve_for_db(&config, sealed_under.key_id()) {
+            Err(
+                e @ MasterKeyError::NoKeyVisible {
+                    expected,
+                    keychain: false,
+                },
+            ) => {
+                assert_eq!(expected, sealed_under.key_id());
+                let msg = e.to_string();
+                assert!(msg.contains("no master key is visible"), "{msg}");
+                assert!(
+                    !msg.contains("login session"),
+                    "key-file wording must not blame the login session: {msg}"
+                );
+                assert!(
+                    !msg.contains("no master key slot holds"),
+                    "must not claim the key is absent from the store: {msg}"
+                );
+                assert!(e.is_vault_locked(), "still a clean back-off signal");
+            }
+            other => panic!("expected NoKeyVisible with every slot empty, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn no_key_visible_on_the_keychain_names_the_login_session() {
+        let id = MasterKey::generate().unwrap().key_id();
+        let msg = MasterKeyError::NoKeyVisible {
+            expected: id,
+            keychain: true,
+        }
+        .to_string();
+        assert!(
+            msg.contains("login session"),
+            "names the likely cause: {msg}"
+        );
+        assert!(msg.contains("launchctl asuser"), "names the remedy: {msg}");
+        assert_eq!(msg.matches(&id.to_hex()).count(), 1, "{msg}");
     }
 
     #[test]

@@ -9,12 +9,14 @@ pub const MAX_SECRET_PENDING_TOTAL: usize = 64;
 pub enum SecretSender {
     Aft,
     Cerebellum,
+    Basal,
 }
 impl SecretSender {
     pub fn actor(self) -> &'static str {
         match self {
             Self::Aft => "reserved:aft",
             Self::Cerebellum => "reserved:cerebellum",
+            Self::Basal => "reserved:basal",
         }
     }
     pub fn admits(self, scope: &SecretScope) -> bool {
@@ -22,6 +24,7 @@ impl SecretSender {
             (self, scope),
             (Self::Aft, SecretScope::ApiKey { .. })
                 | (Self::Cerebellum, SecretScope::SiteLogin { .. })
+                | (Self::Basal, _)
         )
     }
 }
@@ -44,6 +47,35 @@ pub struct SecretUse {
     pub coverage: String,
     pub agent_id: Option<String>,
     pub target: UseTarget,
+}
+
+/// Install-time approval inputs, separate from agent session scopes.
+pub struct SecretFlowApproval {
+    pub name: String,
+    pub flow: super::FlowIdentity,
+    pub target: UseTarget,
+    pub methods: Option<Vec<String>>,
+}
+
+/// `credentials-module` must derive this identity from the decoded
+/// `subc_protocol::scope::ScopeStamp.attributes`: `flow_id`, `flow_version`,
+/// `flow_code_hash`, and `flow_install_id`, never from separate caller parameters.
+pub struct SecretFlowUse {
+    pub name: String,
+    pub flow: super::FlowIdentity,
+    pub target: UseTarget,
+    pub method: Option<String>,
+}
+
+pub fn validate_flow_methods(
+    target: &UseTarget,
+    methods: Option<&[String]>,
+) -> Result<Option<Vec<String>>, ValidationError> {
+    match (target, methods) {
+        (UseTarget::ApiKey { .. }, Some(methods)) => super::sorted_flow_methods(methods).map(Some),
+        (UseTarget::SiteLogin { .. }, None) => Ok(None),
+        _ => Err(ValidationError::InvalidParams),
+    }
 }
 
 pub enum UseTarget {

@@ -6,6 +6,9 @@ use crate::agent_secret::{
 use base64::Engine;
 use serde_json::{json, Value};
 
+#[path = "store_secret_flow.rs"]
+mod flow;
+
 pub struct SecretUseOutcome {
     pub reply: Value,
     /// The module schedules `secret_use_last_use` without awaiting it, so updating
@@ -67,8 +70,13 @@ impl EncryptedStore {
 
     /// Ordinary repeat releases do not need an audit transition or a writer-fence wakeup.
     pub fn secret_use_last_use(&self, id: &str, now: i64) {
-        let _ = self.store.with_conn(|conn| conn.execute(
-            "UPDATE secret_grants SET last_use_ms=MAX(COALESCE(last_use_ms,0),?2) WHERE grant_id=?1", rusqlite::params![id,now]).map(|_| ()));
+        let _ = self.store.with_conn(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            for table in ["secret_grants", "secret_flow_grants"] {
+                tx.execute(&format!("UPDATE {table} SET last_use_ms=MAX(COALESCE(last_use_ms,0),?2) WHERE grant_id=?1"), rusqlite::params![id,now])?;
+            }
+            tx.commit()
+        });
     }
 
     pub fn secret_use(
@@ -76,6 +84,15 @@ impl EncryptedStore {
         call: &SecretUse,
         clock: impl Fn() -> i64,
     ) -> Result<SecretUseOutcome, SecretError> {
+        if call.sender == SecretSender::Basal {
+            return self.use_refused(
+                call,
+                Refusal {
+                    detail: "flow_identity",
+                    addressed: false,
+                },
+            );
+        }
         let now = clock();
         let snapshot = self.store.with_conn(|conn| {
             let record = self.check_secret_use(conn, call)?;
@@ -122,26 +139,32 @@ impl EncryptedStore {
         call: &SecretUse,
         refusal: Refusal,
     ) -> Result<SecretUseOutcome, SecretError> {
+        Err(self.refuse_secret_target(&call.name, call.sender, &call.target, refusal))
+    }
+
+    fn refuse_secret_target(
+        &self,
+        name: &str,
+        sender: SecretSender,
+        target: &agent_secret::UseTarget,
+        refusal: Refusal,
+    ) -> SecretError {
         if refusal.detail == "sealed_scope" {
             // The flip is compare-and-set and audited in one transaction. Failure remains opaque.
             let _ = self.fenced_write(|tx| {
-                let incarnation: Option<String> = tx.query_row("SELECT incarnation FROM agent_secrets WHERE name=?1 AND state='active'",[&call.name],|r|r.get(0)).optional()?;
+                let incarnation: Option<String> = tx.query_row("SELECT incarnation FROM agent_secrets WHERE name=?1 AND state='active'",[name],|r|r.get(0)).optional()?;
                 if let Some(incarnation) = incarnation {
                     // Another writer may have repaired/replaced the row while this call waited.
-                    if self.check_secret_use(tx,call)?.is_err_and(|r|r.detail=="sealed_scope") {
-                        tx.execute("UPDATE agent_secrets SET state='corrupt' WHERE name=?1 AND incarnation=?2 AND state='active'",rusqlite::params![call.name,incarnation])?;
-                        phone::audit(tx,&self.audit_key,AuditOp::SecretQuarantine,Some(format!("secret|{}",call.name)),"vault",&[incarnation.as_bytes()])?;
+                    if self.check_secret_target(tx,name,sender,target)?.is_err_and(|r|r.detail=="sealed_scope") {
+                        tx.execute("UPDATE agent_secrets SET state='corrupt' WHERE name=?1 AND incarnation=?2 AND state='active'",rusqlite::params![name,incarnation])?;
+                        phone::audit(tx,&self.audit_key,AuditOp::SecretQuarantine,Some(format!("secret|{name}")),"vault",&[incarnation.as_bytes()])?;
                     }
                 }
                 Ok(())
             });
         }
-        self.record_secret_use_refusal(
-            call.sender,
-            refusal.addressed.then_some(call.name.as_str()),
-            refusal.detail,
-        );
-        Err(SecretError::NotFound)
+        self.record_secret_use_refusal(sender, refusal.addressed.then_some(name), refusal.detail);
+        SecretError::NotFound
     }
 
     fn check_secret_use(
@@ -149,7 +172,17 @@ impl EncryptedStore {
         conn: &rusqlite::Connection,
         call: &SecretUse,
     ) -> rusqlite::Result<Result<Record, Refusal>> {
-        let row = conn.query_row("SELECT incarnation,state,kind,host,path_prefix,location,origin,envelope FROM agent_secrets WHERE name=?1",[&call.name], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,Option<String>>(3)?,r.get::<_,Option<String>>(4)?,r.get::<_,Option<String>>(5)?,r.get::<_,Option<String>>(6)?,r.get::<_,Vec<u8>>(7)?))).optional()?;
+        self.check_secret_target(conn, &call.name, call.sender, &call.target)
+    }
+
+    fn check_secret_target(
+        &self,
+        conn: &rusqlite::Connection,
+        name: &str,
+        sender: SecretSender,
+        target: &agent_secret::UseTarget,
+    ) -> rusqlite::Result<Result<Record, Refusal>> {
+        let row = conn.query_row("SELECT incarnation,state,kind,host,path_prefix,location,origin,envelope FROM agent_secrets WHERE name=?1",[name], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,Option<String>>(3)?,r.get::<_,Option<String>>(4)?,r.get::<_,Option<String>>(5)?,r.get::<_,Option<String>>(6)?,r.get::<_,Vec<u8>>(7)?))).optional()?;
         let Some((incarnation, state, kind, host, path_prefix, location, origin, blob)) = row
         else {
             return Ok(Err(Refusal {
@@ -175,15 +208,14 @@ impl EncryptedStore {
             ("site_login", None, None, Some(origin)) => SecretScope::SiteLogin { origin },
             _ => return refused("sealed_scope"),
         };
-        let material = match agent_secret::open(&self.key, &incarnation, &call.name, &scope, &blob)
-        {
+        let material = match agent_secret::open(&self.key, &incarnation, name, &scope, &blob) {
             Ok(material) => material,
             Err(_) => return refused("sealed_scope"),
         };
-        if !call.sender.admits(&scope) {
+        if !sender.admits(&scope) {
             return refused("kind");
         }
-        if !call.target.matches(&scope) {
+        if !target.matches(&scope) {
             return refused("target");
         }
         Ok(Ok(Record {
@@ -277,7 +309,7 @@ fn pending(
     };
     let run = || -> rusqlite::Result<Result<SecretUseOutcome, SecretError>> {
         tx.execute("DELETE FROM secret_pending_requests WHERE consumed!=0 OR request_expires_at_ms<=?1 OR member_id!=?2",rusqlite::params![now,member])?;
-        let prior=tx.query_row("SELECT request_id,statement_bytes,request_expires_at_ms FROM secret_pending_requests WHERE request_kind='approve' AND incarnation=?1 AND mapped_owner=?2 AND mapped_kind=?3 AND mapped_ref=?4 AND coverage=?5",rusqlite::params![record.incarnation,call.scope.owner,call.scope.kind,call.scope.scope_ref,call.coverage],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Vec<u8>>(1)?,r.get::<_,i64>(2)?))).optional()?;
+        let prior=tx.query_row("SELECT request_id,statement_bytes,request_expires_at_ms FROM secret_pending_requests WHERE request_kind='approve' AND flow_id IS NULL AND incarnation=?1 AND mapped_owner=?2 AND mapped_kind=?3 AND mapped_ref=?4 AND coverage=?5",rusqlite::params![record.incarnation,call.scope.owner,call.scope.kind,call.scope.scope_ref,call.coverage],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Vec<u8>>(1)?,r.get::<_,i64>(2)?))).optional()?;
         if let Some((id, bytes, expiry)) = prior {
             return Ok(Ok(approval_reply(&id, &bytes, expiry)));
         }

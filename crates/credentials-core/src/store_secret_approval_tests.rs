@@ -6,6 +6,9 @@ use p256::ecdsa::{signature::Signer, Signature, SigningKey};
 #[path = "store_secret_flow_approval_tests.rs"]
 mod flow_tests;
 
+#[path = "store_secret_flow_tests.rs"]
+mod store_flow_tests;
+
 const FP: &str = "11111111111111111111111111111111";
 const UNKNOWN: &str = "00000000000000000000000000";
 fn signer() -> SigningKey {

@@ -6545,28 +6545,33 @@ fn secret_put_refuses_a_material_file_that_is_not_0600_or_is_malformed_without_n
 {
     let vault = GrantCliVault::new("secret-put-file-rules");
     vault.bootstrap();
-    let permissive = material_file(&vault.root, 0o644, MATERIAL_CANARY);
-    let refused = vault.run(&[
-        "secret",
-        "put",
-        "ops-key",
-        "--kind",
-        "api-key",
-        "--host",
-        "x.test",
-        "--material-file",
-        permissive.to_str().unwrap(),
-    ]);
-    assert!(!refused.status.success());
-    let stderr = String::from_utf8_lossy(&refused.stderr);
-    // The message names the path and the rule, and never the content.
-    assert!(stderr.contains(permissive.to_str().unwrap()), "{stderr}");
-    assert!(stderr.contains("0600"), "{stderr}");
-    assert!(!stderr.contains(MATERIAL_CANARY), "{stderr}");
-    assert!(!String::from_utf8_lossy(&refused.stdout).contains(MATERIAL_CANARY));
-    // Nothing was stored.
-    assert!(agent_secret_listing(&vault.data_dir).secrets.is_empty());
-    std::fs::remove_file(&permissive).unwrap();
+    // Mode bits exist only on Unix. On Windows the CLI checks the file's DACL instead,
+    // which a mode-based fixture cannot exercise, so this arm runs on Unix only.
+    #[cfg(unix)]
+    {
+        let permissive = material_file(&vault.root, 0o644, MATERIAL_CANARY);
+        let refused = vault.run(&[
+            "secret",
+            "put",
+            "ops-key",
+            "--kind",
+            "api-key",
+            "--host",
+            "x.test",
+            "--material-file",
+            permissive.to_str().unwrap(),
+        ]);
+        assert!(!refused.status.success());
+        let stderr = String::from_utf8_lossy(&refused.stderr);
+        // The message names the path and the rule, and never the content.
+        assert!(stderr.contains(permissive.to_str().unwrap()), "{stderr}");
+        assert!(stderr.contains("0600"), "{stderr}");
+        assert!(!stderr.contains(MATERIAL_CANARY), "{stderr}");
+        assert!(!String::from_utf8_lossy(&refused.stdout).contains(MATERIAL_CANARY));
+        // Nothing was stored.
+        assert!(agent_secret_listing(&vault.data_dir).secrets.is_empty());
+        std::fs::remove_file(&permissive).unwrap();
+    }
     // A site login file that does not carry a username and password line.
     let malformed = material_file(&vault.root, 0o600, "only-one-line");
     let refused = vault.run(&[

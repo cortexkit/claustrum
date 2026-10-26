@@ -27,7 +27,6 @@ fn call() -> SecretUse {
         worker_parent: None,
         coverage: "scope".into(),
         agent_id: Some("agent-A".into()),
-        display_name: "Alice".into(),
         target: agent_secret::UseTarget::ApiKey {
             scheme: "https".into(),
             host: "x.test".into(),
@@ -245,7 +244,7 @@ fn secret_pending_reuse_caps_cleanup_and_member_binding() {
         .contains("canary-token"));
     let id = first["request_id"].as_str().unwrap();
     let golden = format!(
-        r#"{{"agent":"Alice","coverage":"scope","durations":["once","hour","session","permanent"],"member_id":"fed-computer:22222222222222222222222222222222","request_expires_at_ms":1700000600000,"request_id":"{id}","scope":{{"epoch":7,"kind":"head","owner":"reserved:prefrontal-core","ref":"H"}},"secret":{{"incarnation":"00000000000000000000000000000149","kind":"agent_api_key","name":"key"}},"use":{{"host":"x.test","location":"header:X-Api-Key","path_prefix":"/repos/a"}},"v":"ck-secret-use-statement/v1"}}"#
+        r#"{{"agent_id":"agent-A","coverage":"scope","durations":["once","hour","session","permanent"],"member_id":"fed-computer:22222222222222222222222222222222","request_expires_at_ms":1700000600000,"request_id":"{id}","scope":{{"epoch":7,"kind":"head","owner":"reserved:prefrontal-core","ref":"H"}},"secret":{{"incarnation":"00000000000000000000000000000149","kind":"agent_api_key","name":"key"}},"use":{{"host":"x.test","location":"header:X-Api-Key","path_prefix":"/repos/a"}},"v":"ck-secret-use-statement/v1"}}"#
     );
     assert_eq!(
         decoded,
@@ -347,7 +346,7 @@ fn secret_pending_reuse_caps_cleanup_and_member_binding() {
 fn secret_statement_jcs_pins_unicode_and_escaping_without_normalizing() {
     let (_root, store) = setup("secret-jcs");
     let mut c = call();
-    c.display_name = "Al\"ice\\é".into();
+    c.agent_id = Some("Al\"ice\\é".into());
     c.scope.scope_ref = "H\u{1}".into();
     let reply = use_reply(&store, &c, NOW);
     let id = reply["request_id"].as_str().unwrap();
@@ -355,12 +354,27 @@ fn secret_statement_jcs_pins_unicode_and_escaping_without_normalizing() {
         .decode(reply["statement_b64url"].as_str().unwrap())
         .unwrap();
     let golden = format!(
-        r#"{{"agent":"Al\"ice\\é","coverage":"scope","durations":["once","hour","session","permanent"],"member_id":"fed-computer:22222222222222222222222222222222","request_expires_at_ms":1700000600000,"request_id":"{id}","scope":{{"epoch":7,"kind":"head","owner":"reserved:prefrontal-core","ref":"H\u0001"}},"secret":{{"incarnation":"00000000000000000000000000000149","kind":"agent_api_key","name":"key"}},"use":{{"host":"x.test","location":"header:X-Api-Key","path_prefix":"/repos/a"}},"v":"ck-secret-use-statement/v1"}}"#
+        r#"{{"agent_id":"Al\"ice\\é","coverage":"scope","durations":["once","hour","session","permanent"],"member_id":"fed-computer:22222222222222222222222222222222","request_expires_at_ms":1700000600000,"request_id":"{id}","scope":{{"epoch":7,"kind":"head","owner":"reserved:prefrontal-core","ref":"H\u0001"}},"secret":{{"incarnation":"00000000000000000000000000000149","kind":"agent_api_key","name":"key"}},"use":{{"host":"x.test","location":"header:X-Api-Key","path_prefix":"/repos/a"}},"v":"ck-secret-use-statement/v1"}}"#
     );
     assert_eq!(
         bytes,
         golden.as_bytes(),
         "JCS escaping and UTF-8 are pinned independently of the serializer"
+    );
+
+    // A stamp without an agent id still carries the key, as JSON null, so the
+    // statement's key set never depends on what the stamp happened to include.
+    let (_root, store) = setup("secret-jcs-null-agent");
+    let mut c = call();
+    c.agent_id = None;
+    let reply = use_reply(&store, &c, NOW);
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(reply["statement_b64url"].as_str().unwrap())
+        .unwrap();
+    assert!(
+        bytes.starts_with(br#"{"agent_id":null,"coverage":"scope","#),
+        "{}",
+        String::from_utf8_lossy(&bytes)
     );
 }
 

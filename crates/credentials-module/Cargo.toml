@@ -95,3 +95,6 @@ libc = "0.2"
 rusqlite = { workspace = true }
 # Checks the SHA-256 pins on vendored fixtures from other repositories.
 sha2 = { workspace = true }
+# Signs approval envelopes as a phone would, so the wire-contract tests drive real
+# secret.approve and secret.delete commits through the phone transport.
+p256 = { workspace = true }

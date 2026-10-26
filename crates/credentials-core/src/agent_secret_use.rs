@@ -43,7 +43,6 @@ pub struct SecretUse {
     pub worker_parent: Option<AskingScope>,
     pub coverage: String,
     pub agent_id: Option<String>,
-    pub display_name: String,
     pub target: UseTarget,
 }
 

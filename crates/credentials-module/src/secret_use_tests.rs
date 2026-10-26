@@ -30,7 +30,7 @@ fn stamp(kind: ScopeKind) -> ScopeStamp {
         .with_attributes(ScopeAttributes::new().with_agent_id(Some("agent-A".into())))
 }
 fn params() -> Value {
-    json!({"name":"key","display_name":"Alice","stamp":stamp(ScopeKind::Head),"target":{"scheme":"https","host":"x.test","path":"/repos/a/canary-token"}})
+    json!({"name":"key","stamp":stamp(ScopeKind::Head),"target":{"scheme":"https","host":"x.test","path":"/repos/a/canary-token"}})
 }
 fn body(answer: UseAnswer) -> Value {
     match answer {
@@ -218,7 +218,7 @@ fn secret_worker_under_head_requires_owner_ref_live_state_and_equal_epoch() {
 }
 
 #[test]
-fn secret_use_grammar_targets_key_sets_and_display_name_boundaries() {
+fn secret_use_grammar_targets_and_key_sets() {
     let (_root, store) = rig("grammar");
     let run = |p: &Value| body(serve(&store, Some(&principal("aft")), p, || 1000));
     let invalid = json!({"transport":"invalid_params"});
@@ -237,30 +237,16 @@ fn secret_use_grammar_targets_key_sets_and_display_name_boundaries() {
     assert_eq!(run(&p), SecretError::NotFound.body());
     p["name"] = json!("a".repeat(65));
     assert_eq!(run(&p), SecretError::LimitExceeded.body());
-    for display in [
-        "a\u{202e}",
-        "a\u{200b}",
-        "a\u{feff}",
-        "a\u{2028}",
-        "a\u{2029}",
-        "a\n",
-        "a\u{00ad}",
-    ] {
-        let mut p = params();
-        p["display_name"] = json!(display);
-        assert_eq!(run(&p), invalid);
-    }
+    // The vault takes no caller-supplied agent name; passing one is an unknown key.
     let mut p = params();
-    p["display_name"] = json!("é".repeat(64));
-    assert_eq!(run(&p), SecretError::NotFound.body());
-    p["display_name"] = json!(format!("{}a", "é".repeat(64)));
-    assert_eq!(run(&p), SecretError::LimitExceeded.body());
+    p["display_name"] = json!("Alice");
+    assert_eq!(run(&p), invalid);
     for path in ["/repos/a?x=1", "/repos/a#f", "/a//b", "/a/%2e", "/a/%25"] {
         let mut p = params();
         p["target"]["path"] = json!(path);
         assert_eq!(run(&p), invalid);
     }
-    for key in ["name", "stamp", "display_name", "target"] {
+    for key in ["name", "stamp", "target"] {
         let mut p = params();
         p.as_object_mut().unwrap().remove(key);
         assert_eq!(run(&p), invalid);

@@ -6972,7 +6972,6 @@ fn a_put_secret_releases_to_an_agent_and_operator_revoke_removes_the_grant() {
         worker_parent: None,
         coverage: "scope".into(),
         agent_id: None,
-        display_name: "aft".into(),
         target: UseTarget::ApiKey {
             scheme: "https".into(),
             host: "x.test".into(),

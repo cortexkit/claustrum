@@ -5178,7 +5178,7 @@ mod tests {
                         let body: serde_json::Value = serde_json::from_slice(&malformed.1).unwrap();
                         assert_eq!(body["code"], "invalid_params");
                         assert!(body.get("class").is_none());
-                        let params = json!({"name":"unknown","stamp":subc_protocol::scope::ScopeStamp::new(subc_protocol::Principal::Reserved{module_id:"prefrontal-core".into()},"H",7,subc_protocol::scope::ScopeKind::Head),"display_name":"Alice","target":{"scheme":"https","host":"x.test","path":"/repos/a/canary-token"}});
+                        let params = json!({"name":"unknown","stamp":subc_protocol::scope::ScopeStamp::new(subc_protocol::Principal::Reserved{module_id:"prefrontal-core".into()},"H",7,subc_protocol::scope::ScopeKind::Head),"target":{"scheme":"https","host":"x.test","path":"/repos/a/canary-token"}});
                         assert_eq!(
                             routed_reply(&surface, &admin, channel, "secret.use", params).await,
                             (FrameType::Response, refused.clone())

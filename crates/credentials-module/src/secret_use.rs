@@ -13,6 +13,11 @@ pub enum UseAnswer {
     InvalidParams,
 }
 
+/// The closed `secret.use` key set. There is deliberately no caller-supplied agent name:
+/// a sender has no trusted human name for an agent, and the approval statement is
+/// signed, so the statement names the agent only by the stamp's `agent_id`. The
+/// approval card (Cingulate) is what shows a person-readable name. A sender that still
+/// passes `display_name` is refused as an unknown field.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Params {
@@ -20,7 +25,6 @@ struct Params {
     #[serde(default = "default_coverage")]
     coverage: String,
     stamp: Value,
-    display_name: String,
     target: Target,
 }
 fn default_coverage() -> String {
@@ -129,9 +133,7 @@ pub fn serve(
         Ok(p) => p,
         Err(_) => return invalid(ValidationError::InvalidParams),
     };
-    if let Err(e) =
-        validate_name(&params.name).and_then(|_| validate_display_name(&params.display_name))
-    {
+    if let Err(e) = validate_name(&params.name) {
         return invalid(e);
     }
     if !matches!(params.coverage.as_str(), "scope" | "agent_and_workers") {
@@ -184,7 +186,6 @@ pub fn serve(
         worker_parent,
         coverage: params.coverage,
         agent_id: stamp.attributes.agent_id,
-        display_name: params.display_name,
         target,
     };
     match store.secret_use(&call, clock) {

@@ -11,28 +11,6 @@ pub const MAX_SECRET_PASSWORD_BYTES: usize = 1024;
 pub const MAX_SECRET_API_KEY_BYTES: usize = 8192;
 pub const MIN_SECRET_TOTP_PERIOD: u64 = 15;
 pub const MAX_SECRET_TOTP_PERIOD: u64 = 120;
-pub const MAX_SECRET_DISPLAY_NAME_BYTES: usize = 128;
-
-pub fn validate_display_name(name: &str) -> Result<(), ValidationError> {
-    use unicode_general_category::{get_general_category, GeneralCategory};
-    if name.is_empty()
-        || name.chars().any(|c| {
-            matches!(
-                get_general_category(c),
-                GeneralCategory::Control
-                    | GeneralCategory::Format
-                    | GeneralCategory::LineSeparator
-                    | GeneralCategory::ParagraphSeparator
-            )
-        })
-    {
-        return Err(InvalidParams);
-    }
-    if name.len() > MAX_SECRET_DISPLAY_NAME_BYTES {
-        return Err(LimitExceeded);
-    }
-    Ok(())
-}
 
 pub fn validate_host(host: &str) -> Result<(), ValidationError> {
     if host.is_empty()

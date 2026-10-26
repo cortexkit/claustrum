@@ -87,7 +87,6 @@ fn approve(store: &EncryptedStore, now: i64) -> Value {
         worker_parent: None,
         coverage: "scope".into(),
         agent_id: Some("agent-A".into()),
-        display_name: "aft".into(),
         target: crate::agent_secret::UseTarget::ApiKey {
             scheme: "https".into(),
             host: "x.test".into(),
@@ -202,7 +201,6 @@ fn operator_put_defaults_to_bearer_and_the_record_releases() {
         worker_parent: None,
         coverage: "scope".into(),
         agent_id: None,
-        display_name: "aft".into(),
         target: crate::agent_secret::UseTarget::ApiKey {
             scheme: "https".into(),
             host: "x.test".into(),

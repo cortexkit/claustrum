@@ -1,0 +1,318 @@
+use super::{SecretMaterial, SecretScope, ValidationError};
+use ValidationError::{InvalidParams, LimitExceeded};
+
+pub const MAX_SECRET_HOST_BYTES: usize = 253;
+pub const MAX_SECRET_PATH_PREFIX_BYTES: usize = 1024;
+pub const MAX_SECRET_HEADER_BYTES: usize = 64;
+pub const MAX_SECRET_QUERY_BYTES: usize = 64;
+pub const MAX_SECRET_POINTER_BYTES: usize = 256;
+pub const MAX_SECRET_USERNAME_BYTES: usize = 256;
+pub const MAX_SECRET_PASSWORD_BYTES: usize = 1024;
+pub const MAX_SECRET_API_KEY_BYTES: usize = 8192;
+pub const MIN_SECRET_TOTP_PERIOD: u64 = 15;
+pub const MAX_SECRET_TOTP_PERIOD: u64 = 120;
+
+pub fn validate_host(host: &str) -> Result<(), ValidationError> {
+    if host.is_empty()
+        || host.ends_with('.')
+        || host.parse::<std::net::IpAddr>().is_ok()
+        || !host.split('.').all(|label| {
+            !label.is_empty()
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        })
+    {
+        return Err(InvalidParams);
+    }
+    if host.len() > MAX_SECRET_HOST_BYTES {
+        return Err(LimitExceeded);
+    }
+    Ok(())
+}
+
+/// Compare origins without URL path normalization or accepting user information.
+pub fn canonical_origin(origin: &str) -> Result<String, ValidationError> {
+    let authority = origin.strip_prefix("https://").ok_or(InvalidParams)?;
+    let host = authority.strip_suffix(":443").unwrap_or(authority);
+    validate_host(host)?;
+    Ok(format!("https://{host}"))
+}
+
+pub fn validate_scope(scope: &SecretScope) -> Result<(), ValidationError> {
+    match scope {
+        SecretScope::ApiKey {
+            host,
+            path_prefix,
+            location,
+        } => {
+            validate_host(host)?;
+            if let Some(prefix) = path_prefix {
+                validate_path(prefix)?;
+                if prefix.ends_with('/') {
+                    return Err(InvalidParams);
+                }
+                if prefix.len() > MAX_SECRET_PATH_PREFIX_BYTES {
+                    return Err(LimitExceeded);
+                }
+            }
+            validate_location(location)
+        }
+        SecretScope::SiteLogin { origin } => {
+            canonical_origin(origin)?;
+            Ok(())
+        }
+    }
+}
+
+pub fn validate_path(path: &str) -> Result<(), ValidationError> {
+    if !path.starts_with('/')
+        || path.contains("//")
+        || path
+            .bytes()
+            .any(|b| !(b.is_ascii_alphanumeric() || b"-._~!$&'()*+,;=:@/%".contains(&b)))
+    {
+        return Err(InvalidParams);
+    }
+    let bytes = path.as_bytes();
+    let mut decoded = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let pair = bytes.get(i + 1..i + 3).ok_or(InvalidParams)?;
+            let pair = std::str::from_utf8(pair).map_err(|_| InvalidParams)?;
+            let b = u8::from_str_radix(pair, 16).map_err(|_| InvalidParams)?;
+            if b"/.%\\;".contains(&b) || !(0x21..=0x7e).contains(&b) {
+                return Err(InvalidParams);
+            }
+            decoded.push(b);
+            i += 3;
+        } else {
+            decoded.push(bytes[i]);
+            i += 1;
+        }
+    }
+    if decoded
+        .split(|b| *b == b'/')
+        .any(|segment| matches!(segment.split(|b| *b == b';').next(), Some(b"." | b"..")))
+    {
+        return Err(InvalidParams);
+    }
+    Ok(())
+}
+
+fn validate_location(location: &str) -> Result<(), ValidationError> {
+    if location == "authorization_bearer" {
+        return Ok(());
+    }
+    let (kind, value) = location.split_once(':').ok_or(InvalidParams)?;
+    if value.is_empty() {
+        return Err(InvalidParams);
+    }
+    match kind {
+        "header" => {
+            if !value
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+                || ["host", "cookie", "content-length", "authorization"]
+                    .iter()
+                    .any(|h| value.eq_ignore_ascii_case(h))
+            {
+                return Err(InvalidParams);
+            }
+            if value.len() > MAX_SECRET_HEADER_BYTES {
+                return Err(LimitExceeded);
+            }
+        }
+        "query" => {
+            if !value
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+            {
+                return Err(InvalidParams);
+            }
+            if value.len() > MAX_SECRET_QUERY_BYTES {
+                return Err(LimitExceeded);
+            }
+        }
+        "json_pointer" => {
+            if !value.starts_with('/') || !value.bytes().all(|b| (0x21..=0x7e).contains(&b)) {
+                return Err(InvalidParams);
+            }
+            let mut chars = value.chars();
+            while let Some(c) = chars.next() {
+                if c == '~' && !matches!(chars.next(), Some('0' | '1')) {
+                    return Err(InvalidParams);
+                }
+            }
+            if value.len() > MAX_SECRET_POINTER_BYTES {
+                return Err(LimitExceeded);
+            }
+        }
+        _ => return Err(InvalidParams),
+    }
+    Ok(())
+}
+
+/// Validate opened deposit material and operator input with identical, content-free errors.
+pub fn validate_material(material: &SecretMaterial) -> Result<(), ValidationError> {
+    match material {
+        SecretMaterial::ApiKey(key) => {
+            if key.expose().is_empty() {
+                return Err(InvalidParams);
+            }
+            if key.expose().len() > MAX_SECRET_API_KEY_BYTES {
+                return Err(LimitExceeded);
+            }
+        }
+        SecretMaterial::SiteLogin {
+            username,
+            password,
+            otpauth,
+        } => {
+            if username.expose().len() > MAX_SECRET_USERNAME_BYTES
+                || password.expose().len() > MAX_SECRET_PASSWORD_BYTES
+            {
+                return Err(LimitExceeded);
+            }
+            if let Some(uri) = otpauth {
+                validate_otpauth(uri.expose())?;
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn validate_otpauth(uri: &str) -> Result<(), ValidationError> {
+    let url = url::Url::parse(uri).map_err(|_| InvalidParams)?;
+    if url.scheme() != "otpauth"
+        || url.host_str() != Some("totp")
+        || url.path().len() <= 1
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(InvalidParams);
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut secret = false;
+    for (key, value) in url.query_pairs() {
+        if !seen.insert(key.to_string()) {
+            return Err(InvalidParams);
+        }
+        match key.as_ref() {
+            "secret" => {
+                let unpadded = value.trim_end_matches('=');
+                if unpadded.is_empty()
+                    || !unpadded
+                        .bytes()
+                        .all(|b| b.is_ascii_uppercase() || (b'2'..=b'7').contains(&b))
+                    || !matches!(unpadded.len() % 8, 0 | 2 | 4 | 5 | 7)
+                {
+                    return Err(InvalidParams);
+                }
+                secret = true;
+            }
+            "algorithm" if !matches!(value.as_ref(), "SHA1" | "SHA256" | "SHA512") => {
+                return Err(InvalidParams)
+            }
+            "digits" if !matches!(value.as_ref(), "6" | "8") => return Err(InvalidParams),
+            "period" => {
+                let period = value.parse::<u64>().map_err(|_| InvalidParams)?;
+                if !(MIN_SECRET_TOTP_PERIOD..=MAX_SECRET_TOTP_PERIOD).contains(&period) {
+                    return Err(InvalidParams);
+                }
+            }
+            "algorithm" | "digits" | "issuer" => {}
+            _ => return Err(InvalidParams),
+        }
+    }
+    if !secret {
+        return Err(InvalidParams);
+    }
+    Ok(())
+}
+
+/// The operator `ck auth secret put` request, as the admin op hands it to the store.
+///
+/// Every field arrives as text or base64 text because it crossed a JSON admin op, so
+/// this type exists to turn that back into the validated `SecretScope` and
+/// `SecretMaterial` a phone deposit would have produced. Putting the conversion here
+/// keeps one validator for both doors: a scope that a phone deposit refuses must be
+/// refused by `put` as well, or the two would slowly accept different shapes.
+///
+/// `Debug` is hand-written to redact the material, exactly like `AdminOpBody`. A put
+/// request is created by the CLI just before the admin op is serialized, and the most
+/// likely place a panic message shows a local value is right there -- so the base64 text,
+/// which decodes straight back to the password or key, must not render. The scope fields
+/// stay visible because they are the metadata an operator needs to diagnose a refusal.
+#[derive(Clone)]
+pub struct SecretPut {
+    pub kind: String,
+    pub name: String,
+    pub host: Option<String>,
+    pub path_prefix: Option<String>,
+    pub location: Option<String>,
+    pub origin: Option<String>,
+    /// Unpadded base64url of the deposit-plaintext bytes for `kind`.
+    pub material_b64url: String,
+}
+
+impl SecretPut {
+    /// Decode and validate everything but the name, which the store checks first so a
+    /// bad name is reported before any other field.
+    ///
+    /// The returned errors deliberately carry no field of the request: `invalid_params`
+    /// names no value, and the caller decides which rule to print for a human.
+    pub fn scope_and_material(&self) -> Result<(SecretScope, SecretMaterial), ValidationError> {
+        let scope = match (self.kind.as_str(), &self.host, &self.location, &self.origin) {
+            ("agent_api_key", Some(host), Some(location), None) => SecretScope::ApiKey {
+                host: host.clone(),
+                path_prefix: self.path_prefix.clone(),
+                location: location.clone(),
+            },
+            ("site_login", None, None, Some(origin)) if self.path_prefix.is_none() => {
+                SecretScope::SiteLogin {
+                    origin: origin.clone(),
+                }
+            }
+            _ => return Err(InvalidParams),
+        };
+        validate_scope(&scope)?;
+        let bytes = base64_url_no_pad(&self.material_b64url)?;
+        let framed = super::Secret::new(bytes);
+        let material = super::decode_deposit_plaintext(scope.kind(), &framed)?;
+        validate_material(&material)?;
+        Ok((scope, material))
+    }
+}
+
+/// Strict unpadded base64url: trailing bits must be zero and no padding character may
+/// appear, so one plaintext has exactly one encoding.
+fn base64_url_no_pad(text: &str) -> Result<Vec<u8>, ValidationError> {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    let bytes = URL_SAFE_NO_PAD
+        .decode(text.as_bytes())
+        .map_err(|_| InvalidParams)?;
+    if URL_SAFE_NO_PAD.encode(&bytes) != text {
+        return Err(InvalidParams);
+    }
+    Ok(bytes)
+}
+
+impl std::fmt::Debug for SecretPut {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecretPut")
+            .field("kind", &self.kind)
+            .field("name", &self.name)
+            .field("host", &self.host)
+            .field("path_prefix", &self.path_prefix)
+            .field("location", &self.location)
+            .field("origin", &self.origin)
+            .field("material_b64url", &"<redacted>")
+            .finish()
+    }
+}

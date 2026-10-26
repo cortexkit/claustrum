@@ -192,18 +192,19 @@ module's grants reach. A scoped route without a `flow_id` binds as before. A `ro
 this build cannot decode at all is refused the same way, code `invalid_control_body`, so it
 fails at once instead of waiting out the daemon's bind timeout.
 
-**A call callosum forwards from another computer is refused.** Callosum, the federation
-module, is itself a vault consumer with its own grants. When it relays a call from another
-computer, it opens the route as `reserved:callosum` with a bind-identity `harness` that
-starts `fed-` (for example `fed-computer:<32 hex>`, set from the authenticated peer key).
-On a route whose daemon-attested principal is `reserved:callosum`, such a harness marks a
-forwarded call, and until the vault supports federation it serves that route with no
-principal at all. Without an enrollment token, every scoped op answers the uniform
-`not_found`, byte-identical to an unknown credential, and the admin plane refuses. Like any
-caller without a principal, it still reaches what a bearer secret alone authorizes: a
-capability handle, or an enrollment token presented in the params. Callosum's own calls (any other harness, including an empty one) keep callosum's
-grants, and the harness of every other principal is ignored: it is client-supplied, so the
-vault reads it only to withdraw authority, never to grant it.
+**Callosum-forwarded channels are isolated.** On `reserved:callosum` only, a harness
+derived from the authenticated peer can select a federation member channel (§14) or a
+phone channel (§15). Neither borrows callosum's grants. Both refuse bearer params
+(`handle`, `enrollment_token`) with an `invalid_params` Error frame. With the member gate
+off, the older behavior remains: a `fed-` harness has no principal but can still use a
+vault-local bearer secret on credential operations. A phone setting off or unreadable
+never enables phone operations. Other principals' harnesses are ignored.
+
+**`secret.use` is addressed by sender, not by grant.** Only `reserved:aft` and
+`reserved:cerebellum` may call it, and the asking agent scope comes only from the subc
+`ScopeStamp` they relay in the params (§15). Every other caller, Direct and every
+callosum-forwarded channel included, gets the uniform `not_found` before its params are
+read. No read grant, handle or enrollment token reaches an agent secret.
 
 **An enrollment token** is the vault's OWN attestation: it minted it, holds only its
 hash, and can revoke it. This is how a host-launched consumer gets a name that grants can
@@ -1203,7 +1204,8 @@ this mapping:
 |---|---|---|
 | exactly `callosum-self` | ordinary callosum grants | ordinary callosum grants |
 | `fed-computer:<32 lowercase hex>` | refused principal | federation member channel |
-| any other `fed-` harness, including phone/sim/unknown or malformed hex | refused | refused |
+| exactly `fed-phone:<32 lowercase hex>` | no principal; legacy bearer behavior | phone channel only if `secret.phone_mapping` is also on; otherwise refused |
+| any other `fed-` harness, including sim/unknown or malformed hex | refused | refused |
 | empty or any other harness | ordinary callosum grants | refused |
 
 A harness starting `fed-` never inherits callosum's grants. Other principals' harnesses are
@@ -1225,6 +1227,10 @@ Handles and enrollment tokens are **vault-local bearer secrets**, not member ide
 With the gate off, release-1 bearer-scoped reads remain possible even on a refused `fed-`
 principal; that rollback boundary does not apply the access-token projection. Do not send
 handles or enrollment tokens to another vault.
+
+The phone setting defaults off and must stay off until callosum derives `fed-phone:`
+from the authenticated phone peer on **every call**, never from request params. An
+unreadable member gate never enables phone mapping, even when the phone setting is on.
 
 ### Auth-mode HPKE and exact aad bytes
 
@@ -1497,3 +1503,557 @@ material digest, so retries/restarts add no row but a recreated id at version 1 
 again. Forwarded reports retain the existing `report_auth_failure` hash format and member
 actor: every report adds diagnostics, at most the first state-changing report at a version
 adds a chain row. B records only diagnostics for its forward.
+
+## 15. Agent secrets
+
+An agent can use a password or API key without the model ever seeing it. Two kinds of
+caller reach this surface:
+
+* **Senders** (`reserved:aft` and `reserved:cerebellum`) call `secret.use` for the agent
+  scope they are serving and receive material only for a call a live grant covers.
+* **A paired phone** (through callosum, harness `fed-phone:<fp>`) registers its keys,
+  deposits sealed secrets, approves or refuses use, lists and deletes secrets, and
+  revokes grants with the seven phone operations.
+
+Agent secrets are separate from credentials and cannot be addressed by credential ids,
+handles, scoped lists, federation reads or transfers. The reserved `kem:secret-deposit:*`
+namespace is inaccessible through every credential operation, even with a seeded grant.
+
+Every key set in this section is **closed**. A request missing a required key, or
+carrying any key not shown, is refused with `invalid_params`. A reply carries exactly the
+keys shown; a key marked `?` is present only in the case the text names. Each example
+marked "golden" is checked by the vault's tests (`secret_*_key_sets_match_the_contract`
+in `crates/credentials-module/src/secret_contract_tests.rs`): its key set is pinned, the
+vault's parser accepts the request, and the vault's real reply has the same key set.
+Examples show the unwrapped result; transport responses wrap it in `{"result": …}`.
+
+### Gates and caller matrix
+
+`ck auth secret phone-gate on|off` sends `admin.secret_phone_gate_set {"v":2,"enabled":true|false}`
+through the admin-MAC route online or the leased offline applier. `status` reads the same
+persisted settings without changing them and prints `member mapping on|off|unreadable` and
+`phone setting on|off|unreadable`. An absent phone setting means off. A Direct caller without
+the MAC cannot change it. The phone setting never changes the member gate.
+
+Cells use these answers. Each refusal is exact: the frame type and the body never vary
+with the caller, the gates or the stored state.
+
+* **served**: the operation runs and answers per its own section.
+* **NF**: a `Response` frame with the uniform body
+  `{"result":{"error":{"code":"not_found","class":"permanent"}}}`, byte-identical to an
+  unknown credential.
+* **IP**: an `Error` frame `{"code":"invalid_params","message":…}` with no class (§1a).
+* **POR**: an `Error` frame, no class, with exactly
+  `{"code":"permissions_operator_required","message":"permissions operations need reserved:cingulate or the local operator's direct route"}`.
+
+The seven phone operations are `secret.phone_keys_register`, `secret.deposit_keys`,
+`secret.deposit`, `secret.approve`, `secret.list`, `secret.delete` and
+`secret.revoke_grant`. "Credential get" is `credential.get` with a valid `handle`;
+"scoped get" is `credential.get_scoped` without `enrollment_token`.
+
+Rows name the route principal and, for `reserved:callosum`, the opener harness. Member gate
+is `federation.member_mapping`; phone setting is `secret.phone_mapping`. Each is On, Off or
+Unreadable (a store read that fails), so every row below covers all nine combinations.
+
+| Caller | Gates | Seven phone ops | `secret.use` | `permissions.list`, `permissions.revoke` | credential get | scoped get |
+|---|---|---|---|---|---|---|
+| callosum, `callosum-self` | any | NF | NF | POR | served | served (callosum's grants) |
+| callosum, `fed-phone:<32 lowercase hex>` | member On, phone On | served (phone preflight) | NF | POR | IP | NF |
+| callosum, `fed-phone:<32 lowercase hex>` | member Off, any phone | NF | NF | POR | served (§14 gate-off residual) | NF |
+| callosum, `fed-phone:<32 lowercase hex>` | member On with phone Off or Unreadable; member Unreadable | NF | NF | POR | NF | NF |
+| callosum, malformed `fed-phone:` | member Off | NF | NF | POR | served (§14 gate-off residual) | NF |
+| callosum, malformed `fed-phone:` | member On or Unreadable | NF | NF | POR | NF | NF |
+| callosum, `fed-computer:<32 lowercase hex>` | member On | NF | NF | POR | NF (a member channel answers only its three federation ops, §14) | NF |
+| callosum, `fed-computer:<32 lowercase hex>` | member Off | NF | NF | POR | served (§14 gate-off residual) | NF |
+| callosum, `fed-computer:<32 lowercase hex>` | member Unreadable | NF | NF | POR | NF | NF |
+| callosum, any other `fed-` harness | member Off | NF | NF | POR | served (§14 gate-off residual) | NF |
+| callosum, any other `fed-` harness | member On or Unreadable | NF | NF | POR | NF | NF |
+| `reserved:aft` | any | NF | served | POR | served | served (its grants) |
+| `reserved:cerebellum` | any | NF | served | POR | served | served (its grants) |
+| `reserved:cingulate` | any | NF | NF | served | served | served (its grants) |
+| `direct` with the admin MAC | any | NF | NF | served only through `admin.op` (below); a plain call is POR | served | NF (Direct holds no read grant) |
+| `direct` without the admin MAC | any | NF | NF | POR; `admin.op` is refused | served | NF (Direct holds no read grant) |
+
+Gates are read only on `reserved:callosum` routes; every other principal's harness is
+ignored. On a phone channel, bearer params (`handle`, `enrollment_token`) are IP even on
+a method the channel otherwise refuses, except `permissions.list` and
+`permissions.revoke`, which are POR for every caller other than `reserved:cingulate`
+whatever their params. `secret.use` is NF for every caller other than the two senders,
+before its params are read, so a non-sender cannot learn the grammar.
+`secret_caller_gate_and_op_matrix_matches_the_wire_contract` drives every row,
+gate combination and column above through the real route dispatcher.
+
+The operator uses the existing `admin.challenge` / `admin.op` MAC transcript for
+permissions operations: the authenticated `op_body` is
+`{"op":"permissions.list","v":1,"agent_id":"optional-agent-id"}` (omit `agent_id`
+to list all), or `{"op":"permissions.revoke","v":1,"id":"grant-id"}`.
+Only the wrapper admits Direct. Plain `permissions.list {agent_id?}` and
+`permissions.revoke {id}` keep the `permissions/v1` provider shapes (pinned by the
+vendored vectors in `crates/credentials-module/tests/vectors/permissions-v1/`) and admit
+only `reserved:cingulate`.
+
+### Ordered phone preflight and transaction admission
+
+1. Check exact request keys, grammar and sizes. Grammar faults use `invalid_params`
+   Error frames with no class, fixed content-free messages. Other exceeded limits use
+   `limit_exceeded` result errors.
+2. Except for `deposit_keys`, perform an uncached `callosum.paired_devices_read` lookup
+   for `fed-phone:<fp>`. No answer/transient refusal gives `pairing_unavailable`; an absent
+   device gives `phone_not_registered`. Persist each answered pairing/absence observation
+   with its lookup time. `ck auth secret phone-gate status` performs no pairing lookup.
+3. Except for `deposit_keys` and registration, require keys under the current
+   `(fingerprint, pairing_id)`, otherwise `phone_not_registered`.
+4. Run operation checks and mutation in one serializing store write transaction. The
+   1,500 ms `PHONE_OP_DEADLINE` applies until transaction admission. At or after the
+   deadline, store only the answered observation and answer `pairing_unavailable`.
+   An admitted transaction is never cancelled and returns its commit result.
+
+Storage and audit failures answer `store_error` and roll back mutations. Approve and
+delete step 2 verify the signed canonical envelope and return ordered per-item results.
+Grant revocation is unsigned, but still requires the phone preflight.
+
+### Phone operations: closed key sets and golden examples
+
+All base64url is strict and unpadded and rejects nonzero trailing bits. Names are 1–64
+ASCII bytes `[A-Za-z0-9][A-Za-z0-9._-]*`; refused grammar is `invalid_params`, 65 bytes is
+`limit_exceeded`. Deposit, request and grant ids are canonical 26-character Crockford
+ULIDs. Hex is lowercase.
+
+#### `secret.phone_keys_register`
+
+Request `{deposit_pub, approval_pub}`: 64 hex characters for the X25519 deposit key, 130
+for an on-curve uncompressed SEC1 P-256 approval key. Reply `{status}`, `stored` or
+`already_stored`.
+
+<!-- golden:phone_keys_register.request -->
+```json
+{"deposit_pub":"5dfedd3b6bd47f6fa28ee15d969d5bb0ea53774d488bdaf9df1c6e0124b3ef22","approval_pub":"046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5"}
+```
+
+<!-- golden:phone_keys_register.result -->
+```json
+{"status":"stored"}
+```
+
+Registration is create-only per pairing. An identical retry answers
+`{"status":"already_stored"}`. Different keys give `phone_key_conflict`, no chain row,
+and one best-effort `secret_use_refusal` diagnostic under `secret-phone|<fp>` with
+principal kind `phone`, id `fed-phone:<fp>`, detail `phone_key_conflict`.
+
+#### `secret.deposit_keys`
+
+Request `{}`. Reply `{member_id, keys: [{state, key_id, pub}]}`. `member_id` is this
+vault's `federation.self_member`; `key_id` is the first 8 bytes of SHA-256 over the raw
+public key; `pub` is the 32-byte X25519 public key. `state` is `current`; no `next` key is
+returned in this version. Missing member id, or an inactive, non-KEM or undecodable deposit
+key, gives `secret_setup_incomplete` without replacing the key. No pairing lookup is made.
+
+<!-- golden:deposit_keys.request -->
+```json
+{}
+```
+
+<!-- golden:deposit_keys.result -->
+```json
+{"member_id":"fed-computer:22222222222222222222222222222222","keys":[{"state":"current","key_id":"0123456789abcdef","pub":"57db4b359f23ae5e146e4e2512056704722506348c150c14753d0c933d04d421"}]}
+```
+
+#### `secret.deposit`
+
+API key: `{deposit_id, member_id, name, kind: "agent_api_key", host, path_prefix?,
+location, enc_b64url, ciphertext_b64url}`. `location` is mandatory:
+`authorization_bearer`, `header:<name>`, `query:<name>` or `json_pointer:<pointer>`.
+`path_prefix` is omitted for "every path".
+
+<!-- golden:deposit.request.api_key -->
+```json
+{"deposit_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","member_id":"fed-computer:22222222222222222222222222222222","name":"key","kind":"agent_api_key","host":"x.test","path_prefix":"/repos/a","location":"header:X-Api-Key","enc_b64url":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","ciphertext_b64url":"AA"}
+```
+
+Login: `{deposit_id, member_id, name, kind: "site_login", origin, enc_b64url,
+ciphertext_b64url}`, with no host, path-prefix or location keys.
+
+<!-- golden:deposit.request.site_login -->
+```json
+{"deposit_id":"01ARZ3NDEKTSV4RRFFQ69G5FAW","member_id":"fed-computer:22222222222222222222222222222222","name":"login","kind":"site_login","origin":"https://x.test","enc_b64url":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","ciphertext_b64url":"AA"}
+```
+
+Reply `{status, incarnation?}`: `stored` with the new record's incarnation (32 hex), or
+`already_stored` with no incarnation.
+
+<!-- golden:deposit.result.stored -->
+```json
+{"status":"stored","incarnation":"0123456789abcdef0123456789abcdef"}
+```
+
+<!-- golden:deposit.result.already_stored -->
+```json
+{"status":"already_stored"}
+```
+
+Ciphertext is at most 16,384 bytes. HPKE Auth uses the registered phone deposit key and
+info `cortexkit/claustrum/secret-deposit/v1`; `enc` is 32 bytes.
+
+Deposit transaction order: validate local key/self member; consult permanent deposit-id
+tombstone; require current member and open rebuilt AAD; validate plaintext; refuse any
+existing name, corrupt included; store encrypted record and tombstone atomically. A
+matching digest/current member/live incarnation answers `already_stored`, otherwise a
+used deposit id gives `deposit_conflict`. A new id for an existing name gives `name_exists`.
+Invalid plaintext writes no tombstone, so a corrected ciphertext may reuse the id. A
+`member_id` that is not the current one, or associated data that does not open, answers
+`not_found`.
+
+#### `secret.approve`
+
+Request `{envelope_b64url, signature_b64url, card_ref?}`. The envelope and signature are
+described under "Signed statement and envelope" below. `card_ref` is the Cingulate
+elicitation id of the card the phone answered, 1–64 ASCII graphic bytes; it is not signed,
+takes part in no check, and is stored on each grant only for `permissions.list`. A
+malformed `card_ref`, 65 bytes included, is `invalid_params`.
+
+<!-- golden:approve.request -->
+```json
+{"envelope_b64url":"eyJkZWNpc2lvbiI6ImFsbG93IiwiZGV2aWNlX2ZpbmdlcnByaW50IjoiMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEiLCJkdXJhdGlvbiI6ImhvdXIiLCJncmFudF9leHBpcmVzX2F0X21zIjoxNzAwMDAzNjAwMDAwLCJpc3N1ZWRfYXRfbXMiOjE3MDAwMDAwMDAwMDAsIml0ZW1zIjpbeyJyZXF1ZXN0X2lkIjoiMDFIRjdZQVQwMDAwMDAwMDAwMDAwMDAwMDEiLCJzdGF0ZW1lbnRfc2hhMjU2IjoiZGUzMTc0ZmViMTRjZjJlMjllYzczMDgwZGY3ODVlZTYxNTc0OWQ2MzhjYzgxYmVkOWFhZTQ4MDc5ZDBjYjgxYiJ9XSwidiI6ImNrLXNlY3JldC11c2UtZW52ZWxvcGUvdjEifQ","signature_b64url":"MEUCIQDKRJk3gvG7EYBPT0xIKvcZn5bmJpnOEmY3t5fkhlkPtAIgBxhQIWr_XOuoTrazb1NrM-ZJ4FLMQhENmjQPQyuSlZw","card_ref":"card-1"}
+```
+
+Reply `{results: [{request_id, outcome: "granted"} | {request_id, outcome: "refused",
+code}]}`, one entry per envelope item in envelope order. `code` is always
+`approval_invalid` and never says which check failed.
+
+<!-- golden:approve.result -->
+```json
+{"results":[{"request_id":"01HF7YAT000000000000000001","outcome":"granted"},{"request_id":"00000000000000000000000000","outcome":"refused","code":"approval_invalid"}]}
+```
+
+A whole-envelope failure (strict parse, non-canonical bytes, duplicate request id, more
+than `MAX_ENVELOPE_ITEMS` items, wrong fingerprint, a signature that is not X9.62 DER or
+does not verify against the key registered under the current pairing) answers one
+`approval_invalid` result error instead of `results`.
+
+#### `secret.list`
+
+Request `{}`. Reply `{secrets: [{name, kind, incarnation, state, host?, path_prefix?,
+location?, origin?, grants: [{grant_id, scope: {owner, kind, ref}, coverage, duration,
+expires_at_ms?, last_use_ms?}]}]}`. An API key carries `host`, `location` and
+`path_prefix` (omitted when it covers every path); a login carries `origin`. `state` is
+`active` or `corrupt`. A grant omits `expires_at_ms` when its duration is `permanent`, and
+`last_use_ms` until it has served a call. Material, its digests and requested paths never
+appear.
+
+<!-- golden:list.request -->
+```json
+{}
+```
+
+<!-- golden:list.result -->
+```json
+{"secrets":[{"name":"key","kind":"agent_api_key","incarnation":"0123456789abcdef0123456789abcdef","state":"active","host":"x.test","path_prefix":"/repos/a","location":"header:X-Api-Key","grants":[{"grant_id":"01HF7YB0000000000000000001","scope":{"owner":"reserved:prefrontal-core","kind":"head","ref":"H"},"coverage":"scope","duration":"permanent","last_use_ms":1700000001000}]},{"name":"login","kind":"site_login","incarnation":"fedcba9876543210fedcba9876543210","state":"active","origin":"https://x.test","grants":[{"grant_id":"01HF7YB0000000000000000002","scope":{"owner":"reserved:prefrontal-core","kind":"worker","ref":"W"},"coverage":"scope","duration":"hour","expires_at_ms":1700003600000,"last_use_ms":1700000002000}]}]}
+```
+
+Expired grants are swept only after current-pairing registration passes, with one
+`secret_grant_expire` chain row per removal.
+
+#### `secret.delete`
+
+Two steps, told apart by their key sets. Step 1 is `{name}`; it answers
+`{status: "approval_required", request_id, statement_b64url, expires_at_ms}` for a delete
+statement. A name with no row answers the uniform `not_found`; an unset self member id
+answers `secret_setup_incomplete`. A repeat while a live delete request exists for that
+incarnation returns the same request.
+
+<!-- golden:delete.request.name -->
+```json
+{"name":"key"}
+```
+
+<!-- golden:delete.result.statement -->
+```json
+{"status":"approval_required","request_id":"01HF7YAT000000000000000001","statement_b64url":"eyJtZW1iZXJfaWQiOiJmZWQtY29tcHV0ZXI6MjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIiLCJyZXF1ZXN0X2V4cGlyZXNfYXRfbXMiOjE3MDAwMDA2MDAwMDAsInJlcXVlc3RfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDAwMSIsInNlY3JldCI6eyJpbmNhcm5hdGlvbiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMTQ5Iiwia2luZCI6ImFnZW50X2FwaV9rZXkiLCJuYW1lIjoia2V5In0sInYiOiJjay1zZWNyZXQtZGVsZXRlLXN0YXRlbWVudC92MSJ9","expires_at_ms":1700000600000}
+```
+
+Step 2 is `{envelope_b64url, signature_b64url}` with a `delete` envelope (no `card_ref`).
+It answers the same `{results: […]}` shape as `secret.approve`, where `granted` means the
+deletion committed.
+
+<!-- golden:delete.request.signed -->
+```json
+{"envelope_b64url":"eyJkZWNpc2lvbiI6ImRlbGV0ZSIsImRldmljZV9maW5nZXJwcmludCI6IjExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExIiwiZHVyYXRpb24iOiJub25lIiwiZ3JhbnRfZXhwaXJlc19hdF9tcyI6MTcwMDAwMDYwMDAwMCwiaXNzdWVkX2F0X21zIjoxNzAwMDAwMDAwMDAwLCJpdGVtcyI6W3sicmVxdWVzdF9pZCI6IjAxSEY3WUFUMDAwMDAwMDAwMDAwMDAwMDAxIiwic3RhdGVtZW50X3NoYTI1NiI6ImRmNjVhZDhjZDYzYjVlYmVlODBkNTg3ZDMwNWM4ZTE5NjExMjFhMzY3MWYxZDY2NTg0MjQyNTJhZTdiZmE1ZjIifV0sInYiOiJjay1zZWNyZXQtdXNlLWVudmVsb3BlL3YxIn0","signature_b64url":"MEUCIDo_hfKhCP8-j278u87PM-UKFEFb_AoGvVbbrjXugL8YAiEA6rbPE4zDISfvxqLF96TioYQoQ__NMZZ3mLqxLZdJyoU"}
+```
+
+<!-- golden:delete.result -->
+```json
+{"results":[{"request_id":"01HF7YAT000000000000000001","outcome":"granted"}]}
+```
+
+#### `secret.revoke_grant`
+
+Request `{grant_id}`. Unsigned, because it only removes access. Reply `{outcome}`:
+`revoked`, or `not_found` for an unknown or expired grant.
+
+<!-- golden:revoke_grant.request -->
+```json
+{"grant_id":"01HF7YB0000000000000000001"}
+```
+
+<!-- golden:revoke_grant.result -->
+```json
+{"outcome":"revoked"}
+```
+
+### `secret.use`: the sender contract
+
+Only `reserved:aft` and `reserved:cerebellum` may call `secret.use`; every other caller
+gets the uniform `not_found` before its params are read. AFT receives only API keys and
+Cerebellum only site logins.
+
+**Request** `{name, coverage?, stamp, target}`:
+
+* `name`: the secret name, grammar as above.
+* `coverage?`: `"scope"` (the default when omitted) or `"agent_and_workers"`. Coverage
+  only shapes a new approval statement: `agent_and_workers` is valid only when the mapped
+  asking scope is a Head (an Ephemeral that maps to its Head qualifies) and is offered only
+  `permanent`. Grant lookup always uses every live grant.
+* `stamp`: the `ScopeStamp` of the call being served, passed on exactly as subc delivered
+  it on that call's route bind. The vault cannot verify it and trusts the two senders to
+  relay it unchanged; it takes the asking scope from nowhere else.
+* `target`: for an API key `{scheme, host, port?, path}`, with `port` an integer that
+  defaults to 443; for a login `{origin}`, the frame's origin string.
+
+There is **no agent name parameter**. A sender holds no trusted human-readable name for
+an agent, and the approval statement is signed, so the vault names the agent only by the
+stamp's `attributes.agent_id`. Showing a person-readable name for the agent is the
+approval card's job (Cingulate's), not the vault's. A request that still carries
+`display_name` is refused with `invalid_params` as an unknown key.
+
+**Stamp grammar**, from subc-protocol 0.33.0 `ScopeStamp` (`crates/subc-protocol/src/scope.rs`
+in the subconscious repository; the version is the one locked in `Cargo.lock`):
+
+| Field | Required | Shape | Used for |
+|---|---|---|---|
+| `owner` | yes | principal object: `{"kind":"reserved","module_id":…}`, `{"kind":"direct"}` or `{"kind":"unverified"}` | the asking scope's owner, rendered `reserved:<module_id>`, `direct` or `unverified` |
+| `ref` | yes | string | the asking scope's ref |
+| `scope_epoch` | yes | integer, at most 2^53 − 1 | the asking scope's epoch |
+| `kind` | yes | `"head"`, `"worker"` or `"ephemeral"` | the mapping rule |
+| `owner_authorized` | yes | boolean | required by the decoder; grants no authority here |
+| `parent` | no | `{owner, ref, scope_epoch}`, with `owner` a principal object as above and `scope_epoch` at most 2^53 − 1 | Ephemeral mapping and Worker-under-Head coverage |
+| `parent_state` | no | `"linked"`, `"pending"` or `"ended"`; only `linked` counts as live | as `parent` |
+| `attributes` | no | object with optional `agent_id`, `on_behalf_of_agent`, `delegates`, `flow_id`, `run_id`; unknown attribute keys are refused | `agent_id` names the agent in statements and the permissions listing; a present `flow_id` (a flow-read scope) maps to nothing |
+| `workdir`, `project_id`, `expires_at_ms` | no | as subc defines them | ignored |
+
+Other top-level stamp keys are ignored, as subc's decoder does. A stamp missing any required
+field answers the uniform `not_found`; a stamp whose fields are present but malformed is
+`invalid_params`. Mapping uses only the stamp: a Head or Worker maps to itself; an
+Ephemeral maps to its parent (as a Head) only when `parent.owner` is
+`reserved:prefrontal-core`, `parent_state` is `linked` and `parent.scope_epoch` equals the
+stamp's `scope_epoch`; anything else, and every flow-read scope, maps to nothing (uniform
+`not_found`). A Worker is also served by an `agent_and_workers` grant on Head H when its
+stamp's parent has H's owner and ref, `parent_state` `linked` and an equal epoch.
+
+**Target rules.** The scheme must be `https` and the port 443. The host is lowercase ASCII
+(IDN as A-labels), with no trailing dot and no IP literal, and must equal the record's host.
+The path starts with `/` and holds only RFC 3986 pchar bytes and `/`. Senders strip the
+query and fragment before calling; a path with `?` or `#` is `invalid_params`. Refused,
+never normalised: a raw `\`, space, control byte or byte ≥ 0x80; a percent-escape (either
+case) that decodes to `/`, `.`, `%`, `\`, `;`, a byte below 0x21 or a byte at or above
+0x7F; a segment whose part before the first `;` is `.` or `..`; an empty segment except
+one trailing `/`. A path matches a stored prefix when it equals it or starts with prefix +
+`/`, compared on raw bytes. A login origin is canonical `https://host` with port 443
+omitted, so `https://x.test:443` equals `https://x.test`.
+
+<!-- golden:use.request.api_key -->
+```json
+{"name":"key","coverage":"scope","stamp":{"owner":{"kind":"reserved","module_id":"prefrontal-core"},"ref":"H","scope_epoch":7,"kind":"head","attributes":{"agent_id":"agent-A"},"owner_authorized":true},"target":{"scheme":"https","host":"x.test","port":443,"path":"/repos/a/issues/1"}}
+```
+
+The same call with `coverage` and `port` omitted is equivalent:
+
+<!-- golden:use.request.api_key.defaults -->
+```json
+{"name":"key","stamp":{"owner":{"kind":"reserved","module_id":"prefrontal-core"},"ref":"H","scope_epoch":7,"kind":"head","attributes":{"agent_id":"agent-A"},"owner_authorized":true},"target":{"scheme":"https","host":"x.test","path":"/repos/a/issues/1"}}
+```
+
+A login asked for by a Worker whose parent is a live Head:
+
+<!-- golden:use.request.site_login -->
+```json
+{"name":"login","stamp":{"owner":{"kind":"reserved","module_id":"prefrontal-core"},"ref":"W","scope_epoch":7,"kind":"worker","parent":{"owner":{"kind":"reserved","module_id":"prefrontal-core"},"ref":"H","scope_epoch":7},"parent_state":"linked","attributes":{"agent_id":"agent-A"},"owner_authorized":true},"target":{"origin":"https://x.test"}}
+```
+
+**Replies.** Exactly one of three success shapes, as a `Response` result:
+
+API key released to AFT, `{status: "released", kind: "agent_api_key", key_b64url,
+location}`; `location` tells AFT where to put the key and took no part in matching:
+
+<!-- golden:use.result.released.api_key -->
+```json
+{"status":"released","kind":"agent_api_key","key_b64url":"c2stZXhhbXBsZQ","location":"header:X-Api-Key"}
+```
+
+Login released to Cerebellum, `{status: "released", kind: "site_login", username,
+password, totp?}`; `totp` is the current code, present only when the record holds a TOTP
+seed. The seed itself never leaves the vault.
+
+<!-- golden:use.result.released.site_login -->
+```json
+{"status":"released","kind":"site_login","username":"alice","password":"correct horse","totp":"123456"}
+```
+
+No live grant covers the call, `{status: "approval_required", request_id,
+statement_b64url, expires_at_ms}`. The sender shows nothing from it to the model; the
+statement goes to the approval card, and the sender retries `secret.use` after the phone
+answers. `approval_required` does not mean any phone can currently approve: it is returned
+whether or not one is registered and paired. An uncovered call matching a live request on
+(incarnation, mapped owner, kind and ref, coverage) gets that request back unchanged,
+whatever its path.
+
+<!-- golden:use.result.approval_required -->
+```json
+{"status":"approval_required","request_id":"01HF7YAT000000000000000001","statement_b64url":"eyJhZ2VudF9pZCI6ImFnZW50LUEiLCJjb3ZlcmFnZSI6InNjb3BlIiwiZHVyYXRpb25zIjpbIm9uY2UiLCJob3VyIiwic2Vzc2lvbiIsInBlcm1hbmVudCJdLCJtZW1iZXJfaWQiOiJmZWQtY29tcHV0ZXI6MjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIiLCJyZXF1ZXN0X2V4cGlyZXNfYXRfbXMiOjE3MDAwMDA2MDAwMDAsInJlcXVlc3RfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDAwMSIsInNjb3BlIjp7ImVwb2NoIjo3LCJraW5kIjoiaGVhZCIsIm93bmVyIjoicmVzZXJ2ZWQ6cHJlZnJvbnRhbC1jb3JlIiwicmVmIjoiSCJ9LCJzZWNyZXQiOnsiaW5jYXJuYXRpb24iOiIwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDE0OSIsImtpbmQiOiJhZ2VudF9hcGlfa2V5IiwibmFtZSI6ImtleSJ9LCJ1c2UiOnsiaG9zdCI6IngudGVzdCIsImxvY2F0aW9uIjoiaGVhZGVyOlgtQXBpLUtleSIsInBhdGhfcHJlZml4IjoiL3JlcG9zL2EifSwidiI6ImNrLXNlY3JldC11c2Utc3RhdGVtZW50L3YxIn0","expires_at_ms":1700000600000}
+```
+
+**Ordered checks and refusals.** Checking stops at the first failure.
+
+| Step | Condition | Answer |
+|---|---|---|
+| 1 | caller is not AFT or Cerebellum | uniform `not_found` |
+| 2 | name, coverage value or target grammar invalid; unknown or missing key; malformed stamp | `invalid_params` Error frame |
+| 2 | a name or other length over its limit | `limit_exceeded` (`context_overflow`) |
+| 3 | the stamp maps to nothing, or lacks a field the mapping needs | uniform `not_found` |
+| 3 | `agent_and_workers` for a mapped scope that is not a Head | `invalid_params` Error frame |
+| 4 | unknown name, `corrupt` record, sealed-scope mismatch, kind not released to this sender, or target mismatch | uniform `not_found` |
+| 5 | a live grant covers the call | `released` |
+| 6 | this vault's member id is unset | `secret_setup_incomplete` (`permanent`) |
+| 6 | otherwise | `approval_required`, or `pending_limit` (`transient`) past 8 live requests per mapped scope or 64 in total |
+| any | a store failure or failed release-audit commit | `store_error` (`transient`); nothing is released and no `once` grant is consumed |
+
+Steps 1 to 4 create no pending request, and every `not_found` above is byte-identical, so a
+sender cannot tell which check refused. `approval_required` confirms to the trusted sender
+that the name, kind and target it supplied exist; that is the one accepted disclosure.
+
+### Signed statement and envelope
+
+The approval statement, the delete statement and the envelope are RFC 8785 (JCS)
+canonical JSON, carried as unpadded base64url. All integers are JSON numbers no larger
+than 2^53 − 1; there are no floats; strings are UTF-8. Their `v` field is their domain
+tag, registered in `docs/domain-separators.txt`. The examples below are the pinned phone-app
+test vectors (`crates/credentials-core/tests/vectors/secret-approval-v1.json`), decoded.
+
+Approval statement, exactly `{v, request_id, member_id, scope: {owner, kind, ref, epoch},
+agent_id, coverage, secret: {name, kind, incarnation}, use, durations,
+request_expires_at_ms}`:
+
+* `scope` is the mapped asking scope; `owner` is rendered as in the stamp grammar.
+* `agent_id` is the stamp's `attributes.agent_id`, or `null` when the stamp has none. It
+  is an identifier, not a display name: the approval card supplies the human name.
+* `use` is taken from the record's sealed scope: `{host, path_prefix, location}` for an
+  API key (`path_prefix` is `""` for every path) or `{origin}` for a login. It never
+  carries the requested path.
+* `durations` is the offered list in the order once, hour, session, permanent; an
+  `agent_and_workers` statement offers only `permanent`.
+
+<!-- golden:statement.use -->
+```json
+{"agent_id":"agent-A","coverage":"scope","durations":["once","hour","session","permanent"],"member_id":"fed-computer:22222222222222222222222222222222","request_expires_at_ms":1700000600000,"request_id":"01HF7YAT000000000000000001","scope":{"epoch":7,"kind":"head","owner":"reserved:prefrontal-core","ref":"H"},"secret":{"incarnation":"00000000000000000000000000000149","kind":"agent_api_key","name":"key"},"use":{"host":"x.test","location":"header:X-Api-Key","path_prefix":"/repos/a"},"v":"ck-secret-use-statement/v1"}
+```
+
+Delete statement, exactly `{v, request_id, member_id, secret: {name, kind, incarnation},
+request_expires_at_ms}`:
+
+<!-- golden:statement.delete -->
+```json
+{"member_id":"fed-computer:22222222222222222222222222222222","request_expires_at_ms":1700000600000,"request_id":"01HF7YAT000000000000000001","secret":{"incarnation":"00000000000000000000000000000149","kind":"agent_api_key","name":"key"},"v":"ck-secret-delete-statement/v1"}
+```
+
+Envelope, exactly `{v, items: [{request_id, statement_sha256}], decision, duration,
+grant_expires_at_ms, device_fingerprint, issued_at_ms}`. `statement_sha256` is the lowercase
+hex SHA-256 of the decoded statement bytes. `decision` is `allow` (durations `once`,
+`hour`, `session`, `permanent`) or `delete` (duration `none`). The required
+`grant_expires_at_ms` is `issued_at_ms` + 600,000 for `once`, + 3,600,000 for `hour`,
++ 86,400,000 for `session`, 0 for `permanent`, and the delete request's expiry for `none`.
+An envelope carries at most `MAX_ENVELOPE_ITEMS` = 16 items. The signature is ECDSA P-256
+with SHA-256 over the decoded envelope bytes, by the approval key registered for the
+fingerprint under its current pairing, X9.62 DER. The vault parses the envelope strictly:
+unknown or duplicate keys, and bytes that differ from the canonical re-encoding of the
+parse, are `approval_invalid`. The SHA-256 of the exact accepted envelope bytes is stored
+on every grant it creates and is the `payload_hash` of its audit rows.
+
+<!-- golden:envelope.allow -->
+```json
+{"decision":"allow","device_fingerprint":"11111111111111111111111111111111","duration":"hour","grant_expires_at_ms":1700003600000,"issued_at_ms":1700000000000,"items":[{"request_id":"01HF7YAT000000000000000001","statement_sha256":"de3174feb14cf2e29ec73080df785ee615749d638cc81bed9aae48079d0cb81b"}],"v":"ck-secret-use-envelope/v1"}
+```
+
+<!-- golden:envelope.delete -->
+```json
+{"decision":"delete","device_fingerprint":"11111111111111111111111111111111","duration":"none","grant_expires_at_ms":1700000600000,"issued_at_ms":1700000000000,"items":[{"request_id":"01HF7YAT000000000000000001","statement_sha256":"df65ad8cd63b5ebee80d587d305c8e1961121a3671f1d6658424252ae7bfa5f2"}],"v":"ck-secret-use-envelope/v1"}
+```
+
+Per item, after the whole-envelope checks: the request must be live (unconsumed and
+before its expiry) and of the envelope's kind (approval or delete); `statement_sha256`
+must equal its stored statement digest; `request_expires_at_ms` − 600,000 ≤
+`issued_at_ms` < `request_expires_at_ms`; |vault now − `issued_at_ms`| ≤ 120,000; the
+statement's `member_id` must equal the current self member id; the duration must be
+offered and `grant_expires_at_ms` exact; a live record must have the statement's
+incarnation, and for approval the statement's `secret.kind` and `use` must equal the
+record's sealed scope. A pending request the envelope does not list stays pending.
+
+### Binary byte layouts
+
+Every binary field below is prefixed by its u64 little-endian byte length. Text is UTF-8
+without normalization; absent optional fields are zero length. In order:
+
+* AAD: `ck-secret-deposit-aad/v1`, deposit_id, member_id, name, kind, then host,
+  path_prefix-or-empty, location (API key), or origin (login).
+* Plaintext: `ck-secret-deposit-plaintext/v1`, then key bytes, or username, password,
+  otpauth URI-or-empty.
+* Sealed body: `ck-secret-sealed-body/v1`, kind, scope fields as above, plaintext fields.
+* Deposit digest: SHA-256 over framed deposit_id, enc, ciphertext, rebuilt AAD, no tag.
+
+The shared deposit/operator material validator refuses malformed framing/UTF-8/otpauth
+without echoing content. Username ≤256 bytes, password ≤1,024, API key ≤8,192. TOTP accepts
+SHA1/SHA256/SHA512, digits 6 or 8, period 15–120 inclusive (default 30); HOTP is refused.
+Header names are RFC 9110 tokens ≤64 bytes. `Host`, `Cookie`, `Content-Length` and
+`Authorization` are refused in every ASCII case; `header:X-Api-Key` is accepted.
+
+### Secret codes
+
+Every refusal the secret operations can give. Result errors are a `Response` frame whose
+body is `{"result":{"error":{"code":"…","class":"…"}}}`, for example:
+
+<!-- golden:error.result -->
+```json
+{"error":{"code":"approval_invalid","class":"permanent"}}
+```
+
+Transport errors are an `Error` frame `{"code":"…","message":"…"}` with no class (§1a);
+the message is fixed text and never echoes the request.
+
+| Code | Class | Form | Meaning |
+|---|---|---|---|
+| `invalid_params` | none | transport Error | request grammar or key set, stamp shape, coverage not permitted, malformed `card_ref`, bearer params on a phone channel |
+| `not_found` | `permanent` | result error | uniform refusal: not a sender or phone channel, unknown or unusable name, unmapped scope, target mismatch, wrong member id or unopenable deposit |
+| `limit_exceeded` | `context_overflow` | result error | a length or size over its limit |
+| `approval_invalid` | `permanent` | result error, or the `code` of a refused `results` item | an envelope or item failed a check; never says which |
+| `phone_not_registered` | `permanent` | result error | the phone is absent from callosum, or has no keys under its current pairing |
+| `phone_key_conflict` | `permanent` | result error | different keys for an already registered (fingerprint, pairing) |
+| `deposit_conflict` | `permanent` | result error | a used deposit id with different bytes, member id or a deleted record |
+| `name_exists` | `permanent` | result error | a new deposit for a name that already has a record, corrupt included |
+| `secret_setup_incomplete` | `permanent` | result error | this vault's member id is unset, or its deposit key is unusable |
+| `pairing_unavailable` | `transient` | result error | callosum did not answer the pairing lookup within the 1,500 ms budget |
+| `pending_limit` | `transient` | result error | too many live approval requests (8 per mapped scope, 64 in total) |
+| `store_error` | `transient` | result error | a store or audit-commit failure; nothing changed and nothing was released |
+| `permissions_operator_required` | none | transport Error | `permissions.list` or `permissions.revoke` from a caller other than `reserved:cingulate` or the MAC-authenticated operator; body per `permissions/v1` |
+
+`secret_error_codes_are_golden_and_match_the_doc_table` pins each code's class and body
+and checks this table in both directions.
+
+### Phone transition audit
+
+Payload hashes use SHA-256 of the ordered length-prefixed fields above, never plaintext
+material or its digest. Vault-global rows have no target.
+
+| Op | Actor | Target | Payload fields |
+|---|---|---|---|
+| `secret_phone_gate_set` | offline-cli or route-admin | none | enabled (`true`/`false`) |
+| `secret_phone_register` | fed-phone:<fp> | secret-phone\|<fp> | pairing_id, raw deposit_pub, raw approval_pub |
+| `secret_store` | fed-phone:<fp> | secret\|<name> | kind, incarnation, scope fields, deposit_id |
+| `secret_grant_expire` | vault | secret\|<name> | grant_id, incarnation, expires_at_ms (u64 LE) |

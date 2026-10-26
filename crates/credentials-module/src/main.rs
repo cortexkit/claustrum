@@ -24,6 +24,8 @@ mod admin_surface;
 mod federation;
 mod limiter;
 mod read_surface;
+mod secret_phone;
+mod secret_use;
 #[cfg(test)]
 mod test_support;
 mod watch_scoped;
@@ -708,6 +710,9 @@ async fn build_surface(
 
     let store = EncryptedStore::open(store, key)
         .map_err(|e| ModuleError::Message(format!("open vault: {e}")))?;
+    store
+        .ensure_secret_deposit_key()
+        .map_err(|e| ModuleError::Message(format!("bootstrap deposit key: {e}")))?;
     let store = Arc::new(store);
 
     let http =
@@ -1310,12 +1315,42 @@ async fn dispatch_route_request(
 ) -> Result<(), ModuleError> {
     let header = frame.header;
     let method = serde_json::from_slice::<ReadRequest>(&frame.body).ok();
+    if let Some(request) = method
+        .as_ref()
+        .filter(|r| matches!(r.method.as_str(), "permissions.list" | "permissions.revoke"))
+    {
+        if !matches!(&caller, federation::RouteCaller::Principal(Some(subc_protocol::Principal::Reserved { module_id })) if module_id=="cingulate")
+        {
+            return send_route_error(writer,header.ver,header.channel,header.epoch,header.corr,"permissions_operator_required","permissions operations need reserved:cingulate or the local operator's direct route").await;
+        }
+        return match admin.serve_permissions(&request.method, &request.params, "reserved:cingulate")
+        {
+            Ok(reply) => send_route_result(writer, header, wrap_result(reply)).await,
+            Err(_) => {
+                invalid_params(
+                    writer,
+                    header.ver,
+                    header.channel,
+                    header.epoch,
+                    header.corr,
+                    "invalid permissions params",
+                )
+                .await
+            }
+        };
+    }
+    // Sender admission for secret.use precedes even phone/member parameter preflight.
+    if method.as_ref().is_some_and(|r| r.method == "secret.use")
+        && !matches!(caller, federation::RouteCaller::Principal(_))
+    {
+        return send_route_result(writer, header, uniform_not_found()).await;
+    }
     match caller {
         federation::RouteCaller::Principal(principal) => {
-            if method
-                .as_ref()
-                .is_some_and(|request| federation::is_federation_op(&request.method))
-            {
+            if method.as_ref().is_some_and(|request| {
+                federation::is_federation_op(&request.method)
+                    || secret_phone::is_phone_op(&request.method)
+            }) {
                 return send_route_result(writer, header, uniform_not_found()).await;
             }
             handle_read_request(frame, writer, surface, admin, principal).await
@@ -1345,6 +1380,39 @@ async fn dispatch_route_request(
                     send_route_result(writer, header, wrap_result(reply)).await
                 }
                 federation::HomeAnswer::InvalidParams(detail) => {
+                    invalid_params(
+                        writer,
+                        header.ver,
+                        header.channel,
+                        header.epoch,
+                        header.corr,
+                        &detail,
+                    )
+                    .await
+                }
+            }
+        }
+        federation::RouteCaller::Phone(fingerprint) => {
+            let Some(request) = method else {
+                return invalid_params(
+                    writer,
+                    header.ver,
+                    header.channel,
+                    header.epoch,
+                    header.corr,
+                    "invalid secret request",
+                )
+                .await;
+            };
+            match admin
+                .serve_phone(&fingerprint, &request.method, &request.params)
+                .await
+            {
+                secret_phone::PhoneAnswer::Reply(reply) => {
+                    send_route_result(writer, header, wrap_result(reply)).await
+                }
+                secret_phone::PhoneAnswer::PermissionsOperatorRequired => send_route_error(writer,header.ver,header.channel,header.epoch,header.corr,"permissions_operator_required","permissions operations need reserved:cingulate or the local operator's direct route").await,
+                secret_phone::PhoneAnswer::InvalidParams(detail) => {
                     invalid_params(
                         writer,
                         header.ver,
@@ -1426,6 +1494,20 @@ async fn handle_read_request(
     };
 
     let result = match request.method.as_str() {
+        "secret.use" => match admin.serve_secret_use(principal.as_ref(), &request.params) {
+            secret_use::UseAnswer::Reply(reply) => wrap_result(reply),
+            secret_use::UseAnswer::InvalidParams => {
+                return invalid_params(
+                    writer,
+                    ver,
+                    channel,
+                    epoch,
+                    corr,
+                    "invalid secret use parameters",
+                )
+                .await
+            }
+        },
         OP_ACCOUNT_TOKEN => {
             match serde_json::from_value::<read_surface::AccountTokenParams>(request.params) {
                 Ok(params) => match surface.account_token(principal.as_ref(), &params).await {
@@ -2038,21 +2120,12 @@ fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> 
             optional: Vec::new(),
         },
     }))
-    // `capabilities(None)` is DELIBERATE, not an unfilled field.
-    //
-    // The protocol defines it as `Option<CapabilityDeclarations>` and states that
-    // omitting the block preserves the manifest contract used before capability grammar
-    // existed. A present block is static discovery metadata the daemon validates before
-    // accepting a HELLO, so declaring one is an opt-in that changes what the supervisor
-    // checks about this module. That should be a decision, not a field filled in to clear
-    // a compile error.
-    //
-    // WHAT WOULD MAKE IT WORTH DECLARING: a consumer that must discover this vault's
-    // route surface statically, before binding, instead of learning it from a refusal.
-    // Nothing does today. Every consumer here is configured with the credential ids or
-    // handles it needs, and the read surface is deliberately anonymous, so a discovery
-    // block would publish a menu no caller asked for.
-    .capabilities(None)
+    // Cingulate discovers grant inventories by capability rather than module name.
+    .capabilities(Some(subc_protocol::manifest::CapabilityDeclarations {
+        provides: vec!["permissions/v1".to_owned()],
+        requires: Vec::new(),
+        must_never_reach: Vec::new(),
+    }))
     // `provenance` carries the ONE fact this build actually knows about itself.
     //
     // The protocol's four fields are build_git_sha, build_lock_digest, wire_crate_version
@@ -2212,6 +2285,17 @@ fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> 
         // what it is.
         concurrency: Concurrency::ModuleManaged,
         operations: vec![
+            ManagementOperation { name: "secret.phone_keys_register".into(), description: None, kind: ManagementOperationKind::Mutate },
+            ManagementOperation { name: "secret.deposit_keys".into(), description: None, kind: ManagementOperationKind::Query },
+            ManagementOperation { name: "secret.deposit".into(), description: None, kind: ManagementOperationKind::Mutate },
+            ManagementOperation { name: "secret.approve".into(), description: None, kind: ManagementOperationKind::Mutate },
+            ManagementOperation { name: "secret.list".into(), description: None, kind: ManagementOperationKind::Query },
+            ManagementOperation { name: "secret.delete".into(), description: None, kind: ManagementOperationKind::Mutate },
+            ManagementOperation { name: "secret.revoke_grant".into(), description: None, kind: ManagementOperationKind::Mutate },
+            // A use can consume a grant with duration `once`, so it must not be relayed as a retryable query.
+            ManagementOperation { name: "secret.use".into(), description: None, kind: ManagementOperationKind::Mutate },
+            ManagementOperation { name: "permissions.list".into(), description: None, kind: ManagementOperationKind::Query },
+            ManagementOperation { name: "permissions.revoke".into(), description: None, kind: ManagementOperationKind::Mutate },
             ManagementOperation {
                 name: OP_ACCOUNT_TOKEN.to_string(),
                 description: Some("Mint a short-lived account worker token for one granted audience without exposing machine signing authority.".to_string()),
@@ -2398,6 +2482,7 @@ pub mod probe {
 #[cfg(test)]
 mod tests {
     include!("watch_scoped_tests.rs");
+    include!("secret_contract_tests.rs");
     include!("../tests/fixtures/federation_read_producer.rs");
     #[test]
     fn daemon_uses_shared_record_and_key_path_override_rules() {
@@ -2480,6 +2565,72 @@ mod tests {
             }),
             "cadence must stay derived from the constant the ticker uses"
         );
+    }
+
+    #[test]
+    fn the_manifest_declares_every_secret_and_permissions_op_with_its_kind() {
+        let m = manifest("claustrum", None);
+        assert_eq!(
+            m.capabilities.as_ref().unwrap().provides,
+            vec!["permissions/v1"]
+        );
+        let ProviderRole::ManagementSurface { operations, .. } = &m.provides[0] else {
+            panic!("management surface")
+        };
+        for name in secret_phone::PHONE_OPS.into_iter().chain([
+            "secret.use",
+            "permissions.list",
+            "permissions.revoke",
+        ]) {
+            let matches = operations
+                .iter()
+                .filter(|op| op.name == name)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                matches.len(),
+                1,
+                "missing or duplicated declaration: {name}"
+            );
+            let kind = if matches!(
+                name,
+                "secret.deposit_keys" | "secret.list" | "permissions.list"
+            ) {
+                ManagementOperationKind::Query
+            } else {
+                ManagementOperationKind::Mutate
+            };
+            assert_eq!(matches[0].kind, kind, "wrong relay kind for {name}");
+        }
+    }
+
+    #[test]
+    fn permissions_provider_vectors_have_pinned_provenance() {
+        use sha2::{Digest, Sha256};
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/vectors/permissions-v1");
+        let provenance = std::fs::read_to_string(dir.join("PROVENANCE")).unwrap();
+        let mut lines = provenance.lines();
+        assert_eq!(
+            lines.next(),
+            Some("cingulate ee879790be7a03962926fc5c058eb1a2646c0191 test-vectors/permissions-v1/")
+        );
+        let mut count = 0;
+        for line in lines {
+            let (hash, name) = line.split_once("  ").unwrap();
+            let bytes = std::fs::read(dir.join(name)).unwrap();
+            assert_eq!(format!("{:x}", Sha256::digest(&bytes)), hash, "{name}");
+            if name.ends_with(".json") {
+                let vector: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                let jcs = std::fs::read(dir.join(name.replace(".json", ".jcs"))).unwrap();
+                assert_eq!(
+                    serde_json::to_vec(&vector).unwrap(),
+                    jcs,
+                    "canonical provider vector"
+                );
+            }
+            count += 1;
+        }
+        assert_eq!(count, 24);
     }
 
     #[test]
@@ -5061,6 +5212,202 @@ mod tests {
         serde_json::from_slice(&body).expect("reply JSON")
     }
 
+    #[tokio::test]
+    async fn secret_use_dispatch_is_sender_only_and_grammar_uses_error_frames() {
+        let (surface, admin, store) = scoped_rig(94);
+        let refused = serde_json::to_vec(&uniform_not_found()).unwrap();
+        for member in [false, true] {
+            for phone in [false, true] {
+                set_member_mapping(&store, member);
+                store
+                    .set_secret_phone_mapping_audited(
+                        phone,
+                        AuditCtx::admin(AuditOp::SecretPhoneGateSet),
+                    )
+                    .unwrap();
+                for (channel, module) in [
+                    (92, "aft"),
+                    (93, "cerebellum"),
+                    (94, "prefrontal-core"),
+                    (95, "callosum"),
+                ] {
+                    admin.record_bind_at(
+                        channel,
+                        1,
+                        subc_protocol::Principal::Reserved {
+                            module_id: module.into(),
+                        },
+                        "harness:aft",
+                    );
+                    let malformed =
+                        routed_reply(&surface, &admin, channel, "secret.use", json!({})).await;
+                    if matches!(module, "aft" | "cerebellum") {
+                        assert_eq!(malformed.0, FrameType::Error);
+                        let body: serde_json::Value = serde_json::from_slice(&malformed.1).unwrap();
+                        assert_eq!(body["code"], "invalid_params");
+                        assert!(body.get("class").is_none());
+                        let params = json!({"name":"unknown","stamp":subc_protocol::scope::ScopeStamp::new(subc_protocol::Principal::Reserved{module_id:"prefrontal-core".into()},"H",7,subc_protocol::scope::ScopeKind::Head),"target":{"scheme":"https","host":"x.test","path":"/repos/a/canary-token"}});
+                        assert_eq!(
+                            routed_reply(&surface, &admin, channel, "secret.use", params).await,
+                            (FrameType::Response, refused.clone())
+                        );
+                    } else {
+                        assert_eq!(malformed, (FrameType::Response, refused.clone()));
+                    }
+                }
+                admin.record_bind_at(96, 1, subc_protocol::Principal::Direct, "reserved:aft");
+                assert_eq!(
+                    routed_reply(&surface, &admin, 96, "secret.use", json!({})).await,
+                    (FrameType::Response, refused.clone())
+                );
+                for harness in [
+                    "fed-phone:11111111111111111111111111111111",
+                    "fed-computer:11111111111111111111111111111111",
+                ] {
+                    admin.record_bind_at(
+                        97,
+                        1,
+                        subc_protocol::Principal::Reserved {
+                            module_id: "callosum".into(),
+                        },
+                        harness,
+                    );
+                    assert_eq!(
+                        routed_reply(
+                            &surface,
+                            &admin,
+                            97,
+                            "secret.use",
+                            json!({"handle":"bearer"})
+                        )
+                        .await,
+                        (FrameType::Response, refused.clone())
+                    );
+                }
+            }
+        }
+        assert!(!format!("{:?}", store.recent_auth_events(100).unwrap()).contains("canary-token"));
+    }
+
+    #[tokio::test]
+    async fn phone_dispatch_isolated_from_bearers_and_requires_both_live_gates() {
+        let (surface, admin, store) = scoped_rig(93);
+        let fp = "11111111111111111111111111111111";
+        admin.record_bind_at(
+            90,
+            1,
+            subc_protocol::Principal::Reserved {
+                module_id: "callosum".into(),
+            },
+            &format!("fed-phone:{fp}"),
+        );
+        admin.record_bind_at(
+            91,
+            1,
+            subc_protocol::Principal::Direct,
+            &format!("fed-phone:{fp}"),
+        );
+        let refused = serde_json::to_vec(&uniform_not_found()).unwrap();
+        for member in [false, true] {
+            for phone in [false, true] {
+                set_member_mapping(&store, member);
+                store
+                    .set_secret_phone_mapping_audited(
+                        phone,
+                        AuditCtx::admin(AuditOp::SecretPhoneGateSet),
+                    )
+                    .unwrap();
+                for op in secret_phone::PHONE_OPS {
+                    assert_eq!(
+                        routed_reply(&surface, &admin, 91, op, json!({})).await,
+                        (FrameType::Response, refused.clone())
+                    );
+                    let response =
+                        routed_reply(&surface, &admin, 90, op, json!({"handle":"ckh_bearer"}))
+                            .await;
+                    if member && phone {
+                        assert_eq!(response.0, FrameType::Error);
+                        let body: serde_json::Value = serde_json::from_slice(&response.1).unwrap();
+                        assert_eq!(body["code"], "invalid_params");
+                        assert!(body.get("class").is_none());
+                    } else {
+                        assert_eq!(response, (FrameType::Response, refused.clone()));
+                    }
+                }
+                if member && phone {
+                    assert_eq!(
+                        admin.route_caller(90),
+                        federation::RouteCaller::Phone(fp.into())
+                    );
+                    for op in [
+                        OP_GET,
+                        OP_GET_SCOPED,
+                        OP_LIST_SCOPED,
+                        OP_WATCH_SCOPED,
+                        federation::ingress::OP_REMOTE_TOKEN,
+                    ] {
+                        assert_eq!(
+                            routed_reply(&surface, &admin, 90, op, json!({})).await,
+                            (FrameType::Response, refused.clone())
+                        );
+                    }
+                    for op in ["permissions.list", "permissions.revoke"] {
+                        let response = routed_reply(&surface, &admin, 90, op, json!({})).await;
+                        assert_eq!(response.0, FrameType::Error);
+                        let body: serde_json::Value = serde_json::from_slice(&response.1).unwrap();
+                        assert_eq!(body["code"], "permissions_operator_required");
+                        assert!(body.get("class").is_none());
+                    }
+                }
+            }
+        }
+        assert!(matches!(
+            admin
+                .execute_as(
+                    91,
+                    1,
+                    Some(&subc_protocol::Principal::Direct),
+                    br#"{"op":"admin.secret_phone_gate_set","v":2,"enabled":false}"#,
+                    &"00".repeat(32)
+                )
+                .await,
+            admin_surface::AdminOutcome::Refused(_)
+        ));
+        assert!(store.secret_phone_mapping().unwrap());
+    }
+
+    #[tokio::test]
+    async fn permissions_provider_admits_only_cingulate_on_the_plain_route() {
+        let (surface, admin, _store) = scoped_rig(94);
+        for (channel, principal) in [
+            (101, reserved("cingulate")),
+            (102, subc_protocol::Principal::Direct),
+            (103, reserved("aft")),
+            (104, reserved("callosum")),
+        ] {
+            admin.record_bind_at(channel, 1, principal, "");
+            for (method, params, expected) in [
+                ("permissions.list", json!({}), json!({"grants":[]})),
+                (
+                    "permissions.revoke",
+                    json!({"id":"unknown"}),
+                    json!({"outcome":"not_found"}),
+                ),
+            ] {
+                let (kind, bytes) = routed_reply(&surface, &admin, channel, method, params).await;
+                let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                if channel == 101 {
+                    assert_eq!(kind, FrameType::Response);
+                    assert_eq!(body, wrap_result(expected));
+                } else {
+                    assert_eq!(kind, FrameType::Error);
+                    assert_eq!(body["code"], "permissions_operator_required");
+                    assert!(body.get("class").is_none());
+                }
+            }
+        }
+    }
+
     /// The gate-off bearer-read residual, pinned. Release 1 serves a forwarded call on
     /// callosum's route with no principal, but a handle read still runs: a peer holding
     /// a valid handle gets exactly what a local holder gets, through the ordinary get
@@ -5293,6 +5640,232 @@ mod tests {
     // -----------------------------------------------------------------------------
     // The transfer-key fence on the read surface
     // -----------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn daemon_start_creates_the_deposit_key_once_across_restarts() {
+        let root = TestTempDir::new(format!("secret-start-{}", std::process::id()));
+        let data_dir = root.join("vault");
+        let key_path = root.join("master.key");
+        credentials_core::resolver::bootstrap(&credentials_core::resolver::ResolverConfig {
+            data_dir: data_dir.clone(),
+            source: credentials_core::resolver::KeySource::OperatorPath { path: key_path },
+        })
+        .expect("bootstrap operator key outside vault");
+        let db_path = data_dir.join("store.db");
+        let descriptor = StorageDescriptor {
+            module_id: credentials_core::MODULE_ID.into(),
+            storage_namespace: credentials_core::STORAGE_NAMESPACE.into(),
+            isolation: Isolation::Module,
+            backend: StorageBackend::Sqlite {
+                path: db_path.to_string_lossy().into_owned(),
+            },
+        };
+        let ack: ModuleHelloAckBody = serde_json::from_value(json!({
+            "negotiated_ver": PROTOCOL_VERSION,
+            "subc_ops": [], "subc_capabilities": [],
+            "storage": serde_json::to_value(descriptor).unwrap(),
+        }))
+        .unwrap();
+        let mut first_envelope = None;
+        for _ in 0..2 {
+            let (surface, admin) = build_surface(&ack, credentials_core::MODULE_ID)
+                .await
+                .expect("daemon start");
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            let (state, blob): (String, Vec<u8>) = conn.query_row(
+                "SELECT state, envelope FROM credentials WHERE credential_id = 'kem:secret-deposit:1'", [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            ).unwrap();
+            assert_eq!(state, "active");
+            if let Some(first) = &first_envelope {
+                assert_eq!(&blob, first);
+            } else {
+                first_envelope = Some(blob);
+            }
+            assert_eq!(conn.query_row("SELECT count(*) FROM audit_log WHERE op = 'secret_deposit_key_create' AND actor = 'vault' AND credential_id = 'kem:secret-deposit:1'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+            drop((conn, surface, admin));
+        }
+    }
+
+    #[tokio::test]
+    async fn deposit_key_is_not_found_on_credential_ops_and_absent_from_list_and_watch() {
+        use base64::Engine as _;
+        use credentials_core::agent_secret::DEPOSIT_KEY_ID;
+        let (surface, store, db_path, _root) = tmp_surface_with_store(194);
+        let http = Arc::new(crate::test_support::NoHttp);
+        let engine = Arc::new(RefreshEngine::new(Arc::clone(&store), Vec::new(), http));
+        let key = MasterKey::from_bytes([194; MASTER_KEY_LEN]);
+        let admin = Arc::new(admin_surface::AdminSurface::new(
+            engine,
+            credentials_core::admin_auth::AdminMacKey::derive(&key),
+            credentials_core::vault_id_for(db_path.parent().unwrap()).unwrap(),
+            key.key_id(),
+        ));
+        let routes = Arc::new(RouteEpochs::default());
+        let control = "kem:control";
+        let pem = credentials_core::kem::generate_key().unwrap();
+        store
+            .create(
+                control,
+                &VaultRecord::new_static(CredentialKind::KemKey, "test", pem.into_bytes(), None),
+            )
+            .unwrap();
+        // Seed grants and a handle directly: persisted authority must not bypass the fence.
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        for id in [control, DEPOSIT_KEY_ID] {
+            for operation in ["read", "list", "sign", "open", "seal"] {
+                conn.execute("INSERT INTO read_grants (principal_kind, principal_id, selector_kind, selector, operation, created_at_ms) VALUES ('reserved', 'callosum', 'exact', ?1, ?2, 0)", rusqlite::params![id, operation]).unwrap();
+            }
+        }
+        let handle = credentials_core::store::mint_handle().unwrap();
+        conn.execute("INSERT INTO handles (handle_hash, credential_id, created_at_ms, revoked) VALUES (?1, ?2, 0, 0)", rusqlite::params![handle.hash, DEPOSIT_KEY_ID]).unwrap();
+        let control_handle = mint_test_handle(&store, control);
+        bind_reserved_route(
+            &surface,
+            &admin,
+            &routes,
+            102,
+            1,
+            "callosum",
+            "callosum-self",
+        )
+        .await;
+        let principal = subc_protocol::Principal::Reserved {
+            module_id: "callosum".into(),
+        };
+        let watch_params = serde_json::from_value(json!({})).unwrap();
+        let before = surface
+            .watch_scoped(Some(&principal), &watch_params)
+            .unwrap();
+        store.ensure_secret_deposit_key().unwrap();
+        assert_eq!(
+            surface
+                .watch_scoped(Some(&principal), &watch_params)
+                .unwrap(),
+            before,
+            "neither rows nor held-key digest reveal the deposit key"
+        );
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let unknown_handle = credentials_core::store::mint_handle().unwrap().raw;
+        for method in [
+            OP_GET,
+            OP_GET_SCOPED,
+            OP_STATUS,
+            OP_PUBLIC_KEY,
+            OP_SIGN,
+            OP_OPEN,
+            OP_SEAL,
+            OP_REPORT_AUTH_FAILURE,
+        ] {
+            let mut fields = json!({});
+            if method == OP_SIGN {
+                fields["payload_b64"] = json!("eA==");
+            }
+            if method == OP_OPEN {
+                fields["enc_b64"] = json!(b64.encode([0u8; 32]));
+                fields["ciphertext_b64"] = json!(b64.encode([0u8; 32]));
+                fields["info_b64"] = json!("eA==");
+                fields["aad_b64"] = json!("");
+            }
+            if method == OP_SEAL {
+                fields["recipient_public_key_b64"] = json!(b64.encode([9u8; 32]));
+                fields["plaintext_b64"] = json!("eA==");
+                fields["info_b64"] = json!("eA==");
+                fields["aad_b64"] = json!("");
+            }
+            if method == OP_REPORT_AUTH_FAILURE {
+                fields["record_version"] = json!(1);
+                fields["provider_status"] = json!(401);
+            }
+            for address_key in ["credential_id", "handle"] {
+                if (method == OP_GET && address_key != "handle")
+                    || (matches!(method, OP_GET_SCOPED | OP_OPEN | OP_SEAL)
+                        && address_key != "credential_id")
+                {
+                    continue;
+                }
+                let mut params = fields.clone();
+                let mut unknown = fields.clone();
+                if address_key == "handle" {
+                    params[address_key] = json!(handle.raw);
+                    unknown[address_key] = json!(unknown_handle);
+                } else {
+                    params[address_key] = json!(DEPOSIT_KEY_ID);
+                    unknown[address_key] = json!("kem:unknown");
+                }
+                let reply = routed_reply(&surface, &admin, 102, method, params).await;
+                let unknown_reply = routed_reply(&surface, &admin, 102, method, unknown).await;
+                assert_eq!(reply, unknown_reply, "{method} by {address_key}: a fenced key must be indistinguishable from an unknown address");
+                let body: serde_json::Value = serde_json::from_slice(&reply.1).unwrap();
+                if method == OP_STATUS {
+                    assert_eq!(body["result"]["last_error_code"], "not_found");
+                    assert_eq!(body["result"]["ready"], false);
+                } else {
+                    assert_eq!(
+                        body["result"]["error"],
+                        json!({"code":"not_found","class":"permanent"}),
+                        "{method}: {body}"
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            store.meta(DEPOSIT_KEY_ID).unwrap().state,
+            RecordState::Active
+        );
+        let list = routed_json(&surface, &admin, 102, OP_LIST_SCOPED, json!({})).await;
+        assert!(!list.to_string().contains(DEPOSIT_KEY_ID));
+        assert!(list.to_string().contains(control));
+        let control_key = routed_json(
+            &surface,
+            &admin,
+            102,
+            OP_PUBLIC_KEY,
+            json!({"credential_id":control}),
+        )
+        .await;
+        assert_eq!(control_key["result"]["algorithm"], "x25519");
+        let control_status = routed_json(
+            &surface,
+            &admin,
+            102,
+            OP_STATUS,
+            json!({"credential_id":control}),
+        )
+        .await;
+        assert_eq!(control_status["result"]["ready"], true);
+        store
+            .overwrite_unconditional_audited(
+                control,
+                &VaultRecord::new_static(
+                    CredentialKind::KemKey,
+                    "test",
+                    credentials_core::kem::generate_key().unwrap().into_bytes(),
+                    None,
+                ),
+                AuditCtx::admin(AuditOp::Overwrite),
+            )
+            .unwrap();
+        assert_ne!(
+            surface
+                .watch_scoped(Some(&principal), &watch_params)
+                .unwrap(),
+            before,
+            "the watch still observes a normal key's version change"
+        );
+        let control_get = routed_json(
+            &surface,
+            &admin,
+            102,
+            OP_GET,
+            json!({"handle":control_handle}),
+        )
+        .await;
+        assert_eq!(
+            control_get["result"]["error"],
+            json!({"code":"kind_not_gettable","class":"permanent"})
+        );
+    }
 
     /// The store fences grants that NAME the transfer key, but nothing stops an
     /// operator putting the key in a category and granting the category. The read
@@ -15048,8 +15621,8 @@ mod tests {
     /// the question in front of whoever does it. The count alone cannot see what an
     /// EXISTING site logs, so the test also reads every site's arguments and refuses any
     /// that call `.expose(`: a `Secret` can be read only through `expose()`, so that is
-    /// the one shape every secret read must take. Covers the six files linked into the
-    /// daemon binary.
+    /// the one shape every secret read must take. Covers the eight source files linked
+    /// into the daemon binary, the two agent-secret files each with its own controls.
     ///
     /// Patterns are built by concatenation so this test's own text is not counted, and
     /// `println!` is counted net of `eprintln!` because one contains the other.
@@ -15062,6 +15635,8 @@ mod tests {
             include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/limiter.rs")),
             include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/watch_scoped.rs")),
             include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/account_token.rs")),
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/secret_phone.rs")),
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/secret_use.rs")),
         ];
         let count = |shape: &str| -> usize {
             let pattern = format!("{shape}{}", "!(");
@@ -15125,6 +15700,41 @@ mod tests {
             .into_iter()
             .any(|(_, args)| args.contains(&format!("{}{}", ".expose", "(")));
         assert!(flagged, "control: a planted secret read was not flagged");
+
+        // The agent-secret daemon files are new, so each one gets its own controls: its
+        // slot must hold that file (its module doc line is found there), and the same
+        // planted secret read appended to that file's own text must be flagged. Without
+        // these a mis-pointed include could scan another file twice and still pass.
+        for (slot, file, module_doc) in [
+            (
+                6,
+                "secret_phone.rs",
+                "//! The isolated phone channel: grammar, an uncached pairing lookup",
+            ),
+            (
+                7,
+                "secret_use.rs",
+                "//! The trusted sender boundary for secret release.",
+            ),
+        ] {
+            assert!(
+                sources[slot].starts_with(module_doc),
+                "positive control: slot {slot} does not hold {file}"
+            );
+            let with_plant = format!("{}\n{planted}\n", sources[slot]);
+            assert!(
+                output_site_arguments(&with_plant, &shapes)
+                    .into_iter()
+                    .any(|(_, args)| args.contains(&format!("{}{}", ".expose", "("))),
+                "control: a secret read planted in {file} was not flagged"
+            );
+            assert!(
+                !output_site_arguments(sources[slot], &shapes)
+                    .into_iter()
+                    .any(|(_, args)| args.contains(&format!("{}{}", ".expose", "("))),
+                "{file} logs a secret"
+            );
+        }
     }
 
     /// Each `<shape>!(` call in `source` and the text of its arguments, read up to the

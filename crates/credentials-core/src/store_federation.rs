@@ -1553,6 +1553,9 @@ impl EncryptedStore {
             return Err(StoreOpError::InvalidCredentialId);
         }
         validate_deposit_credential_id(id)?;
+        if crate::agent_secret::is_deposit_key(id) {
+            return Err(StoreOpError::NotFound);
+        }
         if crate::federation::is_vault_transfer_id(id) {
             return Err(StoreOpError::TransferKeyReserved);
         }

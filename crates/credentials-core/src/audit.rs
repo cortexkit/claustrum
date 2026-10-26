@@ -27,6 +27,18 @@ pub const GENESIS_MAC: &str = "genesis";
 /// every record-version change and an unexplained bump is a detectable gap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuditOp {
+    /// Daemon bootstrap generated the reserved HPKE deposit receiver.
+    SecretDepositKeyCreate,
+    SecretPhoneGateSet,
+    SecretPhoneRegister,
+    SecretStore,
+    SecretGrantCreate,
+    SecretDelete,
+    SecretGrantRevoke,
+    SecretGrantExpire,
+    SecretFirstRelease,
+    SecretQuarantine,
+
     /// A module creates a cookie row, recording itself as the immutable creator.
     DepositCookieCreate,
     /// A module replaces a cookie whose recorded creator matches that module.
@@ -163,6 +175,17 @@ impl AuditOp {
     /// The stable wire/storage string for this op.
     pub fn as_str(self) -> &'static str {
         match self {
+            AuditOp::SecretDepositKeyCreate => "secret_deposit_key_create",
+            AuditOp::SecretPhoneGateSet => "secret_phone_gate_set",
+            AuditOp::SecretPhoneRegister => "secret_phone_register",
+            AuditOp::SecretStore => "secret_store",
+            AuditOp::SecretGrantCreate => "secret_grant_create",
+            AuditOp::SecretDelete => "secret_delete",
+            AuditOp::SecretGrantRevoke => "secret_grant_revoke",
+            AuditOp::SecretGrantExpire => "secret_grant_expire",
+            AuditOp::SecretFirstRelease => "secret_first_release",
+            AuditOp::SecretQuarantine => "secret_quarantine",
+
             AuditOp::DepositCookieCreate => "deposit_cookie_create",
             AuditOp::DepositCookieReplace => "deposit_cookie_replace",
             AuditOp::Put => "put",
@@ -212,18 +235,30 @@ impl AuditOp {
 /// Unlike [`AuditOp`] and [`AlarmReason`], these observations are not part of the
 /// tamper-evident audit chain. They explain authentication failures and refusals in a
 /// separate, prunable diagnostics table.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AuthEventKind {
+macro_rules! auth_event_kinds {
+    ($( $(#[$doc:meta])* $variant:ident => $wire:literal, )*) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum AuthEventKind { $( $(#[$doc])* $variant, )* }
+        impl AuthEventKind {
+            pub const ALL: &'static [Self] = &[$(Self::$variant,)*];
+            pub const fn as_str(self) -> &'static str { match self { $(Self::$variant => $wire,)* } }
+        }
+    };
+}
+
+auth_event_kinds! {
+    /// A secret operation refusal, including create-only phone-key conflicts.
+    SecretUseRefusal => "secret_use_refusal",
     /// A provider refresh attempt failed without producing a committed replacement.
-    RefreshFailed,
+    RefreshFailed => "refresh_failed",
     /// A stale report on a non-refreshable credential was latched as `needs_reauth`.
-    StaleNonrefreshableLatch,
+    StaleNonrefreshableLatch => "stale_nonrefreshable_latch",
     /// A consumer report marked a refreshable credential stale for its next read.
-    ConsumerReportStale,
+    ConsumerReportStale => "consumer_report_stale",
     /// A consumer report immediately latched a non-refreshable credential.
-    ConsumerReportLatch,
+    ConsumerReportLatch => "consumer_report_latch",
     /// A principal-scoped read was refused; the detail names the internal reason.
-    ScopedReadRefusal,
+    ScopedReadRefusal => "scoped_read_refusal",
     /// The FIRST time a principal successfully exercised a grant over a credential.
     ///
     /// Written once per (principal, credential, operation) and never again. This is not
@@ -243,17 +278,17 @@ pub enum AuthEventKind {
     /// consumer silently on another path" -- the reach column's question one level up.
     /// A grant reaching 17 credentials that nothing has ever used looks, today, exactly
     /// like one in constant use.
-    ScopedFirstUse,
+    ScopedFirstUse => "scoped_first_use",
     /// Startup reconciliation forced a credential to `needs_reauth`.
-    ReconcileNeedsReauth,
+    ReconcileNeedsReauth => "reconcile_needs_reauth",
     /// A successful GitHub App mint observed changed installation permissions.
-    GithubAppPermissionsChanged,
+    GithubAppPermissionsChanged => "github_app_permissions_changed",
     /// A read found a consumer's stale mark but served the current token without a
     /// refresh, because that token was written inside the report cooldown. Written at
     /// most once per credential version, never once per read.
-    StaleRefreshDeferred,
+    StaleRefreshDeferred => "stale_refresh_deferred",
     /// A bounded consumer-enrollment diagnostic with a fixed, non-secret subject.
-    Enrollment,
+    Enrollment => "enrollment",
 }
 
 /// The consumer-asserted, unverified source of a reported authentication failure.
@@ -285,24 +320,6 @@ impl ReporterSource {
             "relay_status_field" => Self::RelayStatusField,
             "relay_message_parse" => Self::RelayMessageParse,
             _ => Self::Unrecognised,
-        }
-    }
-}
-
-impl AuthEventKind {
-    /// The stable storage string for this authentication diagnostic kind.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            AuthEventKind::RefreshFailed => "refresh_failed",
-            AuthEventKind::StaleNonrefreshableLatch => "stale_nonrefreshable_latch",
-            AuthEventKind::ConsumerReportStale => "consumer_report_stale",
-            AuthEventKind::ConsumerReportLatch => "consumer_report_latch",
-            AuthEventKind::ScopedReadRefusal => "scoped_read_refusal",
-            AuthEventKind::ScopedFirstUse => "scoped_first_use",
-            AuthEventKind::ReconcileNeedsReauth => "reconcile_needs_reauth",
-            AuthEventKind::GithubAppPermissionsChanged => "github_app_permissions_changed",
-            AuthEventKind::StaleRefreshDeferred => "stale_refresh_deferred",
-            AuthEventKind::Enrollment => "enrollment",
         }
     }
 }
@@ -700,6 +717,17 @@ mod vocabulary_documentation_tests {
 
         fn value(op: AuditOp) -> &'static str {
             match op {
+                AuditOp::SecretDepositKeyCreate => AuditOp::SecretDepositKeyCreate.as_str(),
+                AuditOp::SecretPhoneGateSet => AuditOp::SecretPhoneGateSet.as_str(),
+                AuditOp::SecretPhoneRegister => AuditOp::SecretPhoneRegister.as_str(),
+                AuditOp::SecretStore => AuditOp::SecretStore.as_str(),
+                AuditOp::SecretGrantCreate => AuditOp::SecretGrantCreate.as_str(),
+                AuditOp::SecretDelete => AuditOp::SecretDelete.as_str(),
+                AuditOp::SecretGrantRevoke => AuditOp::SecretGrantRevoke.as_str(),
+                AuditOp::SecretGrantExpire => AuditOp::SecretGrantExpire.as_str(),
+                AuditOp::SecretFirstRelease => AuditOp::SecretFirstRelease.as_str(),
+                AuditOp::SecretQuarantine => AuditOp::SecretQuarantine.as_str(),
+
                 AuditOp::DepositCookieCreate => AuditOp::DepositCookieCreate.as_str(),
                 AuditOp::DepositCookieReplace => AuditOp::DepositCookieReplace.as_str(),
                 AuditOp::Put => AuditOp::Put.as_str(),
@@ -826,76 +854,9 @@ mod vocabulary_documentation_tests {
     #[test]
     fn auth_event_kind_values_are_documented() {
         let section = documented_subsection("#### `auth_events.kind`", "**Table:** `auth_events`");
-
-        fn value(kind: AuthEventKind) -> &'static str {
-            match kind {
-                AuthEventKind::RefreshFailed => AuthEventKind::RefreshFailed.as_str(),
-                AuthEventKind::StaleNonrefreshableLatch => {
-                    AuthEventKind::StaleNonrefreshableLatch.as_str()
-                }
-                AuthEventKind::ConsumerReportStale => AuthEventKind::ConsumerReportStale.as_str(),
-                AuthEventKind::ConsumerReportLatch => AuthEventKind::ConsumerReportLatch.as_str(),
-                AuthEventKind::ScopedReadRefusal => AuthEventKind::ScopedReadRefusal.as_str(),
-                AuthEventKind::ScopedFirstUse => AuthEventKind::ScopedFirstUse.as_str(),
-                AuthEventKind::ReconcileNeedsReauth => AuthEventKind::ReconcileNeedsReauth.as_str(),
-                AuthEventKind::GithubAppPermissionsChanged => {
-                    AuthEventKind::GithubAppPermissionsChanged.as_str()
-                }
-                AuthEventKind::StaleRefreshDeferred => AuthEventKind::StaleRefreshDeferred.as_str(),
-                AuthEventKind::Enrollment => AuthEventKind::Enrollment.as_str(),
-            }
+        for kind in AuthEventKind::ALL {
+            assert_documented(section, "auth_events.kind", kind.as_str());
         }
-
-        assert_documented(
-            section,
-            "auth_events.kind",
-            value(AuthEventKind::RefreshFailed),
-        );
-        assert_documented(
-            section,
-            "auth_events.kind",
-            value(AuthEventKind::StaleNonrefreshableLatch),
-        );
-        assert_documented(
-            section,
-            "auth_events.kind",
-            value(AuthEventKind::ConsumerReportStale),
-        );
-        assert_documented(
-            section,
-            "auth_events.kind",
-            value(AuthEventKind::ConsumerReportLatch),
-        );
-        assert_documented(
-            section,
-            "auth_events.kind",
-            value(AuthEventKind::ScopedReadRefusal),
-        );
-        assert_documented(
-            section,
-            "auth_events.kind",
-            value(AuthEventKind::ScopedFirstUse),
-        );
-        assert_documented(
-            section,
-            "auth_events.kind",
-            value(AuthEventKind::ReconcileNeedsReauth),
-        );
-        assert_documented(
-            section,
-            "auth_events.kind",
-            value(AuthEventKind::GithubAppPermissionsChanged),
-        );
-        assert_documented(
-            section,
-            "auth_events.kind",
-            value(AuthEventKind::StaleRefreshDeferred),
-        );
-        assert_documented(
-            section,
-            "auth_events.kind",
-            value(AuthEventKind::Enrollment),
-        );
     }
 
     #[test]

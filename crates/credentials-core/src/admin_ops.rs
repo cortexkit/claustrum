@@ -15,6 +15,7 @@
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 
+use crate::agent_secret::SecretPut;
 use crate::audit::AuditRecord;
 use crate::audit::{AuditCtx, AuditOp};
 use crate::federation::{MemberGrantOperation, MemberGrantSelector};
@@ -242,6 +243,46 @@ pub enum AdminOpBody {
     /// grants. Read live on every federation decision, so it takes effect at once.
     #[serde(rename = "admin.federation_gate_set")]
     FederationGateSet { v: u32, enabled: bool },
+    #[serde(rename = "admin.secret_phone_gate_set")]
+    SecretPhoneGateSet { v: u32, enabled: bool },
+    /// `ck auth secret put`: create an agent secret from operator-supplied material.
+    ///
+    /// THE ONLY ADMIN OP THAT CARRIES SECRET MATERIAL INBOUND, shortly after
+    /// `admin.enroll_reissue` became the only one that carries a bearer outbound. The
+    /// same custody rule applies in both directions: the material must never reach a
+    /// process argument (argv is world-readable on many systems and lands in shell
+    /// history), a log line, a `Debug` rendering or an error, so the CLI reads it from a
+    /// mode-0600 file or a prompt and this body transports it once, inside the bytes the
+    /// admin MAC already covers. A caller that could rewrite those bytes could also
+    /// rewrite `op`, so carrying material here adds no new trust boundary.
+    ///
+    /// The scope fields are the ones the referenced kind needs: `host` and `location`
+    /// for `agent_api_key` (`path_prefix` optional), `origin` for `site_login`. The
+    /// vault validates them with the same validators a phone deposit uses, so the two
+    /// paths cannot accept different shapes.
+    #[serde(rename = "admin.secret_put")]
+    SecretPut {
+        v: u32,
+        kind: String,
+        name: String,
+        host: Option<String>,
+        path_prefix: Option<String>,
+        location: Option<String>,
+        origin: Option<String>,
+        material_b64url: String,
+    },
+    /// `ck auth secret delete`: remove a secret, its grants and its pending requests.
+    ///
+    /// The operator delete is unsigned by design (unlike the phone's two-step signed
+    /// delete): the admin MAC already proves the master key, which is the strongest
+    /// authority this vault has, and requiring a phone ceremony to remove a secret the
+    /// operator put in place would make `put` reversible only through a device the
+    /// operator may no longer hold.
+    #[serde(rename = "admin.secret_delete")]
+    SecretDelete { v: u32, name: String },
+    /// `ck auth secret revoke`: remove one grant by id, keeping the secret itself.
+    #[serde(rename = "admin.secret_revoke_grant")]
+    SecretRevokeGrant { v: u32, grant_id: String },
     /// Set this vault's own member id (`fed-computer:<fp>`), which it writes into every
     /// `requester`, `home`, `sender` and `receiver` field it emits. Peers check those
     /// against the authenticated caller, so a wrong value fails closed.
@@ -564,6 +605,46 @@ impl std::fmt::Debug for AdminOpBody {
                 .field("approver", approver)
                 .finish(),
             AdminOpBody::Status { v } => f.debug_struct("Status").field("v", v).finish(),
+            AdminOpBody::SecretPhoneGateSet { v, enabled } => f
+                .debug_struct("SecretPhoneGateSet")
+                .field("v", v)
+                .field("enabled", enabled)
+                .finish(),
+            // Secondary defence only: the CLI never renders this body. The material itself
+            // is redacted here for the same reason `RevokeHandle` redacts its bearer — a
+            // derived Debug could put a live password in a crash report — and the scope
+            // fields stay visible because they are non-secret metadata an operator
+            // diagnosing a bad put needs to see.
+            AdminOpBody::SecretPut {
+                v,
+                kind,
+                name,
+                host,
+                path_prefix,
+                location,
+                origin,
+                ..
+            } => f
+                .debug_struct("SecretPut")
+                .field("v", v)
+                .field("kind", kind)
+                .field("name", name)
+                .field("host", host)
+                .field("path_prefix", path_prefix)
+                .field("location", location)
+                .field("origin", origin)
+                .field("material_b64url", &"<redacted>")
+                .finish(),
+            AdminOpBody::SecretDelete { v, name } => f
+                .debug_struct("SecretDelete")
+                .field("v", v)
+                .field("name", name)
+                .finish(),
+            AdminOpBody::SecretRevokeGrant { v, grant_id } => f
+                .debug_struct("SecretRevokeGrant")
+                .field("v", v)
+                .field("grant_id", grant_id)
+                .finish(),
             AdminOpBody::FederationGateSet { v, enabled } => f
                 .debug_struct("FederationGateSet")
                 .field("v", v)
@@ -699,6 +780,10 @@ impl AdminOpBody {
             | AdminOpBody::EnrollRevoke { v, .. }
             | AdminOpBody::EnrollReissue { v, .. }
             | AdminOpBody::FederationGateSet { v, .. }
+            | AdminOpBody::SecretPhoneGateSet { v, .. }
+            | AdminOpBody::SecretPut { v, .. }
+            | AdminOpBody::SecretDelete { v, .. }
+            | AdminOpBody::SecretRevokeGrant { v, .. }
             | AdminOpBody::FederationSelfSet { v, .. }
             | AdminOpBody::TransferInit { v, .. }
             | AdminOpBody::TransferRecover { v }
@@ -732,6 +817,10 @@ impl AdminOpBody {
             | AdminOpBody::EnrollRevoke { .. }
             | AdminOpBody::EnrollReissue { .. }
             | AdminOpBody::FederationGateSet { .. }
+            | AdminOpBody::SecretPhoneGateSet { .. }
+            | AdminOpBody::SecretPut { .. }
+            | AdminOpBody::SecretDelete { .. }
+            | AdminOpBody::SecretRevokeGrant { .. }
             | AdminOpBody::FederationSelfSet { .. }
             | AdminOpBody::TransferInit { .. }
             | AdminOpBody::TransferRecover { .. }
@@ -830,7 +919,15 @@ impl AdminOpBody {
             | AdminOpBody::EnrollRevoke { .. }
             | AdminOpBody::EnrollReissue { .. }
             // Federation settings belong to no credential; the fenced write orders them.
+            // Federation settings belong to no credential; the fenced write orders them.
+            // Agent secrets do not live in the `credentials` table at all, so the three
+            // value ops have no credential id to serialize on either: the fenced write
+            // orders them against each other and against the phone path's transactions.
             | AdminOpBody::FederationGateSet { .. }
+            | AdminOpBody::SecretPhoneGateSet { .. }
+            | AdminOpBody::SecretPut { .. }
+            | AdminOpBody::SecretDelete { .. }
+            | AdminOpBody::SecretRevokeGrant { .. }
             | AdminOpBody::FederationSelfSet { .. }
             // A resume, receive, reject, list or member grant writes no credential
             // record. An accept's record id is known only from its stored pending row,
@@ -886,6 +983,10 @@ impl AdminOpBody {
             AdminOpBody::Approval { .. } => "admin.approval",
             AdminOpBody::Status { .. } => "admin.status",
             AdminOpBody::FederationGateSet { .. } => "admin.federation_gate_set",
+            AdminOpBody::SecretPhoneGateSet { .. } => "admin.secret_phone_gate_set",
+            AdminOpBody::SecretPut { .. } => "admin.secret_put",
+            AdminOpBody::SecretDelete { .. } => "admin.secret_delete",
+            AdminOpBody::SecretRevokeGrant { .. } => "admin.secret_revoke_grant",
             AdminOpBody::FederationSelfSet { .. } => "admin.federation_self_set",
             AdminOpBody::TransferInit { .. } => "admin.transfer_init",
             AdminOpBody::TransferRecover { .. } => "admin.transfer_recover",
@@ -940,8 +1041,14 @@ impl AdminOpBody {
             | AdminOpBody::Approval { .. }
             | AdminOpBody::Status { .. }
             // The gate is a store setting: a pure local write, run through `apply`
-            // from the offline lease path too.
+            // from the offline lease path too. The secret value ops are local too; only
+            // the phone channel reaches callosum, and these three never do, which is what
+            // lets an operator put and delete secrets with the daemon stopped.
             | AdminOpBody::FederationGateSet { .. }
+            | AdminOpBody::SecretPhoneGateSet { .. }
+            | AdminOpBody::SecretPut { .. }
+            | AdminOpBody::SecretDelete { .. }
+            | AdminOpBody::SecretRevokeGrant { .. }
             // Local reads and writes with no outbound call.
             | AdminOpBody::TransferRecover { .. }
             | AdminOpBody::TransferReceive { .. }
@@ -1398,6 +1505,40 @@ pub fn apply(
                 .reclassify_audited(force, AuditCtx::route_admin(AuditOp::SetCategory, actor))?;
             Ok(serde_json::json!({ "credentials_reclassified": changed }))
         }
+        AdminOpBody::SecretPhoneGateSet { enabled, .. } => {
+            let changed = store.set_secret_phone_mapping_audited(
+                enabled,
+                AuditCtx::route_admin(AuditOp::SecretPhoneGateSet, actor),
+            )?;
+            Ok(serde_json::json!({"phone_mapping": enabled, "changed": changed}))
+        }
+        AdminOpBody::SecretPut {
+            kind,
+            name,
+            host,
+            path_prefix,
+            location,
+            origin,
+            material_b64url,
+            ..
+        } => store.secret_put_audited(
+            &SecretPut {
+                kind,
+                name,
+                host,
+                path_prefix,
+                location,
+                origin,
+                material_b64url,
+            },
+            actor,
+        ),
+        AdminOpBody::SecretDelete { name, .. } => {
+            store.secret_operator_delete_audited(&name, actor)
+        }
+        AdminOpBody::SecretRevokeGrant { grant_id, .. } => {
+            store.secret_operator_revoke_audited(&grant_id, actor)
+        }
         AdminOpBody::FederationGateSet { enabled, .. } => {
             let changed = store.set_federation_member_mapping_audited(
                 enabled,
@@ -1728,6 +1869,33 @@ mod tests {
             "the redaction marker must be present, or an empty rendering would pass: \
              {rendered}"
         );
+    }
+
+    #[test]
+    fn debug_never_renders_agent_secret_material() {
+        let op = AdminOpBody::SecretPut {
+            v: 2,
+            kind: "agent_api_key".into(),
+            name: "billing-key".into(),
+            host: Some("x.test".into()),
+            path_prefix: Some("/v1".into()),
+            location: Some("authorization_bearer".into()),
+            origin: None,
+            material_b64url: "TUFURVJJQUwtQ0FOQVJZ".into(),
+        };
+        let rendered = format!("{op:?}");
+        assert!(
+            !rendered.contains("TUFURVJJQUwtQ0FOQVJZ"),
+            "agent-secret material rendered into Debug output: {rendered}"
+        );
+        assert!(
+            rendered.contains("<redacted>"),
+            "the redaction marker must be present, or an empty rendering would pass: {rendered}"
+        );
+        // Scope metadata stays visible: an operator diagnosing a bad put needs to see
+        // which host and location were named, and neither is material.
+        assert!(rendered.contains("x.test"), "{rendered}");
+        assert!(rendered.contains("/v1"), "{rendered}");
     }
 
     /// The boxed record inside `Store` is redacted transitively.
@@ -2089,6 +2257,48 @@ mod admin_schema_v2_tests {
                 AdminOpBody::FederationGateSet {
                     v: v2,
                     enabled: true,
+                },
+                v2,
+                None,
+            ),
+            (
+                "SecretPhoneGateSet",
+                AdminOpBody::SecretPhoneGateSet {
+                    v: v2,
+                    enabled: true,
+                },
+                v2,
+                None,
+            ),
+            (
+                "SecretPut",
+                AdminOpBody::SecretPut {
+                    v: v2,
+                    kind: "agent_api_key".into(),
+                    name: "key".into(),
+                    host: Some("x.test".into()),
+                    path_prefix: None,
+                    location: Some("authorization_bearer".into()),
+                    origin: None,
+                    material_b64url: "".into(),
+                },
+                v2,
+                None,
+            ),
+            (
+                "SecretDelete",
+                AdminOpBody::SecretDelete {
+                    v: v2,
+                    name: "key".into(),
+                },
+                v2,
+                None,
+            ),
+            (
+                "SecretRevokeGrant",
+                AdminOpBody::SecretRevokeGrant {
+                    v: v2,
+                    grant_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
                 },
                 v2,
                 None,

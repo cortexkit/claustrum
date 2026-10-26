@@ -917,6 +917,46 @@ fn every_dispatchable_verb_appears_in_the_top_level_verb_table() {
 }
 
 fn accepted_help_flags(verb: &str) -> Vec<String> {
+    // `secret` keeps its per-verb flag tables beside the parser that reads them, keyed by
+    // the sub-verb name rather than by the whole two-word verb, so they are read there:
+    // `put_flags` and `REVOKE_FLAGS` are exactly the set its page must document.
+    if verb == "secret" {
+        let src = include_str!("../src/bin/cli_support/secret_cli.rs");
+        // `put_flags` is a function whose body is the table; `REVOKE_FLAGS` is a constant
+        // whose literal is closed by the `]` at the end of its own line. Reading each up
+        // to its closing `]` therefore gives exactly the entries, with no prose and no
+        // neighbouring code.
+        let put_body = src
+            .split_once("fn put_flags() -> &'static [&'static str] {")
+            .expect("the put flag table")
+            .1;
+        let put_table = put_body
+            .split_once("\n]")
+            .or_else(|| put_body.split_once("]"))
+            .map(|(table, _)| table)
+            .unwrap_or(put_body);
+        let revoke_body = src
+            .split_once("const REVOKE_FLAGS: &[&str] = &[")
+            .expect("the revoke flag table")
+            .1;
+        let revoke_table = revoke_body
+            .split_once("]\n")
+            .map(|(table, _)| table)
+            .unwrap_or(revoke_body);
+        let mut out: Vec<String> = Vec::new();
+        for table in [put_table, revoke_table] {
+            for token in table.split('"').map(str::trim) {
+                if token.starts_with("--")
+                    && token.len() > 2
+                    && !token.contains(' ')
+                    && !out.contains(&token.to_string())
+                {
+                    out.push(token.to_string());
+                }
+            }
+        }
+        return out;
+    }
     let src = include_str!("../src/bin/credentials_cli.rs");
     let mut out: Vec<String> = Vec::new();
     for (idx, _) in src.match_indices("=> &[") {
@@ -4970,10 +5010,10 @@ fn every_verb_help_uses_a_flags_table_and_notes_layout() {
         .collect();
     // This is an anti-narrowing floor for the rendered verb-table scan, not a
     // budget for verbs. It includes the operator signing verb and the four
-    // federation verbs (transfer, remote, member, federation).
+    // federation verbs (transfer, remote, member, federation), and secret controls.
     assert_eq!(
         verbs.len(),
-        38,
+        39,
         "the rendered verb-table scan narrowed; sign is a public verb"
     );
     assert!(accepted_help_flags("login").contains(&"--no-browser".to_string()));
@@ -5985,6 +6025,75 @@ fn provider_cli_live_count_refusal_and_deposit_add_order_use_the_route() {
 }
 
 #[test]
+fn phone_gate_cli_persists_online_and_offline_and_status_reads_both_gates() {
+    if std::env::var_os(CLI_BIN_ENV).is_some() {
+        return;
+    }
+    let vault = GrantCliVault::new("phone-gate");
+    vault.bootstrap();
+    let status = vault.run(&["secret", "phone-gate", "status"]);
+    assert!(
+        status.status.success(),
+        "{}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&status.stdout),
+        "member mapping off\nphone setting off\n"
+    );
+    assert!(vault.run(&["secret", "phone-gate", "on"]).status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&vault.run(&["secret", "phone-gate", "status"]).stdout),
+        "member mapping off\nphone setting on\n"
+    );
+    assert!(vault.run(&["secret", "phone-gate", "off"]).status.success());
+    let peer = ProviderRoutePeer::start(&vault);
+    let run = |args: &[&str]| {
+        cli()
+            .args(args)
+            .arg("--data-dir")
+            .arg(&vault.data_dir)
+            .arg("--key-path")
+            .arg(&vault.key_path)
+            .arg("--subc")
+            .arg(&peer.connection)
+            .env("CORTEXKIT_TEST_BYPASS_VALIDATION", "1")
+            .output()
+            .unwrap()
+    };
+    let on = run(&["secret", "phone-gate", "on"]);
+    assert!(
+        on.status.success(),
+        "{}",
+        String::from_utf8_lossy(&on.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&run(&["secret", "phone-gate", "status"]).stdout),
+        "member mapping off\nphone setting on\n"
+    );
+    assert_eq!(
+        peer.observed
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|v| v["op"] == "admin.secret_phone_gate_set")
+            .count(),
+        1
+    );
+    let off = run(&["secret", "phone-gate", "off"]);
+    assert!(
+        off.status.success(),
+        "{}",
+        String::from_utf8_lossy(&off.stderr)
+    );
+    drop(peer);
+    assert_eq!(
+        String::from_utf8_lossy(&vault.run(&["secret", "phone-gate", "status"]).stdout),
+        "member mapping off\nphone setting off\n"
+    );
+}
+
+#[test]
 fn plan_cli_sets_clears_and_renders_a_conditional_parseable_column() {
     let vault = GrantCliVault::new("plan-roundtrip");
     vault.bootstrap();
@@ -6258,4 +6367,606 @@ fn plan_cli_detected_marker_keeps_fields_and_clear_reveals_detection() {
     assert_eq!(tier(run(&["list"])), "pro_100");
     run(&["set-plan", "--id", "chatgpt:openai", "--clear"]);
     assert_eq!(tier(run(&["list"])), "pro_200*");
+}
+
+/// Path to the vault's agent-secret tables without taking a lease or a key.
+///
+/// The listing is plaintext-only on purpose, so a test can read it exactly as
+/// `ck auth secret list` does: no master key, no daemon, no write access.
+fn agent_secret_listing(
+    data_dir: &std::path::Path,
+) -> credentials_core::store::OperatorSecretListing {
+    // A refused put never migrated the store: it had nothing to write, so the CLI never
+    // opened it with a key. To a caller asking what is stored, that is the same fact as an
+    // empty vault.
+    credentials_core::store::list_agent_secrets_read_only(&data_dir.join("store.db"))
+        .expect("the store file is readable")
+        .unwrap_or_default()
+}
+
+/// Give the secret `name` a permanent `scope` grant through the vault's own gate.
+///
+/// Simpler than driving the phone's signed-envelope ceremony here, and it exercises the
+/// same stored-grant shape: the consumer under test is the release path, not the
+/// signature verification the core crate already covers exhaustively.
+fn grant_permanently(data_dir: &std::path::Path, key_path: &std::path::Path, name: &str) {
+    use credentials_core::audit::{AuditOp, AuditRecord};
+    let path = data_dir.join("store.db");
+    let incarnation = credentials_core::store::list_agent_secrets_read_only(&path)
+        .unwrap()
+        .unwrap()
+        .secrets
+        .into_iter()
+        .find(|secret| secret.name == name)
+        .expect("the secret exists before its grant")
+        .incarnation;
+    let now = 1;
+    let grant_id = credentials_core::agent_secret::request_id(now).unwrap();
+    // The grant row goes in first, on its own connection, and the audit entry second
+    // through the store's leased appender: that keeps the chain's tip the last write, the
+    // same order the approve transaction leaves behind.
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute(
+        "INSERT INTO secret_grants (grant_id,secret_name,incarnation,scope_owner,scope_kind,scope_ref,coverage,duration,expires_at_ms,granted_at_ms,envelope_sha256) VALUES (?1,?2,?3,'reserved:prefrontal-core','head','H','scope','permanent',0,?4,?5)",
+        rusqlite::params![grant_id, name, incarnation, now, "0".repeat(64)],
+    )
+    .unwrap();
+    drop(conn);
+    let store = open_leased_store(data_dir, key_path);
+    store
+        .append_audit(&AuditRecord {
+            op: AuditOp::SecretGrantCreate,
+            credential_id: Some(format!("secret|{name}")),
+            payload_hash: Some("0".repeat(64)),
+            actor: "test".into(),
+            alarm: None,
+        })
+        .unwrap();
+}
+
+/// Open the vault the way the CLI does, with the operator key file as the key source.
+fn open_leased_store(data_dir: &std::path::Path, key_path: &std::path::Path) -> EncryptedStore {
+    let descriptor = StorageDescriptor {
+        module_id: credentials_core::contract::MODULE_ID.into(),
+        storage_namespace: credentials_core::contract::STORAGE_NAMESPACE.into(),
+        isolation: Isolation::Module,
+        backend: StorageBackend::Sqlite {
+            path: data_dir.join("store.db").to_string_lossy().into_owned(),
+        },
+    };
+    let key = credentials_core::resolver::resolve(
+        &credentials_core::resolver::ResolverConfig {
+            data_dir: data_dir.to_path_buf(),
+            source: credentials_core::resolver::KeySource::OperatorPath {
+                path: key_path.to_path_buf(),
+            },
+        },
+        None,
+    )
+    .unwrap();
+    EncryptedStore::open(open_sqlite(&descriptor).unwrap(), key).unwrap()
+}
+
+/// The canary used everywhere a test needs a value that must never surface.
+const MATERIAL_CANARY: &str = "sk-canary-0f7d2a91-never-print";
+
+/// Write a material file with the given mode. The 0600 case is the one the CLI accepts.
+fn material_file(root: &std::path::Path, mode: u32, body: &str) -> PathBuf {
+    use std::io::Write;
+    let path = root.join("secret-material");
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(mode);
+        // `create_new` honours the requested mode, but a permissive umask would still
+        // tighten it; set it explicitly so the permissive case really is permissive.
+        options.mode(mode);
+    }
+    let mut file = options.open(&path).unwrap();
+    file.write_all(body.as_bytes()).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+    drop(file);
+    path
+}
+
+#[test]
+fn secret_put_offline_stores_a_releaseable_key_and_refuses_the_name_twice() {
+    let vault = GrantCliVault::new("secret-put-offline");
+    vault.bootstrap();
+    let file = material_file(&vault.root, 0o600, MATERIAL_CANARY);
+    let put = vault.run(&[
+        "secret",
+        "put",
+        "ops-key",
+        "--kind",
+        "api-key",
+        "--host",
+        "x.test",
+        "--path-prefix",
+        "/repos/a",
+        "--material-file",
+        file.to_str().unwrap(),
+    ]);
+    assert!(
+        put.status.success(),
+        "{}",
+        String::from_utf8_lossy(&put.stderr)
+    );
+    assert!(!String::from_utf8_lossy(&put.stdout).contains(MATERIAL_CANARY));
+    let listing = agent_secret_listing(&vault.data_dir);
+    assert_eq!(listing.secrets.len(), 1, "{listing:?}");
+    let row = &listing.secrets[0];
+    assert_eq!(row.name, "ops-key");
+    assert_eq!(row.state, "active");
+    assert_eq!(row.host.as_deref(), Some("x.test"));
+    // `--location` was omitted, so the CLI default filled the bearer location: an API key
+    // without a location cannot be stored at all, because every byte layout carries one.
+    assert_eq!(row.location.as_deref(), Some("authorization_bearer"));
+    assert!(!vault
+        .run(&[
+            "secret",
+            "put",
+            "ops-key",
+            "--kind",
+            "api-key",
+            "--host",
+            "x.test",
+            "--material-file",
+            file.to_str().unwrap(),
+        ])
+        .status
+        .success());
+    assert!(!String::from_utf8_lossy(
+        &vault
+            .run(&[
+                "secret",
+                "put",
+                "ops-key",
+                "--kind",
+                "api-key",
+                "--host",
+                "x.test",
+                "--material-file",
+                file.to_str().unwrap(),
+            ])
+            .stderr
+    )
+    .contains(MATERIAL_CANARY));
+}
+
+#[test]
+fn secret_put_refuses_a_material_file_that_is_not_0600_or_is_malformed_without_naming_its_content()
+{
+    let vault = GrantCliVault::new("secret-put-file-rules");
+    vault.bootstrap();
+    let permissive = material_file(&vault.root, 0o644, MATERIAL_CANARY);
+    let refused = vault.run(&[
+        "secret",
+        "put",
+        "ops-key",
+        "--kind",
+        "api-key",
+        "--host",
+        "x.test",
+        "--material-file",
+        permissive.to_str().unwrap(),
+    ]);
+    assert!(!refused.status.success());
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    // The message names the path and the rule, and never the content.
+    assert!(stderr.contains(permissive.to_str().unwrap()), "{stderr}");
+    assert!(stderr.contains("0600"), "{stderr}");
+    assert!(!stderr.contains(MATERIAL_CANARY), "{stderr}");
+    assert!(!String::from_utf8_lossy(&refused.stdout).contains(MATERIAL_CANARY));
+    // Nothing was stored.
+    assert!(agent_secret_listing(&vault.data_dir).secrets.is_empty());
+    std::fs::remove_file(&permissive).unwrap();
+    // A site login file that does not carry a username and password line.
+    let malformed = material_file(&vault.root, 0o600, "only-one-line");
+    let refused = vault.run(&[
+        "secret",
+        "put",
+        "ops-login",
+        "--kind",
+        "site-login",
+        "--origin",
+        "https://x.test",
+        "--material-file",
+        malformed.to_str().unwrap(),
+    ]);
+    assert!(!refused.status.success());
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(stderr.contains(malformed.to_str().unwrap()), "{stderr}");
+    assert!(stderr.contains("username"), "{stderr}");
+    assert!(!stderr.contains("only-one-line"), "{stderr}");
+}
+
+#[test]
+fn secret_put_stores_a_site_login_and_keeps_the_material_out_of_every_output() {
+    let vault = GrantCliVault::new("secret-put-login");
+    vault.bootstrap();
+    let file = material_file(
+        &vault.root,
+        0o600,
+        &format!(
+            "ops-user\n{MATERIAL_CANARY}\notpauth://totp/x:y?secret=JBSWY3DPEHPK3PXP&digits=6"
+        ),
+    );
+    let put = vault.run(&[
+        "secret",
+        "put",
+        "ops-login",
+        "--kind",
+        "site-login",
+        "--origin",
+        "https://x.test",
+        "--material-file",
+        file.to_str().unwrap(),
+    ]);
+    assert!(
+        put.status.success(),
+        "{}",
+        String::from_utf8_lossy(&put.stderr)
+    );
+    let listing = agent_secret_listing(&vault.data_dir);
+    assert_eq!(listing.secrets[0].kind, "site_login");
+    assert_eq!(listing.secrets[0].origin.as_deref(), Some("https://x.test"));
+    // The audit chain records one `secret_store` row whose payload is a digest, and no
+    // canary: not the password and not the TOTP seed.
+    let audit = vault.run(&["audit", "--limit", "50"]);
+    let audit_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&audit.stdout),
+        String::from_utf8_lossy(&audit.stderr)
+    );
+    assert!(audit_text.contains("secret_store"), "{audit_text}");
+    for canary in [MATERIAL_CANARY, "JBSWY3DPEHPK3PXP"] {
+        assert!(!audit_text.contains(canary), "{canary} in {audit_text}");
+    }
+    let list = vault.run(&["secret", "list"]);
+    let list_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&list.stdout),
+        String::from_utf8_lossy(&list.stderr)
+    );
+    assert!(!list_text.contains(MATERIAL_CANARY), "{list_text}");
+    assert!(!list_text.contains("JBSWY3DPEHPK3PXP"), "{list_text}");
+}
+
+#[test]
+fn secret_put_never_takes_material_from_argv() {
+    let vault = GrantCliVault::new("secret-put-argv");
+    vault.bootstrap();
+    // `--material` is not a flag any secret verb accepts, so the invocation is refused
+    // before anything could be read from it. The material is on the command line only to
+    // prove the CLI refuses the SHAPE and never repeats the value: a refusal that quoted
+    // the argument would put the secret in the terminal and any captured transcript, the
+    // same leak as reading it from argv in the first place.
+    let refused = vault.run(&[
+        "secret",
+        "put",
+        "ops-key",
+        "--kind",
+        "api-key",
+        "--host",
+        "x.test",
+        "--material",
+        MATERIAL_CANARY,
+    ]);
+    assert!(!refused.status.success());
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(stderr.contains("--material"), "{stderr}");
+    assert!(!stderr.contains(MATERIAL_CANARY), "{stderr}");
+    // The help page names the file and the prompt, and no material flag.
+    let help = vault.run(&["help", "secret"]);
+    let help_text = String::from_utf8_lossy(&help.stdout).to_string();
+    assert!(help_text.contains("--material-file"), "{help_text}");
+    assert!(help_text.contains("never read from a flag"), "{help_text}");
+    assert!(agent_secret_listing(&vault.data_dir).secrets.is_empty());
+}
+
+#[test]
+fn secret_list_and_grants_work_with_the_daemon_down_and_show_phone_key_state() {
+    let vault = GrantCliVault::new("secret-list-offline");
+    vault.bootstrap();
+    let file = material_file(&vault.root, 0o600, MATERIAL_CANARY);
+    let put = vault.run(&[
+        "secret",
+        "put",
+        "ops-key",
+        "--kind",
+        "api-key",
+        "--host",
+        "x.test",
+        "--material-file",
+        file.to_str().unwrap(),
+    ]);
+    assert!(put.status.success());
+    // No daemon was ever started in this test, so both readers are exercising the
+    // lease-free path by construction.
+    let list = vault.run(&["secret", "list"]);
+    assert!(list.status.success());
+    let text = String::from_utf8_lossy(&list.stdout).to_string();
+    assert!(text.contains("ops-key agent_api_key active"), "{text}");
+    assert!(text.contains("location=authorization_bearer"), "{text}");
+    let grants = vault.run(&["secret", "grants"]);
+    assert!(grants.status.success());
+    // Nothing has a grant yet, so the grants listing is empty and says nothing it cannot
+    // support -- in particular it does not invent a phone state.
+    assert_eq!(String::from_utf8_lossy(&grants.stdout), "");
+    assert!(!text.contains("phone"), "{text}");
+}
+
+#[test]
+fn secret_list_and_grants_on_a_pre_migration_store_print_no_agent_secret_tables() {
+    let vault = GrantCliVault::new("secret-list-premigration");
+    vault.bootstrap();
+    // Rebuild the store one migration short of the agent-secret tables: the faithful way
+    // to reach a pre-migration store is the real chain, not a hand-written schema.
+    let path = vault.data_dir.join("store.db");
+    std::fs::remove_file(&path).unwrap();
+    let descriptor = StorageDescriptor {
+        module_id: credentials_core::contract::MODULE_ID.into(),
+        storage_namespace: credentials_core::contract::STORAGE_NAMESPACE.into(),
+        isolation: Isolation::Module,
+        backend: StorageBackend::Sqlite {
+            path: path.to_string_lossy().into_owned(),
+        },
+    };
+    let sqlite = open_sqlite(&descriptor).unwrap();
+    credentials_core::store::migrate_through_for_test(
+        &sqlite,
+        credentials_core::store::AGENT_SECRET_SCHEMA_VERSION - 1,
+    )
+    .unwrap();
+    drop(sqlite);
+    for verb in ["list", "grants"] {
+        let out = vault.run(&["secret", verb]);
+        assert!(
+            out.status.success(),
+            "{verb}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            "no agent-secret tables yet\n"
+        );
+    }
+}
+
+#[test]
+fn every_secret_verb_refuses_a_flag_that_belongs_to_another_verb_and_has_a_help_page() {
+    // A bootstrapped vault, so the refusal comes from the argument check and not from a
+    // missing store. Every case names the verb being run and the flags it takes.
+    let vault = GrantCliVault::new("secret-flag-refusal");
+    vault.bootstrap();
+    for (args, bogus) in [
+        (vec!["list"], "--host"),
+        (vec!["grants"], "--name"),
+        (vec!["delete", "ops-key"], "--kind"),
+        (vec!["revoke"], "--name"),
+        (
+            vec!["put", "ops-key", "--kind", "api-key", "--host", "x.test"],
+            "--grant-id",
+        ),
+        (vec!["phone-gate", "status"], "--name"),
+    ] {
+        let argv = {
+            let mut argv = vec!["secret"];
+            argv.extend(args.iter().copied());
+            argv.push(bogus);
+            argv
+        };
+        // `run` takes string slices, so the vector outlives the call.
+        let out = vault.run(&argv);
+        assert!(!out.status.success(), "{args:?} accepted {bogus}");
+        let message = String::from_utf8_lossy(&out.stderr).to_string();
+        assert!(
+            message.contains("it takes"),
+            "{args:?}: a refusal must say which flags the verb takes: {message}"
+        );
+    }
+    // Every verb is named on the page an operator reaches with `ck auth help secret`.
+    let page = cli().args(["help", "secret"]).output().unwrap();
+    assert!(page.status.success());
+    let page = String::from_utf8_lossy(&page.stdout).to_string();
+    for verb in ["put", "list", "grants", "delete", "revoke", "phone-gate"] {
+        assert!(
+            page.contains(verb),
+            "{verb} missing from the secret page: {page}"
+        );
+    }
+    // An unknown secret verb names itself and prints the page rather than silently doing
+    // nothing.
+    let unknown = cli().args(["secret", "frobnicate"]).output().unwrap();
+    assert!(!unknown.status.success());
+    let stderr = String::from_utf8_lossy(&unknown.stderr);
+    assert!(stderr.contains("frobnicate"), "{stderr}");
+    assert!(stderr.contains("put"), "{stderr}");
+}
+
+#[test]
+fn secret_put_online_uses_the_admin_mac_and_the_same_record_invariants() {
+    if std::env::var_os(CLI_BIN_ENV).is_some() {
+        return;
+    }
+    let vault = GrantCliVault::new("secret-put-online");
+    vault.bootstrap();
+    let peer = ProviderRoutePeer::start(&vault);
+    let file = material_file(&vault.root, 0o600, MATERIAL_CANARY);
+    let put = cli()
+        .args([
+            "secret",
+            "put",
+            "ops-key",
+            "--kind",
+            "api-key",
+            "--host",
+            "x.test",
+            "--material-file",
+            file.to_str().unwrap(),
+            "--data-dir",
+        ])
+        .arg(&vault.data_dir)
+        .arg("--key-path")
+        .arg(&vault.key_path)
+        .arg("--subc")
+        .arg(&peer.connection)
+        .env("CORTEXKIT_TEST_BYPASS_VALIDATION", "1")
+        .output()
+        .unwrap();
+    assert!(
+        put.status.success(),
+        "{}",
+        String::from_utf8_lossy(&put.stderr)
+    );
+    {
+        let ops = peer.observed.lock().unwrap();
+        let put_ops: Vec<_> = ops
+            .iter()
+            .filter(|op| op["op"] == "admin.secret_put")
+            .collect();
+        assert_eq!(put_ops.len(), 1, "{ops:?}");
+        // The material crossed the admin op as base64 text, so the peer -- which decodes
+        // the body -- must not be able to read it as a plaintext field.
+        assert!(!put_ops[0].to_string().contains(MATERIAL_CANARY));
+    }
+    let listing = agent_secret_listing(&vault.data_dir);
+    assert_eq!(listing.secrets[0].state, "active");
+    assert_eq!(
+        listing.secrets[0].location.as_deref(),
+        Some("authorization_bearer")
+    );
+    // The daemon-backed delete removes what the daemon-backed put created.
+    let delete = cli()
+        .args(["secret", "delete", "ops-key", "--data-dir"])
+        .arg(&vault.data_dir)
+        .arg("--key-path")
+        .arg(&vault.key_path)
+        .arg("--subc")
+        .arg(&peer.connection)
+        .env("CORTEXKIT_TEST_BYPASS_VALIDATION", "1")
+        .output()
+        .unwrap();
+    assert!(
+        delete.status.success(),
+        "{}",
+        String::from_utf8_lossy(&delete.stderr)
+    );
+    assert!(agent_secret_listing(&vault.data_dir).secrets.is_empty());
+}
+
+/// An operator `put` produces a record that releases exactly like a deposited one, and
+/// the operator revoke removes the grant that allowed it.
+///
+/// The grant is seeded directly rather than by approving a pending request: the phone's
+/// signed-envelope ceremony is core's own deeply covered subject, and what this test has
+/// to prove is that the CLI's stored record opens and serves.
+#[test]
+fn a_put_secret_releases_to_an_agent_and_operator_revoke_removes_the_grant() {
+    use credentials_core::agent_secret::{AskingScope, SecretSender, SecretUse, UseTarget};
+    let vault = GrantCliVault::new("secret-put-release");
+    vault.bootstrap();
+    // The operator stores the key without a --location, which is the shape the spec calls
+    // out: it must still release, through the bearer location, and stay non-corrupt.
+    let file = material_file(&vault.root, 0o600, MATERIAL_CANARY);
+    let put = vault.run(&[
+        "secret",
+        "put",
+        "ops-key",
+        "--kind",
+        "api-key",
+        "--host",
+        "x.test",
+        "--path-prefix",
+        "/repos/a",
+        "--material-file",
+        file.to_str().unwrap(),
+    ]);
+    assert!(
+        put.status.success(),
+        "{}",
+        String::from_utf8_lossy(&put.stderr)
+    );
+    // A statement always names the vault's own member id, so the vault needs one before
+    // any call can reach the approval step.
+    let store = open_leased_store(&vault.data_dir, &vault.key_path);
+    store
+        .set_federation_self_member_audited(
+            "fed-computer:22222222222222222222222222222222",
+            credentials_core::audit::AuditCtx::admin(
+                credentials_core::audit::AuditOp::FederationSelfSet,
+            ),
+        )
+        .unwrap();
+    drop(store);
+    let call = SecretUse {
+        name: "ops-key".into(),
+        sender: SecretSender::Aft,
+        scope: AskingScope {
+            owner: "reserved:prefrontal-core".into(),
+            kind: "head".into(),
+            scope_ref: "H".into(),
+            epoch: 1,
+        },
+        worker_parent: None,
+        coverage: "scope".into(),
+        agent_id: None,
+        target: UseTarget::ApiKey {
+            scheme: "https".into(),
+            host: "x.test".into(),
+            port: 443,
+            path: "/repos/a/issues/1".into(),
+        },
+    };
+    // Without a grant the call asks for approval, which is what a real agent sees before
+    // anyone has said yes.
+    let store = open_leased_store(&vault.data_dir, &vault.key_path);
+    let request = store
+        .secret_use(&call, || 1)
+        .map_or_else(|e| e.body(), |o| o.reply);
+    assert_eq!(request["status"], "approval_required", "{request}");
+    drop(store);
+    grant_permanently(&vault.data_dir, &vault.key_path, "ops-key");
+    let store = open_leased_store(&vault.data_dir, &vault.key_path);
+    let released = store.secret_use(&call, || 2).unwrap();
+    assert_eq!(released.reply["status"], "released", "{:?}", released.reply);
+    assert_eq!(released.reply["location"], "authorization_bearer");
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(released.reply["key_b64url"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(String::from_utf8(bytes).unwrap(), MATERIAL_CANARY);
+    drop(store);
+    let grants = credentials_core::store::list_agent_secret_grants_read_only(
+        &vault.data_dir.join("store.db"),
+    )
+    .unwrap();
+    let (grant_id, _, _) = grants
+        .into_iter()
+        .find(|(_, name, _)| name == "ops-key")
+        .expect("the seeded grant is listed for the operator");
+    let revoke = vault.run(&["secret", "revoke", "--grant-id", &grant_id]);
+    assert!(
+        revoke.status.success(),
+        "{}",
+        String::from_utf8_lossy(&revoke.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&revoke.stdout).trim(),
+        format!("revoked grant {grant_id}")
+    );
+    let listing = agent_secret_listing(&vault.data_dir);
+    let ops = listing
+        .secrets
+        .iter()
+        .find(|secret| secret.name == "ops-key")
+        .expect("the operator's secret survives a grant revoke");
+    assert!(ops.grants.is_empty(), "{ops:?}");
+    assert_eq!(ops.state, "active");
 }

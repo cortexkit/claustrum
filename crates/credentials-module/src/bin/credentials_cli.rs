@@ -340,6 +340,18 @@ fn run_args(mut args: Vec<String>) -> Result<(), CliError> {
     // an unknown or misspelled flag is a HARD error, never silently ignored. Runs
     // before dispatch, so a bad invocation never reaches the keychain or the lease.
     reject_unknown_args(&command, &args)?;
+    // A secret verb's flags belong to ONE sub-verb each and a flag's value may be any
+    // word, so `secret_cli::guard_args` is the only check that can judge the invocation:
+    // it knows the verb being run and lists the flags that verb takes.
+    if command == "secret" {
+        // `guard_args` reads the same `secret <verb> ...` shape the base check does, so the
+        // verb name goes back in front of its operands. It is the ONLY argument check for
+        // this verb: the generic one cannot judge a flag whose value may be any word.
+        let mut secret_args = Vec::with_capacity(args.len() + 1);
+        secret_args.push(command.clone());
+        secret_args.extend(args.iter().cloned());
+        cli_support::secret_cli::guard_args(&secret_args)?;
+    }
 
     match command.as_str() {
         "bootstrap" => cmd_bootstrap(&global),
@@ -380,6 +392,7 @@ fn run_args(mut args: Vec<String>) -> Result<(), CliError> {
         "remote" => cli_support::federation_cli::cmd_remote(&global, &args),
         "member" => cli_support::federation_cli::cmd_member(&global, &args),
         "federation" => cli_support::federation_cli::cmd_federation(&global, &args),
+        "secret" => cli_support::secret_cli::cmd_secret(&global, &args),
         other => Err(CliError::Usage(format!(
             "unknown verb '{other}'\n\n{}",
             usage_short()
@@ -419,6 +432,12 @@ fn hoist_leading_global_flags(args: &mut Vec<String>) {
 /// that silent drop means a typo'd invocation runs the real mutation. This makes a
 /// bad flag a hard usage error before any keychain or lease access.
 fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
+    // `ck auth secret` keeps its flags per sub-verb, and a flag's value may be any word, so
+    // the generic scan below cannot judge it. `secret_cli` does, against the table for the
+    // verb actually named, and that is the only argument check that runs for this verb.
+    if command == "secret" {
+        return cli_support::secret_cli::guard_args(args);
+    }
     // The per-command flags that TAKE a value. `--data-dir` / `--key-path` are global
     // and already removed by parse_global before this runs.
     let value_flags: &[&str] = match command {
@@ -538,11 +557,32 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
             "remote" => &["add", "remove", "list"],
             "member" => &["grant", "revoke", "list"],
             "federation" => &["self", "mapping"],
+            // Every secret verb name and its one positional action, so none is eaten
+            // here. `secret`'s FLAGS are checked by `secret_cli::guard_args` instead: this
+            // table is keyed on the command name alone and could not say which sub-verb a
+            // flag belongs to.
+            "secret" => &[
+                "put",
+                "list",
+                "grants",
+                "delete",
+                "revoke",
+                "phone-gate",
+                "on",
+                "off",
+                "status",
+            ],
             _ => &[],
         };
-        // `transfer accept|reject <transfer-id>` and `federation self <member>` /
-        // `federation mapping on|off` take one positional value, which the verb itself
-        // checks.
+        // `transfer accept|reject <transfer-id>` and `federation self <member>` take one
+        // positional value, which the verb itself checks.
+        // `secret` is handed entirely to its own guard below: a name may be positional, a
+        // flag's value may be any word, and which flags a verb takes is known there alone.
+        // Judging any token here would only guess at that.
+        if command == "secret" {
+            i += 1;
+            continue;
+        }
         if subcommands.contains(&arg.as_str())
             || (matches!(command, "set-providers" | "transfer" | "federation")
                 && !arg.starts_with("--"))
@@ -612,7 +652,8 @@ fn usage_short() -> String {
        transfer            send, receive, accept or reject a sealed key transfer\n\
        remote              add or remove a login homed in another vault\n\
        member              grant another vault remote reads or deliveries\n\
-       federation          set this vault's member id or the mapping gate\n\
+        federation          set this vault's member id or the mapping gate\n\
+        secret              put, list, delete or revoke agent secrets; phone gate\n\
        rotate-master-key   rotate the vault master key (offline)\n\
        bootstrap           initialize a new vault (offline)\n\
      \n\
@@ -641,6 +682,7 @@ fn usage_short() -> String {
 /// An unknown verb falls back to the short table.
 fn help_verb(verb: &str) -> String {
     let body = match verb {
+        "secret" => cli_support::secret_cli::help_text(),
         "set-plan" => {
             "ck auth set-plan --id <credential-id> (--tier <id> | --clear)\n\
              \n\

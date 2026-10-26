@@ -116,6 +116,68 @@ pub struct AdminSurface {
 const ROUTE_ADMIN_ACTOR: &str = "route-admin";
 
 impl AdminSurface {
+    pub fn serve_permissions(
+        &self,
+        method: &str,
+        params: &serde_json::Value,
+        actor: &str,
+    ) -> Result<serde_json::Value, credentials_core::agent_secret::SecretError> {
+        let object = params
+            .as_object()
+            .ok_or(credentials_core::agent_secret::SecretError::InvalidParams)?;
+        let now = chrono::Utc::now().timestamp_millis();
+        let result = match method {
+            "permissions.list" => {
+                if object.keys().any(|k| k != "agent_id")
+                    || object.get("agent_id").is_some_and(|v| !v.is_string())
+                {
+                    return Err(credentials_core::agent_secret::SecretError::InvalidParams);
+                }
+                self.engine.store().secret_permissions_list(
+                    params.get("agent_id").and_then(serde_json::Value::as_str),
+                    now,
+                )
+            }
+            "permissions.revoke" => {
+                if object.len() != 1 {
+                    return Err(credentials_core::agent_secret::SecretError::InvalidParams);
+                }
+                let id = params
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or(credentials_core::agent_secret::SecretError::InvalidParams)?;
+                self.engine
+                    .store()
+                    .secret_permissions_revoke(id, actor, now)
+            }
+            _ => return Err(credentials_core::agent_secret::SecretError::InvalidParams),
+        };
+        Ok(result.unwrap_or_else(|e| e.body()))
+    }
+    pub fn serve_secret_use(
+        &self,
+        principal: Option<&Principal>,
+        params: &serde_json::Value,
+    ) -> crate::secret_use::UseAnswer {
+        crate::secret_use::serve(self.engine.store(), principal, params, || {
+            chrono::Utc::now().timestamp_millis()
+        })
+    }
+    pub async fn serve_phone(
+        &self,
+        fingerprint: &str,
+        method: &str,
+        params: &serde_json::Value,
+    ) -> crate::secret_phone::PhoneAnswer {
+        crate::secret_phone::serve(
+            Arc::clone(self.engine.store()),
+            self.home.outbound(),
+            fingerprint,
+            method,
+            params,
+        )
+        .await
+    }
     pub fn new(
         engine: Arc<RefreshEngine>,
         mac_key: AdminMacKey,
@@ -195,15 +257,30 @@ impl AdminSurface {
         let Some((principal, harness)) = bound else {
             return crate::federation::RouteCaller::Principal(None);
         };
-        let gate = if crate::federation::ingress::is_callosum(&principal) {
-            crate::federation::MappingGate::from_store(
-                self.engine.store().federation_member_mapping(),
-            )
+        use crate::federation::MappingGate;
+        let (gate, phone_gate) = if crate::federation::ingress::is_callosum(&principal) {
+            match self.engine.store().secret_phone_mapping_gates() {
+                Ok((member, phone)) => (
+                    if member {
+                        MappingGate::On
+                    } else {
+                        MappingGate::Off
+                    },
+                    match phone {
+                        Some(true) => MappingGate::On,
+                        Some(false) => MappingGate::Off,
+                        None => MappingGate::Unreadable,
+                    },
+                ),
+                Err(_) => (MappingGate::Unreadable, MappingGate::Unreadable),
+            }
         } else {
             // Not read for anyone else: their harness is ignored in every gate state.
-            crate::federation::MappingGate::Off
+            (MappingGate::Off, MappingGate::Off)
         };
-        crate::federation::map_route_caller(&principal, &harness, gate)
+        crate::federation::ingress::map_route_caller_with_phone(
+            &principal, &harness, gate, phone_gate,
+        )
     }
 
     /// The EFFECTIVE principal of a route bind: what [`Self::route_caller`] lends the
@@ -377,6 +454,28 @@ impl AdminSurface {
             claimed.bytes
         };
         let _ = claimed_nonce; // (kept for clarity; the claim is the side effect above)
+
+        // Operator permissions calls use the same authenticated transcript as admin writes.
+        // The provider's public parameters remain unchanged for Cingulate.
+        if let Ok(mut body) = serde_json::from_slice::<serde_json::Value>(op_body) {
+            if let Some(method) = body
+                .get("op")
+                .and_then(serde_json::Value::as_str)
+                .filter(|m| matches!(*m, "permissions.list" | "permissions.revoke"))
+                .map(str::to_owned)
+            {
+                if body.get("v").and_then(serde_json::Value::as_u64) != Some(1) {
+                    return AdminOutcome::Refused("unsupported permissions schema version".into());
+                }
+                let object = body.as_object_mut().expect("object has op");
+                object.remove("op");
+                object.remove("v");
+                return match self.serve_permissions(&method, &body, ROUTE_ADMIN_ACTOR) {
+                    Ok(v) => AdminOutcome::Ok(v),
+                    Err(_) => AdminOutcome::Refused("invalid permissions params".into()),
+                };
+            }
+        }
 
         // Parse-AFTER-verify: the body is opaque until the MAC proves possession.
         let op: AdminOpBody = match serde_json::from_slice(op_body) {
@@ -1064,6 +1163,26 @@ mod tests {
         let last = entries.last().expect("an entry");
         assert_eq!(last.actor, "route-admin");
         assert_eq!(last.op, "put");
+    }
+
+    #[tokio::test]
+    async fn permissions_operator_wrapper_requires_the_admin_mac() {
+        let r = rig(94);
+        r.admin.record_bind(77, Principal::Direct);
+        for body in [
+            r#"{"op":"permissions.list","v":1}"#,
+            r#"{"op":"permissions.revoke","v":1,"id":"unknown"}"#,
+        ] {
+            let (tag, _) = challenge_and_sign(&r, 77, body);
+            assert!(matches!(
+                r.admin.execute(77, body.as_bytes(), &"00".repeat(32)).await,
+                AdminOutcome::Refused(_)
+            ));
+            assert!(matches!(
+                r.admin.execute(77, body.as_bytes(), &tag).await,
+                AdminOutcome::Ok(_)
+            ));
+        }
     }
 
     #[tokio::test]

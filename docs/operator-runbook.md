@@ -371,6 +371,54 @@ keeps handles) or `--expected-hash <hex>` (compare-and-set). A `cookie:<domain>:
 always creates a session-cookie record. A `github_app` deposit requires `--client-id`, the
 App JWT issuer.
 
+### Agent secrets: keys an agent uses without seeing them
+
+Agent secrets are a separate record kind that no credential id, handle, grant or transfer
+can reach. An agent (AFT for an API key, Cerebellum for a login) asks the vault to *use*
+one; the vault hands back the key with the header, query or JSON-pointer location to put
+it in, or the username, password and TOTP code for a login. Material is released only to
+those two senders, and only under a grant.
+
+```sh
+ck auth secret put ops-github --kind api-key --host api.github.com \
+  --path-prefix /repos --location header:X-Api-Key --material-file ~/.config/gh.key
+ck auth secret put ops-board --kind site-login --origin https://board.example.com \
+  --material-file ~/.config/board.login
+ck auth secret list
+ck auth secret grants
+ck auth secret revoke --grant-id <grant-id>
+ck auth secret delete ops-github
+```
+
+**Material never comes from a flag.** `--material-file` must be mode `0600`, and its
+content is the deposit plaintext: the key bytes for an API key, or three lines (username,
+password, optional `otpauth://totp/...`) for a login — the same layout a phone deposit
+carries, checked by the same validator. Without the flag, `put` prompts on stdin instead.
+A refusal names the path and the rule that failed and never echoes the content, an error
+message or the audit payload.
+
+`--location` defaults to `authorization_bearer`. It is scope metadata, not a target: it
+tells the sending module where to put the key (`authorization_bearer`, `header:<name>`,
+`query:<name>`, `json_pointer:<pointer>`) and it takes no part in matching the call.
+
+Names are 1 to 64 bytes of `A-Z a-z 0-9 . _ -`, starting with a letter or digit, and they
+are **create-only**: a second `put` of a name is refused, whether the existing row is
+active or `corrupt`, because silently replacing a record an agent already holds a grant to
+is not a repair. Delete first, which is a separate audited act that also removes the
+record's grants and its pending approval requests.
+
+`put`, `delete` and `revoke` are ordinary operator writes: through the master-key admin MAC
+when the daemon is running (`admin.secret_put`, `admin.secret_delete`,
+`admin.secret_revoke_grant`) and under the single-writer lease when it is stopped. `list`
+and `grants` never touch the daemon: they open the store read-only, so they work with the
+vault serving and need no key. On a store whose schema predates the agent-secret migration
+they print `no agent-secret tables yet` and exit 0.
+
+`list` also prints each registered phone's keys as `current as of <time>`, `superseded` or
+`unobserved`. That is the **last observed** pairing — when a lookup saw a different pairing,
+or the device absent, the keys read `superseded` — and never a validity checked now, because
+`list` makes no callosum call.
+
 ### Operator-terminal signing keys
 
 For machine account authentication from the operator's own terminal, generate a
@@ -847,6 +895,23 @@ These values come from the closed `AuditOp` enum and name the mutation or chain 
 | `remote_remove` | Remove a remote record and its local metadata. |
 | `federation_gate_set` | Change the live federation member-mapping setting. |
 | `federation_self_set` | Set the vault's own canonical member id. |
+| `secret_deposit_key_create` | Vault bootstrap creates the dedicated deposit key; target `kem:secret-deposit:1`, payload fields: key id. |
+| `secret_phone_gate_set` | Operator changes the phone mapping gate; no target, payload fields: enabled. |
+| `secret_phone_register` | Phone registers create-only keys for the current pairing; target `secret-phone\|<fp>`, payload fields: pairing id, deposit public key, approval public key. |
+| `secret_store` | Phone or operator stores a secret; target `secret\|<name>`, payload fields: kind, incarnation, sealed scope fields, and the deposit id for a phone deposit. The operator's `ck auth secret put` payload omits the deposit id, because there is none. |
+| `secret_grant_create` | Phone approves a grant; target `secret\|<name>`, payload hash is the SHA-256 of the exact accepted envelope bytes. |
+| `secret_delete` | Phone or operator deletes a secret; target `secret\|<name>`, payload hash is the phone envelope SHA-256, or framed incarnation and request id for the operator. |
+| `secret_grant_revoke` | Phone, Cingulate or operator removes a grant; target `secret\|<name>`, payload fields: grant id, incarnation. |
+| `secret_grant_expire` | Vault sweeps an expired grant after an admitted use or phone list; target `secret\|<name>`, payload fields: grant id, incarnation, expiry as u64 LE. |
+| `secret_first_release` | Sender module first exercises a grant; target `secret\|<name>`, payload fields: grant id, incarnation. The grant's `first_released` marker, not prunable diagnostics, deduplicates this transition. |
+| `secret_quarantine` | Vault flips an active secret to corrupt after an authenticated-scope mismatch; target `secret\|<name>`, payload fields: incarnation. Failed flips remain opaque. Master-key rotation records corrupt secrets under `rotate_master_key`, with no separate quarantine row. |
+
+Secret grants are also visible through the `permissions/v1` provider. Cingulate uses
+`permissions.list` and `permissions.revoke`; the local operator uses those operation
+names inside the existing MAC-authenticated `admin.op` body with `v: 1`. A plain Direct
+permissions call is refused. Listing returns live grant metadata only, never usernames
+or material. Revocation removes access without a phone signature and records the
+calling actor (`fed-phone:<fingerprint>`, `reserved:cingulate`, or `route-admin`).
 
 The `set_category`, `set_providers`, `deposit_cookie_create` and `deposit_cookie_replace` ops
 and their target formats are specified in [the wire contract](wire-contract-v1.md).
@@ -896,6 +961,19 @@ diagnostics table, not the tamper-evident audit chain:
 | `github_app_permissions_changed` | A successful GitHub App mint observed changed installation permissions. |
 | `stale_refresh_deferred` | A read found a consumer's stale mark but served the current token without refreshing, because that version was written less than `REPORT_REFRESH_COOLDOWN_MS` (60 s) ago. Written at most once per credential version, so one row stands for every held-back read in that window; `record_version` names the version that kept serving. The mark stays set and the first read after the window refreshes. |
 | `enrollment` | A bounded enrollment proposal, poll, or expiry diagnostic under a fixed `auth.enroll_*` subject. |
+| `secret_use_refusal` | AFT/Cerebellum refusal during secret-use grammar, scope mapping, or secret/target authorization, or create-only phone-key conflict. Best-effort and never part of a release transaction; failure changes no reply. Details are `grammar`, `limit`, `unmapped`, `coverage`, `unknown_name`, `corrupt`, `sealed_scope`, `kind`, `target`, or `phone_key_conflict`, never a requested path. |
+
+Secret refusal subjects are `secret\|<name>` for an existing secret during secret/target authorization,
+`secret-use\|unaddressed` for grammar, scope mapping and unknown names, and `secret-phone\|<fp>`
+for a phone-key conflict. Each subject retains at most `AUTH_EVENTS_PER_CREDENTIAL`
+(64) rows independently. Deleting a secret removes only `secret\|<name>` rows;
+unaddressed and credential diagnostics survive. Credential writers reroute every
+caller-derived id containing `|` to `credential.invalid_id`, so they cannot trim a
+secret's diagnostics. Non-sender caller admission failures and invalid approval
+replies (`approval_invalid`) write no refusal diagnostic.
+The sender principal kind is `reserved`, id `aft` or `cerebellum`. Phone conflicts
+use principal kind `phone`, id `fed-phone:<fp>`; this identifies the authenticated
+phone, not the callosum transport.
 
 **Retired values you may still meet in the data.** The table above lists what the code
 writes; the table on disk also holds what older binaries wrote, and it is never rewritten:

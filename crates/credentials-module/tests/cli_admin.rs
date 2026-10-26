@@ -6700,12 +6700,26 @@ fn secret_list_and_grants_work_with_the_daemon_down_and_show_phone_key_state() {
     let text = String::from_utf8_lossy(&list.stdout).to_string();
     assert!(text.contains("ops-key agent_api_key active"), "{text}");
     assert!(text.contains("location=authorization_bearer"), "{text}");
+    assert!(!text.contains("no agent secrets stored"), "{text}");
     let grants = vault.run(&["secret", "grants"]);
     assert!(grants.status.success());
-    // Nothing has a grant yet, so the grants listing is empty and says nothing it cannot
-    // support -- in particular it does not invent a phone state.
-    assert_eq!(String::from_utf8_lossy(&grants.stdout), "");
+    // Nothing has a grant yet, so the grants listing says only that, and the secret
+    // listing invents no phone state it has not seen.
+    assert_eq!(
+        String::from_utf8_lossy(&grants.stdout),
+        "no agent-secret grants\n"
+    );
     assert!(!text.contains("phone"), "{text}");
+    // Once the only secret is gone, a migrated store says it holds none, rather than
+    // printing nothing, which would read the same as a listing that failed.
+    let deleted = vault.run(&["secret", "delete", "ops-key"]);
+    assert!(deleted.status.success(), "{deleted:?}");
+    let empty = vault.run(&["secret", "list"]);
+    assert!(empty.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&empty.stdout),
+        "no agent secrets stored\n"
+    );
 }
 
 #[test]

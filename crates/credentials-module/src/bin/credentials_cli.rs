@@ -716,7 +716,8 @@ fn help_verb(verb: &str) -> String {
         "login" => {
             "ck auth login [--provider <name>] [--id <id>] [--account <id>] [--replace]\n\
              \x20             [--no-listener] [--no-browser] [--device] [--payload-file <path>]\n\
-             \x20             [--account-id <id>] [--approve-on this|other] [--browser open|copy|show]\n\
+             \x20             [--account-id <id>] [--approve-on this|other]\n\
+             \x20             [--browser open|copy|show]\n\
              \n\
              \x20 --provider <name>      pick a provider; omit for an interactive picker of\n\
              \x20                        every provider\n\
@@ -748,10 +749,10 @@ fn help_verb(verb: &str) -> String {
              listener and pasted input work at the same time. On another device, paste\n\
              the result here immediately; no listener is bound. Cursor, Devin, Snowflake\n\
              and DigitalOcean keep their provider-specific callback or polling flow.\n\
-             No browser login opens a browser unless you choose it. Without a terminal, pass --provider\n\
-             and optionally --approve-on and --browser; no choices are prompted.\n\
-             github-copilot and kimi always use\n\
-             device authorization. api-key providers prompt for a key, validated before\n\
+             No browser login opens a browser unless you choose it. Without a terminal,\n\
+             pass --provider and optionally --approve-on and --browser; nothing is\n\
+             prompted. github-copilot and kimi always use device authorization.\n\
+             api-key providers prompt for a key, validated before\n\
              storing where the provider offers a check; otherwise login says the key\n\
              was stored unchecked, and why.\n\
              \n\

@@ -1878,12 +1878,15 @@ build_timeout_s = 3600
 
 
 [[control]]
-id = "secret-operator-put-reads-the-name-before-writing"
-guards = "The operator put checks the name inside its write transaction before it seals or inserts"
+id = "secret-operator-put-checks-the-name-against-the-stored-copy"
+guards = "The operator put decides create-only from the name it is storing, read in its own transaction"
 file = "crates/credentials-core/src/store_secret_operator.rs"
-old = """            let exists: bool = tx.query_row("""
-new = """            let exists_skip = false; // NON-VACUITY BREAK
-            let exists: bool = exists_skip || tx.query_row("""
+old = """            let exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM agent_secrets WHERE name=?1)",
+                [&put.name],
+                |r| r.get(0),
+            )?;"""
+new = """            let exists = false; // NON-VACUITY BREAK: skip the create-only query"""
 edits = []
 test_file = "crates/credentials-core/src/store_secret_operator_tests.rs"
 runner = "cargo"
@@ -1927,7 +1930,7 @@ package = "credentials-core"
 target = "--lib"
 features = ["test-support"]
 expect_red = ["agent_secret::tests::the_deposit_namespace_excludes_the_secret_target_form"]
-expect_message = "the secret target form"
+expect_message = "assertion failed: !is_deposit_key(\"kem:secret-deposit:|ops-key\")"
 only = false
 timeout_s = 600
 build_timeout_s = 3600

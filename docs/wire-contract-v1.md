@@ -1545,9 +1545,17 @@ otherwise refused method. All other methods answer uniform `not_found`, except
    deadline, store only the answered observation and answer `pairing_unavailable`.
    An admitted transaction is never cancelled and returns its commit result.
 
-Storage and audit failures answer `store_error` and roll back mutations. Until their
-approval implementation is installed, approve, both delete forms and revoke finish this
-same preflight but answer `secret_op_unavailable`; they never create grants or delete rows.
+Storage and audit failures answer `store_error` and roll back mutations. Approve and
+delete step 2 verify the signed canonical envelope and return ordered per-item results.
+Grant revocation is unsigned, but still requires the phone preflight.
+
+The operator uses the existing `admin.challenge` / `admin.op` MAC transcript for
+permissions operations: the authenticated `op_body` is
+`{"op":"permissions.list","v":1,"agent_id":"optional-agent-id"}` (omit `agent_id`
+to list all), or `{"op":"permissions.revoke","v":1,"id":"grant-id"}`.
+Only the wrapper admits Direct. Plain `permissions.list {agent_id?}` and
+`permissions.revoke {id}` retain the provider shapes and admit only `reserved:cingulate`;
+a plain Direct call answers `permissions_operator_required`.
 
 ### Request and response examples
 
@@ -1634,7 +1642,6 @@ These are result error bodies `{"error":{"code":"…","class":"…"}}`, except
 | `pairing_unavailable` | `transient` |
 | `pending_limit` | `transient` |
 | `limit_exceeded` | `context_overflow` |
-| `secret_op_unavailable` | `transient` |
 | `permissions_operator_required` | none; transport Error as above |
 
 ### Phone transition audit

@@ -1315,6 +1315,30 @@ async fn dispatch_route_request(
 ) -> Result<(), ModuleError> {
     let header = frame.header;
     let method = serde_json::from_slice::<ReadRequest>(&frame.body).ok();
+    if let Some(request) = method
+        .as_ref()
+        .filter(|r| matches!(r.method.as_str(), "permissions.list" | "permissions.revoke"))
+    {
+        if !matches!(&caller, federation::RouteCaller::Principal(Some(subc_protocol::Principal::Reserved { module_id })) if module_id=="cingulate")
+        {
+            return send_route_error(writer,header.ver,header.channel,header.epoch,header.corr,"permissions_operator_required","permissions operations need reserved:cingulate or the local operator's direct route").await;
+        }
+        return match admin.serve_permissions(&request.method, &request.params, "reserved:cingulate")
+        {
+            Ok(reply) => send_route_result(writer, header, wrap_result(reply)).await,
+            Err(_) => {
+                invalid_params(
+                    writer,
+                    header.ver,
+                    header.channel,
+                    header.epoch,
+                    header.corr,
+                    "invalid permissions params",
+                )
+                .await
+            }
+        };
+    }
     // Sender admission for secret.use precedes even phone/member parameter preflight.
     if method.as_ref().is_some_and(|r| r.method == "secret.use")
         && !matches!(caller, federation::RouteCaller::Principal(_))
@@ -2096,21 +2120,12 @@ fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> 
             optional: Vec::new(),
         },
     }))
-    // `capabilities(None)` is DELIBERATE, not an unfilled field.
-    //
-    // The protocol defines it as `Option<CapabilityDeclarations>` and states that
-    // omitting the block preserves the manifest contract used before capability grammar
-    // existed. A present block is static discovery metadata the daemon validates before
-    // accepting a HELLO, so declaring one is an opt-in that changes what the supervisor
-    // checks about this module. That should be a decision, not a field filled in to clear
-    // a compile error.
-    //
-    // WHAT WOULD MAKE IT WORTH DECLARING: a consumer that must discover this vault's
-    // route surface statically, before binding, instead of learning it from a refusal.
-    // Nothing does today. Every consumer here is configured with the credential ids or
-    // handles it needs, and the read surface is deliberately anonymous, so a discovery
-    // block would publish a menu no caller asked for.
-    .capabilities(None)
+    // Cingulate discovers grant inventories by capability rather than module name.
+    .capabilities(Some(subc_protocol::manifest::CapabilityDeclarations {
+        provides: vec!["permissions/v1".to_owned()],
+        requires: Vec::new(),
+        must_never_reach: Vec::new(),
+    }))
     // `provenance` carries the ONE fact this build actually knows about itself.
     //
     // The protocol's four fields are build_git_sha, build_lock_digest, wire_crate_version
@@ -2270,6 +2285,17 @@ fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> 
         // what it is.
         concurrency: Concurrency::ModuleManaged,
         operations: vec![
+            ManagementOperation { name: "secret.phone_keys_register".into(), description: None, kind: ManagementOperationKind::Mutate },
+            ManagementOperation { name: "secret.deposit_keys".into(), description: None, kind: ManagementOperationKind::Query },
+            ManagementOperation { name: "secret.deposit".into(), description: None, kind: ManagementOperationKind::Mutate },
+            ManagementOperation { name: "secret.approve".into(), description: None, kind: ManagementOperationKind::Mutate },
+            ManagementOperation { name: "secret.list".into(), description: None, kind: ManagementOperationKind::Query },
+            ManagementOperation { name: "secret.delete".into(), description: None, kind: ManagementOperationKind::Mutate },
+            ManagementOperation { name: "secret.revoke_grant".into(), description: None, kind: ManagementOperationKind::Mutate },
+            // A use can consume a grant with duration `once`, so it must not be relayed as a retryable query.
+            ManagementOperation { name: "secret.use".into(), description: None, kind: ManagementOperationKind::Mutate },
+            ManagementOperation { name: "permissions.list".into(), description: None, kind: ManagementOperationKind::Query },
+            ManagementOperation { name: "permissions.revoke".into(), description: None, kind: ManagementOperationKind::Mutate },
             ManagementOperation {
                 name: OP_ACCOUNT_TOKEN.to_string(),
                 description: Some("Mint a short-lived account worker token for one granted audience without exposing machine signing authority.".to_string()),
@@ -2518,6 +2544,72 @@ mod tests {
             }),
             "cadence must stay derived from the constant the ticker uses"
         );
+    }
+
+    #[test]
+    fn the_manifest_declares_every_secret_and_permissions_op_with_its_kind() {
+        let m = manifest("claustrum", None);
+        assert_eq!(
+            m.capabilities.as_ref().unwrap().provides,
+            vec!["permissions/v1"]
+        );
+        let ProviderRole::ManagementSurface { operations, .. } = &m.provides[0] else {
+            panic!("management surface")
+        };
+        for name in secret_phone::PHONE_OPS.into_iter().chain([
+            "secret.use",
+            "permissions.list",
+            "permissions.revoke",
+        ]) {
+            let matches = operations
+                .iter()
+                .filter(|op| op.name == name)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                matches.len(),
+                1,
+                "missing or duplicated declaration: {name}"
+            );
+            let kind = if matches!(
+                name,
+                "secret.deposit_keys" | "secret.list" | "permissions.list"
+            ) {
+                ManagementOperationKind::Query
+            } else {
+                ManagementOperationKind::Mutate
+            };
+            assert_eq!(matches[0].kind, kind, "wrong relay kind for {name}");
+        }
+    }
+
+    #[test]
+    fn permissions_provider_vectors_have_pinned_provenance() {
+        use sha2::{Digest, Sha256};
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/vectors/permissions-v1");
+        let provenance = std::fs::read_to_string(dir.join("PROVENANCE")).unwrap();
+        let mut lines = provenance.lines();
+        assert_eq!(
+            lines.next(),
+            Some("cingulate ee879790be7a03962926fc5c058eb1a2646c0191 test-vectors/permissions-v1/")
+        );
+        let mut count = 0;
+        for line in lines {
+            let (hash, name) = line.split_once("  ").unwrap();
+            let bytes = std::fs::read(dir.join(name)).unwrap();
+            assert_eq!(format!("{:x}", Sha256::digest(&bytes)), hash, "{name}");
+            if name.ends_with(".json") {
+                let vector: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                let jcs = std::fs::read(dir.join(name.replace(".json", ".jcs"))).unwrap();
+                assert_eq!(
+                    serde_json::to_vec(&vector).unwrap(),
+                    jcs,
+                    "canonical provider vector"
+                );
+            }
+            count += 1;
+        }
+        assert_eq!(count, 24);
     }
 
     #[test]
@@ -5214,6 +5306,38 @@ mod tests {
             admin_surface::AdminOutcome::Refused(_)
         ));
         assert!(store.secret_phone_mapping().unwrap());
+    }
+
+    #[tokio::test]
+    async fn permissions_provider_admits_only_cingulate_on_the_plain_route() {
+        let (surface, admin, _store) = scoped_rig(94);
+        for (channel, principal) in [
+            (101, reserved("cingulate")),
+            (102, subc_protocol::Principal::Direct),
+            (103, reserved("aft")),
+            (104, reserved("callosum")),
+        ] {
+            admin.record_bind_at(channel, 1, principal, "");
+            for (method, params, expected) in [
+                ("permissions.list", json!({}), json!({"grants":[]})),
+                (
+                    "permissions.revoke",
+                    json!({"id":"unknown"}),
+                    json!({"outcome":"not_found"}),
+                ),
+            ] {
+                let (kind, bytes) = routed_reply(&surface, &admin, channel, method, params).await;
+                let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                if channel == 101 {
+                    assert_eq!(kind, FrameType::Response);
+                    assert_eq!(body, wrap_result(expected));
+                } else {
+                    assert_eq!(kind, FrameType::Error);
+                    assert_eq!(body["code"], "permissions_operator_required");
+                    assert!(body.get("class").is_none());
+                }
+            }
+        }
     }
 
     /// The gate-off bearer-read residual, pinned. Release 1 serves a forwarded call on

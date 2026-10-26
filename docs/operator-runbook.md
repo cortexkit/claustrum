@@ -858,6 +858,13 @@ These values come from the closed `AuditOp` enum and name the mutation or chain 
 | `secret_first_release` | Sender module first exercises a grant; target `secret\|<name>`, payload fields: grant id, incarnation. The grant's `first_released` marker, not prunable diagnostics, deduplicates this transition. |
 | `secret_quarantine` | Vault flips an active secret to corrupt after an authenticated-scope mismatch; target `secret\|<name>`, payload fields: incarnation. Failed flips remain opaque. Master-key rotation records corrupt secrets under `rotate_master_key`, with no separate quarantine row. |
 
+Secret grants are also visible through the `permissions/v1` provider. Cingulate uses
+`permissions.list` and `permissions.revoke`; the local operator uses those operation
+names inside the existing MAC-authenticated `admin.op` body with `v: 1`. A plain Direct
+permissions call is refused. Listing returns live grant metadata only, never usernames
+or material. Revocation removes access without a phone signature and records the
+calling actor (`fed-phone:<fingerprint>`, `reserved:cingulate`, or `route-admin`).
+
 The `set_category`, `set_providers`, `deposit_cookie_create` and `deposit_cookie_replace` ops
 and their target formats are specified in [the wire contract](wire-contract-v1.md).
 

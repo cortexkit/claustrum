@@ -171,17 +171,17 @@ impl EncryptedStore {
                     &[pairing.as_bytes(),deposit_pub,approval_pub])?;
                 return Ok(Ok(json!({"status":"stored"})));
             }
-            let Some((deposit_pub, _)) = keys else { return Ok(Err(SecretError::PhoneNotRegistered)); };
+            let Some((deposit_pub, approval_pub)) = keys else { return Ok(Err(SecretError::PhoneNotRegistered)); };
             match op {
                 PhoneOperation::Deposit(deposit) => self.deposit_tx(tx, fingerprint, &deposit_pub, deposit, op_now),
                 PhoneOperation::List => {
                     sweep(tx, &self.audit_key, op_now)?;
                     list(tx).map(Ok)
                 }
-                // These mutations are deliberately unavailable until their signed
-                // approval implementation replaces this single, preflight-fenced arm.
-                PhoneOperation::Approve { .. } | PhoneOperation::DeleteRequest { .. }
-                | PhoneOperation::DeleteCommit { .. } | PhoneOperation::Revoke { .. } => Ok(Err(SecretError::SecretOpUnavailable)),
+                PhoneOperation::Approve { envelope, signature, card_ref } => self.secret_approval_tx(tx, fingerprint, &approval_pub, envelope, signature, card_ref.as_deref(), false, op_now),
+                PhoneOperation::DeleteCommit { envelope, signature } => self.secret_approval_tx(tx, fingerprint, &approval_pub, envelope, signature, None, true, op_now),
+                PhoneOperation::DeleteRequest { name } => self.secret_delete_request_tx(tx, name, op_now),
+                PhoneOperation::Revoke { grant_id } => super::approval::revoke(tx, &self.audit_key, grant_id, &format!("fed-phone:{fingerprint}"), op_now).map(Ok),
                 PhoneOperation::Register { .. } | PhoneOperation::DepositKeys => unreachable!(),
             }
         }).map_err(|_| SecretError::StoreError)?;

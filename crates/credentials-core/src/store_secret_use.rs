@@ -288,20 +288,17 @@ fn pending(
         let id = agent_secret::request_id(now)
             .map_err(|_| rusqlite_err("request id generation failed"))?;
         let expiry = now + SECRET_PENDING_LIFETIME_LIMIT_MS;
-        let use_scope = match &record.scope {
-            SecretScope::ApiKey {
-                host,
-                path_prefix,
-                location,
-            } => {
-                json!({"host":host,"path_prefix":path_prefix.as_deref().unwrap_or(""),"location":location})
-            }
-            SecretScope::SiteLogin { origin } => json!({"origin":origin}),
-        };
         // The statement has fixed ASCII keys, no floats, and integers in JSON's exact range.
         // Sorted serde_json maps therefore use JCS key ordering; string values such as
         // `agent` and `scope.ref` retain their UTF-8 bytes without normalization.
-        let statement = json!({"v":std::str::from_utf8(agent_secret::USE_STATEMENT_TAG).expect("ASCII domain tag"),"request_id":id,"member_id":member,"scope":{"owner":call.scope.owner,"kind":call.scope.kind,"ref":call.scope.scope_ref,"epoch":call.scope.epoch},"agent":call.display_name,"coverage":call.coverage,"secret":{"name":call.name,"kind":record.scope.kind(),"incarnation":record.incarnation},"use":use_scope,"durations":if call.coverage=="agent_and_workers" {vec!["permanent"]}else{vec!["once","hour","session","permanent"]},"request_expires_at_ms":expiry});
+        let statement = agent_secret::approval_statement(
+            &id,
+            &member,
+            &record.incarnation,
+            call,
+            &record.scope,
+            expiry,
+        );
         let bytes = serde_json::to_vec(&statement)
             .map_err(|_| rusqlite_err("statement encoding failed"))?;
         let digest = phone::hex(&payload_hash(&bytes));

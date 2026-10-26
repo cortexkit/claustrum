@@ -23,6 +23,9 @@ pub use totp::totp;
 mod use_types;
 pub use use_types::*;
 pub use validation::*;
+#[path = "agent_secret_approval.rs"]
+mod approval;
+pub use approval::*;
 
 pub fn validate_phone_approval_key(bytes: &[u8]) -> Result<(), ValidationError> {
     if bytes.len() != 65 || bytes.first() != Some(&4) {
@@ -47,7 +50,6 @@ pub enum SecretError {
     ApprovalInvalid,
     PendingLimit,
     StoreError,
-    SecretOpUnavailable,
 }
 
 impl SecretError {
@@ -65,17 +67,13 @@ impl SecretError {
             Self::ApprovalInvalid => "approval_invalid",
             Self::PendingLimit => "pending_limit",
             Self::StoreError => "store_error",
-            Self::SecretOpUnavailable => "secret_op_unavailable",
         }
     }
 
     pub const fn class(self) -> &'static str {
         match self {
             Self::LimitExceeded => "context_overflow",
-            Self::PairingUnavailable
-            | Self::PendingLimit
-            | Self::StoreError
-            | Self::SecretOpUnavailable => "transient",
+            Self::PairingUnavailable | Self::PendingLimit | Self::StoreError => "transient",
             _ => "permanent",
         }
     }

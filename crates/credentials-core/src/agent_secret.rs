@@ -92,8 +92,13 @@ impl From<ValidationError> for SecretError {
     }
 }
 
+/// Reserved deposit-key namespace. The suffix may not contain `|`, because a secret name
+/// cannot either: that keeps `kem:secret-deposit:|` out of this predicate and out of the
+/// `secret|<name>` target form the operator delete uses, so the two namespaces stay
+/// disjoint and an operator delete can never address the vault's own deposit key.
 pub fn is_deposit_key(id: &str) -> bool {
-    id.starts_with(DEPOSIT_KEY_PREFIX)
+    id.strip_prefix(DEPOSIT_KEY_PREFIX)
+        .is_some_and(|suffix| !suffix.contains('|'))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

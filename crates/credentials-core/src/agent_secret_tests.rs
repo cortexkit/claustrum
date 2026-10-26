@@ -183,3 +183,18 @@ fn plaintext_decoder_refuses_truncation_trailing_bytes_and_wrong_kind() {
     assert!(decode_deposit_plaintext("site_login", &encoded).is_err());
     assert_eq!(format!("{:?}", api_material()), "ApiKey(<redacted>)");
 }
+
+#[test]
+fn the_deposit_namespace_excludes_the_secret_target_form() {
+    // The operator's delete and put address `secret|<name>` targets, where a secret name
+    // can never contain `|`. The reserved deposit key must therefore sit outside the
+    // predicate, or an operator delete could reach the vault's own deposit key.
+    asserting_deposit_namespace();
+}
+
+fn asserting_deposit_namespace() {
+    assert!(is_deposit_key(DEPOSIT_KEY_ID));
+    assert!(is_deposit_key("kem:secret-deposit:2"));
+    assert!(!is_deposit_key("kem:secret-deposit:|ops-key"));
+    assert!(!is_deposit_key("kem:vault-transfer:1"));
+}

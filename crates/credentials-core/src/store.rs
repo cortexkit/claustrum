@@ -1336,6 +1336,9 @@ pub enum StoreOpError {
     /// The reserved deposit key is absent, inactive, or undecodable. Bootstrap leaves
     /// an existing key untouched so deposits fail closed; no recovery command exists.
     SecretSetupIncomplete,
+    /// An agent secret already exists under the requested name, live or `corrupt`.
+    /// Names are create-only, so the operator must delete before storing again.
+    SecretNameExists,
     /// The cipher envelope failed to decode/decrypt. The id has been quarantined.
     Decrypt(EnvelopeError),
     /// The decrypted body failed to parse as a record. The id has been quarantined.
@@ -1383,6 +1386,7 @@ impl std::fmt::Display for StoreOpError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             StoreOpError::SecretSetupIncomplete => f.write_str("secret_setup_incomplete"),
+            StoreOpError::SecretNameExists => f.write_str("name_exists: an agent secret already holds this name; delete it first"),
             StoreOpError::NotFound => f.write_str("credential not found"),
             StoreOpError::AlreadyExists => {
                 f.write_str("credential already exists (create-only; use a CAS overwrite)")
@@ -1467,6 +1471,7 @@ impl StoreOpError {
     pub fn wire_code(&self) -> Option<&'static str> {
         match self {
             StoreOpError::SecretSetupIncomplete => Some("secret_setup_incomplete"),
+            StoreOpError::SecretNameExists => Some("name_exists"),
             StoreOpError::InvalidCredentialId => Some("invalid_credential_id"),
             StoreOpError::InvalidCategoryName => Some("invalid_category_name"),
             StoreOpError::InvalidPlanTier => Some("invalid_plan_tier"),

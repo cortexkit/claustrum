@@ -9,6 +9,10 @@ mod approval;
 #[path = "store_secret_use.rs"]
 mod use_secret;
 pub use use_secret::SecretUseOutcome;
+#[path = "store_secret_operator.rs"]
+mod operator;
+#[allow(unused_imports)]
+pub use operator::*;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SecretDepositPublicKey {
@@ -211,5 +215,9 @@ fn deposit_key_creation_hash(key_id: &str) -> String {
 }
 
 #[cfg(test)]
-#[path = "store_agent_secret_tests.rs"]
+#[path = "store_secret_operator_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "store_agent_secret_tests.rs"]
+mod store_tests;

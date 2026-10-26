@@ -257,3 +257,84 @@ pub(super) fn validate_otpauth(uri: &str) -> Result<(), ValidationError> {
     }
     Ok(())
 }
+
+/// The operator `ck auth secret put` request, as the admin op hands it to the store.
+///
+/// Every field arrives as text or base64 text because it crossed a JSON admin op, so
+/// this type exists to turn that back into the validated `SecretScope` and
+/// `SecretMaterial` a phone deposit would have produced. Putting the conversion here
+/// keeps one validator for both doors: a scope that a phone deposit refuses must be
+/// refused by `put` as well, or the two would slowly accept different shapes.
+///
+/// `Debug` is hand-written to redact the material, exactly like `AdminOpBody`. A put
+/// request is created by the CLI just before the admin op is serialized, and the most
+/// likely place a panic message shows a local value is right there -- so the base64 text,
+/// which decodes straight back to the password or key, must not render. The scope fields
+/// stay visible because they are the metadata an operator needs to diagnose a refusal.
+#[derive(Clone)]
+pub struct SecretPut {
+    pub kind: String,
+    pub name: String,
+    pub host: Option<String>,
+    pub path_prefix: Option<String>,
+    pub location: Option<String>,
+    pub origin: Option<String>,
+    /// Unpadded base64url of the deposit-plaintext bytes for `kind`.
+    pub material_b64url: String,
+}
+
+impl SecretPut {
+    /// Decode and validate everything but the name, which the store checks first so a
+    /// bad name is reported before any other field.
+    ///
+    /// The returned errors deliberately carry no field of the request: `invalid_params`
+    /// names no value, and the caller decides which rule to print for a human.
+    pub fn scope_and_material(&self) -> Result<(SecretScope, SecretMaterial), ValidationError> {
+        let scope = match (self.kind.as_str(), &self.host, &self.location, &self.origin) {
+            ("agent_api_key", Some(host), Some(location), None) => SecretScope::ApiKey {
+                host: host.clone(),
+                path_prefix: self.path_prefix.clone(),
+                location: location.clone(),
+            },
+            ("site_login", None, None, Some(origin)) if self.path_prefix.is_none() => {
+                SecretScope::SiteLogin {
+                    origin: origin.clone(),
+                }
+            }
+            _ => return Err(InvalidParams),
+        };
+        validate_scope(&scope)?;
+        let bytes = base64_url_no_pad(&self.material_b64url)?;
+        let framed = super::Secret::new(bytes);
+        let material = super::decode_deposit_plaintext(scope.kind(), &framed)?;
+        validate_material(&material)?;
+        Ok((scope, material))
+    }
+}
+
+/// Strict unpadded base64url: trailing bits must be zero and no padding character may
+/// appear, so one plaintext has exactly one encoding.
+fn base64_url_no_pad(text: &str) -> Result<Vec<u8>, ValidationError> {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    let bytes = URL_SAFE_NO_PAD
+        .decode(text.as_bytes())
+        .map_err(|_| InvalidParams)?;
+    if URL_SAFE_NO_PAD.encode(&bytes) != text {
+        return Err(InvalidParams);
+    }
+    Ok(bytes)
+}
+
+impl std::fmt::Debug for SecretPut {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecretPut")
+            .field("kind", &self.kind)
+            .field("name", &self.name)
+            .field("host", &self.host)
+            .field("path_prefix", &self.path_prefix)
+            .field("location", &self.location)
+            .field("origin", &self.origin)
+            .field("material_b64url", &"<redacted>")
+            .finish()
+    }
+}

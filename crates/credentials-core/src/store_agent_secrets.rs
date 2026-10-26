@@ -216,8 +216,8 @@ fn deposit_key_creation_hash(key_id: &str) -> String {
 
 #[cfg(test)]
 #[path = "store_secret_operator_tests.rs"]
-mod tests;
+mod operator_tests;
 
 #[cfg(test)]
 #[path = "store_agent_secret_tests.rs"]
-mod store_tests;
+mod tests;

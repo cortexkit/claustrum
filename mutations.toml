@@ -1849,3 +1849,121 @@ build_timeout_s = 1800
 
 [control.select]
 tests = ["audit::vocabulary_documentation_tests::auth_event_kind_values_are_documented", "agent_secret::totp::tests::secret_totp_matches_all_rfc6238_appendix_b_vectors"]
+
+
+# S5 operator CLI: the operator door must keep the deposit door's storage invariants.
+# Each row states the property, the one-line break, and the test that must go red.
+
+[[control]]
+id = "secret-operator-put-keeps-names-create-only"
+guards = "An operator put never overwrites a live or corrupt secret under the same name"
+file = "crates/credentials-core/src/store_secret_operator.rs"
+old = """            if exists {
+                return Ok(Err(SecretError::NameExists));
+            }"""
+new = """            if false { // NON-VACUITY BREAK
+                return Ok(Err(SecretError::NameExists));
+            }"""
+edits = []
+test_file = "crates/credentials-core/src/store_secret_operator_tests.rs"
+runner = "cargo"
+package = "credentials-core"
+target = "--lib"
+features = ["test-support"]
+expect_red = ["store::store_agent_secrets::operator_tests::operator_put_is_create_only_for_live_and_corrupt_rows"]
+expect_message = "name_exists"
+only = false
+timeout_s = 600
+build_timeout_s = 3600
+
+
+[[control]]
+id = "secret-operator-put-reads-the-name-before-writing"
+guards = "The operator put checks the name inside its write transaction before it seals or inserts"
+file = "crates/credentials-core/src/store_secret_operator.rs"
+old = """            let exists: bool = tx.query_row("""
+new = """            let exists_skip = false; // NON-VACUITY BREAK
+            let exists: bool = exists_skip || tx.query_row("""
+edits = []
+test_file = "crates/credentials-core/src/store_secret_operator_tests.rs"
+runner = "cargo"
+package = "credentials-core"
+target = "--lib"
+features = ["test-support"]
+expect_red = ["store::store_agent_secrets::operator_tests::operator_put_is_create_only_for_live_and_corrupt_rows"]
+only = false
+timeout_s = 600
+build_timeout_s = 3600
+
+
+[[control]]
+id = "secret-operator-put-shares-the-name-grammar"
+guards = "The operator put and the phone deposit share one secret-name grammar"
+file = "crates/credentials-core/src/agent_secret.rs"
+old = '        || !bytes[0].is_ascii_alphanumeric()'
+new = '        || false // NON-VACUITY BREAK: a name may start with any byte'
+edits = []
+test_file = "crates/credentials-core/src/agent_secret_tests.rs"
+runner = "cargo"
+package = "credentials-core"
+target = "--lib"
+features = ["test-support"]
+expect_red = ["agent_secret::tests::names_accept_64_bytes_and_refuse_65_and_forbidden_bytes"]
+only = false
+timeout_s = 600
+build_timeout_s = 3600
+
+
+[[control]]
+id = "secret-namespace-excludes-deposit-targets"
+guards = "The reserved deposit namespace can never be addressed as a secret|<name> target"
+file = "crates/credentials-core/src/agent_secret.rs"
+old = """    if !id.starts_with(DEPOSIT_KEY_PREFIX) || id.contains('|') {"""
+new = """    if !id.starts_with(DEPOSIT_KEY_PREFIX) { // NON-VACUITY BREAK: a piped suffix counts as the deposit key"""
+edits = []
+test_file = "crates/credentials-core/src/agent_secret_tests.rs"
+runner = "cargo"
+package = "credentials-core"
+target = "--lib"
+features = ["test-support"]
+expect_red = ["agent_secret::tests::the_deposit_namespace_excludes_the_secret_target_form"]
+expect_message = "the secret target form"
+only = false
+timeout_s = 600
+build_timeout_s = 3600
+
+
+[[control]]
+id = "secret-deposit-key-write-fence-consults-the-namespace"
+guards = "The deposit-key write fence reads the deposit namespace, so no credential write reaches the deposit key"
+file = "crates/credentials-core/src/store_agent_secrets.rs"
+old = """    if !agent_secret::is_deposit_key(id) {"""
+new = """    if !id.starts_with("kem:vault-transfer:") { // NON-VACUITY BREAK"""
+edits = []
+test_file = "crates/credentials-core/src/store_agent_secret_tests.rs"
+runner = "cargo"
+package = "credentials-core"
+target = "--lib"
+features = ["test-support"]
+expect_red = ["store::store_agent_secrets::tests::deposit_key_fence_refuses_grants_handles_and_operator_mutation"]
+only = false
+timeout_s = 600
+build_timeout_s = 3600
+
+
+[[control]]
+id = "secret-list-phone-keys-compare-the-observation"
+guards = "A phone key row reads current only when its pairing equals the last observed pairing"
+file = "crates/credentials-core/src/store_secret_operator.rs"
+old = """            let current_since_ms = if observed.as_deref() == Some(pairing_id.as_str()) {"""
+new = """            let current_since_ms = if true { // NON-VACUITY BREAK: never compare the pairing"""
+edits = []
+test_file = "crates/credentials-core/src/store_secret_operator_tests.rs"
+runner = "cargo"
+package = "credentials-core"
+target = "--lib"
+features = ["test-support"]
+expect_red = ["store::store_agent_secrets::operator_tests::read_only_listing_reports_phone_keys_as_current_superseded_or_unobserved"]
+only = false
+timeout_s = 600
+build_timeout_s = 3600

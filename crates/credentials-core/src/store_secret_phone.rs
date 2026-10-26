@@ -189,7 +189,7 @@ impl EncryptedStore {
             // Diagnostics cannot turn the stable conflict reply into a storage error.
             let actor = format!("fed-phone:{fingerprint}");
             let _ = self.fenced_write(|tx| {
-                append_auth_event_tx(
+                append_secret_auth_event_tx(
                     tx,
                     &format!("secret-phone|{fingerprint}"),
                     &AuthObservation {
@@ -339,7 +339,7 @@ fn deposit_key_error(error: StoreOpError) -> SecretError {
     }
 }
 
-fn self_member(tx: &rusqlite::Transaction<'_>) -> Result<String, SecretError> {
+pub(super) fn self_member(tx: &rusqlite::Transaction<'_>) -> Result<String, SecretError> {
     tx.query_row(
         "SELECT value FROM settings WHERE name='federation.self_member'",
         [],
@@ -361,11 +361,13 @@ fn observation(
     Ok(())
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub(super) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn columns(scope: &SecretScope) -> (Option<&str>, Option<&str>, Option<&str>, Option<&str>) {
+pub(super) fn columns(
+    scope: &SecretScope,
+) -> (Option<&str>, Option<&str>, Option<&str>, Option<&str>) {
     match scope {
         SecretScope::ApiKey {
             host,
@@ -376,7 +378,7 @@ fn columns(scope: &SecretScope) -> (Option<&str>, Option<&str>, Option<&str>, Op
     }
 }
 
-fn audit(
+pub(super) fn audit(
     tx: &rusqlite::Transaction<'_>,
     key: &[u8; 32],
     op: AuditOp,
@@ -402,7 +404,11 @@ fn audit(
     Ok(())
 }
 
-fn sweep(tx: &rusqlite::Transaction<'_>, key: &[u8; 32], now: i64) -> rusqlite::Result<()> {
+pub(super) fn sweep(
+    tx: &rusqlite::Transaction<'_>,
+    key: &[u8; 32],
+    now: i64,
+) -> rusqlite::Result<()> {
     let expired = tx.prepare("SELECT grant_id,secret_name,incarnation,expires_at_ms FROM secret_grants WHERE duration != 'permanent' AND expires_at_ms <= ?1")?.query_map([now], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,u64>(3)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
     for (id, name, incarnation, expiry) in expired {
         tx.execute("DELETE FROM secret_grants WHERE grant_id=?1", [&id])?;

@@ -116,6 +116,15 @@ pub struct AdminSurface {
 const ROUTE_ADMIN_ACTOR: &str = "route-admin";
 
 impl AdminSurface {
+    pub fn serve_secret_use(
+        &self,
+        principal: Option<&Principal>,
+        params: &serde_json::Value,
+    ) -> crate::secret_use::UseAnswer {
+        crate::secret_use::serve(self.engine.store(), principal, params, || {
+            chrono::Utc::now().timestamp_millis()
+        })
+    }
     pub async fn serve_phone(
         &self,
         fingerprint: &str,

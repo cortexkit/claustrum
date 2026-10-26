@@ -847,6 +847,16 @@ These values come from the closed `AuditOp` enum and name the mutation or chain 
 | `remote_remove` | Remove a remote record and its local metadata. |
 | `federation_gate_set` | Change the live federation member-mapping setting. |
 | `federation_self_set` | Set the vault's own canonical member id. |
+| `secret_deposit_key_create` | Vault bootstrap creates the dedicated deposit key; target `kem:secret-deposit:1`, payload fields: key id. |
+| `secret_phone_gate_set` | Operator changes the phone mapping gate; no target, payload fields: enabled. |
+| `secret_phone_register` | Phone registers create-only keys for the current pairing; target `secret-phone\|<fp>`, payload fields: pairing id, deposit public key, approval public key. |
+| `secret_store` | Phone or operator stores a secret; target `secret\|<name>`, payload fields: kind, incarnation, sealed scope fields, deposit id. |
+| `secret_grant_create` | Phone approves a grant; target `secret\|<name>`, payload hash is the SHA-256 of the exact accepted envelope bytes. |
+| `secret_delete` | Phone or operator deletes a secret; target `secret\|<name>`, payload hash is the phone envelope SHA-256, or framed incarnation and request id for the operator. |
+| `secret_grant_revoke` | Phone, Cingulate or operator removes a grant; target `secret\|<name>`, payload fields: grant id, incarnation. |
+| `secret_grant_expire` | Vault sweeps an expired grant after an admitted use or phone list; target `secret\|<name>`, payload fields: grant id, incarnation, expiry as u64 LE. |
+| `secret_first_release` | Sender module first exercises a grant; target `secret\|<name>`, payload fields: grant id, incarnation. The grant's `first_released` marker, not prunable diagnostics, deduplicates this transition. |
+| `secret_quarantine` | Vault flips an active secret to corrupt after an authenticated-scope mismatch; target `secret\|<name>`, payload fields: incarnation. Failed flips remain opaque. Master-key rotation records corrupt secrets under `rotate_master_key`, with no separate quarantine row. |
 
 The `set_category`, `set_providers`, `deposit_cookie_create` and `deposit_cookie_replace` ops
 and their target formats are specified in [the wire contract](wire-contract-v1.md).
@@ -896,6 +906,19 @@ diagnostics table, not the tamper-evident audit chain:
 | `github_app_permissions_changed` | A successful GitHub App mint observed changed installation permissions. |
 | `stale_refresh_deferred` | A read found a consumer's stale mark but served the current token without refreshing, because that version was written less than `REPORT_REFRESH_COOLDOWN_MS` (60 s) ago. Written at most once per credential version, so one row stands for every held-back read in that window; `record_version` names the version that kept serving. The mark stays set and the first read after the window refreshes. |
 | `enrollment` | A bounded enrollment proposal, poll, or expiry diagnostic under a fixed `auth.enroll_*` subject. |
+| `secret_use_refusal` | AFT/Cerebellum refusal during secret-use grammar, scope mapping, or secret/target authorization, or create-only phone-key conflict. Best-effort and never part of a release transaction; failure changes no reply. Details are `grammar`, `limit`, `unmapped`, `coverage`, `unknown_name`, `corrupt`, `sealed_scope`, `kind`, `target`, or `phone_key_conflict`, never a requested path. |
+
+Secret refusal subjects are `secret\|<name>` for an existing secret during secret/target authorization,
+`secret-use\|unaddressed` for grammar, scope mapping and unknown names, and `secret-phone\|<fp>`
+for a phone-key conflict. Each subject retains at most `AUTH_EVENTS_PER_CREDENTIAL`
+(64) rows independently. Deleting a secret removes only `secret\|<name>` rows;
+unaddressed and credential diagnostics survive. Credential writers reroute every
+caller-derived id containing `|` to `credential.invalid_id`, so they cannot trim a
+secret's diagnostics. Non-sender caller admission failures and invalid approval
+replies (`approval_invalid`) write no refusal diagnostic.
+The sender principal kind is `reserved`, id `aft` or `cerebellum`. Phone conflicts
+use principal kind `phone`, id `fed-phone:<fp>`; this identifies the authenticated
+phone, not the callosum transport.
 
 **Retired values you may still meet in the data.** The table above lists what the code
 writes; the table on disk also holds what older binaries wrote, and it is never rewritten:

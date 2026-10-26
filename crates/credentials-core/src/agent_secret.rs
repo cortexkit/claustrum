@@ -14,9 +14,15 @@ pub const USE_ENVELOPE_TAG: &[u8] = b"ck-secret-use-envelope/v1";
 pub const MAX_SECRET_NAME_BYTES: usize = 64;
 pub const SECRET_RECORD_VERSION: u64 = 1;
 
+#[path = "agent_secret_totp.rs"]
+mod totp;
 #[path = "agent_secret_validation.rs"]
 mod validation;
-pub use validation::{validate_material, validate_scope};
+pub use totp::totp;
+#[path = "agent_secret_use.rs"]
+mod use_types;
+pub use use_types::*;
+pub use validation::*;
 
 pub fn validate_phone_approval_key(bytes: &[u8]) -> Result<(), ValidationError> {
     if bytes.len() != 65 || bytes.first() != Some(&4) {

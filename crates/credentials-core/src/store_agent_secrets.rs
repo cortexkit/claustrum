@@ -4,6 +4,9 @@ use crate::agent_secret::{self, DEPOSIT_KEY_ID};
 #[path = "store_secret_phone.rs"]
 mod phone;
 pub use phone::{secret_phone_gate_status_read_only, PhoneDeposit, PhoneOperation};
+#[path = "store_secret_use.rs"]
+mod use_secret;
+pub use use_secret::SecretUseOutcome;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SecretDepositPublicKey {

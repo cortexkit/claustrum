@@ -13,6 +13,7 @@
 #[path = "federation/mod.rs"]
 pub mod federation;
 pub mod secret_phone;
+pub mod secret_use;
 
 // Left out of this library's own unit-test build: the module's unit tests need the
 // daemon's test helpers, and they already run in the daemon binary's test build.

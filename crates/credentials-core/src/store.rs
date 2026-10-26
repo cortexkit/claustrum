@@ -4858,6 +4858,7 @@ impl EncryptedStore {
         principal_id: Option<&str>,
         refusal: ScopedReadRefusal,
     ) -> Result<(), StoreOpError> {
+        let credential_id = credential_auth_subject(credential_id);
         self.store
             .with_conn(|c| {
                 let tx = c.unchecked_transaction()?;
@@ -4905,6 +4906,7 @@ impl EncryptedStore {
         principal_id: Option<&str>,
         operation: GrantOperation,
     ) -> Result<(), StoreOpError> {
+        let credential_id = credential_auth_subject(credential_id);
         self.store
             .with_conn(|c| {
                 let tx = c.unchecked_transaction()?;
@@ -4966,6 +4968,7 @@ impl EncryptedStore {
         credential_id: &str,
         record_version: u64,
     ) -> Result<bool, StoreOpError> {
+        let credential_id = credential_auth_subject(credential_id);
         self.store
             .with_conn(|c| {
                 let tx = c.unchecked_transaction()?;
@@ -8043,6 +8046,31 @@ impl<'a> AuthEventPrincipal<'a> {
 /// what separates "a consumer reported a dead token and we marked it" from "a consumer
 /// reported against a version we had already replaced".
 pub(crate) fn append_auth_event_tx(
+    tx: &rusqlite::Transaction,
+    credential_id: &str,
+    obs: &AuthObservation<'_>,
+    record_version: Option<u64>,
+    applied: bool,
+) -> rusqlite::Result<()> {
+    append_secret_auth_event_tx(
+        tx,
+        credential_auth_subject(credential_id),
+        obs,
+        record_version,
+        applied,
+    )
+}
+
+fn credential_auth_subject(id: &str) -> &str {
+    if id.contains('|') {
+        "credential.invalid_id"
+    } else {
+        id
+    }
+}
+
+// Secret diagnostics use disjoint subjects; generic credential writers must never enter them.
+fn append_secret_auth_event_tx(
     tx: &rusqlite::Transaction,
     credential_id: &str,
     obs: &AuthObservation<'_>,
@@ -16104,4 +16132,5 @@ mod transfer_key_fence_tests;
 mod store_agent_secrets;
 pub use store_agent_secrets::{
     secret_phone_gate_status_read_only, PhoneDeposit, PhoneOperation, SecretDepositPublicKey,
+    SecretUseOutcome,
 };

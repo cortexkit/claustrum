@@ -25,6 +25,7 @@ mod federation;
 mod limiter;
 mod read_surface;
 mod secret_phone;
+mod secret_use;
 #[cfg(test)]
 mod test_support;
 mod watch_scoped;
@@ -1314,6 +1315,12 @@ async fn dispatch_route_request(
 ) -> Result<(), ModuleError> {
     let header = frame.header;
     let method = serde_json::from_slice::<ReadRequest>(&frame.body).ok();
+    // Sender admission for secret.use precedes even phone/member parameter preflight.
+    if method.as_ref().is_some_and(|r| r.method == "secret.use")
+        && !matches!(caller, federation::RouteCaller::Principal(_))
+    {
+        return send_route_result(writer, header, uniform_not_found()).await;
+    }
     match caller {
         federation::RouteCaller::Principal(principal) => {
             if method.as_ref().is_some_and(|request| {
@@ -1463,6 +1470,20 @@ async fn handle_read_request(
     };
 
     let result = match request.method.as_str() {
+        "secret.use" => match admin.serve_secret_use(principal.as_ref(), &request.params) {
+            secret_use::UseAnswer::Reply(reply) => wrap_result(reply),
+            secret_use::UseAnswer::InvalidParams => {
+                return invalid_params(
+                    writer,
+                    ver,
+                    channel,
+                    epoch,
+                    corr,
+                    "invalid secret use parameters",
+                )
+                .await
+            }
+        },
         OP_ACCOUNT_TOKEN => {
             match serde_json::from_value::<read_surface::AccountTokenParams>(request.params) {
                 Ok(params) => match surface.account_token(principal.as_ref(), &params).await {
@@ -5029,6 +5050,83 @@ mod tests {
     ) -> serde_json::Value {
         let (_, body) = routed_reply(surface, admin, channel, method, params).await;
         serde_json::from_slice(&body).expect("reply JSON")
+    }
+
+    #[tokio::test]
+    async fn secret_use_dispatch_is_sender_only_and_grammar_uses_error_frames() {
+        let (surface, admin, store) = scoped_rig(94);
+        let refused = serde_json::to_vec(&uniform_not_found()).unwrap();
+        for member in [false, true] {
+            for phone in [false, true] {
+                set_member_mapping(&store, member);
+                store
+                    .set_secret_phone_mapping_audited(
+                        phone,
+                        AuditCtx::admin(AuditOp::SecretPhoneGateSet),
+                    )
+                    .unwrap();
+                for (channel, module) in [
+                    (92, "aft"),
+                    (93, "cerebellum"),
+                    (94, "prefrontal-core"),
+                    (95, "callosum"),
+                ] {
+                    admin.record_bind_at(
+                        channel,
+                        1,
+                        subc_protocol::Principal::Reserved {
+                            module_id: module.into(),
+                        },
+                        "harness:aft",
+                    );
+                    let malformed =
+                        routed_reply(&surface, &admin, channel, "secret.use", json!({})).await;
+                    if matches!(module, "aft" | "cerebellum") {
+                        assert_eq!(malformed.0, FrameType::Error);
+                        let body: serde_json::Value = serde_json::from_slice(&malformed.1).unwrap();
+                        assert_eq!(body["code"], "invalid_params");
+                        assert!(body.get("class").is_none());
+                        let params = json!({"name":"unknown","stamp":subc_protocol::scope::ScopeStamp::new(subc_protocol::Principal::Reserved{module_id:"prefrontal-core".into()},"H",7,subc_protocol::scope::ScopeKind::Head),"display_name":"Alice","target":{"scheme":"https","host":"x.test","path":"/repos/a/canary-token"}});
+                        assert_eq!(
+                            routed_reply(&surface, &admin, channel, "secret.use", params).await,
+                            (FrameType::Response, refused.clone())
+                        );
+                    } else {
+                        assert_eq!(malformed, (FrameType::Response, refused.clone()));
+                    }
+                }
+                admin.record_bind_at(96, 1, subc_protocol::Principal::Direct, "reserved:aft");
+                assert_eq!(
+                    routed_reply(&surface, &admin, 96, "secret.use", json!({})).await,
+                    (FrameType::Response, refused.clone())
+                );
+                for harness in [
+                    "fed-phone:11111111111111111111111111111111",
+                    "fed-computer:11111111111111111111111111111111",
+                ] {
+                    admin.record_bind_at(
+                        97,
+                        1,
+                        subc_protocol::Principal::Reserved {
+                            module_id: "callosum".into(),
+                        },
+                        harness,
+                    );
+                    assert_eq!(
+                        routed_reply(
+                            &surface,
+                            &admin,
+                            97,
+                            "secret.use",
+                            json!({"handle":"bearer"})
+                        )
+                        .await,
+                        (FrameType::Response, refused.clone())
+                    );
+                }
+            }
+        }
+        assert!(!format!("{:?}", store.recent_auth_events(100).unwrap()).contains("canary-token"));
     }
 
     #[tokio::test]
@@ -15346,6 +15444,7 @@ mod tests {
             include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/watch_scoped.rs")),
             include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/account_token.rs")),
             include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/secret_phone.rs")),
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/secret_use.rs")),
         ];
         let count = |shape: &str| -> usize {
             let pattern = format!("{shape}{}", "!(");

@@ -1637,3 +1637,215 @@ expect_red = ["tests::every_daemon_output_site_is_enumerated"]
 only = false
 timeout_s = 300
 build_timeout_s = 900
+
+[[control]]
+id = "secret-use-segment-prefix"
+guards = "Validated raw paths use a segment boundary for prefix coverage"
+file = "crates/credentials-core/src/agent_secret_use.rs"
+old = "rest.starts_with('/')"
+new = "!rest.is_empty()"
+edits = []
+test_file = "crates/credentials-core/src/store_secret_use_tests.rs"
+runner = "cargo"
+package = "credentials-core"
+target = "--lib"
+features = ["test-support"]
+expect_red = ["store::store_agent_secrets::use_secret::tests::secret_targets_enforce_raw_path_segments_and_exact_https_authority"]
+only = false
+timeout_s = 300
+build_timeout_s = 1800
+
+[control.select]
+tests = ["store::store_agent_secrets::use_secret::tests::secret_targets_enforce_raw_path_segments_and_exact_https_authority", "agent_secret::totp::tests::secret_totp_matches_all_rfc6238_appendix_b_vectors"]
+
+
+[[control]]
+id = "secret-use-exact-host"
+guards = "API-key target host is exactly the sealed host"
+file = "crates/credentials-core/src/agent_secret_use.rs"
+old = "&& host == expected"
+new = "&& !host.is_empty()"
+edits = []
+test_file = "crates/credentials-core/src/store_secret_use_tests.rs"
+runner = "cargo"
+package = "credentials-core"
+target = "--lib"
+features = ["test-support"]
+expect_red = ["store::store_agent_secrets::use_secret::tests::secret_targets_enforce_raw_path_segments_and_exact_https_authority"]
+only = false
+timeout_s = 300
+build_timeout_s = 1800
+
+[control.select]
+tests = ["store::store_agent_secrets::use_secret::tests::secret_targets_enforce_raw_path_segments_and_exact_https_authority", "agent_secret::totp::tests::secret_totp_matches_all_rfc6238_appendix_b_vectors"]
+
+
+[[control]]
+id = "secret-use-release-kind"
+guards = "AFT receives API keys only and Cerebellum receives site logins only"
+file = "crates/credentials-core/src/store_secret_use.rs"
+old = "if !call.sender.admits(&scope) {"
+new = "if false && !call.sender.admits(&scope) {"
+edits = []
+test_file = "crates/credentials-core/src/store_secret_use_tests.rs"
+runner = "cargo"
+package = "credentials-core"
+target = "--lib"
+features = ["test-support"]
+expect_red = ["store::store_agent_secrets::use_secret::tests::secret_release_is_by_kind_and_sender_only"]
+only = false
+timeout_s = 300
+build_timeout_s = 1800
+
+[control.select]
+tests = ["store::store_agent_secrets::use_secret::tests::secret_release_is_by_kind_and_sender_only", "agent_secret::totp::tests::secret_totp_matches_all_rfc6238_appendix_b_vectors"]
+
+
+[[control]]
+id = "secret-use-once-consumption"
+guards = "Once grants are atomically consumed before material is returned"
+file = "crates/credentials-core/src/store_secret_use.rs"
+old = 'if grant.duration == "once" {'
+new = 'if false && grant.duration == "once" {'
+edits = []
+test_file = "crates/credentials-core/src/store_secret_use_tests.rs"
+runner = "cargo"
+package = "credentials-core"
+target = "--lib"
+features = ["test-support"]
+expect_red = ["store::store_agent_secrets::use_secret::tests::secret_once_is_atomic_and_first_release_is_once_per_grant"]
+only = false
+timeout_s = 300
+build_timeout_s = 1800
+
+[control.select]
+tests = ["store::store_agent_secrets::use_secret::tests::secret_once_is_atomic_and_first_release_is_once_per_grant", "agent_secret::totp::tests::secret_totp_matches_all_rfc6238_appendix_b_vectors"]
+
+
+[[control]]
+id = "secret-use-ephemeral-owner"
+guards = "Ephemeral mapping requires its live current-epoch parent to be owned by prefrontal-core"
+file = "crates/credentials-module/src/secret_use.rs"
+old = '.filter(|p| p.owner == "reserved:prefrontal-core")'
+new = ".filter(|_p| true)"
+edits = []
+test_file = "crates/credentials-module/src/secret_use_tests.rs"
+runner = "cargo"
+package = "credentials-module"
+target = "--lib"
+features = ["credentials-core/test-support"]
+expect_red = ["secret_use::tests::secret_ephemeral_mapping_requires_live_prefrontal_parent_and_equal_epoch"]
+only = false
+timeout_s = 300
+build_timeout_s = 1800
+
+[control.select]
+tests = ["secret_use::tests::secret_ephemeral_mapping_requires_live_prefrontal_parent_and_equal_epoch", "secret_use::tests::secret_use_only_trusted_senders_parse_and_write_diagnostics"]
+
+
+[[control]]
+id = "secret-use-uniform-refusal"
+guards = "Secret-use state refusals remain byte-identical not_found even if quarantine or diagnostics fail"
+file = "crates/credentials-core/src/store_secret_use.rs"
+old = "Err(SecretError::NotFound)"
+new = "Err(SecretError::StoreError)"
+edits = []
+test_file = "crates/credentials-core/src/store_secret_use_tests.rs"
+runner = "cargo"
+package = "credentials-core"
+target = "--lib"
+features = ["test-support"]
+expect_red = ["store::store_agent_secrets::use_secret::tests::secret_uniform_refusal_and_quarantine_flip_are_opaque_even_on_write_failure"]
+only = false
+timeout_s = 300
+build_timeout_s = 1800
+
+[control.select]
+tests = ["store::store_agent_secrets::use_secret::tests::secret_uniform_refusal_and_quarantine_flip_are_opaque_even_on_write_failure", "agent_secret::totp::tests::secret_totp_matches_all_rfc6238_appendix_b_vectors"]
+
+
+[[control]]
+id = "secret-use-worker-live-parent"
+guards = "Worker inheritance requires a linked current-epoch parent"
+file = "crates/credentials-module/src/secret_use.rs"
+old = "stamp.parent_state == Some(ParentState::Linked)"
+new = "true"
+edits = []
+test_file = "crates/credentials-module/src/secret_use_tests.rs"
+runner = "cargo"
+package = "credentials-module"
+target = "--lib"
+features = ["credentials-core/test-support"]
+expect_red = ["secret_use::tests::secret_worker_under_head_requires_owner_ref_live_state_and_equal_epoch"]
+only = false
+timeout_s = 300
+build_timeout_s = 1800
+
+[control.select]
+tests = ["secret_use::tests::secret_worker_under_head_requires_owner_ref_live_state_and_equal_epoch", "secret_use::tests::secret_use_only_trusted_senders_parse_and_write_diagnostics"]
+
+
+[[control]]
+id = "secret-use-output-scan-includes-source"
+guards = "Daemon output scanner reads secret-use source and refuses a material-bearing output site"
+file = "crates/credentials-module/src/secret_use.rs"
+old = "//! The trusted sender boundary for secret release. Scope authority comes only from ScopeStamp."
+new = """
+//! The trusted sender boundary for secret release. Scope authority comes only from ScopeStamp.
+#[allow(dead_code)]
+fn planted_output(secret: &credentials_core::secret::Secret<String>) { eprintln!("{}", secret.expose()); }"""
+edits = []
+test_file = "crates/credentials-module/src/main.rs"
+runner = "cargo"
+package = "credentials-module"
+target = "--bin ck-claustrum"
+features = ["credentials-core/test-support"]
+expect_red = ["tests::every_daemon_output_site_is_enumerated"]
+only = false
+timeout_s = 300
+build_timeout_s = 1800
+
+[control.select]
+tests = ["tests::every_daemon_output_site_is_enumerated", "tests::deposit_key_is_not_found_on_credential_ops_and_absent_from_list_and_watch"]
+
+
+[[control]]
+id = "secret-use-diagnostics-subject-fence"
+guards = "Caller-derived credential ids cannot enter or trim secret diagnostic subjects"
+file = "crates/credentials-core/src/store.rs"
+old = "if id.contains('|') {"
+new = "if false && id.contains('|') {"
+edits = []
+test_file = "crates/credentials-core/src/store_secret_use_tests.rs"
+runner = "cargo"
+package = "credentials-core"
+target = "--lib"
+features = ["test-support"]
+expect_red = ["store::store_agent_secrets::use_secret::tests::secret_refusal_partitions_are_bounded_and_credential_writers_cannot_trim_them"]
+only = false
+timeout_s = 300
+build_timeout_s = 1800
+
+[control.select]
+tests = ["store::store_agent_secrets::use_secret::tests::secret_refusal_partitions_are_bounded_and_credential_writers_cannot_trim_them", "agent_secret::totp::tests::secret_totp_matches_all_rfc6238_appendix_b_vectors"]
+
+
+[[control]]
+id = "secret-use-refusal-kind-documentation"
+guards = "Every auth event kind, including secret-use refusal, has an operator runbook row"
+file = "docs/operator-runbook.md"
+old = "| `secret_use_refusal` |"
+new = "| `undocumented_secret_refusal` |"
+edits = []
+test_file = "crates/credentials-core/src/audit.rs"
+runner = "cargo"
+package = "credentials-core"
+target = "--lib"
+features = ["test-support"]
+expect_red = ["audit::vocabulary_documentation_tests::auth_event_kind_values_are_documented"]
+only = false
+timeout_s = 300
+build_timeout_s = 1800
+
+[control.select]
+tests = ["audit::vocabulary_documentation_tests::auth_event_kind_values_are_documented", "agent_secret::totp::tests::secret_totp_matches_all_rfc6238_appendix_b_vectors"]

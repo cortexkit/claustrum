@@ -11,6 +11,57 @@ pub const MAX_SECRET_PASSWORD_BYTES: usize = 1024;
 pub const MAX_SECRET_API_KEY_BYTES: usize = 8192;
 pub const MIN_SECRET_TOTP_PERIOD: u64 = 15;
 pub const MAX_SECRET_TOTP_PERIOD: u64 = 120;
+pub const MAX_SECRET_DISPLAY_NAME_BYTES: usize = 128;
+
+pub fn validate_display_name(name: &str) -> Result<(), ValidationError> {
+    use unicode_general_category::{get_general_category, GeneralCategory};
+    if name.is_empty()
+        || name.chars().any(|c| {
+            matches!(
+                get_general_category(c),
+                GeneralCategory::Control
+                    | GeneralCategory::Format
+                    | GeneralCategory::LineSeparator
+                    | GeneralCategory::ParagraphSeparator
+            )
+        })
+    {
+        return Err(InvalidParams);
+    }
+    if name.len() > MAX_SECRET_DISPLAY_NAME_BYTES {
+        return Err(LimitExceeded);
+    }
+    Ok(())
+}
+
+pub fn validate_host(host: &str) -> Result<(), ValidationError> {
+    if host.is_empty()
+        || host.ends_with('.')
+        || host.parse::<std::net::IpAddr>().is_ok()
+        || !host.split('.').all(|label| {
+            !label.is_empty()
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        })
+    {
+        return Err(InvalidParams);
+    }
+    if host.len() > MAX_SECRET_HOST_BYTES {
+        return Err(LimitExceeded);
+    }
+    Ok(())
+}
+
+/// Compare origins without URL path normalization or accepting user information.
+pub fn canonical_origin(origin: &str) -> Result<String, ValidationError> {
+    let authority = origin.strip_prefix("https://").ok_or(InvalidParams)?;
+    let host = authority.strip_suffix(":443").unwrap_or(authority);
+    validate_host(host)?;
+    Ok(format!("https://{host}"))
+}
 
 pub fn validate_scope(scope: &SecretScope) -> Result<(), ValidationError> {
     match scope {
@@ -19,19 +70,10 @@ pub fn validate_scope(scope: &SecretScope) -> Result<(), ValidationError> {
             path_prefix,
             location,
         } => {
-            if host.is_empty()
-                || !host
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b".-".contains(&b))
-            {
-                return Err(InvalidParams);
-            }
-            if host.len() > MAX_SECRET_HOST_BYTES {
-                return Err(LimitExceeded);
-            }
+            validate_host(host)?;
             if let Some(prefix) = path_prefix {
                 validate_path(prefix)?;
-                if prefix == "/" {
+                if prefix.ends_with('/') {
                     return Err(InvalidParams);
                 }
                 if prefix.len() > MAX_SECRET_PATH_PREFIX_BYTES {
@@ -41,35 +83,18 @@ pub fn validate_scope(scope: &SecretScope) -> Result<(), ValidationError> {
             validate_location(location)
         }
         SecretScope::SiteLogin { origin } => {
-            let url = url::Url::parse(origin).map_err(|_| InvalidParams)?;
-            if url.scheme() != "https"
-                || url.host_str().is_none()
-                || url.port_or_known_default() != Some(443)
-                || !url.username().is_empty()
-                || url.password().is_some()
-                || url.query().is_some()
-                || url.fragment().is_some()
-                || url.path() != "/"
-            {
-                return Err(InvalidParams);
-            }
-            if url
-                .host_str()
-                .is_some_and(|host| host.len() > MAX_SECRET_HOST_BYTES)
-            {
-                return Err(LimitExceeded);
-            }
+            canonical_origin(origin)?;
             Ok(())
         }
     }
 }
 
-fn validate_path(path: &str) -> Result<(), ValidationError> {
+pub fn validate_path(path: &str) -> Result<(), ValidationError> {
     if !path.starts_with('/')
         || path.contains("//")
         || path
             .bytes()
-            .any(|b| !(0x21..=0x7e).contains(&b) || b"\\?#".contains(&b))
+            .any(|b| !(b.is_ascii_alphanumeric() || b"-._~!$&'()*+,;=:@/%".contains(&b)))
     {
         return Err(InvalidParams);
     }
@@ -81,7 +106,7 @@ fn validate_path(path: &str) -> Result<(), ValidationError> {
             let pair = bytes.get(i + 1..i + 3).ok_or(InvalidParams)?;
             let pair = std::str::from_utf8(pair).map_err(|_| InvalidParams)?;
             let b = u8::from_str_radix(pair, 16).map_err(|_| InvalidParams)?;
-            if b == b'/' || b == b'\\' || !(0x21..=0x7e).contains(&b) {
+            if b"/.%\\;".contains(&b) || !(0x21..=0x7e).contains(&b) {
                 return Err(InvalidParams);
             }
             decoded.push(b);
@@ -182,7 +207,7 @@ pub fn validate_material(material: &SecretMaterial) -> Result<(), ValidationErro
     Ok(())
 }
 
-fn validate_otpauth(uri: &str) -> Result<(), ValidationError> {
+pub(super) fn validate_otpauth(uri: &str) -> Result<(), ValidationError> {
     let url = url::Url::parse(uri).map_err(|_| InvalidParams)?;
     if url.scheme() != "otpauth"
         || url.host_str() != Some("totp")

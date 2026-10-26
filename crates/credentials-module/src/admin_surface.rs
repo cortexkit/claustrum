@@ -163,6 +163,22 @@ impl AdminSurface {
             chrono::Utc::now().timestamp_millis()
         })
     }
+    pub fn serve_flow_approval(
+        &self,
+        principal: Option<&Principal>,
+        params: &serde_json::Value,
+    ) -> crate::secret_use::UseAnswer {
+        crate::secret_use::serve_flow_approval(self.engine.store(), principal, params, || {
+            chrono::Utc::now().timestamp_millis()
+        })
+    }
+    pub fn serve_revoke_flow_grants(
+        &self,
+        principal: Option<&Principal>,
+        params: &serde_json::Value,
+    ) -> crate::secret_use::UseAnswer {
+        crate::secret_use::serve_revoke_flow_grants(self.engine.store(), principal, params)
+    }
     pub async fn serve_phone(
         &self,
         fingerprint: &str,

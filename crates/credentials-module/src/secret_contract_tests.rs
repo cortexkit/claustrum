@@ -394,7 +394,7 @@ impl SecretFlow {
         let issued = sc_now_ms();
         let expiry = match duration {
             "hour" => issued + 3_600_000,
-            "permanent" => 0,
+            "permanent" | "version" => 0,
             other => panic!("unsupported test duration {other}"),
         };
         let request = self.signed("approve.request", json!(items), duration, expiry, issued);

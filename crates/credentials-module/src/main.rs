@@ -1494,6 +1494,27 @@ async fn handle_read_request(
     };
 
     let result = match request.method.as_str() {
+        "secret.request_flow_approval" | "secret.revoke_flow_grants" => {
+            let answer = if request.method == "secret.request_flow_approval" {
+                admin.serve_flow_approval(principal.as_ref(), &request.params)
+            } else {
+                admin.serve_revoke_flow_grants(principal.as_ref(), &request.params)
+            };
+            match answer {
+                secret_use::UseAnswer::Reply(reply) => wrap_result(reply),
+                secret_use::UseAnswer::InvalidParams => {
+                    return invalid_params(
+                        writer,
+                        ver,
+                        channel,
+                        epoch,
+                        corr,
+                        "invalid flow secret parameters",
+                    )
+                    .await;
+                }
+            }
+        }
         "secret.use" => match admin.serve_secret_use(principal.as_ref(), &request.params) {
             secret_use::UseAnswer::Reply(reply) => wrap_result(reply),
             secret_use::UseAnswer::InvalidParams => {
@@ -2121,8 +2142,14 @@ fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> 
         },
     }))
     // Cingulate discovers grant inventories by capability rather than module name.
+    // Protocol 0.33.2 stamps flow_version, flow_code_hash and flow_install_id only
+    // for readers providing flow-identity-scopes/v1. This vault reads those fields
+    // from sender params; it still refuses flow-scoped transport route binds.
     .capabilities(Some(subc_protocol::manifest::CapabilityDeclarations {
-        provides: vec!["permissions/v1".to_owned()],
+        provides: vec![
+            "permissions/v1".to_owned(),
+            subc_protocol::scope::FLOW_IDENTITY_SCOPES_CAPABILITY.to_owned(),
+        ],
         requires: Vec::new(),
         must_never_reach: Vec::new(),
     }))
@@ -2294,6 +2321,8 @@ fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> 
             ManagementOperation { name: "secret.revoke_grant".into(), description: None, kind: ManagementOperationKind::Mutate },
             // A use can consume a grant with duration `once`, so it must not be relayed as a retryable query.
             ManagementOperation { name: "secret.use".into(), description: None, kind: ManagementOperationKind::Mutate },
+            ManagementOperation { name: "secret.request_flow_approval".into(), description: None, kind: ManagementOperationKind::Mutate },
+            ManagementOperation { name: "secret.revoke_flow_grants".into(), description: None, kind: ManagementOperationKind::Mutate },
             ManagementOperation { name: "permissions.list".into(), description: None, kind: ManagementOperationKind::Query },
             ManagementOperation { name: "permissions.revoke".into(), description: None, kind: ManagementOperationKind::Mutate },
             ManagementOperation {
@@ -2483,6 +2512,7 @@ pub mod probe {
 mod tests {
     include!("watch_scoped_tests.rs");
     include!("secret_contract_tests.rs");
+    include!("secret_flow_contract_tests.rs");
     include!("../tests/fixtures/federation_read_producer.rs");
     #[test]
     fn daemon_uses_shared_record_and_key_path_override_rules() {
@@ -2572,13 +2602,15 @@ mod tests {
         let m = manifest("claustrum", None);
         assert_eq!(
             m.capabilities.as_ref().unwrap().provides,
-            vec!["permissions/v1"]
+            vec!["permissions/v1", "flow-identity-scopes/v1"]
         );
         let ProviderRole::ManagementSurface { operations, .. } = &m.provides[0] else {
             panic!("management surface")
         };
         for name in secret_phone::PHONE_OPS.into_iter().chain([
             "secret.use",
+            "secret.request_flow_approval",
+            "secret.revoke_flow_grants",
             "permissions.list",
             "permissions.revoke",
         ]) {

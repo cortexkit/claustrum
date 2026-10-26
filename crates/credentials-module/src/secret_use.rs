@@ -8,6 +8,10 @@ use subc_protocol::{
     Principal,
 };
 
+#[path = "secret_flow.rs"]
+mod flow;
+pub use flow::{serve_approval as serve_flow_approval, serve_revoke as serve_revoke_flow_grants};
+
 pub enum UseAnswer {
     Reply(Value),
     InvalidParams,
@@ -36,6 +40,19 @@ fn default_coverage() -> String {
 enum Target {
     Api(ApiTarget),
     Login(LoginTarget),
+}
+impl Target {
+    fn into_use_target(self) -> UseTarget {
+        match self {
+            Self::Api(t) => UseTarget::ApiKey {
+                scheme: t.scheme,
+                host: t.host,
+                port: t.port,
+                path: t.path,
+            },
+            Self::Login(t) => UseTarget::SiteLogin { origin: t.origin },
+        }
+    }
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -108,6 +125,9 @@ pub fn serve(
     clock: impl Fn() -> i64,
 ) -> UseAnswer {
     let sender = match principal {
+        Some(Principal::Reserved { module_id }) if module_id == "basal" => {
+            return flow::serve_use(store, params, clock);
+        }
         Some(Principal::Reserved { module_id }) if module_id == "aft" => SecretSender::Aft,
         Some(Principal::Reserved { module_id }) if module_id == "cerebellum" => {
             SecretSender::Cerebellum
@@ -139,15 +159,7 @@ pub fn serve(
     if !matches!(params.coverage.as_str(), "scope" | "agent_and_workers") {
         return invalid(ValidationError::InvalidParams);
     }
-    let target = match params.target {
-        Target::Api(t) => UseTarget::ApiKey {
-            scheme: t.scheme,
-            host: t.host,
-            port: t.port,
-            path: t.path,
-        },
-        Target::Login(t) => UseTarget::SiteLogin { origin: t.origin },
-    };
+    let target = params.target.into_use_target();
     if let Err(e) = target.validate() {
         return invalid(e);
     }

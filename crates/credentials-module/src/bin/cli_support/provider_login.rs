@@ -70,7 +70,12 @@ fn run_cursor(
     println!();
     println!("  {}", start.authorize_url);
     println!();
-    let _ = super::open_in_browser(args, &start.authorize_url);
+    super::browser_login::choose_and_present(
+        args,
+        super::browser_login::ApproveOn::This,
+        &start.authorize_url,
+    )
+    .map_err(|e| e.to_string())?;
     println!("Waiting for browser sign-in…");
     let poller = cursor::ReqwestCursorPollTransport::new()
         .map_err(|e| format!("starting Cursor login poll: {e}"))?;
@@ -321,7 +326,12 @@ fn open_and_capture(
     println!();
     println!("  {authorize_url}");
     println!();
-    let _ = super::open_in_browser(args, authorize_url);
+    super::browser_login::choose_and_present(
+        args,
+        super::browser_login::ApproveOn::This,
+        authorize_url,
+    )
+    .map_err(|e| e.to_string())?;
     let captured = match listener {
         Some(listener) => {
             println!("Approve in a browser on this machine — if it can reach this listener, the login completes here automatically.");

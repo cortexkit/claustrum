@@ -12,8 +12,6 @@
 //! CLI-ONLY, like the listener beside it. The daemon never opens a browser and
 //! never prompts.
 
-use std::time::Duration;
-
 use credentials_core::catalog::LoginProvider;
 use credentials_core::oauth_login::build_authorize_url;
 
@@ -80,29 +78,6 @@ fn resolve_redirect(wire: &LoginProvider, listener_bound: bool) -> (&'static str
         (false, Some(code_redirect), Some(code_prompt)) => (code_redirect, code_prompt),
         _ => (wire.redirect_uri, wire.paste_prompt),
     }
-}
-
-/// What the operator is told while a bound listener waits for the redirect.
-///
-/// THE BANNER MUST NOT PROMISE MORE THAN THE BIND GIVES. A bound listener completes
-/// the login automatically only when the browser that follows the redirect is on
-/// THIS machine. An operator who opens the printed URL on a second computer — the
-/// usual case when the account to custody is signed in elsewhere — approves
-/// successfully and then sees nothing happen here for the whole wait. That wait does
-/// end in a paste prompt, so the flow is recoverable; an operator who was told the
-/// login completes automatically reads the silence as a hang and interrupts it
-/// instead.
-///
-/// The seconds come from the caller's timeout rather than the text, so the promise
-/// cannot drift away from the code that enforces it.
-pub fn listener_wait_banner(wait: Duration) -> String {
-    format!(
-        "Approve in the browser.\n\
-         \u{b7} If that browser is on THIS machine, the login completes here automatically.\n\
-         \u{b7} If it is on another machine, nothing happens here for up to {secs} seconds \u{2014} \
-         then this command asks you to paste the callback from that browser.",
-        secs = wait.as_secs()
-    )
 }
 
 #[cfg(test)]
@@ -206,10 +181,6 @@ mod tests {
             source.contains("loopback_bind_addr(wire.redirect_uri)"),
             "the single wire.redirect_uri read must be the listener bind"
         );
-        assert!(
-            source.contains("listener_wait_banner(login_listener::LISTEN_TIMEOUT)"),
-            "the wait the banner names must be the constant the listener actually waits"
-        );
     }
 
     /// Defect the operator hit: with no listener the authorize URL still pointed at a
@@ -266,39 +237,5 @@ mod tests {
                 );
             }
         }
-    }
-
-    /// The banner's wait is derived, not typed: a literal would keep promising 300
-    /// seconds after someone changed the timeout, and the operator's whole reason to
-    /// keep waiting is that the number is true.
-    #[test]
-    fn the_listener_banner_derives_its_wait_from_the_timeout_it_is_given() {
-        let short = listener_wait_banner(Duration::from_secs(7));
-        assert!(
-            short.contains("up to 7 seconds"),
-            "the banner must name the wait it was given: {short}"
-        );
-        assert!(
-            !short.contains("300"),
-            "a hardcoded wait survives a timeout change and lies from then on: {short}"
-        );
-
-        let shipped = listener_wait_banner(crate::login_listener::LISTEN_TIMEOUT);
-        assert!(shipped.contains(&format!(
-            "up to {} seconds",
-            crate::login_listener::LISTEN_TIMEOUT.as_secs()
-        )));
-        // The banner is printed when a listener bound, which does NOT mean the
-        // browser is here. It must not claim the completion is unconditional, and it
-        // must not tell the operator to ignore the page — on a second machine that
-        // page is the only thing they can carry back.
-        assert!(
-            shipped.contains("THIS machine") && shipped.contains("another machine"),
-            "the banner must state the condition the automatic completion depends on: {shipped}"
-        );
-        assert!(
-            !shipped.to_lowercase().contains("ignore"),
-            "nothing in the browser is safe to ignore: {shipped}"
-        );
     }
 }

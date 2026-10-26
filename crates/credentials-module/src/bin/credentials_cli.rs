@@ -50,6 +50,8 @@ use std::process::ExitCode;
 mod admin_client;
 #[path = "cli_support/api_key_login.rs"]
 mod api_key_login;
+#[path = "cli_support/browser_login.rs"]
+mod browser_login;
 #[allow(dead_code)]
 mod cli_support;
 #[allow(dead_code)]
@@ -467,6 +469,8 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
         ],
         "login" => &[
             "--provider",
+            "--approve-on",
+            "--browser",
             "--id",
             "--client-id",
             "--client-secret-file",
@@ -670,7 +674,7 @@ fn help_verb(verb: &str) -> String {
         "login" => {
             "ck auth login [--provider <name>] [--id <id>] [--account <id>] [--replace]\n\
              \x20             [--no-listener] [--no-browser] [--device] [--payload-file <path>]\n\
-             \x20             [--account-id <id>]\n\
+             \x20             [--account-id <id>] [--approve-on this|other] [--browser open|copy|show]\n\
              \n\
              \x20 --provider <name>      pick a provider; omit for an interactive picker of\n\
              \x20                        every provider\n\
@@ -681,10 +685,12 @@ fn help_verb(verb: &str) -> String {
              \x20 --client-id <id>       gmail only: your Google Cloud Desktop OAuth client id\n\
              \x20 --client-secret-file <path>  gmail only: read your client secret from a file\n\
              \x20 --replace              swap an existing credential (keeps its handle)\n\
-             \x20 --no-listener          paste the address-bar URL instead of using the loopback\n\
-             \x20                        listener (automatic on Linux with no display)\n\
-             \x20 --no-browser           only print the browser URL for headless or SSH sessions\n\
-             \x20                        (automatic on Linux with no display)\n\
+             \x20 --approve-on this|other  choose where to approve a browser OAuth login;\n\
+             \x20                        default: this, or other on Linux with no display\n\
+             \x20 --browser open|copy|show  open the browser, copy the link, or just show it;\n\
+             \x20                        default without a terminal: show\n\
+             \x20 --no-listener          disable the loopback listener and paste the callback\n\
+             \x20 --no-browser           skip the browser action picker and just show the URL\n\
              \x20 --device               select headless device authorization for openai/xai\n\
              \x20 --payload-file <path>  api-key logins: read the key from a file instead of\n\
              \x20                        prompting\n\
@@ -695,9 +701,14 @@ fn help_verb(verb: &str) -> String {
              Vault-native first-party login — mints an INDEPENDENT credential the vault\n\
              solely custodies (no dual-custody rotation race).\n\
              \n\
-             OAuth providers open a browser URL. A one-shot CLI-local listener on the\n\
-             loopback redirect completes the flow automatically; a busy port or a timeout\n\
-             falls back to pasting the address-bar URL. github-copilot and kimi always use\n\
+             Anthropic, OpenAI, xAI and Google-family browser OAuth ask where you will\n\
+             approve before showing the URL. On this computer, a CLI-local loopback\n\
+             listener and pasted input work at the same time. On another device, paste\n\
+             the result here immediately; no listener is bound. Cursor, Devin, Snowflake\n\
+             and DigitalOcean keep their provider-specific callback or polling flow.\n\
+             No browser login opens a browser unless you choose it. Without a terminal, pass --provider\n\
+             and optionally --approve-on and --browser; no choices are prompted.\n\
+             github-copilot and kimi always use\n\
              device authorization. api-key providers prompt for a key, validated before\n\
              storing where the provider offers a check; otherwise login says the key\n\
              was stored unchecked, and why.\n\
@@ -2951,7 +2962,7 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     provider_id_flags(args)?;
     use credentials_core::oauth_login::{
         decode_jwt_claims, exchange_authorization_code, exchange_authorization_code_form,
-        extract_chatgpt_account_id, generate_pkce, generate_state, parse_callback,
+        extract_chatgpt_account_id, generate_pkce, generate_state,
     };
 
     // With --provider the flow is fully flag-driven (scriptable); without it, the
@@ -2962,6 +2973,11 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             id_override: None,
             replace: false,
         },
+        None if !std::io::IsTerminal::is_terminal(&std::io::stdin()) => {
+            return Err(CliError::Usage(
+                "login without a terminal needs --provider <name>".into(),
+            ));
+        }
         None => pick_login_interactively(global, args)?,
     };
     let provider = interactive.provider.clone();
@@ -3252,6 +3268,9 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
         );
     }
 
+    #[cfg(all(debug_assertions, feature = "test-support"))]
+    let wire = &browser_login::test_wire(wire);
+    let approve_on = browser_login::approve_on(args)?;
     let replace = login_replace(args, interactive.replace);
     let preflighted_key = preflight_login(
         global,
@@ -3286,22 +3305,16 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
         authorize_params.push(("nonce", nonce));
     }
 
-    // Every login provider registers a loopback redirect, so bind a one-shot
-    // CLI-local listener on the EXACT redirect address BEFORE opening the browser
-    // (the redirect can't race an unbound socket). `--no-listener` forces the paste
-    // path. The listener is a pure convenience over paste; the daemon never listens.
-    //
-    // THE BIND COMES BEFORE THE URL IS BUILT because the URL depends on its outcome:
-    // with no socket holding the loopback address, a redirect there can only land on
-    // a connection error, so a provider that also registers a code-display redirect
-    // is sent to that one instead. Bind-before-browser-open is preserved — the open
-    // is still below.
-    let listener = if paste_only(args) {
-        None
-    } else {
-        login_listener::loopback_bind_addr(wire.redirect_uri)
-            .and_then(|addr| login_listener::capture_callback(&addr))
-    };
+    // Bind before building the URL: providers with a code-display redirect use it
+    // when there is no listener. Explicitly choosing this computer overrides the
+    // headless default, but --no-listener still disables the socket.
+    let listener =
+        if approve_on == browser_login::ApproveOn::Other || has_flag(args, "--no-listener") {
+            None
+        } else {
+            login_listener::loopback_bind_addr(wire.redirect_uri)
+                .and_then(|addr| login_listener::capture_callback(&addr))
+        };
 
     // ONE redirect for the whole flow. The token exchange replays the redirect, and
     // the provider refuses the exchange unless it byte-matches the one in the
@@ -3322,46 +3335,12 @@ fn cmd_login(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     println!();
     println!("  {}", plan.authorize_url);
     println!();
-    // Best-effort browser open; the printed URL is the source of truth if it fails.
-    let _ = open_in_browser(args, &plan.authorize_url);
-
-    // Prefer the listener: if it captured the redirect, use it; otherwise (bind
-    // failed, timed out, or a non-loopback redirect) fall back to paste. The pasted
-    // value never touches argv — it is a secret-grade code read from stdin only.
-    let captured = match listener {
-        Some(l) => {
-            // A bound listener completes the login automatically only for a browser on
-            // THIS machine, so the banner states that condition and names the wait an
-            // operator on another machine is about to sit through before being asked to
-            // paste.
-            println!(
-                "{}",
-                login_wire::listener_wait_banner(login_listener::LISTEN_TIMEOUT)
-            );
-            let got = l.wait();
-            if got.is_some() {
-                // Say the capture happened, so the operator is never left matching
-                // the browser's "paste this code" instruction against a CLI that
-                // (correctly) shows no paste prompt.
-                println!("Browser redirect received — completing the login, nothing to paste.");
-            }
-            got
-        }
-        None => None,
-    };
-    let raw_callback = match captured {
-        Some(query) => query,
-        None => {
-            println!("{}", plan.paste_prompt);
-            let mut pasted = String::new();
-            std::io::stdin()
-                .read_line(&mut pasted)
-                .map_err(|e| CliError::Io(format!("reading pasted code: {e}")))?;
-            pasted
-        }
-    };
-    let callback = parse_callback(&raw_callback)
-        .ok_or_else(|| CliError::Usage("could not parse the login callback".to_string()))?;
+    browser_login::choose_and_present(args, approve_on, &plan.authorize_url)?;
+    let callback = tokio_block_on(browser_login::read_callback(
+        listener,
+        plan.paste_prompt,
+        &state,
+    ))?;
 
     // Exchange the code for tokens over the provider's wire. State is validated
     // inside (before any network call), so a forged/stale callback is refused up
@@ -6616,15 +6595,11 @@ fn tokio_block_on<F: std::future::Future>(fut: F) -> F::Output {
         .block_on(fut)
 }
 
-fn browser_open_allowed(args: &[String]) -> bool {
-    !has_flag(args, "--no-browser") && !no_local_display()
-}
-
 /// True on Linux when no graphical session is present (neither `DISPLAY` nor
 /// `WAYLAND_DISPLAY` is set), as on a headless server or a plain SSH login. No
-/// browser can open there, and a browser on another device can't reach this
-/// machine's loopback listener, so the login goes straight to the paste prompt
-/// instead of waiting on a callback that can't arrive.
+/// browser is likely to work there, and another device cannot reach this machine's
+/// loopback listener. Auth-code login defaults to approving on another device;
+/// the provider-specific callback drivers use this to disable their listener.
 fn no_local_display() -> bool {
     no_local_display_from(
         cfg!(target_os = "linux"),
@@ -6648,15 +6623,10 @@ fn paste_only(args: &[String]) -> bool {
     has_flag(args, "--no-listener") || no_local_display()
 }
 
-/// Best-effort open of a URL in the operator's default browser. A failure is ignored
-/// by the caller — the URL is also printed, so the login still works if this no-ops.
-/// Headless sessions can refuse the spawn before any platform command is constructed.
+/// Open only after an explicit browser action has been selected.
 /// Never passes the URL through a shell (no injection surface).
-fn open_in_browser(args: &[String], url: &str) -> std::io::Result<()> {
-    if no_local_display() && !has_flag(args, "--no-browser") {
-        println!("No display found on this machine, so no browser opens here. Open the URL above on any device, then paste the address it lands on.");
-    }
-    if !browser_open_allowed(args) {
+fn open_in_browser(action: browser_login::BrowserAction, url: &str) -> std::io::Result<()> {
+    if action != browser_login::BrowserAction::Open {
         return Ok(());
     }
     #[cfg(target_os = "macos")]
@@ -6940,10 +6910,14 @@ mod tests {
 
     #[test]
     fn no_browser_flag_refuses_the_platform_browser_spawn() {
-        // Without the flag the answer depends on this machine's display (a headless
-        // Linux CI runner has none); with it, the spawn is always refused.
-        assert_eq!(super::browser_open_allowed(&[]), !super::no_local_display());
-        assert!(!super::browser_open_allowed(&["--no-browser".to_string()]));
+        assert_eq!(
+            super::browser_login::browser_action(
+                &["--no-browser".to_string()],
+                super::browser_login::ApproveOn::This,
+            )
+            .unwrap(),
+            super::browser_login::BrowserAction::Show,
+        );
     }
 
     #[test]

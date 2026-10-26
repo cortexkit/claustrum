@@ -462,6 +462,20 @@ fn list(global: &GlobalArgs, _args: &[String]) -> Result<(), CliError> {
                 }
             );
         }
+        for grant in &secret.flow_grants {
+            // A flow grant lists the installed version that owns it in place of an asking
+            // scope, and prints its approved methods where an agent grant prints coverage.
+            // Its duration is always `version`, so it needs no column of its own.
+            println!(
+                "  grant {} {} version{}",
+                grant.grant_id,
+                flow_holder(grant),
+                match &grant.methods {
+                    Some(methods) => format!(" methods={}", methods.join(",")),
+                    None => String::new(),
+                }
+            );
+        }
     }
     // Phone keys are reported by their LAST OBSERVED pairing, never by a check made now:
     // this verb does not check the pairing at all, so "superseded" means a lookup saw
@@ -478,6 +492,17 @@ fn list(global: &GlobalArgs, _args: &[String]) -> Result<(), CliError> {
         );
     }
     Ok(())
+}
+
+/// How the operator names the holder of a flow grant: one installed flow version.
+///
+/// Written as `flow:<flow_id>@<version>/<install_id>`, the form the install card and
+/// basal's own logs use, so an operator can match a grant against the install that runs it.
+fn flow_holder(grant: &credentials_core::store::OperatorFlowGrantRow) -> String {
+    format!(
+        "flow:{}@{}/{}",
+        grant.flow_id, grant.flow_version, grant.flow_install_id
+    )
 }
 
 fn grants(global: &GlobalArgs, _args: &[String]) -> Result<(), CliError> {
@@ -500,6 +525,24 @@ fn grants(global: &GlobalArgs, _args: &[String]) -> Result<(), CliError> {
                     .expires_at_ms
                     .map(|at| at.to_string())
                     .unwrap_or_else(|| "none".into()),
+                grant
+                    .last_use_ms
+                    .map(|at| at.to_string())
+                    .unwrap_or_else(|| "never".into())
+            );
+        }
+        for grant in &secret.flow_grants {
+            // A flow grant never expires, so its expiry is the same "none" a permanent
+            // agent grant prints, and its methods take the coverage column's place.
+            println!(
+                "{} secret|{} {} version{} expiry=none last_use={}",
+                grant.grant_id,
+                secret.name,
+                flow_holder(grant),
+                match &grant.methods {
+                    Some(methods) => format!(" methods={}", methods.join(",")),
+                    None => String::new(),
+                },
                 grant
                     .last_use_ms
                     .map(|at| at.to_string())

@@ -434,14 +434,32 @@ fn list(tx: &rusqlite::Transaction<'_>) -> rusqlite::Result<Value> {
         Ok(value)
     })?.collect::<rusqlite::Result<Vec<_>>>()?;
     for secret in &mut secrets {
-        let mut grants = tx.prepare("SELECT grant_id,scope_owner,scope_kind,scope_ref,coverage,duration,expires_at_ms,last_use_ms FROM secret_grants WHERE incarnation=?1 ORDER BY grant_id")?;
+        let mut grants = tx.prepare("SELECT grant_id,scope_owner,scope_kind,scope_ref,coverage,duration,expires_at_ms,last_use_ms,agent_id FROM secret_grants WHERE incarnation=?1 ORDER BY grant_id")?;
         secret["grants"] = Value::Array(grants.query_map([secret["incarnation"].as_str().expect("incarnation")], |r| {
             let duration: String=r.get(5)?;
-            let mut grant = json!({"grant_id":r.get::<_,String>(0)?,"scope":{"owner":r.get::<_,String>(1)?,"kind":r.get::<_,String>(2)?,"ref":r.get::<_,String>(3)?},"coverage":r.get::<_,String>(4)?,"duration":duration});
+            // `agent_id` is always present so the phone never has to tell a missing key
+            // from an agent-less grant: it is null when the grant named no agent.
+            let mut grant = json!({"grant_id":r.get::<_,String>(0)?,"scope":{"owner":r.get::<_,String>(1)?,"kind":r.get::<_,String>(2)?,"ref":r.get::<_,String>(3)?},"coverage":r.get::<_,String>(4)?,"duration":duration,"agent_id":r.get::<_,Option<String>>(8)?});
             if duration != "permanent" { grant["expires_at_ms"]=json!(r.get::<_,i64>(6)?); }
             if let Some(last)=r.get::<_,Option<i64>>(7)? { grant["last_use_ms"]=json!(last); }
             Ok(grant)
         })?.collect::<rusqlite::Result<Vec<_>>>()?);
+        // A flow grant answers a different question: "which installed flow version may
+        // use this?" It therefore names its flow instead of an asking scope, has no
+        // coverage and never expires, and carries `methods` only for an API key.
+        let mut flows = tx.prepare("SELECT grant_id,flow_id,flow_version,flow_install_id,methods,last_use_ms FROM secret_flow_grants WHERE incarnation=?1 ORDER BY grant_id")?;
+        let flow_grants = flows.query_map([secret["incarnation"].as_str().expect("incarnation")], |r| {
+            let methods: Option<String> = r.get(4)?;
+            let mut grant = json!({"grant_id":r.get::<_,String>(0)?,"flow":{"flow_id":r.get::<_,String>(1)?,"version":r.get::<_,u64>(2)?,"install_id":r.get::<_,String>(3)?},"duration":"version"});
+            if let Some(methods) = methods {
+                grant["methods"] = serde_json::from_str(&methods).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, Box::new(e))
+                })?;
+            }
+            if let Some(last)=r.get::<_,Option<i64>>(5)? { grant["last_use_ms"]=json!(last); }
+            Ok(grant)
+        })?.collect::<rusqlite::Result<Vec<_>>>()?;
+        secret["flow_grants"] = Value::Array(flow_grants);
     }
     Ok(json!({"secrets":secrets}))
 }

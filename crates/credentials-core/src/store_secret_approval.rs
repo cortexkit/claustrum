@@ -48,7 +48,13 @@ impl EncryptedStore {
                 if let Some(card) = r.get::<_,Option<String>>(12)? { row["card_ref"]=json!(card); }
                 Ok(row)
             })?.collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok(json!({"grants":rows}))
+            let mut grants = rows;
+            // Flow grants belong to an installed flow version, not to an agent, so an
+            // agent-filtered listing can never contain one and the query is skipped there.
+            if agent_id.is_none() {
+                grants.extend(flow_permission_rows(conn)?);
+            }
+            Ok(json!({"grants":grants}))
         }).map_err(|_|SecretError::StoreError)
     }
 
@@ -456,6 +462,58 @@ fn envelope_audit(
         },
     )
     .map(|_| ())
+}
+
+/// One `permissions.list` row per live flow grant.
+///
+/// A flow grant has no wall-clock expiry and no agent, so it carries no `expires_at_ms`
+/// and no `agent_id`. Its holder is the installed flow version that owns it, which the
+/// phone and desktop permission pages render from these three fields plus the secret's
+/// name and kind. `methods` describes how an API key may be used, so a site login, which
+/// has no method at all, omits the key rather than sending an empty list.
+fn flow_permission_rows(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<Value>> {
+    conn.prepare("SELECT g.grant_id,g.flow_id,g.flow_version,g.flow_install_id,s.name,s.kind,s.host,s.path_prefix,COALESCE(s.origin,''),g.methods,g.granted_at_ms,g.card_ref,g.envelope_sha256 FROM secret_flow_grants g JOIN agent_secrets s ON s.incarnation=g.incarnation AND s.name=g.secret_name ORDER BY g.grant_id")?
+        .query_map([], |r| {
+            let name: String = r.get(4)?;
+            let kind: String = r.get(5)?;
+            let api_key = kind == "agent_api_key";
+            let label = if api_key {
+                format!("use {name} on {}{}", r.get::<_,String>(6)?, r.get::<_,Option<String>>(7)?.unwrap_or_default())
+            } else {
+                format!("fill {name} on {}", r.get::<_,String>(8)?)
+            };
+            let version: u64 = r.get(2)?;
+            let mut row = json!({
+                "id":r.get::<_,String>(0)?,
+                "holder":{"kind":"flow", "flow_id":r.get::<_,String>(1)?, "flow_version":version, "flow_install_id":r.get::<_,String>(3)?},
+                "module":"claustrum",
+                "subject_label":name,
+                "scope":if api_key {"api_key"} else {"site_login"},
+                "scope_label":label,
+                "granted_at_ms":r.get::<_,i64>(10)?,
+            });
+            if api_key {
+                let methods: Option<String> = r.get(9)?;
+                match methods {
+                    Some(methods) => {
+                        row["methods"] = serde_json::from_str(&methods).map_err(|e| {
+                            rusqlite::Error::FromSqlConversionFailure(9, rusqlite::types::Type::Text, Box::new(e))
+                        })?;
+                    }
+                    // A stored API-key grant always records the methods it was approved
+                    // for; a missing list cannot be shown as "any method", so it is an error.
+                    None => return Err(rusqlite_err("api key flow grant without methods")),
+                }
+            }
+            if let Some(card) = r.get::<_,Option<String>>(11)? {
+                row["card_ref"] = json!(card);
+            }
+            // Revocation by id needs the same digest an agent grant carries, so an
+            // operator can recognize a signed grant without re-reading the envelope.
+            row["envelope_sha256"] = json!(r.get::<_,String>(12)?);
+            Ok(row)
+        })?
+        .collect()
 }
 
 pub(super) fn revoke(

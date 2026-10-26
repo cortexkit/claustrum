@@ -6460,10 +6460,10 @@ fn material_file(root: &std::path::Path, mode: u32, body: &str) -> PathBuf {
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(mode);
-        // `create_new` honours the requested mode, but a permissive umask would still
-        // tighten it; set it explicitly so the permissive case really is permissive.
-        options.mode(mode);
     }
+    // Windows has no mode bits; the file custody there is the owner-only DACL.
+    #[cfg(not(unix))]
+    let _ = mode;
     let mut file = options.open(&path).unwrap();
     file.write_all(body.as_bytes()).unwrap();
     #[cfg(unix)]

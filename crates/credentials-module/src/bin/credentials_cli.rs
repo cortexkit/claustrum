@@ -340,6 +340,12 @@ fn run_args(mut args: Vec<String>) -> Result<(), CliError> {
     // an unknown or misspelled flag is a HARD error, never silently ignored. Runs
     // before dispatch, so a bad invocation never reaches the keychain or the lease.
     reject_unknown_args(&command, &args)?;
+    // `ck auth secret put` and `ck auth secret delete` name the secret positionally,
+    // because a name is the one operand every secret verb takes and a flag in front of it
+    // would be the only way to reach an object the operator already names on the line.
+    if command == "secret" {
+        reject_secret_verb_args(&args)?;
+    }
 
     match command.as_str() {
         "bootstrap" => cmd_bootstrap(&global),
@@ -522,6 +528,13 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
     } else {
         0
     };
+    // `secret put` and `secret delete` take a positional secret name; a name never
+    // starts with `--`, so the flag scan below can still refuse a stray flag.
+    if matches!(command, "secret put" | "secret delete")
+        && args.first().is_some_and(|arg| !arg.starts_with("--"))
+    {
+        i = 1;
+    }
     while i < args.len() {
         let arg = &args[i];
         // VERBS WITH POSITIONAL SUBCOMMANDS must name them here, or this check eats the
@@ -539,7 +552,22 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
             "remote" => &["add", "remove", "list"],
             "member" => &["grant", "revoke", "list"],
             "federation" => &["self", "mapping"],
-            "secret" => &["phone-gate", "on", "off", "status"],
+            // Each secret verb is its own entry: one shared subcommand list for the verb
+            // would let `secret list` accept `--host` and `secret put` accept `--grant-id`,
+            // and the per-verb pages advertise narrower shapes than that.
+            "secret put" => &[
+                "--kind",
+                "--name",
+                "--host",
+                "--path-prefix",
+                "--location",
+                "--origin",
+                "--material-file",
+            ],
+            "secret list" | "secret grants" | "secret phone-gate status" => &[],
+            "secret delete" => &["--name"],
+            "secret revoke" => &["--grant-id"],
+            "secret phone-gate on" | "secret phone-gate off" => &[],
             _ => &[],
         };
         // `transfer accept|reject <transfer-id>` and `federation self <member>` /
@@ -567,6 +595,35 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
         )));
     }
     Ok(())
+}
+
+/// Refuse unknown flags on one `ck auth secret <verb>` invocation.
+///
+/// `reject_unknown_args` sees the secret verb as a single command with subcommands, so it
+/// cannot tell `secret list` from `secret put`: a flag belonging to another secret verb
+/// would pass there. This narrows the check to the verb actually named, which is what
+/// makes a typo such as `secret put --locaton` a refusal instead of a put that silently
+/// stored the bearer default. An unrecognised verb is left to `cmd_secret`, which names
+/// it and prints the page.
+fn reject_secret_verb_args(args: &[String]) -> Result<(), CliError> {
+    let Some(verb) = args.first() else {
+        return Ok(());
+    };
+    let (key, consumed) = match (verb.as_str(), args.get(1).map(String::as_str)) {
+        ("phone-gate", Some(action @ ("on" | "off" | "status"))) => {
+            (format!("secret phone-gate {action}"), 2)
+        }
+        ("put" | "list" | "grants" | "delete" | "revoke", _) => (format!("secret {verb}"), 1),
+        _ => return Ok(()),
+    };
+    // The name is positional for put and delete, and no name begins with `--`.
+    let mut rest: Vec<String> = args.iter().skip(consumed).cloned().collect();
+    if matches!(verb.as_str(), "put" | "delete")
+        && rest.first().is_some_and(|arg| !arg.starts_with("--"))
+    {
+        rest.remove(0);
+    }
+    reject_unknown_args(&key, &rest)
 }
 
 /// The short verb table shown for bare `ck auth`, `ck auth help`, and an unknown
@@ -615,7 +672,7 @@ fn usage_short() -> String {
        remote              add or remove a login homed in another vault\n\
        member              grant another vault remote reads or deliveries\n\
         federation          set this vault's member id or the mapping gate\n\
-        secret              control the agent-secret phone gate\n\
+        secret              put, list, delete or revoke agent secrets; phone gate\n\
        rotate-master-key   rotate the vault master key (offline)\n\
        bootstrap           initialize a new vault (offline)\n\
      \n\
@@ -644,13 +701,7 @@ fn usage_short() -> String {
 /// An unknown verb falls back to the short table.
 fn help_verb(verb: &str) -> String {
     let body = match verb {
-        "secret" => {
-            "ck auth secret phone-gate on|off|status\n\nNOTES\n\
-             On/off uses the admin MAC online or the offline lease.\n\
-             Status reads the persisted member and phone gates.\n\
-             Keep the phone setting off until callosum derives the forwarded harness\n\
-             from the authenticated phone peer on every call."
-        }
+        "secret" => cli_support::secret_cli::help_text().to_string(),
         "set-plan" => {
             "ck auth set-plan --id <credential-id> (--tier <id> | --clear)\n\
              \n\

@@ -16135,6 +16135,11 @@ mod transfer_key_fence_tests;
 
 #[path = "store_agent_secrets.rs"]
 mod store_agent_secrets;
+/// Operator writes for agent secrets and the lease-free `ck auth secret` listing.
+pub use store_agent_secrets::{
+    list_agent_secrets_read_only, OperatorGrantRow, OperatorPhoneRow, OperatorSecretListing,
+    OperatorSecretRow,
+};
 pub use store_agent_secrets::{
     secret_phone_gate_status_read_only, PhoneDeposit, PhoneOperation, SecretDepositPublicKey,
     SecretUseOutcome,

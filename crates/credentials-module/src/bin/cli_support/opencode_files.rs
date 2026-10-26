@@ -2502,12 +2502,18 @@ mod manifest_lock_aba_regression {
                 retry_min: Duration::from_millis(50),
                 retry_max: Duration::from_millis(50),
                 now_sequence_ms: Some(clock),
+                // Staleness is judged on the injected clock, but the claim deadline is
+                // real time and defaults to the 100 ms ttl. Under build-server load the
+                // advancing thread could run after that deadline, failing a correct lock.
+                // A long real deadline keeps the test about order: the claim must
+                // succeed once the injected clock passes the ttl, however late that is.
+                claim_timeout: Some(Duration::from_secs(30)),
                 ..ManifestLockOptions::default()
             },
             |_| Ok(()),
         );
         advance.join().unwrap();
-        assert!(result.is_ok());
+        assert!(result.is_ok(), "{result:?}");
         assert!(!lock_path(&path).exists());
         let _ = fs::remove_dir_all(root);
     }

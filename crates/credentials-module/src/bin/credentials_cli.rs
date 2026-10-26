@@ -629,35 +629,6 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
     Ok(())
 }
 
-/// Refuse unknown flags on one `ck auth secret <verb>` invocation.
-///
-/// `reject_unknown_args` sees the secret verb as a single command with subcommands, so it
-/// cannot tell `secret list` from `secret put`: a flag belonging to another secret verb
-/// would pass there. This narrows the check to the verb actually named, which is what
-/// makes a typo such as `secret put --locaton` a refusal instead of a put that silently
-/// stored the bearer default. An unrecognised verb is left to `cmd_secret`, which names
-/// it and prints the page.
-fn reject_secret_verb_args(args: &[String]) -> Result<(), CliError> {
-    let Some(verb) = args.first() else {
-        return Ok(());
-    };
-    let (key, consumed) = match (verb.as_str(), args.get(1).map(String::as_str)) {
-        ("phone-gate", Some(action @ ("on" | "off" | "status"))) => {
-            (format!("secret phone-gate {action}"), 2)
-        }
-        ("put" | "list" | "grants" | "delete" | "revoke", _) => (format!("secret {verb}"), 1),
-        _ => return Ok(()),
-    };
-    // The name is positional for put and delete, and no name begins with `--`.
-    let mut rest: Vec<String> = args.iter().skip(consumed).cloned().collect();
-    if matches!(verb.as_str(), "put" | "delete")
-        && rest.first().is_some_and(|arg| !arg.starts_with("--"))
-    {
-        rest.remove(0);
-    }
-    reject_unknown_args(&key, &rest)
-}
-
 /// The short verb table shown for bare `ck auth`, `ck auth help`, and an unknown
 /// verb. Matches the `ck` dispatcher house style (compact verb + one-line
 /// description); per-verb flags and semantics live in `help_verb`, reached via

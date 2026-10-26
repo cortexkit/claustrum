@@ -518,36 +518,55 @@ fn read_only_listing_reports_scopes_grants_and_excludes_secrets_from_the_deposit
 
 #[test]
 fn read_only_listing_reports_phone_keys_as_current_superseded_or_unobserved() {
+    // `setup` registers a phone, and registering records that lookup as the fingerprint's
+    // observation, so this vault starts out `current as of` the registration time.
     let (root, store) = setup("op-list-phones");
-    let observed = |pairing: Option<&str>, at: i64| {
-        store
-            .observe_secret_phone("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", pairing, at)
-            .unwrap();
-    };
-    // Before any lookup: unobserved.
-    let first = by_path(&store_file(&root)).unwrap();
-    assert_eq!(first.phones.len(), 1);
-    assert!(first.phones[0].unobserved);
-    assert!(first.phones[0].current_since_ms.is_none());
-    // A lookup that sees this pairing: current as of that time.
-    observed(Some("pair-A"), 5_000);
     let current = by_path(&store_file(&root)).unwrap();
-    assert_eq!(current.phones[0].current_since_ms, Some(5_000));
+    assert_eq!(current.phones.len(), 1);
+    assert_eq!(current.phones[0].current_since_ms, Some(NOW));
     assert!(!current.phones[0].unobserved);
+    let observed = |pairing: Option<&str>, at: i64| {
+        store.observe_secret_phone(FP, pairing, at).unwrap();
+    };
     // A later lookup that sees another pairing: superseded.
-    observed(Some("pair-B"), 6_000);
+    observed(Some("pair-B"), NOW + 1);
     let superseded = by_path(&store_file(&root)).unwrap();
     assert!(superseded.phones[0].current_since_ms.is_none());
     assert_eq!(
         superseded.phones[0].observed_pairing_id.as_deref(),
         Some("pair-B")
     );
-    // A lookup that found the device absent: also superseded.
-    observed(None, 7_000);
+    // A lookup that found the device absent: also superseded, and still observed.
+    observed(None, NOW + 2);
     let absent = by_path(&store_file(&root)).unwrap();
     assert!(absent.phones[0].current_since_ms.is_none());
-    assert_eq!(absent.phones[0].observed_pairing_id, None);
+    assert!(absent.phones[0].observed_pairing_id.is_none());
     assert!(!absent.phones[0].unobserved);
+    // The unobserved state needs a key row with no observation at all, which is what a
+    // vault holds between a restore of the key table and its first lookup.
+    let (fresh_root, fresh) = rig("op-list-unobserved", 76);
+    fresh
+        .store
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO secret_phone_keys (fingerprint,pairing_id,deposit_pub,approval_pub,created_at_ms) VALUES (?1,'pair-A',?2,?3,1)",
+                rusqlite::params![
+                    FP,
+                    vec![2u8; 32],
+                    signer()
+                        .verifying_key()
+                        .to_encoded_point(false)
+                        .as_bytes()
+                        .to_vec()
+                ],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let unobserved = by_path(&store_file(&fresh_root)).unwrap();
+    assert_eq!(unobserved.phones.len(), 1);
+    assert!(unobserved.phones[0].unobserved, "{unobserved:?}");
+    assert!(unobserved.phones[0].current_since_ms.is_none());
 }
 
 #[test]

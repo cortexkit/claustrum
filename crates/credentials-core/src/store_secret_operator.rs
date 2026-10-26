@@ -335,10 +335,11 @@ pub fn list_agent_secrets_read_only(
             // Comparing against the stored observation, not against callosum, is the
             // whole point: this verb makes no network call, so it can only report what
             // the LAST lookup saw.
-            let current_since_ms = observed
-                .as_deref()
-                .filter(|seen| *seen == pairing_id)
-                .and_then(|_| observed_at);
+            let current_since_ms = if observed.as_deref() == Some(pairing_id.as_str()) {
+                observed_at
+            } else {
+                None
+            };
             // A row exists in `secret_phone_observations` for any lookup that happened,
             // including one that found the device absent. So `observed_at` alone cannot
             // say whether anything was ever seen: the left join's missing row is what an

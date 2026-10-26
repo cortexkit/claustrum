@@ -946,10 +946,12 @@ fn accepted_help_flags(verb: &str) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         for table in [put_table, revoke_table] {
             for token in table.split('"').map(str::trim) {
-                if token.starts_with("--") && token.len() > 2 && !token.contains(' ') {
-                    if !out.contains(&token.to_string()) {
-                        out.push(token.to_string());
-                    }
+                if token.starts_with("--")
+                    && token.len() > 2
+                    && !token.contains(' ')
+                    && !out.contains(&token.to_string())
+                {
+                    out.push(token.to_string());
                 }
             }
         }
@@ -6428,106 +6430,12 @@ fn plan_cli_detected_marker_keeps_fields_and_clear_reveals_detection() {
 fn agent_secret_listing(
     data_dir: &std::path::Path,
 ) -> credentials_core::store::OperatorSecretListing {
-    match credentials_core::store::list_agent_secrets_read_only(&data_dir.join("store.db"))
+    // A refused put never migrated the store: it had nothing to write, so the CLI never
+    // opened it with a key. To a caller asking what is stored, that is the same fact as an
+    // empty vault.
+    credentials_core::store::list_agent_secrets_read_only(&data_dir.join("store.db"))
         .expect("the store file is readable")
-    {
-        Some(listing) => listing,
-        // A refused put never migrated the store: it had nothing to write, so the CLI
-        // never opened it with a key. To a caller asking what is stored, that is the same
-        // fact as an empty vault.
-        None => credentials_core::store::OperatorSecretListing::default(),
-    }
-}
-
-/// Deposit a secret through the phone channel into the given vault.
-///
-/// This is how a real agent gets a secret to use: a registered phone seals the plaintext
-/// to the vault's deposit key. Driving that path here rather than inserting a row is
-/// what makes the release tests evidence about the operator CLI's `put`, which must
-/// produce a record that behaves the same.
-fn phone_deposit(
-    data_dir: &std::path::Path,
-    key_path: &std::path::Path,
-    name: &str,
-    material: &credentials_core::agent_secret::SecretMaterial,
-    scope: &credentials_core::agent_secret::SecretScope,
-) {
-    use credentials_core::agent_secret as secret;
-    use credentials_core::audit::{AuditCtx, AuditOp};
-    use credentials_core::store::{EncryptedStore, PhoneDeposit, PhoneOperation};
-    let descriptor = StorageDescriptor {
-        module_id: credentials_core::contract::MODULE_ID.into(),
-        storage_namespace: credentials_core::contract::STORAGE_NAMESPACE.into(),
-        isolation: Isolation::Module,
-        backend: StorageBackend::Sqlite {
-            path: data_dir.join("store.db").to_string_lossy().into_owned(),
-        },
-    };
-    let key = credentials_core::resolver::resolve(
-        &credentials_core::resolver::ResolverConfig {
-            data_dir: data_dir.to_path_buf(),
-            source: credentials_core::resolver::KeySource::OperatorPath {
-                path: key_path.to_path_buf(),
-            },
-        },
-        None,
-    )
-    .unwrap();
-    let sqlite = open_sqlite(&descriptor).unwrap();
-    let store = EncryptedStore::open(sqlite, key).unwrap();
-    store.ensure_secret_deposit_key().unwrap();
-    store
-        .set_federation_self_member_audited(
-            "fed-computer:22222222222222222222222222222222",
-            AuditCtx::admin(AuditOp::FederationSelfSet),
-        )
-        .unwrap();
-    let sender = credentials_core::kem::generate_key().unwrap();
-    let (sender_public, _) = credentials_core::kem::public_half(&sender).unwrap();
-    let op = |op: PhoneOperation| {
-        store
-            .secret_phone_operation(
-                "11111111111111111111111111111111",
-                Some("pair-A"),
-                1,
-                &op,
-                || true,
-                || 1,
-            )
-            .unwrap()
-    };
-    // A syntactically valid SEC1 uncompressed P-256 point: the 0x04 prefix and a 64-byte
-    // body. These tests deposit and list but never approve, so the key only has to pass
-    // registration's shape check.
-    let mut approval_pub = vec![4u8];
-    approval_pub.extend([7u8; 64]);
-    op(PhoneOperation::Register {
-        deposit_pub: sender_public.clone(),
-        approval_pub,
-    });
-    // A fixed 26-character Crockford base32 ULID; the deposit id is opaque to the store.
-    let deposit_id = "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned();
-    let member = "fed-computer:22222222222222222222222222222222";
-    let aad = secret::deposit_aad(&deposit_id, member, name, scope).unwrap();
-    let body = secret::deposit_plaintext(material);
-    let deposit_key = store.secret_deposit_public_key().unwrap();
-    let (enc, ciphertext) = credentials_core::kem::seal_auth(
-        &sender,
-        &deposit_key.public_key,
-        body.expose(),
-        secret::DEPOSIT_INFO,
-        &aad,
-    )
-    .unwrap();
-    let reply = op(PhoneOperation::Deposit(PhoneDeposit {
-        deposit_id,
-        member_id: member.to_owned(),
-        name: name.to_owned(),
-        scope: scope.clone(),
-        enc,
-        ciphertext,
-    }));
-    assert_eq!(reply["status"], "stored", "{reply}");
+        .unwrap_or_default()
 }
 
 /// Give the secret `name` a permanent `scope` grant through the vault's own gate.
@@ -6654,23 +6562,20 @@ fn secret_put_offline_stores_a_releaseable_key_and_refuses_the_name_twice() {
     // `--location` was omitted, so the CLI default filled the bearer location: an API key
     // without a location cannot be stored at all, because every byte layout carries one.
     assert_eq!(row.location.as_deref(), Some("authorization_bearer"));
-    assert_eq!(
-        vault
-            .run(&[
-                "secret",
-                "put",
-                "ops-key",
-                "--kind",
-                "api-key",
-                "--host",
-                "x.test",
-                "--material-file",
-                file.to_str().unwrap(),
-            ])
-            .status
-            .success(),
-        false
-    );
+    assert!(!vault
+        .run(&[
+            "secret",
+            "put",
+            "ops-key",
+            "--kind",
+            "api-key",
+            "--host",
+            "x.test",
+            "--material-file",
+            file.to_str().unwrap(),
+        ])
+        .status
+        .success());
     assert!(!String::from_utf8_lossy(
         &vault
             .run(&[

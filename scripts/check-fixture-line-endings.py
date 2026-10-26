@@ -19,7 +19,7 @@ A CONVENTION STATED IN A FILE IS ONLY FOLLOWED BY PEOPLE WHO OPEN THAT FILE. Thi
 script is the same rule with a failure mode: it refuses rather than advises.
 
 WHAT IT CHECKS, and the rule is deliberately mechanical so it needs no judgement:
-every directory named `golden` or `fixtures` must be covered by a `-text` pattern
+every directory named `golden`, `fixtures` or `vectors` must be covered by a `-text` pattern
 in `.gitattributes`. Not "every content-asserted file" -- distinguishing a
 byte-exact comparison from a `contains()` check would need the script to understand
 the assertion, and a checker that guesses is worse than one with a crude rule.
@@ -37,7 +37,7 @@ import sys
 from pathlib import Path
 
 SKIP = {".git", "node_modules", "target", "dist", ".cortexkit"}
-FIXTURE_DIR_NAMES = {"golden", "fixtures"}
+FIXTURE_DIR_NAMES = {"golden", "fixtures", "vectors"}
 
 # POSITIVE CONTROL FOR THE MATCHER. The two refusals in main() catch a blind WALK (no
 # directories found) and a blind PARSE (no patterns found), but neither proves that

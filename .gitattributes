@@ -19,6 +19,11 @@
 crates/credentials-core/tests/fixtures/** -text
 crates/credentials-module/tests/fixtures/** -text
 packages/opencode/golden/** -text
+crates/credentials-core/tests/vectors/** -text
+crates/credentials-module/tests/vectors/** -text
+# The agent-secret contract tests read golden JSON blocks out of this doc byte for
+# byte, so a CRLF checkout would hide every golden on Windows.
+docs/wire-contract-v1.md -text
 
 # THE LIST ABOVE IS NOW ENFORCED, because the instruction in this comment did not
 # survive contact with a new directory. `scripts/check-fixture-line-endings.py`

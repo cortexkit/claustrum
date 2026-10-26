@@ -707,8 +707,23 @@ async fn secret_list_request_and_result_key_sets_match_the_contract() {
     );
     let flow = SecretFlow::new(207).await;
     flow.granted_and_used().await;
+    // The golden predates both the agent-id column and flow grants: a reply always names
+    // each agent grant's `agent_id` (null when the statement named no agent) and always
+    // carries `flow_grants`. This store holds agent grants only, so every golden key is
+    // checked here and the two keys the golden does not know yet are named exactly.
     let listed = flow.phone("secret.list", json!({})).await;
-    assert_secret_reply_matches("list.result", &listed);
+    assert_eq!(listed["secrets"][0]["grants"][0]["agent_id"], "agent-A");
+    for secret in listed["secrets"].as_array().unwrap() {
+        assert!(secret["flow_grants"].as_array().unwrap().is_empty());
+    }
+    let shape = secret_shape(&listed);
+    let golden = secret_shape(&secret_golden("list.result"));
+    assert!(golden.is_subset(&shape), "{listed}");
+    let added: std::collections::BTreeSet<String> = shape.difference(&golden).cloned().collect();
+    assert_eq!(
+        added,
+        secret_keys("secrets[].flow_grants secrets[].grants[].agent_id")
+    );
     // The permanent grant omits its expiry; the hour grant carries one.
     let grants: Vec<&serde_json::Value> = listed["secrets"]
         .as_array()

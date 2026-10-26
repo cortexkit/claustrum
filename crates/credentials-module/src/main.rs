@@ -2313,6 +2313,26 @@ fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> 
                 description: Some("Accept a consumer's report that a served token was refused, at the version it was served.".to_string()),
                 kind: ManagementOperationKind::Mutate,
             },
+            // The three ops another computer's vault calls on this one, relayed by
+            // callosum. Callosum only offers a paired computer what this catalog declares,
+            // so leaving them out made federation unreachable however the profile was set.
+            // Declaring them grants nothing: dispatch answers them only on a mapped member
+            // channel, and only with that member's own grants.
+            ManagementOperation {
+                name: federation::ingress::OP_REMOTE_TOKEN.to_string(),
+                description: Some("Serve a member vault a short-lived access token for a login this vault holds. Never returns refresh material.".to_string()),
+                kind: ManagementOperationKind::Query,
+            },
+            ManagementOperation {
+                name: federation::ingress::OP_REPORT_AUTH_FAILURE.to_string(),
+                description: Some("Accept a member vault's report that a served token was refused upstream.".to_string()),
+                kind: ManagementOperationKind::Mutate,
+            },
+            ManagementOperation {
+                name: federation::ingress::OP_TRANSFER_DELIVER.to_string(),
+                description: Some("Accept a sealed static-key transfer from a member vault into the pending queue.".to_string()),
+                kind: ManagementOperationKind::Mutate,
+            },
         ],
         config_schema: json!({ "type": "object" }),
         observability: Vec::new(),
@@ -2471,6 +2491,53 @@ mod tests {
              no-plaintext-outward boundary with cerebellum and the immune-by-role-shape \
              property the supervisor's connection census depends on. Found: {:?}",
             manifest.consumes
+        );
+    }
+
+    /// Every federation op is in the management catalog.
+    ///
+    /// Callosum relays to a paired computer only the ops this module declares, so a
+    /// dispatched-but-undeclared op is unreachable from another machine with no error on
+    /// either side. That shipped: all three were dispatched and none was declared, and it
+    /// surfaced only when callosum's live catalog came up empty for the two-computer test.
+    #[test]
+    fn the_manifest_declares_every_federation_op_with_its_kind() {
+        let manifest = super::manifest("claustrum", None);
+        let declared: Vec<(String, ManagementOperationKind)> = manifest
+            .provides
+            .iter()
+            .flat_map(|role| match role {
+                ProviderRole::ManagementSurface { operations, .. } => operations
+                    .iter()
+                    .map(|op| (op.name.clone(), op.kind.clone()))
+                    .collect::<Vec<_>>(),
+                _ => Vec::new(),
+            })
+            .collect();
+        for (op, kind) in [
+            (
+                federation::ingress::OP_REMOTE_TOKEN,
+                ManagementOperationKind::Query,
+            ),
+            (
+                federation::ingress::OP_REPORT_AUTH_FAILURE,
+                ManagementOperationKind::Mutate,
+            ),
+            (
+                federation::ingress::OP_TRANSFER_DELIVER,
+                ManagementOperationKind::Mutate,
+            ),
+        ] {
+            assert!(
+                declared.iter().any(|(name, k)| name == op && *k == kind),
+                "{op} must be declared as {kind:?}: callosum offers a paired computer only \
+                 declared ops. Declared: {declared:?}"
+            );
+        }
+        assert_eq!(
+            federation::ingress::FEDERATION_OPS.len(),
+            3,
+            "a new federation op must be added to the manifest and to this test"
         );
     }
 

@@ -332,9 +332,8 @@ pub fn list_agent_secrets_read_only(
             let pairing_id: String = r.get(1)?;
             let observed: Option<String> = r.get(2)?;
             let observed_at: Option<i64> = r.get(3)?;
-            // Comparing against the stored observation, not against callosum, is the
-            // whole point: this verb makes no network call, so it can only report what
-            // the LAST lookup saw.
+            // Comparing against the STORED observation is the whole point: this verb
+            // makes no network call, so it can only report what the last lookup saw.
             let current_since_ms = if observed.as_deref() == Some(pairing_id.as_str()) {
                 observed_at
             } else {

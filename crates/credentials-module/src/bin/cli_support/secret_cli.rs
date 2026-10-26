@@ -464,8 +464,8 @@ fn list(global: &GlobalArgs, _args: &[String]) -> Result<(), CliError> {
         }
     }
     // Phone keys are reported by their LAST OBSERVED pairing, never by a check made now:
-    // this verb makes no callosum call, so "superseded" means a lookup saw something else,
-    // not that the pairing is known to be dead.
+    // this verb does not check the pairing at all, so "superseded" means a lookup saw
+    // something else, not that the pairing is known to be dead.
     for phone in &listing.phones {
         let state = match (phone.unobserved, phone.current_since_ms) {
             (true, _) => "unobserved".to_owned(),

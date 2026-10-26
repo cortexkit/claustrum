@@ -454,6 +454,27 @@ fn secret_approval_whole_envelope_strictness_and_item_limit() {
 
 #[test]
 fn secret_approval_checks_sealed_release_scope_not_caller_scope() {
+    let (_root, store, r) = approval_setup("approve-kind-quarantine");
+    sql(
+        &store,
+        "PRAGMA ignore_check_constraints=ON; UPDATE agent_secrets SET kind='site_login'",
+    );
+    assert_eq!(
+        phone(
+            &store,
+            &signed(&envelope(vec![item(&r)], "hour", NOW), false),
+            NOW
+        )
+        .unwrap(),
+        json!({"results":[refused(&r)]})
+    );
+    assert_eq!(
+        count(
+            &store,
+            "SELECT COUNT(*) FROM agent_secrets WHERE state='corrupt'"
+        ),
+        1
+    );
     let (_root, store, r) = approval_setup("approve-scope");
     sql(
         &store,
@@ -584,7 +605,7 @@ fn secret_delete_is_signed_reusable_uncapped_and_removes_corrupt_records() {
         ),
         Err(SecretError::ApprovalInvalid)
     );
-    sql(&store, "UPDATE agent_secrets SET state='corrupt'");
+    sql(&store, "PRAGMA ignore_check_constraints=ON; UPDATE agent_secrets SET state='corrupt',kind='site_login'");
     let barrier = Arc::new(Barrier::new(2));
     let handles = (0..2)
         .map(|_| {

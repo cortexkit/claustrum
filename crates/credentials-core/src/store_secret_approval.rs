@@ -199,9 +199,6 @@ impl EncryptedStore {
         let Some((kind, state, host, path_prefix, location, origin, blob)) = row else {
             return Ok(false);
         };
-        if statement["secret"]["kind"] != kind {
-            return Ok(false);
-        }
         let actor = format!("fed-phone:{fingerprint}");
         if delete {
             if e.duration != "none" || statement["v"] != "ck-secret-delete-statement/v1" {
@@ -276,7 +273,7 @@ impl EncryptedStore {
             }
             agent_secret::SecretScope::SiteLogin { origin } => json!({"origin":origin}),
         };
-        if statement["use"] != sealed_use {
+        if statement["secret"]["kind"] != scope.kind() || statement["use"] != sealed_use {
             return Ok(false);
         }
         let id = agent_secret::request_id(now)

@@ -41,6 +41,7 @@ harness = false
 
 [features]
 default = []
+test-support = ["credentials-core/test-support"]
 import-prompt-seam = []
 # Debug-only Windows CLI rendezvous points keep real handles open for the
 # runtime tests. The shipped default-feature release contains none of them.
@@ -81,6 +82,9 @@ dialoguer = { version = "0.12", features = ["fuzzy-select"] }
 rustix = { version = "1.1.4", features = ["process"] }
 
 [dev-dependencies]
+# Integration tests link the probe library without cfg(test); enable its seams only
+# in the development graph, never in a default-feature release build.
+credentials-module = { path = ".", features = ["test-support"] }
 subc-os = { workspace = true, features = ["test-support"] }
 cortexkit-test-support = { workspace = true }
 credentials-core = { path = "../credentials-core", features = ["test-support"] }

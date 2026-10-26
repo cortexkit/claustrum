@@ -985,6 +985,7 @@ pub type TransferClock = Arc<dyn Fn() -> i64 + Send + Sync>;
 
 /// A test seam: when it returns true, the send's commit fails between the outgoing row
 /// and its audit row. No production caller sets one.
+#[cfg(any(test, feature = "test-support"))]
 pub type CommitFault = Arc<dyn Fn() -> bool + Send + Sync>;
 
 fn real_wall() -> TransferClock {
@@ -1022,6 +1023,7 @@ pub struct Transfers {
     outbound: OnceLock<OutboundClient>,
     wall: TransferClock,
     budget: Duration,
+    #[cfg(any(test, feature = "test-support"))]
     commit_fault: Option<CommitFault>,
 }
 
@@ -1041,6 +1043,7 @@ impl Transfers {
             outbound: OnceLock::new(),
             wall: real_wall(),
             budget: ADMIN_OP_BUDGET,
+            #[cfg(any(test, feature = "test-support"))]
             commit_fault: None,
         }
     }
@@ -1063,6 +1066,7 @@ impl Transfers {
     /// returns true. A test seam with no production caller: it is how a test proves the
     /// two commit together or not at all, and that nothing is sent after a failed
     /// commit.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn with_commit_fault(mut self, fault: CommitFault) -> Self {
         self.commit_fault = Some(fault);
         self
@@ -1169,24 +1173,27 @@ impl Transfers {
                 TransferRefusal::transfer_key_missing(Some(own.self_id.clone()))
             }
         })?;
-        let fault = self.commit_fault.clone();
-        let fault_hook = move || fault.as_ref().is_some_and(|fault| fault());
-        self.store
-            .commit_outgoing_transfer_audited(
-                &NewOutgoingTransfer {
-                    transfer_id,
-                    receiver_member: to.to_string(),
-                    credential_id: credential_id.to_string(),
-                    sealed: SealedTransfer {
-                        enc,
-                        ciphertext,
-                        aad: aad.into_bytes(),
-                    },
-                    created_at_ms: now,
-                },
-                Some(&fault_hook),
-            )
-            .map_err(|_| TransferRefusal::store_error())
+        let new = NewOutgoingTransfer {
+            transfer_id,
+            receiver_member: to.to_string(),
+            credential_id: credential_id.to_string(),
+            sealed: SealedTransfer {
+                enc,
+                ciphertext,
+                aad: aad.into_bytes(),
+            },
+            created_at_ms: now,
+        };
+        #[cfg(any(test, feature = "test-support"))]
+        let result = {
+            let fault = self.commit_fault.clone();
+            let fault_hook = move || fault.as_ref().is_some_and(|fault| fault());
+            self.store
+                .commit_outgoing_transfer_with_fault(&new, Some(&fault_hook))
+        };
+        #[cfg(not(any(test, feature = "test-support")))]
+        let result = self.store.commit_outgoing_transfer_audited(&new);
+        result.map_err(|_| TransferRefusal::store_error())
     }
 
     /// `send`'s outbound post-step, run only after [`Self::send_commit`] returned the

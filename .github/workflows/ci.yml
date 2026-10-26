@@ -240,7 +240,7 @@ jobs:
           CK_NATIVE_STORE_TESTS: '1'
         # Resolve the workspace like the `cargo test --workspace --all-targets` step,
         # allowing it to reuse this target's dependency artifacts.
-        run: cargo test --locked --workspace --test native_store -- --nocapture --test-threads=1
+        run: cargo test --locked --workspace --test native_store -- --ignored --nocapture --test-threads=1
 
       - name: Fixture line endings
         # Guards a defect only the Windows job can see: git rewrites LF to CRLF on

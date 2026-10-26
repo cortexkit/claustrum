@@ -19,9 +19,7 @@ export type ManifestHandleAccount = OpenCodeHandleFileV1['providers'][number]['a
 export type ManifestHandleProvider = OpenCodeHandleFileV1['providers'][number]
 export type ManifestHandleFile = OpenCodeHandleFileV1
 type Owner = { tenant: string; pid: number; claimed_at_ms: number; nonce: string }
-type TestOptions = { ttlMs?: number; renewEveryMs?: number; retryMinMs?: number; retryMaxMs?: number; afterClaim?: () => Promise<void> | void; beforeEvict?: () => Promise<void>; afterEvictRenameAttempt?: () => Promise<void>; afterEvict?: () => void; beforeManifestRename?: (path: string) => Promise<void> }
-let testOptions: TestOptions | undefined
-export function __setManifestLockTestOptions(options?: TestOptions): void { testOptions = options }
+type ManifestLockOptions = Readonly<{ ttlMs?: number; renewEveryMs?: number; retryMinMs?: number; retryMaxMs?: number; afterClaim?: () => Promise<void> | void; beforeEvict?: () => Promise<void>; afterEvictRenameAttempt?: () => Promise<void>; afterEvict?: () => void; beforeManifestRename?: (path: string) => Promise<void>; checkPath?: typeof checkPrivatePath }>
 // 16 CSPRNG bytes: a collision needs both the same millisecond and the same nonce. Do not
 // simplify this to a counter, pid+timestamp, or a short token.
 const token = () => randomBytes(16).toString('base64url')
@@ -87,7 +85,11 @@ async function reclaimStaleManifestLockQuarantines(path: string, ttlMs: number, 
   }))
 }
 
-export async function withManifestLock<T>(path: string, tenant: string, fn: () => Promise<T> | T): Promise<T> {
+/** Each instance captures its dependencies; callers cannot reconfigure the shared writer. */
+export function createManifestLock(options: ManifestLockOptions = {}) {
+  const settings = Object.freeze({ ...options })
+  const checkPath = settings.checkPath ?? checkPrivatePath
+async function withManifestLock<T>(path: string, tenant: string, fn: () => Promise<T> | T): Promise<T> {
   return withLockCommit(path, tenant, async () => fn())
 }
 async function withLockCommit<T>(path: string, tenant: string, fn: (commit: () => Promise<void>) => Promise<T> | T): Promise<T> {
@@ -97,10 +99,10 @@ async function withLockCommit<T>(path: string, tenant: string, fn: (commit: () =
   // refuse rather than risk two writers overlapping on the shared handle file.
   if (process.platform === 'win32') throw unsupportedOnWindows()
   path = resolve(path)
-  const lock = `${path}.lock`, ownerPath = join(lock, 'owner'), ttl = testOptions?.ttlMs ?? MANIFEST_LOCK.ttlMs, renewEvery = testOptions?.renewEveryMs ?? MANIFEST_LOCK.renewEveryMs, retryMin = testOptions?.retryMinMs ?? 25, retryMax = testOptions?.retryMaxMs ?? 75
+  const lock = `${path}.lock`, ownerPath = join(lock, 'owner'), ttl = settings.ttlMs ?? MANIFEST_LOCK.ttlMs, renewEvery = settings.renewEveryMs ?? MANIFEST_LOCK.renewEveryMs, retryMin = settings.retryMinMs ?? 25, retryMax = settings.retryMaxMs ?? 75
   const nonce = token(), started = Date.now(), deadline = started + ttl
   while (true) {
-    try { await createPrivateDirectory(lock); await writeOwner(lock, { tenant, pid: process.pid, claimed_at_ms: Date.now(), nonce }); await testOptions?.afterClaim?.(); break } catch (error) {
+    try { await createPrivateDirectory(lock); await writeOwner(lock, { tenant, pid: process.pid, claimed_at_ms: Date.now(), nonce }); await settings.afterClaim?.(); break } catch (error) {
       if (code(error) !== 'EEXIST') { if (code(error) !== 'ENOENT') await rm(lock, { recursive: true, force: true }).catch(() => {}); throw error }
     }
     let observed: Owner | undefined, ownerReadError: unknown
@@ -108,29 +110,29 @@ async function withLockCommit<T>(path: string, tenant: string, fn: (commit: () =
     if (!observed && code(ownerReadError) === 'ENOENT') {
       const metadata = await lstat(lock).catch(() => undefined)
       if (metadata?.isDirectory() && Date.now() - metadata.mtimeMs >= ttl) {
-        await testOptions?.beforeEvict?.()
+        await settings.beforeEvict?.()
         const stale = `${lock}.stale-${Math.floor(metadata.mtimeMs)}-${token()}`
         try {
           await rename(lock, stale)
           // A claimant may have published its owner while the eviction was pending.
           const moved = await lstat(stale)
           const ownerExists = await lstat(join(stale, 'owner')).then(() => true, (error: unknown) => code(error) !== 'ENOENT')
-          if (!ownerExists && moved.mtimeMs === metadata.mtimeMs) { testOptions?.afterEvict?.(); continue }
+          if (!ownerExists && moved.mtimeMs === metadata.mtimeMs) { settings.afterEvict?.(); continue }
           await rename(stale, lock).catch(() => {})
         } catch (error) { if (!['ENOENT', 'EEXIST', 'ENOTEMPTY'].includes(code(error) ?? '')) throw error }
       }
     }
     if (observed && Date.now() - observed.claimed_at_ms >= ttl) {
-      await testOptions?.beforeEvict?.()
+      await settings.beforeEvict?.()
       // The owner record remains because the quarantine is the ABA guard, not an audit log;
       // bounded reclamation below is what makes that retention finite.
       const stale = `${lock}.stale-${observed.claimed_at_ms}-${observed.nonce}`
       let renameError: unknown
       try { await rename(lock, stale) } catch (error) { renameError = error }
-      await testOptions?.afterEvictRenameAttempt?.()
+      await settings.afterEvictRenameAttempt?.()
       if (renameError === undefined) {
         const moved = await readOwner(join(stale, 'owner')).catch(() => undefined)
-        if (moved?.nonce === observed.nonce && moved.claimed_at_ms === observed.claimed_at_ms) { testOptions?.afterEvict?.(); continue }
+        if (moved?.nonce === observed.nonce && moved.claimed_at_ms === observed.claimed_at_ms) { settings.afterEvict?.(); continue }
         await rename(stale, lock).catch(() => {})
       } else if (!['ENOENT', 'EEXIST', 'ENOTEMPTY'].includes(code(renameError) ?? '')) throw renameError
     }
@@ -158,14 +160,14 @@ async function readManifest(path: string): Promise<ManifestHandleFile> {
   try { metadata = await lstat(path) } catch (error) { if (code(error) === 'ENOENT') return { version: 1, providers: [] }; throw error }
   if (metadata.isSymbolicLink() || !metadata.isFile()) throw new Error('handle file must be a regular file')
   if (process.platform !== 'win32' && (metadata.mode & 0o777) !== HANDLE_FILE_CONTRACT.mode) throw new Error('handle file mode must be exactly 0600')
-  const protection = await checkPrivatePath(path)
+  const protection = await checkPath(path)
   if (!protection.ok) throw new Error(notPrivate('handle file folder', protection))
   const source = await readFile(path); if (source.byteLength > HANDLE_FILE_CONTRACT.maxBytes) throw new Error('handle file exceeds 256 KiB')
   return parseHandleFile(JSON.parse(source.toString('utf8')))
 }
 const foreign = (file: ManifestHandleFile, tenant: string) => file.providers.filter((provider) => provider.serve !== tenant).map((provider) => JSON.stringify(provider))
 async function refuseWritableAncestors(parent: string): Promise<void> {
-  const protection = await checkPrivatePath(parent)
+  const protection = await checkPath(parent)
   if (!protection.ok) throw new Error(notPrivate('handle file folder', protection))
 }
 async function prepareParent(path: string): Promise<void> {
@@ -182,16 +184,11 @@ async function prepareParent(path: string): Promise<void> {
 }
 async function writeAtomic(path: string, file: ManifestHandleFile, commit: () => Promise<void>): Promise<void> {
   const bytes = Buffer.from(JSON.stringify(file)); if (bytes.byteLength > HANDLE_FILE_CONTRACT.maxBytes) throw new Error('handle file exceeds 256 KiB')
-    // pathBasename for the same reason the quarantine sweep uses it, but this one fails LOUD
-    // rather than inert: a '/' split over a backslash path yields the whole path, so the temp
-    // name embeds separators and a drive-letter colon, join() nests it under its own directory,
-    // and O_CREAT|O_EXCL throws on a name Windows will not accept -- taking the manifest WRITE
-    // down, not just the reclaim. Covered by the dual-basename test, which a POSIX filesystem
-    // test cannot reach.
+  // Use the native basename so the temporary name cannot embed path separators.
     const temporary = join(dirname(path), `.${pathBasename(path)}.${process.pid}.${token()}.tmp`); let handle: Awaited<ReturnType<typeof open>> | undefined
-  try { await createPrivateFile(temporary, bytes); handle = await open(temporary, 'r+'); await handle.sync(); await handle.close(); handle = undefined; await testOptions?.beforeManifestRename?.(`${path}.lock`); await commit(); await rename(temporary, path) } finally { await handle?.close().catch(() => {}); await unlink(temporary).catch(() => {}) }
+  try { await createPrivateFile(temporary, bytes); handle = await open(temporary, 'r+'); await handle.sync(); await handle.close(); handle = undefined; await settings.beforeManifestRename?.(`${path}.lock`); await commit(); await rename(temporary, path) } finally { await handle?.close().catch(() => {}); await unlink(temporary).catch(() => {}) }
 }
-export async function writeHandleFileLocked(path: string, tenant: string, mutate: (file: ManifestHandleFile) => void | ManifestHandleFile | Promise<void | ManifestHandleFile>): Promise<void> {
+async function writeHandleFileLocked(path: string, tenant: string, mutate: (file: ManifestHandleFile) => void | ManifestHandleFile | Promise<void | ManifestHandleFile>): Promise<void> {
   // Refuse before any path check, so a Windows caller gets the platform reason rather
   // than a private-path refusal from the parent check that runs next.
   if (process.platform === 'win32') throw unsupportedOnWindows()
@@ -202,9 +199,13 @@ export async function writeHandleFileLocked(path: string, tenant: string, mutate
     if (JSON.stringify(foreign(next, tenant)) !== JSON.stringify(beforeForeign)) throw new Error('manifest mutation changed another tenant block')
     await writeAtomic(path, next, commit)
     if (process.platform !== 'win32' && ((await lstat(path)).mode & 0o777) !== HANDLE_FILE_CONTRACT.mode) throw new Error('manifest readback mode is not 0600')
-    if (!(await checkPrivatePath(path)).ok) throw new Error('manifest readback mode is not 0600')
+    if (!(await checkPath(path)).ok) throw new Error('manifest readback mode is not 0600')
     const readback = await readManifest(path)
     if (JSON.stringify(readback) !== JSON.stringify(next)) throw new Error('manifest readback differs')
     if (JSON.stringify(foreign(readback, tenant)) !== JSON.stringify(beforeForeign)) throw new Error('manifest readback changed another tenant block')
   })
 }
+  return { withManifestLock, writeHandleFileLocked }
+}
+
+export const { withManifestLock, writeHandleFileLocked } = createManifestLock()

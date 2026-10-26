@@ -1620,7 +1620,7 @@ fn a_crash_after_the_outgoing_commit_leaves_the_identical_bytes_for_resume() {
     let label = "federation-outgoing-crash";
     let (root, store) = rig(label, 231);
     let committed = store
-        .commit_outgoing_transfer_audited(&new_outgoing(TRANSFER_ID, 5), None)
+        .commit_outgoing_transfer_audited(&new_outgoing(TRANSFER_ID, 5))
         .expect("commit");
     drop(store);
 
@@ -1663,7 +1663,7 @@ fn a_fault_between_the_outgoing_row_and_transfer_out_leaves_neither() {
     let (_root, store) = rig("federation-outgoing-fault", 232);
     let fault = || true;
     let result =
-        store.commit_outgoing_transfer_audited(&new_outgoing(TRANSFER_ID, 6), Some(&fault));
+        store.commit_outgoing_transfer_with_fault(&new_outgoing(TRANSFER_ID, 6), Some(&fault));
     assert!(
         result.is_err(),
         "the injected fault fails the commit: {result:?}"
@@ -1892,7 +1892,7 @@ fn transfer_key_recovery_rejects_pending_and_abandons_outgoing_in_one_transactio
         .insert_incoming_transfer(&new_incoming(OTHER, TRANSFER_ID, 31))
         .unwrap();
     store
-        .commit_outgoing_transfer_audited(&new_outgoing(TRANSFER_ID_2, 32), None)
+        .commit_outgoing_transfer_audited(&new_outgoing(TRANSFER_ID_2, 32))
         .unwrap();
     let new_key = VaultRecord::new_static(
         CredentialKind::KemKey,

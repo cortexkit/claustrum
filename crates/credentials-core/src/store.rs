@@ -15773,8 +15773,9 @@ mod migration_10_tests {
         let secret = enrollment_secret(11);
         let secret_hash = enrollment_secret_hash(&secret).expect("hash secret");
         let base = now_ms();
+        let terminal_cycles = ENROLLMENT_TERMINAL_MAX_ROWS + 8;
         let chain_before_expiry = store.read_audit(None).expect("audit").len();
-        for index in 0..1000_i64 {
+        for index in 0..terminal_cycles {
             store
                 .propose_enrollment_at(
                     "expiry-cycle",
@@ -15789,10 +15790,10 @@ mod migration_10_tests {
             "propose and expiry never enter the HMAC chain"
         );
 
-        let denial_base = base + 1001 * (ENROLLMENT_PENDING_TTL_MS + 1);
+        let denial_base = base + (terminal_cycles + 1) * (ENROLLMENT_PENDING_TTL_MS + 1);
         let mut saw_below_terminal_cap = false;
         let mut saw_terminal_cap = false;
-        for index in 0..1000_i64 {
+        for index in 0..terminal_cycles {
             let proposal = store
                 .propose_enrollment_at("denial-cycle", &secret_hash, denial_base + index)
                 .expect("terminal rows neither block a name nor consume queue capacity");
@@ -15848,7 +15849,7 @@ mod migration_10_tests {
             .expect("legitimate pending row");
         let chain_before_wrong_secrets = store.read_audit(None).expect("audit").len();
         let wrong = enrollment_secret(12);
-        for _ in 0..1000 {
+        for _ in 0..(AUTH_EVENTS_PER_CREDENTIAL + 8) {
             assert!(matches!(
                 store.poll_enrollment_at(&legitimate.request_id, &wrong, denial_base + 2_001),
                 Err(EnrollmentError::Refused(EnrollmentRefusal::NotFound))

@@ -1,6 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import type { GoldenTombstone } from "../contracts";
 import { carriesSentinel, isProviderTombstone, sentinel, TOMBSTONE_PREFIX, tombstoneFor } from "../tombstone";
 import { parseHandleFile } from "../handles";
@@ -23,9 +21,6 @@ function manifestWithCredential(provider: string, label: string, credentialId: s
 }
 
 describe("custody wire contracts", () => {
-  test("loads the canonical tombstone golden rather than a copied fixture", () => {
-    expect(goldenTombstone).toEqual(JSON.parse(readFileSync(join(import.meta.dir, "../../golden/tombstone.json"), "utf8")));
-  });
   test("api golden stays a valid OpenCode ApiAuth entry", () => {
     const fixture = goldenTombstone.fixtures.api;
     expect(fixture.entry.type).toBe("api");

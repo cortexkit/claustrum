@@ -37,7 +37,10 @@ use credentials_core::record::{CredentialKind, RecordState, VaultRecord};
 use credentials_core::store::{EncryptedStore, SetCategoryMode, SetProvidersMode};
 use serde_json::{json, Value};
 
-use crate::support::{wall_ms, HomeStore, Ledger, Reply, Responder, TwoVaults, VaultFixture};
+use crate::support::{
+    poll_once, resolved_after_advance, wall_ms, Held, HomeStore, Ledger, Reply, Responder,
+    TwoVaults, VaultFixture,
+};
 
 const API_ID: &str = "apikey:openai";
 const PAIR_A: &str = "pair-a";
@@ -258,16 +261,14 @@ fn tid(index: u32) -> String {
 // ---------------------------------------------------------------------------------
 
 /// What the stand-in does with one delivery, when a test does not want B's answer.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 enum Step {
     /// B's real answer.
     Forward,
     /// B processes the delivery, then the reply is lost: the lost acknowledgement.
-    ForwardThenDrop,
+    ForwardThenDrop(Held),
     /// The receiver is never reached: callosum refuses with this class.
     Unreachable(&'static str),
-    /// The delivery is never answered.
-    Stall,
 }
 
 type Script = Arc<Mutex<VecDeque<Step>>>;
@@ -280,8 +281,7 @@ fn deliver_responder(home: Arc<HomeVault>, sender: String, script: Script) -> Re
         Box::pin(async move {
             match step {
                 Step::Unreachable(code) => Reply::RouteRefusal(code.into()),
-                Step::Stall => Reply::Stall,
-                Step::Forward | Step::ForwardThenDrop => {
+                Step::Forward | Step::ForwardThenDrop(_) => {
                     let reply = match home.serve(&sender, OP_TRANSFER_DELIVER, &params).await {
                         HomeAnswer::Reply(body) => Reply::Ok(body),
                         HomeAnswer::InvalidParams(_) => {
@@ -289,7 +289,7 @@ fn deliver_responder(home: Arc<HomeVault>, sender: String, script: Script) -> Re
                         }
                     };
                     match step {
-                        Step::ForwardThenDrop => Reply::Stall,
+                        Step::ForwardThenDrop(held) => Reply::Hold(held),
                         _ => reply,
                     }
                 }
@@ -675,8 +675,18 @@ async fn a_lost_acknowledgement_resolves_stepwise_through_resume_and_accept() {
     rig.api_key_on_a(API_ID, b"sk-lost-ack");
 
     // Deliver with the reply dropped: one pending row, one transfer_out, no transfer_in.
-    rig.then(Step::ForwardThenDrop);
-    let sent = rig.a.transfers.send(API_ID, &rig.b.member).await.unwrap();
+    let lost_ack = Held::new();
+    rig.then(Step::ForwardThenDrop(lost_ack.clone()));
+    let sender = Transfers::new(Arc::clone(&rig.a.home_store.store)).with_budget(SEND_BUDGET);
+    assert!(sender.attach_outbound(rig.vaults.a.outbound.clone()));
+    let to = rig.b.member.clone();
+    let mut send = tokio::spawn(async move { sender.send(API_ID, &to).await });
+    lost_ack.arrived_before(&mut send).await;
+    tokio::time::pause();
+    let sent = resolved_after_advance(send, SEND_BUDGET + Duration::from_millis(1))
+        .await
+        .unwrap();
+    tokio::time::resume();
     assert_eq!(refused_code(&sent.reply), "home_unreachable");
     assert!(sent.row_kept);
     assert_eq!(rig.b.pending(), 1);
@@ -1524,26 +1534,38 @@ async fn a_send_with_a_slow_key_lookup_and_a_stalled_delivery_answers_inside_the
             "vault_transfer_x25519": { "pub": hex(&rig.b.public), "version": "1" },
         } },
     }] });
+    let lookup = Held::new();
+    let delivery = Held::new();
     rig.vaults.callosum.answer(
         crate::support::TARGET_MODULE,
         "callosum.peer_keys_read",
-        Reply::Delayed(Duration::from_secs(4), Box::new(Reply::Ok(peers))),
+        Reply::Hold(lookup.clone()),
     );
-    rig.then(Step::Stall);
+    rig.vaults.callosum.answer(
+        crate::support::TARGET_MODULE,
+        OP_TRANSFER_DELIVER,
+        Reply::Hold(delivery.clone()),
+    );
     // The production budget, not the rig's shortened one.
     let sender = Transfers::new(Arc::clone(&rig.a.home_store.store));
     assert!(sender.attach_outbound(rig.vaults.a.outbound.clone()));
-    let started = std::time::Instant::now();
-    let sent = sender
-        .send(API_ID, &rig.b.member)
+    let to = rig.b.member.clone();
+    let mut send = tokio::spawn(async move { sender.send(API_ID, &to).await });
+    lookup.arrived_before(&mut send).await;
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(6)).await;
+    assert!(!send.is_finished(), "the key lookup is still held");
+    tokio::time::resume();
+    lookup.release(Reply::Ok(peers));
+    delivery.arrived_before(&mut send).await;
+    assert!(
+        poll_once(&mut send).await.is_none(),
+        "the delivery is still held"
+    );
+    tokio::time::pause();
+    let sent = resolved_after_advance(send, Duration::from_millis(4_001))
         .await
         .expect("a definite reply");
-    let elapsed = started.elapsed();
-    assert!(elapsed < Duration::from_secs(15), "{elapsed:?}");
-    assert!(
-        elapsed >= Duration::from_secs(4),
-        "the lookup really was slow: {elapsed:?}"
-    );
     assert_eq!(refused_code(&sent.reply), "home_unreachable");
     assert!(sent.row_kept);
     assert_eq!(rig.deliveries().len(), 1);

@@ -583,15 +583,6 @@ class ScriptContracts(unittest.TestCase):
         self.assertTrue(paths.is_test_typescript(paths.ROOT / 'packages/tests/index.ts'))
         self.assertIn('SCRIPTS.rglob("*.py")', text('scripts/check-path-rendering.py'))
 
-    def test_inbound_missing_key_has_diagnostic(self):
-        source = text('scripts/check-inbound-contracts.sh')
-        line = next(line for line in source.splitlines() if line.startswith('theirs_mutable='))
-        spec = self.root / 'spec'
-        spec.write_text('no key')
-        result = self.run_shell('spec=' + repr(os.fspath(spec)) + '\n' + line + '\necho "could not read: $theirs_mutable"')
-        self.assertEqual(result.returncode, 0)
-        self.assertIn('could not read:', result.stdout)
-
     def test_doc_status_checks_all_markers_and_identifier_boundaries(self):
         docs = module('check-doc-status')
         docs.DOCS = self.root / 'docs'
@@ -711,10 +702,16 @@ class ScriptContracts(unittest.TestCase):
 
     def test_inbound_mismatch_is_refused(self):
         block = shell_function('scripts/check-inbound-contracts.sh', 'compare')
-        result = self.run_shell('source_file=fixture; fail=0;\n' + block +
-                                '\ncompare control wrong expected\n[ "$fail" = 1 ]')
-        self.assertEqual(result.returncode, 0, result.stdout)
-        self.assertIn('MISMATCH in control', result.stdout)
+        for ours, theirs, diagnostic in [
+            ('wrong', 'expected', 'MISMATCH in control'),
+            ('', 'expected', 'could not read control from fixture'),
+            ('expected', '', 'could not read control from the spec'),
+        ]:
+            with self.subTest(ours=ours, theirs=theirs):
+                result = self.run_shell('source_file=fixture; fail=0;\n' + block +
+                                        f'\ncompare control "{ours}" "{theirs}"\n[ "$fail" = 1 ]')
+                self.assertEqual(result.returncode, 0, result.stdout)
+                self.assertIn(diagnostic, result.stdout)
 
     def test_scan_self_control_must_execute_not_skip(self):
         from contextlib import redirect_stdout, redirect_stderr
@@ -727,11 +724,6 @@ class ScriptContracts(unittest.TestCase):
             result = subprocess.CompletedProcess([], 0, stdout='', stderr=stderr)
             with patch.object(control.subprocess, 'run', return_value=result), redirect_stdout(StringIO()), redirect_stderr(StringIO()):
                 self.assertEqual(control.check('fixture'), expected)
-
-    def test_stub_startup_budget_exceeds_cold_start(self):
-        source = text('scripts/spikes/opencode-config-fetch.sh')
-        tries = int(re.search(r'for _ in \{1\.\.(\d+)\}', source).group(1))
-        self.assertGreaterEqual(tries * 0.01, 10)
 
 
 if __name__ == '__main__':

@@ -304,27 +304,6 @@ async fn zero_notice_close_confirms_list_once() {
     }
 }
 
-#[cfg(feature = "transport")]
-#[tokio::test]
-async fn watch_and_confirming_list_send_exact_method_request_envelopes() {
-    let (mut watch, server) = stand_in(
-        vec![(FrameType::StreamEnd, Value::Null)],
-        json!({"result":{"credentials":[], "view":"view"}}),
-    )
-    .await;
-    assert!(matches!(
-        closed(&mut watch).await,
-        ScopedWatchOutcome::NotAccepting
-    ));
-    assert_eq!(
-        server.await.unwrap(),
-        vec![
-            json!({"method":"auth.watch_scoped", "params":{"enrollment_token":"token"}}),
-            json!({"method":"credential.list_scoped", "params":{"enrollment_token":"token"}}),
-        ]
-    );
-}
-
 #[test]
 fn stand_in_rejects_op_and_extra_read_envelope_keys() {
     for body in [

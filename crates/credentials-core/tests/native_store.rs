@@ -3,10 +3,6 @@
 //! requires a disposable bus/keyring so it cannot lock a developer's login keyring.
 #![forbid(unsafe_code)]
 
-// The real-store bodies exist only where a native store exists, but each test is
-// registered on every OS. That keeps the workspace test count the same on macOS,
-// Linux and Windows, which scripts/gate.sh compares against one minimum count to
-// catch tests that silently stop running.
 #[cfg(any(target_os = "linux", windows))]
 mod native {
     use credentials_core::{
@@ -15,13 +11,12 @@ mod native {
     };
     use std::path::{Path, PathBuf};
 
-    fn enabled() -> bool {
-        if std::env::var("CK_NATIVE_STORE_TESTS").as_deref() == Ok("1") {
-            true
-        } else {
-            eprintln!("SKIPPING native store: set CK_NATIVE_STORE_TESTS=1 to test real OS custody");
-            false
-        }
+    fn require_enabled() {
+        assert_eq!(
+            std::env::var("CK_NATIVE_STORE_TESTS").as_deref(),
+            Ok("1"),
+            "native custody tests require CK_NATIVE_STORE_TESTS=1 and an available OS store"
+        );
     }
 
     struct Fixture {
@@ -83,9 +78,7 @@ mod native {
     }
 
     pub fn round_trip() {
-        if !enabled() {
-            return;
-        }
+        require_enabled();
         let fixture = Fixture::new();
         let config = fixture.config();
         let store = fixture.source.backend();
@@ -135,19 +128,18 @@ mod native {
 
     #[cfg(target_os = "linux")]
     pub fn locked_refusal() {
-        if !enabled() {
-            return;
-        }
-        // First prove the Secret Service is reachable (a load must succeed), so an
-        // unreachable service fails here even when the lock part below is skipped.
+        require_enabled();
+        // Prove the service is reachable before locking the disposable collection,
+        // so an unavailable service cannot be mistaken for a locked-store refusal.
         let mut fixture = Fixture::new();
         let backend = fixture.source.backend();
         backend.load_slot(&fixture.dir, KeySlot::Current).unwrap();
         fixture.cleanup().unwrap();
-        if std::env::var("CK_NATIVE_STORE_DISPOSABLE_SESSION").as_deref() != Ok("1") {
-            eprintln!("SKIPPING lock test: requires CK_NATIVE_STORE_DISPOSABLE_SESSION=1 on an isolated bus/keyring");
-            return;
-        }
+        assert_eq!(
+            std::env::var("CK_NATIVE_STORE_DISPOSABLE_SESSION").as_deref(),
+            Ok("1"),
+            "lock test requires CK_NATIVE_STORE_DISPOSABLE_SESSION=1 on an isolated bus/keyring"
+        );
         // No items were created. After locking, cleanup must not access the collection.
         fixture.clean_store = false;
         let connection = zbus::blocking::Connection::session().unwrap();
@@ -193,17 +185,17 @@ mod native {
 }
 
 #[test]
+#[cfg(any(target_os = "linux", windows))]
+#[ignore = "requires CK_NATIVE_STORE_TESTS=1 and an available native custody service"]
 fn native_store_round_trip_both_slots_and_rotation() {
     #[cfg(any(target_os = "linux", windows))]
     native::round_trip();
-    #[cfg(not(any(target_os = "linux", windows)))]
-    eprintln!("SKIPPING native store: this OS keeps the master key in the keychain");
 }
 
 #[test]
+#[cfg(target_os = "linux")]
+#[ignore = "requires CK_NATIVE_STORE_TESTS=1 and CK_NATIVE_STORE_DISPOSABLE_SESSION=1 on an isolated bus/keyring"]
 fn secret_service_locked_collection_refuses_without_prompt() {
     #[cfg(target_os = "linux")]
     native::locked_refusal();
-    #[cfg(not(target_os = "linux"))]
-    eprintln!("SKIPPING: the Secret Service lock test runs only on Linux");
 }

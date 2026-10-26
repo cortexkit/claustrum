@@ -1136,15 +1136,31 @@ impl EncryptedStore {
     /// before any delivery attempt, so a crash after it leaves a row `send --resume`
     /// redelivers byte for byte, and a failure here leaves neither row and sends
     /// nothing.
-    ///
-    /// `fault_after_insert` is a test seam: when it returns true, the transaction fails
-    /// between the row insert and the audit write, which is how a test proves the two
-    /// cannot commit apart. Production passes `None`, or (from `Transfers::send`) a hook
-    /// that returns false unless a test configured a fault.
     pub fn commit_outgoing_transfer_audited(
         &self,
         new: &NewOutgoingTransfer,
+    ) -> Result<OutgoingTransfer, StoreOpError> {
+        self.commit_outgoing_transfer_inner(
+            new,
+            #[cfg(any(test, feature = "test-support"))]
+            None,
+        )
+    }
+
+    /// Fail between the row insert and audit write to check transaction rollback.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn commit_outgoing_transfer_with_fault(
+        &self,
+        new: &NewOutgoingTransfer,
         fault_after_insert: Option<&dyn Fn() -> bool>,
+    ) -> Result<OutgoingTransfer, StoreOpError> {
+        self.commit_outgoing_transfer_inner(new, fault_after_insert)
+    }
+
+    fn commit_outgoing_transfer_inner(
+        &self,
+        new: &NewOutgoingTransfer,
+        #[cfg(any(test, feature = "test-support"))] fault_after_insert: Option<&dyn Fn() -> bool>,
     ) -> Result<OutgoingTransfer, StoreOpError> {
         check_member_id(&new.receiver_member)?;
         if new.credential_id.is_empty() {
@@ -1177,6 +1193,7 @@ impl EncryptedStore {
             if inserted == 0 {
                 return Ok(Err(StoreOpError::AlreadyExists));
             }
+            #[cfg(any(test, feature = "test-support"))]
             if fault_after_insert.is_some_and(|fault| fault()) {
                 return Ok(Err(StoreOpError::Encode(
                     "injected fault between the outgoing row and its audit row".into(),

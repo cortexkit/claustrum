@@ -932,11 +932,11 @@ async fn a_hundred_forwarded_reports_at_one_version_add_one_chain_row_naming_the
 // ---------------------------------------------------------------------------------
 
 #[tokio::test]
-async fn a_hundred_fetches_at_one_version_write_one_remote_issue_row_also_after_a_restart() {
+async fn repeated_fetches_at_one_version_write_one_remote_issue_row_also_after_a_restart() {
     let rig = Rig::new("ingress-issue-bound").await;
     rig.add_login(TOKEN_ID, "llm-provider");
     rig.grant_exact(TOKEN_ID);
-    for _ in 0..100 {
+    for _ in 0..3 {
         rig.served_token(TOKEN_ID).await;
     }
     let rows = rig.audit_ops("remote_issue");

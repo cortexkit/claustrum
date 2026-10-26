@@ -1,6 +1,6 @@
 import { readerFixtureOptions, withSharedAncestorGroup } from './ancestor-fixture.js'
 import { createPrivateDirectory, createPrivateFile, checkOwnerOnlyPathAsync } from '@cortexkit/store'
-import { privatePathContext } from '../private-path.js'
+import { privatePathContext, readHandleFile } from './injected-files.js'
 import { afterAll, afterEach, describe, expect, test } from 'bun:test'
 import { chmod, mkdir, rm, symlink, writeFile } from 'node:fs/promises'
 import { mkdtempSync, rmSync } from 'node:fs'
@@ -12,7 +12,6 @@ import {
   defaultHandleFilePath,
   handleFileRevision,
   parseHandleFile,
-  readHandleFile,
   type OpenCodeHandleFileV1,
 } from '../handles.js'
 import { throwerOf } from './settle'

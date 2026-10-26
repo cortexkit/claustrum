@@ -25,7 +25,9 @@
 //! This file is compiled into the daemon and into the test-only library, so it depends
 //! on nothing in the daemon outside `federation`.
 
+#[cfg(any(test, feature = "test-support"))]
 use std::future::Future;
+#[cfg(any(test, feature = "test-support"))]
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -678,6 +680,7 @@ pub enum HomeAnswer {
 
 /// A future the home awaits between the serving read and the `remote_issue` audit
 /// transaction. See [`HomeVault::with_issue_audit_gate`].
+#[cfg(any(test, feature = "test-support"))]
 pub type IssueAuditGate = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
 /// This vault in its role as home: it answers other members' federation ops.
@@ -690,6 +693,7 @@ pub struct HomeVault {
     /// on the same clock that decided to defer. Real time unless a test replaces both.
     cooldown_clock: Arc<dyn Fn() -> i64 + Send + Sync>,
     op_deadline: Duration,
+    #[cfg(any(test, feature = "test-support"))]
     issue_audit_gate: Option<IssueAuditGate>,
 }
 
@@ -709,6 +713,7 @@ impl HomeVault {
             callosum: OnceLock::new(),
             cooldown_clock: Arc::new(wall_now_ms),
             op_deadline: HOME_OP_DEADLINE,
+            #[cfg(any(test, feature = "test-support"))]
             issue_audit_gate: None,
         }
     }
@@ -724,6 +729,7 @@ impl HomeVault {
     /// transaction. A test seam with no production caller: it is how a test pauses a
     /// fetch at exactly that point to re-create or refresh the record underneath it
     /// and prove the audit transaction notices.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn with_issue_audit_gate(mut self, gate: IssueAuditGate) -> Self {
         self.issue_audit_gate = Some(gate);
         self
@@ -853,6 +859,7 @@ impl HomeVault {
             return Err(TTL_UNSATISFIABLE);
         }
         let plaintext = self.token_reply(member, &aad.credential_id, &served)?;
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(gate) = self.issue_audit_gate.as_ref() {
             gate().await;
         }

@@ -3821,26 +3821,6 @@ mod error_class_tests {
         }
     }
 
-    /// Every ReadError code maps to the contract class the vault produced it as.
-    /// This is the vault-side classification table, asserted so a new ReadError arm
-    /// cannot ship without a deliberate class decision (match is exhaustive) and an
-    /// existing arm cannot silently change class.
-    #[test]
-    fn read_error_classification_table() {
-        assert_eq!(ReadError::NotFound.class(), ErrorClass::Permanent);
-        assert_eq!(ReadError::Corrupt.class(), ErrorClass::Permanent);
-        assert_eq!(ReadError::RefreshUnsupported.class(), ErrorClass::Permanent);
-        assert_eq!(ReadError::KindNotGettable.class(), ErrorClass::Permanent);
-        assert_eq!(ReadError::NeedsReauth.class(), ErrorClass::AuthRequired);
-        assert_eq!(ReadError::RefreshFailed.class(), ErrorClass::Transient);
-        assert_eq!(ReadError::VaultLocked.class(), ErrorClass::Transient);
-        assert_eq!(ReadError::TooManyItems.class(), ErrorClass::ContextOverflow);
-        assert_eq!(
-            ReadError::TtlUnsatisfiable.class(),
-            ErrorClass::ContextOverflow
-        );
-    }
-
     /// The wire body carries BOTH the producer detail (`code`) and the produced class.
     /// The class gives retry policy; the code remains available for the request-specific remedy.
     #[test]

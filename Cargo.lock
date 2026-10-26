@@ -542,6 +542,7 @@ dependencies = [
  "cortexkit-store",
  "cortexkit-test-support",
  "credentials-core",
+ "credentials-module",
  "dialoguer",
  "libc",
  "reqwest",

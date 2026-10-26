@@ -162,6 +162,7 @@ type HandleFileDescriptor = {
   close(): Promise<void>
 }
 export type HandleFileIo = {
+  pathOptions?: Parameters<typeof checkPrivatePath>[1]
   stat?: (path: string) => Promise<HandleFileStat>
   lstat?: (path: string) => Promise<HandleFileStat>
   readFile?: (path: string, encoding: 'utf8') => Promise<string>
@@ -243,10 +244,10 @@ async function readHandleSnapshot(path = defaultHandleFilePath(), io: HandleFile
       const value = await io.stat!(candidate)
       return { ...value, isDirectory: () => value.isDirectory?.() ?? false }
     })
-    const protection = await checkPrivatePath(process.platform === 'win32' ? path : dirname(path), fixtureStat ? {
+    const protection = await checkPrivatePath(process.platform === 'win32' ? path : dirname(path), io.pathOptions ?? (fixtureStat ? {
       euid: expectedUid,
       fs: { stat: fixtureStat, lstat: fixtureStat },
-    } : undefined)
+    } : undefined))
     if (!protection.ok) invalid(notPrivate('handle file folder', protection))
     let source: string
     try {

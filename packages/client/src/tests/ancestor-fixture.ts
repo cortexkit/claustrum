@@ -2,7 +2,7 @@ import { mkdtemp, rm, stat, readFile, writeFile } from 'node:fs/promises'
 import { createPrivateDirectory, type OwnerOnlyPathAsyncOptions } from '@cortexkit/store'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { privatePathContext } from '../private-path.js'
+import { privatePathContext } from './injected-files.js'
 
 // Handle-reader unit tests inject file and parent stats. A root-owned 0755 ancestor
 // passes @cortexkit/store's path check, isolating descriptor reads and validation order.

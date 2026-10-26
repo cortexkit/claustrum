@@ -48,6 +48,6 @@ export XDG_DATA_HOME="$root/data" XDG_CONFIG_HOME="$root/config" XDG_CACHE_HOME=
 unset GNOME_KEYRING_CONTROL DBUS_SESSION_BUS_ADDRESS
 dbus-run-session -- bash -euo pipefail -c '
   printf "ci-test-only-password\n" | gnome-keyring-daemon --unlock --components=secrets
-  CK_NATIVE_STORE_TESTS=1 cargo test --locked -p credentials-core --test native_store -- --nocapture --test-threads=1 --skip secret_service_locked_collection_refuses_without_prompt
-  CK_NATIVE_STORE_TESTS=1 CK_NATIVE_STORE_DISPOSABLE_SESSION=1 cargo test --locked -p credentials-core --test native_store secret_service_locked_collection_refuses_without_prompt -- --exact --nocapture
+  CK_NATIVE_STORE_TESTS=1 cargo test --locked -p credentials-core --test native_store -- --ignored --nocapture --test-threads=1 --skip secret_service_locked_collection_refuses_without_prompt
+  CK_NATIVE_STORE_TESTS=1 CK_NATIVE_STORE_DISPOSABLE_SESSION=1 cargo test --locked -p credentials-core --test native_store secret_service_locked_collection_refuses_without_prompt -- --ignored --exact --nocapture
 '

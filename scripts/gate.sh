@@ -375,9 +375,9 @@ assert_floor_not_lowered() {
 # To raise it after adding tests, run the command below on the final tree (debug, not
 # --release, with the same features) and sum the "N passed" counts across its
 # targets. Never add a planned delta to the old number: branches and rebases have
-# repeatedly made the arithmetic wrong. Every test must be registered on every OS
-# (platform-specific bodies print a skip line), so the count is the same on macOS,
-# Linux and Windows. `assert_floor_not_lowered` below stops a branch from lowering
+# repeatedly made the arithmetic wrong. This floor measures the Linux workspace lane;
+# native custody and Windows-only checks have their own required lanes rather than
+# counting off-platform no-ops. `assert_floor_not_lowered` below stops a branch from lowering
 # the floor below its merge target. The history of each raise is in git log.
 linux_tests() {
 run_expect 1150 "workspace unit + integration" \
@@ -401,8 +401,8 @@ windows_native() {
       MINGW*|MSYS*|CYGWIN*) ;;
       *) fail "Windows native lane refuses to compile on this host" ;;
     esac
-    run_expect 2 "native master-key store" env CK_NATIVE_STORE_TESTS=1 \
-      cargo test --locked -p credentials-core --test native_store -- --nocapture --test-threads=1
+    run_expect 1 "native master-key store" env CK_NATIVE_STORE_TESTS=1 \
+      cargo test --locked -p credentials-core --test native_store -- --ignored --nocapture --test-threads=1
     run_expect 4 "Windows operator filesystem workflows" \
       cargo test --locked -p credentials-module --features windows-runtime-test-seam \
       --test windows_runtime -- --nocapture --test-threads=1

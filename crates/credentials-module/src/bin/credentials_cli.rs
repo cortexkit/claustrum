@@ -7702,10 +7702,9 @@ mod deposit_cli_tests {
     // A child test process runs the production argv parser and exit/stderr handler,
     // so CLI tests can live beside the binary without requiring a prebuilt artifact.
     #[test]
+    #[ignore = "subprocess argv-parser helper; invoked by deposit CLI tests"]
     fn cli_child() {
-        let Ok(raw) = std::env::var("CK_AUTH_TEST_ARGV") else {
-            return;
-        };
+        let raw = std::env::var("CK_AUTH_TEST_ARGV").expect("child helper needs CK_AUTH_TEST_ARGV");
         let args: Vec<String> = serde_json::from_str(&raw).unwrap();
         let code = finish(run_args(args));
         let value = (0..=255u8)
@@ -7723,7 +7722,12 @@ mod deposit_cli_tests {
             root.join("master.key").display().to_string(),
         ]);
         Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "deposit_cli_tests::cli_child", "--nocapture"])
+            .args([
+                "--ignored",
+                "--exact",
+                "deposit_cli_tests::cli_child",
+                "--nocapture",
+            ])
             .env("CK_AUTH_TEST_ARGV", serde_json::to_string(&argv).unwrap())
             .output()
             .unwrap()

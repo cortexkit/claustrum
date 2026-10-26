@@ -1,5 +1,6 @@
-//! Real Windows filesystem custody checks; wrappers keep the test count portable.
+//! Real Windows filesystem custody checks, registered only on Windows.
 #![forbid(unsafe_code)]
+#![cfg(windows)]
 
 #[cfg(windows)]
 mod native {
@@ -90,24 +91,16 @@ mod native {
 fn windows_key_file_with_everyone_read_is_refused() {
     #[cfg(windows)]
     native::extra_key_grant_is_refused();
-    #[cfg(not(windows))]
-    eprintln!("SKIPPING windows_key_file_with_everyone_read_is_refused: requires Windows DACLs");
 }
 
 #[test]
 fn windows_created_key_file_has_protected_owner_only_dacl() {
     #[cfg(windows)]
     native::created_key_has_protected_dacl();
-    #[cfg(not(windows))]
-    eprintln!(
-        "SKIPPING windows_created_key_file_has_protected_owner_only_dacl: requires Windows DACLs"
-    );
 }
 
 #[test]
 fn windows_existing_vault_directory_loses_broad_inherited_grants() {
     #[cfg(windows)]
     native::inherited_vault_grants_are_tightened();
-    #[cfg(not(windows))]
-    eprintln!("SKIPPING windows_existing_vault_directory_loses_broad_inherited_grants: requires Windows DACLs");
 }

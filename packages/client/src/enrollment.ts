@@ -18,8 +18,9 @@ function validateTokenFile(value: EnrollmentTokenFile): void {
   }
 }
 
+export function createEnrollmentWriter(checkPath: typeof checkPrivatePath = checkPrivatePath) {
 async function refuseWritableAncestor(parent: string): Promise<void> {
-  const result = await checkPrivatePath(parent)
+  const result = await checkPath(parent)
   if (!result.ok) throw new Error(notPrivate('enrollment token folder', result))
 }
 
@@ -30,7 +31,7 @@ async function refuseWritableAncestor(parent: string): Promise<void> {
  * any bytes. @cortexkit/store checks that ancestors cannot be replaced by other
  * users, and on Windows also verifies the completed parent's owner-only ACL.
  */
-export async function writeEnrollmentTokenFile(path: string, value: EnrollmentTokenFile): Promise<void> {
+async function writeEnrollmentTokenFile(path: string, value: EnrollmentTokenFile): Promise<void> {
   validateTokenFile(value)
   path = resolve(path)
   const parent = dirname(path)
@@ -63,3 +64,7 @@ export async function writeEnrollmentTokenFile(path: string, value: EnrollmentTo
     if (created) await unlink(temporary).catch(() => undefined)
   }
 }
+  return writeEnrollmentTokenFile
+}
+
+export const writeEnrollmentTokenFile = createEnrollmentWriter()

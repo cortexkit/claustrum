@@ -1,14 +1,8 @@
-import { AsyncLocalStorage } from 'node:async_hooks'
 import { stat } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import { checkOwnerOnlyPathAsync, createPrivateDirectory, type OwnerOnlyPathAsyncOptions, type OwnerOnlyPathResult } from '@cortexkit/store'
 
-// Tests run the ownership check against fixture uids and account files through this
-// context, isolated per concurrent test. It is internal: the package `exports` map
-// exposes only the index, so consumers cannot reach it.
-export const privatePathContext = new AsyncLocalStorage<OwnerOnlyPathAsyncOptions>()
-
-export const checkPrivatePath = (path: string, options?: OwnerOnlyPathAsyncOptions) => checkOwnerOnlyPathAsync(resolve(path), privatePathContext.getStore() ?? options)
+export const checkPrivatePath = (path: string, options?: OwnerOnlyPathAsyncOptions) => checkOwnerOnlyPathAsync(resolve(path), options)
 
 /**
  * The refusal text for a path the store judged not private. It names the folder and the

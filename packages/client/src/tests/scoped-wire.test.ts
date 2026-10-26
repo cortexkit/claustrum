@@ -9,18 +9,21 @@ function fixtureReply(op: string): unknown {
   const fixture = JSON.parse(readFileSync(join(
     import.meta.dir,
     '../../../../crates/credentials-module/tests/fixtures/enrollment_wire_contract.json',
-  ), 'utf8')) as { operations: { op: string; success?: string[] }[] }
-  const successes = fixture.operations.find((row) => row.op === op)?.success
+  ), 'utf8')) as { operations: { op: string; success?: string[] | string; reply?: string }[] }
+  const row = fixture.operations.find((row) => row.op === op)
+  if (row?.reply !== undefined) return JSON.parse(row.reply)
+  const successes = row?.success
   if (!Array.isArray(successes) || successes.length !== 1) throw new Error(`no golden success for ${op}`)
   return JSON.parse(successes[0]!)
 }
 
-async function clientFor(op: string): Promise<ClaustrumClient> {
+async function clientFor(op: string, capture: (params: unknown) => void = () => {}): Promise<ClaustrumClient> {
   return ClaustrumClient.connect({
     logger: () => {},
     connector: async () => ({
-      call: async (_module: string, method: string) => {
+      call: async (_module: string, method: string, params: unknown) => {
         expect(method).toBe(op)
+        capture(params)
         return fixtureReply(op)
       },
       close: () => {},
@@ -29,14 +32,28 @@ async function clientFor(op: string): Promise<ClaustrumClient> {
 }
 
 test('producer get_scoped success decodes through the real client method', async () => {
-  const client = await clientFor('credential.get_scoped')
+  const requests: unknown[] = []
+  const client = await clientFor('credential.get_scoped', (params) => requests.push(params))
   try {
-    expect(await client.getScoped({ credentialId: 'oauth:anthropic', minTtlMs: 300_000 })).toEqual({
+    expect(await client.getScoped({ credentialId: 'oauth:anthropic', enrollmentToken: 'fixture-token', minTtlMs: 300_000 })).toEqual({
       material: 'fixture-not-a-secret',
       credentialId: 'oauth:anthropic',
       expiresAtMs: 4_102_444_800_000,
       recordVersion: 1,
     })
+    expect(requests).toEqual([{ credential_id: 'oauth:anthropic', enrollment_token: 'fixture-token', min_ttl_ms: 300_000 }])
+  } finally {
+    client.close()
+  }
+})
+
+test('list_scoped emits only the enrollment token and decodes the producer reply', async () => {
+  const requests: unknown[] = []
+  const client = await clientFor('credential.list_scoped', (params) => requests.push(params))
+  try {
+    const inventory = await client.listScoped('fixture-token')
+    expect(requests).toEqual([{ enrollment_token: 'fixture-token' }])
+    expect(inventory.rows.find((row) => row.id === 'oauth:anthropic')?.refreshAdapter).toBe('anthropic')
   } finally {
     client.close()
   }

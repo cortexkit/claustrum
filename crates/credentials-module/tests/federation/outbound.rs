@@ -5,7 +5,9 @@ use std::time::{Duration, Instant};
 
 use serde_json::json;
 
-use crate::support::{resolved_before_deadline, Held, Reply, TwoVaults};
+use crate::support::{
+    poll_once, resolved_after_advance, resolved_before_deadline, Held, Reply, TwoVaults,
+};
 use claustrum_module_probe::federation as fed;
 
 fn consumer_get() -> serde_json::Value {
@@ -314,27 +316,33 @@ async fn an_admin_op_budget_bounds_the_call_that_exhausts_it_inside_the_cli_wait
     let root = crate::support::temp_root("outbound-admin-budget");
     let vaults = TwoVaults::new(&root).await;
     let home = vaults.home_member().to_string();
-    vaults
-        .callosum
-        .answer("claustrum", "callosum.peer_keys_read", Reply::Stall);
+    let held = Held::new();
+    vaults.callosum.answer(
+        "claustrum",
+        "callosum.peer_keys_read",
+        Reply::Hold(held.clone()),
+    );
 
-    let started = Instant::now();
-    let first = call(
-        &vaults.b.outbound,
-        &home,
-        json!({ "method": "callosum.peer_keys_read", "params": {} }),
-        fed::ADMIN_OP_BUDGET,
-    )
-    .await;
-    assert!(first.is_err());
+    let client = vaults.b.outbound.clone();
+    let mut request = tokio::spawn(async move {
+        call(
+            &client,
+            &home,
+            json!({ "method": "callosum.peer_keys_read", "params": {} }),
+            fed::ADMIN_OP_BUDGET,
+        )
+        .await
+    });
+    held.arrived_before(&mut request).await;
+    tokio::time::pause();
+    tokio::time::advance(fed::ADMIN_OP_BUDGET - Duration::from_millis(100)).await;
     assert!(
-        started.elapsed() >= fed::ADMIN_OP_BUDGET,
-        "the admin budget is what ended the call"
+        poll_once(&mut request).await.is_none(),
+        "the admin budget has not expired"
     );
-    assert!(
-        started.elapsed() < Duration::from_secs(15),
-        "the operator still gets a definite reply inside the CLI's wait"
-    );
+    assert!(resolved_after_advance(request, Duration::from_millis(101))
+        .await
+        .is_err());
 }
 
 #[tokio::test]
@@ -396,31 +404,6 @@ fn a_clone_shares_the_launch_identity_of_the_client_it_came_from() {
     );
 }
 
-/// `OutboundClient::call` is the only way to reach the peer, so a deadline is not
-/// optional at any call site. This compiles only because `deadline` has no default: if
-/// `call` gained one, this call would silently lose its deadline and this test would
-/// stop proving the rule. The tripwire is deliberately a compile-time shape, and the
-/// body asserts the value it passed is the one the client enforces.
-#[test]
-fn the_only_way_to_call_the_peer_takes_a_deadline() {
-    fn takes_deadline<F>(_f: F)
-    where
-        F: for<'a> Fn(
-            &'a fed::OutboundClient,
-            &'a str,
-            fed::RouteCall,
-            Duration,
-        ) -> std::pin::Pin<
-            Box<
-                dyn std::future::Future<Output = Result<serde_json::Value, fed::OutboundError>>
-                    + 'a,
-            >,
-        >,
-    {
-    }
-    takes_deadline(|client, key, call, deadline| Box::pin(client.call(key, call, deadline)));
-}
-
 // ---------------------------------------------------------------------------------
 // Multiplexing: one connection carries many calls, and one slow or failing call must
 // not decide another call's outcome.
@@ -431,14 +414,12 @@ async fn a_slow_admin_call_does_not_delay_a_consumer_call_on_the_same_connection
     let root = crate::support::temp_root("outbound-mux-admin");
     let vaults = TwoVaults::new(&root).await;
     let home = vaults.home_member().to_string();
-    // An admin-class call the stand-in holds for 5 s, well past a consumer's budget.
+    // Hold the admin reply until the consumer has answered, proving actual overlap.
+    let held = Held::new();
     vaults.callosum.answer(
         "claustrum",
         "callosum.peer_keys_read",
-        Reply::Delayed(
-            Duration::from_secs(5),
-            Box::new(Reply::Ok(json!({ "keys": [] }))),
-        ),
+        Reply::Hold(held.clone()),
     );
     vaults.callosum.answer(
         "claustrum",
@@ -446,7 +427,7 @@ async fn a_slow_admin_call_does_not_delay_a_consumer_call_on_the_same_connection
         Reply::Ok(json!({ "payload": "tok" })),
     );
 
-    let admin = {
+    let mut admin = {
         let client = vaults.b.outbound.clone();
         let home = home.clone();
         tokio::spawn(async move {
@@ -459,8 +440,7 @@ async fn a_slow_admin_call_does_not_delay_a_consumer_call_on_the_same_connection
             .await
         })
     };
-    // Let the admin call reach the stand-in and start holding the connection's reply.
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    held.arrived_before(&mut admin).await;
 
     let started = Instant::now();
     call(
@@ -477,6 +457,9 @@ async fn a_slow_admin_call_does_not_delay_a_consumer_call_on_the_same_connection
         "the consumer call waited on the admin call: {elapsed:?}"
     );
 
+    assert!(!admin.is_finished(), "the admin reply is still held");
+    held.release(Reply::Ok(json!({ "keys": [] })));
+    held.answered_before(&mut admin).await;
     admin
         .await
         .expect("admin task joined")

@@ -520,33 +520,29 @@ mod native {
 }
 
 #[test]
+#[cfg(all(windows, feature = "windows-runtime-test-seam"))]
 fn windows_cli_bootstrap_put_remove_have_owner_only_custody() {
     #[cfg(all(windows, feature = "windows-runtime-test-seam"))]
     native::bootstrap_put_remove();
-    #[cfg(not(all(windows, feature = "windows-runtime-test-seam")))]
-    eprintln!("SKIPPING windows_cli_bootstrap_put_remove_have_owner_only_custody: requires Windows and windows-runtime-test-seam");
 }
 
 #[test]
+#[cfg(all(windows, feature = "windows-runtime-test-seam"))]
 fn windows_cli_rotation_promotes_key_file_and_rewraps_every_record() {
     #[cfg(all(windows, feature = "windows-runtime-test-seam"))]
     native::rotation();
-    #[cfg(not(all(windows, feature = "windows-runtime-test-seam")))]
-    eprintln!("SKIPPING windows_cli_rotation_promotes_key_file_and_rewraps_every_record: requires Windows and windows-runtime-test-seam");
 }
 
 #[test]
+#[cfg(all(windows, feature = "windows-runtime-test-seam"))]
 fn windows_cli_mode_ro_list_overlaps_a_real_put() {
     #[cfg(all(windows, feature = "windows-runtime-test-seam"))]
     native::reader_and_writer();
-    #[cfg(not(all(windows, feature = "windows-runtime-test-seam")))]
-    eprintln!("SKIPPING windows_cli_mode_ro_list_overlaps_a_real_put: requires Windows and windows-runtime-test-seam");
 }
 
 #[test]
+#[cfg(all(windows, feature = "windows-runtime-test-seam"))]
 fn windows_cli_second_put_is_refused_cleanly_by_the_writer_lease() {
     #[cfg(all(windows, feature = "windows-runtime-test-seam"))]
     native::second_writer();
-    #[cfg(not(all(windows, feature = "windows-runtime-test-seam")))]
-    eprintln!("SKIPPING windows_cli_second_put_is_refused_cleanly_by_the_writer_lease: requires Windows and windows-runtime-test-seam");
 }

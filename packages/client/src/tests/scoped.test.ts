@@ -31,18 +31,6 @@ function fixtureRequest(op: string): Record<string, unknown> {
 }
 
 describe('the client speaks the producer-pinned wire', () => {
-  test('list_scoped sends exactly the keys the vault accepts', () => {
-    expect(Object.keys(fixtureRequest('credential.list_scoped')).sort()).toEqual(['enrollment_token'])
-  })
-
-  test('get_scoped carries the id, the token and the ttl demand', () => {
-    expect(Object.keys(fixtureRequest('credential.get_scoped')).sort()).toEqual([
-      'credential_id',
-      'enrollment_token',
-      'min_ttl_ms',
-    ])
-  })
-
   /**
    * ABSENT MEANS ABSENT, and this is the arm that would have caught my own defect.
    * `ReportAuthFailureParams` serialised `"handle":null` until an emitter printed it --
@@ -62,36 +50,7 @@ describe('the client speaks the producer-pinned wire', () => {
   })
 
   /**
-   * THE REPLY SHAPE, WHICH THE REQUEST PINS CANNOT SEE.
-   *
-   * My own decoder read `credential_type` where the wire says `type` -- the Rust field is
-   * renamed -- and refused EVERY valid row, while every request-shape assertion above
-   * stayed green. A request fixture cannot catch a reply-decoding defect, and I wrote the
-   * decoder from the Rust struct instead of from a served payload.
-   */
-  test('the client decodes the row the producer actually emits', () => {
-    const fixture = JSON.parse(readFileSync(FIXTURE, 'utf8')) as {
-      operations: (FixtureRow & { row?: string })[]
-    }
-    const row = fixture.operations.find((entry) => entry.op === 'credential.list_scoped')?.row
-    if (row === undefined) throw new Error('no pinned row for credential.list_scoped')
-    const decoded = JSON.parse(row) as Record<string, unknown>
-
-    // Exactly the keys the client reads, named as the WIRE names them.
-    expect(Object.hasOwn(decoded, 'type')).toBe(true)
-    expect(Object.hasOwn(decoded, 'credential_type')).toBe(false)
-    expect(Object.hasOwn(decoded, 'id')).toBe(true)
-    expect(Object.hasOwn(decoded, 'credential_id')).toBe(false)
-    expect(decoded.refresh_adapter).toBe('anthropic')
-  })
-
-  /**
    * THE WHOLE REPLY, DECODED BY THE REAL DECODER.
-   *
-   * The key checks above pass on a decoder that reads the wrong key -- they assert what the
-   * fixture holds, not what this client does with it. A downstream consumer lost an
-   * evening to exactly that: its decoder, its stub and its fixture all spelled `kind` and
-   * agreed with each other while the vault had always sent `type`.
    *
    * The `reply` row is serialised by the producer's own test from the real
    * `ListScopedResult`, wrapped as it goes on the wire, with a `view` computed by the
@@ -118,6 +77,7 @@ describe('the client speaks the producer-pinned wire', () => {
     const bare = inventory.rows.find((row) => row.id === 'apikey:openrouter')
     expect(full?.credentialType).toBe('oauth')
     expect(full?.refreshAdapter).toBe('anthropic')
+    expect(full?.id).toBe('oauth:anthropic')
     expect(bare?.credentialType).toBe('apikey')
     expect(bare?.refreshAdapter).toBeUndefined()
     expect(full?.orgName).toBe('Example Org')

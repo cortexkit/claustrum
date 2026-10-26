@@ -44,6 +44,19 @@ REQUIRED_DAEMON_TESTS = [
     "public_key_matches_signatures_without_serializing_private_material",
     "every_daemon_output_site_is_enumerated",
     "no_shipped_source_reads_the_launch_nonce_directly",
+    # Agent-secret wire contract (docs/wire-contract-v1.md section 15).
+    "secret_phone_keys_register_request_and_result_key_sets_match_the_contract",
+    "secret_deposit_keys_request_and_result_key_sets_match_the_contract",
+    "secret_deposit_request_and_result_key_sets_match_the_contract",
+    "secret_approve_request_and_result_key_sets_match_the_contract",
+    "secret_list_request_and_result_key_sets_match_the_contract",
+    "secret_delete_request_and_result_key_sets_match_the_contract",
+    "secret_revoke_grant_request_and_result_key_sets_match_the_contract",
+    "secret_use_request_and_result_key_sets_match_the_contract",
+    "secret_statement_and_envelope_key_sets_match_the_contract_and_the_pinned_vectors",
+    "secret_error_codes_are_golden_and_match_the_doc_table",
+    "secret_caller_gate_and_op_matrix_matches_the_wire_contract",
+    "every_secret_golden_example_in_the_wire_contract_is_checked",
 ]
 
 

@@ -76,7 +76,7 @@ pub async fn serve(
     .await
 }
 
-async fn serve_with_lookup(
+pub(crate) async fn serve_with_lookup(
     store: Arc<EncryptedStore>,
     fingerprint: &str,
     method: &str,
@@ -177,7 +177,7 @@ pub fn valid_ulid(value: &str) -> bool {
             .all(|b| b"0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(&b))
 }
 
-fn parse(method: &str, params: &Value) -> Result<PhoneOperation, SecretError> {
+pub(crate) fn parse(method: &str, params: &Value) -> Result<PhoneOperation, SecretError> {
     match method {
         "secret.deposit_keys" | "secret.list" => {
             keys(params, &[], &[])?;

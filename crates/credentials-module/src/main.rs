@@ -2462,6 +2462,7 @@ pub mod probe {
 #[cfg(test)]
 mod tests {
     include!("watch_scoped_tests.rs");
+    include!("secret_contract_tests.rs");
     include!("../tests/fixtures/federation_read_producer.rs");
     #[test]
     fn daemon_uses_shared_record_and_key_path_override_rules() {
@@ -15553,8 +15554,8 @@ mod tests {
     /// the question in front of whoever does it. The count alone cannot see what an
     /// EXISTING site logs, so the test also reads every site's arguments and refuses any
     /// that call `.expose(`: a `Secret` can be read only through `expose()`, so that is
-    /// the one shape every secret read must take. Covers the six files linked into the
-    /// daemon binary.
+    /// the one shape every secret read must take. Covers the eight source files linked
+    /// into the daemon binary, the two agent-secret files each with its own controls.
     ///
     /// Patterns are built by concatenation so this test's own text is not counted, and
     /// `println!` is counted net of `eprintln!` because one contains the other.
@@ -15632,6 +15633,41 @@ mod tests {
             .into_iter()
             .any(|(_, args)| args.contains(&format!("{}{}", ".expose", "(")));
         assert!(flagged, "control: a planted secret read was not flagged");
+
+        // The agent-secret daemon files are new, so each one gets its own controls: its
+        // slot must hold that file (its module doc line is found there), and the same
+        // planted secret read appended to that file's own text must be flagged. Without
+        // these a mis-pointed include could scan another file twice and still pass.
+        for (slot, file, module_doc) in [
+            (
+                6,
+                "secret_phone.rs",
+                "//! The isolated phone channel: grammar, an uncached pairing lookup",
+            ),
+            (
+                7,
+                "secret_use.rs",
+                "//! The trusted sender boundary for secret release.",
+            ),
+        ] {
+            assert!(
+                sources[slot].starts_with(module_doc),
+                "positive control: slot {slot} does not hold {file}"
+            );
+            let with_plant = format!("{}\n{planted}\n", sources[slot]);
+            assert!(
+                output_site_arguments(&with_plant, &shapes)
+                    .into_iter()
+                    .any(|(_, args)| args.contains(&format!("{}{}", ".expose", "("))),
+                "control: a secret read planted in {file} was not flagged"
+            );
+            assert!(
+                !output_site_arguments(sources[slot], &shapes)
+                    .into_iter()
+                    .any(|(_, args)| args.contains(&format!("{}{}", ".expose", "("))),
+                "{file} logs a secret"
+            );
+        }
     }
 
     /// Each `<shape>!(` call in `source` and the text of its arguments, read up to the

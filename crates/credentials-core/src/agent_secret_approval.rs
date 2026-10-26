@@ -73,6 +73,34 @@ pub fn sorted_flow_methods(methods: &[String]) -> Result<Vec<String>, super::Val
     Ok(sorted)
 }
 
+/// The statement tags. A flow id equal to one of them cannot sit in a statement object: the
+/// JSON encoder writes a repeated key rather than refusing, and the bytes it produces are not
+/// the statement anyone meant to sign.
+const STATEMENT_TAGS: &[&str] = &["ck-secret-flow-statement/v1", "ck-secret-use-statement/v1"];
+
+/// Refuses a flow identity that cannot be stored as given. Every flow attribute is checked
+/// here, not only at the sender boundary, because approval signs one JSON object whose
+/// fields are these values: a value that reproduces the statement's own `v` key would
+/// collide with the tag below, and one holding a byte JSON cannot carry would fail to
+/// encode. The remaining checks are the ones the store's own grant lookup relies on, so a
+/// grant is never created for an identity it could not match later.
+fn flow_identity_encodes_unchanged(flow: &FlowIdentity) -> Result<(), super::ValidationError> {
+    if flow.flow_id.is_empty()
+        || STATEMENT_TAGS.contains(&flow.flow_id.as_str())
+        || !(1..=256).contains(&flow.install_id.len())
+        || !flow.install_id.bytes().all(|b| (0x20..=0x7e).contains(&b))
+        || flow.code_hash.len() != 64
+        || !flow
+            .code_hash
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        || !(1..=MAX_SECRET_JSON_INTEGER).contains(&flow.version)
+    {
+        return Err(super::ValidationError::InvalidParams);
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn flow_approval_statement(
     id: &str,
@@ -86,6 +114,10 @@ pub fn flow_approval_statement(
 ) -> Result<serde_json::Value, super::ValidationError> {
     use serde_json::json;
     flow.validate()?;
+    // Approval grants on the flow identity as given, so the encoder must be handed that
+    // identity exactly as it is stored; a value it cannot carry verbatim is refused rather
+    // than signed in some other form.
+    flow_identity_encodes_unchanged(flow)?;
     let use_scope = match (scope, methods) {
         (
             super::SecretScope::ApiKey {
@@ -123,10 +155,42 @@ pub struct ApprovalItem {
     pub statement_sha256: String,
 }
 
+/// Whether every element of the envelope's `items` array holds exactly `request_id` and
+/// `statement_sha256`. The rebuilt item serializes only those two keys, so each element must
+/// be byte-identical to its own canonical form; a key such as `duration` inside an item is
+/// not part of the envelope schema and makes the whole envelope `approval_invalid`.
+fn envelope_items_carry_only_their_two_keys(bytes: &[u8]) -> bool {
+    let parsed = serde_json::from_slice::<serde_json::Value>(bytes);
+    let Ok(parsed) = parsed else {
+        return false;
+    };
+    let Some(items) = parsed.get("items").and_then(serde_json::Value::as_array) else {
+        return false;
+    };
+    items.iter().all(|item| {
+        let rebuilt = serde_json::to_value(ApprovalItem {
+            request_id: item
+                .get("request_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            statement_sha256: item
+                .get("statement_sha256")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+        });
+        rebuilt.is_ok_and(|rebuilt| rebuilt == *item)
+    })
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ApprovalEnvelope {
     pub v: String,
+    /// One entry per answered request; `#[serde(deny_unknown_fields)]` on this struct does
+    /// not reach an element, so `verify` refuses items carrying extra keys itself. A key
+    /// inside an item, `duration` included, never takes part in approval.
     pub items: Vec<ApprovalItem>,
     pub decision: String,
     pub duration: String,
@@ -181,6 +245,7 @@ impl ApprovalEnvelope {
                         .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
                     || !ids.insert(&item.request_id)
             })
+            || !envelope_items_carry_only_their_two_keys(bytes)
             || envelope.canonical_bytes()? != bytes
         {
             return Err(invalid);

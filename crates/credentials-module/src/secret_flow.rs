@@ -32,6 +32,14 @@ fn admitted(principal: Option<&Principal>) -> bool {
     matches!(principal, Some(Principal::Reserved { module_id }) if module_id == "basal")
 }
 
+/// Whether `flow_id` carries one of the statement tags. An approval statement is one JSON
+/// object of ASCII keys, and the flow identity is one of its values: a flow id equal to the
+/// statement's own tag would take the `v` key's place in the object and cannot be signed as
+/// delivered.
+fn flow_id_reproduces_a_statement_tag(flow_id: &str) -> bool {
+    ["ck-secret-flow-statement/v1", "ck-secret-use-statement/v1"].contains(&flow_id)
+}
+
 fn invalid(store: &EncryptedStore, error: ValidationError) -> UseAnswer {
     store.record_secret_use_refusal(
         SecretSender::Basal,
@@ -81,6 +89,12 @@ pub fn serve_approval(
     let validation = (|| {
         validate_name(&parsed.name)?;
         parsed.flow.validate()?;
+        // The statement encoder embeds the flow id in a JSON object beside its own tag, so
+        // a flow id holding the statement's `v` value is refused at grammar rather than
+        // left to whoever encodes it.
+        if flow_id_reproduces_a_statement_tag(&parsed.flow.flow_id) {
+            return Err(ValidationError::InvalidParams);
+        }
         target.validate()?;
         // Even a null methods key is forbidden for a login target.
         if matches!(target, UseTarget::SiteLogin { .. }) && params.get("methods").is_some() {
@@ -200,6 +214,13 @@ pub fn serve_revoke(
             .flow_version
             .is_some_and(|v| !(1..=MAX_SECRET_JSON_INTEGER).contains(&v))
         || (params.get("flow_version").is_some() && parsed.flow_version.is_none())
+        // The key set is closed: an explicit null version has to be named as one, and no
+        // other key may ride along.
+        || params.as_object().is_some_and(|object| {
+            object
+                .keys()
+                .any(|key| !matches!(key.as_str(), "flow_install_id" | "flow_version"))
+        })
     {
         return invalid(store, ValidationError::InvalidParams);
     }

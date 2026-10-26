@@ -30,6 +30,10 @@ struct Pending {
 
 impl EncryptedStore {
     /// The caller must enforce provider admission; this method reads metadata only.
+    ///
+    /// Flow grants are listed here as their own holder kind, which `permissions/v1` gained a
+    /// flow holder for. An agent-filtered read is asking for one agent's grants and a flow
+    /// row names no agent, so flow rows appear only in an unfiltered reply.
     pub fn secret_permissions_list(
         &self,
         agent_id: Option<&str>,
@@ -49,8 +53,6 @@ impl EncryptedStore {
                 Ok(row)
             })?.collect::<rusqlite::Result<Vec<_>>>()?;
             let mut grants = rows;
-            // Flow grants belong to an installed flow version, not to an agent, so an
-            // agent-filtered listing can never contain one and the query is skipped there.
             if agent_id.is_none() {
                 grants.extend(flow_permission_rows(conn)?);
             }
@@ -464,13 +466,12 @@ fn envelope_audit(
     .map(|_| ())
 }
 
-/// One `permissions.list` row per live flow grant.
+/// One `permissions.list` row per flow grant, held by the installed flow version.
 ///
-/// A flow grant has no wall-clock expiry and no agent, so it carries no `expires_at_ms`
-/// and no `agent_id`. Its holder is the installed flow version that owns it, which the
-/// phone and desktop permission pages render from these three fields plus the secret's
-/// name and kind. `methods` describes how an API key may be used, so a site login, which
-/// has no method at all, omits the key rather than sending an empty list.
+/// A flow grant has no wall-clock expiry and belongs to no agent, so the row carries no
+/// `agent_id` and no `expires_at_ms`. `methods` is how the provider limits an API key, so
+/// only an API-key row has it; a site login has no method at all. `card_ref` is present
+/// only when the approval named the card that answered it.
 fn flow_permission_rows(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<Value>> {
     conn.prepare("SELECT g.grant_id,g.flow_id,g.flow_version,g.flow_install_id,s.name,s.kind,s.host,s.path_prefix,COALESCE(s.origin,''),g.methods,g.granted_at_ms,g.card_ref FROM secret_flow_grants g JOIN agent_secrets s ON s.incarnation=g.incarnation AND s.name=g.secret_name ORDER BY g.grant_id")?
         .query_map([], |r| {
@@ -482,10 +483,9 @@ fn flow_permission_rows(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<Val
             } else {
                 format!("fill {name} on {}", r.get::<_,String>(8)?)
             };
-            let version: u64 = r.get(2)?;
             let mut row = json!({
                 "id":r.get::<_,String>(0)?,
-                "holder":{"kind":"flow", "flow_id":r.get::<_,String>(1)?, "flow_version":version, "flow_install_id":r.get::<_,String>(3)?},
+                "holder":{"kind":"flow", "flow_id":r.get::<_,String>(1)?, "flow_version":r.get::<_,u64>(2)?, "flow_install_id":r.get::<_,String>(3)?},
                 "module":"claustrum",
                 "subject_label":name,
                 "scope":if api_key {"api_key"} else {"site_login"},
@@ -493,6 +493,9 @@ fn flow_permission_rows(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<Val
                 "granted_at_ms":r.get::<_,i64>(10)?,
             });
             if api_key {
+                // A grant the provider approved by method always stores its list; an
+                // API-key row without one could not be shown as "any method", so it is
+                // reported as a store fault rather than silently widened.
                 let methods: Option<String> = r.get(9)?;
                 match methods {
                     Some(methods) => {
@@ -500,8 +503,6 @@ fn flow_permission_rows(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<Val
                             rusqlite::Error::FromSqlConversionFailure(9, rusqlite::types::Type::Text, Box::new(e))
                         })?;
                     }
-                    // A stored API-key grant always records the methods it was approved
-                    // for; a missing list cannot be shown as "any method", so it is an error.
                     None => return Err(rusqlite_err("api key flow grant without methods")),
                 }
             }

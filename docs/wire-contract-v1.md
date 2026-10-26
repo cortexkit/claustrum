@@ -1506,11 +1506,15 @@ adds a chain row. B records only diagnostics for its forward.
 
 ## 15. Agent secrets
 
-An agent can use a password or API key without the model ever seeing it. Two kinds of
-caller reach this surface:
+An agent can use a password or API key without the model ever seeing it, and a scheduled
+flow run can use one without waking an agent. Three kinds of caller reach this surface:
 
 * **Senders** (`reserved:aft` and `reserved:cerebellum`) call `secret.use` for the agent
   scope they are serving and receive material only for a call a live grant covers.
+* **Basal** (`reserved:basal`) asks for a flow grant to be approved at install with
+  `secret.request_flow_approval`, releases one with `secret.use` from a flow run, and
+  revokes grants with `secret.revoke_flow_grants`. This is the only caller of those three
+  operations, and the only caller whose `secret.use` serves a flow.
 * **A paired phone** (through callosum, harness `fed-phone:<fp>`) registers its keys,
   deposits sealed secrets, approves or refuses use, lists and deletes secrets, and
   revokes grants with the seven phone operations.
@@ -1725,20 +1729,35 @@ code}]}`, one entry per envelope item in envelope order. `code` is always
 {"results":[{"request_id":"01HF7YAT000000000000000001","outcome":"granted"},{"request_id":"00000000000000000000000000","outcome":"refused","code":"approval_invalid"}]}
 ```
 
-A whole-envelope failure (strict parse, non-canonical bytes, duplicate request id, more
-than `MAX_ENVELOPE_ITEMS` items, wrong fingerprint, a signature that is not X9.62 DER or
-does not verify against the key registered under the current pairing) answers one
-`approval_invalid` result error instead of `results`.
+A whole-envelope failure (strict parse, non-canonical bytes, an item carrying any key but
+`request_id` and `statement_sha256`, duplicate request id, more than `MAX_ENVELOPE_ITEMS`
+items, wrong fingerprint, a signature that is not X9.62 DER or does not verify against the
+key registered under the current pairing) answers one `approval_invalid` result error
+instead of `results`.
+
+An exact resend is answered, not refused. The vault keeps each accepted envelope's reply,
+keyed by the SHA-256 of the envelope bytes and scoped to the phone that sent it, until
+`issued_at_ms + 120000` — the same skew limit the envelope is checked against. A
+byte-identical envelope sent again by that phone in that window, signed again or not,
+gets its first `results` back and grants nothing a second time. So a phone whose reply was
+lost learns the outcome by resending the exact bytes. This is not a licence to re-sign:
+a different envelope naming an already-consumed request is refused `approval_invalid`, and
+so is an exact resend after the window, when it is handled as the ordinary duplicate-item
+case. The signed delete commit follows the same rule.
 
 #### `secret.list`
 
 Request `{}`. Reply `{secrets: [{name, kind, incarnation, state, host?, path_prefix?,
 location?, origin?, grants: [{grant_id, scope: {owner, kind, ref}, coverage, duration,
-expires_at_ms?, last_use_ms?}]}]}`. An API key carries `host`, `location` and
-`path_prefix` (omitted when it covers every path); a login carries `origin`. `state` is
-`active` or `corrupt`. A grant omits `expires_at_ms` when its duration is `permanent`, and
-`last_use_ms` until it has served a call. Material, its digests and requested paths never
-appear.
+agent_id, expires_at_ms?, last_use_ms?}], flow_grants: [{grant_id, flow: {flow_id,
+version, install_id}, duration, methods?, last_use_ms?}]}]}`. An API key carries `host`,
+`location` and `path_prefix` (omitted when it covers every path); a login carries `origin`.
+`state` is `active` or `corrupt`. An agent grant always names its `agent_id`, `null` when
+the statement named no agent, and omits `expires_at_ms` when its duration is `permanent`.
+A flow grant appears in `flow_grants` with `flow` and duration `version` in place of an
+asking scope and coverage, and carries `methods` only for an API key. A grant of either
+kind omits `last_use_ms` until it has served a call. Material, its digests and requested
+paths never appear.
 
 <!-- golden:list.request -->
 ```json
@@ -1747,7 +1766,7 @@ appear.
 
 <!-- golden:list.result -->
 ```json
-{"secrets":[{"name":"key","kind":"agent_api_key","incarnation":"0123456789abcdef0123456789abcdef","state":"active","host":"x.test","path_prefix":"/repos/a","location":"header:X-Api-Key","grants":[{"grant_id":"01HF7YB0000000000000000001","scope":{"owner":"reserved:prefrontal-core","kind":"head","ref":"H"},"coverage":"scope","duration":"permanent","last_use_ms":1700000001000}]},{"name":"login","kind":"site_login","incarnation":"fedcba9876543210fedcba9876543210","state":"active","origin":"https://x.test","grants":[{"grant_id":"01HF7YB0000000000000000002","scope":{"owner":"reserved:prefrontal-core","kind":"worker","ref":"W"},"coverage":"scope","duration":"hour","expires_at_ms":1700003600000,"last_use_ms":1700000002000}]}]}
+{"secrets":[{"name":"key","kind":"agent_api_key","incarnation":"0123456789abcdef0123456789abcdef","state":"active","host":"x.test","path_prefix":"/repos/a","location":"header:X-Api-Key","grants":[{"grant_id":"01HF7YB0000000000000000001","scope":{"owner":"reserved:prefrontal-core","kind":"head","ref":"H"},"coverage":"scope","duration":"permanent","agent_id":"agent-A","last_use_ms":1700000003000}],"flow_grants":[{"grant_id":"01HF7YAXX0040G2081040G2081","flow":{"flow_id":"daily-fetch","version":7,"install_id":"install-A"},"duration":"version","methods":["GET"]}]},{"name":"login","kind":"site_login","incarnation":"fedcba9876543210fedcba9876543210","state":"active","origin":"https://x.test","grants":[{"grant_id":"01HF7YB0000000000000000002","scope":{"owner":"reserved:prefrontal-core","kind":"worker","ref":"W"},"coverage":"scope","duration":"hour","expires_at_ms":1700003600000,"agent_id":null,"last_use_ms":1700000002000}],"flow_grants":[{"grant_id":"01HF7YAXX0081040G2081040G2","flow":{"flow_id":"daily-fetch","version":7,"install_id":"install-A"},"duration":"version"}]}]}
 ```
 
 Expired grants are swept only after current-pairing registration passes, with one
@@ -1802,11 +1821,12 @@ Request `{grant_id}`. Unsigned, because it only removes access. Reply `{outcome}
 
 ### `secret.use`: the sender contract
 
-Only `reserved:aft` and `reserved:cerebellum` may call `secret.use`; every other caller
-gets the uniform `not_found` before its params are read. AFT receives only API keys and
-Cerebellum only site logins.
+Only `reserved:aft` and `reserved:cerebellum` may call `secret.use` for an agent scope, and
+`reserved:basal` for a flow run (see "Flow secrets" below); every other caller gets the
+uniform `not_found` before its params are read. AFT receives only API keys and Cerebellum
+only site logins; basal receives both kinds.
 
-**Request** `{name, coverage?, stamp, target}`:
+**Request** `{name, coverage?, stamp, target}` for an agent caller:
 
 * `name`: the secret name, grammar as above.
 * `coverage?`: `"scope"` (the default when omitted) or `"agent_and_workers"`. Coverage
@@ -1929,6 +1949,234 @@ whatever its path.
 Steps 1 to 4 create no pending request, and every `not_found` above is byte-identical, so a
 sender cannot tell which check refused. `approval_required` confirms to the trusted sender
 that the name, kind and target it supplied exist; that is the one accepted disclosure.
+
+### Flow secrets: install approval, run-time use and revocation
+
+A flow grant lets one **installed flow version** use a secret while basal runs it, so a
+scheduled flow reads its own API key instead of waking an agent. The holder is the identity
+basal's stamp carries — `flow_id`, `flow_version`, `flow_code_hash` and `flow_install_id` —
+not an asking scope. All four arrive together and only with `flow_id`. `flow_code_hash` is
+core's stored hash: 64 lowercase hex, compared byte for byte and never recomputed here.
+
+Basal is the only caller of `secret.request_flow_approval`, `secret.revoke_flow_grants` and
+a flow-run `secret.use`; every other caller gets the uniform `not_found` before its params
+are read. Basal's `secret.use` is flow-only: a remark without the flow attributes is that
+uniform `not_found` too, never an asking scope, so basal can never reach an agent grant.
+The reverse holds as well — a flow grant never satisfies `reserved:aft` or
+`reserved:cerebellum`, whose `secret.use` keeps its closed key set and its
+`approval_required` reply byte for byte.
+
+#### The flow identity object
+
+Install requests, flow statements and `secret.list` rows write the same identity as one
+nested object, with the stamp's names shortened:
+
+| Stamp attribute (`scope.attributes.flow_*`) | Nested key |
+|---|---|
+| `flow_id` | `flow_id` |
+| `flow_version` | `version` |
+| `flow_code_hash` | `code_hash` |
+| `flow_install_id` | `install_id` |
+
+`flow_id` is 1–256 printable ASCII bytes; `version` is an integer from 1 to 2^53 − 1;
+`code_hash` is exactly 64 lowercase hex characters; `install_id` is 1–256 printable ASCII
+bytes (core mints 1–64 of `[A-Za-z0-9_-]`).
+
+**Methods** describe how an API key may be used. Each is 1–16 bytes of `[A-Z]`, compared
+byte for byte against the method of the call being served. `methods` belongs to API keys
+alone: it is required for an API-key `target` and forbidden for a login `target`, checked
+against the caller's own `target` before any secret lookup, so the refusal for a missing or
+malformed list never depends on whether the name exists. The list is non-empty, without
+duplicates, and stored and signed sorted ascending, so `["POST","GET"]` is accepted and
+stored as `["GET","POST"]`, while `[]`, `["GET","GET"]`, `["get"]` and `["A",…]` past
+16 bytes are `invalid_params`. A flow-run `secret.use` names its single `method` the same
+way, and only for an API key.
+
+#### `secret.request_flow_approval`
+
+Basal calls this once per secret an installed flow version needs, when the flow is
+installed. Request `{name, flow, target, methods?}`: `name` has the usual grammar, `flow` is
+the identity object above, `target` has the same shapes as `secret.use` (an API key
+`{scheme, host, port?, path}` or a login `{origin}`), and `methods` is required with an
+API-shaped target and forbidden with a login target. There is no `coverage`, no `stamp` and
+no agent name.
+
+<!-- golden:request_flow_approval.request.api_key -->
+```json
+{"name":"key","flow":{"flow_id":"daily-fetch","version":7,"code_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","install_id":"install-A"},"target":{"scheme":"https","host":"x.test","port":443,"path":"/repos/a/issues/1"},"methods":["GET"]}
+```
+
+The same ask for a site login, which has no `methods`:
+
+<!-- golden:request_flow_approval.request.site_login -->
+```json
+{"name":"login","flow":{"flow_id":"daily-fetch","version":7,"code_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","install_id":"install-A"},"target":{"origin":"https://x.test"}}
+```
+
+Reply `{status: "approval_required", request_id, statement_b64url, expires_at_ms}`, the same
+shape `secret.use` answers in the same case:
+
+<!-- golden:request_flow_approval.result -->
+```json
+{"status":"approval_required","request_id":"01HF7YAT000000000000000001","statement_b64url":"eyJkdXJhdGlvbnMiOlsidmVyc2lvbiJdLCJmbG93Ijp7ImNvZGVfaGFzaCI6IjAxMjM0NTY3ODlhYmNkZWYwMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWYiLCJmbG93X2lkIjoiZGFpbHktZmV0Y2giLCJpbnN0YWxsX2lkIjoiaW5zdGFsbC1BIiwidmVyc2lvbiI6N30sIm1lbWJlcl9pZCI6ImZlZC1jb21wdXRlcjoyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMiIsInJlcXVlc3RfZXhwaXJlc19hdF9tcyI6MTcwMDAwMDYwMDAwMCwicmVxdWVzdF9pZCI6IjAxSEY3WUFUMDAwMDAwMDAwMDAwMDAwMDAxIiwic2VjcmV0Ijp7ImluY2FybmF0aW9uIjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAxNDkiLCJraW5kIjoiYWdlbnRfYXBpX2tleSIsIm5hbWUiOiJrZXkifSwidXNlIjp7Imhvc3QiOiJ4LnRlc3QiLCJsb2NhdGlvbiI6ImhlYWRlcjpYLUFwaS1LZXkiLCJtZXRob2RzIjpbIkdFVCJdLCJwYXRoX3ByZWZpeCI6Ii9yZXBvcy9hIn0sInYiOiJjay1zZWNyZXQtZmxvdy1zdGF0ZW1lbnQvdjEifQ","expires_at_ms":1700000600000}
+```
+
+**Ordered checks and refusals.** Checking stops at the first failure.
+
+| Step | Condition | Answer |
+|---|---|---|
+| 1 | caller is not `reserved:basal` | uniform `not_found` |
+| 2 | name, flow identity or target grammar invalid; `methods` missing, forbidden or malformed; unknown or missing key | `invalid_params` Error frame |
+| 2 | a name over its limit | `limit_exceeded` (`context_overflow`) |
+| 3 | unknown name, `corrupt` record, sealed-scope mismatch, or target mismatch | uniform `not_found` |
+| 4 | an identical (incarnation, flow identity, methods) request is still live | the same request id and bytes |
+| 4 | 8 live requests for this `flow_install_id`, or 64 in total | `pending_limit` (`transient`) |
+| 4 | this vault's member id is unset | `secret_setup_incomplete` (`permanent`) |
+| 4 | otherwise | `approval_required` with a new request |
+| any | a store failure | `store_error` (`transient`); no request is created |
+
+The request expiry is the usual 10-minute pending lifetime. Approval grants a duration
+`version` grant, which has no expiry of its own; the two are unrelated.
+
+#### `secret.use` from a flow run
+
+Basal's `secret.use` has the key set `{name, stamp, target, method?}`: no `coverage` (an
+explicit `coverage` is `invalid_params`), and `method` only with an API-shaped `target`. The
+stamp is the flow-run `ScopeStamp` relayed exactly as subc delivered it, and the four
+`flow_*` attributes are read from `stamp.attributes`; they are never taken from the vault's
+own route binding. A request whose stamp carries no `flow_id`, or whose four attributes are
+not all present, is the uniform `not_found` and records the `flow_identity` refusal detail.
+
+<!-- golden:use.request.flow.api_key -->
+```json
+{"name":"key","stamp":{"owner":{"kind":"reserved","module_id":"prefrontal-core"},"ref":"H","scope_epoch":7,"kind":"head","attributes":{"agent_id":"agent-A","flow_code_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","flow_id":"daily-fetch","flow_install_id":"install-A","flow_version":7},"owner_authorized":true},"target":{"scheme":"https","host":"x.test","port":443,"path":"/repos/a/issues/1"},"method":"GET"}
+```
+
+A flow run serving a site login, which carries no `method`:
+
+<!-- golden:use.request.flow.site_login -->
+```json
+{"name":"login","stamp":{"owner":{"kind":"reserved","module_id":"prefrontal-core"},"ref":"H","scope_epoch":7,"kind":"head","attributes":{"agent_id":"agent-A","flow_code_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","flow_id":"daily-fetch","flow_install_id":"install-A","flow_version":7},"owner_authorized":true},"target":{"origin":"https://x.test"}}
+```
+
+It releases only when a live flow grant for the secret's current incarnation matches all
+four attributes exactly, the target passes the usual scope check, and, for an API key, the
+`method` is in the grant's `methods`. The reply is the same three success shapes as an agent
+call, and so is every refusal: `not_found` covers an unknown secret, a wrong kind, no grant,
+a wrong target and an undeclared method alike. A flow run never creates a pending request
+and never gets `approval_required`; only `secret.request_flow_approval` does.
+
+**Refusal details.** Each refusal writes an `auth_events` row whose `detail` is the variant
+name only, never an identity value: `unknown_name`, `corrupt`, `sealed_scope`, `kind`,
+`target`, and for flow calls `flow_identity` (the stamp is not a complete flow identity),
+`flow_no_grant` (a complete identity with no matching grant) and `flow_method` (a grant
+exists but does not declare this method).
+
+#### `secret.revoke_flow_grants`
+
+Request `{flow_install_id, flow_version?}`: the install to clear, and optionally one
+version of it. Reply `{status: "revoked", grants}`, where `grants` is the number of grants
+removed and may be 0; the call is idempotent. In one transaction it deletes the matching
+flow grants and the matching unconsumed flow approval requests, so a request signed within
+its 10 minutes cannot recreate a grant that was just revoked.
+
+<!-- golden:revoke_flow_grants.request -->
+```json
+{"flow_install_id":"install-A","flow_version":7}
+```
+
+<!-- golden:revoke_flow_grants.result -->
+```json
+{"status":"revoked","grants":1}
+```
+
+Without `flow_version` every version of that install is cleared:
+
+<!-- golden:revoke_flow_grants.request.all_versions -->
+```json
+{"flow_install_id":"install-A"}
+```
+
+<!-- golden:revoke_flow_grants.result.none -->
+```json
+{"status":"revoked","grants":0}
+```
+
+Basal revokes on uninstall, and a version's grants once a newer version replaced it and its
+last run finished. Deleting a secret also deletes its flow grants and its pending flow
+requests. The vault never expires an older version's grants when a newer one is granted, so
+a still-running old version is not cut off; only an explicit revoke or a delete removes a
+grant.
+
+#### Listing a flow grant
+
+`secret.list` shows a flow grant under a new per-secret array, `flow_grants`, whose
+`{grant_id, flow, duration, methods?, last_use_ms?}` names the flow identity object in place
+of an asking scope, has no `coverage` and no `expires_at_ms`, and carries `methods` only for
+an API key. `ck auth secret list` and `ck auth secret grants` print the holder as
+`flow:<flow_id>@<version>/<install_id>`, with duration `version` and
+`methods=<A,B>` where the secret has methods, and `expiry=none`.
+
+`permissions.list` lists flow grants under a holder kind of their own, as Cingulate's
+`permissions/v1` contract defines it (tag `permissions-v1.1`, cingulate `49fab2ea`):
+`holder {kind: "flow", flow_id, flow_version, flow_install_id}`, `methods` — a non-empty
+list of uppercase HTTP methods — only for an API-key grant, and neither `agent_id` nor
+`expires_at_ms`. A flow row appears only in an unfiltered read: `permissions.list {agent_id}`
+asks for one agent's grants, and a flow row names no agent, so the reply never carries one.
+Otherwise a flow row has the shape every provider row has — `id`, `module`, `subject_label`,
+`scope`, `scope_label`, `granted_at_ms`, and `card_ref` when the approval named one — and
+its `id` is what `permissions.revoke` takes to end that grant.
+
+#### The flow statement
+
+The flow statement is `ck-secret-flow-statement/v1`: the `ck-secret-use-statement/v1`
+fields except that `flow` replaces `scope` and `agent_id`, there is no `coverage`,
+`durations` is exactly `["version"]`, and an API key's `use` gains `methods`. `use` is built
+from the secret's stored scope as for an agent, so approval binds the stored host and path
+prefix (or origin), and any run-time target that passes the scope check is covered. This
+statement is the pinned flow vector `flow-version` of
+`crates/credentials-core/tests/vectors/secret-flow-approval-v1.json`, decoded:
+
+<!-- golden:statement.flow -->
+```json
+{"durations":["version"],"flow":{"code_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","flow_id":"daily-fetch","install_id":"install-A","version":7},"member_id":"fed-computer:22222222222222222222222222222222","request_expires_at_ms":1700000600000,"request_id":"01HF7YAT000000000000000001","secret":{"incarnation":"00000000000000000000000000000149","kind":"agent_api_key","name":"key"},"use":{"host":"x.test","location":"header:X-Api-Key","methods":["GET"],"path_prefix":"/repos/a"},"v":"ck-secret-flow-statement/v1"}
+```
+
+A login's flow statement carries `use: {origin}` and no `methods`.
+
+#### The `version` duration
+
+A flow approval is an `allow` envelope whose `duration` is `version` and whose
+`grant_expires_at_ms` is 0. `version` is valid only on an `allow` envelope with that 0, and
+every other duration value keeps the meaning it has for agents. The envelope keeps its shape
+and its single `grant_expires_at_ms` for the whole batch; `ApprovalItem` stays
+`{request_id, statement_sha256}` and an item carrying any other key, `duration` included, is
+the whole-envelope `approval_invalid`.
+
+<!-- golden:envelope.flow -->
+```json
+{"decision":"allow","device_fingerprint":"11111111111111111111111111111111","duration":"version","grant_expires_at_ms":0,"issued_at_ms":1700000000000,"items":[{"request_id":"01HF7YAT000000000000000001","statement_sha256":"bcf3f59a99c0beaa52366c6fa37af6a799460257215252d804ce7474240a7c57"},{"request_id":"01HF7YAT000000000000000002","statement_sha256":"1a912e7090daa30f10111228ae3ef4275fd6faaae754f2aec9c3f6cbc90bb6b8"}],"v":"ck-secret-use-envelope/v1"}
+```
+
+<!-- golden:envelope.flow.bytes -->
+```text
+eyJkZWNpc2lvbiI6ImFsbG93IiwiZGV2aWNlX2ZpbmdlcnByaW50IjoiMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEiLCJkdXJhdGlvbiI6InZlcnNpb24iLCJncmFudF9leHBpcmVzX2F0X21zIjowLCJpc3N1ZWRfYXRfbXMiOjE3MDAwMDAwMDAwMDAsIml0ZW1zIjpbeyJyZXF1ZXN0X2lkIjoiMDFIRjdZQVQwMDAwMDAwMDAwMDAwMDAwMDEiLCJzdGF0ZW1lbnRfc2hhMjU2IjoiYmNmM2Y1OWE5OWMwYmVhYTUyMzY2YzZmYTM3YWY2YTc5OTQ2MDI1NzIxNTI1MmQ4MDRjZTc0NzQyNDBhN2M1NyJ9LHsicmVxdWVzdF9pZCI6IjAxSEY3WUFUMDAwMDAwMDAwMDAwMDAwMDAyIiwic3RhdGVtZW50X3NoYTI1NiI6IjFhOTEyZTcwOTBkYWEzMGYxMDExMTIyOGFlM2VmNDI3NWZkNmZhYWFlNzU0ZjJhZWM5YzNmNmNiYzkwYmI2YjgifV0sInYiOiJjay1zZWNyZXQtdXNlLWVudmVsb3BlL3YxIn0
+```
+
+The offered duration is checked per item. In a `version` envelope an agent item is refused
+`approval_invalid` and a flow item is granted; in a `once`, `hour`, `session` or `permanent`
+envelope a flow item is refused and the batch's other items proceed. The envelope's own
+`approval_invalid` results never say which item failed a check.
+
+#### `flow-identity-scopes/v1`
+
+The vault's manifest provides `permissions/v1` and `flow-identity-scopes/v1`. subc-protocol
+0.33.2 stamps `flow_version`, `flow_code_hash` and `flow_install_id` on a `ScopeStamp` only
+for a reader that declares `flow-identity-scopes/v1`, so a vault without it would see
+`flow_id` alone and could not hold a flow to one installed version. The vault needs the
+fields themselves, not flow-scoped authority: it reads them from the sender's params and
+still refuses a flow-scoped transport route bind. The capability therefore widens what the
+stamp carries to this reader and changes nothing about who may use what.
 
 ### Signed statement and envelope
 

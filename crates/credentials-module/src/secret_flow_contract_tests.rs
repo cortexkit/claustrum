@@ -503,6 +503,7 @@ async fn secret_flow_ops_dispatch_only_for_basal_and_revoke_params_are_closed() 
         json!({"flow_install_id":"install-A", "flow_version":9_007_199_254_740_992u64}),
         json!({"flow_install_id":"install-A", "flow_version":"7"}),
         json!({"flow_install_id":"install-A", "extra":true}),
+        json!({"flow_install_id":"install-A", "flow":{}}),
     ] {
         let (kind, bytes) = sc_dispatch(
             &surface,
@@ -543,6 +544,13 @@ async fn secret_flow_install_errors_and_closed_shapes_do_not_create_pending_rows
     let mut request = sf_install(false);
     request["flow"]["extra"] = json!(true);
     assert_eq!(sf_request(&flow, &request), invalid);
+    // A flow id equal to a statement tag cannot be carried in the signed statement, whose
+    // own `v` key holds that value.
+    for tag in ["ck-secret-flow-statement/v1", "ck-secret-use-statement/v1"] {
+        let mut request = sf_install(false);
+        request["flow"]["flow_id"] = json!(tag);
+        assert_eq!(sf_request(&flow, &request), invalid, "{tag}");
+    }
     for key in ["extra", "stamp", "coverage"] {
         let mut request = sf_install(false);
         request[key] = json!(true);
@@ -621,8 +629,8 @@ async fn secret_flow_grants_list_with_flow_holders_and_revoke_one_at_a_time() {
     let admin =
         admin_surface::AdminSurface::new(engine, mac, vault_id.clone(), key.key_id());
 
-    // The provider surface: one row per installed version, no expiry, no agent, and the
-    // approved methods only where the secret has methods at all.
+    // The provider surface: one row per installed version under a flow holder, no expiry,
+    // no agent, and the approved methods only where the secret has methods at all.
     let listed = admin
         .serve_permissions("permissions.list", &json!({}), "test")
         .unwrap();
@@ -634,6 +642,7 @@ async fn secret_flow_grants_list_with_flow_holders_and_revoke_one_at_a_time() {
         assert_eq!(row["holder"]["flow_version"], 7);
         assert!(row.get("expires_at_ms").is_none(), "{row}");
         assert!(row.get("agent_id").is_none(), "{row}");
+        assert!(row["holder"].get("agent_id").is_none(), "{row}");
         if row["scope"] == "api_key" {
             assert_eq!(row["methods"], json!(["GET"]), "{row}");
         } else {
@@ -645,8 +654,8 @@ async fn secret_flow_grants_list_with_flow_holders_and_revoke_one_at_a_time() {
         .map(|row| row["holder"]["flow_install_id"].as_str().unwrap())
         .collect();
     assert!(installs.contains(&"install-A") && installs.contains(&"install-B"));
-    // An agent-filtered listing never contains a flow grant, and it is the only reason
-    // the two installs are distinguishable here: they share flow id and version.
+    // A flow row names no agent, so an agent-filtered read never carries one. It is also
+    // the only place the two installs could be told apart: they share flow id and version.
     assert_eq!(
         admin
             .serve_permissions("permissions.list", &json!({"agent_id":"agent-A"}), "test")
@@ -696,10 +705,6 @@ async fn secret_flow_grants_list_with_flow_holders_and_revoke_one_at_a_time() {
     // Revoking one of two grants that share flow id and version leaves the other install
     // releasing, and the login's own grant untouched. Both revokes go through the
     // operator's single-grant delete by id.
-    let listed = admin
-        .serve_permissions("permissions.list", &json!({}), "test")
-        .unwrap();
-    let rows = listed["grants"].as_array().unwrap();
     let id_of = |install: &str, scope: &str| -> String {
         rows.iter()
             .find(|row| row["holder"]["flow_install_id"] == install && row["scope"] == scope)

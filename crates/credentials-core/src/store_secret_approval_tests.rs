@@ -744,6 +744,35 @@ fn secret_revoke_is_unsigned_and_provider_lists_only_live_grants() {
 }
 
 #[test]
+fn secret_agent_approval_refuses_a_version_envelope_and_a_key_inside_an_item() {
+    let (_root, store, request) = approval_setup("agent-version-envelope");
+    // A `version` envelope offers a duration no agent statement carries, so its agent item
+    // is refused and no agent grant appears.
+    let e = envelope(vec![item(&request)], "version", NOW);
+    assert_eq!(
+        phone(&store, &signed(&e, false), NOW).unwrap(),
+        json!({"results":[refused(&request)]})
+    );
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM secret_grants"), 0);
+    // An item holds `request_id` and `statement_sha256` and nothing else. It has no
+    // `deny_unknown_fields` of its own, so a key such as `duration` inside it must still be
+    // refused by the whole-envelope parse rather than ignored.
+    let mut with_key = envelope(vec![item(&request)], "hour", NOW);
+    with_key["items"][0]["duration"] = json!("version");
+    assert_eq!(
+        phone(&store, &signed(&with_key, false), NOW),
+        Err(SecretError::ApprovalInvalid)
+    );
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM secret_grants"), 0);
+    // The same envelope without the extra key grants, so the refusal above is the key.
+    let e = envelope(vec![item(&request)], "hour", NOW);
+    assert_eq!(
+        phone(&store, &signed(&e, false), NOW).unwrap(),
+        json!({"results":[granted(&request)]})
+    );
+}
+
+#[test]
 fn secret_ckios_vectors_are_emitted_by_vault_code_and_pinned() {
     let a = "01HF7YAT000000000000000001";
     let b = "01HF7YAT000000000000000002";

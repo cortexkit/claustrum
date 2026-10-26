@@ -340,11 +340,11 @@ fn run_args(mut args: Vec<String>) -> Result<(), CliError> {
     // an unknown or misspelled flag is a HARD error, never silently ignored. Runs
     // before dispatch, so a bad invocation never reaches the keychain or the lease.
     reject_unknown_args(&command, &args)?;
-    // `ck auth secret put` and `ck auth secret delete` name the secret positionally,
-    // because a name is the one operand every secret verb takes and a flag in front of it
-    // would be the only way to reach an object the operator already names on the line.
+    // A secret verb's flags belong to ONE sub-verb each and a flag's value may be any
+    // word, so `secret_cli::guard_args` is the only check that can judge the invocation:
+    // it knows the verb being run and lists the flags that verb takes.
     if command == "secret" {
-        reject_secret_verb_args(&args)?;
+        cli_support::secret_cli::guard_args(&args)?;
     }
 
     match command.as_str() {
@@ -555,6 +555,22 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
             // Each secret verb is its own entry: one shared subcommand list for the verb
             // would let `secret list` accept `--host` and `secret put` accept `--grant-id`,
             // and the per-verb pages advertise narrower shapes than that.
+            // Every secret verb name, so none is eaten here. Its FLAGS are checked by
+            // `secret_cli::guard_args`, which knows which sub-verb is running: this table
+            // is keyed on the command name alone and cannot tell a flag's verb.
+            "secret" => &[
+                "put",
+                "list",
+                "grants",
+                "delete",
+                "revoke",
+                "phone-gate",
+                "on",
+                "off",
+                "status",
+            ],
+            // Written only so the accept-list reader in the CLI tests can see the flags;
+            // the parser that enforces them is `secret_cli::guard_args`.
             "secret put" => &[
                 "--kind",
                 "--name",
@@ -564,15 +580,17 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
                 "--origin",
                 "--material-file",
             ],
-            "secret list" | "secret grants" | "secret phone-gate status" => &[],
-            "secret delete" => &["--name"],
-            "secret revoke" => &["--grant-id"],
-            "secret phone-gate on" | "secret phone-gate off" => &[],
             _ => &[],
         };
-        // `transfer accept|reject <transfer-id>` and `federation self <member>` /
-        // `federation mapping on|off` take one positional value, which the verb itself
-        // checks.
+        // `transfer accept|reject <transfer-id>` and `federation self <member>` take one
+        // positional value, which the verb itself checks. For `secret` this pass cannot
+        // judge anything: every flag and every value after it looks like a plain word, and
+        // which flags a verb takes is known to `secret_cli` alone. Its per-verb check runs
+        // right after this one and is the only check that decides a secret invocation.
+        if command == "secret" {
+            i += 1;
+            continue;
+        }
         if subcommands.contains(&arg.as_str())
             || (matches!(command, "set-providers" | "transfer" | "federation")
                 && !arg.starts_with("--"))
@@ -589,9 +607,23 @@ fn reject_unknown_args(command: &str, args: &[String]) -> Result<(), CliError> {
             i += 2;
             continue;
         }
+        // For `secret` the token in a flag position may be a secret that reached the
+        // command line by mistake, and this function does not know which sub-verb is
+        // running. The position is reported and never the token, so a secret is not
+        // repeated into the terminal or any captured transcript. The page is asked for by
+        // the plain verb name: it is a lookup, and a compound name would miss every arm.
+        let description = if command == "secret" {
+            format!("unexpected argument at position {}", i + 1)
+        } else {
+            format!("unexpected argument '{arg}'")
+        };
+        let page = help_verb(if command == "secret" {
+            "secret"
+        } else {
+            command
+        });
         return Err(CliError::Usage(format!(
-            "unexpected argument '{arg}' for '{command}'\n\n{}",
-            help_verb(command)
+            "{description} for '{command}'\n\n{page}",
         )));
     }
     Ok(())
@@ -701,7 +733,7 @@ fn usage_short() -> String {
 /// An unknown verb falls back to the short table.
 fn help_verb(verb: &str) -> String {
     let body = match verb {
-        "secret" => cli_support::secret_cli::help_text().to_string(),
+        "secret" => cli_support::secret_cli::help_text(),
         "set-plan" => {
             "ck auth set-plan --id <credential-id> (--tier <id> | --clear)\n\
              \n\

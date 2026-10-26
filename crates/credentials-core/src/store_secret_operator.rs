@@ -186,6 +186,29 @@ fn hex_of(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Every live grant as id, secret name and expiry, for the operator who needs a grant id
+/// to revoke. Plaintext columns only, so no master key is involved.
+pub fn list_agent_secret_grants_read_only(
+    store_path: &std::path::Path,
+) -> Result<Vec<(String, String, i64)>, StoreOpError> {
+    let Some(listing) = list_agent_secrets_read_only(store_path)? else {
+        return Ok(Vec::new());
+    };
+    Ok(listing
+        .secrets
+        .into_iter()
+        .flat_map(|secret| {
+            secret.grants.into_iter().map(move |grant| {
+                (
+                    grant.grant_id,
+                    secret.name.clone(),
+                    grant.expires_at_ms.unwrap_or(0),
+                )
+            })
+        })
+        .collect())
+}
+
 /// One agent secret as the read-only listing renders it.
 ///
 /// Deliberately holds no material, no digest of it and no requested target path: every
@@ -316,11 +339,16 @@ pub fn list_agent_secrets_read_only(
                 .as_deref()
                 .filter(|seen| *seen == pairing_id)
                 .and_then(|_| observed_at);
+            // A row exists in `secret_phone_observations` for any lookup that happened,
+            // including one that found the device absent. So `observed_at` alone cannot
+            // say whether anything was ever seen: the left join's missing row is what an
+            // unobserved fingerprint looks like.
+            let unobserved = observed_at.is_none();
             Ok(OperatorPhoneRow {
                 fingerprint: r.get(0)?,
                 pairing_id,
                 current_since_ms,
-                unobserved: observed_at.is_none(),
+                unobserved,
                 observed_pairing_id: observed,
             })
         })

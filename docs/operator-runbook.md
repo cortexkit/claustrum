@@ -371,6 +371,54 @@ keeps handles) or `--expected-hash <hex>` (compare-and-set). A `cookie:<domain>:
 always creates a session-cookie record. A `github_app` deposit requires `--client-id`, the
 App JWT issuer.
 
+### Agent secrets: keys an agent uses without seeing them
+
+Agent secrets are a separate record kind that no credential id, handle, grant or transfer
+can reach. An agent (AFT for an API key, Cerebellum for a login) asks the vault to *use*
+one; the vault hands back the key with the header, query or JSON-pointer location to put
+it in, or the username, password and TOTP code for a login. Material is released only to
+those two senders, and only under a grant.
+
+```sh
+ck auth secret put ops-github --kind api-key --host api.github.com \
+  --path-prefix /repos --location header:X-Api-Key --material-file ~/.config/gh.key
+ck auth secret put ops-board --kind site-login --origin https://board.example.com \
+  --material-file ~/.config/board.login
+ck auth secret list
+ck auth secret grants
+ck auth secret revoke --grant-id <grant-id>
+ck auth secret delete ops-github
+```
+
+**Material never comes from a flag.** `--material-file` must be mode `0600`, and its
+content is the deposit plaintext: the key bytes for an API key, or three lines (username,
+password, optional `otpauth://totp/...`) for a login — the same layout a phone deposit
+carries, checked by the same validator. Without the flag, `put` prompts on stdin instead.
+A refusal names the path and the rule that failed and never echoes the content, an error
+message or the audit payload.
+
+`--location` defaults to `authorization_bearer`. It is scope metadata, not a target: it
+tells the sending module where to put the key (`authorization_bearer`, `header:<name>`,
+`query:<name>`, `json_pointer:<pointer>`) and it takes no part in matching the call.
+
+Names are 1 to 64 bytes of `A-Z a-z 0-9 . _ -`, starting with a letter or digit, and they
+are **create-only**: a second `put` of a name is refused, whether the existing row is
+active or `corrupt`, because silently replacing a record an agent already holds a grant to
+is not a repair. Delete first, which is a separate audited act that also removes the
+record's grants and its pending approval requests.
+
+`put`, `delete` and `revoke` are ordinary operator writes: through the master-key admin MAC
+when the daemon is running (`admin.secret_put`, `admin.secret_delete`,
+`admin.secret_revoke_grant`) and under the single-writer lease when it is stopped. `list`
+and `grants` never touch the daemon: they open the store read-only, so they work with the
+vault serving and need no key. On a store whose schema predates the agent-secret migration
+they print `no agent-secret tables yet` and exit 0.
+
+`list` also prints each registered phone's keys as `current as of <time>`, `superseded` or
+`unobserved`. That is the **last observed** pairing — when a lookup saw a different pairing,
+or the device absent, the keys read `superseded` — and never a validity checked now, because
+`list` makes no callosum call.
+
 ### Operator-terminal signing keys
 
 For machine account authentication from the operator's own terminal, generate a
@@ -850,7 +898,7 @@ These values come from the closed `AuditOp` enum and name the mutation or chain 
 | `secret_deposit_key_create` | Vault bootstrap creates the dedicated deposit key; target `kem:secret-deposit:1`, payload fields: key id. |
 | `secret_phone_gate_set` | Operator changes the phone mapping gate; no target, payload fields: enabled. |
 | `secret_phone_register` | Phone registers create-only keys for the current pairing; target `secret-phone\|<fp>`, payload fields: pairing id, deposit public key, approval public key. |
-| `secret_store` | Phone or operator stores a secret; target `secret\|<name>`, payload fields: kind, incarnation, sealed scope fields, deposit id. |
+| `secret_store` | Phone or operator stores a secret; target `secret\|<name>`, payload fields: kind, incarnation, sealed scope fields, and the deposit id for a phone deposit. The operator's `ck auth secret put` payload omits the deposit id, because there is none. |
 | `secret_grant_create` | Phone approves a grant; target `secret\|<name>`, payload hash is the SHA-256 of the exact accepted envelope bytes. |
 | `secret_delete` | Phone or operator deletes a secret; target `secret\|<name>`, payload hash is the phone envelope SHA-256, or framed incarnation and request id for the operator. |
 | `secret_grant_revoke` | Phone, Cingulate or operator removes a grant; target `secret\|<name>`, payload fields: grant id, incarnation. |

@@ -37,38 +37,122 @@ pub fn cmd_secret(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> 
     }
 }
 
+/// The flags `secret put` takes, and nothing else. One table serves the guard, the
+/// dispatcher's awareness of a flag's value, and the CLI's page-versus-parser check.
+fn put_flags() -> &'static [&'static str] {
+    &[
+        "--kind",
+        "--name",
+        "--host",
+        "--path-prefix",
+        "--location",
+        "--origin",
+        "--material-file",
+    ]
+}
+
+/// The flags `secret revoke` takes: the grant id.
+const REVOKE_FLAGS: &[&str] = &["--grant-id"];
+
+/// Refuse an unknown or misplaced flag on one `ck auth secret <verb>` invocation.
+///
+/// The dispatcher's shared argument check sees only the verb name `secret`, and a flag's
+/// value may be any word, so it cannot judge a secret invocation. This does, against the
+/// table for the verb actually named, and it names the flags that verb takes — a typo such
+/// as `secret put --locaton header:X` would otherwise store the key under the bearer
+/// default with nothing on screen to say why.
+pub fn guard_args(args: &[String]) -> Result<(), CliError> {
+    let Some((verb, rest)) = args.split_first() else {
+        return Ok(());
+    };
+    let (value_flags, positional) = match verb.as_str() {
+        // `phone-gate` and `delete` each take one positional operand and no flags.
+        "phone-gate" | "delete" => (&[][..], true),
+        // `put` names the secret first, then its flags.
+        "put" => (put_flags(), true),
+        "revoke" => (REVOKE_FLAGS, false),
+        "list" | "grants" => (&[][..], false),
+        // An unknown verb is diagnosed by `cmd_secret`, which names it.
+        _ => return Ok(()),
+    };
+    let mut i = usize::from(positional);
+    while let Some(arg) = args_or(rest, i) {
+        if value_flags.contains(&arg.as_str()) {
+            match args_or(rest, i + 1) {
+                Some(value) if !value.starts_with("--") => {
+                    i += 2;
+                    continue;
+                }
+                _ => {
+                    return Err(CliError::Usage(format!(
+                        "{arg} needs a value for 'secret {verb}'\n\n{}",
+                        help_text()
+                    )));
+                }
+            }
+        }
+        // A token in a flag position is named only when it looks like a flag, which the
+        // operator typed on purpose. Anything else may be a secret that reached the command
+        // line by mistake, and repeating it would put it in the terminal, the scrollback
+        // and any captured transcript: the same leak as reading it from argv.
+        let description = if arg.starts_with("--") {
+            format!("unexpected argument '{arg}'")
+        } else {
+            format!("unexpected argument at position {}", i + 1)
+        };
+        return Err(CliError::Usage(format!(
+            "{description} for 'secret {verb}'; it takes {}\n\n{}",
+            if value_flags.is_empty() {
+                "no flags".to_string()
+            } else {
+                format!("only {}", value_flags.join(", "))
+            },
+            help_text()
+        )));
+    }
+    let _ = rest;
+    Ok(())
+}
+
+fn args_or(args: &[String], index: usize) -> Option<&String> {
+    args.get(index)
+}
+
 /// The page `ck auth help secret` prints. Every listed verb and flag is one this module
 /// accepts, because a printed shape the parser refuses is worse than no listing.
 pub fn help_text() -> &'static str {
     "ck auth secret <verb> [flags]\n\
      \n\
-     \x20 put       create an agent secret (create-only)\n\
-     \x20 list      secrets, their scopes and their live grants\n\
-     \x20 grants    one row per live grant\n\
-     \x20 delete    remove a secret, its grants and its pending requests\n\
-     \x20 revoke    remove one grant by id\n\
-     \x20 phone-gate on|off|status   the phone channel gate\n\
-     \n\
-     PUT\n\
-     \x20 ck auth secret put --kind api-key|site-login --name <name> [scope flags]\n\
-     \x20 \x20 \x20 \x20 \x20 \x20 \x20 \x20 \x20 \x20 [--material-file <path> | prompt]\n\
-     \x20 --kind api-key     --host <host> [--path-prefix </path>] [--location <where>]\n\
-     \x20 --kind site-login   --origin <https://host>\n\
-     \x20 --material-file <path>  read the material from a mode-0600 file\n\
-     \n\
-     The material is never read from a flag. Without --material-file, a site login is\n\
-     prompted for its username and password and an api key for its key bytes; neither\n\
-     is echoed. --location defaults to authorization_bearer and names where the agent\n\
-     puts the key: authorization_bearer, header:<name>, query:<name> or\n\
-     json_pointer:<pointer>.\n\
-     \n\
-     NOTES\n\
-     Secrets are addressed by name only (1-64 bytes of A-Z a-z 0-9 . _ -) and never by a\n\
-     credential id. Names are create-only: a second put of a name is refused, and reusing\n\
-     a name means deleting it first. Writes use the admin MAC online or the offline lease;\n\
-     list, grants and phone-gate status read the store without a daemon or a key.\n\
-     Keep the phone setting off until callosum derives the forwarded harness from the\n\
-     authenticated phone peer on every call."
+      \x20 --kind <api-key|site-login>  which kind of secret to store\n\
+      \x20 --name <name>                secret name; put also takes it first\n\
+      \x20 --host <host>                api key: the approved host\n\
+      \x20 --path-prefix <path>         api key: an optional path prefix\n\
+      \x20 --location <where>           api key: where to put it; the default\n\
+      \x20                             is authorization_bearer\n\
+      \x20 --origin <https://host>      site login: the approved origin\n\
+      \x20 --material-file <path>       read the material from a 0600 file\n\
+      \x20 --grant-id <id>              remove one grant by id (revoke)\n\
+      \n\
+      VERBS\n\
+      put creates a secret. list shows secrets, scopes and grants. grants shows one\n\
+      row per live grant. delete removes a secret with its grants and pending\n\
+      requests. revoke removes one grant. phone-gate turns the phone channel on or\n\
+      off, or prints its state.\n\
+      \n\
+      NOTES\n\
+      The material is never read from a flag. Without --material-file, a site login\n\
+      is prompted for username, password and an optional otpauth URI, and an api key\n\
+      for its key bytes; nothing is echoed. The file holds the same plaintext a\n\
+      phone deposit carries: the key bytes, or username, password and otpauth on\n\
+      separate lines. A file that is not mode 0600 is refused, naming the path and\n\
+      the rule.\n\
+      \n\
+      Secrets are addressed by name only (1-64 bytes of A-Z a-z 0-9 . _ -) and\n\
+      never by a credential id. Names are create-only: a second put of a name is\n\
+      refused, and reusing a name means deleting it first. Writes use the admin MAC\n\
+      online or the offline lease; list, grants and phone-gate status read the store\n\
+      without either. Keep the phone setting off until callosum derives the forwarded\n\
+      harness from the authenticated phone peer on every call."
 }
 
 fn phone_gate(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
@@ -108,7 +192,7 @@ fn phone_gate(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     Ok(())
 }
 
-/// What the operator handed us on stdin, already split into the kind's plaintext fields.
+/// What the operator supplied, already split into the kind's plaintext fields.
 enum Material {
     ApiKey(Vec<u8>),
     SiteLogin {
@@ -142,30 +226,29 @@ fn put(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
         "api-key" => {
             if origin.is_some() {
                 return Err(CliError::Usage(
-                    "--origin belongs to --kind site-login; an api key names --host".into(),
+                    "an api key names a host, never an origin".into(),
                 ));
             }
             if host.is_none() {
-                return Err(CliError::Usage(
-                    "--host is required for --kind api-key".into(),
-                ));
+                return Err(CliError::Usage("an api key requires the host flag".into()));
             }
         }
         "site-login" => {
             if host.is_some() || path_prefix.is_some() || optional(args, "--location").is_some() {
                 return Err(CliError::Usage(
-                    "--kind site-login takes --origin only; --host, --path-prefix and --location belong to an api key".into(),
+                    "a site login takes only the origin flag, never the host, prefix or location"
+                        .into(),
                 ));
             }
             if origin.is_none() {
                 return Err(CliError::Usage(
-                    "--origin is required for --kind site-login".into(),
+                    "a site login requires the origin flag".into(),
                 ));
             }
         }
         other => {
             return Err(CliError::Usage(format!(
-                "--kind must be api-key or site-login, not '{other}'"
+                "the kind must be api-key or site-login, not '{other}'"
             )))
         }
     }
@@ -174,7 +257,6 @@ fn put(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
         Some(path) => read_material_file(&path, &kind)?,
         None => prompt_material(&kind)?,
     };
-    let framed = frame_plaintext(&material);
     let (op_kind, host, origin) = match kind.as_str() {
         "api-key" => ("agent_api_key", host, None),
         _ => ("site_login", None, origin),
@@ -190,11 +272,11 @@ fn put(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             location: (op_kind == "agent_api_key").then_some(location),
             origin,
             material_b64url: base64::engine::general_purpose::URL_SAFE_NO_PAD
-                .encode(framed.expose()),
+                .encode(frame_plaintext(&material).expose()),
         },
     )?;
-    // Only the incarnation is reported: it is a random id, and an operator comparing it
-    // with `secret list` can confirm which record this put created.
+    // Only the incarnation is reported: it is a random id, and comparing it with
+    // `secret list` tells the operator which record this put created.
     println!(
         "stored secret {name} (incarnation {})",
         reply["incarnation"].as_str().unwrap_or("unknown")
@@ -202,11 +284,9 @@ fn put(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     Ok(())
 }
 
-/// Read the material file, refusing everything about it that the spec makes a rule:
-/// a non-0600 mode, an empty file, an unreadable path. Every message names the path and
-/// the rule and never the content.
+/// Read the material file, refusing a mode other than 0600 or a body that is not the kind's
+/// plaintext. Every message names the path and the rule and never the content.
 fn read_material_file(path: &str, kind: &str) -> Result<Material, CliError> {
-    use std::os::unix::fs::MetadataExt;
     let metadata = std::fs::metadata(path)
         .map_err(|_| CliError::Usage(format!("cannot read material file {path}")))?;
     if !metadata.is_file() {
@@ -214,11 +294,15 @@ fn read_material_file(path: &str, kind: &str) -> Result<Material, CliError> {
             "material file {path} is not a regular file"
         )));
     }
-    if metadata.mode() & 0o077 != 0 {
-        return Err(CliError::Usage(format!(
-            "material file {path} is mode {:04o}; it must be 0600 so no other user can read it",
-            metadata.mode() & 0o777
-        )));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.mode() & 0o077 != 0 {
+            return Err(CliError::Usage(format!(
+                "material file {path} is mode {:04o}; it must be 0600 so no other user can read it",
+                metadata.mode() & 0o777
+            )));
+        }
     }
     let text = std::fs::read_to_string(path)
         .map_err(|_| CliError::Usage(format!("material file {path} is not readable UTF-8 text")))?;
@@ -299,8 +383,8 @@ fn prompt_material(kind: &str) -> Result<Material, CliError> {
     }
 }
 
-/// Encode the same u64-length-prefixed plaintext a phone deposit carries, so one
-/// validator (`decode_deposit_plaintext`) checks both doors.
+/// Encode the same u64-length-prefixed plaintext a phone deposit carries, so one validator
+/// (`decode_deposit_plaintext`) checks both doors.
 fn frame_plaintext(material: &Material) -> credentials_core::secret::Secret<Vec<u8>> {
     use credentials_core::agent_secret::push_field;
     let mut out = Vec::new();
@@ -327,8 +411,8 @@ fn frame_plaintext(material: &Material) -> credentials_core::secret::Secret<Vec<
     credentials_core::secret::Secret::new(out)
 }
 
-/// `put` and `delete` name the secret positionally; `--name` is accepted too, because
-/// an operator scanning `ck auth help secret` for a flag is not making a mistake.
+/// The secret name: positional for `put` and `delete`, or `--name`. Both at once is a
+/// mistake worth naming, because the two could differ.
 fn secret_name(args: &[String]) -> Result<String, CliError> {
     let positional = args.first().filter(|arg| !arg.starts_with("--")).cloned();
     match (positional, optional(args, "--name")) {
@@ -337,9 +421,10 @@ fn secret_name(args: &[String]) -> Result<String, CliError> {
         (Some(_), Some(_)) => Err(CliError::Usage(
             "name the secret once, positionally or with --name".into(),
         )),
-        (None, None) => Err(CliError::Usage(
-            "the secret name is required\n\nThe name is the first argument.".into(),
-        )),
+        (None, None) => Err(CliError::Usage(format!(
+            "the secret name is required\n\n{}",
+            help_text()
+        ))),
     }
 }
 
@@ -379,8 +464,8 @@ fn list(global: &GlobalArgs, _args: &[String]) -> Result<(), CliError> {
         }
     }
     // Phone keys are reported by their LAST OBSERVED pairing, never by a check made now:
-    // this verb makes no callosum call, so "superseded" means a lookup saw something
-    // else, not that the pairing is known to be dead.
+    // this verb makes no callosum call, so "superseded" means a lookup saw something else,
+    // not that the pairing is known to be dead.
     for phone in &listing.phones {
         let state = match (phone.unobserved, phone.current_since_ms) {
             (true, _) => "unobserved".to_owned(),
@@ -462,8 +547,8 @@ fn revoke(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     )?;
     match reply["outcome"].as_str() {
         Some("revoked") => println!("revoked grant {grant_id}"),
-        // A missing grant is the operator's answer, not a failure: an expired grant and
-        // an unknown id are the same thing to whoever asked.
+        // A grant that is gone is the operator's answer, not a failure: an expired grant
+        // and an unknown id mean the same thing to whoever asked.
         _ => println!("no live grant {grant_id}"),
     }
     Ok(())

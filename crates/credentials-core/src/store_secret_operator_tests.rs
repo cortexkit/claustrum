@@ -255,10 +255,13 @@ fn operator_put_validates_the_scope_material_and_name_like_a_deposit() {
     let (_root, store) = setup("op-put-validation");
     let before = counts(&store);
     // An API key without a location: the location is always explicit in the byte layouts,
-    // and only the CLI fills the bearer default.
-    assert!(store
-        .secret_put_audited(&api_key_put("ops-key", None), "offline-cli")
-        .is_err());
+    // and only the CLI fills the bearer default, so the store itself must refuse.
+    let mut absent = api_key_put("ops-key", None);
+    absent.location = None;
+    let error = store
+        .secret_put_audited(&absent, "offline-cli")
+        .unwrap_err();
+    assert_eq!(error.wire_code(), Some("invalid_credential_id"), "{error}");
     // A location the phone path refuses (a forbidden header name) must fail here too.
     assert!(store
         .secret_put_audited(&api_key_put("ops-key", Some("header:Host")), "offline-cli")
@@ -400,14 +403,13 @@ fn operator_delete_removes_the_record_its_grants_and_its_pending_requests() {
         })
         .unwrap();
     assert_eq!(after, (0, 0, 1));
-    // A second delete finds nothing to remove.
-    assert_eq!(
+    // A second delete finds nothing to remove, and says so as the store's own absence.
+    assert!(matches!(
         store
             .secret_operator_delete_audited("ops-key", "offline-cli")
-            .unwrap_err()
-            .wire_code(),
-        Some("not_found")
-    );
+            .unwrap_err(),
+        StoreOpError::NotFound
+    ));
 }
 
 #[test]

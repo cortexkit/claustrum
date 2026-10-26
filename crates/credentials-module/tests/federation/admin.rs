@@ -928,6 +928,7 @@ fn the_manifest_shows_no_read_surface_op_can_trigger_a_send() {
         "secret_use.rs",
         "secret_use_tests.rs",
         "secret_phone_tests.rs",
+        "secret_contract_tests.rs",
         "test_support.rs",
         "federation/ingress.rs",
         "federation/outbound.rs",

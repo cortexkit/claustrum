@@ -1182,8 +1182,11 @@ impl HomeVault {
         // 1. Only a home-role vault serves forwarded secret ops; nothing else falls back
         // to local state or forwards again.
         let self_id = self.secret_home_self()?;
-        // 2. The member's current pairing id.
+        // 2. The member's current pairing id, and a `secret_use` member grant under it.
+        // The grant is checked before anything is parsed, as for the flow ops, so a
+        // member without it cannot drive the grammar or binding diagnostics below.
         let pairing_id = self.current_pairing(member, OP_SECRET_USE, budget).await?;
+        self.require_secret_use_grant(member, &pairing_id, OP_SECRET_USE)?;
         // 3. Strict parse of the params, the aad and the sender.
         let request: SecretUseParams = serde_json::from_value(params.clone())
             .map_err(|error| Refusal::InvalidParams(error.to_string()))?;
@@ -1214,9 +1217,7 @@ impl HomeVault {
         if request.call.get("name").and_then(Value::as_str) != Some(aad.secret_name.as_str()) {
             return Err(self.secret_refusal(&subject, member, "secret_name_mismatch"));
         }
-        // 7. A `secret_use` member grant under the current pairing.
-        self.require_secret_use_grant(member, &pairing_id, &subject)?;
-        // 8. The requester's announced key, matching the aad's key id.
+        // 7. The requester's announced key, matching the aad's key id.
         let peer = match self.peer_key(member, budget).await {
             Ok(peer) => peer,
             Err(Refusal::SetupIncomplete(_)) => {
@@ -1227,7 +1228,7 @@ impl HomeVault {
         if peer.key_id != aad.recipient_key_id {
             return Err(self.secret_refusal(&subject, member, "recipient_key_mismatch"));
         }
-        // 9. The local sender's grammar, then the store's grant choice, release receipt
+        // 8. The local sender's grammar, then the store's grant choice, release receipt
         // and seal, all under the asking member. The seal runs inside the store's
         // transaction, over the received aad bytes.
         let release = ReleaseRequest {

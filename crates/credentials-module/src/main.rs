@@ -1462,6 +1462,38 @@ fn route_connection_id(channel: u16, epoch: u32) -> u64 {
     (u64::from(epoch) << 16) | u64::from(channel)
 }
 
+/// Serve one sender secret call (`secret.use`, `secret.request_flow_approval`,
+/// `secret.revoke_flow_grants`). An admitted call on a vault whose secret home is
+/// another member is forwarded there and nothing is looked up locally; on a vault that
+/// serves its own secrets, and for a caller who is not admitted, the local serve
+/// functions answer exactly as before.
+async fn serve_secret_call(
+    surface: &Arc<ReadSurface>,
+    admin: &Arc<admin_surface::AdminSurface>,
+    principal: Option<&subc_protocol::Principal>,
+    method: &str,
+    params: &serde_json::Value,
+) -> secret_use::UseAnswer {
+    use federation::remote_read::{SecretForwardAnswer, SecretRoute};
+    let route = match secret_use::sender_call(method, principal, params) {
+        Some(call) => surface.remote().route_secret_call(call).await,
+        None => SecretRoute::Local,
+    };
+    match route {
+        SecretRoute::Answer(SecretForwardAnswer::Reply(reply)) => {
+            secret_use::UseAnswer::Reply(reply)
+        }
+        SecretRoute::Answer(SecretForwardAnswer::InvalidParams) => {
+            secret_use::UseAnswer::InvalidParams
+        }
+        SecretRoute::Local => match method {
+            "secret.use" => admin.serve_secret_use(principal, params),
+            "secret.request_flow_approval" => admin.serve_flow_approval(principal, params),
+            _ => admin.serve_revoke_flow_grants(principal, params),
+        },
+    }
+}
+
 async fn handle_read_request(
     frame: Frame,
     writer: &mpsc::Sender<Frame>,
@@ -1494,41 +1526,21 @@ async fn handle_read_request(
     };
 
     let result = match request.method.as_str() {
-        "secret.request_flow_approval" | "secret.revoke_flow_grants" => {
-            let answer = if request.method == "secret.request_flow_approval" {
-                admin.serve_flow_approval(principal.as_ref(), &request.params)
-            } else {
-                admin.serve_revoke_flow_grants(principal.as_ref(), &request.params)
-            };
-            match answer {
+        method @ ("secret.use" | "secret.request_flow_approval" | "secret.revoke_flow_grants") => {
+            match serve_secret_call(surface, admin, principal.as_ref(), method, &request.params)
+                .await
+            {
                 secret_use::UseAnswer::Reply(reply) => wrap_result(reply),
                 secret_use::UseAnswer::InvalidParams => {
-                    return invalid_params(
-                        writer,
-                        ver,
-                        channel,
-                        epoch,
-                        corr,
-                        "invalid flow secret parameters",
-                    )
-                    .await;
+                    let detail = if method == "secret.use" {
+                        "invalid secret use parameters"
+                    } else {
+                        "invalid flow secret parameters"
+                    };
+                    return invalid_params(writer, ver, channel, epoch, corr, detail).await;
                 }
             }
         }
-        "secret.use" => match admin.serve_secret_use(principal.as_ref(), &request.params) {
-            secret_use::UseAnswer::Reply(reply) => wrap_result(reply),
-            secret_use::UseAnswer::InvalidParams => {
-                return invalid_params(
-                    writer,
-                    ver,
-                    channel,
-                    epoch,
-                    corr,
-                    "invalid secret use parameters",
-                )
-                .await
-            }
-        },
         OP_ACCOUNT_TOKEN => {
             match serde_json::from_value::<read_surface::AccountTokenParams>(request.params) {
                 Ok(params) => match surface.account_token(principal.as_ref(), &params).await {
@@ -6205,6 +6217,619 @@ mod tests {
             .unwrap()
             .retain(|key, _| !key.starts_with("flow_"));
         run
+    }
+
+    // -----------------------------------------------------------------------------
+    // A vault whose secret home is another member
+    // -----------------------------------------------------------------------------
+
+    /// What the asking vault's route stub does with each call, and what it saw.
+    #[derive(Default)]
+    struct HomeLine {
+        /// Answers given instead of the home's, in order, before the home is reached.
+        canned: std::collections::VecDeque<Result<serde_json::Value, federation::OutboundError>>,
+        /// Answer every home call with this, never reaching the home.
+        always: Option<federation::OutboundError>,
+        /// How many of the home's next replies are dropped after the home served them,
+        /// as a lost reply frame would be.
+        drop_replies: usize,
+        /// Flip one ciphertext bit of a sealed home reply.
+        corrupt_seal: bool,
+        /// The key callosum announces for the home; `None` announces none.
+        home_pub: Option<Vec<u8>>,
+        /// The params of every home request, in order.
+        sent: Vec<serde_json::Value>,
+        /// Every reply the home gave, delivered or dropped.
+        replies: Vec<serde_json::Value>,
+    }
+
+    /// A remote-role vault: self id [`HOME_ASKER`], `secrets.home_member` set to the
+    /// [`SecretHome`]'s [`SC_MEMBER`], and the transfer key the home's callosum stub
+    /// announces for [`HOME_ASKER`]. AFT, Cerebellum and basal are bound on channels
+    /// 92, 93 and 94, and a non-sender module on 95.
+    struct AskingVault {
+        surface: Arc<ReadSurface>,
+        admin: Arc<admin_surface::AdminSurface>,
+        store: Arc<EncryptedStore>,
+    }
+
+    impl AskingVault {
+        fn new(seed: u8, transfer_key: bool) -> Self {
+            let (surface, admin, store) = scoped_rig(seed);
+            store
+                .set_federation_self_member_audited(
+                    HOME_ASKER,
+                    AuditCtx::admin(AuditOp::FederationSelfSet),
+                )
+                .expect("self member");
+            if transfer_key {
+                store
+                    .create_audited(
+                        credentials_core::federation::VAULT_TRANSFER_ID,
+                        &VaultRecord::new_static(
+                            CredentialKind::KemKey,
+                            "operator",
+                            credentials_core::kem::pem_from_scalar(&[9; 32]).into_bytes(),
+                            None,
+                        ),
+                        AuditCtx::admin(AuditOp::Put),
+                    )
+                    .expect("transfer key");
+            }
+            store
+                .set_secret_home_audited(Some(SC_MEMBER), AuditCtx::admin(AuditOp::SecretHomeSet))
+                .expect("home setting");
+            for (channel, module) in [
+                (92, "aft"),
+                (93, "cerebellum"),
+                (94, "basal"),
+                (95, "prefrontal-core"),
+            ] {
+                admin.record_bind_at(
+                    channel,
+                    1,
+                    subc_protocol::Principal::Reserved {
+                        module_id: module.into(),
+                    },
+                    "harness:sender",
+                );
+            }
+            AskingVault {
+                surface,
+                admin,
+                store,
+            }
+        }
+
+        /// Route this vault's calls to `home`: callosum announces the home's transfer
+        /// key, and a home call is served by the home vault as coming from
+        /// [`HOME_ASKER`], subject to the returned line's faults.
+        fn attach(&self, home: &Arc<SecretHome>) -> Arc<std::sync::Mutex<HomeLine>> {
+            let line = Arc::new(std::sync::Mutex::new(HomeLine {
+                home_pub: Some(home.home_pub.clone()),
+                ..HomeLine::default()
+            }));
+            let (stub_home, stub_line) = (Arc::clone(home), Arc::clone(&line));
+            let stub: federation::remote_read::RouteStub =
+                Arc::new(move |route_key: &str, request: serde_json::Value| {
+                    let (home, line) = (Arc::clone(&stub_home), Arc::clone(&stub_line));
+                    let route_key = route_key.to_string();
+                    Box::pin(async move { home_line_call(&home, &line, &route_key, request).await })
+                });
+            assert!(self.surface.remote().attach_route_stub(stub));
+            line
+        }
+
+        async fn reply(
+            &self,
+            channel: u16,
+            method: &str,
+            params: &serde_json::Value,
+        ) -> (FrameType, serde_json::Value) {
+            let (ty, body) =
+                routed_reply(&self.surface, &self.admin, channel, method, params.clone()).await;
+            (ty, serde_json::from_slice(&body).expect("reply JSON"))
+        }
+
+        /// The `result` of one sender call.
+        async fn call(
+            &self,
+            channel: u16,
+            method: &str,
+            params: &serde_json::Value,
+        ) -> serde_json::Value {
+            let (ty, body) = self.reply(channel, method, params).await;
+            assert_eq!(ty, FrameType::Response, "{body}");
+            body["result"].clone()
+        }
+
+        /// This vault's `secret_forward` rows: (subject, outcome, sender module).
+        fn forward_rows(&self) -> Vec<(String, String, String)> {
+            self.store
+                .recent_auth_events(1_000)
+                .unwrap()
+                .into_iter()
+                .filter(|row| row.kind == "secret_forward")
+                .map(|row| {
+                    (
+                        row.credential_id,
+                        row.detail.unwrap_or_default(),
+                        row.principal_id.unwrap_or_default(),
+                    )
+                })
+                .rev()
+                .collect()
+        }
+    }
+
+    async fn home_line_call(
+        home: &SecretHome,
+        line: &std::sync::Mutex<HomeLine>,
+        route_key: &str,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, federation::OutboundError> {
+        use base64::Engine as _;
+        if route_key == "callosum" {
+            assert_eq!(request["method"], "callosum.peer_keys_read", "{request}");
+            let peers = match &line.lock().unwrap().home_pub {
+                Some(public) => json!([{
+                    "fingerprint": SC_MEMBER.strip_prefix("fed-computer:").unwrap(),
+                    "key_record": {"keys": {"vault_transfer_x25519": {"pub": sc_hex(public)}}},
+                }]),
+                None => json!([]),
+            };
+            return Ok(json!({ "peers": peers }));
+        }
+        assert_eq!(route_key, format!("home:{SC_MEMBER}"));
+        {
+            let mut line = line.lock().unwrap();
+            line.sent.push(request["params"].clone());
+            if let Some(error) = line.always.clone() {
+                return Err(error);
+            }
+            if let Some(canned) = line.canned.pop_front() {
+                return canned;
+            }
+        }
+        let method = request["method"].as_str().unwrap();
+        let mut reply = match home
+            .home
+            .serve(HOME_ASKER, method, &request["params"])
+            .await
+        {
+            federation::HomeAnswer::Reply(reply) => reply,
+            federation::HomeAnswer::InvalidParams(detail) => {
+                json!({"code":"invalid_params","message":detail})
+            }
+        };
+        let mut line = line.lock().unwrap();
+        line.replies.push(reply.clone());
+        if line.drop_replies > 0 {
+            line.drop_replies -= 1;
+            return Err(federation::OutboundError::Unavailable(
+                "the reply was lost".into(),
+            ));
+        }
+        if line.corrupt_seal && reply["status"] == "sealed" {
+            let b64 = base64::engine::general_purpose::STANDARD;
+            let mut ciphertext = b64.decode(reply["ciphertext"].as_str().unwrap()).unwrap();
+            *ciphertext.last_mut().unwrap() ^= 1;
+            reply["ciphertext"] = json!(b64.encode(ciphertext));
+        }
+        Ok(reply)
+    }
+
+    fn sent_aad(params: &serde_json::Value) -> serde_json::Value {
+        serde_json::from_str(params["aad"].as_str().expect("aad")).expect("aad JSON")
+    }
+
+    /// On a remote-role vault, AFT's and Cerebellum's `secret.use` look nothing up
+    /// locally: each goes to the home as `federation.secret_use` under a fresh aad
+    /// naming this vault, the home and this vault's own transfer key, and the home's
+    /// answers come back in the local §15 shapes. The release is opened from the sealed
+    /// reply; no request, reply or diagnostic row holds material, and a second release
+    /// of the same secret writes no second diagnostic row.
+    #[tokio::test]
+    async fn a_remote_vault_forwards_secret_use_and_relays_the_release_it_opens() {
+        let home = Arc::new(SecretHome::new(240, Some("self")).await);
+        home.flow.deposit_both().await;
+        let asker = AskingVault::new(241, true);
+        let line = asker.attach(&home);
+        let api = secret_golden("use.request.api_key");
+        let login = secret_golden("use.request.site_login");
+
+        let asked = asker.call(92, "secret.use", &api).await;
+        assert_secret_reply_matches("use.result.approval_required", &asked);
+        let statement = SecretHome::statement(&asked);
+        assert_eq!(statement["v"], "ck-secret-use-statement/v2", "{statement}");
+        assert_eq!(statement["member_id"], SC_MEMBER);
+        assert_eq!(statement["asking_member_id"], HOME_ASKER);
+        let approved = home.flow.approve(&asked, "permanent", false).await;
+        assert_eq!(approved["results"][0]["outcome"], "granted", "{approved}");
+        let released = asker.call(92, "secret.use", &api).await;
+        assert_secret_reply_matches("use.result.released.api_key", &released);
+        assert_eq!(released["key_b64url"], sc_b64(b"sk-example"));
+        assert_eq!(asker.call(92, "secret.use", &api).await, released);
+
+        let asked = asker.call(93, "secret.use", &login).await;
+        let approved = home.flow.approve(&asked, "hour", false).await;
+        assert_eq!(approved["results"][0]["outcome"], "granted", "{approved}");
+        let released = asker.call(93, "secret.use", &login).await;
+        assert_eq!(released["status"], "released", "{released}");
+        assert_eq!(released["username"], "alice");
+        assert_eq!(released["password"], "correct horse");
+        assert!(released["totp"].is_string(), "{released}");
+
+        // One fresh aad per sender call, in the documented field order, bound to this
+        // vault, the home and this vault's own transfer key.
+        let line = line.lock().unwrap();
+        assert_eq!(line.sent.len(), 5);
+        let (_, key_id) = credentials_core::kem::public_half(&home.asker_pem).unwrap();
+        let mut nonces = std::collections::BTreeSet::new();
+        for (params, sender, call) in line
+            .sent
+            .iter()
+            .zip(
+                ["aft", "aft", "aft", "cerebellum", "cerebellum"]
+                    .into_iter()
+                    .zip([&api, &api, &api, &login, &login]),
+            )
+            .map(|(params, (sender, call))| (params, sender, call))
+        {
+            assert_eq!(params["sender"], sender);
+            assert_eq!(&params["call"], call);
+            let aad_text = params["aad"].as_str().unwrap();
+            assert!(aad_text.starts_with(r#"{"secret_name":"#), "{aad_text}");
+            let aad = sent_aad(params);
+            assert_eq!(
+                aad.as_object().unwrap().keys().collect::<Vec<_>>(),
+                [
+                    "call_sha256",
+                    "home",
+                    "nonce",
+                    "recipient_key_id",
+                    "requester",
+                    "secret_name"
+                ]
+            );
+            assert_eq!(aad["secret_name"], call["name"]);
+            assert_eq!(aad["requester"], HOME_ASKER);
+            assert_eq!(aad["home"], SC_MEMBER);
+            assert_eq!(aad["recipient_key_id"], key_id);
+            assert_eq!(
+                aad["call_sha256"],
+                federation::ingress::secret_call_sha256(sender, call).unwrap()
+            );
+            let nonce = aad["nonce"].as_str().unwrap();
+            assert!(credentials_core::federation::is_lower_hex_16_bytes(nonce));
+            nonces.insert(nonce.to_string());
+        }
+        assert_eq!(nonces.len(), 5, "every sender call has its own nonce");
+
+        // Material crosses only sealed, and this vault keeps none of it.
+        let canaries = [sc_b64(b"sk-example"), "correct horse".to_string()];
+        let wire = format!("{:?} {:?}", line.sent, line.replies);
+        let rows = format!("{:?}", asker.store.recent_auth_events(1_000).unwrap());
+        for canary in &canaries {
+            assert!(
+                !wire.contains(canary.as_str()),
+                "{canary} crossed in the clear"
+            );
+            assert!(
+                !rows.contains(canary.as_str()),
+                "{canary} is in a diagnostic row"
+            );
+        }
+        let api_subject = format!("secret|{}", api["name"].as_str().unwrap());
+        let login_subject = format!("secret|{}", login["name"].as_str().unwrap());
+        let row = |subject: &str, outcome: &str, module: &str| {
+            (subject.to_string(), outcome.to_string(), module.to_string())
+        };
+        assert_eq!(
+            asker.forward_rows(),
+            [
+                row(&api_subject, "approval_required", "aft"),
+                row(&api_subject, "released", "aft"),
+                row(&login_subject, "approval_required", "cerebellum"),
+                row(&login_subject, "released", "cerebellum"),
+            ]
+        );
+    }
+
+    /// Basal's flow consent, flow run and revoke on a remote-role vault are the home's:
+    /// the consent is a v2 flow statement naming this vault, the run is released
+    /// sealed, and the revoke ends it. A request the home finds malformed answers the
+    /// same `invalid_params` `Error` frame a local one does.
+    #[tokio::test]
+    async fn a_remote_vault_forwards_basals_flow_consent_run_and_revoke() {
+        let home = Arc::new(SecretHome::new(242, Some("self")).await);
+        home.flow.deposit_both().await;
+        let asker = AskingVault::new(243, true);
+        let line = asker.attach(&home);
+
+        let asked = asker
+            .call(94, "secret.request_flow_approval", &sf_install(false))
+            .await;
+        let statement = SecretHome::statement(&asked);
+        assert_eq!(statement["v"], "ck-secret-flow-statement/v2", "{statement}");
+        assert_eq!(statement["asking_member_id"], HOME_ASKER);
+        let approved = home.flow.approve(&asked, "version", false).await;
+        assert_eq!(approved["results"][0]["outcome"], "granted", "{approved}");
+        let released = asker.call(94, "secret.use", &sf_run(false)).await;
+        assert_eq!(released["status"], "released", "{released}");
+        assert_eq!(released["key_b64url"], sc_b64(b"sk-example"));
+        assert_eq!(
+            asker
+                .call(
+                    94,
+                    "secret.revoke_flow_grants",
+                    &json!({"flow_install_id":"install-A"})
+                )
+                .await,
+            json!({"status":"revoked","grants":1})
+        );
+        assert_eq!(
+            asker.call(94, "secret.use", &sf_run(false)).await,
+            sh_not_found()
+        );
+        let (ty, body) = asker
+            .reply(
+                94,
+                "secret.revoke_flow_grants",
+                &json!({"flow_install_id":""}),
+            )
+            .await;
+        assert_eq!(ty, FrameType::Error, "{body}");
+        assert_eq!(body["code"], "invalid_params");
+
+        let methods: Vec<_> = line
+            .lock()
+            .unwrap()
+            .sent
+            .iter()
+            .map(|params| params.get("aad").is_some())
+            .collect();
+        // The two flow mutates carry basal's params unchanged, with no aad.
+        assert_eq!(methods, [false, true, false, true, false]);
+        let subject = format!("secret|{}", sf_run(false)["name"].as_str().unwrap());
+        let outcomes: Vec<_> = asker
+            .forward_rows()
+            .into_iter()
+            .map(|(subject, outcome, module)| {
+                assert_eq!(module, "basal");
+                (subject, outcome)
+            })
+            .collect();
+        let unaddressed = "secret-use|unaddressed".to_string();
+        assert_eq!(
+            outcomes,
+            [
+                (subject.clone(), "approval_required".to_string()),
+                (subject.clone(), "released".to_string()),
+                (unaddressed.clone(), "revoked".to_string()),
+                (subject, "not_found".to_string()),
+                (unaddressed, "invalid_params".to_string()),
+            ]
+        );
+    }
+
+    /// A transport fault is retried with the very same aad bytes, so a release whose
+    /// reply was lost after the home committed it is answered from the home's receipt
+    /// with the identical sealed bytes and released once. The next sender call gets a
+    /// new nonce, and the whole retry window is far inside the receipt's lifetime.
+    #[tokio::test]
+    async fn a_forwarded_secret_use_keeps_one_aad_across_transport_retries() {
+        assert!(
+            federation::outbound::SECRET_FORWARD_DEADLINE.as_millis()
+                < credentials_core::store::SECRET_RELEASE_RECEIPT_LIFETIME_MS as u128
+        );
+        let home = Arc::new(SecretHome::new(244, Some("self")).await);
+        home.flow.deposit_both().await;
+        let asker = AskingVault::new(245, true);
+        let line = asker.attach(&home);
+        let api = secret_golden("use.request.api_key");
+        let asked = asker.call(92, "secret.use", &api).await;
+        home.flow.approve(&asked, "permanent", false).await;
+
+        {
+            let mut line = line.lock().unwrap();
+            line.sent.clear();
+            line.canned.extend([
+                Err(federation::OutboundError::Unavailable("dropped".into())),
+                Err(federation::OutboundError::Refused {
+                    code: "fed_busy".into(),
+                    message: "busy".into(),
+                }),
+            ]);
+            line.drop_replies = 1;
+        }
+        let released = asker.call(92, "secret.use", &api).await;
+        assert_eq!(released["key_b64url"], sc_b64(b"sk-example"));
+        let next = asker.call(92, "secret.use", &api).await;
+        assert_eq!(next, released);
+
+        let line = line.lock().unwrap();
+        // Two refused attempts, the attempt whose reply was lost, the retry that got
+        // the receipt, then the next sender call.
+        assert_eq!(line.sent.len(), 5, "{:?}", line.sent);
+        for retry in &line.sent[1..4] {
+            assert_eq!(retry, &line.sent[0], "a retry resends the same params");
+        }
+        assert_ne!(
+            sent_aad(&line.sent[4])["nonce"],
+            sent_aad(&line.sent[0])["nonce"],
+            "a new sender call gets a new nonce"
+        );
+        let sealed: Vec<_> = line.replies.iter().skip(1).collect();
+        assert_eq!(sealed.len(), 3);
+        assert_eq!(
+            sealed[0], sealed[1],
+            "the retry is answered from the receipt"
+        );
+        assert_ne!(sealed[1], sealed[2], "a new nonce is sealed afresh");
+        let releases = home
+            .flow
+            .store
+            .read_audit(None)
+            .unwrap()
+            .into_iter()
+            .filter(|entry| entry.op == "secret_first_release")
+            .count();
+        assert_eq!(
+            releases, 1,
+            "a permanent grant audits its first release once"
+        );
+    }
+
+    /// A sealed reply that will not open over the aad this vault sent, with its own
+    /// key and the home's announced key, is `remote_seal_invalid` and releases nothing.
+    #[tokio::test]
+    async fn a_forwarded_release_that_will_not_open_releases_nothing() {
+        let home = Arc::new(SecretHome::new(246, Some("self")).await);
+        home.flow.deposit_both().await;
+        let asker = AskingVault::new(247, true);
+        let line = asker.attach(&home);
+        let api = secret_golden("use.request.api_key");
+        let asked = asker.call(92, "secret.use", &api).await;
+        home.flow.approve(&asked, "permanent", false).await;
+        let seal_invalid = json!({"error":{"code":"remote_seal_invalid","class":"permanent"}});
+
+        line.lock().unwrap().corrupt_seal = true;
+        assert_eq!(asker.call(92, "secret.use", &api).await, seal_invalid);
+        {
+            let mut line = line.lock().unwrap();
+            line.corrupt_seal = false;
+            // Another key announced for the home: the reply was not sealed by it.
+            line.home_pub = Some(
+                credentials_core::kem::public_half(&credentials_core::kem::pem_from_scalar(
+                    &[5; 32],
+                ))
+                .unwrap()
+                .0,
+            );
+        }
+        assert_eq!(asker.call(92, "secret.use", &api).await, seal_invalid);
+        let outcomes: Vec<_> = asker
+            .forward_rows()
+            .into_iter()
+            .map(|(_, outcome, _)| outcome)
+            .collect();
+        assert_eq!(
+            outcomes,
+            [
+                "approval_required",
+                "remote_seal_invalid",
+                "remote_seal_invalid"
+            ]
+        );
+    }
+
+    /// Transport and setup faults answer the codes a remote read answers, and a home
+    /// refusal is relayed as the same body a local refusal is.
+    #[tokio::test]
+    async fn forwarding_faults_answer_the_remote_read_codes() {
+        let home = Arc::new(SecretHome::new(248, Some("self")).await);
+        let asker = AskingVault::new(249, true);
+        let line = asker.attach(&home);
+        let api = secret_golden("use.request.api_key");
+        let refusal = |code: &str, class: &str, remedy: Option<&str>| {
+            let mut error = json!({"code": code, "class": class});
+            if let Some(member) = remedy {
+                error["remedy_member"] = json!(member);
+            }
+            json!({ "error": error })
+        };
+
+        // The home holds no such secret: its uniform not_found, byte for byte.
+        assert_eq!(asker.call(92, "secret.use", &api).await, sh_not_found());
+        line.lock().unwrap().always = Some(federation::OutboundError::Refused {
+            code: "fed_not_exposed".into(),
+            message: "not exposed".into(),
+        });
+        assert_eq!(
+            asker.call(92, "secret.use", &api).await,
+            refusal("federation_setup_invalid", "permanent", None)
+        );
+        line.lock().unwrap().always =
+            Some(federation::OutboundError::Unavailable("unreachable".into()));
+        assert_eq!(
+            asker.call(92, "secret.use", &api).await,
+            refusal("home_unreachable", "transient", None)
+        );
+        {
+            let mut line = line.lock().unwrap();
+            line.always = None;
+            line.home_pub = None;
+        }
+        assert_eq!(
+            asker.call(92, "secret.use", &api).await,
+            refusal("remote_setup_incomplete", "permanent", Some(SC_MEMBER))
+        );
+
+        let keyless = AskingVault::new(250, false);
+        let keyless_line = keyless.attach(&home);
+        assert_eq!(
+            keyless.call(92, "secret.use", &api).await,
+            refusal("transfer_key_missing", "permanent", Some(HOME_ASKER))
+        );
+        assert!(keyless_line.lock().unwrap().sent.is_empty());
+    }
+
+    /// The role is read on every call. A vault whose setting names a member while it
+    /// has no self id refuses `remote_setup_incomplete` and forwards nothing, and a
+    /// caller that is not a sender is refused before any forwarding.
+    #[tokio::test]
+    async fn secret_calls_are_forwarded_only_for_an_admitted_sender_on_a_remote_vault() {
+        let home = Arc::new(SecretHome::new(251, Some("self")).await);
+        let asker = AskingVault::new(252, true);
+        let line = asker.attach(&home);
+        let api = secret_golden("use.request.api_key");
+        let not_found = serde_json::to_vec(&uniform_not_found()).unwrap();
+        for (method, params) in [
+            ("secret.use", &api),
+            ("secret.request_flow_approval", &sf_install(false)),
+            (
+                "secret.revoke_flow_grants",
+                &json!({"flow_install_id":"install-A"}),
+            ),
+        ] {
+            let (ty, body) =
+                routed_reply(&asker.surface, &asker.admin, 95, method, params.clone()).await;
+            assert_eq!(
+                (ty, body),
+                (FrameType::Response, not_found.clone()),
+                "{method}"
+            );
+        }
+        // AFT may not drive basal's flow ops.
+        let (ty, body) = routed_reply(
+            &asker.surface,
+            &asker.admin,
+            92,
+            "secret.revoke_flow_grants",
+            json!({"flow_install_id":"install-A"}),
+        )
+        .await;
+        assert_eq!((ty, body), (FrameType::Response, not_found.clone()));
+        assert!(line.lock().unwrap().sent.is_empty());
+        assert!(asker.forward_rows().is_empty());
+
+        let (surface, admin, store) = scoped_rig(253);
+        store
+            .set_secret_home_audited(Some(SC_MEMBER), AuditCtx::admin(AuditOp::SecretHomeSet))
+            .unwrap();
+        admin.record_bind_at(
+            92,
+            1,
+            subc_protocol::Principal::Reserved {
+                module_id: "aft".into(),
+            },
+            "harness:sender",
+        );
+        assert_eq!(
+            routed_json(&surface, &admin, 92, "secret.use", api).await,
+            json!({"result":{"error":{"code":"remote_setup_incomplete","class":"permanent"}}})
+        );
     }
 
     /// The federation ops answer the uniform not_found on every channel that is not a

@@ -252,6 +252,8 @@ macro_rules! auth_event_kinds {
 auth_event_kinds! {
     /// A secret operation refusal, including create-only phone-key conflicts.
     SecretUseRefusal => "secret_use_refusal",
+    /// A secret call this vault forwarded to the secret home, with its outcome code.
+    SecretForward => "secret_forward",
     /// A provider refresh attempt failed without producing a committed replacement.
     RefreshFailed => "refresh_failed",
     /// A stale report on a non-refreshable credential was latched as `needs_reauth`.

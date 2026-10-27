@@ -40,6 +40,15 @@ use tokio::sync::{oneshot, Mutex as AsyncMutex};
 /// finish end to end in this long, because the Rust client gives the reply frame 3 s.
 pub const CONSUMER_FACING_DEADLINE: Duration = Duration::from_millis(2_500);
 
+/// How long a vault whose secret home is another member keeps trying one forwarded
+/// secret call (`secret.use` and the two flow ops), retries included. The local sender
+/// waits for the reply as a consumer read does, so this is the consumer-facing
+/// deadline. It is also far below the home's release-receipt lifetime
+/// (`SECRET_RELEASE_RECEIPT_LIFETIME_MS`, 10 minutes): every retry of one call reaches
+/// the home while the receipt for its nonce still exists, so a nonce is never answered
+/// afresh after the home has swept its receipt.
+pub const SECRET_FORWARD_DEADLINE: Duration = CONSUMER_FACING_DEADLINE;
+
 /// The home handles each federation op within this long, which keeps its work inside
 /// the requester's 2.5 s budget with room for the round trip.
 pub const HOME_OP_DEADLINE: Duration = Duration::from_millis(1_500);

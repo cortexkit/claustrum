@@ -157,6 +157,71 @@ impl EncryptedStore {
         });
     }
 
+    /// Record one secret call this vault forwarded to its secret home, under the local
+    /// `sender`, with `outcome`, the code the sender was answered with. The subject is
+    /// `secret|<name>`, or `secret-use|unaddressed` when the call named no valid secret.
+    ///
+    /// A `released` outcome is written only when the subject holds no `released` row for
+    /// this sender yet: the table keeps 64 rows per subject, and a row per release would
+    /// evict the refusal rows that explain why a call stopped working. Every other
+    /// outcome is written each time. Best effort, like the refusal diagnostics: a
+    /// failure here changes no reply.
+    pub fn record_secret_forward(
+        &self,
+        sender: SecretSender,
+        name: Option<&str>,
+        outcome: &'static str,
+    ) {
+        let subject = name.map_or_else(
+            || "secret-use|unaddressed".to_owned(),
+            |n| format!("secret|{n}"),
+        );
+        let module = sender
+            .actor()
+            .strip_prefix("reserved:")
+            .expect("sender module");
+        let principal = AuthEventPrincipal::Reserved(module);
+        let _ = self.store.with_conn(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            if outcome == "released" {
+                tx.execute(
+                    "INSERT INTO auth_events \
+                     (ts_ms, credential_id, kind, provider_status, detail, record_version, applied, principal_kind, principal_id) \
+                     SELECT ?1, ?2, ?3, NULL, ?4, NULL, 0, ?5, ?6 \
+                     WHERE NOT EXISTS ( \
+                       SELECT 1 FROM auth_events \
+                       WHERE credential_id = ?2 AND kind = ?3 AND detail = ?4 \
+                         AND principal_kind = ?5 AND (principal_id IS ?6) \
+                     )",
+                    rusqlite::params![
+                        now_ms(),
+                        subject,
+                        AuthEventKind::SecretForward.as_str(),
+                        outcome,
+                        principal.kind(),
+                        principal.id(),
+                    ],
+                )?;
+                trim_auth_events_tx(&tx, &subject)?;
+            } else {
+                append_secret_auth_event_tx(
+                    &tx,
+                    &subject,
+                    &AuthObservation {
+                        kind: AuthEventKind::SecretForward.as_str(),
+                        provider_status: None,
+                        detail: Some(outcome),
+                        reporter_source: None,
+                        principal: Some(principal),
+                    },
+                    None,
+                    false,
+                )?;
+            }
+            tx.commit()
+        });
+    }
+
     /// Ordinary repeat releases do not need an audit transition or a writer-fence wakeup.
     pub fn secret_use_last_use(&self, id: &str, now: i64) {
         let _ = self.store.with_conn(|conn| {
@@ -1417,6 +1482,67 @@ mod receipt_tests {
                     version.as_bytes(),
                     ASKER.as_bytes()
                 ]),
+            ]
+        );
+    }
+}
+
+/// The diagnostic rows a vault whose secret home is elsewhere writes for the calls it
+/// forwards: one per outcome, except a release, which is written once per sender and
+/// secret so releases never push refusal rows out of the trimmed table.
+#[cfg(test)]
+mod forward_audit_tests {
+    use super::*;
+    use crate::store::taxonomy_tests::rig;
+
+    fn forward_rows(store: &EncryptedStore) -> Vec<(String, String, String, String)> {
+        let mut rows: Vec<_> = store
+            .recent_auth_events(1_000)
+            .unwrap()
+            .into_iter()
+            .filter(|row| row.kind == "secret_forward")
+            .map(|row| {
+                (
+                    row.credential_id,
+                    row.detail.unwrap_or_default(),
+                    row.principal_kind.unwrap_or_default(),
+                    row.principal_id.unwrap_or_default(),
+                )
+            })
+            .collect();
+        rows.sort();
+        rows
+    }
+
+    #[test]
+    fn every_outcome_but_a_release_writes_a_row_and_a_release_writes_one_per_sender() {
+        let (_root, store) = rig("secret-forward-audit", 68);
+        store.record_secret_forward(SecretSender::Aft, Some("key"), "approval_required");
+        store.record_secret_forward(SecretSender::Aft, Some("key"), "not_found");
+        store.record_secret_forward(SecretSender::Aft, Some("key"), "not_found");
+        for _ in 0..3 {
+            store.record_secret_forward(SecretSender::Aft, Some("key"), "released");
+        }
+        // Another sender's first release of the same secret is its own row.
+        store.record_secret_forward(SecretSender::Cerebellum, Some("key"), "released");
+        store.record_secret_forward(SecretSender::Basal, None, "revoked");
+        let row = |subject: &str, detail: &str, module: &str| {
+            (
+                subject.to_owned(),
+                detail.to_owned(),
+                "reserved".to_owned(),
+                module.to_owned(),
+            )
+        };
+        assert_eq!(
+            forward_rows(&store),
+            vec![
+                row("secret-use|unaddressed", "revoked", "basal"),
+                row("secret|key", "approval_required", "aft"),
+                row("secret|key", "not_found", "aft"),
+                row("secret|key", "not_found", "aft"),
+                row("secret|key", "released", "aft"),
+                row("secret|key", "released", "cerebellum"),
             ]
         );
     }

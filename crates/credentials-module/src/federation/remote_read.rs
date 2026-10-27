@@ -47,6 +47,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use base64::Engine as _;
+use credentials_core::agent_secret::{validate_name, SecretError, SecretSender};
 use credentials_core::audit::{AuthEventKind, ReporterSource};
 use credentials_core::federation::{
     valid_member_id, NewRemoteRecord, RemoteHomeState, RemoteHomeSuccess, RemoteRecord,
@@ -56,19 +57,20 @@ use credentials_core::plan_detection::DetectedPlan;
 use credentials_core::record::{CredentialKind, RecordIdentity, RecordState};
 use credentials_core::store::{
     AuthEventPrincipal, AuthObservation, EncryptedStore, GrantOperation, ReadGrant, ScopedListRow,
-    SelectorKind, StoreOpError,
+    SecretHomeRole, SelectorKind, StoreOpError, SECRET_RELEASE_RECEIPT_LIFETIME_MS,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::watch;
 
 use super::ingress::{
-    decode_peer_transfer_key, Lookup, CALLOSUM_MODULE_ID, OP_REMOTE_TOKEN, OP_REPORT_AUTH_FAILURE,
-    REMOTE_TOKEN_INFO,
+    decode_peer_transfer_key, secret_call_sha256, Lookup, CALLOSUM_MODULE_ID, OP_REMOTE_TOKEN,
+    OP_REPORT_AUTH_FAILURE, OP_SECRET_REQUEST_FLOW_APPROVAL, OP_SECRET_REVOKE_FLOW_GRANTS,
+    OP_SECRET_USE, REMOTE_TOKEN_INFO, SECRET_RELEASE_INFO,
 };
 use super::outbound::{
     is_permanent_callosum_class, management_surface, OutboundClient, OutboundError, RouteCall,
-    CONSUMER_FACING_DEADLINE,
+    CONSUMER_FACING_DEADLINE, SECRET_FORWARD_DEADLINE,
 };
 
 /// The skew allowance: a token is treated as expired this long before the home said.
@@ -680,11 +682,27 @@ fn real_mono() -> MonoClock {
     Arc::new(move || u64::try_from(origin.elapsed().as_millis()).unwrap_or(u64::MAX))
 }
 
+/// A stand-in for every route a [`RemoteReader`] calls: the route key (`callosum` or
+/// `home:<member>`) and the request body in, the reply's `result` member or a
+/// transport error out. See [`RemoteReader::attach_route_stub`].
+#[cfg(any(test, feature = "test-support"))]
+pub type RouteStub = Arc<
+    dyn Fn(
+            &str,
+            Value,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<Value, OutboundError>> + Send>,
+        > + Send
+        + Sync,
+>;
+
 /// This vault in its role as requester: it serves its consumers the remote records
 /// it holds, fetching tokens from their home vaults.
 pub struct RemoteReader {
     store: Arc<EncryptedStore>,
     outbound: OnceLock<OutboundClient>,
+    #[cfg(any(test, feature = "test-support"))]
+    route_stub: OnceLock<RouteStub>,
     /// The refresh adapters this vault itself registers. A home reply naming any other
     /// adapter is refused: this vault would list a protocol it cannot describe.
     adapters: BTreeSet<String>,
@@ -709,6 +727,8 @@ impl RemoteReader {
         Self {
             store,
             outbound: OnceLock::new(),
+            #[cfg(any(test, feature = "test-support"))]
+            route_stub: OnceLock::new(),
             adapters: adapters.into_iter().collect(),
             wall: real_wall(),
             mono: real_mono(),
@@ -729,6 +749,37 @@ impl RemoteReader {
     /// effect; returns whether this one did.
     pub fn attach_outbound(&self, client: OutboundClient) -> bool {
         self.outbound.set(client).is_ok()
+    }
+
+    /// Answer every route call (callosum lookups and home calls) from `stub` instead
+    /// of the outbound client. A test seam with no production caller: it lets a test
+    /// put a real home vault, or a faulty transport, behind this reader without a
+    /// callosum. Only the first call takes effect; returns whether this one did.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn attach_route_stub(&self, stub: RouteStub) -> bool {
+        self.route_stub.set(stub).is_ok()
+    }
+
+    /// One route call within `left`, through the outbound client (or the test stub),
+    /// with its failure already mapped to a consumer-table row.
+    async fn call_route(
+        &self,
+        route_key: &str,
+        call: RouteCall,
+        left: Duration,
+    ) -> Result<Value, Failure> {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(stub) = self.route_stub.get() {
+            return match tokio::time::timeout(left, stub(route_key, call.request)).await {
+                Ok(result) => result.map_err(map_outbound_error),
+                Err(_) => Err(Failure::home_unreachable()),
+            };
+        }
+        let client = self.outbound.get().ok_or_else(Failure::home_unreachable)?;
+        client
+            .call(route_key, call, left)
+            .await
+            .map_err(map_outbound_error)
     }
 
     /// The remote record stored under `credential_id`, or `None` when the id is not a
@@ -1030,13 +1081,12 @@ impl RemoteReader {
     /// never for a member named anywhere in a request or a reply.
     async fn home_key(
         &self,
-        client: &OutboundClient,
         home: &str,
         budget: tokio::time::Instant,
     ) -> Result<super::ingress::PeerKey, Failure> {
         let left = Self::left(budget).ok_or_else(Failure::home_unreachable)?;
-        let body = client
-            .call(
+        let body = self
+            .call_route(
                 CALLOSUM_ROUTE_KEY,
                 RouteCall {
                     target: management_surface(CALLOSUM_MODULE_ID),
@@ -1045,8 +1095,7 @@ impl RemoteReader {
                 },
                 left,
             )
-            .await
-            .map_err(map_outbound_error)?;
+            .await?;
         match decode_peer_transfer_key(&body, home) {
             Lookup::Found(key) => Ok(key),
             Lookup::Absent => Err(Failure::home_key_missing(home)),
@@ -1108,7 +1157,7 @@ impl RemoteReader {
     ) -> Result<TokenReply, Failure> {
         let (self_id, pem, key_id) = self.own_setup()?;
         let client = self.outbound.get().ok_or_else(Failure::home_unreachable)?;
-        let home_key = self.home_key(client, home, budget).await?;
+        let home_key = self.home_key(home, budget).await?;
         let nonce = random_nonce().ok_or_else(Failure::store_error)?;
         let aad = serde_json::to_string(&TokenAad {
             credential_id,
@@ -1314,6 +1363,434 @@ impl RemoteReader {
             .await
             .map_err(|error| map_outbound_error(error).refusal)?;
         map_report_reply(&reply, home)
+    }
+}
+
+// ---------------------------------------------------------------------------------
+// Forwarded secret calls
+// ---------------------------------------------------------------------------------
+
+// Every retry of one forwarded secret call must reach the home while the release
+// receipt for its nonce still exists (see `SECRET_FORWARD_DEADLINE`).
+const _: () =
+    assert!((SECRET_FORWARD_DEADLINE.as_millis() as i64) < SECRET_RELEASE_RECEIPT_LIFETIME_MS);
+
+/// The pause before a forwarded secret call is retried after a transport fault, so a
+/// home that is restarting is not called in a tight loop. A retry is made only while
+/// at least this much of the call's budget is left.
+const SECRET_FORWARD_RETRY_PAUSE: Duration = Duration::from_millis(100);
+
+/// A secret call a local sender made on this vault while its secret home is another
+/// member. The sender was admitted by this vault, exactly as for a local call; the
+/// params are the sender's own, unchanged.
+pub enum SecretCall<'a> {
+    /// `secret.use` from AFT, Cerebellum or basal.
+    Use {
+        sender: SecretSender,
+        call: &'a Value,
+    },
+    /// basal's `secret.request_flow_approval`.
+    RequestFlowApproval(&'a Value),
+    /// basal's `secret.revoke_flow_grants`.
+    RevokeFlowGrants(&'a Value),
+}
+
+impl SecretCall<'_> {
+    fn sender(&self) -> SecretSender {
+        match self {
+            Self::Use { sender, .. } => *sender,
+            Self::RequestFlowApproval(_) | Self::RevokeFlowGrants(_) => SecretSender::Basal,
+        }
+    }
+
+    /// The secret the call names, when it is a valid secret name: the diagnostic
+    /// subject. A revoke names a flow, not a secret.
+    fn secret_name(&self) -> Option<&str> {
+        let params = match self {
+            Self::Use { call, .. } => call,
+            Self::RequestFlowApproval(params) => params,
+            Self::RevokeFlowGrants(_) => return None,
+        };
+        params
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|name| validate_name(name).is_ok())
+    }
+}
+
+/// What the local sender is answered with for a forwarded secret call.
+pub enum SecretForwardAnswer {
+    /// A §15 reply body, the same shape a local call answers: `released`,
+    /// `approval_required`, `revoked`, or a `{"error":{code, class, remedy_member?}}`
+    /// refusal.
+    Reply(Value),
+    /// The home found the sender's params malformed, which a local call answers with
+    /// an `invalid_params` `Error` frame.
+    InvalidParams,
+}
+
+/// Where a secret call is served, from this vault's role.
+pub enum SecretRoute {
+    /// The vault serves its own secrets (setting unset, or this vault is the home).
+    Local,
+    /// The call was forwarded to the home, or refused because the role is unusable.
+    Answer(SecretForwardAnswer),
+}
+
+/// Why a forwarded secret call ends without a body from the home.
+enum SecretFault {
+    Refused(RemoteRefusal),
+    InvalidParams,
+}
+
+impl From<Failure> for SecretFault {
+    fn from(failure: Failure) -> Self {
+        Self::Refused(failure.refusal)
+    }
+}
+
+/// The release `aad`, serialized once per sender call, fields in this order. The exact
+/// bytes travel with every retry of the call and the sealed reply is opened over them.
+#[derive(Serialize)]
+struct SecretAad<'a> {
+    secret_name: &'a str,
+    requester: &'a str,
+    home: &'a str,
+    nonce: &'a str,
+    recipient_key_id: &'a str,
+    call_sha256: &'a str,
+}
+
+/// The `sender` a `federation.secret_use` names.
+fn sender_wire(sender: SecretSender) -> &'static str {
+    match sender {
+        SecretSender::Aft => "aft",
+        SecretSender::Cerebellum => "cerebellum",
+        SecretSender::Basal => "basal",
+    }
+}
+
+/// Every §15 secret refusal code, so a home refusal in that vocabulary is relayed as
+/// the exact body this vault's own store would answer.
+const SECRET_ERRORS: [SecretError; 12] = [
+    SecretError::InvalidParams,
+    SecretError::LimitExceeded,
+    SecretError::NotFound,
+    SecretError::PairingUnavailable,
+    SecretError::PhoneNotRegistered,
+    SecretError::PhoneKeyConflict,
+    SecretError::DepositConflict,
+    SecretError::NameExists,
+    SecretError::SecretSetupIncomplete,
+    SecretError::ApprovalInvalid,
+    SecretError::PendingLimit,
+    SecretError::StoreError,
+];
+
+/// Map the home's `{code, class, remedy_member?}` refusal of a forwarded secret call.
+/// A §15 code keeps this vault's own class for it; anything else maps as a token
+/// fetch refusal does, so a code this vault does not know is `home_unavailable`.
+fn map_secret_refusal(error: &Value, home: &str, self_id: &str) -> RemoteRefusal {
+    let code = error.get("code").and_then(Value::as_str).unwrap_or("");
+    match SECRET_ERRORS.iter().find(|known| known.code() == code) {
+        Some(known) => RemoteRefusal::new(known.code(), known.class()),
+        None => map_home_refusal(error, home, self_id).refusal,
+    }
+}
+
+/// Whether every member of `object` is named in `required` or `optional`, every name
+/// in `required` is present, and every value is a string.
+fn string_members(object: &Value, required: &[&str], optional: &[&str]) -> bool {
+    let Some(members) = object.as_object() else {
+        return false;
+    };
+    required.iter().all(|key| members.contains_key(*key))
+        && members.iter().all(|(key, value)| {
+            (required.contains(&key.as_str()) || optional.contains(&key.as_str()))
+                && value.is_string()
+        })
+}
+
+/// The opened plaintext is exactly a §15 `released` object: an API key, or a site
+/// login with an optional TOTP code. Anything else is not passed to the sender.
+fn valid_released(released: &Value) -> bool {
+    match released.get("kind").and_then(Value::as_str) {
+        _ if released.get("status").and_then(Value::as_str) != Some("released") => false,
+        Some("agent_api_key") => {
+            string_members(released, &["status", "kind", "key_b64url", "location"], &[])
+        }
+        Some("site_login") => string_members(
+            released,
+            &["status", "kind", "username", "password"],
+            &["totp"],
+        ),
+        _ => false,
+    }
+}
+
+/// The §15 `approval_required` body, with exactly its four members. It carries the
+/// statement to sign and never material.
+fn valid_approval_required(reply: &Value) -> bool {
+    let Some(members) = reply.as_object() else {
+        return false;
+    };
+    members.len() == 4
+        && reply.get("status").and_then(Value::as_str) == Some("approval_required")
+        && reply.get("request_id").is_some_and(Value::is_string)
+        && reply.get("statement_b64url").is_some_and(Value::is_string)
+        && reply.get("expires_at_ms").is_some_and(Value::is_i64)
+}
+
+/// A home answer that is neither a §15 body nor sealed: the home's refusal, an
+/// `Error` frame, or something this vault does not recognise.
+fn classify_secret_refusal(reply: &Value, home: &str, self_id: &str) -> SecretFault {
+    if let Some(error) = reply.get("error").filter(|error| error.is_object()) {
+        return SecretFault::Refused(map_secret_refusal(error, home, self_id));
+    }
+    match reply.get("code").and_then(Value::as_str) {
+        // The home parsed the sender's params exactly as this vault would have and
+        // refused them: the sender gets the same `Error` frame a local call gets.
+        Some("invalid_params") => SecretFault::InvalidParams,
+        Some(code) => map_frame_code(code).into(),
+        None => Failure::home_unavailable().into(),
+    }
+}
+
+/// Whether a home call's outcome is a transport fault worth one more try with the
+/// same request bytes: the home could not be reached, or it could not finish a lookup.
+fn retryable(outcome: &Result<Value, Failure>) -> bool {
+    match outcome {
+        Err(failure) => failure.refusal.code == "home_unreachable",
+        Ok(reply) => {
+            reply
+                .get("error")
+                .and_then(|error| error.get("code"))
+                .and_then(Value::as_str)
+                == Some("home_unavailable")
+                || reply
+                    .get("code")
+                    .and_then(Value::as_str)
+                    .is_some_and(|code| map_frame_code(code).refusal.code == "home_unreachable")
+        }
+    }
+}
+
+impl RemoteReader {
+    /// Serve a sender's secret call by this vault's role, read on every call. A vault
+    /// that serves its own secrets answers [`SecretRoute::Local`] and the caller serves
+    /// it as before. A remote-role vault looks nothing up locally: it forwards the call
+    /// to the home and relays the answer. A setting that names a member while this
+    /// vault's self id is unset or equal to it refuses `remote_setup_incomplete`
+    /// naming this vault, and an unreadable setting refuses `store_error`.
+    pub async fn route_secret_call(&self, call: SecretCall<'_>) -> SecretRoute {
+        let refused = |refusal: RemoteRefusal| {
+            SecretRoute::Answer(SecretForwardAnswer::Reply(
+                json!({ "error": refusal.body() }),
+            ))
+        };
+        match self.store.secret_home_role() {
+            SecretHomeRole::Single | SecretHomeRole::Home { .. } => SecretRoute::Local,
+            SecretHomeRole::Remote { home_member } => {
+                SecretRoute::Answer(self.forward_secret_call(&home_member, call).await)
+            }
+            SecretHomeRole::RemoteSetupIncomplete { self_member } => refused(
+                RemoteRefusal::new("remote_setup_incomplete", "permanent").remedy(self_member),
+            ),
+            SecretHomeRole::StoreError => {
+                SecretRoute::Answer(SecretForwardAnswer::Reply(SecretError::StoreError.body()))
+            }
+        }
+    }
+
+    /// Forward one sender call to `home` at `fed:<fp>:claustrum` and map its answer to
+    /// the §15 shape the sender would get locally. The whole call, retries included,
+    /// finishes inside [`SECRET_FORWARD_DEADLINE`]. One diagnostic row records the call
+    /// and its outcome code, never material.
+    pub async fn forward_secret_call(
+        &self,
+        home: &str,
+        call: SecretCall<'_>,
+    ) -> SecretForwardAnswer {
+        let budget = tokio::time::Instant::now() + SECRET_FORWARD_DEADLINE;
+        let outcome = match &call {
+            SecretCall::Use { sender, call } => self.forward_use(home, *sender, call, budget).await,
+            SecretCall::RequestFlowApproval(params) => {
+                self.forward_flow(home, OP_SECRET_REQUEST_FLOW_APPROVAL, params, budget)
+                    .await
+            }
+            SecretCall::RevokeFlowGrants(params) => {
+                self.forward_flow(home, OP_SECRET_REVOKE_FLOW_GRANTS, params, budget)
+                    .await
+            }
+        };
+        let (answer, code) = match outcome {
+            Ok((reply, code)) => (SecretForwardAnswer::Reply(reply), code),
+            Err(SecretFault::Refused(refusal)) => (
+                SecretForwardAnswer::Reply(json!({ "error": refusal.body() })),
+                refusal.code,
+            ),
+            Err(SecretFault::InvalidParams) => {
+                (SecretForwardAnswer::InvalidParams, "invalid_params")
+            }
+        };
+        self.store
+            .record_secret_forward(call.sender(), call.secret_name(), code);
+        answer
+    }
+
+    /// `secret.use` as `federation.secret_use`: one fresh aad for this sender call,
+    /// sent unchanged with every retry, and a sealed release opened only over those
+    /// bytes with this vault's transfer key and the home's announced key.
+    async fn forward_use(
+        &self,
+        home: &str,
+        sender: SecretSender,
+        call: &Value,
+        budget: tokio::time::Instant,
+    ) -> Result<(Value, &'static str), SecretFault> {
+        // The aad names the secret and binds the exact params. A call with no name, or
+        // with a number no §15 param can hold, is one the home's parser refuses anyway.
+        let Some(secret_name) = call
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|name| !name.is_empty())
+        else {
+            return Err(SecretFault::InvalidParams);
+        };
+        let sender = sender_wire(sender);
+        let call_sha256 = secret_call_sha256(sender, call).ok_or(SecretFault::InvalidParams)?;
+        let (self_id, pem, key_id) = self.own_setup()?;
+        let home_key = self.home_key(home, budget).await?;
+        let nonce = random_nonce().ok_or_else(Failure::store_error)?;
+        let aad = serde_json::to_string(&SecretAad {
+            secret_name,
+            requester: &self_id,
+            home,
+            nonce: &nonce,
+            recipient_key_id: &key_id,
+            call_sha256: &call_sha256,
+        })
+        .map_err(|_| Failure::store_error())?;
+        let request = json!({
+            "method": OP_SECRET_USE,
+            "params": { "aad": aad, "sender": sender, "call": call },
+        });
+        let reply = self.call_home(home, &request, budget).await?;
+        match reply.get("status").and_then(Value::as_str) {
+            Some("sealed") => {
+                let released = open_release(&reply, &aad, &pem, &home_key.public)?;
+                Ok((released, "released"))
+            }
+            Some("approval_required") if valid_approval_required(&reply) => {
+                Ok((reply, "approval_required"))
+            }
+            // A release in the clear, or a status this op never answers, is not
+            // passed on: material crosses only sealed.
+            Some(_) => Err(Failure::reply_invalid("status").into()),
+            None => Err(classify_secret_refusal(&reply, home, &self_id)),
+        }
+    }
+
+    /// A flow consent op, forwarded with basal's params unchanged. Neither carries a
+    /// sender, a stamp or material, so nothing is sealed either way.
+    async fn forward_flow(
+        &self,
+        home: &str,
+        method: &'static str,
+        params: &Value,
+        budget: tokio::time::Instant,
+    ) -> Result<(Value, &'static str), SecretFault> {
+        let self_id = match self.store.federation_self_member() {
+            Ok(Some(self_id)) => self_id,
+            Ok(None) => return Err(Failure::transfer_key_missing(None).into()),
+            Err(_) => return Err(Failure::store_error().into()),
+        };
+        let request = json!({ "method": method, "params": params });
+        let reply = self.call_home(home, &request, budget).await?;
+        let status = reply.get("status").and_then(Value::as_str);
+        match (method, status) {
+            (OP_SECRET_REQUEST_FLOW_APPROVAL, Some("approval_required"))
+                if valid_approval_required(&reply) =>
+            {
+                Ok((reply, "approval_required"))
+            }
+            (OP_SECRET_REVOKE_FLOW_GRANTS, Some("revoked")) => {
+                let grants = reply.get("grants").and_then(Value::as_u64);
+                match grants {
+                    Some(grants) if reply.as_object().is_some_and(|m| m.len() == 2) => {
+                        Ok((json!({ "status": "revoked", "grants": grants }), "revoked"))
+                    }
+                    _ => Err(Failure::reply_invalid("shape").into()),
+                }
+            }
+            (_, Some(_)) => Err(Failure::reply_invalid("status").into()),
+            (_, None) => Err(classify_secret_refusal(&reply, home, &self_id)),
+        }
+    }
+
+    /// Send `request` to the home, retrying a transport fault with the same request
+    /// bytes while `budget` allows. The last outcome is returned as it is.
+    async fn call_home(
+        &self,
+        home: &str,
+        request: &Value,
+        budget: tokio::time::Instant,
+    ) -> Result<Value, Failure> {
+        loop {
+            let left = Self::left(budget).ok_or_else(Failure::home_unreachable)?;
+            let outcome = self
+                .call_route(
+                    &home_route_key(home),
+                    RouteCall {
+                        target: management_surface(&fed_provider_module(home)),
+                        prelude: None,
+                        request: request.clone(),
+                    },
+                    left,
+                )
+                .await;
+            let room = Self::left(budget).is_some_and(|left| left > SECRET_FORWARD_RETRY_PAUSE);
+            if !retryable(&outcome) || !room {
+                return outcome;
+            }
+            tokio::time::sleep(SECRET_FORWARD_RETRY_PAUSE).await;
+        }
+    }
+}
+
+/// Open the home's sealed release over the aad bytes this vault sent, with this vault's
+/// transfer key and the home's announced key, under the secret-release info. A reply
+/// sealed for another request, by another member or for another purpose does not open
+/// and releases nothing. The opened object goes to the sender and is never stored.
+fn open_release(reply: &Value, aad: &str, pem: &str, home_public: &[u8]) -> Result<Value, Failure> {
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let field = |key: &str| {
+        reply
+            .get(key)
+            .and_then(Value::as_str)
+            .and_then(|text| b64.decode(text).ok())
+    };
+    let (Some(enc), Some(ciphertext)) = (field("enc"), field("ciphertext")) else {
+        return Err(Failure::seal_invalid());
+    };
+    if reply.as_object().is_some_and(|members| members.len() != 3) {
+        return Err(Failure::seal_invalid());
+    }
+    let plaintext = credentials_core::kem::open_auth(
+        pem,
+        home_public,
+        &enc,
+        &ciphertext,
+        SECRET_RELEASE_INFO,
+        aad.as_bytes(),
+    )
+    .map_err(|_| Failure::seal_invalid())?;
+    let released: Value =
+        serde_json::from_slice(&plaintext).map_err(|_| Failure::reply_invalid("shape"))?;
+    if valid_released(&released) {
+        Ok(released)
+    } else {
+        Err(Failure::reply_invalid("shape"))
     }
 }
 

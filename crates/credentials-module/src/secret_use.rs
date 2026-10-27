@@ -158,6 +158,38 @@ pub fn serve(
     }
 }
 
+/// The forwardable form of a secret call from `principal`, or `None` when the caller is
+/// not admitted to `method` (the local serve functions then refuse it with `not_found`,
+/// before anything is looked up). Admission is the local one: `secret.use` from AFT,
+/// Cerebellum or basal, and the two flow ops from basal only.
+pub fn sender_call<'a>(
+    method: &str,
+    principal: Option<&Principal>,
+    params: &'a Value,
+) -> Option<crate::federation::remote_read::SecretCall<'a>> {
+    use crate::federation::remote_read::SecretCall;
+    let Some(Principal::Reserved { module_id }) = principal else {
+        return None;
+    };
+    match (method, module_id.as_str()) {
+        ("secret.use", "aft") => Some(SecretCall::Use {
+            sender: SecretSender::Aft,
+            call: params,
+        }),
+        ("secret.use", "cerebellum") => Some(SecretCall::Use {
+            sender: SecretSender::Cerebellum,
+            call: params,
+        }),
+        ("secret.use", "basal") => Some(SecretCall::Use {
+            sender: SecretSender::Basal,
+            call: params,
+        }),
+        ("secret.request_flow_approval", "basal") => Some(SecretCall::RequestFlowApproval(params)),
+        ("secret.revoke_flow_grants", "basal") => Some(SecretCall::RevokeFlowGrants(params)),
+        _ => None,
+    }
+}
+
 /// Parse and validate `secret.use` params from an agent sender (AFT or Cerebellum) into
 /// the call the store authorizes, or the answer that ends the request. Every refusal
 /// here writes its diagnostic under `sender`.

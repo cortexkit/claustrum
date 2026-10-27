@@ -30,6 +30,17 @@ pub fn is_phone_op(method: &str) -> bool {
     PHONE_OPS.contains(&method)
 }
 
+/// The phone-callable query that says where this account's agent secrets live. It is
+/// kept apart from [`PHONE_OPS`], the seven ops a vault refuses when the secrets live
+/// elsewhere, because this one answers on every vault: it is how the phone finds the
+/// home.
+pub const HOME_OP: &str = "secret.home";
+
+/// Every op the phone route serves: the seven secret ops and [`HOME_OP`].
+pub fn is_phone_route_op(method: &str) -> bool {
+    is_phone_op(method) || method == HOME_OP
+}
+
 fn before_deadline(now: tokio::time::Instant, deadline: tokio::time::Instant) -> bool {
     now < deadline
 }
@@ -90,7 +101,7 @@ pub(crate) async fn serve_with_lookup(
     if matches!(method, "permissions.list" | "permissions.revoke") {
         return PhoneAnswer::PermissionsOperatorRequired;
     }
-    if !is_phone_op(method) {
+    if !is_phone_route_op(method) {
         return answer(Err(SecretError::NotFound));
     }
     let op = match parse(method, params) {
@@ -179,12 +190,12 @@ pub fn valid_ulid(value: &str) -> bool {
 
 pub(crate) fn parse(method: &str, params: &Value) -> Result<PhoneOperation, SecretError> {
     match method {
-        "secret.deposit_keys" | "secret.list" => {
+        "secret.deposit_keys" | "secret.list" | HOME_OP => {
             keys(params, &[], &[])?;
-            Ok(if method == "secret.list" {
-                PhoneOperation::List
-            } else {
-                PhoneOperation::DepositKeys
+            Ok(match method {
+                "secret.list" => PhoneOperation::List,
+                HOME_OP => PhoneOperation::Home,
+                _ => PhoneOperation::DepositKeys,
             })
         }
         "secret.phone_keys_register" => {

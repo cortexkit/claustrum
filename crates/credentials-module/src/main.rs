@@ -1349,7 +1349,7 @@ async fn dispatch_route_request(
         federation::RouteCaller::Principal(principal) => {
             if method.as_ref().is_some_and(|request| {
                 federation::is_federation_op(&request.method)
-                    || secret_phone::is_phone_op(&request.method)
+                    || secret_phone::is_phone_route_op(&request.method)
             }) {
                 return send_route_result(writer, header, uniform_not_found()).await;
             }
@@ -5399,7 +5399,10 @@ mod tests {
                         AuditCtx::admin(AuditOp::SecretPhoneGateSet),
                     )
                     .unwrap();
-                for op in secret_phone::PHONE_OPS {
+                for op in secret_phone::PHONE_OPS
+                    .into_iter()
+                    .chain([secret_phone::HOME_OP])
+                {
                     assert_eq!(
                         routed_reply(&surface, &admin, 91, op, json!({})).await,
                         (FrameType::Response, refused.clone())
@@ -5440,6 +5443,18 @@ mod tests {
                         assert_eq!(body["code"], "permissions_operator_required");
                         assert!(body.get("class").is_none());
                     }
+                    // The admitted phone route dispatches `secret.home` to the phone
+                    // channel, which asks callosum about the pairing first, exactly as
+                    // for `secret.list`. This rig has no outbound client, so both get
+                    // the same transient pairing refusal rather than `not_found`.
+                    let list = routed_json(&surface, &admin, 90, "secret.list", json!({})).await;
+                    let home =
+                        routed_json(&surface, &admin, 90, secret_phone::HOME_OP, json!({})).await;
+                    assert_eq!(
+                        home["result"]["error"]["code"], "pairing_unavailable",
+                        "{home}"
+                    );
+                    assert_eq!(home, list);
                 }
             }
         }
@@ -5697,6 +5712,263 @@ mod tests {
     // -----------------------------------------------------------------------------
     // The secret home's federation ingress
     // -----------------------------------------------------------------------------
+
+    /// The member named as the secret home in the phone-role tests below. It is never
+    /// this test vault's own self id.
+    const PHONE_TEST_HOME: &str = "fed-computer:44444444444444444444444444444444";
+    /// A paired phone that never registered keys with the test vault.
+    const UNREGISTERED_FP: &str = "55555555555555555555555555555555";
+
+    /// Callosum's pairing answer listing phone `fp` under pairing `pair-A`.
+    fn paired_phone(fp: &str) -> serde_json::Value {
+        json!({"devices":[{"class":"phone","fingerprint":fp,"pairing_id":"pair-A"}]})
+    }
+
+    /// `method` on `store`'s phone channel for phone `fp`, with callosum's pairing lookup
+    /// answering `lookup` (`None` is no answer).
+    async fn phone_on(
+        store: &Arc<EncryptedStore>,
+        fp: &str,
+        method: &str,
+        params: serde_json::Value,
+        lookup: Option<serde_json::Value>,
+    ) -> serde_json::Value {
+        sc_answer(
+            secret_phone::serve_with_lookup(
+                Arc::clone(store),
+                fp,
+                method,
+                &params,
+                tokio::time::Instant::now() + secret_phone::PHONE_OP_DEADLINE,
+                async move { lookup },
+            )
+            .await,
+        )
+    }
+
+    /// On a vault whose secrets live on another member, each of the seven phone ops is
+    /// refused `secret_home_elsewhere` naming the home, for a registered phone and for a
+    /// paired phone that never registered here, and none of them writes anything. The
+    /// same requests are served again once the setting is cleared, so the refusal comes
+    /// from the role alone.
+    #[tokio::test]
+    async fn a_remote_role_vault_refuses_every_phone_op_with_the_home_and_writes_nothing() {
+        use credentials_core::{agent_secret::SecretMaterial, secret::Secret};
+        let flow = SecretFlow::new(201).await;
+        let deposit = flow.deposit_request(
+            "deposit.request.api_key",
+            &SecretMaterial::ApiKey(Secret::new(b"sk-example".to_vec())),
+        );
+        flow.store
+            .set_secret_home_audited(
+                Some(PHONE_TEST_HOME),
+                AuditCtx::admin(AuditOp::SecretHomeSet),
+            )
+            .expect("home set");
+        let audit_rows = flow.store.read_audit(None).unwrap().len();
+        let elsewhere = json!({"error":{
+            "code":"secret_home_elsewhere","class":"permanent","remedy_member":PHONE_TEST_HOME,
+        }});
+        let calls = [
+            ("secret.phone_keys_register", flow.register_request()),
+            ("secret.deposit_keys", json!({})),
+            ("secret.deposit", deposit.clone()),
+            (
+                "secret.approve",
+                json!({"envelope_b64url":sc_b64(b"envelope"),"signature_b64url":sc_b64(b"signature")}),
+            ),
+            ("secret.list", json!({})),
+            ("secret.delete", json!({"name": deposit["name"].clone()})),
+            (
+                "secret.revoke_grant",
+                json!({"grant_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV"}),
+            ),
+        ];
+        assert_eq!(
+            calls.iter().map(|(method, _)| *method).collect::<Vec<_>>(),
+            secret_phone::PHONE_OPS.to_vec()
+        );
+        for (method, params) in &calls {
+            assert_eq!(
+                flow.phone(method, params.clone()).await,
+                elsewhere,
+                "registered phone: {method}"
+            );
+            assert_eq!(
+                phone_on(
+                    &flow.store,
+                    UNREGISTERED_FP,
+                    method,
+                    params.clone(),
+                    Some(paired_phone(UNREGISTERED_FP)),
+                )
+                .await,
+                elsewhere,
+                "unregistered phone: {method}"
+            );
+        }
+        assert_eq!(flow.store.read_audit(None).unwrap().len(), audit_rows);
+
+        // A vault that cannot tell whether it is the home refuses the same ops with the
+        // setup refusal instead: here the self id now equals the configured home.
+        flow.store
+            .set_federation_self_member_audited(
+                PHONE_TEST_HOME,
+                AuditCtx::admin(AuditOp::FederationSelfSet),
+            )
+            .unwrap();
+        let incomplete = json!({"error":{
+            "code":"remote_setup_incomplete","class":"permanent","remedy_member":PHONE_TEST_HOME,
+        }});
+        for (method, params) in &calls {
+            assert_eq!(
+                flow.phone(method, params.clone()).await,
+                incomplete,
+                "{method}"
+            );
+        }
+        flow.store
+            .set_federation_self_member_audited(
+                SC_MEMBER,
+                AuditCtx::admin(AuditOp::FederationSelfSet),
+            )
+            .unwrap();
+
+        flow.store
+            .set_secret_home_audited(None, AuditCtx::admin(AuditOp::SecretHomeSet))
+            .expect("home unset");
+        assert_eq!(
+            flow.phone("secret.list", json!({})).await,
+            json!({"secrets":[]}),
+            "no refused deposit was stored"
+        );
+        assert_eq!(
+            flow.phone("secret.deposit", deposit).await["status"],
+            "stored"
+        );
+        assert_eq!(
+            flow.phone("secret.phone_keys_register", flow.register_request())
+                .await,
+            json!({"status":"already_stored"})
+        );
+    }
+
+    /// `secret.home` answers each row of the role table. It is admitted like
+    /// `secret.list` (the phone route, then a current pairing from callosum), but needs
+    /// no registered phone keys: the phone asks it to learn which vault to register with.
+    #[tokio::test]
+    async fn secret_home_answers_each_role_with_the_admission_of_secret_list() {
+        let (_surface, store, db_path, _root) = tmp_surface_with_store(202);
+        let raw = |sql: &str| {
+            rusqlite::Connection::open(&db_path)
+                .unwrap()
+                .execute(sql, [])
+                .unwrap();
+        };
+        let set_self = |member: &str| {
+            store
+                .set_federation_self_member_audited(
+                    member,
+                    AuditCtx::admin(AuditOp::FederationSelfSet),
+                )
+                .unwrap();
+        };
+        let set_home = |home: Option<&str>| {
+            store
+                .set_secret_home_audited(home, AuditCtx::admin(AuditOp::SecretHomeSet))
+                .unwrap();
+        };
+        let clear_self = || raw("DELETE FROM settings WHERE name='federation.self_member'");
+        let store_ref = &store;
+        let ask =
+            move |fp: &'static str, method: &'static str, lookup: Option<serde_json::Value>| {
+                phone_on(store_ref, fp, method, json!({}), lookup)
+            };
+        let home = || {
+            ask(
+                UNREGISTERED_FP,
+                secret_phone::HOME_OP,
+                Some(paired_phone(UNREGISTERED_FP)),
+            )
+        };
+
+        // Unset: a single computer, with or without a self id.
+        assert_eq!(home().await, json!({"home":true,"home_member_id":null}));
+        set_self(SC_MEMBER);
+        assert_eq!(home().await, json!({"home":true,"home_member_id":null}));
+        // `self`: the home, named by its self id when it has one.
+        set_home(Some("self"));
+        assert_eq!(
+            home().await,
+            json!({"home":true,"home_member_id":SC_MEMBER})
+        );
+        clear_self();
+        assert_eq!(home().await, json!({"home":true,"home_member_id":null}));
+        // Another member: a remote, naming the home.
+        set_self(SC_MEMBER);
+        set_home(Some(PHONE_TEST_HOME));
+        assert_eq!(
+            home().await,
+            json!({"home":false,"home_member_id":PHONE_TEST_HOME})
+        );
+
+        // Admission: the same pairing refusals `secret.list` gets, before any role answer.
+        for lookup in [None, Some(paired_phone(SC_FP))] {
+            let listed = ask(UNREGISTERED_FP, "secret.list", lookup.clone()).await;
+            let answered = ask(UNREGISTERED_FP, secret_phone::HOME_OP, lookup.clone()).await;
+            assert!(
+                matches!(
+                    answered["error"]["code"].as_str(),
+                    Some("pairing_unavailable" | "phone_not_registered")
+                ),
+                "{answered}"
+            );
+            assert_eq!(answered, listed, "{lookup:?}");
+        }
+        assert_eq!(
+            phone_on(
+                &store,
+                UNREGISTERED_FP,
+                secret_phone::HOME_OP,
+                json!({"handle":"ckh_bearer"}),
+                Some(paired_phone(UNREGISTERED_FP)),
+            )
+            .await,
+            json!({"transport":"invalid_params"})
+        );
+        assert_eq!(
+            phone_on(
+                &store,
+                UNREGISTERED_FP,
+                secret_phone::HOME_OP,
+                json!({"extra":1}),
+                Some(paired_phone(UNREGISTERED_FP)),
+            )
+            .await,
+            json!({"transport":"invalid_params"})
+        );
+
+        // A setting naming a member while the self id is equal to it, or absent: the
+        // setup refusal every other phone op gets, naming this vault when it can.
+        set_self(PHONE_TEST_HOME);
+        assert_eq!(
+            home().await,
+            json!({"error":{
+                "code":"remote_setup_incomplete","class":"permanent","remedy_member":PHONE_TEST_HOME,
+            }})
+        );
+        clear_self();
+        assert_eq!(
+            home().await,
+            json!({"error":{"code":"remote_setup_incomplete","class":"permanent"}})
+        );
+        // An unreadable setting decides nothing: the transient store refusal.
+        raw("UPDATE settings SET value='not-a-member' WHERE name='secrets.home_member'");
+        assert_eq!(
+            home().await,
+            credentials_core::agent_secret::SecretError::StoreError.body()
+        );
+    }
 
     /// The paired computer that forwards secret calls to the home in these tests.
     const HOME_ASKER: &str = "fed-computer:33333333333333333333333333333333";

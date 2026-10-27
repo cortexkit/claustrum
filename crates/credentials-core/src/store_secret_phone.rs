@@ -72,6 +72,10 @@ pub enum PhoneOperation {
     Revoke {
         grant_id: String,
     },
+    /// `secret.home`: where this account's agent secrets live. It needs a current
+    /// pairing, like `secret.list`, but no registered phone keys, because a phone asks it
+    /// before it knows which vault to register with.
+    Home,
 }
 
 impl EncryptedStore {
@@ -151,9 +155,29 @@ impl EncryptedStore {
             if !admitted { return Ok(Err(SecretError::PairingUnavailable)); }
             let op_now = clock();
             if matches!(op, PhoneOperation::DepositKeys) {
+                if let Some(refusal) = super::operator::secret_home_role_conn(tx).phone_deposit_refusal() {
+                    return Ok(refusal);
+                }
                 return Ok(self.deposit_keys_tx(tx));
             }
             let Some(pairing) = pairing else { return Ok(Err(SecretError::PhoneNotRegistered)); };
+            // The role is read in this transaction, so a concurrent `home set` either sees
+            // what this op writes or refuses it here.
+            let role = super::operator::secret_home_role_conn(tx);
+            if matches!(op, PhoneOperation::Home) {
+                return Ok(home_reply(role));
+            }
+            // A vault whose secrets live on another member's vault serves no phone op, so
+            // a stray phone profile cannot build a second Secrets page here. The refusal
+            // names the home and comes before the registration check, so even a phone
+            // that never registered here learns where to go. `phone_deposit_refusal`
+            // holds the refusal for every phone op, not only deposits. `SecretError`
+            // names a code only, while this refusal must also name the home, so the full
+            // refusal body is returned as the reply; the transport passes it through
+            // unchanged, exactly as it would `SecretError::body()`.
+            if let Some(refusal) = role.phone_deposit_refusal() {
+                return Ok(refusal);
+            }
             let keys: Option<(Vec<u8>, Vec<u8>)> = tx.query_row(
                 "SELECT deposit_pub, approval_pub FROM secret_phone_keys WHERE fingerprint=?1 AND pairing_id=?2",
                 rusqlite::params![fingerprint, pairing], |r| Ok((r.get(0)?, r.get(1)?)),
@@ -182,7 +206,7 @@ impl EncryptedStore {
                 PhoneOperation::DeleteCommit { envelope, signature } => self.secret_approval_tx(tx, fingerprint, &approval_pub, envelope, signature, None, true, op_now),
                 PhoneOperation::DeleteRequest { name } => self.secret_delete_request_tx(tx, name, op_now),
                 PhoneOperation::Revoke { grant_id } => super::approval::revoke(tx, &self.audit_key, grant_id, &format!("fed-phone:{fingerprint}"), op_now).map(Ok),
-                PhoneOperation::Register { .. } | PhoneOperation::DepositKeys => unreachable!(),
+                PhoneOperation::Register { .. } | PhoneOperation::DepositKeys | PhoneOperation::Home => unreachable!(),
             }
         }).map_err(|_| SecretError::StoreError)?;
         if answer == Err(SecretError::PhoneKeyConflict) {
@@ -229,15 +253,8 @@ impl EncryptedStore {
         d: &PhoneDeposit,
         now: i64,
     ) -> rusqlite::Result<Result<Value, SecretError>> {
-        // A vault whose secrets live on another member's vault stores nothing, so the
-        // deposit is refused before any other check, with a refusal that names the home. The role is read in this transaction,
-        // so a concurrent `home set` either sees this deposit's row or refuses it here.
-        // `SecretError` names a code only, while this refusal must also name the home, so
-        // the full refusal body is returned as the reply; the transport passes it through
-        // unchanged, exactly as it would `SecretError::body()`.
-        if let Some(refusal) = super::operator::secret_home_role_conn(tx).phone_deposit_refusal() {
-            return Ok(refusal);
-        }
+        // The caller has already refused the deposit when this vault is not where the
+        // secrets live, in this same transaction.
         // All deposit checks use this transaction, including key and member reads. Reading
         // either through a public store method would reacquire the connection lock.
         let prepared = (|| {
@@ -338,6 +355,26 @@ impl EncryptedStore {
             &fields,
         )?;
         Ok(Ok(json!({"status":"stored","incarnation":incarnation})))
+    }
+}
+
+/// The `secret.home` reply for `role`: where this account's agent secrets live, as the
+/// phone reads it. A single computer and a home serve their own secrets; a remote names
+/// the home. A role that cannot decide answers the same refusal every other phone op
+/// gets on this vault, so the phone never mistakes a broken setup for an answer.
+fn home_reply(role: super::operator::SecretHomeRole) -> Result<Value, SecretError> {
+    use super::operator::SecretHomeRole;
+    match role {
+        SecretHomeRole::Single => Ok(json!({"home":true,"home_member_id":null})),
+        SecretHomeRole::Home { self_member } => {
+            Ok(json!({"home":true,"home_member_id":self_member}))
+        }
+        SecretHomeRole::Remote { home_member } => {
+            Ok(json!({"home":false,"home_member_id":home_member}))
+        }
+        other => other
+            .phone_deposit_refusal()
+            .unwrap_or(Err(SecretError::StoreError)),
     }
 }
 

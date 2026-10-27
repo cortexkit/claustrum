@@ -1,5 +1,5 @@
 use super::*;
-use agent_secret::{flow_approval_statement, ApprovalEnvelope, FlowIdentity};
+use agent_secret::{flow_approval_statement, ApprovalEnvelope, FlowIdentity, ValidationError};
 
 const API: &str = "01HF7YAT000000000000000001";
 const LOGIN: &str = "01HF7YAT000000000000000002";
@@ -172,6 +172,48 @@ fn secret_flow_approval_version_envelope_rules_and_closed_item_shape() {
         verify(&invalid),
         Err(SecretError::ApprovalInvalid)
     ));
+}
+
+#[test]
+fn secret_flow_statement_encoder_carries_every_identity_value_verbatim() {
+    let api_scope = SecretScope::ApiKey {
+        host: "x.test".into(),
+        path_prefix: None,
+        location: "authorization_bearer".into(),
+    };
+    let encode = |identity: &FlowIdentity| {
+        flow_approval_statement(
+            API,
+            MEMBER,
+            "incarnation",
+            "key",
+            identity,
+            &api_scope,
+            Some(&["GET".to_string()]),
+            NOW,
+        )
+    };
+    // A flow id equal to a statement tag would take the `v` key's place in the object.
+    for tag in ["ck-secret-flow-statement/v1", "ck-secret-use-statement/v1"] {
+        let mut identity = flow();
+        identity.flow_id = tag.into();
+        assert_eq!(
+            encode(&identity),
+            Err(ValidationError::InvalidParams),
+            "{tag}"
+        );
+    }
+    // An install id that is not 1-256 printable ASCII could not come back as the same
+    // value at grant lookup, so such an identity is refused rather than stored.
+    for install_id in ["".to_string(), "install\u{7f}".to_string(), "x".repeat(257)] {
+        let mut identity = flow();
+        identity.install_id = install_id;
+        assert_eq!(encode(&identity), Err(ValidationError::InvalidParams));
+    }
+    // The identity a flow really carries encodes as itself, under the flow statement tag.
+    let statement = encode(&flow()).unwrap();
+    assert_eq!(statement["v"], "ck-secret-flow-statement/v1");
+    assert_eq!(statement["flow"], json!(flow()));
 }
 
 fn pending(

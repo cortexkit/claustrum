@@ -21,6 +21,7 @@ crates/credentials-core/src/admin_auth.rs cortexkit-credentials/vault-id/v1 cort
 crates/credentials-core/src/agent_secret.rs ck-secret-delete-statement/v1 ck-secret-delete-statement/v1
 crates/credentials-core/src/agent_secret.rs ck-secret-deposit-aad/v1 ck-secret-deposit-aad/v1
 crates/credentials-core/src/agent_secret.rs ck-secret-deposit-plaintext/v1 ck-secret-deposit-plaintext/v1
+crates/credentials-core/src/agent_secret.rs ck-secret-flow-statement/v1 ck-secret-flow-statement/v1
 crates/credentials-core/src/agent_secret.rs ck-secret-sealed-body/v1 ck-secret-sealed-body/v1
 crates/credentials-core/src/agent_secret.rs ck-secret-use-envelope/v1 ck-secret-use-envelope/v1
 crates/credentials-core/src/agent_secret.rs ck-secret-use-statement/v1 ck-secret-use-statement/v1

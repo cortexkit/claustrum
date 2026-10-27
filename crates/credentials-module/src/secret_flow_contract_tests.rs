@@ -503,6 +503,7 @@ async fn secret_flow_ops_dispatch_only_for_basal_and_revoke_params_are_closed() 
         json!({"flow_install_id":"install-A", "flow_version":9_007_199_254_740_992u64}),
         json!({"flow_install_id":"install-A", "flow_version":"7"}),
         json!({"flow_install_id":"install-A", "extra":true}),
+        json!({"flow_install_id":"install-A", "flow":{}}),
     ] {
         let (kind, bytes) = sc_dispatch(
             &surface,
@@ -543,6 +544,13 @@ async fn secret_flow_install_errors_and_closed_shapes_do_not_create_pending_rows
     let mut request = sf_install(false);
     request["flow"]["extra"] = json!(true);
     assert_eq!(sf_request(&flow, &request), invalid);
+    // A flow id equal to a statement tag cannot be carried in the signed statement, whose
+    // own `v` key holds that value.
+    for tag in ["ck-secret-flow-statement/v1", "ck-secret-use-statement/v1"] {
+        let mut request = sf_install(false);
+        request["flow"]["flow_id"] = json!(tag);
+        assert_eq!(sf_request(&flow, &request), invalid, "{tag}");
+    }
     for key in ["extra", "stamp", "coverage"] {
         let mut request = sf_install(false);
         request[key] = json!(true);

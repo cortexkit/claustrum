@@ -17,6 +17,12 @@ const SECRET_CONTRACT_VECTORS: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../credentials-core/tests/vectors/secret-approval-v1.json"
 ));
+
+/// The flow approval vectors behind the §15 flow statement and `version` envelope goldens.
+const SECRET_FLOW_CONTRACT_VECTORS: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../credentials-core/tests/vectors/secret-flow-approval-v1.json"
+));
 const SC_FP: &str = "11111111111111111111111111111111";
 const SC_MEMBER: &str = "fed-computer:22222222222222222222222222222222";
 const SC_UNKNOWN_REQUEST: &str = "00000000000000000000000000";
@@ -24,6 +30,11 @@ const SC_UNKNOWN_REQUEST: &str = "00000000000000000000000000";
 /// Every golden id the §15 text carries. `every_secret_golden_example_in_the_wire_contract_is_checked`
 /// requires this list and the doc's markers to be the same set, so a golden added to the
 /// doc without a test, or a test whose golden was deleted, fails.
+/// The one golden that is a JSON string, not an object: the exact base64url envelope bytes
+/// the phone signs for a `version` approval, checked byte for byte against the pinned flow
+/// vectors. It is the only block `secret_json_golden` cannot parse, so it is named here.
+const SECRET_GOLDEN_STRING_ID: &str = "envelope.flow.bytes";
+
 const SECRET_GOLDEN_IDS: &[&str] = &[
     "phone_keys_register.request",
     "phone_keys_register.result",
@@ -49,10 +60,22 @@ const SECRET_GOLDEN_IDS: &[&str] = &[
     "use.result.released.api_key",
     "use.result.released.site_login",
     "use.result.approval_required",
+    "use.request.flow.api_key",
+    "use.request.flow.site_login",
+    "request_flow_approval.request.api_key",
+    "request_flow_approval.request.site_login",
+    "request_flow_approval.result",
+    "revoke_flow_grants.request",
+    "revoke_flow_grants.result",
+    "revoke_flow_grants.request.all_versions",
+    "revoke_flow_grants.result.none",
     "statement.use",
     "statement.delete",
+    "statement.flow",
     "envelope.allow",
     "envelope.delete",
+    "envelope.flow",
+    "envelope.flow.bytes",
     "error.result",
 ];
 
@@ -76,8 +99,37 @@ fn secret_golden_text(id: &str) -> &'static str {
 }
 
 fn secret_golden(id: &str) -> serde_json::Value {
+    secret_optional_golden(id).unwrap_or_else(|| panic!("golden `{id}` is missing from §15"))
+}
+
+/// The golden's value, or `None` when §15 carries no such block. Only the one block that
+/// pins an optional key uses this; every other caller wants `secret_golden`.
+fn secret_optional_golden(id: &str) -> Option<serde_json::Value> {
+    let marker = format!("<!-- golden:{id} -->\n```json\n");
+    let blocks: Vec<usize> = SECRET_CONTRACT_DOC
+        .match_indices(&marker)
+        .map(|(at, _)| at)
+        .collect();
+    match blocks.as_slice() {
+        [] => None,
+        [at] => {
+            let start = at + marker.len();
+            let end = SECRET_CONTRACT_DOC[start..]
+                .find("\n```")
+                .unwrap_or_else(|| panic!("golden `{id}` has no closing fence"));
+            Some(
+                serde_json::from_str(&SECRET_CONTRACT_DOC[start..start + end])
+                    .unwrap_or_else(|e| panic!("golden `{id}` is not JSON: {e}")),
+            )
+        }
+        _ => panic!("docs/wire-contract-v1.md must carry golden `{id}` at most once"),
+    }
+}
+
+/// A golden block that holds one JSON string rather than an object.
+fn secret_golden_string(id: &str) -> String {
     serde_json::from_str(secret_golden_text(id))
-        .unwrap_or_else(|e| panic!("golden `{id}` is not JSON: {e}"))
+        .unwrap_or_else(|e| panic!("golden `{id}` is not a JSON string: {e}"))
 }
 
 /// Every object key path in `value`: `a`, `a.b`, and `a[].b` for objects inside arrays.
@@ -667,6 +719,186 @@ fn api_location() -> serde_json::Value {
 }
 
 #[tokio::test]
+async fn secret_flow_requests_results_and_the_pinned_flow_vectors_match_the_contract() {
+    assert_secret_golden_shape(
+        "request_flow_approval.request.api_key",
+        "name flow flow.flow_id flow.version flow.code_hash flow.install_id target \
+         target.scheme target.host target.port target.path methods",
+    );
+    assert_secret_golden_shape(
+        "request_flow_approval.request.site_login",
+        "name flow flow.flow_id flow.version flow.code_hash flow.install_id target \
+         target.origin",
+    );
+    assert_secret_golden_shape(
+        "request_flow_approval.result",
+        "status request_id statement_b64url expires_at_ms",
+    );
+    let flow_stamp = "stamp stamp.owner stamp.owner.kind stamp.owner.module_id stamp.ref \
+                      stamp.scope_epoch stamp.kind stamp.owner_authorized";
+    let api = assert_secret_golden_shape(
+        "use.request.flow.api_key",
+        &format!(
+            "name {flow_stamp} stamp.attributes stamp.attributes.agent_id \
+             stamp.attributes.flow_id stamp.attributes.flow_version \
+             stamp.attributes.flow_code_hash stamp.attributes.flow_install_id \
+             target target.scheme target.host target.port target.path method"
+        ),
+    );
+    let login = assert_secret_golden_shape(
+        "use.request.flow.site_login",
+        &format!(
+            "name {flow_stamp} stamp.attributes stamp.attributes.agent_id \
+             stamp.attributes.flow_id stamp.attributes.flow_version \
+             stamp.attributes.flow_code_hash stamp.attributes.flow_install_id \
+             target target.origin"
+        ),
+    );
+    // The flow stamps are real subc ScopeStamps, and the nested identity names the same
+    // installed version the flat stamp attributes do.
+    for golden in [&api, &login] {
+        serde_json::from_value::<subc_protocol::scope::ScopeStamp>(golden["stamp"].clone())
+            .expect("flow golden stamp decodes as subc's ScopeStamp");
+    }
+    for (stone, nested_id) in [
+        ("request_flow_approval.request.api_key", "flow"),
+        ("request_flow_approval.request.site_login", "flow"),
+        ("use.request.flow.api_key", "stamp/attributes"),
+    ] {
+        // The nested request object and the flat stamp attributes name one identity: the
+        // one the shared flow test helpers stamp and install.
+        let nested = secret_golden(stone);
+        let expected = sf_identity();
+        let (id, version, code_hash, install_id) = if nested_id == "flow" {
+            let flow = &nested["flow"];
+            (
+                flow["flow_id"].clone(),
+                flow["version"].clone(),
+                flow["code_hash"].clone(),
+                flow["install_id"].clone(),
+            )
+        } else {
+            let attributes = &nested["stamp"]["attributes"];
+            (
+                attributes["flow_id"].clone(),
+                attributes["flow_version"].clone(),
+                attributes["flow_code_hash"].clone(),
+                attributes["flow_install_id"].clone(),
+            )
+        };
+        assert_eq!(id, expected["flow_id"], "{stone}");
+        assert_eq!(version, expected["version"], "{stone}");
+        assert_eq!(code_hash, expected["code_hash"], "{stone}");
+        assert_eq!(install_id, expected["install_id"], "{stone}");
+    }
+    assert_secret_golden_shape(
+        "revoke_flow_grants.request",
+        "flow_install_id flow_version",
+    );
+    assert_secret_golden_shape("revoke_flow_grants.request.all_versions", "flow_install_id");
+    assert_secret_golden_shape("revoke_flow_grants.result", "status grants");
+    assert_secret_golden_shape("revoke_flow_grants.result.none", "status grants");
+    assert_secret_golden_shape(
+        "statement.flow",
+        "v request_id member_id flow flow.flow_id flow.version flow.code_hash \
+         flow.install_id secret secret.name secret.kind secret.incarnation use use.host \
+         use.path_prefix use.location use.methods durations request_expires_at_ms",
+    );
+    let envelope = "v items items[].request_id items[].statement_sha256 decision duration \
+                    grant_expires_at_ms device_fingerprint issued_at_ms";
+    assert_secret_golden_shape("envelope.flow", envelope);
+
+    // Every flow golden that is a pinned vector is the vector's own bytes.
+    let flow_vectors: serde_json::Value = serde_json::from_str(SECRET_FLOW_CONTRACT_VECTORS)
+        .expect("pinned flow approval vectors");
+    let case = |vectors: &serde_json::Value, name: &str| {
+        vectors["vectors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["case"] == name)
+            .unwrap_or_else(|| panic!("vector case {name}"))
+            .clone()
+    };
+    let crlf = case(&flow_vectors, "flow-version");
+    assert_eq!(
+        secret_golden_text("statement.flow"),
+        String::from_utf8(sc_unb64(
+            crlf["statements"][0]["statement_b64url"].as_str().unwrap()
+        ))
+        .expect("UTF-8")
+    );
+    assert_eq!(
+        secret_golden_text("envelope.flow"),
+        String::from_utf8(sc_unb64(crlf["envelope_b64url"].as_str().unwrap()))
+            .expect("UTF-8")
+    );
+    assert_eq!(
+        secret_golden("request_flow_approval.result")["statement_b64url"],
+        crlf["statements"][0]["statement_b64url"]
+    );
+    assert_eq!(
+        secret_golden_string("envelope.flow.bytes"),
+        crlf["envelope_b64url"].as_str().unwrap()
+    );
+
+    let flow = SecretFlow::new(226).await;
+    flow.deposit_both().await;
+    for (golden_id, use_id) in [
+        (
+            "request_flow_approval.request.api_key",
+            "use.result.released.api_key",
+        ),
+        (
+            "request_flow_approval.request.site_login",
+            "use.result.released.site_login",
+        ),
+    ] {
+        let install = secret_golden(golden_id);
+        let asked = sf_request(&flow, &install);
+        assert_eq!(asked["status"], "approval_required", "{asked}");
+        assert_secret_reply_matches("request_flow_approval.result", &asked);
+        // The issued statement matches the golden, except that a login statement's `use`
+        // holds only `origin` where the golden shows an API key's fields. Its identity and
+        // methods are the ones the install request named.
+        let statement: serde_json::Value =
+            serde_json::from_slice(&sc_unb64(asked["statement_b64url"].as_str().unwrap()))
+                .unwrap();
+        // A login statement's `use` is the origin alone, where the golden shows an API
+        // key's host, prefix, location and methods; every other key is the golden's.
+        let golden_shape = secret_shape(&secret_golden("statement.flow"));
+        let shape: std::collections::BTreeSet<String> = secret_shape(&statement)
+            .into_iter()
+            .filter(|path| !path.starts_with("use.") || golden_shape.contains(path))
+            .collect();
+        assert!(shape.is_subset(&golden_shape), "{statement}");
+        assert_eq!(statement["v"], "ck-secret-flow-statement/v1");
+        assert_eq!(statement["flow"], install["flow"], "{golden_id}");
+        assert_eq!(statement["durations"], json!(["version"]));
+        assert_eq!(
+            statement["use"].get("methods").is_some(),
+            install.get("methods").is_some(),
+            "{golden_id}"
+        );
+        assert_eq!(
+            flow.approve(&asked, "version", false).await["results"][0]["outcome"],
+            "granted"
+        );
+        // A run stamped with that installed version releases, in the golden reply shape.
+        let released = flow.use_secret("basal", &sf_run(golden_id.ends_with("site_login")));
+        assert_eq!(released["status"], "released", "{released}");
+        assert_secret_reply_matches(use_id, &released);
+        assert_eq!(
+            sf_revoke(&flow, &secret_golden("revoke_flow_grants.request"))["status"],
+            "revoked"
+        );
+    }
+    // Both requests are gone with their grants, so a versionless revoke finds nothing.
+    let repeat = sf_revoke(&flow, &secret_golden("revoke_flow_grants.request.all_versions"));
+    assert_eq!(repeat, secret_golden("revoke_flow_grants.result.none"));
+}
+
+#[tokio::test]
 async fn secret_approve_request_and_result_key_sets_match_the_contract() {
     let golden = assert_secret_golden_shape(
         "approve.request",
@@ -703,27 +935,30 @@ async fn secret_list_request_and_result_key_sets_match_the_contract() {
          secrets[].grants[].scope.owner secrets[].grants[].scope.kind \
          secrets[].grants[].scope.ref secrets[].grants[].coverage \
          secrets[].grants[].duration secrets[].grants[].expires_at_ms \
-         secrets[].grants[].last_use_ms",
+         secrets[].grants[].last_use_ms secrets[].grants[].agent_id \
+         secrets[].flow_grants",
     );
     let flow = SecretFlow::new(207).await;
     flow.granted_and_used().await;
-    // The golden predates both the agent-id column and flow grants: a reply always names
-    // each agent grant's `agent_id` (null when the statement named no agent) and always
-    // carries `flow_grants`. This store holds agent grants only, so every golden key is
-    // checked here and the two keys the golden does not know yet are named exactly.
+    // The reply names each agent grant's `agent_id`, and the flow grants live in their own
+    // array with `flow` and duration `version` in place of a scope and coverage. This store
+    // holds agent grants only, so its flow arrays are empty and every other golden key is
+    // the real reply's.
     let listed = flow.phone("secret.list", json!({})).await;
     assert_eq!(listed["secrets"][0]["grants"][0]["agent_id"], "agent-A");
     for secret in listed["secrets"].as_array().unwrap() {
         assert!(secret["flow_grants"].as_array().unwrap().is_empty());
     }
-    let shape = secret_shape(&listed);
+    // The doc's `list.result` may not yet carry the flow row, so its keys must all be the
+    // real reply's, and anything the reply adds on top must be exactly the flow array and
+    // the agent-id key that arrived with it: a further unlisted key fails here.
+    let reply = secret_shape(&listed);
     let golden = secret_shape(&secret_golden("list.result"));
-    assert!(golden.is_subset(&shape), "{listed}");
-    let added: std::collections::BTreeSet<String> = shape.difference(&golden).cloned().collect();
-    assert_eq!(
-        added,
-        secret_keys("secrets[].flow_grants secrets[].grants[].agent_id")
-    );
+    assert!(golden.is_subset(&reply), "the reply lacks a golden key: {listed}");
+    let newer: std::collections::BTreeSet<String> = reply.difference(&golden).cloned().collect();
+    // Every key the reply answers is one the golden names, so nothing may be left over.
+    let expected_newer = std::collections::BTreeSet::new();
+    assert_eq!(newer, expected_newer, "the reply answers keys §15 does not");
     // The permanent grant omits its expiry; the hour grant carries one.
     let grants: Vec<&serde_json::Value> = listed["secrets"]
         .as_array()
@@ -738,6 +973,49 @@ async fn secret_list_request_and_result_key_sets_match_the_contract() {
             "{grant}"
         );
     }
+}
+
+/// The `flow_grants` half of the `secret.list` reply: the golden row shape once a flow
+/// grant exists, with the properties an empty flow array cannot show — the flow identity
+/// in place of an asking scope, duration `version`, no expiry, and `methods` only for an
+/// API key.
+#[tokio::test]
+async fn secret_list_flow_grant_rows_carry_the_golden_keys_and_no_expiry() {
+    let flow = SecretFlow::new(224).await;
+    flow.deposit_both().await;
+    for login in [false, true] {
+        let asked = sf_request(&flow, &sf_install(login));
+        assert_eq!(asked["status"], "approval_required", "{asked}");
+        assert_eq!(
+            flow.approve(&asked, "version", false).await["results"][0]["outcome"],
+            "granted"
+        );
+    }
+    let listed = flow.phone("secret.list", json!({})).await;
+    // A flow row always names `last_use_ms` in this store, since each grant has just
+    // served nothing but was created; the reply omits it before the first release, which
+    // the agent grants above already exercise.
+    let without_methods = |value: &serde_json::Value| -> std::collections::BTreeSet<String> {
+        secret_shape(value)
+            .into_iter()
+            .filter(|path| !path.starts_with("methods"))
+            .collect()
+    };
+    let golden = secret_keys("grant_id flow flow.flow_id flow.version flow.install_id duration last_use_ms");
+    let mut rows = 0;
+    for secret in listed["secrets"].as_array().unwrap() {
+        for row in secret["flow_grants"].as_array().unwrap() {
+            rows += 1;
+            assert_eq!(without_methods(row), golden, "flow row keys: {row}");
+            assert_eq!(row["duration"], "version", "{row}");
+            assert_eq!(
+                row.get("methods").is_some(),
+                secret["kind"] == "agent_api_key",
+                "{row}"
+            );
+        }
+    }
+    assert_eq!(rows, 2, "one flow grant per deposited secret: {listed}");
 }
 
 #[tokio::test]
@@ -922,7 +1200,14 @@ fn every_secret_golden_example_in_the_wire_contract_is_checked() {
         "control: the marker scan found too few goldens"
     );
     for id in SECRET_GOLDEN_IDS {
-        secret_golden(id);
+        if *id == SECRET_GOLDEN_STRING_ID {
+            assert!(
+                !secret_golden_string(id).is_empty(),
+                "golden `{id}` is empty"
+            );
+        } else {
+            secret_golden(id);
+        }
     }
 }
 

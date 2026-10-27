@@ -992,16 +992,15 @@ async fn secret_list_flow_grant_rows_carry_the_golden_keys_and_no_expiry() {
         );
     }
     let listed = flow.phone("secret.list", json!({})).await;
-    // A flow row always names `last_use_ms` in this store, since each grant has just
-    // served nothing but was created; the reply omits it before the first release, which
-    // the agent grants above already exercise.
+    // Neither grant has released anything yet, so neither row carries `last_use_ms`: the
+    // reply leaves it out until the first release.
     let without_methods = |value: &serde_json::Value| -> std::collections::BTreeSet<String> {
         secret_shape(value)
             .into_iter()
             .filter(|path| !path.starts_with("methods"))
             .collect()
     };
-    let golden = secret_keys("grant_id flow flow.flow_id flow.version flow.install_id duration last_use_ms");
+    let golden = secret_keys("grant_id flow flow.flow_id flow.version flow.install_id duration");
     let mut rows = 0;
     for secret in listed["secrets"].as_array().unwrap() {
         for row in secret["flow_grants"].as_array().unwrap() {

@@ -31,6 +31,51 @@
         "scope": "site",
         "scope_label": "the site github.com in the agent browser",
         "subject_label": "github.com"
+      },
+      {
+        "card_ref": "el_7",
+        "granted_at_ms": 1000000,
+        "holder": {
+          "flow_id": "flow_web_index",
+          "flow_install_id": "flowinst_9c41d2",
+          "flow_version": 3,
+          "kind": "flow"
+        },
+        "id": "grt_06",
+        "methods": [
+          "GET"
+        ],
+        "module": "claustrum",
+        "scope": "api_key",
+        "scope_label": "the search API key, for reads only",
+        "subject_label": "Search API"
+      },
+      {
+        "card_ref": "el_8",
+        "granted_at_ms": 1000000,
+        "holder": {
+          "flow_id": "flow_web_index",
+          "flow_install_id": "flowinst_1b77e0",
+          "flow_version": 4,
+          "kind": "flow"
+        },
+        "id": "grt_07",
+        "module": "claustrum",
+        "scope": "site_login",
+        "scope_label": "your news.example login",
+        "subject_label": "news.example"
+      },
+      {
+        "granted_at_ms": 1000000,
+        "holder": {
+          "kind": "schedule",
+          "schedule_ref": "sched_nightly"
+        },
+        "id": "grt_08",
+        "module": "claustrum",
+        "scope": "api_key",
+        "scope_label": "the archive API key",
+        "subject_label": "Archive"
       }
     ]
   },

@@ -2117,16 +2117,12 @@ an API key. `ck auth secret list` and `ck auth secret grants` print the holder a
 `flow:<flow_id>@<version>/<install_id>`, with duration `version` and
 `methods=<A,B>` where the secret has methods, and `expiry=none`.
 
-`permissions.list` does **not** carry flow grants in this version: it answers agent grants
-alone, filtered or not, because its holder set is closed to agent, worker and operator.
-Operators see flow grants through `secret.list` and `ck auth secret`.
-
-Cingulate's `permissions/v1` contract has since grown a flow holder — tag `permissions-v1.1`,
-cingulate `49fab2ea` — and the vault will list flow grants that way once the provider surface,
-the vendored `permissions/v1` vectors and the phone all agree. That holder is:
-`{kind: "flow", flow_id, flow_version, flow_install_id}`; the row carries `methods`, a
-non-empty list of uppercase HTTP methods, only for an API-key grant, carries neither
-`agent_id` nor `expires_at_ms`, and appears only in an unfiltered read, since a row that
+`permissions.list` lists each flow grant as one row, in the flow holder that Cingulate's
+`permissions/v1` contract defines from tag `permissions-v1.1` (cingulate `49fab2ea`; the
+vendored provider vectors `grt_06` and `grt_07` pin the shape). The holder is
+`{kind: "flow", flow_id, flow_version, flow_install_id}`. The row carries `methods`, a
+non-empty list of uppercase HTTP methods, only for an API-key grant, and carries neither
+`agent_id` nor `expires_at_ms`. Flow rows appear only in an unfiltered read: a row that
 names no agent can never answer `permissions.list {agent_id}`.
 
 #### The flow statement

@@ -826,6 +826,87 @@ fn secret_agent_approval_refuses_a_version_envelope_and_a_key_inside_an_item() {
     );
 }
 
+/// The resend rule for the phone, emitted through the real approval path: the exact first
+/// envelope and signature sent again return the same results, and a different envelope for
+/// the request it consumed is refused. The resend fixture is stored separately so the
+/// existing `secret-approval-v1.json` vectors stay byte-identical.
+#[test]
+fn secret_ckios_resend_vectors_are_emitted_by_vault_code_and_pinned() {
+    let a = "01HF7YAT000000000000000001";
+    let (_root, store, _) = approval_setup("ckios-resend-vector");
+    sql(&store, "DELETE FROM secret_pending_requests");
+    let incarnation = format!(
+        "{:032x}",
+        b"key".iter().copied().map(u64::from).sum::<u64>()
+    );
+    let s =
+        agent_secret::approval_statement(a, MEMBER, &incarnation, &call(), &scope(), NOW + 600_000);
+    let statement = serde_json::to_vec(&s).unwrap();
+    let digest = phone::hex(&payload_hash(&statement));
+    store.fenced_write(|tx|tx.execute("INSERT INTO secret_pending_requests (request_id,request_kind,secret_name,incarnation,member_id,mapped_owner,mapped_kind,mapped_ref,mapped_epoch,coverage,agent_id,statement_bytes,statement_sha256,request_expires_at_ms) VALUES (?1,'approve','key',?2,?3,'reserved:prefrontal-core','head','H',7,'scope','agent-A',?4,?5,?6)",rusqlite::params![a,incarnation,MEMBER,statement,digest,NOW+600_000]).map(|_|())).unwrap();
+    let item = json!({"request_id":a,"statement_sha256":digest});
+    let send = |e: &Value, now: i64| -> (Vec<u8>, Vec<u8>, Value) {
+        let bytes = serde_json::to_vec(e).unwrap();
+        let signature: Signature = signer().sign(&bytes);
+        let der = signature.to_der().as_bytes().to_vec();
+        let reply = phone(
+            &store,
+            &PhoneOperation::Approve {
+                envelope: bytes.clone(),
+                signature: der.clone(),
+                card_ref: Some("card-1".into()),
+            },
+            now,
+        )
+        .unwrap();
+        (bytes, der, reply)
+    };
+    let first = envelope(vec![item.clone()], "hour", NOW);
+    let (bytes, signature, first_reply) = send(&first, NOW);
+    assert_eq!(first_reply["results"][0]["outcome"], "granted");
+    // The phone kept the first bytes and signature and sends exactly those again.
+    let resend_reply = phone(
+        &store,
+        &PhoneOperation::Approve {
+            envelope: bytes.clone(),
+            signature: signature.clone(),
+            card_ref: Some("card-1".into()),
+        },
+        NOW + 30_000,
+    )
+    .unwrap();
+    assert_eq!(resend_reply, first_reply);
+    // A new envelope for the same, now consumed, request is a different decision.
+    let second = envelope(vec![item], "hour", NOW + 30_000);
+    let (second_bytes, second_signature, second_reply) = send(&second, NOW + 30_000);
+    assert_eq!(
+        second_reply["results"][0],
+        json!({"request_id":a,"outcome":"refused","code":"approval_invalid"})
+    );
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM secret_grants"), 1);
+    let emitted = json!({
+        "approval_private_key_hex":"07".repeat(32),
+        "statement":{"request_id":a,"statement_b64url":URL_SAFE_NO_PAD.encode(&statement),"statement_sha256":digest},
+        "first_send":{"now_ms":NOW,"envelope_b64url":URL_SAFE_NO_PAD.encode(&bytes),"signature_b64url":URL_SAFE_NO_PAD.encode(&signature),"envelope_sha256":phone::hex(&payload_hash(&bytes)),"results":first_reply["results"]},
+        "exact_resend":{"now_ms":NOW+30_000,"same_bytes_and_signature_as":"first_send","results":resend_reply["results"]},
+        "new_envelope_for_consumed_request":{"now_ms":NOW+30_000,"envelope_b64url":URL_SAFE_NO_PAD.encode(&second_bytes),"signature_b64url":URL_SAFE_NO_PAD.encode(&second_signature),"envelope_sha256":phone::hex(&payload_hash(&second_bytes)),"results":second_reply["results"]}
+    });
+    let pinned = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/vectors/secret-approval-resend-v1.json");
+    if std::env::var_os("CK_EMIT_SECRET_VECTORS").is_some() {
+        std::fs::write(&pinned, serde_json::to_vec_pretty(&emitted).unwrap()).unwrap();
+        println!("emitted the CKIOS resend vectors");
+    } else {
+        let expected: Value =
+            serde_json::from_slice(&std::fs::read(&pinned).expect("pinned CKIOS resend vectors"))
+                .unwrap();
+        assert_eq!(
+            emitted, expected,
+            "vault-emitted CKIOS resend vectors changed"
+        );
+    }
+}
+
 #[test]
 fn secret_ckios_vectors_are_emitted_by_vault_code_and_pinned() {
     let a = "01HF7YAT000000000000000001";

@@ -2644,7 +2644,7 @@ mod tests {
         let mut lines = provenance.lines();
         assert_eq!(
             lines.next(),
-            Some("cingulate ee879790be7a03962926fc5c058eb1a2646c0191 test-vectors/permissions-v1/")
+            Some("cingulate 49fab2eafc0a47aa44fca80d09e309ce3d70d17e test-vectors/permissions-v1/")
         );
         let mut count = 0;
         for line in lines {

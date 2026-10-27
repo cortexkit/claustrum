@@ -629,16 +629,57 @@ async fn secret_flow_grants_list_on_the_phone_and_revoke_one_at_a_time() {
     let admin =
         admin_surface::AdminSurface::new(engine, mac, vault_id, key.key_id());
 
-    // Flow grants stay out of the provider surface until permissions/v1 has a flow holder:
-    // the phone decodes those rows strictly and would show one as held by the user.
-    for filter in [json!({}), json!({"agent_id":"agent-A"})] {
-        assert_eq!(
-            admin
-                .serve_permissions("permissions.list", &filter, "test")
-                .unwrap(),
-            json!({"grants":[]})
-        );
+    // The provider surface lists one row per flow grant, under its installed flow version,
+    // with no expiry and no agent, in the shape Cingulate's permissions-v1.1 vectors pin as grt_06 (an API key
+    // limited by method) and grt_07 (a site login, so no methods).
+    let vectors: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/vectors/permissions-v1/provider-list.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let pinned = |id: &str| -> serde_json::Value {
+        vectors["reply"]["grants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == id)
+            .cloned()
+            .unwrap_or_else(|| panic!("{id} is missing from the vendored vectors"))
+    };
+    let keys = |row: &serde_json::Value| -> std::collections::BTreeSet<String> {
+        row.as_object().unwrap().keys().cloned().collect()
+    };
+    let (api_shape, login_shape) = (pinned("grt_06"), pinned("grt_07"));
+    let listed = admin
+        .serve_permissions("permissions.list", &json!({}), "test")
+        .unwrap();
+    let rows = listed["grants"].as_array().unwrap();
+    assert_eq!(rows.len(), 3, "{listed}");
+    for row in rows {
+        let shape = if row["scope"] == "api_key" {
+            &api_shape
+        } else {
+            &login_shape
+        };
+        assert_eq!(keys(row), keys(shape), "{row}");
+        assert_eq!(keys(&row["holder"]), keys(&shape["holder"]), "{row}");
+        assert_eq!(row["holder"]["kind"], "flow");
+        assert_eq!(row["holder"]["flow_id"], "daily-fetch");
+        assert_eq!(row["holder"]["flow_version"], 7);
+        if row["scope"] == "api_key" {
+            assert_eq!(row["methods"], json!(["GET"]), "{row}");
+        }
     }
+    // A flow row names no agent, so an agent-filtered listing carries none.
+    assert_eq!(
+        admin
+            .serve_permissions("permissions.list", &json!({"agent_id":"agent-A"}), "test")
+            .unwrap(),
+        json!({"grants":[]})
+    );
 
     // The phone surface lists the grants under each secret, with `flow` and duration
     // `version` in place of an asking scope and coverage.

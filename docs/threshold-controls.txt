@@ -97,3 +97,4 @@ MAX_SECRET_TOTP_PERIOD crates/credentials-core/src/agent_secret_validation.rs se
 
 # Explicitly unchecked thresholds. These are known gaps, not coverage claims.
 # New constants still fail unless deliberately recorded in a reviewed change.
+MAX_EXACT crates/credentials-module/src/federation/ingress.rs the_call_digest_is_over_the_rfc_8785_bytes_of_sender_and_call

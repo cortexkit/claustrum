@@ -477,7 +477,7 @@ fn list(global: &GlobalArgs, _args: &[String]) -> Result<(), CliError> {
         println!("{} {} {} {scope}", secret.name, secret.kind, secret.state);
         for grant in &secret.grants {
             println!(
-                "  grant {} {}/{}:{} {} {}",
+                "  grant {} {}/{}:{} {} {}{}",
                 grant.grant_id,
                 grant.scope_owner,
                 grant.scope_kind,
@@ -486,7 +486,8 @@ fn list(global: &GlobalArgs, _args: &[String]) -> Result<(), CliError> {
                 match grant.expires_at_ms {
                     Some(expiry) => format!("{} until {}", grant.duration, stamp(expiry)),
                     None => grant.duration.clone(),
-                }
+                },
+                asking_member(grant.asking_member_id.as_deref())
             );
         }
         for grant in &secret.flow_grants {
@@ -494,13 +495,14 @@ fn list(global: &GlobalArgs, _args: &[String]) -> Result<(), CliError> {
             // scope, and prints its approved methods where an agent grant prints coverage.
             // Its duration is always `version`, so it needs no column of its own.
             println!(
-                "  grant {} {} version{}",
+                "  grant {} {} version{}{}",
                 grant.grant_id,
                 flow_holder(grant),
                 match &grant.methods {
                     Some(methods) => format!(" methods={}", methods.join(",")),
                     None => String::new(),
-                }
+                },
+                asking_member(grant.asking_member_id.as_deref())
             );
         }
     }
@@ -532,6 +534,13 @@ fn flow_holder(grant: &credentials_core::store::OperatorFlowGrantRow) -> String 
     )
 }
 
+/// The ` asking_member=<id>` suffix for a grant another computer asked for, and nothing
+/// for a grant made on this vault, so a single-computer vault prints what it always did.
+fn asking_member(id: Option<&str>) -> String {
+    id.map(|id| format!(" asking_member={id}"))
+        .unwrap_or_default()
+}
+
 fn grants(global: &GlobalArgs, _args: &[String]) -> Result<(), CliError> {
     let Some(listing) = read_listing(global)? else {
         println!("{NO_TABLES}");
@@ -547,7 +556,7 @@ fn grants(global: &GlobalArgs, _args: &[String]) -> Result<(), CliError> {
     for secret in &listing.secrets {
         for grant in &secret.grants {
             println!(
-                "{} secret|{} {}/{}:{} {} {} expiry={} last_use={}",
+                "{} secret|{} {}/{}:{} {} {} expiry={} last_use={}{}",
                 grant.grant_id,
                 secret.name,
                 grant.scope_owner,
@@ -562,14 +571,15 @@ fn grants(global: &GlobalArgs, _args: &[String]) -> Result<(), CliError> {
                 grant
                     .last_use_ms
                     .map(|at| at.to_string())
-                    .unwrap_or_else(|| "never".into())
+                    .unwrap_or_else(|| "never".into()),
+                asking_member(grant.asking_member_id.as_deref())
             );
         }
         for grant in &secret.flow_grants {
             // A flow grant never expires, so its expiry is the same "none" a permanent
             // agent grant prints, and its methods take the coverage column's place.
             println!(
-                "{} secret|{} {} version{} expiry=none last_use={}",
+                "{} secret|{} {} version{} expiry=none last_use={}{}",
                 grant.grant_id,
                 secret.name,
                 flow_holder(grant),
@@ -580,7 +590,8 @@ fn grants(global: &GlobalArgs, _args: &[String]) -> Result<(), CliError> {
                 grant
                     .last_use_ms
                     .map(|at| at.to_string())
-                    .unwrap_or_else(|| "never".into())
+                    .unwrap_or_else(|| "never".into()),
+                asking_member(grant.asking_member_id.as_deref())
             );
         }
     }

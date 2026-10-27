@@ -10,6 +10,19 @@ impl EncryptedStore {
         call: &SecretFlowApproval,
         clock: impl Fn() -> i64,
     ) -> Result<SecretUseOutcome, SecretError> {
+        self.secret_request_flow_approval_from(call, LOCAL_ASKING_MEMBER, clock)
+    }
+
+    /// [`Self::secret_request_flow_approval`] for a request that `asking_member`
+    /// forwarded to this vault. The pending request records that asker, so its approval
+    /// grants that computer's flow and nobody else's. The caller must have
+    /// authenticated `asking_member`.
+    pub fn secret_request_flow_approval_from(
+        &self,
+        call: &SecretFlowApproval,
+        asking_member: &str,
+        clock: impl Fn() -> i64,
+    ) -> Result<SecretUseOutcome, SecretError> {
         agent_secret::validate_name(&call.name)?;
         call.flow.validate()?;
         call.target.validate()?;
@@ -30,7 +43,7 @@ impl EncryptedStore {
                     Err(refusal) => return Ok(Err(refusal)),
                 };
                 let now = clock();
-                flow_pending(tx, call, &record, methods.as_deref(), now).map(Ok)
+                flow_pending(tx, call, asking_member, &record, methods.as_deref(), now).map(Ok)
             })
             .map_err(|_| SecretError::StoreError)?;
         match answer {
@@ -47,6 +60,18 @@ impl EncryptedStore {
     pub fn secret_flow_use(
         &self,
         call: &SecretFlowUse,
+        clock: impl Fn() -> i64,
+    ) -> Result<SecretUseOutcome, SecretError> {
+        self.secret_flow_use_from(call, LOCAL_ASKING_MEMBER, clock)
+    }
+
+    /// [`Self::secret_flow_use`] for a flow run that `asking_member` forwarded to this
+    /// vault. Only flow grants recorded for that same asker release. The caller must
+    /// have authenticated `asking_member`.
+    pub fn secret_flow_use_from(
+        &self,
+        call: &SecretFlowUse,
+        asking_member: &str,
         clock: impl Fn() -> i64,
     ) -> Result<SecretUseOutcome, SecretError> {
         agent_secret::validate_name(&call.name)?;
@@ -69,7 +94,7 @@ impl EncryptedStore {
                     Ok(record) => record,
                     Err(refusal) => return Ok(Err(refusal)),
                 };
-                match choose_flow_grant(conn, call, &record.incarnation)? {
+                match choose_flow_grant(conn, call, asking_member, &record.incarnation)? {
                     Ok(grant) => Ok(Ok((record, grant))),
                     Err(refusal) => Ok(Err(refusal)),
                 }
@@ -99,7 +124,7 @@ impl EncryptedStore {
                 Ok(record) => record,
                 Err(refusal) => return Ok(Err(refusal)),
             };
-            let grant = match choose_flow_grant(tx, call, &record.incarnation)? {
+            let grant = match choose_flow_grant(tx, call, asking_member, &record.incarnation)? {
                 Ok(grant) => grant,
                 Err(refusal) => return Ok(Err(refusal)),
             };
@@ -122,6 +147,20 @@ impl EncryptedStore {
         install_id: &str,
         version: Option<u64>,
     ) -> Result<usize, SecretError> {
+        self.revoke_flow_grants_from(install_id, version, LOCAL_ASKING_MEMBER)
+    }
+
+    /// [`Self::revoke_flow_grants`] for a revoke that `asking_member` forwarded to this
+    /// vault. It removes only that asker's flow grants and unconsumed requests, so one
+    /// computer uninstalling a flow leaves the same flow identity's grants on other
+    /// computers, and on this vault itself, in place. The caller must have
+    /// authenticated `asking_member`.
+    pub fn revoke_flow_grants_from(
+        &self,
+        install_id: &str,
+        version: Option<u64>,
+        asking_member: &str,
+    ) -> Result<usize, SecretError> {
         if !(1..=256).contains(&install_id.len())
             || !install_id.bytes().all(|b| (0x20..=0x7e).contains(&b))
             || version.is_some_and(|v| v == 0 || v > agent_secret::MAX_SECRET_JSON_INTEGER)
@@ -129,14 +168,14 @@ impl EncryptedStore {
             return Err(SecretError::InvalidParams);
         }
         self.fenced_write(|tx| {
-            let mut stmt = tx.prepare("SELECT grant_id,secret_name,incarnation,flow_id,flow_version FROM secret_flow_grants WHERE flow_install_id=?1 AND (?2 IS NULL OR flow_version=?2) ORDER BY grant_id")?;
-            let grants = stmt.query_map(rusqlite::params![install_id, version], |r| Ok((r.get::<_,String>(0)?, r.get::<_,String>(1)?, r.get::<_,String>(2)?, r.get::<_,String>(3)?, r.get::<_,u64>(4)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            let mut stmt = tx.prepare("SELECT grant_id,secret_name,incarnation,flow_id,flow_version FROM secret_flow_grants WHERE flow_install_id=?1 AND (?2 IS NULL OR flow_version=?2) AND asking_member_id=?3 ORDER BY grant_id")?;
+            let grants = stmt.query_map(rusqlite::params![install_id, version, asking_member], |r| Ok((r.get::<_,String>(0)?, r.get::<_,String>(1)?, r.get::<_,String>(2)?, r.get::<_,String>(3)?, r.get::<_,u64>(4)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
             for (id, name, incarnation, flow_id, flow_version) in &grants {
                 tx.execute("DELETE FROM secret_flow_grants WHERE grant_id=?1", [id])?;
                 phone::audit(tx, &self.audit_key, AuditOp::SecretGrantRevoke, Some(format!("secret|{name}")), SecretSender::Basal.actor(),
                     &[id.as_bytes(), incarnation.as_bytes(), flow_id.as_bytes(), flow_version.to_string().as_bytes()])?;
             }
-            tx.execute("DELETE FROM secret_pending_requests WHERE consumed=0 AND flow_install_id=?1 AND (?2 IS NULL OR flow_version=?2)", rusqlite::params![install_id, version])?;
+            tx.execute("DELETE FROM secret_pending_requests WHERE consumed=0 AND flow_install_id=?1 AND (?2 IS NULL OR flow_version=?2) AND asking_member_id=?3", rusqlite::params![install_id, version, asking_member])?;
             phone::audit(tx, &self.audit_key, AuditOp::SecretGrantRevoke, Some(format!("secret-flow|{install_id}")), SecretSender::Basal.actor(),
                 &[install_id.as_bytes(), version.map(|v| v.to_string()).unwrap_or_default().as_bytes(), grants.len().to_string().as_bytes()])?;
             Ok(grants.len())
@@ -147,6 +186,7 @@ impl EncryptedStore {
 fn flow_pending(
     tx: &rusqlite::Transaction<'_>,
     call: &SecretFlowApproval,
+    asking_member: &str,
     record: &Record,
     methods: Option<&str>,
     now: i64,
@@ -156,12 +196,18 @@ fn flow_pending(
         Err(SecretError::StoreError) => return Err(rusqlite_err("member lookup failed")),
         Err(error) => return Ok(Err(error)),
     };
+    // Housekeeping only: drop consumed and expired requests, and requests whose serving
+    // member id is no longer this vault's. Live requests from any asker stay.
     tx.execute("DELETE FROM secret_pending_requests WHERE consumed!=0 OR request_expires_at_ms<=?1 OR member_id!=?2", rusqlite::params![now, member])?;
-    let prior = tx.query_row("SELECT request_id,statement_bytes,request_expires_at_ms FROM secret_pending_requests WHERE request_kind='approve' AND incarnation=?1 AND flow_id=?2 AND flow_version=?3 AND flow_code_hash=?4 AND flow_install_id=?5 AND methods IS ?6 AND mapped_owner IS NULL AND mapped_kind IS NULL AND mapped_ref IS NULL AND mapped_epoch IS NULL AND coverage IS NULL AND agent_id IS NULL", rusqlite::params![record.incarnation, call.flow.flow_id, call.flow.version, call.flow.code_hash, call.flow.install_id, methods], |r| Ok((r.get::<_,String>(0)?, r.get::<_,Vec<u8>>(1)?, r.get::<_,i64>(2)?))).optional()?;
+    // Reused only for the same asker: the same flow identity on another computer gets
+    // its own approval request.
+    let prior = tx.query_row("SELECT request_id,statement_bytes,request_expires_at_ms FROM secret_pending_requests WHERE request_kind='approve' AND incarnation=?1 AND flow_id=?2 AND flow_version=?3 AND flow_code_hash=?4 AND flow_install_id=?5 AND methods IS ?6 AND mapped_owner IS NULL AND mapped_kind IS NULL AND mapped_ref IS NULL AND mapped_epoch IS NULL AND coverage IS NULL AND agent_id IS NULL AND asking_member_id=?7", rusqlite::params![record.incarnation, call.flow.flow_id, call.flow.version, call.flow.code_hash, call.flow.install_id, methods, asking_member], |r| Ok((r.get::<_,String>(0)?, r.get::<_,Vec<u8>>(1)?, r.get::<_,i64>(2)?))).optional()?;
     if let Some((id, bytes, expiry)) = prior {
         return Ok(Ok(approval_reply(&id, &bytes, expiry)));
     }
-    let (total, install): (usize,usize) = tx.query_row("SELECT COUNT(*),COALESCE(SUM(flow_install_id=?1),0) FROM secret_pending_requests WHERE request_kind='approve' AND flow_id IS NOT NULL", [&call.flow.install_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    // The per-install limit counts this asker's requests only, like the agent path's
+    // per-scope limit.
+    let (total, install): (usize,usize) = tx.query_row("SELECT COUNT(*),COALESCE(SUM(flow_install_id=?1 AND asking_member_id=?2),0) FROM secret_pending_requests WHERE request_kind='approve' AND flow_id IS NOT NULL", rusqlite::params![call.flow.install_id, asking_member], |r| Ok((r.get(0)?, r.get(1)?)))?;
     if total >= MAX_FLOW_SECRET_PENDING_TOTAL || install >= MAX_FLOW_SECRET_PENDING_PER_INSTALL {
         return Ok(Err(SecretError::PendingLimit));
     }
@@ -182,16 +228,17 @@ fn flow_pending(
     let bytes =
         serde_json::to_vec(&statement).map_err(|_| rusqlite_err("statement encoding failed"))?;
     let digest = phone::hex(&payload_hash(&bytes));
-    tx.execute("INSERT INTO secret_pending_requests (request_id,request_kind,secret_name,incarnation,member_id,flow_id,flow_version,flow_code_hash,flow_install_id,methods,statement_bytes,statement_sha256,request_expires_at_ms) VALUES (?1,'approve',?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)", rusqlite::params![id, call.name, record.incarnation, member, call.flow.flow_id, call.flow.version, call.flow.code_hash, call.flow.install_id, methods, bytes, digest, expiry])?;
+    tx.execute("INSERT INTO secret_pending_requests (request_id,request_kind,secret_name,incarnation,member_id,flow_id,flow_version,flow_code_hash,flow_install_id,methods,statement_bytes,statement_sha256,request_expires_at_ms,asking_member_id) VALUES (?1,'approve',?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)", rusqlite::params![id, call.name, record.incarnation, member, call.flow.flow_id, call.flow.version, call.flow.code_hash, call.flow.install_id, methods, bytes, digest, expiry, asking_member])?;
     Ok(Ok(approval_reply(&id, &bytes, expiry)))
 }
 
 fn choose_flow_grant(
     conn: &rusqlite::Connection,
     call: &SecretFlowUse,
+    asking_member: &str,
     incarnation: &str,
 ) -> rusqlite::Result<Result<Grant, Refusal>> {
-    let mut stmt = conn.prepare("SELECT grant_id,first_released,methods FROM secret_flow_grants WHERE secret_name=?1 AND incarnation=?2 AND flow_id=?3 AND flow_version=?4 AND flow_code_hash=?5 AND flow_install_id=?6 ORDER BY granted_at_ms,grant_id")?;
+    let mut stmt = conn.prepare("SELECT grant_id,first_released,methods FROM secret_flow_grants WHERE secret_name=?1 AND incarnation=?2 AND flow_id=?3 AND flow_version=?4 AND flow_code_hash=?5 AND flow_install_id=?6 AND asking_member_id=?7 ORDER BY granted_at_ms,grant_id")?;
     let rows = stmt.query_map(
         rusqlite::params![
             call.name,
@@ -199,7 +246,8 @@ fn choose_flow_grant(
             call.flow.flow_id,
             call.flow.version,
             call.flow.code_hash,
-            call.flow.install_id
+            call.flow.install_id,
+            asking_member
         ],
         |r| {
             Ok((

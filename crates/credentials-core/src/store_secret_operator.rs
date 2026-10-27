@@ -248,6 +248,8 @@ pub struct OperatorGrantRow {
     /// Absent for a permanent grant, which has no expiry to report.
     pub expires_at_ms: Option<i64>,
     pub last_use_ms: Option<i64>,
+    /// The paired computer whose agent this grant serves; `None` for this vault's own.
+    pub asking_member_id: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -262,6 +264,8 @@ pub struct OperatorFlowGrantRow {
     pub granted_at_ms: i64,
     pub last_use_ms: Option<i64>,
     pub card_ref: Option<String>,
+    /// The paired computer whose flow this grant serves; `None` for this vault's own.
+    pub asking_member_id: Option<String>,
 }
 
 /// One registered phone and how current its keys are.
@@ -326,9 +330,17 @@ pub fn list_agent_secrets_read_only(
         .map_err(map)?
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(map)?;
+    // A store the daemon has not yet migrated has no `asking_member_id` column; every
+    // grant in it was made on this vault, which `''` stands for.
+    let asking_member = if schema_version >= SECRET_ASKING_MEMBER_SCHEMA_VERSION {
+        "asking_member_id"
+    } else {
+        "''"
+    };
+    let asking = |id: String| (!id.is_empty()).then_some(id);
     for secret in &mut secrets {
         secret.grants = conn
-            .prepare("SELECT grant_id,scope_owner,scope_kind,scope_ref,coverage,duration,expires_at_ms,last_use_ms FROM secret_grants WHERE incarnation=?1 ORDER BY grant_id")
+            .prepare(&format!("SELECT grant_id,scope_owner,scope_kind,scope_ref,coverage,duration,expires_at_ms,last_use_ms,{asking_member} FROM secret_grants WHERE incarnation=?1 ORDER BY grant_id"))
             .map_err(map)?
             .query_map([&secret.incarnation], |r| {
                 let duration: String = r.get(5)?;
@@ -341,6 +353,7 @@ pub fn list_agent_secrets_read_only(
                     expires_at_ms: (duration != "permanent").then(|| r.get(6)).transpose()?,
                     duration,
                     last_use_ms: r.get(7)?,
+                    asking_member_id: asking(r.get(8)?),
                 })
             })
             .map_err(map)?
@@ -348,7 +361,7 @@ pub fn list_agent_secrets_read_only(
             .map_err(map)?;
         if schema_version >= FLOW_SECRET_SCHEMA_VERSION {
             secret.flow_grants = conn
-                .prepare("SELECT grant_id,flow_id,flow_version,flow_code_hash,flow_install_id,methods,granted_at_ms,last_use_ms,card_ref FROM secret_flow_grants WHERE incarnation=?1 ORDER BY grant_id")
+                .prepare(&format!("SELECT grant_id,flow_id,flow_version,flow_code_hash,flow_install_id,methods,granted_at_ms,last_use_ms,card_ref,{asking_member} FROM secret_flow_grants WHERE incarnation=?1 ORDER BY grant_id"))
                 .map_err(map)?
                 .query_map([&secret.incarnation], |r| {
                     let methods: Option<String> = r.get(5)?;
@@ -367,6 +380,7 @@ pub fn list_agent_secrets_read_only(
                         granted_at_ms: r.get(6)?,
                         last_use_ms: r.get(7)?,
                         card_ref: r.get(8)?,
+                        asking_member_id: asking(r.get(9)?),
                     })
                 })
                 .map_err(map)?

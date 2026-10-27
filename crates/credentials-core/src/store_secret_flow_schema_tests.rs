@@ -75,8 +75,11 @@ fn migration_28_conserves_every_agent_row_and_only_appends_nullable_pending_colu
         "secret_phone_observations",
     ];
     let before: Vec<_> = tables.iter().map(|table| rows(&sqlite, table)).collect();
-    EncryptedStore::migrate(&sqlite).unwrap();
-    assert_eq!(sqlite.with_conn(read_schema_version).unwrap(), 29);
+    migrate_through_for_test(&sqlite, FLOW_SECRET_SCHEMA_VERSION).unwrap();
+    assert_eq!(
+        sqlite.with_conn(read_schema_version).unwrap(),
+        FLOW_SECRET_SCHEMA_VERSION
+    );
     for (table, before) in tables.into_iter().zip(before) {
         let after = rows(&sqlite, table);
         assert_eq!(after.len(), before.len(), "{table}");
@@ -117,6 +120,7 @@ fn read_only_listing_works_at_all_three_schema_generations_without_migrating() {
             duration: "permanent".into(),
             expires_at_ms: None,
             last_use_ms: Some(12),
+            asking_member_id: None,
         }]
     );
 
@@ -134,7 +138,7 @@ fn read_only_listing_works_at_all_three_schema_generations_without_migrating() {
         None,
     );
     let after = list_agent_secrets_read_only(&path).unwrap().unwrap();
-    assert_eq!(sqlite.with_conn(read_schema_version).unwrap(), 29);
+    assert_eq!(sqlite.with_conn(read_schema_version).unwrap(), 30);
     assert_eq!(after.phones, before.phones);
     let key = after.secrets.iter().find(|s| s.name == "ops-key").unwrap();
     assert_eq!(key.grants, before.secrets[0].grants);
@@ -170,7 +174,43 @@ fn read_only_listing_works_at_all_three_schema_generations_without_migrating() {
         .collect();
     ids.sort();
     assert_eq!(ids, ["agent-grant", "flow-A", "flow-B", "flow-login"]);
-    assert_eq!(sqlite.with_conn(read_schema_version).unwrap(), 29);
+    assert_eq!(sqlite.with_conn(read_schema_version).unwrap(), 30);
+}
+
+#[test]
+fn migration_30_keeps_every_secret_row_and_marks_it_local() {
+    let (root, sqlite) = old_store(SECRET_ASKING_MEMBER_SCHEMA_VERSION - 1);
+    sqlite.with_conn(|conn| conn.execute_batch(&format!(
+        "INSERT INTO agent_secrets VALUES ('ops-key','agent_api_key','{INC}','active','x.test','/repos/a','authorization_bearer',NULL,1,'key',x'1234',10);
+         INSERT INTO secret_grants (grant_id,secret_name,incarnation,scope_owner,scope_kind,scope_ref,coverage,duration,expires_at_ms,granted_at_ms,envelope_sha256) VALUES ('agent-grant','ops-key','{INC}','owner','head','H','scope','permanent',0,11,'envelope-hash');
+         INSERT INTO secret_pending_requests (request_id,request_kind,secret_name,incarnation,member_id,statement_bytes,statement_sha256,request_expires_at_ms,flow_id,flow_version,flow_code_hash,flow_install_id) VALUES ('flow-request','approve','ops-key','{INC}','member',x'00','hash',1000,'daily-fetch',7,'{CODE_HASH}','flow-A');"
+    ))).unwrap();
+    seed_flow(&sqlite, "flow-A", "ops-key", INC, Some(r#"["GET"]"#));
+    let tables = [
+        "secret_grants",
+        "secret_flow_grants",
+        "secret_pending_requests",
+    ];
+    let before: Vec<_> = tables.iter().map(|table| rows(&sqlite, table)).collect();
+    EncryptedStore::migrate(&sqlite).unwrap();
+    assert_eq!(
+        sqlite.with_conn(read_schema_version).unwrap(),
+        SECRET_ASKING_MEMBER_SCHEMA_VERSION
+    );
+    for (table, before) in tables.into_iter().zip(before) {
+        let after = rows(&sqlite, table);
+        assert_eq!(after.len(), 1, "{table}");
+        assert_eq!(before.len(), 1, "{table}");
+        // Every old column keeps its value and the one appended column reads '' (local).
+        let mut expected = before[0].clone();
+        expected.push(SqlValue::Text(String::new()));
+        assert_eq!(after[0], expected, "{table}");
+    }
+    let listing = list_agent_secrets_read_only(&store_file(&root))
+        .unwrap()
+        .unwrap();
+    assert_eq!(listing.secrets[0].grants[0].asking_member_id, None);
+    assert_eq!(listing.secrets[0].flow_grants[0].asking_member_id, None);
 }
 
 #[test]

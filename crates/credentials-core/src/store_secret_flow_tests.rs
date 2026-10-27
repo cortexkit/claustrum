@@ -804,3 +804,6 @@ fn secret_flow_revoke_failure_rolls_back_grants_requests_and_audit_together() {
     assert!(audit_rows(&store, "secret_grant_revoke").is_empty());
     assert_eq!(store.verify_audit_chain().unwrap(), None);
 }
+
+#[path = "store_secret_asking_member_tests.rs"]
+mod asking_member_tests;

@@ -7127,3 +7127,68 @@ fn secret_list_and_grants_name_a_flow_holder_and_revoke_removes_one_grant() {
     assert!(!text.contains("flow-grant-a"), "{text}");
     assert!(text.contains("flow:daily-fetch@7/install-B"), "{text}");
 }
+
+#[test]
+fn secret_list_and_grants_name_the_asking_member_only_for_a_forwarded_grant() {
+    let vault = GrantCliVault::new("secret-asking-member");
+    vault.bootstrap();
+    let file = material_file(&vault.root, 0o600, MATERIAL_CANARY);
+    let put = vault.run(&[
+        "secret",
+        "put",
+        "ops-key",
+        "--kind",
+        "api-key",
+        "--host",
+        "x.test",
+        "--material-file",
+        file.to_str().unwrap(),
+    ]);
+    assert!(
+        put.status.success(),
+        "{}",
+        String::from_utf8_lossy(&put.stderr)
+    );
+    // One local and one forwarded grant of each kind, written directly like
+    // `add_flow_grant` does: the subject here is what the listing prints.
+    let asker = "fed-computer:33333333333333333333333333333333";
+    add_flow_grant(&vault.data_dir, "flow-local", "ops-key", "install-A");
+    add_flow_grant(&vault.data_dir, "flow-remote", "ops-key", "install-A");
+    let path = vault.data_dir.join("store.db");
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute(
+        "INSERT INTO secret_grants (grant_id,secret_name,incarnation,scope_owner,scope_kind,scope_ref,coverage,duration,expires_at_ms,granted_at_ms,envelope_sha256) SELECT grant_id,'ops-key',incarnation,'reserved:prefrontal-core','head','H','scope','permanent',0,10,'digest' FROM (SELECT 'agent-local' AS grant_id UNION ALL SELECT 'agent-remote') CROSS JOIN agent_secrets WHERE name='ops-key'",
+        [],
+    )
+    .unwrap();
+    for table in ["secret_grants", "secret_flow_grants"] {
+        conn.execute(
+            &format!("UPDATE {table} SET asking_member_id=?1 WHERE grant_id LIKE '%-remote'"),
+            [asker],
+        )
+        .unwrap();
+    }
+    drop(conn);
+    let suffix = format!(" asking_member={asker}");
+
+    for verb in ["list", "grants"] {
+        let out = vault.run(&["secret", verb]);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let text = String::from_utf8_lossy(&out.stdout).to_string();
+        for id in ["agent-local", "agent-remote", "flow-local", "flow-remote"] {
+            let line = text
+                .lines()
+                .find(|line| line.contains(id))
+                .unwrap_or_else(|| panic!("{verb}: {id} missing from:\n{text}"));
+            if id.ends_with("-remote") {
+                assert!(line.ends_with(&suffix), "{verb}: {line}");
+            } else {
+                assert!(!line.contains("asking_member"), "{verb}: {line}");
+            }
+        }
+    }
+}

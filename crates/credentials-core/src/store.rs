@@ -138,6 +138,10 @@ pub const FLOW_SECRET_SCHEMA_VERSION: u32 = 28;
 /// operation, which allows a paired computer to forward agent-secret calls here.
 const SECRET_USE_MEMBER_GRANT_SCHEMA_VERSION: u32 = 29;
 
+/// The migration that records which computer asked for each agent-secret grant, flow
+/// grant and pending approval request. Below it every row is this vault's own (`''`).
+pub const SECRET_ASKING_MEMBER_SCHEMA_VERSION: u32 = 30;
+
 /// The audit ops that DEPOSIT a credential, so the earliest entry carrying one of
 /// them is that credential's birth instant.
 ///
@@ -902,6 +906,19 @@ const MIGRATIONS: &[Migration] = &[
                          FROM member_grants; \
                      DROP TABLE member_grants; \
                      ALTER TABLE member_grants_v29 RENAME TO member_grants;",
+    },
+    // A grant or pending request now also belongs to the computer whose agent or flow
+    // asked for it: `''` for a request made on this vault itself, or the paired member id
+    // (`fed-computer:<fp>`) of a computer that forwarded the call here. Grant selection,
+    // pending reuse and flow-grant revocation compare it, so one computer's grant never
+    // answers another computer's request for the same scope stamp or flow identity.
+    // Every existing row was made locally, which the `''` default records. Adding a
+    // column with a constant default rewrites no row.
+    Migration {
+        version: SECRET_ASKING_MEMBER_SCHEMA_VERSION,
+        statements: "ALTER TABLE secret_grants ADD COLUMN asking_member_id TEXT NOT NULL DEFAULT ''; \
+                     ALTER TABLE secret_flow_grants ADD COLUMN asking_member_id TEXT NOT NULL DEFAULT ''; \
+                     ALTER TABLE secret_pending_requests ADD COLUMN asking_member_id TEXT NOT NULL DEFAULT '';",
     },
 ];
 
@@ -12217,7 +12234,7 @@ mod tests {
     fn the_newest_migration_version_is_pinned_because_the_manifest_declares_it() {
         assert_eq!(
             newest_migration_version(),
-            29,
+            30,
             "the newest migration changed. This value is DECLARED in the module manifest \
              as store_schema_version, so a supervisor comparing declared-against-actual \
              sees it. Update the literal, and note the manifest consequence."

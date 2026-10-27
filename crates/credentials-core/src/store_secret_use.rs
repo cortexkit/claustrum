@@ -26,6 +26,13 @@ struct Refusal {
     detail: &'static str,
     addressed: bool,
 }
+/// The `asking_member_id` of a grant or pending request made on this vault itself.
+///
+/// A call forwarded here by a paired computer carries that computer's member id
+/// instead, so a grant approved for one computer's agent or flow never answers another
+/// computer's request, nor this vault's own, for the same scope stamp or flow identity.
+const LOCAL_ASKING_MEMBER: &str = "";
+
 struct Grant {
     id: String,
     first: bool,
@@ -84,6 +91,20 @@ impl EncryptedStore {
         call: &SecretUse,
         clock: impl Fn() -> i64,
     ) -> Result<SecretUseOutcome, SecretError> {
+        self.secret_use_from(call, LOCAL_ASKING_MEMBER, clock)
+    }
+
+    /// [`Self::secret_use`] for a call that `asking_member` forwarded to this vault.
+    ///
+    /// Only grants recorded for that same asking member can release, and a request
+    /// with no such grant gets its own pending approval, never one another asker made.
+    /// The caller must have authenticated `asking_member`; this method trusts it.
+    pub fn secret_use_from(
+        &self,
+        call: &SecretUse,
+        asking_member: &str,
+        clock: impl Fn() -> i64,
+    ) -> Result<SecretUseOutcome, SecretError> {
         if call.sender == SecretSender::Basal {
             return self.use_refused(
                 call,
@@ -97,7 +118,7 @@ impl EncryptedStore {
         let snapshot = self.store.with_conn(|conn| {
             let record = self.check_secret_use(conn, call)?;
             let Ok(record) = record else { return Ok(Err(record.err().expect("refusal"))); };
-            let grant = choose_grant(conn, call, &record.incarnation, now)?;
+            let grant = choose_grant(conn, call, asking_member, &record.incarnation, now)?;
             let expired: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM secret_grants WHERE duration != 'permanent' AND expires_at_ms<=?1)", [now], |r|r.get(0))?;
             Ok(Ok((record, grant, expired)))
         }).map_err(|_|SecretError::StoreError)?;
@@ -117,7 +138,7 @@ impl EncryptedStore {
             let now = clock();
             let record = match self.check_secret_use(tx, call)? { Ok(r)=>r, Err(r)=>return Ok(Err(r)) };
             phone::sweep(tx, &self.audit_key, now)?;
-            if let Some(grant) = choose_grant(tx, call, &record.incarnation, now)? {
+            if let Some(grant) = choose_grant(tx, call, asking_member, &record.incarnation, now)? {
                 let reply = release(&record, now).map_err(|_|rusqlite_err("secret release failed"))?;
                 if !grant.first || grant.duration == "once" {
                     phone::audit(tx, &self.audit_key, AuditOp::SecretFirstRelease, Some(format!("secret|{}",call.name)), call.sender.actor(), &[grant.id.as_bytes(),record.incarnation.as_bytes()])?;
@@ -126,7 +147,7 @@ impl EncryptedStore {
                 else { tx.execute("UPDATE secret_grants SET first_released=1,last_use_ms=?2 WHERE grant_id=?1",rusqlite::params![grant.id,now])?; }
                 return Ok(Ok(Ok(SecretUseOutcome { reply, last_use:None })));
             }
-            pending(tx, call, &record, now).map(Ok)
+            pending(tx, call, asking_member, &record, now).map(Ok)
         }).map_err(|_|SecretError::StoreError)?;
         match answer {
             Err(refusal) => self.use_refused(call, refusal),
@@ -229,21 +250,25 @@ impl EncryptedStore {
 fn choose_grant(
     conn: &rusqlite::Connection,
     call: &SecretUse,
+    asking_member: &str,
     incarnation: &str,
     now: i64,
 ) -> rusqlite::Result<Option<Grant>> {
-    let mut stmt=conn.prepare("SELECT grant_id,scope_owner,scope_kind,scope_ref,coverage,duration,first_released FROM secret_grants WHERE incarnation=?1 AND secret_name=?2 AND (duration='permanent' OR expires_at_ms>?3) ORDER BY (duration='once'), (duration='permanent') DESC, CASE WHEN duration!='once' THEN expires_at_ms ELSE 0 END DESC, granted_at_ms, grant_id")?;
-    let rows = stmt.query_map(rusqlite::params![incarnation, call.name, now], |r| {
-        Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, String>(2)?,
-            r.get::<_, String>(3)?,
-            r.get::<_, String>(4)?,
-            r.get::<_, String>(5)?,
-            r.get::<_, bool>(6)?,
-        ))
-    })?;
+    let mut stmt=conn.prepare("SELECT grant_id,scope_owner,scope_kind,scope_ref,coverage,duration,first_released FROM secret_grants WHERE incarnation=?1 AND secret_name=?2 AND (duration='permanent' OR expires_at_ms>?3) AND asking_member_id=?4 ORDER BY (duration='once'), (duration='permanent') DESC, CASE WHEN duration!='once' THEN expires_at_ms ELSE 0 END DESC, granted_at_ms, grant_id")?;
+    let rows = stmt.query_map(
+        rusqlite::params![incarnation, call.name, now, asking_member],
+        |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, String>(5)?,
+                r.get::<_, bool>(6)?,
+            ))
+        },
+    )?;
     for row in rows {
         let (id, owner, kind, scope_ref, coverage, duration, first) = row?;
         let equal = |scope: &AskingScope| {
@@ -299,6 +324,7 @@ fn approval_reply(id: &str, statement: &[u8], expiry: i64) -> SecretUseOutcome {
 fn pending(
     tx: &rusqlite::Transaction<'_>,
     call: &SecretUse,
+    asking_member: &str,
     record: &Record,
     now: i64,
 ) -> rusqlite::Result<Result<SecretUseOutcome, SecretError>> {
@@ -308,12 +334,19 @@ fn pending(
         Err(error) => return Ok(Err(error)),
     };
     let run = || -> rusqlite::Result<Result<SecretUseOutcome, SecretError>> {
+        // Housekeeping only: drop consumed and expired requests, and requests
+        // whose serving member id is no longer this vault's. Live requests from any
+        // asker stay.
         tx.execute("DELETE FROM secret_pending_requests WHERE consumed!=0 OR request_expires_at_ms<=?1 OR member_id!=?2",rusqlite::params![now,member])?;
-        let prior=tx.query_row("SELECT request_id,statement_bytes,request_expires_at_ms FROM secret_pending_requests WHERE request_kind='approve' AND flow_id IS NULL AND incarnation=?1 AND mapped_owner=?2 AND mapped_kind=?3 AND mapped_ref=?4 AND coverage=?5",rusqlite::params![record.incarnation,call.scope.owner,call.scope.kind,call.scope.scope_ref,call.coverage],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Vec<u8>>(1)?,r.get::<_,i64>(2)?))).optional()?;
+        // A request is reused only for the same asker, so two computers whose agents carry
+        // the same scope stamp each get their own approval, never a shared one.
+        let prior=tx.query_row("SELECT request_id,statement_bytes,request_expires_at_ms FROM secret_pending_requests WHERE request_kind='approve' AND flow_id IS NULL AND incarnation=?1 AND mapped_owner=?2 AND mapped_kind=?3 AND mapped_ref=?4 AND coverage=?5 AND asking_member_id=?6",rusqlite::params![record.incarnation,call.scope.owner,call.scope.kind,call.scope.scope_ref,call.coverage,asking_member],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Vec<u8>>(1)?,r.get::<_,i64>(2)?))).optional()?;
         if let Some((id, bytes, expiry)) = prior {
             return Ok(Ok(approval_reply(&id, &bytes, expiry)));
         }
-        let (total,scope):(usize,usize)=tx.query_row("SELECT COUNT(*),COALESCE(SUM(mapped_owner=?1 AND mapped_kind=?2 AND mapped_ref=?3),0) FROM secret_pending_requests WHERE request_kind='approve' AND flow_id IS NULL",rusqlite::params![call.scope.owner,call.scope.kind,call.scope.scope_ref],|r|Ok((r.get(0)?,r.get(1)?)))?;
+        // The per-scope limit counts this asker's requests only, so another computer
+        // cannot use up the quota of a scope stamp it happens to share.
+        let (total,scope):(usize,usize)=tx.query_row("SELECT COUNT(*),COALESCE(SUM(mapped_owner=?1 AND mapped_kind=?2 AND mapped_ref=?3 AND asking_member_id=?4),0) FROM secret_pending_requests WHERE request_kind='approve' AND flow_id IS NULL",rusqlite::params![call.scope.owner,call.scope.kind,call.scope.scope_ref,asking_member],|r|Ok((r.get(0)?,r.get(1)?)))?;
         if total >= MAX_SECRET_PENDING_TOTAL || scope >= MAX_SECRET_PENDING_PER_SCOPE {
             return Ok(Err(SecretError::PendingLimit));
         }
@@ -334,7 +367,7 @@ fn pending(
         let bytes = serde_json::to_vec(&statement)
             .map_err(|_| rusqlite_err("statement encoding failed"))?;
         let digest = phone::hex(&payload_hash(&bytes));
-        tx.execute("INSERT INTO secret_pending_requests (request_id,request_kind,secret_name,incarnation,member_id,mapped_owner,mapped_kind,mapped_ref,mapped_epoch,coverage,agent_id,statement_bytes,statement_sha256,request_expires_at_ms) VALUES (?1,'approve',?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",rusqlite::params![id,call.name,record.incarnation,member,call.scope.owner,call.scope.kind,call.scope.scope_ref,call.scope.epoch,call.coverage,call.agent_id,bytes,digest,expiry])?;
+        tx.execute("INSERT INTO secret_pending_requests (request_id,request_kind,secret_name,incarnation,member_id,mapped_owner,mapped_kind,mapped_ref,mapped_epoch,coverage,agent_id,statement_bytes,statement_sha256,request_expires_at_ms,asking_member_id) VALUES (?1,'approve',?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",rusqlite::params![id,call.name,record.incarnation,member,call.scope.owner,call.scope.kind,call.scope.scope_ref,call.scope.epoch,call.coverage,call.agent_id,bytes,digest,expiry,asking_member])?;
         Ok(Ok(approval_reply(&id, &bytes, expiry)))
     };
     run()

@@ -26,6 +26,9 @@ struct Pending {
     flow_code_hash: Option<String>,
     flow_install_id: Option<String>,
     methods: Option<String>,
+    /// The computer whose request this is, `''` for this vault's own. Each grant the
+    /// request's approval creates records the same asker.
+    asking_member: String,
 }
 
 impl EncryptedStore {
@@ -198,7 +201,7 @@ impl EncryptedStore {
         delete: bool,
         now: i64,
     ) -> rusqlite::Result<bool> {
-        let pending = tx.query_row("SELECT request_kind,secret_name,incarnation,member_id,mapped_owner,mapped_kind,mapped_ref,mapped_epoch,coverage,agent_id,statement_bytes,statement_sha256,request_expires_at_ms,consumed,flow_id,flow_version,flow_code_hash,flow_install_id,methods FROM secret_pending_requests WHERE request_id=?1",[&item.request_id],|r| Ok(Pending {kind:r.get(0)?,name:r.get(1)?,incarnation:r.get(2)?,member:r.get(3)?,owner:r.get(4)?,scope_kind:r.get(5)?,scope_ref:r.get(6)?,epoch:r.get(7)?,coverage:r.get(8)?,agent_id:r.get(9)?,bytes:r.get(10)?,digest:r.get(11)?,expiry:r.get(12)?,consumed:r.get(13)?,flow_id:r.get(14)?,flow_version:r.get(15)?,flow_code_hash:r.get(16)?,flow_install_id:r.get(17)?,methods:r.get(18)?})).optional()?;
+        let pending = tx.query_row("SELECT request_kind,secret_name,incarnation,member_id,mapped_owner,mapped_kind,mapped_ref,mapped_epoch,coverage,agent_id,statement_bytes,statement_sha256,request_expires_at_ms,consumed,flow_id,flow_version,flow_code_hash,flow_install_id,methods,asking_member_id FROM secret_pending_requests WHERE request_id=?1",[&item.request_id],|r| Ok(Pending {kind:r.get(0)?,name:r.get(1)?,incarnation:r.get(2)?,member:r.get(3)?,owner:r.get(4)?,scope_kind:r.get(5)?,scope_ref:r.get(6)?,epoch:r.get(7)?,coverage:r.get(8)?,agent_id:r.get(9)?,bytes:r.get(10)?,digest:r.get(11)?,expiry:r.get(12)?,consumed:r.get(13)?,flow_id:r.get(14)?,flow_version:r.get(15)?,flow_code_hash:r.get(16)?,flow_install_id:r.get(17)?,methods:r.get(18)?,asking_member:r.get(19)?})).optional()?;
         let Some(p) = pending else {
             return Ok(false);
         };
@@ -355,7 +358,7 @@ impl EncryptedStore {
             "UPDATE secret_pending_requests SET consumed=1 WHERE request_id=?1",
             [&item.request_id],
         )?;
-        tx.execute("INSERT INTO secret_grants (grant_id,secret_name,incarnation,scope_owner,scope_kind,scope_ref,coverage,duration,expires_at_ms,granted_at_ms,envelope_sha256,agent_id,card_ref) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",rusqlite::params![id,p.name,p.incarnation,p.owner,p.scope_kind,p.scope_ref,p.coverage,e.duration,e.grant_expires_at_ms,now,envelope_hash,p.agent_id,card_ref])?;
+        tx.execute("INSERT INTO secret_grants (grant_id,secret_name,incarnation,scope_owner,scope_kind,scope_ref,coverage,duration,expires_at_ms,granted_at_ms,envelope_sha256,agent_id,card_ref,asking_member_id) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",rusqlite::params![id,p.name,p.incarnation,p.owner,p.scope_kind,p.scope_ref,p.coverage,e.duration,e.grant_expires_at_ms,now,envelope_hash,p.agent_id,card_ref,p.asking_member])?;
         envelope_audit(
             tx,
             &self.audit_key,
@@ -437,7 +440,7 @@ impl EncryptedStore {
             "UPDATE secret_pending_requests SET consumed=1 WHERE request_id=?1",
             [&item.request_id],
         )?;
-        tx.execute("INSERT INTO secret_flow_grants (grant_id,secret_name,incarnation,flow_id,flow_version,flow_code_hash,flow_install_id,methods,granted_at_ms,envelope_sha256,card_ref) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",rusqlite::params![id,p.name,p.incarnation,flow.flow_id,flow.version,flow.code_hash,flow.install_id,p.methods,now,envelope_hash,card_ref])?;
+        tx.execute("INSERT INTO secret_flow_grants (grant_id,secret_name,incarnation,flow_id,flow_version,flow_code_hash,flow_install_id,methods,granted_at_ms,envelope_sha256,card_ref,asking_member_id) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",rusqlite::params![id,p.name,p.incarnation,flow.flow_id,flow.version,flow.code_hash,flow.install_id,p.methods,now,envelope_hash,card_ref,p.asking_member])?;
         envelope_audit(
             tx,
             &self.audit_key,

@@ -229,8 +229,8 @@ impl EncryptedStore {
         d: &PhoneDeposit,
         now: i64,
     ) -> rusqlite::Result<Result<Value, SecretError>> {
-        // A vault whose secrets live on another member's vault stores nothing, so the phone
-        // is sent to the home before any other check. The role is read in this transaction,
+        // A vault whose secrets live on another member's vault stores nothing, so the
+        // deposit is refused before any other check, with a refusal that names the home. The role is read in this transaction,
         // so a concurrent `home set` either sees this deposit's row or refuses it here.
         // `SecretError` names a code only, while this refusal must also name the home, so
         // the full refusal body is returned as the reply; the transport passes it through

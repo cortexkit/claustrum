@@ -107,7 +107,7 @@ impl SecretHomeRole {
 }
 
 /// Resolve the role from the stored setting and the stored self id. A self id that is
-/// not a valid member id counts as unset, which can only make the answer a refusal.
+/// not a valid member id counts as unset.
 pub fn resolve_secret_home_role(
     setting: Option<&str>,
     self_member: Option<&str>,

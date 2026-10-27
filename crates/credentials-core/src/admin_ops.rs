@@ -287,8 +287,9 @@ pub enum AdminOpBody {
     /// the vault that holds this account's agent secrets (`secrets.home_member`).
     ///
     /// Setting `self` or clearing the setting is a local write and runs offline too.
-    /// Naming a member runs only on the live daemon, which first checks the id against
-    /// callosum's pairing and stores an id equal to this vault's own as `self`.
+    /// Naming a member runs only on the live daemon. An id that is this computer's own
+    /// (the stored self id, or the id callosum computes for this computer) is stored as
+    /// `self`; any other id must be a member callosum shows as paired.
     #[serde(rename = "admin.secret_home_set")]
     SecretHomeSet { v: u32, home: SecretHomeTarget },
     /// Set this vault's own member id (`fed-computer:<fp>`), which it writes into every

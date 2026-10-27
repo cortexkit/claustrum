@@ -6540,6 +6540,43 @@ fn secret_put_offline_stores_a_releaseable_key_and_refuses_the_name_twice() {
     .contains(MATERIAL_CANARY));
 }
 
+/// The help page lists `--name` as a way to name the secret, so `put` and `delete` must
+/// accept it in place of the positional name.
+#[test]
+fn secret_put_and_delete_accept_the_name_as_a_flag() {
+    let vault = GrantCliVault::new("secret-name-flag");
+    vault.bootstrap();
+    let file = material_file(&vault.root, 0o600, MATERIAL_CANARY);
+    let put = vault.run(&[
+        "secret",
+        "put",
+        "--name",
+        "flag-key",
+        "--kind",
+        "api-key",
+        "--host",
+        "x.test",
+        "--material-file",
+        file.to_str().unwrap(),
+    ]);
+    assert!(
+        put.status.success(),
+        "{}",
+        String::from_utf8_lossy(&put.stderr)
+    );
+    assert_eq!(
+        agent_secret_listing(&vault.data_dir).secrets[0].name,
+        "flag-key"
+    );
+    let delete = vault.run(&["secret", "delete", "--name", "flag-key"]);
+    assert!(
+        delete.status.success(),
+        "{}",
+        String::from_utf8_lossy(&delete.stderr)
+    );
+    assert!(agent_secret_listing(&vault.data_dir).secrets.is_empty());
+}
+
 #[test]
 fn secret_put_refuses_a_material_file_that_is_not_0600_or_is_malformed_without_naming_its_content()
 {

@@ -56,6 +56,9 @@ fn put_flags() -> &'static [&'static str] {
 /// The flags `secret revoke` takes: the grant id.
 const REVOKE_FLAGS: &[&str] = &["--grant-id"];
 
+/// The flags `secret delete` takes: the name, as an alternative to the positional operand.
+const DELETE_FLAGS: &[&str] = &["--name"];
+
 /// Refuse an unknown or misplaced flag on one `ck auth secret <verb>` invocation.
 ///
 /// The dispatcher's shared argument check sees only the verb name `secret`, and a flag's
@@ -68,16 +71,20 @@ pub fn guard_args(args: &[String]) -> Result<(), CliError> {
         return Ok(());
     };
     let (value_flags, positional) = match verb.as_str() {
-        // `phone-gate` and `delete` each take one positional operand and no flags.
-        "phone-gate" | "delete" => (&[][..], true),
-        // `put` names the secret first, then its flags.
+        // `phone-gate` takes one positional operand and no flags.
+        "phone-gate" => (&[][..], true),
+        // `delete` names the secret positionally or with `--name`, as `secret_name` reads it.
+        "delete" => (DELETE_FLAGS, true),
+        // `put` names the secret first or with `--name`, then its flags.
         "put" => (put_flags(), true),
         "revoke" => (REVOKE_FLAGS, false),
         "list" | "grants" => (&[][..], false),
         // An unknown verb is diagnosed by `cmd_secret`, which names it.
         _ => return Ok(()),
     };
-    let mut i = usize::from(positional);
+    // A positional operand, when the verb takes one, is the first token unless that token is
+    // a flag: `put --name ops-key ...` names the secret with the flag instead.
+    let mut i = usize::from(positional && rest.first().is_some_and(|arg| !arg.starts_with("--")));
     while let Some(arg) = args_or(rest, i) {
         if value_flags.contains(&arg.as_str()) {
             match args_or(rest, i + 1) {

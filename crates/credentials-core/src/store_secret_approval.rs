@@ -1,7 +1,7 @@
 use super::*;
 use crate::agent_secret::{
-    ApprovalEnvelope, ApprovalItem, SecretError, SECRET_ISSUE_SKEW_LIMIT_MS,
-    SECRET_PENDING_LIFETIME_LIMIT_MS,
+    ApprovalEnvelope, ApprovalItem, SecretError, FLOW_SECRET_PENDING_LIFETIME_LIMIT_MS,
+    SECRET_ISSUE_SKEW_LIMIT_MS, SECRET_PENDING_LIFETIME_LIMIT_MS,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde_json::{json, Value};
@@ -203,6 +203,11 @@ impl EncryptedStore {
             return Ok(false);
         };
         let issued = e.issued_at_ms as i64;
+        let pending_lifetime = if p.flow_id.is_some() {
+            FLOW_SECRET_PENDING_LIFETIME_LIMIT_MS
+        } else {
+            SECRET_PENDING_LIFETIME_LIMIT_MS
+        };
         let statement: Value = match serde_json::from_slice(&p.bytes) {
             Ok(v) => v,
             Err(_) => return Ok(false),
@@ -211,7 +216,7 @@ impl EncryptedStore {
             || now >= p.expiry
             || p.digest != item.statement_sha256
             || phone::hex(&payload_hash(&p.bytes)) != p.digest
-            || issued < p.expiry - SECRET_PENDING_LIFETIME_LIMIT_MS
+            || issued < p.expiry - pending_lifetime
             || issued >= p.expiry
             || now.abs_diff(issued) > SECRET_ISSUE_SKEW_LIMIT_MS as u64
             || member != Some(p.member.as_str())

@@ -175,7 +175,7 @@ fn secret_flow_pending_retries_bind_identity_methods_and_incarnation_not_target(
         .unwrap();
     let recreated = request(&store, &install(), NOW);
     assert_ne!(recreated["request_id"], original["request_id"]);
-    let expired = request(&store, &install(), NOW + 600_000);
+    let expired = request(&store, &install(), NOW + 86_400_000);
     assert_ne!(expired["request_id"], recreated["request_id"]);
     assert_eq!(
         count(&store, "SELECT COUNT(*) FROM secret_pending_requests"),
@@ -185,44 +185,146 @@ fn secret_flow_pending_retries_bind_identity_methods_and_incarnation_not_target(
 }
 
 #[test]
-fn secret_flow_pending_limits_are_shared_total_and_per_install_across_versions() {
-    let (_root, store) = setup("flow-pending-limits");
+fn secret_flow_pending_lifetime_is_24_hours_and_cleanup_preserves_live_flows() {
+    let (_root, store) = setup("flow-pending-lifetime");
+    let first = request(&store, &install(), NOW);
+    assert_eq!(first["status"], "approval_required");
+    assert_eq!(first["expires_at_ms"], NOW + 86_400_000);
+    let statement: Value = serde_json::from_slice(
+        &URL_SAFE_NO_PAD
+            .decode(first["statement_b64url"].as_str().unwrap())
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(statement["request_expires_at_ms"], NOW + 86_400_000);
+    let agent = use_reply(&store, &call(), NOW);
+    assert_eq!(agent["expires_at_ms"], NOW + 600_000);
+    for delta in [600_000, 82_800_000, 86_399_999] {
+        let fresh_agent = use_reply(&store, &call(), NOW + delta);
+        assert_eq!(fresh_agent["status"], "approval_required");
+        assert_ne!(fresh_agent["request_id"], agent["request_id"]);
+        assert_eq!(request(&store, &install(), NOW + delta), first);
+        assert_eq!(
+            count(
+                &store,
+                "SELECT COUNT(*) FROM secret_pending_requests WHERE flow_id IS NOT NULL"
+            ),
+            1
+        );
+    }
+    assert_ne!(
+        request(&store, &install(), NOW + 86_400_000)["request_id"],
+        first["request_id"]
+    );
+    assert_eq!(
+        count(
+            &store,
+            "SELECT COUNT(*) FROM secret_pending_requests WHERE flow_id IS NOT NULL"
+        ),
+        1
+    );
+}
+
+#[test]
+fn secret_flow_pending_per_install_allows_16_across_versions_and_refuses_17() {
+    let (_root, store) = setup("flow-pending-install-limit");
     let mut c = install();
     let first = request(&store, &c, NOW);
-    for version in 8..15 {
+    assert_eq!(first["status"], "approval_required");
+    for version in 8..23 {
         c.flow.version = version;
         assert_eq!(request(&store, &c, NOW)["status"], "approval_required");
     }
-    c.flow.version = 15;
+    assert_eq!(
+        count(&store, "SELECT COUNT(*) FROM secret_pending_requests"),
+        16
+    );
+    c.flow.version = 23;
     assert_eq!(request(&store, &c, NOW), SecretError::PendingLimit.body());
     assert_eq!(
         request(&store, &install(), NOW + 1),
         first,
         "retry still succeeds at the limit"
     );
-    for n in 0..55 {
+    assert_eq!(
+        count(&store, "SELECT COUNT(*) FROM secret_pending_requests"),
+        16
+    );
+    c.flow.install_id = "another-install".into();
+    assert_eq!(request(&store, &c, NOW)["status"], "approval_required");
+}
+
+#[test]
+fn secret_flow_pending_total_allows_256_and_refuses_257_independently_of_agents() {
+    let (_root, store) = setup("flow-pending-total-limit");
+    let mut agent = call();
+    assert_eq!(
+        use_reply(&store, &agent, NOW)["status"],
+        "approval_required"
+    );
+    let mut c = install();
+    let first = request(&store, &c, NOW);
+    assert_eq!(first["status"], "approval_required");
+    for n in 1..256 {
         c.flow.install_id = format!("install-{n}");
         assert_eq!(request(&store, &c, NOW)["status"], "approval_required");
     }
     assert_eq!(
-        use_reply(&store, &call(), NOW)["status"],
+        count(
+            &store,
+            "SELECT COUNT(*) FROM secret_pending_requests WHERE flow_id IS NOT NULL"
+        ),
+        256
+    );
+    c.flow.install_id = "one-too-many".into();
+    assert_eq!(request(&store, &c, NOW), SecretError::PendingLimit.body());
+    assert_eq!(request(&store, &install(), NOW + 1), first);
+    assert_eq!(
+        count(
+            &store,
+            "SELECT COUNT(*) FROM secret_pending_requests WHERE flow_id IS NOT NULL"
+        ),
+        256
+    );
+    agent.scope.scope_ref.push('x');
+    assert_eq!(
+        use_reply(&store, &agent, NOW)["status"],
+        "approval_required",
+        "256 live flow requests do not fill the agent pool"
+    );
+    assert_eq!(
+        request(&store, &c, NOW + 86_400_000)["status"],
         "approval_required"
     );
     assert_eq!(
         count(&store, "SELECT COUNT(*) FROM secret_pending_requests"),
-        64
+        1
     );
-    c.flow.install_id = "one-too-many".into();
-    assert_eq!(request(&store, &c, NOW), SecretError::PendingLimit.body());
+}
+
+#[test]
+fn secret_flow_pending_is_not_limited_by_64_live_agent_requests() {
+    let (_root, store) = setup("flow-pending-agent-pool-full");
     let mut agent = call();
-    agent.scope.scope_ref.push('x');
+    for n in 0..64 {
+        agent.scope.scope_ref = format!("H{n}");
+        assert_eq!(
+            use_reply(&store, &agent, NOW)["status"],
+            "approval_required"
+        );
+    }
+    agent.scope.scope_ref = "one-too-many".into();
     assert_eq!(
         use_reply(&store, &agent, NOW),
         SecretError::PendingLimit.body()
     );
     assert_eq!(
-        request(&store, &c, NOW + 600_000)["status"],
+        request(&store, &install(), NOW)["status"],
         "approval_required"
+    );
+    assert_eq!(
+        count(&store, "SELECT COUNT(*) FROM secret_pending_requests"),
+        65
     );
 }
 
@@ -272,6 +374,35 @@ fn secret_flow_request_validation_precedes_lookup_and_store_failure_is_atomic() 
         count(&store, "SELECT COUNT(*) FROM secret_pending_requests"),
         0
     );
+}
+
+#[test]
+fn secret_flow_approval_creation_time_and_24_hour_expiry_boundaries() {
+    for (issued_delta, now_delta, valid) in [
+        (0, 0, true),
+        (-1, 0, false),
+        (82_800_000, 82_800_000, true),
+        (0, 82_800_000, false),
+        (86_399_999, 86_399_999, true),
+        (86_399_999, 86_400_000, false),
+        (86_400_000, 86_399_999, false),
+    ] {
+        let (_root, store) = registered("flow-approve-time");
+        let r = request(&store, &install(), NOW);
+        let e = envelope(vec![item(&r)], "version", NOW + issued_delta);
+        assert_eq!(
+            phone(&store, &signed(&e, false), NOW + now_delta).unwrap(),
+            json!({"results":[if valid {granted(&r)}else{refused(&r)}]}),
+            "issued {issued_delta}, now {now_delta}"
+        );
+        assert_eq!(grant_rows(&store).len(), usize::from(valid));
+        if valid {
+            assert_eq!(
+                release_flow(&store, &run(), NOW + now_delta)["status"],
+                "released"
+            );
+        }
+    }
 }
 
 #[test]

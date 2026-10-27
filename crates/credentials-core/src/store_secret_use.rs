@@ -313,7 +313,7 @@ fn pending(
         if let Some((id, bytes, expiry)) = prior {
             return Ok(Ok(approval_reply(&id, &bytes, expiry)));
         }
-        let (total,scope):(usize,usize)=tx.query_row("SELECT COUNT(*),COALESCE(SUM(mapped_owner=?1 AND mapped_kind=?2 AND mapped_ref=?3),0) FROM secret_pending_requests WHERE request_kind='approve'",rusqlite::params![call.scope.owner,call.scope.kind,call.scope.scope_ref],|r|Ok((r.get(0)?,r.get(1)?)))?;
+        let (total,scope):(usize,usize)=tx.query_row("SELECT COUNT(*),COALESCE(SUM(mapped_owner=?1 AND mapped_kind=?2 AND mapped_ref=?3),0) FROM secret_pending_requests WHERE request_kind='approve' AND flow_id IS NULL",rusqlite::params![call.scope.owner,call.scope.kind,call.scope.scope_ref],|r|Ok((r.get(0)?,r.get(1)?)))?;
         if total >= MAX_SECRET_PENDING_TOTAL || scope >= MAX_SECRET_PENDING_PER_SCOPE {
             return Ok(Err(SecretError::PendingLimit));
         }

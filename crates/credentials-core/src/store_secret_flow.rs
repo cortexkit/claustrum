@@ -1,5 +1,8 @@
 use super::*;
-use agent_secret::{SecretFlowApproval, SecretFlowUse};
+use agent_secret::{
+    SecretFlowApproval, SecretFlowUse, FLOW_SECRET_PENDING_LIFETIME_LIMIT_MS,
+    MAX_FLOW_SECRET_PENDING_PER_INSTALL, MAX_FLOW_SECRET_PENDING_TOTAL,
+};
 
 impl EncryptedStore {
     pub fn secret_request_flow_approval(
@@ -158,13 +161,13 @@ fn flow_pending(
     if let Some((id, bytes, expiry)) = prior {
         return Ok(Ok(approval_reply(&id, &bytes, expiry)));
     }
-    let (total, install): (usize,usize) = tx.query_row("SELECT COUNT(*),COALESCE(SUM(flow_install_id=?1),0) FROM secret_pending_requests WHERE request_kind='approve'", [&call.flow.install_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
-    if total >= MAX_SECRET_PENDING_TOTAL || install >= MAX_SECRET_PENDING_PER_SCOPE {
+    let (total, install): (usize,usize) = tx.query_row("SELECT COUNT(*),COALESCE(SUM(flow_install_id=?1),0) FROM secret_pending_requests WHERE request_kind='approve' AND flow_id IS NOT NULL", [&call.flow.install_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    if total >= MAX_FLOW_SECRET_PENDING_TOTAL || install >= MAX_FLOW_SECRET_PENDING_PER_INSTALL {
         return Ok(Err(SecretError::PendingLimit));
     }
     let id =
         agent_secret::request_id(now).map_err(|_| rusqlite_err("request id generation failed"))?;
-    let expiry = now + SECRET_PENDING_LIFETIME_LIMIT_MS;
+    let expiry = now + FLOW_SECRET_PENDING_LIFETIME_LIMIT_MS;
     let statement = agent_secret::flow_approval_statement(
         &id,
         &member,

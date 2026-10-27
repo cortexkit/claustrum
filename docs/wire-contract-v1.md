@@ -2030,12 +2030,12 @@ shape `secret.use` answers in the same case:
 | 2 | a name over its limit | `limit_exceeded` (`context_overflow`) |
 | 3 | unknown name, `corrupt` record, sealed-scope mismatch, or target mismatch | uniform `not_found` |
 | 4 | an identical (incarnation, flow identity, methods) request is still live | the same request id and bytes |
-| 4 | 8 live requests for this `flow_install_id`, or 64 in total | `pending_limit` (`transient`) |
+| 4 | 16 live flow requests for this `flow_install_id`, or 256 flow requests in total, counted separately from agent requests | `pending_limit` (`transient`) |
 | 4 | this vault's member id is unset | `secret_setup_incomplete` (`permanent`) |
 | 4 | otherwise | `approval_required` with a new request |
 | any | a store failure | `store_error` (`transient`); no request is created |
 
-The request expiry is the usual 10-minute pending lifetime. Approval grants a duration
+The request expiry is a 24-hour pending lifetime for flow requests. Approval grants a duration
 `version` grant, which has no expiry of its own; the two are unrelated.
 
 #### `secret.use` from a flow run
@@ -2078,7 +2078,7 @@ Request `{flow_install_id, flow_version?}`: the install to clear, and optionally
 version of it. Reply `{status: "revoked", grants}`, where `grants` is the number of grants
 removed and may be 0; the call is idempotent. In one transaction it deletes the matching
 flow grants and the matching unconsumed flow approval requests, so a request signed within
-its 10 minutes cannot recreate a grant that was just revoked.
+its 24-hour pending lifetime cannot recreate a grant that was just revoked.
 
 <!-- golden:revoke_flow_grants.request -->
 ```json
@@ -2235,9 +2235,11 @@ on every grant it creates and is the `payload_hash` of its audit rows.
 
 Per item, after the whole-envelope checks: the request must be live (unconsumed and
 before its expiry) and of the envelope's kind (approval or delete); `statement_sha256`
-must equal its stored statement digest; `request_expires_at_ms` − 600,000 ≤
-`issued_at_ms` < `request_expires_at_ms`; |vault now − `issued_at_ms`| ≤ 120,000; the
-statement's `member_id` must equal the current self member id; the duration must be
+must equal its stored statement digest; `request_expires_at_ms` − pending lifetime ≤
+`issued_at_ms` < `request_expires_at_ms`, where the pending lifetime is 86,400,000 ms
+for flow requests and 600,000 ms for agent and delete requests;
+|vault now − `issued_at_ms`| ≤ 120,000; the statement's `member_id` must equal the current
+self member id; the duration must be
 offered and `grant_expires_at_ms` exact; a live record must have the statement's
 incarnation, and for approval the statement's `secret.kind` and `use` must equal the
 record's sealed scope. A pending request the envelope does not list stays pending.

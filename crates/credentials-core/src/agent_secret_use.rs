@@ -5,6 +5,13 @@ pub const SECRET_PENDING_LIFETIME_LIMIT_MS: i64 = 600_000;
 pub const MAX_SECRET_PENDING_PER_SCOPE: usize = 8;
 pub const MAX_SECRET_PENDING_TOTAL: usize = 64;
 
+/// Flow install cards can wait for the user's phone approval for up to a day.
+pub const FLOW_SECRET_PENDING_LIFETIME_LIMIT_MS: i64 = 86_400_000;
+/// All sixteen secrets on one flow install card must fit in its pending pool.
+pub const MAX_FLOW_SECRET_PENDING_PER_INSTALL: usize = 16;
+/// Bound pending flow approvals without consuming the live-agent request pool.
+pub const MAX_FLOW_SECRET_PENDING_TOTAL: usize = 256;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SecretSender {
     Aft,

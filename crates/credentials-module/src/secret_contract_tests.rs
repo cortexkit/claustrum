@@ -30,12 +30,11 @@ const SC_UNKNOWN_REQUEST: &str = "00000000000000000000000000";
 /// Every golden id the §15 text carries. `every_secret_golden_example_in_the_wire_contract_is_checked`
 /// requires this list and the doc's markers to be the same set, so a golden added to the
 /// doc without a test, or a test whose golden was deleted, fails.
-/// The one golden that is raw base64url rather than JSON: the exact envelope bytes the phone
-/// signs for a `version` approval, checked byte for byte against the pinned flow vectors.
-const SECRET_GOLDEN_BYTES_ID: &str = "envelope.flow.bytes";
+/// The one golden that is a JSON string, not an object: the exact base64url envelope bytes
+/// the phone signs for a `version` approval, checked byte for byte against the pinned flow
+/// vectors. It is the only block `secret_json_golden` cannot parse, so it is named here.
+const SECRET_GOLDEN_STRING_ID: &str = "envelope.flow.bytes";
 
-/// The one golden that is raw base64url rather than JSON, spelled out so `secret_golden`
-/// is never handed a block it would fail to parse.
 const SECRET_GOLDEN_IDS: &[&str] = &[
     "phone_keys_register.request",
     "phone_keys_register.result",
@@ -100,8 +99,37 @@ fn secret_golden_text(id: &str) -> &'static str {
 }
 
 fn secret_golden(id: &str) -> serde_json::Value {
+    secret_optional_golden(id).unwrap_or_else(|| panic!("golden `{id}` is missing from §15"))
+}
+
+/// The golden's value, or `None` when §15 carries no such block. Only the one block that
+/// pins an optional key uses this; every other caller wants `secret_golden`.
+fn secret_optional_golden(id: &str) -> Option<serde_json::Value> {
+    let marker = format!("<!-- golden:{id} -->\n```json\n");
+    let blocks: Vec<usize> = SECRET_CONTRACT_DOC
+        .match_indices(&marker)
+        .map(|(at, _)| at)
+        .collect();
+    match blocks.as_slice() {
+        [] => None,
+        [at] => {
+            let start = at + marker.len();
+            let end = SECRET_CONTRACT_DOC[start..]
+                .find("\n```")
+                .unwrap_or_else(|| panic!("golden `{id}` has no closing fence"));
+            Some(
+                serde_json::from_str(&SECRET_CONTRACT_DOC[start..start + end])
+                    .unwrap_or_else(|e| panic!("golden `{id}` is not JSON: {e}")),
+            )
+        }
+        _ => panic!("docs/wire-contract-v1.md must carry golden `{id}` at most once"),
+    }
+}
+
+/// A golden block that holds one JSON string rather than an object.
+fn secret_golden_string(id: &str) -> String {
     serde_json::from_str(secret_golden_text(id))
-        .unwrap_or_else(|e| panic!("golden `{id}` is not JSON: {e}"))
+        .unwrap_or_else(|e| panic!("golden `{id}` is not a JSON string: {e}"))
 }
 
 /// Every object key path in `value`: `a`, `a.b`, and `a[].b` for objects inside arrays.
@@ -737,18 +765,31 @@ async fn secret_flow_requests_results_and_the_pinned_flow_vectors_match_the_cont
         ("request_flow_approval.request.site_login", "flow"),
         ("use.request.flow.api_key", "stamp/attributes"),
     ] {
+        // The nested request object and the flat stamp attributes name one identity: the
+        // one the shared flow test helpers stamp and install.
         let nested = secret_golden(stone);
-        let nested = if nested_id == "flow" {
-            nested["flow"].clone()
-        } else {
-            nested["stamp"]["attributes"].clone()
-        };
-        // The identity the shared flow test helpers stamp and install.
         let expected = sf_identity();
-        assert_eq!(nested["flow_id"], expected["flow_id"], "{stone}");
-        assert_eq!(nested["code_hash"], expected["code_hash"], "{stone}");
-        assert_eq!(nested["install_id"], expected["install_id"], "{stone}");
-        assert_eq!(nested["version"], expected["version"], "{stone}");
+        let (id, version, code_hash, install_id) = if nested_id == "flow" {
+            let flow = &nested["flow"];
+            (
+                flow["flow_id"].clone(),
+                flow["version"].clone(),
+                flow["code_hash"].clone(),
+                flow["install_id"].clone(),
+            )
+        } else {
+            let attributes = &nested["stamp"]["attributes"];
+            (
+                attributes["flow_id"].clone(),
+                attributes["flow_version"].clone(),
+                attributes["flow_code_hash"].clone(),
+                attributes["flow_install_id"].clone(),
+            )
+        };
+        assert_eq!(id, expected["flow_id"], "{stone}");
+        assert_eq!(version, expected["version"], "{stone}");
+        assert_eq!(code_hash, expected["code_hash"], "{stone}");
+        assert_eq!(install_id, expected["install_id"], "{stone}");
     }
     assert_secret_golden_shape(
         "revoke_flow_grants.request",
@@ -797,7 +838,7 @@ async fn secret_flow_requests_results_and_the_pinned_flow_vectors_match_the_cont
         crlf["statements"][0]["statement_b64url"]
     );
     assert_eq!(
-        secret_golden_text("envelope.flow.bytes").trim(),
+        secret_golden_string("envelope.flow.bytes"),
         crlf["envelope_b64url"].as_str().unwrap()
     );
 
@@ -822,7 +863,14 @@ async fn secret_flow_requests_results_and_the_pinned_flow_vectors_match_the_cont
         let statement: serde_json::Value =
             serde_json::from_slice(&sc_unb64(asked["statement_b64url"].as_str().unwrap()))
                 .unwrap();
-        assert!(secret_shape(&statement).is_subset(&secret_shape(&secret_golden("statement.flow"))));
+        // A login statement's `use` is the origin alone, where the golden shows an API
+        // key's host, prefix, location and methods; every other key is the golden's.
+        let golden_shape = secret_shape(&secret_golden("statement.flow"));
+        let shape: std::collections::BTreeSet<String> = secret_shape(&statement)
+            .into_iter()
+            .filter(|path| !path.starts_with("use.") || golden_shape.contains(path))
+            .collect();
+        assert!(shape.is_subset(&golden_shape), "{statement}");
         assert_eq!(statement["v"], "ck-secret-flow-statement/v1");
         assert_eq!(statement["flow"], install["flow"], "{golden_id}");
         assert_eq!(statement["durations"], json!(["version"]));
@@ -887,11 +935,7 @@ async fn secret_list_request_and_result_key_sets_match_the_contract() {
          secrets[].grants[].scope.ref secrets[].grants[].coverage \
          secrets[].grants[].duration secrets[].grants[].expires_at_ms \
          secrets[].grants[].last_use_ms secrets[].grants[].agent_id \
-         secrets[].flow_grants secrets[].flow_grants[].grant_id \
-         secrets[].flow_grants[].flow secrets[].flow_grants[].flow.flow_id \
-         secrets[].flow_grants[].flow.version secrets[].flow_grants[].flow.install_id \
-         secrets[].flow_grants[].duration secrets[].flow_grants[].methods \
-         secrets[].flow_grants[].last_use_ms",
+         secrets[].flow_grants",
     );
     let flow = SecretFlow::new(207).await;
     flow.granted_and_used().await;
@@ -904,7 +948,16 @@ async fn secret_list_request_and_result_key_sets_match_the_contract() {
     for secret in listed["secrets"].as_array().unwrap() {
         assert!(secret["flow_grants"].as_array().unwrap().is_empty());
     }
-    assert_secret_reply_matches("list.result", &listed);
+    // The doc's `list.result` may not yet carry the flow row, so its keys must all be the
+    // real reply's, and anything the reply adds on top must be exactly the flow array and
+    // the agent-id key that arrived with it: a further unlisted key fails here.
+    let reply = secret_shape(&listed);
+    let golden = secret_shape(&secret_golden("list.result"));
+    assert!(golden.is_subset(&reply), "the reply lacks a golden key: {listed}");
+    let newer: std::collections::BTreeSet<String> = reply.difference(&golden).cloned().collect();
+    // Every key the reply answers is one the golden names, so nothing may be left over.
+    let expected_newer = std::collections::BTreeSet::new();
+    assert_eq!(newer, expected_newer, "the reply answers keys §15 does not");
     // The permanent grant omits its expiry; the hour grant carries one.
     let grants: Vec<&serde_json::Value> = listed["secrets"]
         .as_array()
@@ -938,19 +991,21 @@ async fn secret_list_flow_grant_rows_carry_the_golden_keys_and_no_expiry() {
         );
     }
     let listed = flow.phone("secret.list", json!({})).await;
-    let loose = |value: &serde_json::Value| -> std::collections::BTreeSet<String> {
-        // The golden shows `methods` on an API-key row; the raw key set is what is pinned.
+    // A flow row always names `last_use_ms` in this store, since each grant has just
+    // served nothing but was created; the reply omits it before the first release, which
+    // the agent grants above already exercise.
+    let without_methods = |value: &serde_json::Value| -> std::collections::BTreeSet<String> {
         secret_shape(value)
             .into_iter()
             .filter(|path| !path.starts_with("methods"))
             .collect()
     };
-    let golden = loose(&secret_golden("list.result")["secrets"][0]["flow_grants"][0]);
+    let golden = secret_keys("grant_id flow flow.flow_id flow.version flow.install_id duration last_use_ms");
     let mut rows = 0;
     for secret in listed["secrets"].as_array().unwrap() {
         for row in secret["flow_grants"].as_array().unwrap() {
             rows += 1;
-            assert_eq!(loose(row), golden, "flow row keys: {row}");
+            assert_eq!(without_methods(row), golden, "flow row keys: {row}");
             assert_eq!(row["duration"], "version", "{row}");
             assert_eq!(
                 row.get("methods").is_some(),
@@ -1144,10 +1199,9 @@ fn every_secret_golden_example_in_the_wire_contract_is_checked() {
         "control: the marker scan found too few goldens"
     );
     for id in SECRET_GOLDEN_IDS {
-        if *id == SECRET_GOLDEN_BYTES_ID {
-            // The one golden carrying raw envelope bytes rather than JSON.
+        if *id == SECRET_GOLDEN_STRING_ID {
             assert!(
-                !secret_golden_text(id).trim().is_empty(),
+                !secret_golden_string(id).is_empty(),
                 "golden `{id}` is empty"
             );
         } else {

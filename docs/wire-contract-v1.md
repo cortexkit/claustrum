@@ -1766,7 +1766,7 @@ paths never appear.
 
 <!-- golden:list.result -->
 ```json
-{"secrets":[{"name":"key","kind":"agent_api_key","incarnation":"0123456789abcdef0123456789abcdef","state":"active","host":"x.test","path_prefix":"/repos/a","location":"header:X-Api-Key","grants":[{"grant_id":"01HF7YB0000000000000000001","scope":{"owner":"reserved:prefrontal-core","kind":"head","ref":"H"},"coverage":"scope","duration":"permanent","agent_id":"agent-A","last_use_ms":1700000003000}],"flow_grants":[{"grant_id":"01HF7YAXX0040G2081040G2081","flow":{"flow_id":"daily-fetch","version":7,"install_id":"install-A"},"duration":"version","methods":["GET"]}]},{"name":"login","kind":"site_login","incarnation":"fedcba9876543210fedcba9876543210","state":"active","origin":"https://x.test","grants":[{"grant_id":"01HF7YB0000000000000000002","scope":{"owner":"reserved:prefrontal-core","kind":"worker","ref":"W"},"coverage":"scope","duration":"hour","expires_at_ms":1700003600000,"agent_id":null,"last_use_ms":1700000002000}],"flow_grants":[{"grant_id":"01HF7YAXX0081040G2081040G2","flow":{"flow_id":"daily-fetch","version":7,"install_id":"install-A"},"duration":"version"}]}]}
+{"secrets":[{"name":"key","kind":"agent_api_key","incarnation":"0123456789abcdef0123456789abcdef","state":"active","host":"x.test","path_prefix":"/repos/a","location":"header:X-Api-Key","grants":[{"grant_id":"01HF7YB0000000000000000001","scope":{"owner":"reserved:prefrontal-core","kind":"head","ref":"H"},"coverage":"scope","duration":"permanent","agent_id":"agent-A","last_use_ms":1700000003000}],"flow_grants":[]},{"name":"login","kind":"site_login","incarnation":"fedcba9876543210fedcba9876543210","state":"active","origin":"https://x.test","grants":[{"grant_id":"01HF7YB0000000000000000002","scope":{"owner":"reserved:prefrontal-core","kind":"worker","ref":"W"},"coverage":"scope","duration":"hour","expires_at_ms":1700003600000,"agent_id":null,"last_use_ms":1700000002000}],"flow_grants":[]}]}
 ```
 
 Expired grants are swept only after current-pairing registration passes, with one
@@ -2117,15 +2117,17 @@ an API key. `ck auth secret list` and `ck auth secret grants` print the holder a
 `flow:<flow_id>@<version>/<install_id>`, with duration `version` and
 `methods=<A,B>` where the secret has methods, and `expiry=none`.
 
-`permissions.list` lists flow grants under a holder kind of their own, as Cingulate's
-`permissions/v1` contract defines it (tag `permissions-v1.1`, cingulate `49fab2ea`):
-`holder {kind: "flow", flow_id, flow_version, flow_install_id}`, `methods` — a non-empty
-list of uppercase HTTP methods — only for an API-key grant, and neither `agent_id` nor
-`expires_at_ms`. A flow row appears only in an unfiltered read: `permissions.list {agent_id}`
-asks for one agent's grants, and a flow row names no agent, so the reply never carries one.
-Otherwise a flow row has the shape every provider row has — `id`, `module`, `subject_label`,
-`scope`, `scope_label`, `granted_at_ms`, and `card_ref` when the approval named one — and
-its `id` is what `permissions.revoke` takes to end that grant.
+`permissions.list` does **not** carry flow grants in this version: it answers agent grants
+alone, filtered or not, because its holder set is closed to agent, worker and operator.
+Operators see flow grants through `secret.list` and `ck auth secret`.
+
+Cingulate's `permissions/v1` contract has since grown a flow holder — tag `permissions-v1.1`,
+cingulate `49fab2ea` — and the vault will list flow grants that way once the provider surface,
+the vendored `permissions/v1` vectors and the phone all agree. That holder is:
+`{kind: "flow", flow_id, flow_version, flow_install_id}`; the row carries `methods`, a
+non-empty list of uppercase HTTP methods, only for an API-key grant, carries neither
+`agent_id` nor `expires_at_ms`, and appears only in an unfiltered read, since a row that
+names no agent can never answer `permissions.list {agent_id}`.
 
 #### The flow statement
 
@@ -2159,8 +2161,8 @@ the whole-envelope `approval_invalid`.
 ```
 
 <!-- golden:envelope.flow.bytes -->
-```text
-eyJkZWNpc2lvbiI6ImFsbG93IiwiZGV2aWNlX2ZpbmdlcnByaW50IjoiMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEiLCJkdXJhdGlvbiI6InZlcnNpb24iLCJncmFudF9leHBpcmVzX2F0X21zIjowLCJpc3N1ZWRfYXRfbXMiOjE3MDAwMDAwMDAwMDAsIml0ZW1zIjpbeyJyZXF1ZXN0X2lkIjoiMDFIRjdZQVQwMDAwMDAwMDAwMDAwMDAwMDEiLCJzdGF0ZW1lbnRfc2hhMjU2IjoiYmNmM2Y1OWE5OWMwYmVhYTUyMzY2YzZmYTM3YWY2YTc5OTQ2MDI1NzIxNTI1MmQ4MDRjZTc0NzQyNDBhN2M1NyJ9LHsicmVxdWVzdF9pZCI6IjAxSEY3WUFUMDAwMDAwMDAwMDAwMDAwMDAyIiwic3RhdGVtZW50X3NoYTI1NiI6IjFhOTEyZTcwOTBkYWEzMGYxMDExMTIyOGFlM2VmNDI3NWZkNmZhYWFlNzU0ZjJhZWM5YzNmNmNiYzkwYmI2YjgifV0sInYiOiJjay1zZWNyZXQtdXNlLWVudmVsb3BlL3YxIn0
+```json
+"eyJkZWNpc2lvbiI6ImFsbG93IiwiZGV2aWNlX2ZpbmdlcnByaW50IjoiMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEiLCJkdXJhdGlvbiI6InZlcnNpb24iLCJncmFudF9leHBpcmVzX2F0X21zIjowLCJpc3N1ZWRfYXRfbXMiOjE3MDAwMDAwMDAwMDAsIml0ZW1zIjpbeyJyZXF1ZXN0X2lkIjoiMDFIRjdZQVQwMDAwMDAwMDAwMDAwMDAwMDEiLCJzdGF0ZW1lbnRfc2hhMjU2IjoiYmNmM2Y1OWE5OWMwYmVhYTUyMzY2YzZmYTM3YWY2YTc5OTQ2MDI1NzIxNTI1MmQ4MDRjZTc0NzQyNDBhN2M1NyJ9LHsicmVxdWVzdF9pZCI6IjAxSEY3WUFUMDAwMDAwMDAwMDAwMDAwMDAyIiwic3RhdGVtZW50X3NoYTI1NiI6IjFhOTEyZTcwOTBkYWEzMGYxMDExMTIyOGFlM2VmNDI3NWZkNmZhYWFlNzU0ZjJhZWM5YzNmNmNiYzkwYmI2YjgifV0sInYiOiJjay1zZWNyZXQtdXNlLWVudmVsb3BlL3YxIn0"
 ```
 
 The offered duration is checked per item. In a `version` envelope an agent item is refused

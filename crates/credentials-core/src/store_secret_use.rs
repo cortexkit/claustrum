@@ -1489,7 +1489,7 @@ mod receipt_tests {
 
 /// The diagnostic rows a vault whose secret home is elsewhere writes for the calls it
 /// forwards: one per outcome, except a release, which is written once per sender and
-/// secret so releases never push refusal rows out of the trimmed table.
+/// secret so repeated releases do not keep pushing refusal rows out of the trimmed table.
 #[cfg(test)]
 mod forward_audit_tests {
     use super::*;

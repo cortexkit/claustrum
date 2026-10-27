@@ -1424,7 +1424,8 @@ pub enum SecretForwardAnswer {
     /// `approval_required`, `revoked`, or a `{"error":{code, class, remedy_member?}}`
     /// refusal.
     Reply(Value),
-    /// The home found the sender's params malformed, which a local call answers with
+    /// The sender's params are malformed (found here or by the home), which a local
+    /// call answers with
     /// an `invalid_params` `Error` frame.
     InvalidParams,
 }
@@ -1604,8 +1605,9 @@ impl RemoteReader {
 
     /// Forward one sender call to `home` at `fed:<fp>:claustrum` and map its answer to
     /// the §15 shape the sender would get locally. The whole call, retries included,
-    /// finishes inside [`SECRET_FORWARD_DEADLINE`]. One diagnostic row records the call
-    /// and its outcome code, never material.
+    /// finishes inside [`SECRET_FORWARD_DEADLINE`]. A best-effort diagnostic row records
+    /// the outcome code, never material; repeated releases are recorded once per
+    /// sender and secret.
     pub async fn forward_secret_call(
         &self,
         home: &str,

@@ -8,6 +8,12 @@ pub const MAX_ENVELOPE_ITEMS: usize = 16;
 pub const SECRET_ISSUE_SKEW_LIMIT_MS: i64 = 120_000;
 pub const MAX_SECRET_JSON_INTEGER: u64 = (1 << 53) - 1;
 
+/// The v2 statement tags. A forwarded request carries the v1 object plus
+/// `asking_member_id`, under a v2 tag so a v1-only phone or Cingulate decoder
+/// refuses it rather than approving a statement it does not understand.
+pub const USE_STATEMENT_V2: &str = "ck-secret-use-statement/v2";
+pub const FLOW_STATEMENT_V2: &str = "ck-secret-flow-statement/v2";
+
 pub fn approval_statement(
     id: &str,
     member: &str,
@@ -28,6 +34,27 @@ pub fn approval_statement(
         super::SecretScope::SiteLogin { origin } => json!({"origin":origin}),
     };
     json!({"v":"ck-secret-use-statement/v1","request_id":id,"member_id":member,"scope":{"owner":call.scope.owner,"kind":call.scope.kind,"ref":call.scope.scope_ref,"epoch":call.scope.epoch},"agent_id":call.agent_id,"coverage":call.coverage,"secret":{"name":call.name,"kind":scope.kind(),"incarnation":incarnation},"use":use_scope,"durations":if call.coverage=="agent_and_workers" {vec!["permanent"]}else{vec!["once","hour","session","permanent"]},"request_expires_at_ms":expiry})
+}
+
+/// The statement for a request `asking_member` forwarded to this vault. A local
+/// request keeps the v1 object byte for byte; a forwarded one carries the v1
+/// object plus the required `asking_member_id` key under a v2 tag, encoded
+/// with the same canonical bytes as today.
+pub fn approval_statement_for_asker(
+    id: &str,
+    member: &str,
+    incarnation: &str,
+    call: &super::SecretUse,
+    scope: &super::SecretScope,
+    expiry: i64,
+    asking_member: &str,
+) -> serde_json::Value {
+    let mut statement = approval_statement(id, member, incarnation, call, scope, expiry);
+    if !asking_member.is_empty() {
+        statement["asking_member_id"] = serde_json::json!(asking_member);
+        statement["v"] = serde_json::json!(USE_STATEMENT_V2);
+    }
+    statement
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -134,6 +161,53 @@ pub fn flow_approval_statement(
     Ok(
         json!({"v":"ck-secret-flow-statement/v1","request_id":id,"member_id":member,"flow":flow,"secret":{"name":name,"kind":scope.kind(),"incarnation":incarnation},"use":use_scope,"durations":["version"],"request_expires_at_ms":expiry}),
     )
+}
+
+/// Whether `flow_id` equals a v2 statement tag. Only a forwarded flow approval
+/// refuses these: the local sender boundary stays v1-only, so a local flow
+/// approval whose flow id equals a v2 tag is still accepted and still encodes
+/// as a v1 statement.
+pub fn flow_id_is_v2_statement_tag(flow_id: &str) -> bool {
+    flow_id == USE_STATEMENT_V2 || flow_id == FLOW_STATEMENT_V2
+}
+
+/// The flow statement for a request `asking_member` forwarded to this vault.
+/// A local request keeps the v1 object byte for byte; a forwarded one carries
+/// the v1 object plus the required `asking_member_id` key under a v2 tag. A
+/// forwarded request whose flow id equals a v2 tag is refused, since that id
+/// would collide with the v2 statement's own `v` key.
+#[allow(clippy::too_many_arguments)]
+pub fn flow_approval_statement_for_asker(
+    id: &str,
+    member: &str,
+    incarnation: &str,
+    name: &str,
+    flow: &FlowIdentity,
+    scope: &super::SecretScope,
+    methods: Option<&[String]>,
+    expiry: i64,
+    asking_member: &str,
+) -> Result<serde_json::Value, super::ValidationError> {
+    if asking_member.is_empty() {
+        return flow_approval_statement(
+            id,
+            member,
+            incarnation,
+            name,
+            flow,
+            scope,
+            methods,
+            expiry,
+        );
+    }
+    if flow_id_is_v2_statement_tag(&flow.flow_id) {
+        return Err(super::ValidationError::InvalidParams);
+    }
+    let mut statement =
+        flow_approval_statement(id, member, incarnation, name, flow, scope, methods, expiry)?;
+    statement["asking_member_id"] = serde_json::json!(asking_member);
+    statement["v"] = serde_json::json!(FLOW_STATEMENT_V2);
+    Ok(statement)
 }
 
 pub fn delete_statement(
@@ -253,5 +327,377 @@ impl ApprovalEnvelope {
         let signature = Signature::from_der(signature).map_err(|_| invalid)?;
         key.verify(bytes, &signature).map_err(|_| invalid)?;
         Ok(envelope)
+    }
+}
+
+#[cfg(test)]
+mod v2_statement_tests {
+    use super::*;
+    use crate::agent_secret::{AskingScope, SecretScope, SecretSender, SecretUse};
+
+    const HOME: &str = "fed-computer:22222222222222222222222222222222";
+    const ASKER: &str = "fed-computer:11111111111111111111111111111111";
+    const NOW: i64 = 1_700_000_000_000;
+    const REQUEST_ID: &str = "01HF7YAT000000000000000001";
+    const INCARNATION: &str = "00000000000000000000000000000149";
+
+    fn api_scope() -> SecretScope {
+        SecretScope::ApiKey {
+            host: "x.test".into(),
+            path_prefix: Some("/repos/a".into()),
+            location: "header:X-Api-Key".into(),
+        }
+    }
+
+    fn api_call() -> SecretUse {
+        SecretUse {
+            name: "key".into(),
+            sender: SecretSender::Aft,
+            scope: AskingScope {
+                owner: "reserved:prefrontal-core".into(),
+                kind: "head".into(),
+                scope_ref: "H".into(),
+                epoch: 7,
+            },
+            worker_parent: None,
+            coverage: "scope".into(),
+            agent_id: Some("agent-A".into()),
+            target: crate::agent_secret::UseTarget::ApiKey {
+                scheme: "https".into(),
+                host: "x.test".into(),
+                port: 443,
+                path: "/repos/a/canary-token".into(),
+            },
+        }
+    }
+
+    fn login_scope() -> SecretScope {
+        SecretScope::SiteLogin {
+            origin: "https://x.test".into(),
+        }
+    }
+
+    fn flow_identity() -> FlowIdentity {
+        FlowIdentity {
+            flow_id: "daily-fetch".into(),
+            version: 7,
+            code_hash: "0123456789abcdef".repeat(4),
+            install_id: "install-A".into(),
+        }
+    }
+
+    #[test]
+    fn forwarded_use_statement_is_v1_plus_asker_under_v2_tag() {
+        let v1 = approval_statement(
+            REQUEST_ID,
+            HOME,
+            INCARNATION,
+            &api_call(),
+            &api_scope(),
+            NOW + 600_000,
+        );
+        assert_eq!(v1["v"], "ck-secret-use-statement/v1");
+        assert!(v1.get("asking_member_id").is_none());
+        let v1_bytes = serde_json::to_vec(&v1).unwrap();
+        let v2 = approval_statement_for_asker(
+            REQUEST_ID,
+            HOME,
+            INCARNATION,
+            &api_call(),
+            &api_scope(),
+            NOW + 600_000,
+            ASKER,
+        );
+        assert_eq!(v2["v"], USE_STATEMENT_V2);
+        assert_eq!(v2["asking_member_id"], ASKER);
+        // Every other key is the v1 object unchanged.
+        let mut v2_as_v1 = v2.clone();
+        v2_as_v1["v"] = serde_json::json!("ck-secret-use-statement/v1");
+        v2_as_v1.as_object_mut().unwrap().remove("asking_member_id");
+        assert_eq!(v2_as_v1, v1);
+        // Canonical bytes: the same Value re-encoded is identical.
+        let v2_bytes = serde_json::to_vec(&v2).unwrap();
+        assert_ne!(v1_bytes, v2_bytes);
+        let decoded: serde_json::Value = serde_json::from_slice(&v2_bytes).unwrap();
+        assert_eq!(serde_json::to_vec(&decoded).unwrap(), v2_bytes);
+    }
+
+    #[test]
+    fn local_use_statement_stays_v1_byte_for_byte() {
+        let direct = approval_statement(
+            REQUEST_ID,
+            HOME,
+            INCARNATION,
+            &api_call(),
+            &api_scope(),
+            NOW + 600_000,
+        );
+        let via_asker = approval_statement_for_asker(
+            REQUEST_ID,
+            HOME,
+            INCARNATION,
+            &api_call(),
+            &api_scope(),
+            NOW + 600_000,
+            "",
+        );
+        assert_eq!(via_asker, direct);
+        assert_eq!(via_asker["v"], "ck-secret-use-statement/v1");
+        assert!(via_asker.get("asking_member_id").is_none());
+    }
+
+    #[test]
+    fn forwarded_flow_statement_is_v1_plus_asker_under_v2_tag() {
+        let v1 = flow_approval_statement(
+            REQUEST_ID,
+            HOME,
+            INCARNATION,
+            "key",
+            &flow_identity(),
+            &api_scope(),
+            Some(&["GET".to_string()]),
+            NOW + 600_000,
+        )
+        .unwrap();
+        assert_eq!(v1["v"], "ck-secret-flow-statement/v1");
+        assert!(v1.get("asking_member_id").is_none());
+        let v2 = flow_approval_statement_for_asker(
+            REQUEST_ID,
+            HOME,
+            INCARNATION,
+            "key",
+            &flow_identity(),
+            &api_scope(),
+            Some(&["GET".to_string()]),
+            NOW + 600_000,
+            ASKER,
+        )
+        .unwrap();
+        assert_eq!(v2["v"], FLOW_STATEMENT_V2);
+        assert_eq!(v2["asking_member_id"], ASKER);
+        let mut v2_as_v1 = v2.clone();
+        v2_as_v1["v"] = serde_json::json!("ck-secret-flow-statement/v1");
+        v2_as_v1.as_object_mut().unwrap().remove("asking_member_id");
+        assert_eq!(v2_as_v1, v1);
+        let v2_bytes = serde_json::to_vec(&v2).unwrap();
+        let decoded: serde_json::Value = serde_json::from_slice(&v2_bytes).unwrap();
+        assert_eq!(serde_json::to_vec(&decoded).unwrap(), v2_bytes);
+    }
+
+    #[test]
+    fn local_flow_statement_stays_v1_byte_for_byte() {
+        let direct = flow_approval_statement(
+            REQUEST_ID,
+            HOME,
+            INCARNATION,
+            "key",
+            &flow_identity(),
+            &api_scope(),
+            Some(&["GET".to_string()]),
+            NOW + 600_000,
+        )
+        .unwrap();
+        let via_asker = flow_approval_statement_for_asker(
+            REQUEST_ID,
+            HOME,
+            INCARNATION,
+            "key",
+            &flow_identity(),
+            &api_scope(),
+            Some(&["GET".to_string()]),
+            NOW + 600_000,
+            "",
+        )
+        .unwrap();
+        assert_eq!(via_asker, direct);
+    }
+
+    #[test]
+    fn only_forwarded_flow_refuses_a_v2_tag_flow_id() {
+        for tag in [USE_STATEMENT_V2, FLOW_STATEMENT_V2] {
+            let mut identity = flow_identity();
+            identity.flow_id = tag.into();
+            // Local keeps the v1-only sender check, so a v2 tag still encodes.
+            assert!(flow_approval_statement(
+                REQUEST_ID,
+                HOME,
+                INCARNATION,
+                "key",
+                &identity,
+                &api_scope(),
+                Some(&["GET".to_string()]),
+                NOW + 600_000,
+            )
+            .is_ok());
+            // Forwarded refuses it: the id would collide with the v2 `v` key.
+            assert!(flow_approval_statement_for_asker(
+                REQUEST_ID,
+                HOME,
+                INCARNATION,
+                "key",
+                &identity,
+                &api_scope(),
+                Some(&["GET".to_string()]),
+                NOW + 600_000,
+                ASKER,
+            )
+            .is_err());
+            assert!(flow_id_is_v2_statement_tag(tag));
+        }
+        assert!(!flow_id_is_v2_statement_tag("daily-fetch"));
+        assert!(!flow_id_is_v2_statement_tag("ck-secret-flow-statement/v1"));
+    }
+
+    fn statement_record(statement: &serde_json::Value) -> serde_json::Value {
+        use base64::Engine;
+        use sha2::{Digest, Sha256};
+        let bytes = serde_json::to_vec(statement).unwrap();
+        let digest: Vec<u8> = Sha256::digest(&bytes).to_vec();
+        let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+        serde_json::json!({
+            "statement": statement,
+            "statement_b64url": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&bytes),
+            "statement_sha256": hex,
+        })
+    }
+
+    #[test]
+    fn v2_statement_vectors_are_emitted_by_the_real_encoders_and_pinned() {
+        let use_v2 = approval_statement_for_asker(
+            REQUEST_ID,
+            HOME,
+            INCARNATION,
+            &api_call(),
+            &api_scope(),
+            NOW + 600_000,
+            ASKER,
+        );
+        let login_incarnation = format!(
+            "{:032x}",
+            b"login".iter().copied().map(u64::from).sum::<u64>()
+        );
+        let login_call = SecretUse {
+            name: "login".into(),
+            sender: SecretSender::Cerebellum,
+            scope: AskingScope {
+                owner: "reserved:prefrontal-core".into(),
+                kind: "head".into(),
+                scope_ref: "H".into(),
+                epoch: 7,
+            },
+            worker_parent: None,
+            coverage: "scope".into(),
+            agent_id: Some("agent-A".into()),
+            target: crate::agent_secret::UseTarget::SiteLogin {
+                origin: "https://x.test".into(),
+            },
+        };
+        let login_v2 = approval_statement_for_asker(
+            "01HF7YAT000000000000000002",
+            HOME,
+            &login_incarnation,
+            &login_call,
+            &login_scope(),
+            NOW + 600_000,
+            ASKER,
+        );
+        let mut use_vectors = Vec::new();
+        for (case, request_id, statement) in [
+            ("forwarded-use-api-key", REQUEST_ID, use_v2),
+            (
+                "forwarded-use-site-login",
+                "01HF7YAT000000000000000002",
+                login_v2,
+            ),
+        ] {
+            let mut record = statement_record(&statement);
+            record["case"] = serde_json::json!(case);
+            record["request_id"] = serde_json::json!(request_id);
+            record["member_id"] = serde_json::json!(HOME);
+            record["asking_member_id"] = serde_json::json!(ASKER);
+            use_vectors.push(record);
+        }
+        let emitted_use = serde_json::json!({"vectors": use_vectors});
+        let use_pinned = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/vectors/secret-approval-v2.json");
+        if std::env::var_os("CK_EMIT_SECRET_VECTORS").is_some() {
+            std::fs::create_dir_all(use_pinned.parent().unwrap()).unwrap();
+            std::fs::write(
+                &use_pinned,
+                serde_json::to_vec_pretty(&emitted_use).unwrap(),
+            )
+            .unwrap();
+            println!("emitted v2 use statement vectors");
+        } else {
+            let expected: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(&use_pinned).expect("pinned v2 use statement vectors"),
+            )
+            .unwrap();
+            assert_eq!(
+                emitted_use, expected,
+                "vault-emitted v2 use vectors changed"
+            );
+        }
+        let flow_api_v2 = flow_approval_statement_for_asker(
+            REQUEST_ID,
+            HOME,
+            INCARNATION,
+            "key",
+            &flow_identity(),
+            &api_scope(),
+            Some(&["GET".to_string()]),
+            NOW + 600_000,
+            ASKER,
+        )
+        .unwrap();
+        let flow_login_v2 = flow_approval_statement_for_asker(
+            "01HF7YAT000000000000000002",
+            HOME,
+            &login_incarnation,
+            "login",
+            &flow_identity(),
+            &login_scope(),
+            None,
+            NOW + 600_000,
+            ASKER,
+        )
+        .unwrap();
+        let mut flow_vectors = Vec::new();
+        for (case, request_id, statement) in [
+            ("forwarded-flow-api-key", REQUEST_ID, flow_api_v2),
+            (
+                "forwarded-flow-site-login",
+                "01HF7YAT000000000000000002",
+                flow_login_v2,
+            ),
+        ] {
+            let mut record = statement_record(&statement);
+            record["case"] = serde_json::json!(case);
+            record["request_id"] = serde_json::json!(request_id);
+            record["member_id"] = serde_json::json!(HOME);
+            record["asking_member_id"] = serde_json::json!(ASKER);
+            flow_vectors.push(record);
+        }
+        let emitted_flow = serde_json::json!({"vectors": flow_vectors});
+        let flow_pinned = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/vectors/secret-flow-approval-v2.json");
+        if std::env::var_os("CK_EMIT_SECRET_VECTORS").is_some() {
+            std::fs::create_dir_all(flow_pinned.parent().unwrap()).unwrap();
+            std::fs::write(
+                &flow_pinned,
+                serde_json::to_vec_pretty(&emitted_flow).unwrap(),
+            )
+            .unwrap();
+            println!("emitted v2 flow statement vectors");
+        } else {
+            let expected: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(&flow_pinned).expect("pinned v2 flow statement vectors"),
+            )
+            .unwrap();
+            assert_eq!(
+                emitted_flow, expected,
+                "vault-emitted v2 flow vectors changed"
+            );
+        }
     }
 }

@@ -356,13 +356,16 @@ fn pending(
         // The statement has fixed ASCII keys, no floats, and integers in JSON's exact range.
         // Sorted serde_json maps therefore use JCS key ordering; string values such as
         // `agent` and `scope.ref` retain their UTF-8 bytes without normalization.
-        let statement = agent_secret::approval_statement(
+        // A forwarded request carries the v1 object plus `asking_member_id` under a
+        // v2 tag; a local one stays v1 byte for byte.
+        let statement = agent_secret::approval_statement_for_asker(
             &id,
             &member,
             &record.incarnation,
             call,
             &record.scope,
             expiry,
+            asking_member,
         );
         let bytes = serde_json::to_vec(&statement)
             .map_err(|_| rusqlite_err("statement encoding failed"))?;
@@ -376,3 +379,135 @@ fn pending(
 #[cfg(test)]
 #[path = "store_secret_use_tests.rs"]
 mod tests;
+#[cfg(test)]
+mod v2_use_tests {
+    use super::*;
+    use crate::{secret::Secret, store::taxonomy_tests::rig};
+    use std::sync::Arc;
+
+    const V2_MEMBER: &str = "fed-computer:22222222222222222222222222222222";
+    const V2_ASKER: &str = "fed-computer:11111111111111111111111111111111";
+    const V2_NOW: i64 = 1_700_000_000_000;
+
+    fn v2_scope() -> SecretScope {
+        SecretScope::ApiKey {
+            host: "x.test".into(),
+            path_prefix: Some("/repos/a".into()),
+            location: "header:X-Api-Key".into(),
+        }
+    }
+
+    fn v2_call() -> SecretUse {
+        SecretUse {
+            name: "key".into(),
+            sender: SecretSender::Aft,
+            scope: AskingScope {
+                owner: "reserved:prefrontal-core".into(),
+                kind: "head".into(),
+                scope_ref: "H".into(),
+                epoch: 7,
+            },
+            worker_parent: None,
+            coverage: "scope".into(),
+            agent_id: Some("agent-A".into()),
+            target: agent_secret::UseTarget::ApiKey {
+                scheme: "https".into(),
+                host: "x.test".into(),
+                port: 443,
+                path: "/repos/a/canary-token".into(),
+            },
+        }
+    }
+
+    fn v2_setup(tag: &str) -> (crate::test_support::TestTempDir, Arc<EncryptedStore>) {
+        let (root, store) = rig(tag, 65);
+        store
+            .set_federation_self_member_audited(
+                V2_MEMBER,
+                crate::audit::AuditCtx::admin(crate::audit::AuditOp::FederationSelfSet),
+            )
+            .unwrap();
+        let incarnation = format!(
+            "{:032x}",
+            b"key".iter().copied().map(u64::from).sum::<u64>()
+        );
+        let blob = agent_secret::seal(
+            &store.key,
+            &incarnation,
+            "key",
+            &v2_scope(),
+            &SecretMaterial::ApiKey(Secret::new(b"material-canary".to_vec())),
+        )
+        .unwrap();
+        let scope = v2_scope();
+        let (host, prefix, location, origin) = phone::columns(&scope);
+        store
+            .fenced_write(|tx| {
+                tx.execute(
+                    "INSERT INTO agent_secrets (name,kind,incarnation,state,host,path_prefix,location,origin,record_version,key_id,envelope,created_at_ms) VALUES ('key',?1,?2,'active',?3,?4,?5,?6,1,?7,?8,?9)",
+                    rusqlite::params![
+                        v2_scope().kind(),
+                        incarnation,
+                        host,
+                        prefix,
+                        location,
+                        origin,
+                        store.key_id.to_hex(),
+                        blob,
+                        V2_NOW
+                    ],
+                )
+                .map(|_| ())
+            })
+            .unwrap();
+        (root, Arc::new(store))
+    }
+
+    #[test]
+    fn forwarded_use_pending_carries_v2_statement_with_asker() {
+        let (_root, store) = v2_setup("v2-use-forwarded");
+        let outcome = store
+            .secret_use_from(&v2_call(), V2_ASKER, || V2_NOW)
+            .unwrap();
+        assert_eq!(outcome.reply["status"], "approval_required");
+        let request_id = outcome.reply["request_id"].as_str().unwrap().to_owned();
+        let (bytes, asker): (Vec<u8>, String) = store
+            .store
+            .with_conn(|c| {
+                c.query_row(
+                    "SELECT statement_bytes,asking_member_id FROM secret_pending_requests WHERE request_id=?1",
+                    [&request_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+            })
+            .unwrap();
+        assert_eq!(asker, V2_ASKER);
+        let statement: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(statement["v"], "ck-secret-use-statement/v2");
+        assert_eq!(statement["asking_member_id"], V2_ASKER);
+        assert_eq!(statement["member_id"], V2_MEMBER);
+        assert_eq!(serde_json::to_vec(&statement).unwrap(), bytes);
+    }
+
+    #[test]
+    fn local_use_pending_stays_v1_without_asker() {
+        let (_root, store) = v2_setup("v2-use-local");
+        let outcome = store.secret_use(&v2_call(), || V2_NOW).unwrap();
+        let request_id = outcome.reply["request_id"].as_str().unwrap().to_owned();
+        let (bytes, asker): (Vec<u8>, String) = store
+            .store
+            .with_conn(|c| {
+                c.query_row(
+                    "SELECT statement_bytes,asking_member_id FROM secret_pending_requests WHERE request_id=?1",
+                    [&request_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+            })
+            .unwrap();
+        assert_eq!(asker, "");
+        let statement: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(statement["v"], "ck-secret-use-statement/v1");
+        assert!(statement.get("asking_member_id").is_none());
+        assert_eq!(serde_json::to_vec(&statement).unwrap(), bytes);
+    }
+}

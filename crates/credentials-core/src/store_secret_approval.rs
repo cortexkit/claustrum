@@ -233,6 +233,25 @@ impl EncryptedStore {
         {
             return Ok(false);
         }
+        // The statement's asker and version must match the pending row: a local
+        // row carries a v1 statement with no asker key, a forwarded row carries
+        // a v2 statement naming its asker. A v1-only decoder therefore refuses
+        // a forwarded statement rather than approving what it cannot read.
+        {
+            let asker_ok = if p.asking_member.is_empty() {
+                statement.get("asking_member_id").is_none()
+            } else {
+                statement.get("asking_member_id").and_then(|v| v.as_str())
+                    == Some(p.asking_member.as_str())
+            };
+            let is_v2 = statement
+                .get("v")
+                .and_then(|v| v.as_str())
+                .is_some_and(|v| v.ends_with("/v2"));
+            if !asker_ok || is_v2 != !p.asking_member.is_empty() {
+                return Ok(false);
+            }
+        }
         let expected_expiry = match e.duration.as_str() {
             "once" => issued.checked_add(600_000),
             "hour" => issued.checked_add(3_600_000),
@@ -295,7 +314,12 @@ impl EncryptedStore {
             || p.methods.is_some();
         if !flow_item
             && (e.duration == "version"
-                || statement["v"] != "ck-secret-use-statement/v1"
+                || statement["v"]
+                    != if p.asking_member.is_empty() {
+                        "ck-secret-use-statement/v1"
+                    } else {
+                        "ck-secret-use-statement/v2"
+                    }
                 || statement["scope"]
                     != json!({"owner":p.owner,"kind":p.scope_kind,"ref":p.scope_ref,"epoch":p.epoch})
                 || statement["coverage"] != json!(p.coverage)
@@ -407,6 +431,12 @@ impl EncryptedStore {
             code_hash: code_hash.clone(),
             install_id: install_id.clone(),
         };
+        // Only a forwarded flow approval refuses a flow id equal to a v2 tag:
+        // the local sender boundary stays v1-only, so a local flow id holding
+        // a v2 tag is still accepted.
+        if !p.asking_member.is_empty() && agent_secret::flow_id_is_v2_statement_tag(&flow.flow_id) {
+            return Ok(false);
+        }
         let methods: Option<Vec<String>> =
             match p.methods.as_deref().map(serde_json::from_str).transpose() {
                 Ok(methods) => methods,
@@ -417,7 +447,7 @@ impl EncryptedStore {
                 return Ok(false);
             }
         }
-        let expected = match agent_secret::flow_approval_statement(
+        let expected = match agent_secret::flow_approval_statement_for_asker(
             &item.request_id,
             &p.member,
             &p.incarnation,
@@ -426,6 +456,7 @@ impl EncryptedStore {
             scope,
             methods.as_deref(),
             p.expiry,
+            &p.asking_member,
         ) {
             Ok(statement) => statement,
             Err(_) => return Ok(false),
@@ -597,4 +628,409 @@ pub(super) fn revoke(
         &[id.as_bytes(), incarnation.as_bytes()],
     )?;
     Ok(json!({"outcome":"revoked"}))
+}
+#[cfg(test)]
+mod v2_approval_tests {
+    use super::*;
+    use crate::{secret::Secret, store::taxonomy_tests::rig};
+    use p256::ecdsa::{signature::Signer, SigningKey};
+    use std::sync::Arc;
+
+    const V2_HOME: &str = "fed-computer:22222222222222222222222222222222";
+    const V2_ASKER: &str = "fed-computer:11111111111111111111111111111111";
+    const V2_OTHER_ASKER: &str = "fed-computer:33333333333333333333333333333333";
+    const V2_FP: &str = "11111111111111111111111111111111";
+    const V2_NOW: i64 = 1_700_000_000_000;
+
+    fn v2_signer() -> SigningKey {
+        SigningKey::from_bytes((&[7u8; 32]).into()).unwrap()
+    }
+
+    fn v2_scope() -> agent_secret::SecretScope {
+        agent_secret::SecretScope::ApiKey {
+            host: "x.test".into(),
+            path_prefix: Some("/repos/a".into()),
+            location: "header:X-Api-Key".into(),
+        }
+    }
+
+    fn v2_call() -> agent_secret::SecretUse {
+        agent_secret::SecretUse {
+            name: "key".into(),
+            sender: agent_secret::SecretSender::Aft,
+            scope: agent_secret::AskingScope {
+                owner: "reserved:prefrontal-core".into(),
+                kind: "head".into(),
+                scope_ref: "H".into(),
+                epoch: 7,
+            },
+            worker_parent: None,
+            coverage: "scope".into(),
+            agent_id: Some("agent-A".into()),
+            target: agent_secret::UseTarget::ApiKey {
+                scheme: "https".into(),
+                host: "x.test".into(),
+                port: 443,
+                path: "/repos/a/canary-token".into(),
+            },
+        }
+    }
+
+    fn v2_flow() -> agent_secret::FlowIdentity {
+        agent_secret::FlowIdentity {
+            flow_id: "daily-fetch".into(),
+            version: 7,
+            code_hash: "0123456789abcdef".repeat(4),
+            install_id: "install-A".into(),
+        }
+    }
+
+    fn v2_flow_call() -> agent_secret::SecretFlowApproval {
+        agent_secret::SecretFlowApproval {
+            name: "key".into(),
+            flow: v2_flow(),
+            target: agent_secret::UseTarget::ApiKey {
+                scheme: "https".into(),
+                host: "x.test".into(),
+                port: 443,
+                path: "/repos/a".into(),
+            },
+            methods: Some(vec!["GET".to_string()]),
+        }
+    }
+
+    fn v2_setup(tag: &str) -> (crate::test_support::TestTempDir, Arc<EncryptedStore>) {
+        let (root, store) = rig(tag, 67);
+        store
+            .set_federation_self_member_audited(
+                V2_HOME,
+                crate::audit::AuditCtx::admin(crate::audit::AuditOp::FederationSelfSet),
+            )
+            .unwrap();
+        let scope = v2_scope();
+        let incarnation = format!(
+            "{:032x}",
+            b"key".iter().copied().map(u64::from).sum::<u64>()
+        );
+        let blob = agent_secret::seal(
+            &store.key,
+            &incarnation,
+            "key",
+            &scope,
+            &agent_secret::SecretMaterial::ApiKey(Secret::new(b"material-canary".to_vec())),
+        )
+        .unwrap();
+        let (host, prefix, location, origin) = phone::columns(&scope);
+        store
+            .fenced_write(|tx| {
+                tx.execute(
+                    "INSERT INTO agent_secrets (name,kind,incarnation,state,host,path_prefix,location,origin,record_version,key_id,envelope,created_at_ms) VALUES ('key',?1,?2,'active',?3,?4,?5,?6,1,?7,?8,?9)",
+                    rusqlite::params![
+                        scope.kind(),
+                        incarnation,
+                        host,
+                        prefix,
+                        location,
+                        origin,
+                        store.key_id.to_hex(),
+                        blob,
+                        V2_NOW
+                    ],
+                )
+                .map(|_| ())
+            })
+            .unwrap();
+        let approval_pub = v2_signer()
+            .verifying_key()
+            .to_encoded_point(false)
+            .as_bytes()
+            .to_vec();
+        store
+            .secret_phone_operation(
+                V2_FP,
+                Some("pair-A"),
+                V2_NOW,
+                &crate::store::store_agent_secrets::PhoneOperation::Register {
+                    deposit_pub: vec![2; 32],
+                    approval_pub,
+                },
+                || true,
+                || V2_NOW,
+            )
+            .unwrap();
+        (root, Arc::new(store))
+    }
+
+    fn v2_item(request: &Value) -> Value {
+        let bytes = URL_SAFE_NO_PAD
+            .decode(request["statement_b64url"].as_str().unwrap())
+            .unwrap();
+        json!({"request_id":request["request_id"],"statement_sha256":phone::hex(&payload_hash(&bytes))})
+    }
+
+    fn v2_envelope(items: Vec<Value>, duration: &str, issued: i64) -> Value {
+        let expiry = match duration {
+            "once" => issued + 600_000,
+            "hour" => issued + 3_600_000,
+            "session" => issued + 86_400_000,
+            "permanent" | "version" => 0,
+            _ => 0,
+        };
+        json!({"v":"ck-secret-use-envelope/v1","items":items,"decision":"allow","duration":duration,"grant_expires_at_ms":expiry,"device_fingerprint":V2_FP,"issued_at_ms":issued})
+    }
+
+    fn v2_approve(store: &EncryptedStore, request: &Value, duration: &str) -> Value {
+        let e = v2_envelope(vec![v2_item(request)], duration, V2_NOW);
+        let bytes = serde_json::to_vec(&e).unwrap();
+        let signature: p256::ecdsa::Signature = v2_signer().sign(&bytes);
+        store
+            .secret_phone_operation(
+                V2_FP,
+                Some("pair-A"),
+                V2_NOW,
+                &crate::store::store_agent_secrets::PhoneOperation::Approve {
+                    envelope: bytes,
+                    signature: signature.to_der().as_bytes().to_vec(),
+                    card_ref: Some("card-1".into()),
+                },
+                || true,
+                || V2_NOW,
+            )
+            .unwrap()
+    }
+
+    fn v2_grant_asker(store: &EncryptedStore, table: &str) -> String {
+        store
+            .store
+            .with_conn(|c| {
+                c.query_row(&format!("SELECT asking_member_id FROM {table}"), [], |r| {
+                    r.get(0)
+                })
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn forwarded_use_approval_grants_and_inherits_the_asker() {
+        let (_root, store) = v2_setup("v2-appr-use-fwd");
+        let request = store
+            .secret_use_from(&v2_call(), V2_ASKER, || V2_NOW)
+            .unwrap()
+            .reply;
+        assert_eq!(request["status"], "approval_required");
+        let reply = v2_approve(&store, &request, "hour");
+        assert_eq!(
+            reply,
+            json!({"results":[{"request_id":request["request_id"],"outcome":"granted"}]})
+        );
+        assert_eq!(v2_grant_asker(&store, "secret_grants"), V2_ASKER);
+        // The grant releases for its asker.
+        let released = store
+            .secret_use_from(&v2_call(), V2_ASKER, || V2_NOW)
+            .unwrap()
+            .reply;
+        assert_eq!(released["status"], "released");
+    }
+
+    #[test]
+    fn local_use_approval_still_grants_a_v1_statement() {
+        let (_root, store) = v2_setup("v2-appr-use-local");
+        let request = store.secret_use(&v2_call(), || V2_NOW).unwrap().reply;
+        let reply = v2_approve(&store, &request, "hour");
+        assert_eq!(
+            reply,
+            json!({"results":[{"request_id":request["request_id"],"outcome":"granted"}]})
+        );
+        assert_eq!(v2_grant_asker(&store, "secret_grants"), "");
+    }
+
+    #[test]
+    fn use_approval_refuses_asker_or_version_mismatch() {
+        // Forwarded row carrying a v1 statement: version is v1 but the row is not local.
+        let (_root, store) = v2_setup("v2-appr-mismatch-v1");
+        let forwarded = store
+            .secret_use_from(&v2_call(), V2_ASKER, || V2_NOW)
+            .unwrap()
+            .reply;
+        let request_id = forwarded["request_id"].as_str().unwrap().to_owned();
+        let v1 = agent_secret::approval_statement(
+            &request_id,
+            V2_HOME,
+            "00000000000000000000000000000149",
+            &v2_call(),
+            &v2_scope(),
+            V2_NOW + 600_000,
+        );
+        let v1_bytes = serde_json::to_vec(&v1).unwrap();
+        let v1_digest = phone::hex(&payload_hash(&v1_bytes));
+        store
+            .store
+            .with_conn(|c| {
+                c.execute(
+                    "UPDATE secret_pending_requests SET statement_bytes=?1,statement_sha256=?2 WHERE request_id=?3",
+                    rusqlite::params![v1_bytes, v1_digest, request_id],
+                )
+            })
+            .unwrap();
+        let tampered = json!({"request_id":request_id,"statement_b64url":URL_SAFE_NO_PAD.encode(&v1_bytes),"statement_sha256":v1_digest,"status":"approval_required","expires_at_ms":V2_NOW+600_000});
+        assert_eq!(
+            v2_approve(&store, &tampered, "hour"),
+            json!({"results":[{"request_id":request_id,"outcome":"refused","code":"approval_invalid"}]})
+        );
+        assert_eq!(
+            store
+                .store
+                .with_conn(
+                    |c| c.query_row("SELECT COUNT(*) FROM secret_grants", [], |r| r
+                        .get::<_, i64>(0))
+                )
+                .unwrap(),
+            0
+        );
+
+        // Forwarded row whose statement names another asker.
+        let (_root, store) = v2_setup("v2-appr-mismatch-asker");
+        let forwarded = store
+            .secret_use_from(&v2_call(), V2_ASKER, || V2_NOW)
+            .unwrap()
+            .reply;
+        let request_id = forwarded["request_id"].as_str().unwrap().to_owned();
+        store
+            .store
+            .with_conn(|c| {
+                c.execute(
+                    "UPDATE secret_pending_requests SET asking_member_id=?1 WHERE request_id=?2",
+                    rusqlite::params![V2_OTHER_ASKER, request_id],
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            v2_approve(&store, &forwarded, "hour"),
+            json!({"results":[{"request_id":request_id,"outcome":"refused","code":"approval_invalid"}]})
+        );
+
+        // Local row carrying a v2 statement: version is v2 but the row is local.
+        let (_root, store) = v2_setup("v2-appr-mismatch-v2");
+        let local = store.secret_use(&v2_call(), || V2_NOW).unwrap().reply;
+        let request_id = local["request_id"].as_str().unwrap().to_owned();
+        let v2 = agent_secret::approval_statement_for_asker(
+            &request_id,
+            V2_HOME,
+            "00000000000000000000000000000149",
+            &v2_call(),
+            &v2_scope(),
+            V2_NOW + 600_000,
+            V2_ASKER,
+        );
+        let v2_bytes = serde_json::to_vec(&v2).unwrap();
+        let v2_digest = phone::hex(&payload_hash(&v2_bytes));
+        store
+            .store
+            .with_conn(|c| {
+                c.execute(
+                    "UPDATE secret_pending_requests SET statement_bytes=?1,statement_sha256=?2 WHERE request_id=?3",
+                    rusqlite::params![v2_bytes, v2_digest, request_id],
+                )
+            })
+            .unwrap();
+        let tampered = json!({"request_id":request_id,"statement_b64url":URL_SAFE_NO_PAD.encode(&v2_bytes),"statement_sha256":v2_digest,"status":"approval_required","expires_at_ms":V2_NOW+600_000});
+        assert_eq!(
+            v2_approve(&store, &tampered, "hour"),
+            json!({"results":[{"request_id":request_id,"outcome":"refused","code":"approval_invalid"}]})
+        );
+
+        // Local v1 statement carrying an explicit empty asker key is not the v1 object.
+        let (_root, store) = v2_setup("v2-appr-mismatch-empty");
+        let local = store.secret_use(&v2_call(), || V2_NOW).unwrap().reply;
+        let request_id = local["request_id"].as_str().unwrap().to_owned();
+        let mut v1_with_empty_asker: Value = serde_json::from_slice(
+            &URL_SAFE_NO_PAD
+                .decode(local["statement_b64url"].as_str().unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+        v1_with_empty_asker["asking_member_id"] = json!("");
+        let bytes = serde_json::to_vec(&v1_with_empty_asker).unwrap();
+        let digest = phone::hex(&payload_hash(&bytes));
+        store
+            .store
+            .with_conn(|c| {
+                c.execute(
+                    "UPDATE secret_pending_requests SET statement_bytes=?1,statement_sha256=?2 WHERE request_id=?3",
+                    rusqlite::params![bytes, digest, request_id],
+                )
+            })
+            .unwrap();
+        let tampered = json!({"request_id":request_id,"statement_b64url":URL_SAFE_NO_PAD.encode(&bytes),"statement_sha256":digest,"status":"approval_required","expires_at_ms":V2_NOW+600_000});
+        assert_eq!(
+            v2_approve(&store, &tampered, "hour"),
+            json!({"results":[{"request_id":request_id,"outcome":"refused","code":"approval_invalid"}]})
+        );
+    }
+
+    #[test]
+    fn forwarded_flow_approval_grants_v2_and_inherits_the_asker() {
+        let (_root, store) = v2_setup("v2-appr-flow-fwd");
+        let request = store
+            .secret_request_flow_approval_from(&v2_flow_call(), V2_ASKER, || V2_NOW)
+            .unwrap()
+            .reply;
+        let reply = v2_approve(&store, &request, "version");
+        assert_eq!(
+            reply,
+            json!({"results":[{"request_id":request["request_id"],"outcome":"granted"}]})
+        );
+        assert_eq!(v2_grant_asker(&store, "secret_flow_grants"), V2_ASKER);
+    }
+
+    #[test]
+    fn only_forwarded_flow_approval_refuses_a_v2_tag_flow_id() {
+        // Local still accepts it: the request encodes as v1 and the approval grants.
+        let (_root, store) = v2_setup("v2-appr-flow-tag-local");
+        let mut local_call = v2_flow_call();
+        local_call.flow.flow_id = agent_secret::FLOW_STATEMENT_V2.into();
+        let local = store
+            .secret_request_flow_approval(&local_call, || V2_NOW)
+            .unwrap()
+            .reply;
+        assert_eq!(
+            v2_approve(&store, &local, "version"),
+            json!({"results":[{"request_id":local["request_id"],"outcome":"granted"}]})
+        );
+        // Forwarded refuses it at the request boundary.
+        assert!(matches!(
+            store.secret_request_flow_approval_from(&local_call, V2_ASKER, || V2_NOW),
+            Err(agent_secret::SecretError::InvalidParams)
+        ));
+        // And at the approval boundary, a smuggled row with that flow id is refused.
+        let (_root, store) = v2_setup("v2-appr-flow-tag-fwd");
+        let request = store
+            .secret_request_flow_approval_from(&v2_flow_call(), V2_ASKER, || V2_NOW)
+            .unwrap()
+            .reply;
+        let request_id = request["request_id"].as_str().unwrap().to_owned();
+        store
+            .store
+            .with_conn(|c| {
+                c.execute(
+                    "UPDATE secret_pending_requests SET flow_id=?1 WHERE request_id=?2",
+                    rusqlite::params![agent_secret::FLOW_STATEMENT_V2, request_id],
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            v2_approve(&store, &request, "version"),
+            json!({"results":[{"request_id":request_id,"outcome":"refused","code":"approval_invalid"}]})
+        );
+        assert_eq!(
+            store
+                .store
+                .with_conn(
+                    |c| c.query_row("SELECT COUNT(*) FROM secret_flow_grants", [], |r| r
+                        .get::<_, i64>(0))
+                )
+                .unwrap(),
+            0
+        );
+    }
 }

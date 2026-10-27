@@ -214,8 +214,8 @@ pub fn serve_revoke(
             .flow_version
             .is_some_and(|v| !(1..=MAX_SECRET_JSON_INTEGER).contains(&v))
         || (params.get("flow_version").is_some() && parsed.flow_version.is_none())
-        // The key set is closed: an explicit null version has to be named as one, and no
-        // other key may ride along.
+        // The key set is closed: only `flow_install_id` and `flow_version` are allowed, and
+        // a present `flow_version: null` is refused rather than treated as omitted.
         || params.as_object().is_some_and(|object| {
             object
                 .keys()

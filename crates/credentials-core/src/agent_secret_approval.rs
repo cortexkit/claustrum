@@ -78,12 +78,11 @@ pub fn sorted_flow_methods(methods: &[String]) -> Result<Vec<String>, super::Val
 /// the statement anyone meant to sign.
 const STATEMENT_TAGS: &[&str] = &["ck-secret-flow-statement/v1", "ck-secret-use-statement/v1"];
 
-/// Refuses a flow identity that cannot be stored as given. Every flow attribute is checked
-/// here, not only at the sender boundary, because approval signs one JSON object whose
-/// fields are these values: a value that reproduces the statement's own `v` key would
-/// collide with the tag below, and one holding a byte JSON cannot carry would fail to
-/// encode. The remaining checks are the ones the store's own grant lookup relies on, so a
-/// grant is never created for an identity it could not match later.
+/// Refuses a flow identity that cannot be stored as given. A flow id equal to the
+/// statement's own `v` tag would collide with that key when the statement object is built,
+/// so it is refused here as well as at the sender boundary: approval signs that one object.
+/// The remaining checks are the identity constraints the store's grant lookup relies on, so
+/// a grant is never created for an identity it could not match later.
 fn flow_identity_encodes_unchanged(flow: &FlowIdentity) -> Result<(), super::ValidationError> {
     if flow.flow_id.is_empty()
         || STATEMENT_TAGS.contains(&flow.flow_id.as_str())
@@ -156,9 +155,9 @@ pub struct ApprovalItem {
 }
 
 /// Whether every element of the envelope's `items` array holds exactly `request_id` and
-/// `statement_sha256`. The rebuilt item serializes only those two keys, so each element must
-/// be byte-identical to its own canonical form; a key such as `duration` inside an item is
-/// not part of the envelope schema and makes the whole envelope `approval_invalid`.
+/// `statement_sha256`. Each element is compared with the rebuilt JSON value holding only
+/// those two keys; a key such as `duration` inside an item is not part of the envelope
+/// schema and makes the whole envelope `approval_invalid`.
 fn envelope_items_carry_only_their_two_keys(bytes: &[u8]) -> bool {
     let parsed = serde_json::from_slice::<serde_json::Value>(bytes);
     let Ok(parsed) = parsed else {

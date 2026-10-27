@@ -858,7 +858,8 @@ async fn secret_flow_requests_results_and_the_pinned_flow_vectors_match_the_cont
         let asked = sf_request(&flow, &install);
         assert_eq!(asked["status"], "approval_required", "{asked}");
         assert_secret_reply_matches("request_flow_approval.result", &asked);
-        // The statement really issued has the golden's key set, and its identity and
+        // The issued statement matches the golden, except that a login statement's `use`
+        // holds only `origin` where the golden shows an API key's fields. Its identity and
         // methods are the ones the install request named.
         let statement: serde_json::Value =
             serde_json::from_slice(&sc_unb64(asked["statement_b64url"].as_str().unwrap()))

@@ -653,8 +653,9 @@ async fn secret_flow_grants_list_with_flow_holders_and_revoke_one_at_a_time() {
         .map(|row| row["holder"]["flow_install_id"].as_str().unwrap())
         .collect();
     assert!(installs.contains(&"install-A") && installs.contains(&"install-B"));
-    // An agent-filtered listing never contains a flow grant, and it is the only reason
-    // the two installs are distinguishable here: they share flow id and version.
+    // A flow row names no agent, so an agent-filtered listing carries none. It is also the
+    // only place the two installs show apart: they share flow id and version and differ in
+    // `flow_install_id` alone.
     assert_eq!(
         admin
             .serve_permissions("permissions.list", &json!({"agent_id":"agent-A"}), "test")

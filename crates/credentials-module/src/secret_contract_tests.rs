@@ -23,6 +23,16 @@ const SECRET_FLOW_CONTRACT_VECTORS: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../credentials-core/tests/vectors/secret-flow-approval-v1.json"
 ));
+/// The forwarded-statement vectors behind the §15 v2 statement goldens: the same cases
+/// the real statement encoders emit for an asking computer, pinned byte for byte.
+const SECRET_USE_V2_CONTRACT_VECTORS: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../credentials-core/tests/vectors/secret-approval-v2.json"
+));
+const SECRET_FLOW_V2_CONTRACT_VECTORS: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../credentials-core/tests/vectors/secret-flow-approval-v2.json"
+));
 const SC_FP: &str = "11111111111111111111111111111111";
 const SC_MEMBER: &str = "fed-computer:22222222222222222222222222222222";
 const SC_UNKNOWN_REQUEST: &str = "00000000000000000000000000";
@@ -30,10 +40,11 @@ const SC_UNKNOWN_REQUEST: &str = "00000000000000000000000000";
 /// Every golden id the §15 text carries. `every_secret_golden_example_in_the_wire_contract_is_checked`
 /// requires this list and the doc's markers to be the same set, so a golden added to the
 /// doc without a test, or a test whose golden was deleted, fails.
-/// The one golden that is a JSON string, not an object: the exact base64url envelope bytes
-/// the phone signs for a `version` approval, checked byte for byte against the pinned flow
-/// vectors. It is the only block `secret_json_golden` cannot parse, so it is named here.
-const SECRET_GOLDEN_STRING_ID: &str = "envelope.flow.bytes";
+/// The goldens that are one JSON string, not an object: the exact base64url envelope bytes
+/// the phone signs for a `version` approval, and the exact aad string a member vault sends
+/// the secret home, each checked byte for byte. They are the only blocks `secret_golden`
+/// cannot parse, so they are named here.
+const SECRET_GOLDEN_STRING_IDS: &[&str] = &["envelope.flow.bytes", "federation.secret_use.aad"];
 
 const SECRET_GOLDEN_IDS: &[&str] = &[
     "phone_keys_register.request",
@@ -77,6 +88,21 @@ const SECRET_GOLDEN_IDS: &[&str] = &[
     "envelope.flow",
     "envelope.flow.bytes",
     "error.result",
+    "home.request",
+    "home.result.single",
+    "home.result.home",
+    "home.result.remote",
+    "home.refused.elsewhere",
+    "federation.secret_use.aad",
+    "federation.secret_use.request",
+    "federation.secret_use.result.sealed",
+    "federation.secret_use.result.approval_required",
+    "statement.use.v2",
+    "statement.flow.v2",
+    "federation.secret_request_flow_approval.request",
+    "federation.secret_request_flow_approval.result",
+    "federation.secret_revoke_flow_grants.request",
+    "federation.secret_revoke_flow_grants.result",
 ];
 
 /// The raw JSON text of one `<!-- golden:<id> -->` block in §15.
@@ -1179,6 +1205,345 @@ async fn secret_statement_and_envelope_key_sets_match_the_contract_and_the_pinne
     );
 }
 
+/// The secret-home goldens in §15: the request, one reply per role row, and the
+/// remote-role refusal, through the real phone parser and the real store.
+#[tokio::test]
+async fn secret_home_request_and_replies_match_the_contract() {
+    use credentials_core::store::SecretHomeRole;
+    assert_secret_golden_shape("home.request", "");
+    let request = secret_golden("home.request");
+    assert_phone_request_key_set_is_closed("secret.home", &request, &[]);
+    assert_secret_golden_shape("home.result.single", "home home_member_id");
+    assert_secret_golden_shape("home.result.home", "home home_member_id");
+    assert_secret_golden_shape("home.result.remote", "home home_member_id");
+    let elsewhere = assert_secret_golden_shape(
+        "home.refused.elsewhere",
+        "error error.class error.code error.remedy_member",
+    );
+    assert_eq!(elsewhere["error"]["code"], "secret_home_elsewhere");
+    assert_eq!(elsewhere["error"]["class"], "permanent");
+
+    let flow = SecretFlow::new(213).await;
+    // Unset: a single computer serves its own secrets.
+    assert_eq!(flow.store.secret_home_role(), SecretHomeRole::Single);
+    assert_secret_reply_matches(
+        "home.result.single",
+        &flow.phone("secret.home", request.clone()).await,
+    );
+    // `self`: the home, named by its self id.
+    flow.store
+        .set_secret_home_audited(Some("self"), AuditCtx::admin(AuditOp::SecretHomeSet))
+        .unwrap();
+    assert_secret_reply_matches(
+        "home.result.home",
+        &flow.phone("secret.home", request.clone()).await,
+    );
+    assert_eq!(secret_golden("home.result.home")["home_member_id"], SC_MEMBER);
+    // Another member: a remote naming the home. The phone ops refuse with the golden
+    // body, before any registration check or state write.
+    const REMOTE: &str = "fed-computer:44444444444444444444444444444444";
+    flow.store
+        .set_secret_home_audited(Some(REMOTE), AuditCtx::admin(AuditOp::SecretHomeSet))
+        .unwrap();
+    assert_eq!(secret_golden("home.result.remote")["home_member_id"], REMOTE);
+    assert_secret_reply_matches(
+        "home.result.remote",
+        &flow.phone("secret.home", request.clone()).await,
+    );
+    assert_eq!(secret_golden("home.refused.elsewhere")["error"]["remedy_member"], REMOTE);
+    let audit_rows = flow.store.read_audit(None).unwrap().len();
+    assert_eq!(
+        flow.phone("secret.list", secret_golden("list.request")).await,
+        elsewhere
+    );
+    assert_eq!(
+        flow.phone("secret.deposit_keys", secret_golden("deposit_keys.request")).await,
+        elsewhere
+    );
+    assert_eq!(flow.store.read_audit(None).unwrap().len(), audit_rows);
+    // A setting naming a member while the self id equals it is the setup refusal,
+    // naming this vault: the phone never mistakes it for an answer.
+    flow.store
+        .set_federation_self_member_audited(REMOTE, AuditCtx::admin(AuditOp::FederationSelfSet))
+        .unwrap();
+    let refused = flow.phone("secret.home", request.clone()).await;
+    assert_eq!(refused["error"]["code"], "remote_setup_incomplete");
+    assert_eq!(refused["error"]["remedy_member"], REMOTE);
+    flow.store
+        .set_federation_self_member_audited(SC_MEMBER, AuditCtx::admin(AuditOp::FederationSelfSet))
+        .unwrap();
+    // Clearing the setting serves locally again, with nothing refused away.
+    flow.store
+        .set_secret_home_audited(None, AuditCtx::admin(AuditOp::SecretHomeSet))
+        .unwrap();
+    assert_eq!(
+        flow.phone("secret.list", secret_golden("list.request")).await,
+        json!({"secrets": []})
+    );
+}
+
+/// The `federation.secret_use` goldens in §14: the request and aad field order, the sealed
+/// reply shape, and a real seal opened over the golden aad bytes.
+#[tokio::test]
+async fn federation_secret_use_goldens_match_the_real_encoders() {
+    assert_secret_golden_shape(
+        "federation.secret_use.request",
+        "aad sender call call.name call.coverage call.stamp call.stamp.owner \
+         call.stamp.owner.kind call.stamp.owner.module_id call.stamp.ref call.stamp.scope_epoch \
+         call.stamp.kind call.stamp.attributes call.stamp.attributes.agent_id \
+         call.stamp.owner_authorized call.target call.target.scheme call.target.host \
+         call.target.port call.target.path",
+    );
+    let request = secret_golden("federation.secret_use.request");
+    // The wrapped call is the §15 agent call unchanged, and the sender names it.
+    assert_eq!(request["call"], secret_golden("use.request.api_key"));
+    assert_eq!(request["sender"], "aft");
+    // The aad travels as one JSON string: the doc's string golden is the request's field.
+    let aad = secret_golden_string("federation.secret_use.aad");
+    assert_eq!(request["aad"], aad);
+    // The real field order, re-serialized from the documented order, is those bytes.
+    #[derive(serde::Serialize)]
+    struct SecretAadDoc<'a> {
+        secret_name: &'a str,
+        requester: &'a str,
+        home: &'a str,
+        nonce: &'a str,
+        recipient_key_id: &'a str,
+        call_sha256: &'a str,
+    }
+    let aad_value: serde_json::Value = serde_json::from_str(&aad).unwrap();
+    let field = |key: &str| aad_value[key].as_str().unwrap();
+    assert_eq!(
+        serde_json::to_string(&SecretAadDoc {
+            secret_name: field("secret_name"),
+            requester: field("requester"),
+            home: field("home"),
+            nonce: field("nonce"),
+            recipient_key_id: field("recipient_key_id"),
+            call_sha256: field("call_sha256"),
+        })
+        .unwrap(),
+        aad,
+        "the aad field order is the contract order"
+    );
+    // The bound digest is the real encoder's over the wrapped sender and call.
+    assert_eq!(
+        field("call_sha256"),
+        federation::ingress::secret_call_sha256("aft", &request["call"]).unwrap()
+    );
+    assert_eq!(field("secret_name"), request["call"]["name"].as_str().unwrap());
+
+    assert_secret_golden_shape(
+        "federation.secret_use.result.sealed",
+        "status enc ciphertext",
+    );
+    let sealed_golden = secret_golden("federation.secret_use.result.sealed");
+    assert_eq!(sealed_golden["status"], "sealed");
+    // The placeholder bytes are strict standard base64, as a real seal's are.
+    use base64::Engine as _;
+    let standard = base64::engine::general_purpose::STANDARD;
+    standard.decode(sealed_golden["enc"].as_str().unwrap()).unwrap();
+    standard
+        .decode(sealed_golden["ciphertext"].as_str().unwrap())
+        .unwrap();
+    // A real seal over the golden aad bytes has the golden key set and opens, over those
+    // bytes, to exactly the §15 released object. Other aad does not open.
+    let home_pem = credentials_core::kem::generate_key().expect("home key");
+    let (home_pub, _) = credentials_core::kem::public_half(&home_pem).expect("home pub");
+    let asker_pem = credentials_core::kem::pem_from_scalar(&[9; 32]);
+    let (asker_pub, _) = credentials_core::kem::public_half(&asker_pem).expect("asker pub");
+    let plaintext = serde_json::to_vec(&secret_golden("use.result.released.api_key")).unwrap();
+    let (enc, ciphertext) = credentials_core::kem::seal_auth(
+        &home_pem,
+        &asker_pub,
+        &plaintext,
+        federation::ingress::SECRET_RELEASE_INFO,
+        aad.as_bytes(),
+    )
+    .expect("seal release");
+    let reply = json!({
+        "status": "sealed",
+        "enc": standard.encode(&enc),
+        "ciphertext": standard.encode(&ciphertext),
+    });
+    assert_secret_reply_matches("federation.secret_use.result.sealed", &reply);
+    let opened = credentials_core::kem::open_auth(
+        &asker_pem,
+        &home_pub,
+        &enc,
+        &ciphertext,
+        federation::ingress::SECRET_RELEASE_INFO,
+        aad.as_bytes(),
+    )
+    .expect("open release");
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&opened).unwrap(),
+        secret_golden("use.result.released.api_key")
+    );
+    assert!(
+        credentials_core::kem::open_auth(
+            &asker_pem,
+            &home_pub,
+            &enc,
+            &ciphertext,
+            federation::ingress::SECRET_RELEASE_INFO,
+            b"{}",
+        )
+        .is_err()
+    );
+}
+
+/// The flow federation goldens in §14 are the §15 shapes unchanged, and the approval
+/// result carries the v2 flow statement.
+#[tokio::test]
+async fn federation_flow_goldens_are_the_unchanged_secret_shapes() {
+    let request = assert_secret_golden_shape(
+        "federation.secret_request_flow_approval.request",
+        "name flow flow.flow_id flow.version flow.code_hash flow.install_id target \
+         target.scheme target.host target.port target.path methods",
+    );
+    assert_eq!(request, secret_golden("request_flow_approval.request.api_key"));
+    assert_secret_golden_shape(
+        "federation.secret_request_flow_approval.result",
+        "status request_id statement_b64url expires_at_ms",
+    );
+    assert_secret_golden_shape(
+        "federation.secret_revoke_flow_grants.request",
+        "flow_install_id flow_version",
+    );
+    let revoke_request = secret_golden("federation.secret_revoke_flow_grants.request");
+    assert_eq!(revoke_request, secret_golden("revoke_flow_grants.request"));
+    assert_secret_golden_shape(
+        "federation.secret_revoke_flow_grants.result",
+        "status grants",
+    );
+
+    // The vault's forwarded flow path answers the golden shapes, with the asker named.
+    const ASKER: &str = "fed-computer:11111111111111111111111111111111";
+    let flow = SecretFlow::new(214).await;
+    flow.deposit_both().await;
+    let asked = sc_use_answer(crate::secret_use::serve_flow_approval_forwarded(
+        &flow.store,
+        ASKER,
+        &request,
+        sc_now_ms,
+    ));
+    assert_eq!(asked["status"], "approval_required", "{asked}");
+    assert_secret_reply_matches("federation.secret_request_flow_approval.result", &asked);
+    let statement: serde_json::Value =
+        serde_json::from_slice(&sc_unb64(asked["statement_b64url"].as_str().unwrap())).unwrap();
+    assert_eq!(statement["asking_member_id"], ASKER);
+    assert_eq!(statement["v"], "ck-secret-flow-statement/v2");
+    assert_secret_reply_matches("statement.flow.v2", &statement);
+    assert_eq!(
+        flow.approve(&asked, "version", false).await["results"][0]["outcome"],
+        "granted"
+    );
+    let revoked = sc_use_answer(crate::secret_use::serve_revoke_flow_grants_forwarded(
+        &flow.store,
+        ASKER,
+        &revoke_request,
+    ));
+    assert_eq!(revoked, secret_golden("federation.secret_revoke_flow_grants.result"));
+}
+
+/// Forwarded approvals are the v1 statements plus the asking computer under a v2 tag:
+/// the goldens equal the real encoders' pinned vectors, and the live vault's forwarded
+/// approvals carry them while local ones stay v1.
+#[tokio::test]
+async fn forwarded_statements_are_v2_and_match_the_pinned_vectors() {
+    assert_secret_golden_shape(
+        "statement.use.v2",
+        "v request_id member_id asking_member_id scope scope.owner scope.kind scope.ref \
+         scope.epoch agent_id coverage secret secret.name secret.kind secret.incarnation use \
+         use.host use.path_prefix use.location durations request_expires_at_ms",
+    );
+    assert_secret_golden_shape(
+        "statement.flow.v2",
+        "v request_id member_id asking_member_id flow flow.flow_id flow.version \
+         flow.code_hash flow.install_id secret secret.name secret.kind secret.incarnation use \
+         use.host use.path_prefix use.location use.methods durations request_expires_at_ms",
+    );
+    let v2_case = |vectors: &str, case: &str| {
+        let parsed: serde_json::Value = serde_json::from_str(vectors).expect("pinned vectors");
+        parsed["vectors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["case"] == case)
+            .unwrap_or_else(|| panic!("vector case {case}"))
+            .clone()
+    };
+    let use_v2 = v2_case(SECRET_USE_V2_CONTRACT_VECTORS, "forwarded-use-api-key");
+    assert_eq!(
+        secret_golden_text("statement.use.v2"),
+        String::from_utf8(sc_unb64(use_v2["statement_b64url"].as_str().unwrap()))
+            .expect("UTF-8")
+    );
+    let flow_v2 = v2_case(SECRET_FLOW_V2_CONTRACT_VECTORS, "forwarded-flow-api-key");
+    assert_eq!(
+        secret_golden_text("statement.flow.v2"),
+        String::from_utf8(sc_unb64(flow_v2["statement_b64url"].as_str().unwrap()))
+            .expect("UTF-8")
+    );
+    // The §14 approval replies carry those same pinned statements.
+    assert_eq!(
+        secret_golden("federation.secret_use.result.approval_required")["statement_b64url"],
+        use_v2["statement_b64url"]
+    );
+    assert_secret_reply_matches(
+        "use.result.approval_required",
+        &secret_golden("federation.secret_use.result.approval_required"),
+    );
+    assert_eq!(
+        secret_golden("federation.secret_request_flow_approval.result")["statement_b64url"],
+        flow_v2["statement_b64url"]
+    );
+    assert_secret_reply_matches(
+        "request_flow_approval.result",
+        &secret_golden("federation.secret_request_flow_approval.result"),
+    );
+
+    // The live vault agrees: a forwarded agent approval names the asker under v2, while
+    // the local one stays v1 with no asker.
+    const ASKER: &str = "fed-computer:11111111111111111111111111111111";
+    let flow = SecretFlow::new(215).await;
+    flow.deposit_both().await;
+    let api = secret_golden("use.request.api_key");
+    let aad = secret_golden_string("federation.secret_use.aad");
+    let aad_value: serde_json::Value = serde_json::from_str(&aad).unwrap();
+    assert_eq!(aad_value["secret_name"], api["name"]);
+    assert_eq!(aad_value["home"], SC_MEMBER);
+    let forwarded = crate::secret_use::serve_forwarded(
+        &flow.store,
+        credentials_core::agent_secret::SecretSender::Aft,
+        &api,
+        &credentials_core::store::ReleaseRequest {
+            requester: ASKER,
+            nonce: "0123456789abcdef0123456789abcdef",
+            aad: aad.as_bytes(),
+        },
+        |_: &serde_json::Value| -> Result<credentials_core::store::SealedRelease, String> {
+            panic!("no release without a grant")
+        },
+        sc_now_ms,
+    );
+    let crate::secret_use::ForwardedUseAnswer::Reply(asked) = forwarded else {
+        panic!("a grantless forwarded use asks for approval")
+    };
+    assert_eq!(asked["status"], "approval_required", "{asked}");
+    assert_secret_reply_matches("federation.secret_use.result.approval_required", &asked);
+    let statement: serde_json::Value =
+        serde_json::from_slice(&sc_unb64(asked["statement_b64url"].as_str().unwrap())).unwrap();
+    assert_secret_reply_matches("statement.use.v2", &statement);
+    assert_eq!(statement["asking_member_id"], ASKER);
+    let local = flow.use_secret("aft", &api);
+    let local_statement: serde_json::Value =
+        serde_json::from_slice(&sc_unb64(local["statement_b64url"].as_str().unwrap())).unwrap();
+    assert_eq!(local_statement["v"], "ck-secret-use-statement/v1");
+    assert!(local_statement.get("asking_member_id").is_none());
+}
+
 #[test]
 fn every_secret_golden_example_in_the_wire_contract_is_checked() {
     let marker = "<!-- golden:";
@@ -1199,7 +1564,7 @@ fn every_secret_golden_example_in_the_wire_contract_is_checked() {
         "control: the marker scan found too few goldens"
     );
     for id in SECRET_GOLDEN_IDS {
-        if *id == SECRET_GOLDEN_STRING_ID {
+        if SECRET_GOLDEN_STRING_IDS.contains(id) {
             assert!(
                 !secret_golden_string(id).is_empty(),
                 "golden `{id}` is empty"

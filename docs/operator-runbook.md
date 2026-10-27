@@ -419,6 +419,56 @@ they print `no agent-secret tables yet` and exit 0.
 or the device absent, the keys read `superseded` — and never a validity checked now, because
 `list` makes no callosum call.
 
+### Secret home: which vault holds the agent secrets
+
+One vault holds every agent secret, every grant and every flow grant for the account.
+Other computers hold none. Each vault names that vault once:
+
+```sh
+ck auth secret home show     # secrets.home_member <value> + role <role>
+ck auth secret home set self               # this vault is the home
+ck auth secret home set fed-computer:<fp>  # another member's vault is the home
+ck auth secret home unset                  # back to serving locally
+```
+
+`show` reads the store without the daemon or the lease, like `list`. The stored value is
+`self`, a member id, or unset; the role is what that value resolves to with the live
+federation self id: `single` (unset: served locally, exactly as before), `home`, `remote`,
+or the refusal a secret op would answer when the setting is unusable
+(`remote_setup_incomplete`, `store_error`). On a remote-role vault nothing local is
+created: phone operations and `ck auth secret put` refuse
+`secret_home_elsewhere/permanent: remedy_member=<home id>`, so a stray phone profile
+cannot split the Secrets page. `delete`, `revoke-grant`, `list` and `grants` stay allowed,
+so leftover state can be inspected and cleaned up.
+
+`set <member-id>` needs the running daemon. A member id equal to this vault's live self
+id is stored as `self` without a pairing lookup; any other member is checked against
+callosum's pairing first, the same way `ck auth federation self` checks the self member.
+A member callosum does not
+know is refused `member_not_paired`, and a lookup that fails is refused
+`callosum_unavailable`; an id is never stored unchecked. `set self` and `unset` are local
+writes and run offline. Setting another member is refused while this vault still holds
+any agent secret, grant, flow grant or pending request — the refusal names the counts
+(`secret_home_not_empty/permanent: agent_secrets=<n> grants=<n> flow_grants=<n>
+pending_requests=<n>; delete the secrets on this vault before naming another member as the
+home`). Delete the secrets first, which also removes their grants and pending requests;
+a concurrent put either commits first and is counted, or runs after the set and is itself
+refused `secret_home_elsewhere`.
+
+A member computer forwards only with the home's permission. On the home, grant it a
+selector-free forwarding grant:
+
+```sh
+ck auth member grant --member fed-computer:<fp> --operation secret_use
+```
+
+Like `transfer_deliver`, `secret_use` takes no `--id` or `--category`: an exact or
+category selector is refused. The grant records the member's current pairing id and counts
+only while that pairing lasts, so after a re-pair the member's forwarded calls refuse
+with the uniform `not_found` until the grant is made again. Revoking the grant, or
+re-pairing, makes a retry with the same nonce fail with `not_found`. The grant needs the running daemon (it asks callosum for
+the pairing); revocation needs no lookup.
+
 ### Operator-terminal signing keys
 
 For machine account authentication from the operator's own terminal, generate a
@@ -1423,6 +1473,24 @@ fetch outcome; `remote remove --id <id>` removes it. Re-homing is remove then ad
 After a re-pair or trust-backup restore, re-grant: old pairing-bound grants do not apply.
 Repair a home login on A, then poll B's `get_scoped`; remote status alone cannot observe
 the repair. A cached access token can remain usable for at most 300 s after grant revocation.
+
+For agent secrets, one vault is the home for the whole account. On each vault run
+`ck auth secret home show` to see the stored setting and the role it resolves to, and on
+every non-home vault run `ck auth secret home set <home-member>` (or `self` on the home).
+`set <member>` needs the running daemon and is refused for an unpaired member; it is
+refused with the blocking counts while the vault still holds agent secrets, grants, flow
+grants or pending requests, and refused `secret_home_elsewhere` is what that vault's phone
+operations and `ck auth secret put` answer until the setting points at the home. On the
+home, each member computer needs `ck auth member grant --member <m> --operation
+secret_use` (selector-free, pairing-bound like `transfer_deliver`); without it the home
+refuses that member's forwarded calls with the uniform `not_found`. After a re-pair,
+re-grant. A remote-role vault forwards `secret.use` and the two flow ops and relays the
+home's answer; a vault that is not the home-role vault answers an inbound forward with
+`not_found` and never re-forwards, so a misconfigured two-way pairing ends after one hop.
+The phone finds the home through `secret.home`, and only after the forwarded approval
+statements (`ck-secret-use-statement/v2` and `ck-secret-flow-statement/v2`) and
+`secret_home_elsewhere` are deployed to every vault does an operator set the member
+setting on any non-home vault.
 
 For a static credential, B grants A `transfer_deliver` without a selector. A runs
 `ck auth transfer send --id <id> --to <B>`. B inspects `ck auth transfer receive` and runs

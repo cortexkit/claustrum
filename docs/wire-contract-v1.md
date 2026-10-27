@@ -1217,11 +1217,15 @@ answer uniform `not_found`. Only a federation member channel can invoke these op
 | `federation.remote_token` | Query | Fetch an Auth-sealed access-token projection; callosum must not persist query replies. |
 | `federation.report_auth_failure` | Mutate | Forward a version-checked 401/403 report to the home. |
 | `federation.transfer_deliver` | Mutate | Deliver an Auth-sealed static credential for operator acceptance. |
+| `federation.secret_use` | Query | Forward a member vault's sender `secret.use` to the secret home; the release is Auth-sealed, so callosum must not persist query replies. |
+| `federation.secret_request_flow_approval` | Mutate | Record a member vault's flow consent request for a secret this vault holds. |
+| `federation.secret_revoke_flow_grants` | Mutate | Revoke a member vault's flow grants for one flow install. |
 
 Every other op on that channel is `not_found` before dispatch. `handle` or
-`enrollment_token` params are `invalid_params`, never resolved. The three federation ops
+`enrollment_token` params are `invalid_params`, never resolved. The six federation ops
 on any non-federation channel (including `callosum-self`, a granted reserved module, or
-any channel with the gate off) are `not_found`.
+any channel with the gate off) are `not_found`. `secret.home` is declared beside the
+phone ops (§15) and is never on this allowlist: a member channel answers it `not_found`.
 
 Handles and enrollment tokens are **vault-local bearer secrets**, not member identities.
 With the gate off, release-1 bearer-scoped reads remain possible even on a refused `fed-`
@@ -1245,9 +1249,10 @@ handles cannot be minted and active-key mutation is protected.
 |---|---|---|
 | Token reply | `cortexkit/claustrum/remote-token/v1` | `credential_id`, `requester`, `home`, `nonce`, `recipient_key_id` |
 | Transfer | `cortexkit/claustrum/transfer/v1` | `transfer_id`, `credential_id`, `sender`, `receiver`, `recipient_key_id` |
+| Secret release | `cortexkit/claustrum/secret-release/v1` | `secret_name`, `requester`, `home`, `nonce`, `recipient_key_id`, `call_sha256` |
 
-The requester (token) or sender (transfer) serializes the aad exactly once, as compact JSON
-in the listed order, and transmits those bytes. `nonce` (fresh per fetch) and `transfer_id`
+The requester (token, secret release) or sender (transfer) serializes the aad exactly once, as compact JSON
+in the listed order, and transmits those bytes. `nonce` (fresh per fetch, per sender call for a secret release) and `transfer_id`
 are 16 random bytes encoded as 32 lowercase hex characters. Members fill their own role
 from their stored self id. Unknown or missing aad fields are refused. The peer validates
 every field and authenticates the **received bytes**, never a rebuilt JSON object. A token
@@ -1386,6 +1391,142 @@ A same-version token returned during the per-credential 60 s refresh cooldown ca
 `recheck_in_ms`; B keeps `stale_pending` and refetches when it elapses, without a second
 report. An applied success above the reported version, one without `recheck_in_ms`, a home
 re-create or an authoritative non-success clears the mark. Transient outcomes leave it.
+
+### Forwarded agent secrets: `federation.secret_use`
+
+Request: `{"method":"federation.secret_use","params":{"aad":"<exact JSON string>","sender":"aft","call":{… §15 `secret.use` params, unchanged}}}`.
+`sender` is one of `aft`, `cerebellum` or `basal` and names the local sender the asking
+vault already admitted; `call` is that sender's `secret.use` params byte for byte. The
+kind is Query: callosum keeps no reply body, and the release in it is sealed. A query may
+still write home state: the home commits the release receipt and its audit in the same
+`fenced_write` transaction that consumes a `once` grant (or marks first release) and
+writes the release audit, as `federation.remote_token` commits its issue audit.
+
+The aad binds the release to one secret, one requester, one home, one nonce, one
+announced key and one exact call. `nonce` is 16 random bytes in lower hex, one per sender
+call: every transport retry of that call resends the same aad, and a new sender call gets
+a new nonce. `call_sha256` is the lower-hex SHA-256 of the RFC 8785 encoding of
+`{"sender","call"}` (keys sorted at every level, compact JSON, exact-range integers
+only). Parsing is strict as for the token aad: unknown, missing or duplicate fields, or
+a field that is not well formed (`secret_name` empty, a member id that is not
+`fed-computer:<32 lowercase hex>`, a `nonce` that is not 32 lowercase hex, an empty
+`recipient_key_id`, a `call_sha256` that is not 64 lowercase hex), refuses the call. After
+the pairing and `secret_use` member-grant checks succeed, malformed params or aad produce
+an `invalid_params` Error frame; earlier pairing and grant refusals take precedence.
+
+The home runs its checks in order and stops at the first refusal:
+
+1. Home role: only a vault whose secret home is `self` serves forwarded secret ops. A
+   single-role (setting unset) or remote-role vault answers `not_found` and writes nothing,
+   so a misrouted call ends after one hop and is never re-forwarded.
+2. The member's current pairing, then a selector-free `secret_use` member grant stored under
+   that pairing. The grant is checked before anything is parsed, so a member without it
+   cannot drive the grammar or binding checks below. Re-pairing voids the grant until it is
+   made again.
+3. Strict parse of the params, the aad and the sender.
+4. The aad's `requester` equals the attested harness member; the home's self id and active
+   transfer key are read; the aad's `home` equals that self id, its `call_sha256` equals the
+   recomputed digest of the received params, and `call.name` equals its `secret_name`.
+5. The requester's announced transfer key matches the aad's `recipient_key_id`.
+6. The sender's grammar, then the store's grant choice, release receipt and seal, all under
+   the asking member. AFT and Cerebellum take the agent path with a required `ScopeStamp`;
+   basal takes the flow path whose stamp must carry the flow attributes.
+
+The reply is exactly one of: `{status: "sealed", enc, ciphertext}`, the §15
+`approval_required` body (a v2 statement, never material), or a refusal body. `enc` is
+the 32-byte encapsulation and ciphertext the Auth-sealed plaintext below, both standard
+base64. The plaintext is exactly the §15 `released` object `release()` builds: an API key
+or username, password and optional TOTP. The home seals with Auth-mode HPKE
+(`kem::seal_auth`) from its `kem:vault-transfer:1` key to the requester's announced X25519
+key, info `cortexkit/claustrum/secret-release/v1`, over the received aad bytes. The asking
+vault opens it only over the aad bytes it sent, passes the object to the local sender, and
+never stores it. A reply sealed to another key, or over aad naming another requester,
+home, nonce, secret name or `call_sha256`, does not open and releases nothing. Secret
+material crosses computers only sealed in this reply: no recorded request or reply body
+holds plaintext secret material, and no mutate reply holds sealed material either.
+
+<!-- golden:federation.secret_use.aad -->
+```json
+"{\"secret_name\":\"key\",\"requester\":\"fed-computer:11111111111111111111111111111111\",\"home\":\"fed-computer:22222222222222222222222222222222\",\"nonce\":\"0123456789abcdef0123456789abcdef\",\"recipient_key_id\":\"0123456789abcdef\",\"call_sha256\":\"13cdb396de6f9079e66fd0591073f29052fba7a82c3e1a36eccc571bcd524d55\"}"
+```
+
+<!-- golden:federation.secret_use.request -->
+```json
+{"aad":"{\"secret_name\":\"key\",\"requester\":\"fed-computer:11111111111111111111111111111111\",\"home\":\"fed-computer:22222222222222222222222222222222\",\"nonce\":\"0123456789abcdef0123456789abcdef\",\"recipient_key_id\":\"0123456789abcdef\",\"call_sha256\":\"13cdb396de6f9079e66fd0591073f29052fba7a82c3e1a36eccc571bcd524d55\"}","sender":"aft","call":{"name":"key","coverage":"scope","stamp":{"owner":{"kind":"reserved","module_id":"prefrontal-core"},"ref":"H","scope_epoch":7,"kind":"head","attributes":{"agent_id":"agent-A"},"owner_authorized":true},"target":{"scheme":"https","host":"x.test","port":443,"path":"/repos/a/issues/1"}}}
+```
+
+A retry with the same aad bytes is answered from the home's release receipt, not released
+afresh. The receipt `(requester, nonce)` holds the aad SHA-256, the incarnation, the grant
+kind and id, the sealed bytes and a 10-minute expiry. The home returns the stored bytes
+unchanged, with no second consumption or audit, only while the receipt is unexpired, the
+aad digest matches, the pairing, `secret_use` grant and announced-key checks still pass,
+the secret's incarnation is unchanged, and the stored grant is still live (except the
+`once` grant the receipt consumed). A same-nonce request the checks authoritatively deny
+(expired receipt, other aad bytes including reordered JSON or another `recipient_key_id`,
+unpaired member, missing or stale grant, changed incarnation, gone or expired grant) gets
+`not_found` plus a refusal audit and never a fresh release. A check that cannot be
+performed keeps its transient code and decides nothing: a callosum timeout or
+`fed_not_ready` answers `home_unavailable`, and a store failure its mapped transient code.
+Such a refusal writes no refusal audit, leaves the receipt untouched, and a later retry with
+the same aad is judged afresh. Receipts survive restart and are swept after expiry; the
+asking vault's retry deadline is shorter than the receipt lifetime, so a nonce is never
+replayed after its sweep.
+
+<!-- golden:federation.secret_use.result.sealed -->
+```json
+{"status":"sealed","enc":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","ciphertext":"AA=="}
+```
+
+The `enc` and `ciphertext` above are placeholders: a real seal is randomized, so the
+contract pins the key set, and the vault's tests seal and open with the real encoders over
+the golden aad bytes. `secret_contract_tests.rs` (`federation_secret_use_goldens_match_the_real_encoders`)
+pins the request key set, checks the golden call equals the §15 `use.request.api_key`
+golden, re-serializes the aad field order with the real field order, recomputes
+`call_sha256` with the real digest, and round-trips a seal over the golden aad bytes.
+
+`approval_required` answers an otherwise eligible request with no matching approved grant,
+as locally, with a v2 statement naming the asking computer (§15):
+
+<!-- golden:federation.secret_use.result.approval_required -->
+```json
+{"status":"approval_required","request_id":"01HF7YAT000000000000000001","statement_b64url":"eyJhZ2VudF9pZCI6ImFnZW50LUEiLCJhc2tpbmdfbWVtYmVyX2lkIjoiZmVkLWNvbXB1dGVyOjExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExIiwiY292ZXJhZ2UiOiJzY29wZSIsImR1cmF0aW9ucyI6WyJvbmNlIiwiaG91ciIsInNlc3Npb24iLCJwZXJtYW5lbnQiXSwibWVtYmVyX2lkIjoiZmVkLWNvbXB1dGVyOjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyIiwicmVxdWVzdF9leHBpcmVzX2F0X21zIjoxNzAwMDAwNjAwMDAwLCJyZXF1ZXN0X2lkIjoiMDFIRjdZQVQwMDAwMDAwMDAwMDAwMDAwMDEiLCJzY29wZSI6eyJlcG9jaCI6Nywia2luZCI6ImhlYWQiLCJvd25lciI6InJlc2VydmVkOnByZWZyb250YWwtY29yZSIsInJlZiI6IkgifSwic2VjcmV0Ijp7ImluY2FybmF0aW9uIjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAxNDkiLCJraW5kIjoiYWdlbnRfYXBpX2tleSIsIm5hbWUiOiJrZXkifSwidXNlIjp7Imhvc3QiOiJ4LnRlc3QiLCJsb2NhdGlvbiI6ImhlYWRlcjpYLUFwaS1LZXkiLCJwYXRoX3ByZWZpeCI6Ii9yZXBvcy9hIn0sInYiOiJjay1zZWNyZXQtdXNlLXN0YXRlbWVudC92MiJ9","expires_at_ms":1700000600000}
+```
+
+### Forwarded flow consent: `federation.secret_request_flow_approval` and `federation.secret_revoke_flow_grants`
+
+Both carry the §15 params unchanged and answer the §15 reply (never material). They carry
+no `sender`, no stamp and no `call`: they are basal's by op name. Everything they create
+or remove belongs to the asking member only: the pending request records the asker, the
+approval grants that computer's flow only, and a revoke leaves the home's and another
+member's grants for that flow identity in place. The home role, pairing and `secret_use`
+member-grant checks run before the params are parsed, as for `federation.secret_use`.
+
+<!-- golden:federation.secret_request_flow_approval.request -->
+```json
+{"name":"key","flow":{"flow_id":"daily-fetch","version":7,"code_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","install_id":"install-A"},"target":{"scheme":"https","host":"x.test","port":443,"path":"/repos/a/issues/1"},"methods":["GET"]}
+```
+
+<!-- golden:federation.secret_request_flow_approval.result -->
+```json
+{"status":"approval_required","request_id":"01HF7YAT000000000000000001","statement_b64url":"eyJhc2tpbmdfbWVtYmVyX2lkIjoiZmVkLWNvbXB1dGVyOjExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExIiwiZHVyYXRpb25zIjpbInZlcnNpb24iXSwiZmxvdyI6eyJjb2RlX2hhc2giOiIwMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWYwMTIzNDU2Nzg5YWJjZGVmIiwiZmxvd19pZCI6ImRhaWx5LWZldGNoIiwiaW5zdGFsbF9pZCI6Imluc3RhbGwtQSIsInZlcnNpb24iOjd9LCJtZW1iZXJfaWQiOiJmZWQtY29tcHV0ZXI6MjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIiLCJyZXF1ZXN0X2V4cGlyZXNfYXRfbXMiOjE3MDAwMDA2MDAwMDAsInJlcXVlc3RfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDAwMSIsInNlY3JldCI6eyJpbmNhcm5hdGlvbiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMTQ5Iiwia2luZCI6ImFnZW50X2FwaV9rZXkiLCJuYW1lIjoia2V5In0sInVzZSI6eyJob3N0IjoieC50ZXN0IiwibG9jYXRpb24iOiJoZWFkZXI6WC1BcGktS2V5IiwibWV0aG9kcyI6WyJHRVQiXSwicGF0aF9wcmVmaXgiOiIvcmVwb3MvYSJ9LCJ2IjoiY2stc2VjcmV0LWZsb3ctc3RhdGVtZW50L3YyIn0","expires_at_ms":1700000600000}
+```
+
+<!-- golden:federation.secret_revoke_flow_grants.request -->
+```json
+{"flow_install_id":"install-A","flow_version":7}
+```
+
+<!-- golden:federation.secret_revoke_flow_grants.result -->
+```json
+{"status":"revoked","grants":1}
+```
+
+The flow federation goldens equal the §15 goldens field for field: the request goldens
+carry the same bytes as `request_flow_approval.request.api_key` and
+`revoke_flow_grants.request`, and the result goldens the same key sets as
+`request_flow_approval.result` and `revoke_flow_grants.result`. `secret_contract_tests.rs`
+(`federation_flow_goldens_are_the_unchanged_secret_shapes`) checks the equalities and that
+the approval result's statement decodes to the §15 `statement.flow.v2` golden.
 
 ### Transfers: delivery, body v1 and sender action
 
@@ -1567,7 +1708,7 @@ Unreadable (a store read that fails), so every row below covers all nine combina
 | callosum, `fed-phone:<32 lowercase hex>` | member On with phone Off or Unreadable; member Unreadable | NF | NF | POR | NF | NF |
 | callosum, malformed `fed-phone:` | member Off | NF | NF | POR | served (§14 gate-off residual) | NF |
 | callosum, malformed `fed-phone:` | member On or Unreadable | NF | NF | POR | NF | NF |
-| callosum, `fed-computer:<32 lowercase hex>` | member On | NF | NF | POR | NF (a member channel answers only its three federation ops, §14) | NF |
+| callosum, `fed-computer:<32 lowercase hex>` | member On | NF | NF | POR | NF (a member channel answers only its six federation ops, §14) | NF |
 | callosum, `fed-computer:<32 lowercase hex>` | member Off | NF | NF | POR | served (§14 gate-off residual) | NF |
 | callosum, `fed-computer:<32 lowercase hex>` | member Unreadable | NF | NF | POR | NF | NF |
 | callosum, any other `fed-` harness | member Off | NF | NF | POR | served (§14 gate-off residual) | NF |
@@ -1595,6 +1736,87 @@ Only the wrapper admits Direct. Plain `permissions.list {agent_id?}` and
 `permissions.revoke {id}` keep the `permissions/v1` provider shapes (pinned by the
 vendored vectors in `crates/credentials-module/tests/vectors/permissions-v1/`) and admit
 only `reserved:cingulate`.
+
+### Secret home: one vault holds every agent secret
+
+One vault holds every agent secret, every grant and every flow grant for the account.
+Other computers hold none. A vault knows where the secrets live through the
+`secrets.home_member` setting, set by an operator (`ck auth secret home set <member-id>|self`, `ck auth secret home show`). `set self` stores the literal `self`, never a copy of the
+self id, so a later `ck auth federation self` change cannot turn a home into a remote.
+`set <member-id>` is checked against callosum's pairing the same way `ck auth federation
+self` checks the self member, except that a member id equal to the live self id is stored
+as `self` without a pairing lookup.
+Each secret call resolves the vault's role from the setting and the live federation self id:
+
+| setting | role | local secret ops | inbound `federation.secret_*` | `secret.home` reply |
+|---|---|---|---|---|
+| unset | single | served locally, exactly as today | `not_found` | `{"home":true,"home_member_id":null}` |
+| `self` | home | served locally | served (see §14); needs the self id | `{"home":true,"home_member_id":<self id or null>}` |
+| a member id ≠ self id | remote | sender ops forwarded; phone ops and `admin.secret_put` refused `secret_home_elsewhere` | `not_found` | `{"home":false,"home_member_id":"<home id>"}` |
+| a member id with self id absent or equal to it, or store unreadable | — | `remote_setup_incomplete` (permanent; `remedy_member` names this vault only when its self id is known) or `store_error` (transient) | same | same refusal |
+
+Unset keeps every existing behaviour and golden vector byte for byte. On a remote-role vault
+nothing local is created: `ck auth secret delete`, `revoke-grant`, `list` and `grants` stay
+allowed, so leftover state can be inspected and cleaned up.
+
+`secret.home` is a phone-callable query with the same caller admission as `secret.list`:
+it needs a current pairing from callosum but no registered phone keys, because the phone
+asks it to learn which vault to register with. It is declared beside the phone ops and is
+never on the member allowlist. Request `{}`:
+
+<!-- golden:home.request -->
+```json
+{}
+```
+
+Reply `{home, home_member_id}` per the role table above:
+
+<!-- golden:home.result.single -->
+```json
+{"home":true,"home_member_id":null}
+```
+
+<!-- golden:home.result.home -->
+```json
+{"home":true,"home_member_id":"fed-computer:22222222222222222222222222222222"}
+```
+
+<!-- golden:home.result.remote -->
+```json
+{"home":false,"home_member_id":"fed-computer:44444444444444444444444444444444"}
+```
+
+A role that cannot decide answers the same refusal every other phone op gets on that vault,
+so the phone never mistakes a broken setup for an answer: `remote_setup_incomplete` with
+`remedy_member` naming this vault when its self id is known, otherwise without one, and
+`store_error` when the setting is unreadable.
+
+On a remote-role vault the seven phone operations refuse with the home named, before any
+registration check or state write, so a stray phone profile cannot split the Secrets page:
+
+<!-- golden:home.refused.elsewhere -->
+```json
+{"error":{"code":"secret_home_elsewhere","class":"permanent","remedy_member":"fed-computer:44444444444444444444444444444444"}}
+```
+
+`admin.secret_put` (online and offline `ck auth secret put`) refuses the same body there.
+A remote-role vault holds no secrets it uses, so setting `self` or clearing the setting is
+always allowed. Setting another member is refused while this vault holds any agent secret,
+grant, flow grant or pending request: the counts that block the change are part of the
+refusal (`secret_home_not_empty` with `agent_secrets`, `grants`, `flow_grants` and
+`pending_requests`), and the count and the write share one transaction, so a concurrent put
+either commits first and is counted, or runs after and is refused itself.
+
+A member computer forwards only with the home's permission: a selector-free `secret_use`
+member grant on the home (`ck auth member grant --member <m> --operation secret_use`), recorded
+under the member's current pairing id like `transfer_deliver`, so re-pairing cancels it.
+Without it the home refuses every forwarded call from that member with the uniform
+`not_found`. Storing it needs no selector: `secret_use` with an exact or category selector
+is refused.
+
+`secret_contract_tests.rs` (`secret_home_request_and_replies_match_the_contract`) pins the
+request and reply key sets, drives the real phone parser and the real store through every
+role row and the elsewhere refusal, and checks the refused ops write nothing.
 
 ### Ordered phone preflight and transaction admission
 
@@ -2175,6 +2397,78 @@ for a reader that declares `flow-identity-scopes/v1`, so a vault without it woul
 fields themselves, not flow-scoped authority: it reads them from the sender's params and
 still refuses a flow-scoped transport route bind. The capability therefore widens what the
 stamp carries to this reader and changes nothing about who may use what.
+
+### Forwarded secrets: the member relays the home's answer
+
+Senders do not change. AFT, Cerebellum and basal keep calling their local vault's
+`secret.use`, `secret.request_flow_approval` and `secret.revoke_flow_grants` with the same
+request and reply shapes. On a remote-role vault the local vault looks nothing up locally:
+it forwards the call to the home over the federation channel and relays the home's answer,
+mapped to the same §15 reply and refusal shapes. A request from another computer with the
+same stamp gets its own v2 approval request, never the other computer's grant: the holder
+is the asking computer, and pending reuse never merges requests from different askers. Only
+a forwarded flow approval also refuses a flow id equal to a v2 tag; the local check stays
+v1-only, so single-computer behaviour is unchanged.
+
+The asking vault's retry deadline is shorter than the home's 10-minute receipt lifetime.
+A forwarded call that authoritatively fails (unknown secret, wrong target or flow identity,
+unpaired member, missing or stale `secret_use` grant, changed incarnation, gone or expired
+grant) is the uniform `not_found`. A check that cannot be performed keeps its transient
+code and decides nothing: a callosum timeout or `fed_not_ready` at the home answers
+`home_unavailable`, and a home store failure keeps its mapped transient code; neither
+writes a refusal audit. The
+member maps the home's answer to its consumer as:
+
+| Home answer | Member's `secret.use` code / class | Stored effect |
+|---|---|---|
+| `approval_required`, `released` (opened) | relayed (§15 shapes) | diagnostics only |
+| §15 refusal code | same code, this vault's own class | outcome only |
+| `home_unavailable`, or a code this vault does not know | `home_unavailable` / transient | outcome only |
+| unreachable, deadline, partition, retry-safe or outcome-unknown callosum failure | `home_unreachable` / transient | outcome only |
+| this vault's own self id or transfer key absent | `transfer_key_missing` / permanent, `remedy_member` = this vault when its self id is known | outcome only |
+| no announced key for the home, or an unusable role setting | `remote_setup_incomplete` / permanent, `remedy_member` = who must fix it | outcome only |
+| permanent callosum class | `federation_setup_invalid` / permanent | outcome only |
+| the sealed reply will not open (aad, key or info mismatch) | `remote_seal_invalid` / permanent | outcome only |
+| the opened reply fails validation | `remote_reply_invalid` / permanent | outcome only |
+
+Only grants made for the asking computer release, and a release crosses back only sealed.
+The asking vault records each forwarded call and its outcome code (never material); the
+home records requests, grants and releases as locally, plus `asking_member_id`. A grant
+revocation, timed-grant expiry, `secret.revoke_flow_grants` or secret delete ends replay at
+once: a same-nonce retry is `not_found`.
+
+#### Forwarded statements are v2
+
+Local statements stay `ck-secret-use-statement/v1` and `ck-secret-flow-statement/v1`, byte
+for byte. A forwarded request produces `ck-secret-use-statement/v2` and
+`ck-secret-flow-statement/v2`: the v1 object plus one required key,
+`"asking_member_id":"fed-computer:…"`, RFC 8785 canonical as today. Approval checks the
+statement's `asking_member_id` equals the pending row's, and that the version is v2 exactly
+when the row's value is non-empty. The grant inherits the pending row's value. Delete
+statements are unchanged. The v2 tags are registered in `docs/domain-separators.txt`. Phone
+and Cingulate strict decoders reject v2 until they add it: only after the operator sets
+`secrets.home_member` is a v2 statement ever produced, because nothing forwards while the
+setting is unset.
+
+The v2 examples are the pinned flow vectors' forwarded cases
+(`crates/credentials-core/tests/vectors/secret-approval-v2.json` and
+`secret-flow-approval-v2.json`), decoded:
+
+<!-- golden:statement.use.v2 -->
+```json
+{"agent_id":"agent-A","asking_member_id":"fed-computer:11111111111111111111111111111111","coverage":"scope","durations":["once","hour","session","permanent"],"member_id":"fed-computer:22222222222222222222222222222222","request_expires_at_ms":1700000600000,"request_id":"01HF7YAT000000000000000001","scope":{"epoch":7,"kind":"head","owner":"reserved:prefrontal-core","ref":"H"},"secret":{"incarnation":"00000000000000000000000000000149","kind":"agent_api_key","name":"key"},"use":{"host":"x.test","location":"header:X-Api-Key","path_prefix":"/repos/a"},"v":"ck-secret-use-statement/v2"}
+```
+
+<!-- golden:statement.flow.v2 -->
+```json
+{"asking_member_id":"fed-computer:11111111111111111111111111111111","durations":["version"],"flow":{"code_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","flow_id":"daily-fetch","install_id":"install-A","version":7},"member_id":"fed-computer:22222222222222222222222222222222","request_expires_at_ms":1700000600000,"request_id":"01HF7YAT000000000000000001","secret":{"incarnation":"00000000000000000000000000000149","kind":"agent_api_key","name":"key"},"use":{"host":"x.test","location":"header:X-Api-Key","methods":["GET"],"path_prefix":"/repos/a"},"v":"ck-secret-flow-statement/v2"}
+```
+
+A login's v2 statement carries `use: {origin}` and no `methods`, as its v1 does.
+`secret_contract_tests.rs` (`forwarded_statements_are_v2_and_match_the_pinned_vectors`)
+pins the v2 key sets (each v1 set plus `asking_member_id`), checks the golden text equals
+the real encoders' pinned vectors byte for byte, and checks a forwarded approval from the
+real store carries the v2 tag naming the asker while the local one stays v1.
 
 ### Signed statement and envelope
 

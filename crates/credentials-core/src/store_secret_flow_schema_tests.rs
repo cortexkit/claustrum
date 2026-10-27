@@ -138,7 +138,7 @@ fn read_only_listing_works_at_all_three_schema_generations_without_migrating() {
         None,
     );
     let after = list_agent_secrets_read_only(&path).unwrap().unwrap();
-    assert_eq!(sqlite.with_conn(read_schema_version).unwrap(), 30);
+    assert_eq!(sqlite.with_conn(read_schema_version).unwrap(), 31);
     assert_eq!(after.phones, before.phones);
     let key = after.secrets.iter().find(|s| s.name == "ops-key").unwrap();
     assert_eq!(key.grants, before.secrets[0].grants);
@@ -174,7 +174,7 @@ fn read_only_listing_works_at_all_three_schema_generations_without_migrating() {
         .collect();
     ids.sort();
     assert_eq!(ids, ["agent-grant", "flow-A", "flow-B", "flow-login"]);
-    assert_eq!(sqlite.with_conn(read_schema_version).unwrap(), 30);
+    assert_eq!(sqlite.with_conn(read_schema_version).unwrap(), 31);
 }
 
 #[test]
@@ -195,7 +195,7 @@ fn migration_30_keeps_every_secret_row_and_marks_it_local() {
     EncryptedStore::migrate(&sqlite).unwrap();
     assert_eq!(
         sqlite.with_conn(read_schema_version).unwrap(),
-        SECRET_ASKING_MEMBER_SCHEMA_VERSION
+        newest_migration_version()
     );
     for (table, before) in tables.into_iter().zip(before) {
         let after = rows(&sqlite, table);

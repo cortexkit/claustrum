@@ -430,6 +430,20 @@ pub(super) fn sweep(
             &[id.as_bytes(), incarnation.as_bytes(), &expiry.to_le_bytes()],
         )?;
     }
+    sweep_release_receipts(tx, now)
+}
+
+/// Delete release receipts that can no longer answer a retry. This only reclaims
+/// space: a receipt lookup compares `expires_at_ms` with its own clock and never
+/// relies on this having run.
+pub(super) fn sweep_release_receipts(
+    tx: &rusqlite::Transaction<'_>,
+    now: i64,
+) -> rusqlite::Result<()> {
+    tx.execute(
+        "DELETE FROM secret_release_receipts WHERE expires_at_ms <= ?1",
+        [now],
+    )?;
     Ok(())
 }
 

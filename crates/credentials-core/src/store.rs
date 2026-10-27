@@ -142,6 +142,10 @@ const SECRET_USE_MEMBER_GRANT_SCHEMA_VERSION: u32 = 29;
 /// grant and pending approval request. Below it every row is this vault's own (`''`).
 pub const SECRET_ASKING_MEMBER_SCHEMA_VERSION: u32 = 30;
 
+/// The migration that added `secret_release_receipts`, which lets a paired computer
+/// retry a forwarded secret release and receive the same sealed reply.
+pub const SECRET_RELEASE_RECEIPT_SCHEMA_VERSION: u32 = 31;
+
 /// The audit ops that DEPOSIT a credential, so the earliest entry carrying one of
 /// them is that credential's birth instant.
 ///
@@ -919,6 +923,30 @@ const MIGRATIONS: &[Migration] = &[
         statements: "ALTER TABLE secret_grants ADD COLUMN asking_member_id TEXT NOT NULL DEFAULT ''; \
                      ALTER TABLE secret_flow_grants ADD COLUMN asking_member_id TEXT NOT NULL DEFAULT ''; \
                      ALTER TABLE secret_pending_requests ADD COLUMN asking_member_id TEXT NOT NULL DEFAULT '';",
+    },
+    // One row per secret release sealed for a paired computer, keyed by that computer's
+    // member id and the nonce from the request's AAD. A retry of the same request (same
+    // nonce, same AAD bytes) gets the stored `enc` and `ciphertext` back unchanged, so a
+    // reply lost in transit neither consumes a `once` grant twice nor writes a second
+    // release audit. The row records what made the release valid (the secret's
+    // incarnation and the grant used) so a retry is refused once either has gone, and
+    // `expires_at_ms` bounds how long a nonce can be replayed at all. Rows are deleted
+    // after expiry, but every lookup compares `expires_at_ms` itself.
+    Migration {
+        version: SECRET_RELEASE_RECEIPT_SCHEMA_VERSION,
+        statements: "CREATE TABLE secret_release_receipts (\
+                         requester     TEXT NOT NULL, \
+                         nonce         TEXT NOT NULL, \
+                         aad_sha256    TEXT NOT NULL, \
+                         incarnation   TEXT NOT NULL, \
+                         grant_kind    TEXT NOT NULL CHECK (grant_kind IN ('agent','once','flow')), \
+                         grant_id      TEXT NOT NULL, \
+                         enc           BLOB NOT NULL, \
+                         ciphertext    BLOB NOT NULL, \
+                         expires_at_ms INTEGER NOT NULL, \
+                         PRIMARY KEY (requester, nonce)\
+                     ); \
+                     CREATE INDEX secret_release_receipts_expiry ON secret_release_receipts(expires_at_ms);",
     },
 ];
 
@@ -12277,7 +12305,7 @@ mod tests {
     fn the_newest_migration_version_is_pinned_because_the_manifest_declares_it() {
         assert_eq!(
             newest_migration_version(),
-            30,
+            31,
             "the newest migration changed. This value is DECLARED in the module manifest \
              as store_schema_version, so a supervisor comparing declared-against-actual \
              sees it. Update the literal, and note the manifest consequence."
@@ -16252,4 +16280,8 @@ pub use store_agent_secrets::{
 pub use store_agent_secrets::{
     secret_phone_gate_status_read_only, PhoneDeposit, PhoneOperation, SecretDepositPublicKey,
     SecretUseOutcome,
+};
+/// Sealed releases to paired computers and the receipts that answer their retries.
+pub use store_agent_secrets::{
+    ForwardedUse, ReleaseRequest, SealedRelease, SECRET_RELEASE_RECEIPT_LIFETIME_MS,
 };

@@ -119,27 +119,148 @@ impl EncryptedStore {
             _ => {}
         }
         // Recheck under the writer fence so concurrent first releases audit only once.
-        let answer = self.fenced_write(|tx| {
-            let record = match self.check_secret_target(tx, &call.name, SecretSender::Basal, &call.target)? {
-                Ok(record) => record,
-                Err(refusal) => return Ok(Err(refusal)),
-            };
-            let grant = match choose_flow_grant(tx, call, asking_member, &record.incarnation)? {
-                Ok(grant) => grant,
-                Err(refusal) => return Ok(Err(refusal)),
-            };
-            let now = clock();
-            let reply = release(&record, now).map_err(|_| rusqlite_err("secret release failed"))?;
-            if !grant.first {
-                phone::audit(tx, &self.audit_key, AuditOp::SecretFirstRelease, Some(format!("secret|{}", call.name)), SecretSender::Basal.actor(),
-                    &[grant.id.as_bytes(), record.incarnation.as_bytes(), call.flow.flow_id.as_bytes(), call.flow.version.to_string().as_bytes()])?;
-            }
-            tx.execute("UPDATE secret_flow_grants SET first_released=1,last_use_ms=?2 WHERE grant_id=?1", rusqlite::params![grant.id, now])?;
-            Ok(Ok(SecretUseOutcome { reply, last_use: None }))
-        }).map_err(|_| SecretError::StoreError)?;
+        let answer = self
+            .fenced_write(|tx| {
+                let record = match self.check_secret_target(
+                    tx,
+                    &call.name,
+                    SecretSender::Basal,
+                    &call.target,
+                )? {
+                    Ok(record) => record,
+                    Err(refusal) => return Ok(Err(refusal)),
+                };
+                let grant = match choose_flow_grant(tx, call, asking_member, &record.incarnation)? {
+                    Ok(grant) => grant,
+                    Err(refusal) => return Ok(Err(refusal)),
+                };
+                let now = clock();
+                let reply =
+                    release(&record, now).map_err(|_| rusqlite_err("secret release failed"))?;
+                self.commit_flow_release(tx, call, &grant, &record, now)?;
+                Ok(Ok(SecretUseOutcome {
+                    reply,
+                    last_use: None,
+                }))
+            })
+            .map_err(|_| SecretError::StoreError)?;
         answer.map_err(|refusal| {
             self.refuse_secret_target(&call.name, SecretSender::Basal, &call.target, refusal)
         })
+    }
+
+    /// Mark a flow grant released, and write the release audit the first time it releases.
+    fn commit_flow_release(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        call: &SecretFlowUse,
+        grant: &Grant,
+        record: &Record,
+        now: i64,
+    ) -> rusqlite::Result<()> {
+        if !grant.first {
+            phone::audit(
+                tx,
+                &self.audit_key,
+                AuditOp::SecretFirstRelease,
+                Some(format!("secret|{}", call.name)),
+                SecretSender::Basal.actor(),
+                &[
+                    grant.id.as_bytes(),
+                    record.incarnation.as_bytes(),
+                    call.flow.flow_id.as_bytes(),
+                    call.flow.version.to_string().as_bytes(),
+                ],
+            )?;
+        }
+        tx.execute(
+            "UPDATE secret_flow_grants SET first_released=1,last_use_ms=?2 WHERE grant_id=?1",
+            rusqlite::params![grant.id, now],
+        )?;
+        Ok(())
+    }
+
+    /// [`Self::secret_flow_use_from`] for a flow run a paired computer forwarded, whose
+    /// release must cross to that computer sealed. `seal`, the release receipt and the
+    /// caller's duties are exactly as for [`Self::secret_use_sealed`]; a flow grant
+    /// counts as live while its row exists, since flow grants never expire.
+    pub fn secret_flow_use_sealed<E>(
+        &self,
+        call: &SecretFlowUse,
+        request: &ReleaseRequest<'_>,
+        seal: impl FnOnce(&Value) -> Result<SealedRelease, E>,
+        clock: impl Fn() -> i64,
+    ) -> Result<Result<ForwardedUse, E>, SecretError> {
+        request.validate()?;
+        agent_secret::validate_name(&call.name)?;
+        call.target.validate()?;
+        let method = call.method.as_ref().map(std::slice::from_ref);
+        agent_secret::validate_flow_methods(&call.target, method)?;
+        if call.flow.validate().is_err() {
+            self.record_secret_use_refusal(SecretSender::Basal, None, "flow_identity");
+            return Err(SecretError::NotFound);
+        }
+        let aad_sha256 = phone::hex(&payload_hash(request.aad));
+        let mut seal_failure = None;
+        let answer = self.fenced_write(|tx| {
+            let now = clock();
+            let record = match self.check_secret_target(
+                tx,
+                &call.name,
+                SecretSender::Basal,
+                &call.target,
+            )? {
+                Ok(record) => record,
+                Err(refusal) => return Ok(Forwarded::Refused(refusal)),
+            };
+            if let Some(replay) = replay(
+                tx,
+                request,
+                &aad_sha256,
+                &record.incarnation,
+                &[ReceiptGrant::Flow],
+                now,
+            )? {
+                return Ok(replay);
+            }
+            phone::sweep_release_receipts(tx, now)?;
+            let grant = match choose_flow_grant(tx, call, request.requester, &record.incarnation)? {
+                Ok(grant) => grant,
+                Err(refusal) => return Ok(Forwarded::Refused(refusal)),
+            };
+            let reply = release(&record, now).map_err(|_| rusqlite_err("secret release failed"))?;
+            let sealed = match seal(&reply) {
+                Ok(sealed) => sealed,
+                Err(error) => {
+                    seal_failure = Some(error);
+                    return Err(rusqlite_err("secret release seal failed"));
+                }
+            };
+            self.commit_flow_release(tx, call, &grant, &record, now)?;
+            write_receipt(
+                tx,
+                request,
+                &aad_sha256,
+                &record.incarnation,
+                ReceiptGrant::Flow,
+                &grant.id,
+                &sealed,
+                now,
+            )?;
+            Ok(Forwarded::Answer(Ok(ForwardedUse::Sealed(sealed))))
+        });
+        if let Some(error) = seal_failure {
+            return Ok(Err(error));
+        }
+        match answer.map_err(|_| SecretError::StoreError)? {
+            Forwarded::Answer(answer) => answer.map(Ok),
+            Forwarded::Refused(refusal) => Err(self.refuse_secret_target(
+                &call.name,
+                SecretSender::Basal,
+                &call.target,
+                refusal,
+            )),
+        }
     }
 
     pub fn revoke_flow_grants(

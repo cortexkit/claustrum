@@ -8,7 +8,10 @@ pub use phone::{secret_phone_gate_status_read_only, PhoneDeposit, PhoneOperation
 mod approval;
 #[path = "store_secret_use.rs"]
 mod use_secret;
-pub use use_secret::SecretUseOutcome;
+pub use use_secret::{
+    ForwardedUse, ReleaseRequest, SealedRelease, SecretUseOutcome,
+    SECRET_RELEASE_RECEIPT_LIFETIME_MS,
+};
 #[path = "store_secret_operator.rs"]
 mod operator;
 #[allow(unused_imports)]

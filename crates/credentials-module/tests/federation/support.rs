@@ -365,7 +365,34 @@ struct StandInState {
     /// Member harnesses presented on forwarded calls, in arrival order. A call that
     /// carries no harness is recorded as the empty string.
     harnesses: Vec<String>,
+    /// One command line per accepted connection, in accept order. A connection that
+    /// has ended stops receiving, so a command sent to it is simply refused.
+    connections: Vec<tokio::sync::mpsc::UnboundedSender<Command>>,
+    /// `(target module, channel)` for every route the stand-in opened, in order.
+    route_channels: Vec<(String, u16)>,
 }
+
+/// What a test asks a live connection to do, outside any request it sent.
+#[derive(Debug)]
+enum Command {
+    /// Send a route `Goodbye` for every route open to `target`, leaving the connection
+    /// open, and report how many were sent once they are written.
+    GoodbyeRoutes {
+        target: String,
+        sent: tokio::sync::oneshot::Sender<usize>,
+    },
+    /// End the connection from the stand-in's side (a channel-0 `Goodbye` first when
+    /// `goodbye` is set, then closing the write side), and report when the client has
+    /// closed its side too.
+    Close {
+        goodbye: bool,
+        closed: tokio::sync::oneshot::Sender<()>,
+    },
+}
+
+/// How long a stand-in command may take before a test reports it hung. Generous: it
+/// only ever ends a broken test, never a passing one.
+const COMMAND_HANG_GUARD: Duration = Duration::from_secs(10);
 
 impl SharedCallosumStandIn {
     pub fn stray_error_before(&self, method: &str, code: &str) {
@@ -381,6 +408,83 @@ impl SharedCallosumStandIn {
             .unwrap()
             .held_opens
             .insert(target.into(), held);
+    }
+
+    /// Close every route open to `target_module` with a route `Goodbye`, on every live
+    /// connection, the way subc drains a route whose far end (callosum, say) went
+    /// away. The connections stay open. Returns how many routes it closed, after
+    /// attempting to write each `Goodbye`.
+    pub async fn goodbye_routes(&self, target_module: &str) -> usize {
+        let mut replies = Vec::new();
+        for connection in self.live_connections() {
+            let (sent, reply) = tokio::sync::oneshot::channel();
+            let command = Command::GoodbyeRoutes {
+                target: target_module.to_string(),
+                sent,
+            };
+            if connection.send(command).is_ok() {
+                replies.push(reply);
+            }
+        }
+        let mut closed = 0;
+        for reply in replies {
+            closed += tokio::time::timeout(COMMAND_HANG_GUARD, reply)
+                .await
+                .expect("the stand-in sent its route goodbyes")
+                .unwrap_or(0);
+        }
+        closed
+    }
+
+    /// End every live connection from the stand-in's side, with a channel-0 `Goodbye`
+    /// first when `goodbye` is set. Returns once each client has closed its own side
+    /// in turn, which is the client's proof that its reader saw the connection end.
+    pub async fn close_connections(&self, goodbye: bool) {
+        let mut waits = Vec::new();
+        for connection in self.live_connections() {
+            let (closed, wait) = tokio::sync::oneshot::channel();
+            if connection.send(Command::Close { goodbye, closed }).is_ok() {
+                waits.push(wait);
+            }
+        }
+        assert!(!waits.is_empty(), "no live connection to close");
+        for wait in waits {
+            let _ = tokio::time::timeout(COMMAND_HANG_GUARD, wait)
+                .await
+                .expect("the client never closed its side of the ended connection");
+        }
+    }
+
+    /// How many connections the stand-in has accepted and authenticated.
+    pub fn connections(&self) -> usize {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .connections
+            .len()
+    }
+
+    /// The channel each route opened to `target_module` was given, in order.
+    pub fn route_channels(&self, target_module: &str) -> Vec<u16> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .route_channels
+            .iter()
+            .filter(|(target, _)| target == target_module)
+            .map(|(_, channel)| *channel)
+            .collect()
+    }
+
+    fn live_connections(&self) -> Vec<tokio::sync::mpsc::UnboundedSender<Command>> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .connections
+            .iter()
+            .filter(|connection| !connection.is_closed())
+            .cloned()
+            .collect()
     }
 
     /// A successful round trip on the same connection orders the reader after all
@@ -667,16 +771,75 @@ async fn serve_one(
     }
     let next_channel = AtomicU64::new(9);
     let mut open_routes: HashMap<u16, (String, String, Value)> = HashMap::new();
+    // The epoch each open route was handed, so a route `Goodbye` names the right one.
+    let mut route_epochs: HashMap<u16, u32> = HashMap::new();
+    // Routes the stand-in closed with a route `Goodbye`: channel -> (target, epoch).
+    // Like subc, it drops a request on a closed route without answering, and hands the
+    // channel number to the next route opened to the same target, at a later epoch.
+    let mut closed_routes: HashMap<u16, (String, u32)> = HashMap::new();
     // Requests a test answered with `Reply::Stall`: recorded and never replied to.
     let mut stalled: Vec<(u16, u32, u64)> = Vec::new();
+    // Tests waiting for this connection to end after `close_connections`.
+    let mut closing: Vec<tokio::sync::oneshot::Sender<()>> = Vec::new();
+    let (command_sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+    state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .connections
+        .push(command_sender);
     // A delayed reply is answered from its own task, so two tasks may write to the
     // socket at once; the split writer keeps their frames from interleaving.
     let (mut reader, writer) = tokio::io::split(stream);
     let writer = Arc::new(tokio::sync::Mutex::new(writer));
+    // Frames are read on a task of their own and handed over a channel, so the loop
+    // below can wait for a frame and a test's command at once without abandoning a
+    // half-read frame.
+    let (frame_sender, mut frames) = tokio::sync::mpsc::channel(64);
+    let read_task = tokio::spawn(async move {
+        while let Ok(Some(frame)) = read_frame(&mut reader).await {
+            if frame_sender.send(frame).await.is_err() {
+                break;
+            }
+        }
+    });
 
     loop {
-        let Ok(Some(frame)) = read_frame(&mut reader).await else {
-            break;
+        let frame = tokio::select! {
+            frame = frames.recv() => match frame {
+                Some(frame) => frame,
+                None => break,
+            },
+            Some(command) = commands.recv() => {
+                match command {
+                    Command::GoodbyeRoutes { target, sent } => {
+                        let channels: Vec<u16> = open_routes
+                            .iter()
+                            .filter(|(_, (open_target, _, _))| *open_target == target)
+                            .map(|(channel, _)| *channel)
+                            .collect();
+                        for channel in &channels {
+                            open_routes.remove(channel);
+                            let epoch = route_epochs.remove(channel).unwrap_or(1);
+                            closed_routes.insert(*channel, (target.clone(), epoch));
+                            let goodbye = goodbye_frame(*channel, epoch);
+                            let _ = write_frame(&mut *writer.lock().await, &goodbye).await;
+                        }
+                        let _ = sent.send(channels.len());
+                    }
+                    Command::Close { goodbye, closed } => {
+                        if goodbye {
+                            let _ = write_frame(&mut *writer.lock().await, &goodbye_frame(0, 0))
+                                .await;
+                        }
+                        let _ = tokio::io::AsyncWriteExt::shutdown(&mut *writer.lock().await)
+                            .await;
+                        // Keep reading: the connection ends when the client closes its
+                        // side, which is what the waiting test is told.
+                        closing.push(closed);
+                    }
+                }
+                continue;
+            }
         };
         if frame.header.ty == FrameType::Goodbye {
             for (target, _, _) in open_routes.values() {
@@ -746,8 +909,24 @@ async fn serve_one(
                         );
                         continue;
                     }
-                    let channel = next_channel.fetch_add(1, Ordering::Relaxed) as u16;
-                    let epoch = 1;
+                    let reopened = closed_routes
+                        .iter()
+                        .filter(|(_, (closed_target, _))| *closed_target == target)
+                        .map(|(channel, (_, epoch))| (*channel, *epoch))
+                        .min();
+                    let (channel, epoch) = match reopened {
+                        Some((channel, epoch)) => {
+                            closed_routes.remove(&channel);
+                            (channel, epoch + 1)
+                        }
+                        None => (next_channel.fetch_add(1, Ordering::Relaxed) as u16, 1),
+                    };
+                    state
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .route_channels
+                        .push((target.clone(), channel));
+                    route_epochs.insert(channel, epoch);
                     open_routes.insert(channel, (target, harness, body.clone()));
                     let reply = response_on_channel(
                         0,
@@ -763,6 +942,12 @@ async fn serve_one(
                     let _ = write_frame(&mut *writer.lock().await, &reply).await;
                 }
             }
+            continue;
+        }
+
+        // A request on a route the stand-in closed is dropped unanswered, as subc drops
+        // a frame on a dead route: only a client that reopens the route gets a reply.
+        if closed_routes.contains_key(&frame.header.channel) {
             continue;
         }
 
@@ -940,6 +1125,24 @@ async fn serve_one(
     }
     // Nothing replies to a held request once the connection is gone.
     stalled.clear();
+    read_task.abort();
+    for closed in closing {
+        let _ = closed.send(());
+    }
+}
+
+/// A `Goodbye` frame: on a route channel it closes that route, on channel 0 the whole
+/// connection. It is a pure header frame, so it carries no body.
+fn goodbye_frame(channel: u16, epoch: u32) -> Frame {
+    Frame::build(
+        FrameType::Goodbye,
+        Flags::new(false, Priority::Passive, false),
+        channel,
+        epoch,
+        0,
+        Vec::new(),
+    )
+    .expect("goodbye frame")
 }
 
 fn hold_reply(

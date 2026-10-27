@@ -16,13 +16,15 @@
 //! 15 s for `admin.op` (`route_client.rs`). If the vault's own call outlived those, the
 //! consumer would see a transport timeout instead of the vault's definite refusal.
 //!
-//! A binding is a cache entry, not a fixture. Any missed deadline, `Goodbye`, EOF or
-//! IO error drops it, so the next call opens a fresh route. A restarted subc or
+//! A binding is a cache entry, not a fixture. A missed deadline or a `Goodbye` on its
+//! route channel drops it, and a binding never outlives the connection it was opened
+//! on, so the next call opens a fresh route. A restarted subc or
 //! callosum is silent about the old route (frames on a dead epoch are dropped without
 //! an error, see `docs/wire-contract-v1.md` §9), and this is what turns that silence
 //! into one transient failure followed by a success instead of a vault restart.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -30,6 +32,7 @@ use serde_json::{json, Value};
 use subc_control::ConsumerIdentity;
 use subc_protocol::{BindIdentity, Flags, Frame, FrameType, Priority, RouteTarget};
 use subc_transport::{authenticate_client, connection_file, read_frame, write_frame};
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::sync::{oneshot, Mutex as AsyncMutex};
 
@@ -119,6 +122,13 @@ pub struct RouteCall {
 struct Binding {
     channel: u16,
     epoch: u32,
+    /// The [`Link::id`] of the connection the route was opened on. A route belongs to
+    /// one connection, so a binding is never sent on any other.
+    link: u64,
+    /// The channel's [`Link::route_closures`] count when the route opened. A higher
+    /// count means the daemon has closed this route since, even if it has handed the
+    /// same channel number to a newer route.
+    closures: u64,
 }
 
 /// The outbound client. Cheap to clone; every clone shares one connection, one
@@ -140,18 +150,59 @@ pub struct OutboundClient {
 /// - a call that misses its deadline withdraws only its own waiter and drops only its
 ///   own binding, leaving the connection and every other call alone.
 ///
-/// The connection dies as a unit, and only for a reason that condemns all of it: EOF,
-/// a daemon `Goodbye`, an IO error or a frame that cannot be read. That fails every
-/// pending call, and the call that observes it retires the link so the next call
-/// reconnects. Until then, calls still queue on the dead link and fail at once rather
-/// than each waiting out its own deadline.
+/// The daemon can end one route or the whole connection, and the reader tells the two
+/// apart:
+///
+/// - A `Goodbye` on a route channel closes that route alone. subc sends one per route
+///   when the far end of the route goes away (a callosum restart, say) and keeps the
+///   connection open. The reader fails only the calls waiting on that channel, counts
+///   the closure in [`Link::route_closures`], and keeps reading. A cached binding
+///   saved under an earlier count is rejected on reuse, so the next call on that
+///   route opens it again.
+/// - A `Goodbye` on channel 0, EOF, an IO error or a frame that cannot be read ends the
+///   connection. The reader sets [`Link::closed`], fails every pending call, closes its
+///   write side so the daemon can release the connection, and stops.
+///
+/// A closed link is never used again, whether or not a call was in flight to see it
+/// die: the client treats a closed link as absent and dials a new one. A call that
+/// registers its waiter after the reader has already failed the pending ones sees the
+/// flag and fails at once, rather than writing into a socket nobody reads and waiting
+/// out its whole deadline.
 struct Link {
-    /// Names the link in its `Debug` output, so a log line can say which one died.
-    /// Nothing else uses it: the identity that matters is the `Arc` both the client and
-    /// the reader task hold.
+    /// Names the link in its `Debug` output, so a log line can say which one died, and
+    /// ties each [`Binding`] to the connection its route was opened on.
     id: u64,
     write: AsyncMutex<tokio::io::WriteHalf<TcpStream>>,
     waiters: std::sync::Mutex<HashMap<WaiterKey, oneshot::Sender<Result<Frame, String>>>>,
+    /// Set by the reader before it fails the pending calls and stops. Nothing reads
+    /// replies on a closed link, so nothing may be sent on it.
+    closed: AtomicBool,
+    /// How many route `Goodbye`s the reader has seen on each channel. subc may reuse a
+    /// channel number for a later route, so a closure is counted rather than recorded
+    /// as a yes/no: a binding is live only while the count is still the one it was
+    /// opened under.
+    route_closures: std::sync::Mutex<HashMap<u16, u64>>,
+}
+
+impl Link {
+    fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::SeqCst)
+    }
+
+    fn closures(&self, channel: u16) -> u64 {
+        self.route_closures
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&channel)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// True when `binding` was opened on this connection and its route has not been
+    /// closed since.
+    fn holds(&self, binding: &Binding) -> bool {
+        binding.link == self.id && binding.closures == self.closures(binding.channel)
+    }
 }
 
 impl std::fmt::Debug for Link {
@@ -329,8 +380,14 @@ impl OutboundClient {
         Ok(link)
     }
 
+    /// The live link, or `None` when there is none or the one held has closed. A closed
+    /// link is dropped here, so its socket is released even if no call ever saw it die.
     async fn current_link(&self) -> Option<Arc<Link>> {
-        self.inner.connection.lock().await.clone()
+        let mut slot = self.inner.connection.lock().await;
+        if slot.as_ref().is_some_and(|link| link.is_closed()) {
+            *slot = None;
+        }
+        slot.clone()
     }
 
     /// Split a freshly handshaken socket from its read half and start the reader task.
@@ -340,6 +397,8 @@ impl OutboundClient {
             id: self.next_corr(),
             write: tokio::sync::Mutex::new(write_half),
             waiters: std::sync::Mutex::new(HashMap::new()),
+            closed: AtomicBool::new(false),
+            route_closures: std::sync::Mutex::new(HashMap::new()),
         });
         let reader_link = Arc::clone(&link);
         tokio::spawn(async move {
@@ -382,6 +441,7 @@ impl OutboundClient {
                     WaiterKey::Control(corr),
                     budget,
                     "prelude",
+                    None,
                 )
                 .await?;
             if reply.header.ty == FrameType::Error {
@@ -389,6 +449,9 @@ impl OutboundClient {
             }
         }
 
+        // A cached binding counts only if its route is still open on this very
+        // connection: one opened on a connection that has since closed, or closed by a
+        // route `Goodbye`, is reopened instead of written into a route nobody serves.
         let cached = {
             self.inner
                 .bindings
@@ -396,7 +459,8 @@ impl OutboundClient {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .get(route_key)
                 .cloned()
-        };
+        }
+        .filter(|binding| link.holds(binding));
         let binding = match cached {
             Some(binding) => binding,
             None => {
@@ -408,12 +472,13 @@ impl OutboundClient {
                         WaiterKey::Control(corr),
                         budget,
                         "route.open",
+                        None,
                     )
                     .await?;
                 if reply.header.ty == FrameType::Error {
                     return Err(failure(control_refusal(&reply.body)));
                 }
-                let opened = parse_open(&reply.body)?;
+                let opened = parse_open(&reply.body, &link)?;
                 self.inner
                     .bindings
                     .lock()
@@ -441,6 +506,7 @@ impl OutboundClient {
                 WaiterKey::Route(binding.channel, corr),
                 budget,
                 "request",
+                Some(&binding),
             )
             .await?;
         if reply.header.channel == 0 && reply.header.ty == FrameType::Error {
@@ -460,6 +526,9 @@ impl OutboundClient {
     /// The waiter is registered before the write, so a reply that arrives immediately
     /// cannot be missed. Either way, this call removes its own waiter before returning,
     /// and a deadline withdraws it, so no later reply can be delivered to it.
+    ///
+    /// `route` is the binding a route request travels on, and `None` for a channel-0
+    /// control request.
     async fn exchange(
         &self,
         link: &Arc<Link>,
@@ -467,12 +536,33 @@ impl OutboundClient {
         key: WaiterKey,
         budget: tokio::time::Instant,
         stage: &'static str,
+        route: Option<&Binding>,
     ) -> Result<Frame, LinkFailure> {
         let (sender, reply) = oneshot::channel();
         link.waiters
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(key, sender);
+        // The reader marks a link closed (or counts a route closure) before it fails
+        // the waiters already registered. Checking after registering therefore leaves
+        // no gap: either the reader's sweep finds this waiter, or this check sees the
+        // mark. Without it a call that raced the reader's exit would write into a
+        // socket nobody reads and wait out its whole deadline.
+        if link.is_closed() {
+            withdraw(link, key);
+            return Err(LinkFailure {
+                error: OutboundError::Unavailable(format!(
+                    "the connection closed before the {stage} was sent"
+                )),
+                dead: Some(Arc::clone(link)),
+            });
+        }
+        if route.is_some_and(|binding| !link.holds(binding)) {
+            withdraw(link, key);
+            return Err(failure(OutboundError::Unavailable(format!(
+                "the route closed before the {stage} was sent"
+            ))));
+        }
         let written = self
             .write(link, &frame, budget, stage)
             .await
@@ -489,9 +579,12 @@ impl OutboundClient {
         }
         match tokio::time::timeout_at(budget, reply).await {
             Ok(Ok(Ok(frame))) => Ok(frame),
+            // The reader failed this call. If it closed the whole connection, the call
+            // hands the link back to be retired; a route `Goodbye` leaves the link
+            // healthy and costs this call only its binding.
             Ok(Ok(Err(why))) => Err(LinkFailure {
                 error: OutboundError::Unavailable(why),
-                dead: Some(Arc::clone(link)),
+                dead: link.is_closed().then(|| Arc::clone(link)),
             }),
             Ok(Err(_)) => Err(LinkFailure {
                 error: OutboundError::Unavailable(format!("the {stage} reply channel closed")),
@@ -552,8 +645,9 @@ fn withdraw(link: &Link, key: WaiterKey) -> bool {
 /// The one reader of a connection. Every frame it reads is handed to the call waiting
 /// for it; a frame nobody waits for (a late reply for a call that timed out, a ping) is
 /// dropped, because a dropped request can still produce a reply for an earlier
-/// correlation id. A frame that proves the connection is gone fails every pending call
-/// and ends this task, which is what makes the next call dial a fresh connection.
+/// correlation id. A route `Goodbye` fails that route's calls and reading goes on. A
+/// frame that proves the connection is gone closes the link and ends this task, and
+/// the next call, seeing the link closed, dials a fresh connection.
 async fn read_replies<R>(mut reader: R, link: Arc<Link>)
 where
     R: tokio::io::AsyncRead + Unpin,
@@ -562,7 +656,11 @@ where
         match read_frame(&mut reader).await {
             Ok(Some(frame)) => {
                 if frame.header.ty == FrameType::Goodbye {
-                    fail_all(&link, "the daemon said goodbye");
+                    if frame.header.channel != 0 {
+                        close_route(&link, frame.header.channel);
+                        continue;
+                    }
+                    close_link(&link, "the daemon said goodbye").await;
                     return;
                 }
                 if frame.header.ty == FrameType::Ping || frame.header.ty == FrameType::Pong {
@@ -594,14 +692,59 @@ where
                 }
             }
             Ok(None) => {
-                fail_all(&link, "the connection closed");
+                close_link(&link, "the connection closed").await;
                 return;
             }
             Err(error) => {
-                fail_all(&link, &format!("the connection failed: {error}"));
+                close_link(&link, &format!("the connection failed: {error}")).await;
                 return;
             }
         }
+    }
+}
+
+/// End a connection the reader can no longer read: mark it closed first, so no call
+/// registers a waiter that the sweep below would miss, then fail every pending call
+/// and close the write side. Closing the write side tells the daemon this client has
+/// finished with the connection, so it stops holding routes for a socket nobody
+/// reads. The write lock is only ever held for one frame's bounded write, and the wait
+/// for it is bounded here too, so the reader always finishes.
+async fn close_link(link: &Link, why: &str) {
+    link.closed.store(true, Ordering::SeqCst);
+    fail_all(link, why);
+    let _ = tokio::time::timeout(CONNECT_DEADLINE, async {
+        let _ = link.write.lock().await.shutdown().await;
+    })
+    .await;
+}
+
+/// Close one route after the daemon's `Goodbye` on its channel. The closure is counted
+/// before the route's waiters are failed, for the same no-gap reason as
+/// [`close_link`]. Calls on other channels, and the connection, are untouched.
+fn close_route(link: &Link, channel: u16) {
+    *link
+        .route_closures
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .entry(channel)
+        .or_insert(0) += 1;
+    let pending: Vec<_> = {
+        let mut waiters = link
+            .waiters
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let on_route: Vec<WaiterKey> = waiters
+            .keys()
+            .copied()
+            .filter(|key| matches!(key, WaiterKey::Route(on, _) if *on == channel))
+            .collect();
+        on_route
+            .into_iter()
+            .filter_map(|key| waiters.remove(&key))
+            .collect()
+    };
+    for waiter in pending {
+        let _ = waiter.send(Err("the daemon closed the route".to_string()));
     }
 }
 
@@ -677,7 +820,7 @@ fn control_frame(corr: u64, body: &Value) -> Frame {
     .expect("valid control frame")
 }
 
-fn parse_open(body: &[u8]) -> Result<Binding, OutboundError> {
+fn parse_open(body: &[u8], link: &Link) -> Result<Binding, OutboundError> {
     let value: Value = serde_json::from_slice(body)
         .map_err(|error| OutboundError::Unavailable(format!("decode route.open: {error}")))?;
     // `call` hands back the frame's `result` member, whatever the channel: one shape for
@@ -691,7 +834,15 @@ fn parse_open(body: &[u8]) -> Result<Binding, OutboundError> {
         .as_u64()
         .and_then(|epoch| u32::try_from(epoch).ok())
         .ok_or_else(|| OutboundError::Unavailable("route.open returned no route_epoch".into()))?;
-    Ok(Binding { channel, epoch })
+    Ok(Binding {
+        channel,
+        epoch,
+        link: link.id,
+        // Read after the reply arrived: the reader handles frames in order, so any
+        // `Goodbye` for an earlier route on this channel number is already counted and
+        // does not condemn this new one.
+        closures: link.closures(channel),
+    })
 }
 
 /// Connect and complete the client handshake under `deadline` (the connect attempt

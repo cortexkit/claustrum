@@ -47,6 +47,9 @@ use crate::support::{
     SharedCallosumStandIn, TwoVaults, VaultFixture, FAKE_ADAPTERS, TARGET_MODULE,
 };
 
+#[path = "secret_lifecycle.rs"]
+mod lifecycle;
+
 const PAIRING_B: &str = "pair-b";
 const PAIRING_C: &str = "pair-c";
 /// A third computer, paired with A and granted `secret_use` there, used where a test
@@ -282,7 +285,9 @@ type Script = Arc<Mutex<VecDeque<Step>>>;
 /// scripted forger holding A's key.
 #[derive(Clone)]
 struct HomeLine {
-    home: Arc<HomeVault>,
+    // A responder must not keep an old engine and its store lease alive when the
+    // home is stopped. An in-flight serve upgrades this reference only for its call.
+    home: std::sync::Weak<HomeVault>,
     member: String,
     script: Script,
     home_pem: String,
@@ -331,7 +336,8 @@ impl HomeLine {
     }
 
     async fn serve(&self, method: &str, params: &Value) -> Reply {
-        match self.home.serve(&self.member, method, params).await {
+        let home = self.home.upgrade().expect("the serving home is running");
+        match home.serve(&self.member, method, params).await {
             HomeAnswer::Reply(body) => Reply::Ok(body),
             HomeAnswer::InvalidParams(_) => Reply::RouteRefusal("invalid_params".into()),
         }
@@ -461,7 +467,7 @@ impl Rig {
         let home = Arc::new(home);
         let script: Script = Arc::default();
         let line = HomeLine {
-            home: Arc::clone(&home),
+            home: Arc::downgrade(&home),
             member: requester.clone(),
             script: Arc::clone(&script),
             home_pem: home_pem.clone(),
@@ -547,8 +553,9 @@ impl Rig {
             .unwrap();
         let issued = self.vaults.a.clock.wall_ms();
         let expiry = match duration {
+            "once" => issued + 600_000,
             "hour" => issued + 3_600_000,
-            "permanent" => 0,
+            "permanent" | "version" => 0,
             other => panic!("no test duration {other}"),
         };
         // serde_json orders object keys, and every value here is an ASCII string or a
@@ -634,7 +641,7 @@ impl Rig {
         // C reads A's announced key from its own stand-in, and its calls reach A as C.
         callosum.announce_peer_key(&self.home_id(), &hex(&self.home_public));
         let line = HomeLine {
-            home: Arc::clone(&self.home),
+            home: Arc::downgrade(&self.home),
             member: member.clone(),
             script: Arc::default(),
             home_pem: self.home_pem.clone(),

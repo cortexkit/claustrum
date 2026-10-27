@@ -14,7 +14,7 @@
 //! The phone's approval is a signed envelope applied to A's store, with A's virtual
 //! clock, as A's phone transport applies it after its pairing lookup.
 //!
-//! Every test ends with the reply-custody check: no request B sent and no reply the
+//! The forwarding-flow tests end with the reply-custody check: no request B sent and no reply the
 //! stand-in carried holds plaintext secret material, and no reply to an op the
 //! production catalogue declares a mutate holds sealed material.
 
@@ -113,7 +113,8 @@ fn error_code(reply: &Value) -> &str {
         .unwrap_or_else(|| panic!("expected a refusal, got {reply}"))
 }
 
-/// The statement an `approval_required` reply asks the phone to sign.
+/// The statement in an `approval_required` reply; the phone's signed envelope carries
+/// its SHA-256 digest.
 fn statement(reply: &Value) -> Value {
     assert_eq!(reply["status"], "approval_required", "{reply}");
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD

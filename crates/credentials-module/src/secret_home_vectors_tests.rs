@@ -43,37 +43,30 @@ mod secret_home_vectors {
     }
 
     /// Ask `method` on the phone channel with `lookup` as callosum's paired-devices
-    /// answer, and return the reply body bytes the way the phone route delivers them:
-    /// the phone channel's answer, or the error body on its own for an Error frame.
+    /// answer, and return the Response body bytes the phone route writes for it. The
+    /// route wraps every `PhoneAnswer::Reply` in `result`, a refusal body included
+    /// (`{"result":{"error":…}}`), exactly as the daemon's phone dispatch does; only
+    /// malformed params and the permissions ops become Error frames, and none of the
+    /// pinned cases is one of those.
     async fn phone_bytes(
         store: &Arc<EncryptedStore>,
         fingerprint: &str,
         method: &str,
         lookup: Option<serde_json::Value>,
     ) -> Vec<u8> {
-        let answer = sc_answer(
-            secret_phone::serve_with_lookup(
-                Arc::clone(store),
-                fingerprint,
-                method,
-                &json!({}),
-                tokio::time::Instant::now() + secret_phone::PHONE_OP_DEADLINE,
-                async move { lookup },
-            )
-            .await,
-        );
-        serde_json::to_vec(&frame(answer)).expect("reply bytes")
-    }
-
-    /// The body the phone route writes for an answer: a reply wrapped in `result`, an
-    /// Error frame body (a bare `{"error":…}`) as it is.
-    fn frame(answer: serde_json::Value) -> serde_json::Value {
-        match answer {
-            serde_json::Value::Object(reply) if reply.contains_key("error") => {
-                serde_json::json!(reply)
-            }
-            reply => wrap_result(reply),
-        }
+        let answer = secret_phone::serve_with_lookup(
+            Arc::clone(store),
+            fingerprint,
+            method,
+            &json!({}),
+            tokio::time::Instant::now() + secret_phone::PHONE_OP_DEADLINE,
+            async move { lookup },
+        )
+        .await;
+        let secret_phone::PhoneAnswer::Reply(reply) = answer else {
+            panic!("{method}: a pinned phone case must be a Response, not an Error frame");
+        };
+        serde_json::to_vec(&wrap_result(reply)).expect("reply bytes")
     }
 
     /// One vault, used for one case at a time so each case sets its own role.
@@ -290,9 +283,9 @@ mod secret_home_vectors {
         let refused_list = remote.phone("secret.list", Some(paired_devices())).await;
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&refused_list).unwrap(),
-            json!({"error":{
+            json!({"result":{"error":{
                 "code":"secret_home_elsewhere","class":"permanent","remedy_member":HOME_MEMBER,
-            }})
+            }}})
         );
         assert_eq!(
             remote.store.read_audit(None).unwrap().len(),
@@ -312,9 +305,9 @@ mod secret_home_vectors {
         let incomplete = unplaceable.ask_home().await;
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&incomplete).unwrap(),
-            json!({"error":{
+            json!({"result":{"error":{
                 "code":"remote_setup_incomplete","class":"permanent","remedy_member":SELF_MEMBER,
-            }})
+            }}})
         );
 
         // `secret.home` is a phone op: a route whose caller is an ordinary principal

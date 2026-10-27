@@ -909,12 +909,13 @@ fn help_verb(verb: &str) -> String {
         "member" => {
             "ck auth member grant|revoke --member <member> --operation remote_read\n\
              \x20                    (--id <credential> | --category <name>)\n\
-             \x20 member grant|revoke --member <member> --operation transfer_deliver\n\
+             \x20 member grant|revoke --member <member> --operation transfer_deliver|secret_use\n\
              \x20 member list\n\
              \n\
              \x20 --member <member>    the other member (fed-computer:<32 hex>)\n\
              \x20 --operation <op>     remote_read (fetch access tokens for a login homed\n\
-             \x20                      here) or transfer_deliver (send transfers here)\n\
+             \x20                      here), transfer_deliver (send transfers here) or\n\
+             \x20                      secret_use (forward agent-secret calls here)\n\
              \x20 --id <credential>    remote_read on one credential\n\
              \x20 --category <name>    remote_read on every credential in a category\n\
              \n\

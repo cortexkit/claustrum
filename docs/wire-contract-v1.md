@@ -1960,7 +1960,7 @@ core's stored hash: 64 lowercase hex, compared byte for byte and never recompute
 
 Basal is the only caller of `secret.request_flow_approval`, `secret.revoke_flow_grants` and
 a flow-run `secret.use`; every other caller gets the uniform `not_found` before its params
-are read. Basal's `secret.use` is flow-only: a remark without the flow attributes is that
+are read. Basal's `secret.use` is flow-only: a stamp without the flow attributes is that
 uniform `not_found` too, never an asking scope, so basal can never reach an agent grant.
 The reverse holds as well — a flow grant never satisfies `reserved:aft` or
 `reserved:cerebellum`, whose `secret.use` keeps its closed key set and its

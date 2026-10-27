@@ -1401,6 +1401,7 @@ fn the_manifest_shows_no_read_surface_op_can_trigger_a_send() {
         "secret_contract_tests.rs",
         "secret_flow.rs",
         "secret_flow_contract_tests.rs",
+        "secret_home_vectors_tests.rs",
         "test_support.rs",
         "federation/ingress.rs",
         "federation/outbound.rs",

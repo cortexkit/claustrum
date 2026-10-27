@@ -1384,20 +1384,14 @@ impl HomeVault {
         self.note_secret_event(subject, member, reason);
     }
 
-    /// One `secret_use_refusal` diagnostic row naming the member. Best effort, like
-    /// [`Self::note_refusal`].
+    /// One `secret_use_refusal` diagnostic row naming the member, under the forwarded
+    /// call's own subject. Best effort, like [`Self::note_refusal`]. It goes through the
+    /// secret writer: the generic credential writer files any `secret|<name>` subject
+    /// under `credential.invalid_id`, which would hide which secret was refused.
     fn note_secret_event(&self, subject: &str, member: &str, reason: &str) {
-        let _ = self.engine.store().record_auth_event(
-            subject,
-            AuthObservation {
-                kind: AuthEventKind::SecretUseRefusal.as_str(),
-                provider_status: None,
-                detail: Some(reason),
-                reporter_source: None,
-                principal: Some(AuthEventPrincipal::Member(member)),
-            },
-            None,
-        );
+        self.engine
+            .store()
+            .record_member_secret_refusal(member, subject, reason);
     }
 
     /// Step 2: the member's current pairing id from callosum.

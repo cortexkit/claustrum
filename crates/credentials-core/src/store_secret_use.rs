@@ -157,6 +157,31 @@ impl EncryptedStore {
         });
     }
 
+    /// Record, on the secret home, a refusal of a call another computer forwarded, under
+    /// that computer's member principal. `subject` is the forwarded call's subject: a
+    /// `secret|<name>` subject, which the generic credential writer would rewrite to
+    /// `credential.invalid_id`, or a forwarded op name. The caller must have
+    /// authenticated `member`. Best effort, like the other secret diagnostics.
+    pub fn record_member_secret_refusal(&self, member: &str, subject: &str, detail: &str) {
+        let _ = self.store.with_conn(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            append_secret_auth_event_tx(
+                &tx,
+                subject,
+                &AuthObservation {
+                    kind: AuthEventKind::SecretUseRefusal.as_str(),
+                    provider_status: None,
+                    detail: Some(detail),
+                    reporter_source: None,
+                    principal: Some(AuthEventPrincipal::Member(member)),
+                },
+                None,
+                false,
+            )?;
+            tx.commit()
+        });
+    }
+
     /// Record one secret call this vault forwarded to its secret home, under the local
     /// `sender`, with `outcome`, the code the sender was answered with. The subject is
     /// `secret|<name>`, or `secret-use|unaddressed` when the call named no valid secret.
@@ -1543,6 +1568,53 @@ mod forward_audit_tests {
                 row("secret|key", "not_found", "aft"),
                 row("secret|key", "released", "aft"),
                 row("secret|key", "released", "cerebellum"),
+            ]
+        );
+    }
+
+    /// A home's refusal of a forwarded call is filed under the secret it named and the
+    /// member that asked. The generic credential writer would have filed it under
+    /// `credential.invalid_id`, hiding both which secret and that it was forwarded.
+    #[test]
+    fn a_member_refusal_is_filed_under_its_secret_and_member() {
+        let (_root, store) = rig("secret-member-refusal", 68);
+        let member = "fed-computer:0123456789abcdef0123456789abcdef";
+        store.record_member_secret_refusal(member, "secret|key", "no_secret_use_grant");
+        store.record_member_secret_refusal(
+            member,
+            "federation.secret_revoke_flow_grants",
+            "forwarded_not_found",
+        );
+        let mut rows: Vec<_> = store
+            .recent_auth_events(1_000)
+            .unwrap()
+            .into_iter()
+            .filter(|row| row.kind == "secret_use_refusal")
+            .map(|row| {
+                (
+                    row.credential_id,
+                    row.detail.unwrap_or_default(),
+                    row.principal_kind.unwrap_or_default(),
+                    row.principal_id.unwrap_or_default(),
+                )
+            })
+            .collect();
+        rows.sort();
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "federation.secret_revoke_flow_grants".to_owned(),
+                    "forwarded_not_found".to_owned(),
+                    "member".to_owned(),
+                    member.to_owned(),
+                ),
+                (
+                    "secret|key".to_owned(),
+                    "no_secret_use_grant".to_owned(),
+                    "member".to_owned(),
+                    member.to_owned(),
+                ),
             ]
         );
     }

@@ -592,3 +592,171 @@ async fn a_dead_connection_fails_every_pending_call_and_the_next_call_succeeds()
     .await
     .expect("the next call dials a fresh connection and succeeds");
 }
+
+// ---------------------------------------------------------------------------------
+// Recovery: subc closes a route or the whole connection while no call is waiting on
+// it, and the next call must not inherit the breakage. Nothing here waits on a clock:
+// each step waits for the stand-in's own signal, behind its hang guard.
+// ---------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_route_goodbye_with_no_call_in_flight_leaves_the_next_call_working() {
+    let root = crate::support::temp_root("outbound-route-goodbye-idle");
+    let vaults = TwoVaults::new(&root).await;
+    let home = vaults.home_member().to_string();
+    vaults.callosum.answer(
+        "claustrum",
+        "credential.get_scoped",
+        Reply::Ok(json!({ "payload": "tok" })),
+    );
+    call(
+        &vaults.b.outbound,
+        &home,
+        consumer_get(),
+        fed::CONSUMER_FACING_DEADLINE,
+    )
+    .await
+    .expect("the first call succeeds");
+
+    // The shape of a callosum restart: subc drains the route with a route GOODBYE and
+    // keeps the vault's connection open, while no call is waiting on the route.
+    assert_eq!(vaults.callosum.goodbye_routes("claustrum").await, 1);
+    // A round trip on another route of the same connection proves the client's reader
+    // has handled the GOODBYE, and that the connection still carries calls.
+    vaults.callosum.reply_fence(&vaults.b.outbound).await;
+
+    call(
+        &vaults.b.outbound,
+        &home,
+        consumer_get(),
+        fed::CONSUMER_FACING_DEADLINE,
+    )
+    .await
+    .expect("the call after the route goodbye reopens the route and succeeds");
+    call(
+        &vaults.b.outbound,
+        &home,
+        consumer_get(),
+        fed::CONSUMER_FACING_DEADLINE,
+    )
+    .await
+    .expect("the reopened route serves the next call too");
+
+    let channels = vaults.callosum.route_channels("claustrum");
+    assert_eq!(
+        channels.len(),
+        2,
+        "the closed route was reopened once, and the reopened binding was then reused: \
+         {channels:?}"
+    );
+    assert_eq!(
+        channels[0], channels[1],
+        "the stand-in handed the old channel number to the reopened route, which the \
+         client treats as live again"
+    );
+    assert_eq!(
+        vaults.callosum.connections(),
+        1,
+        "a route goodbye leaves the connection in use"
+    );
+}
+
+#[tokio::test]
+async fn a_connection_ended_with_no_call_in_flight_is_redialed_by_the_next_call() {
+    // Once by a channel-0 GOODBYE and once by a bare close: either way the reader is
+    // the only one who sees it, because no call is waiting.
+    for goodbye in [true, false] {
+        let root = crate::support::temp_root(&format!("outbound-idle-close-{goodbye}"));
+        let vaults = TwoVaults::new(&root).await;
+        let home = vaults.home_member().to_string();
+        vaults.callosum.answer(
+            "claustrum",
+            "credential.get_scoped",
+            Reply::Ok(json!({ "payload": "tok" })),
+        );
+        call(
+            &vaults.b.outbound,
+            &home,
+            consumer_get(),
+            fed::CONSUMER_FACING_DEADLINE,
+        )
+        .await
+        .expect("the first call succeeds");
+
+        vaults.callosum.close_connections(goodbye).await;
+
+        call(
+            &vaults.b.outbound,
+            &home,
+            consumer_get(),
+            fed::CONSUMER_FACING_DEADLINE,
+        )
+        .await
+        .unwrap_or_else(|error| {
+            panic!("goodbye={goodbye}: the next call dials a new connection: {error:?}")
+        });
+        assert_eq!(
+            vaults.callosum.connections(),
+            2,
+            "goodbye={goodbye}: the next call dialed a fresh connection"
+        );
+        assert_eq!(
+            vaults.callosum.route_channels("claustrum").len(),
+            2,
+            "goodbye={goodbye}: a route belongs to the connection it was opened on, so \
+             the new connection opened its own"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_route_goodbye_fails_that_routes_call_and_leaves_another_routes_call_alone() {
+    let root = crate::support::temp_root("outbound-route-goodbye-other");
+    let vaults = TwoVaults::new(&root).await;
+    let doomed = Held::new();
+    let survivor = Held::new();
+    vaults
+        .callosum
+        .answer("claustrum", "route-a.held", Reply::Hold(doomed.clone()));
+    vaults
+        .callosum
+        .answer("claustrum", "route-b.held", Reply::Hold(survivor.clone()));
+
+    let client = vaults.b.outbound.clone();
+    let mut on_a = tokio::spawn(async move {
+        client
+            .call(
+                "route-a",
+                route("route-a", json!({ "method": "route-a.held" })),
+                fed::CONSUMER_FACING_DEADLINE,
+            )
+            .await
+    });
+    doomed.arrived_before(&mut on_a).await;
+    let client = vaults.b.outbound.clone();
+    let mut on_b = tokio::spawn(async move {
+        call(
+            &client,
+            "route-b",
+            json!({ "method": "route-b.held" }),
+            fed::CONSUMER_FACING_DEADLINE,
+        )
+        .await
+    });
+    survivor.arrived_before(&mut on_b).await;
+
+    assert_eq!(vaults.callosum.goodbye_routes("route-a").await, 1);
+    survivor.release(Reply::Ok(json!({ "survived": true })));
+    survivor.answered_before(&mut on_b).await;
+    vaults.callosum.reply_fence(&vaults.b.outbound).await;
+    tokio::time::pause();
+    let error = resolved_before_deadline(on_a).await.unwrap_err();
+    assert_eq!(
+        resolved_before_deadline(on_b).await.unwrap(),
+        json!({ "survived": true })
+    );
+    assert!(
+        error.is_transient() && error.message().contains("closed the route"),
+        "the closed route's call fails at once, as a route closure: {error:?}"
+    );
+}

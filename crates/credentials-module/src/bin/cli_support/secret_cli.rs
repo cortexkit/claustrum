@@ -355,7 +355,19 @@ fn parse_material(text: &str, kind: &str) -> Result<Material, &'static str> {
 }
 
 fn prompt_material(kind: &str) -> Result<Material, CliError> {
-    let prompt = |label: &str| -> Result<String, CliError> {
+    use std::io::IsTerminal;
+    // At a terminal a secret field is read with echo off, so the key never appears on
+    // screen, in scrollback or in a captured transcript. Piped input has no echo to turn
+    // off and is read one line per field.
+    let interactive = std::io::stdin().is_terminal();
+    let prompt = |label: &str, secret: bool| -> Result<String, CliError> {
+        if interactive && secret {
+            return dialoguer::Password::new()
+                .with_prompt(label)
+                .allow_empty_password(true)
+                .interact()
+                .map_err(|_| CliError::Usage("cannot read from the terminal".into()));
+        }
         eprint!("{label}: ");
         use std::io::{BufRead, Write};
         let _ = std::io::stderr().flush();
@@ -368,16 +380,17 @@ fn prompt_material(kind: &str) -> Result<Material, CliError> {
     };
     match kind {
         "api-key" => {
-            let key = prompt("API key")?;
+            let key = prompt("API key", true)?;
             if key.is_empty() {
                 return Err(CliError::Usage("the key is empty".into()));
             }
             Ok(Material::ApiKey(key.into_bytes()))
         }
         _ => {
-            let username = prompt("Username")?;
-            let password = prompt("Password")?;
-            let otpauth = prompt("otpauth:// URI (optional)")?;
+            let username = prompt("Username", false)?;
+            let password = prompt("Password", true)?;
+            // The otpauth URI carries the TOTP seed, so it is as secret as the password.
+            let otpauth = prompt("otpauth:// URI (optional)", true)?;
             if username.is_empty() || password.is_empty() {
                 return Err(CliError::Usage(
                     "a site login needs a username and a password".into(),

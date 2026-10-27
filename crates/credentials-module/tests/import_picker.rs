@@ -394,6 +394,20 @@ fn flag_shaped_imports_never_open_the_picker_and_keep_validation_errors() {
 
 #[cfg(unix)]
 fn run_terminal_picker(fixture: &Fixture, input: &[u8]) -> (std::process::ExitStatus, String) {
+    run_in_terminal(fixture, &["import"], input, None)
+}
+
+/// Run `ck auth <args>` on the slave side of a fresh PTY, feed `input` through the master,
+/// and return the exit status with everything the terminal displayed. With `wait_for`, no
+/// input is sent until that text has been displayed, as a person would wait for a prompt:
+/// bytes typed before a prompt turns echo off are echoed by the terminal itself.
+#[cfg(unix)]
+fn run_in_terminal(
+    fixture: &Fixture,
+    args: &[&str],
+    input: &[u8],
+    wait_for: Option<&str>,
+) -> (std::process::ExitStatus, String) {
     use std::fs::File;
     use std::io::{self, Read, Write};
     use std::os::fd::{AsRawFd, FromRawFd};
@@ -446,7 +460,7 @@ fn run_terminal_picker(fixture: &Fixture, input: &[u8]) -> (std::process::ExitSt
     );
 
     let mut command = fixture.command(env!("CARGO_BIN_EXE_ck-auth"));
-    command.arg("import");
+    command.args(args);
     fixture.global(&mut command);
     command
         .env_remove(PROMPT_ENV)
@@ -530,7 +544,9 @@ fn run_terminal_picker(fixture: &Fixture, input: &[u8]) -> (std::process::ExitSt
                 io::Error::last_os_error()
             );
             status = Some(child.wait().expect("reap killed picker"));
-        } else if !remaining.is_empty() {
+        } else if !remaining.is_empty()
+            && wait_for.is_none_or(|prompt| String::from_utf8_lossy(&bytes).contains(prompt))
+        {
             match master.write(remaining) {
                 Ok(n) => remaining = &remaining[n..],
                 Err(error)
@@ -599,4 +615,33 @@ fn real_terminal_adapter_exercises_submit_controls_drop_and_attempt_bound() {
         "fourth id-prompt open was allowed:\n{screen}"
     );
     assert!(screen.contains("id prompt exhausted"), "{screen}");
+}
+
+/// A secret typed at the `ck auth secret put` prompt must not appear on the terminal: the
+/// help page promises nothing is echoed, and an echoed key lands in scrollback and in any
+/// captured transcript.
+#[cfg(unix)]
+#[test]
+fn secret_put_reads_a_typed_key_without_echoing_it() {
+    const TYPED: &str = "typed-key-canary-7f3a";
+    let fixture = Fixture::new("pty-secret-put");
+    fixture.bootstrap();
+    let (status, screen) = run_in_terminal(
+        &fixture,
+        &[
+            "secret", "put", "pty-key", "--kind", "api-key", "--host", "x.test",
+        ],
+        format!("{TYPED}\r").as_bytes(),
+        Some("API key"),
+    );
+    assert!(status.success(), "secret put under a PTY failed:\n{screen}");
+    assert!(
+        screen.contains("API key"),
+        "the prompt was not shown:\n{screen}"
+    );
+    assert!(screen.contains("stored secret pty-key"), "{screen}");
+    assert!(
+        !screen.contains(TYPED),
+        "the typed key was echoed to the terminal:\n{screen}"
+    );
 }

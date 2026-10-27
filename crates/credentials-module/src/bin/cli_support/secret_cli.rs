@@ -167,8 +167,9 @@ pub fn help_text() -> &'static str {
       online or the offline lease; list, grants, phone-gate status and home show\n\
       read the store without either. home set <member-id> needs the daemon, which\n\
       checks the member against callosum's pairing; it is refused while this vault\n\
-      still holds secrets, grants or pending requests. Keep the phone setting off until callosum derives the forwarded\n\
-      harness from the authenticated phone peer on every call."
+      still holds secrets, grants or pending requests. Keep the phone setting off\n\
+      until callosum derives the forwarded harness from the authenticated phone\n\
+      peer on every call."
 }
 
 fn phone_gate(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {

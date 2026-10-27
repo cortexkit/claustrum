@@ -1818,6 +1818,17 @@ is refused.
 request and reply key sets, drives the real phone parser and the real store through every
 role row and the elsewhere refusal, and checks the refused ops write nothing.
 
+The pinned samples for the phone app's Secrets page are
+`crates/credentials-module/tests/vectors/secret-home-v1.json`: six cases, each with its
+request (`method`, `params`) and the exact reply bytes as `reply_b64url` with their
+`reply_sha256`, covering the unset, `self` and remote rows above, a `secret.list` refused
+`secret_home_elsewhere` on the remote vault, the setup refusal, and the uniform
+`not_found` reply returned when a non-phone route calls `secret.home`.
+`secret_home_vectors_tests.rs` (`secret_home_ckios_vectors_are_emitted_by_vault_code_and_pinned`)
+regenerates them on every run, through the phone channel's own serve function with a
+fixed pairing answer and through the real route dispatch for the non-phone refusal, and
+`CK_EMIT_SECRET_VECTORS=1` rewrites the file.
+
 ### Ordered phone preflight and transaction admission
 
 1. Check exact request keys, grammar and sizes. Grammar faults use `invalid_params`

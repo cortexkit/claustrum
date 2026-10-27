@@ -928,8 +928,9 @@ const MIGRATIONS: &[Migration] = &[
     // member id and the nonce from the request's AAD. A retry of the same request (same
     // nonce, same AAD bytes) gets the stored `enc` and `ciphertext` back unchanged, so a
     // reply lost in transit neither consumes a `once` grant twice nor writes a second
-    // release audit. The row records what made the release valid (the secret's
-    // incarnation and the grant used) so a retry is refused once either has gone, and
+    // release audit. The row records the secret's incarnation and the grant used: a retry
+    // is refused once the incarnation changes or the grant is no longer live (a `once`
+    // grant the release consumed is exempt), and
     // `expires_at_ms` bounds how long a nonce can be replayed at all. Rows are deleted
     // after expiry, but every lookup compares `expires_at_ms` itself.
     Migration {

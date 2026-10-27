@@ -1285,6 +1285,12 @@ pub struct LoginProvider {
     pub device: Option<DeviceKind>,
     pub categories: &'static [CredentialCategory],
     pub serves: &'static [ModelVendor],
+    /// The catalog provider ids a fresh login stores when the operator passes no
+    /// `--provider-id`. Only the subscription rows the live vault already carries
+    /// ids for name one here; every other row is empty and stays as today. Kept on
+    /// the row (rather than matched on the credential id) so the mapping lives in
+    /// one place next to the ids it derives from.
+    pub default_provider_ids: &'static [&'static str],
 }
 
 pub const LOGIN_PROVIDERS: &[LoginProvider] = &[
@@ -1310,6 +1316,7 @@ pub const LOGIN_PROVIDERS: &[LoginProvider] = &[
         device: None,
         categories: LLM,
         serves: &[Anthropic],
+        default_provider_ids: &["anthropic"],
     },
     LoginProvider {
         key: "openai",
@@ -1330,6 +1337,7 @@ pub const LOGIN_PROVIDERS: &[LoginProvider] = &[
         device: Some(DeviceKind::OpenAi),
         categories: LLM,
         serves: &[OpenAI],
+        default_provider_ids: &["openai"],
     },
     LoginProvider {
         key: "xai",
@@ -1350,6 +1358,7 @@ pub const LOGIN_PROVIDERS: &[LoginProvider] = &[
         device: Some(DeviceKind::Xai),
         categories: LLM,
         serves: &[XAI],
+        default_provider_ids: &["xai"],
     },
     LoginProvider {
         key: "github-copilot",
@@ -1370,6 +1379,7 @@ pub const LOGIN_PROVIDERS: &[LoginProvider] = &[
         device: Some(DeviceKind::GithubCopilot),
         categories: LLM,
         serves: &[OpenAI, Anthropic, Google, XAI],
+        default_provider_ids: &[],
     },
     LoginProvider {
         key: "kimi",
@@ -1390,6 +1400,7 @@ pub const LOGIN_PROVIDERS: &[LoginProvider] = &[
         device: Some(DeviceKind::Kimi),
         categories: LLM,
         serves: &[Moonshot],
+        default_provider_ids: &[],
     },
     LoginProvider {
         key: "meta",
@@ -1410,6 +1421,7 @@ pub const LOGIN_PROVIDERS: &[LoginProvider] = &[
         device: Some(DeviceKind::Meta),
         categories: LLM,
         serves: &[Meta],
+        default_provider_ids: &["meta"],
     },
     LoginProvider {
         key: "google",
@@ -1430,6 +1442,7 @@ pub const LOGIN_PROVIDERS: &[LoginProvider] = &[
         device: None,
         categories: LLM,
         serves: &[Google],
+        default_provider_ids: &[],
     },
     LoginProvider {
         key: "gmail",
@@ -1450,6 +1463,7 @@ pub const LOGIN_PROVIDERS: &[LoginProvider] = &[
         device: None,
         categories: NO_CATEGORIES,
         serves: &[],
+        default_provider_ids: &[],
     },
     LoginProvider {
         key: "antigravity",
@@ -1470,6 +1484,7 @@ pub const LOGIN_PROVIDERS: &[LoginProvider] = &[
         device: None,
         categories: LLM,
         serves: &[Google, Anthropic, OpenAI],
+        default_provider_ids: &["google"],
     },
     LoginProvider {
         key: "cursor",
@@ -1490,6 +1505,7 @@ pub const LOGIN_PROVIDERS: &[LoginProvider] = &[
         device: None,
         categories: LLM,
         serves: &[Anthropic, OpenAI, Google, XAI],
+        default_provider_ids: &[],
     },
     LoginProvider {
         key: "devin",
@@ -1510,6 +1526,7 @@ pub const LOGIN_PROVIDERS: &[LoginProvider] = &[
         device: None,
         categories: NO_CATEGORIES,
         serves: &[],
+        default_provider_ids: &[],
     },
     LoginProvider {
         key: "snowflake",
@@ -1530,6 +1547,7 @@ pub const LOGIN_PROVIDERS: &[LoginProvider] = &[
         device: None,
         categories: DATA_WAREHOUSE,
         serves: &[],
+        default_provider_ids: &[],
     },
     LoginProvider {
         key: "digitalocean",
@@ -1550,6 +1568,7 @@ pub const LOGIN_PROVIDERS: &[LoginProvider] = &[
         device: None,
         categories: CLOUD_INFRASTRUCTURE,
         serves: &[],
+        default_provider_ids: &[],
     },
 ];
 
@@ -1678,6 +1697,21 @@ pub fn serves_for(credential_id: &str) -> &'static [ModelVendor] {
     catalog_match(credential_id)
         .map(CatalogEntry::serves)
         .unwrap_or_default()
+}
+
+/// The catalog provider ids a fresh `ck auth login` stores when the operator
+/// passes no `--provider-id`.
+///
+/// Only the five subscription rows the live vault already carries ids for name
+/// one here (anthropic, openai, xai, meta, antigravity-to-google); every other
+/// row, including all API-key rows, returns empty so those logins stay as today.
+/// Labeled accounts share their provider's default through the same catalog
+/// match that stamps categories, not through string matching on the id.
+pub fn default_provider_ids(credential_id: &str) -> &'static [&'static str] {
+    match catalog_match(credential_id) {
+        Some(CatalogEntry::Login(entry)) => entry.default_provider_ids,
+        _ => &[],
+    }
 }
 
 pub fn credential_type(credential_id: &str) -> &'static str {

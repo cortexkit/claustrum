@@ -7304,3 +7304,299 @@ fn secret_list_and_grants_name_the_asking_member_only_for_a_forwarded_grant() {
         }
     }
 }
+
+fn drive_anthropic_oauth_login(
+    data_dir: &std::path::Path,
+    key_path: &std::path::Path,
+    extra_args: &[&str],
+) -> (bool, String) {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+    use std::time::{Duration, Instant};
+
+    let token_listener = TcpListener::bind("127.0.0.1:0").expect("bind token server");
+    let origin = format!("http://{}", token_listener.local_addr().unwrap());
+    let wire = serde_json::json!({
+        "authorize_url": format!("{origin}/authorize"),
+        "token_url": format!("{origin}/token"),
+        "redirect_uri": "http://127.0.0.1:1/callback",
+        "code_redirect_uri": format!("{origin}/code"),
+    })
+    .to_string();
+
+    let token_thread = std::thread::spawn(move || {
+        let (mut stream, _) = token_listener
+            .accept()
+            .expect("token exchange was not reached");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line).unwrap();
+        assert!(request_line.starts_with("POST /token "), "{request_line}");
+        let mut len: usize = 0;
+        loop {
+            let mut header = String::new();
+            reader.read_line(&mut header).unwrap();
+            if header == "\r\n" {
+                break;
+            }
+            if let Some(value) = header.to_ascii_lowercase().strip_prefix("content-length:") {
+                len = value.trim().parse().unwrap();
+            }
+        }
+        let mut body = vec![0u8; len];
+        std::io::Read::read_exact(&mut reader, &mut body).unwrap();
+        let resp =
+            r#"{"access_token":"fake-access","refresh_token":"fake-refresh","expires_in":3600}"#;
+        let out = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{resp}",
+            resp.len()
+        );
+        stream.write_all(out.as_bytes()).unwrap();
+    });
+
+    let mut cmd = cli();
+    cmd.args([
+        "login",
+        "--provider",
+        "anthropic",
+        "--approve-on",
+        "other",
+        "--browser",
+        "show",
+    ]);
+    cmd.args(extra_args);
+    cmd.arg("--data-dir").arg(data_dir);
+    cmd.arg("--key-path").arg(key_path);
+    cmd.env("CK_AUTH_TEST_LOGIN_WIRE", &wire);
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn().expect("spawn login");
+
+    let stderr = child.stderr.take().unwrap();
+    let stderr_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut out = String::new();
+        let mut stderr = stderr;
+        let _ = stderr.read_to_string(&mut out);
+        out
+    });
+
+    let stdout = child.stdout.take().unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            if tx.send(line.unwrap() + "\n").is_err() {
+                break;
+            }
+        }
+    });
+
+    let mut output = String::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut state: Option<String> = None;
+    while Instant::now() < deadline {
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(line) => {
+                output.push_str(&line);
+                if line.contains("/authorize?") && state.is_none() {
+                    if let Some(query) = line.split_once('?').map(|(_, q)| q) {
+                        for pair in query.split('&') {
+                            if let Some((key, value)) = pair.split_once('=') {
+                                if key == "state" {
+                                    let mut decoded = String::new();
+                                    let mut bytes = value.as_bytes().iter();
+                                    while let Some(&byte) = bytes.next() {
+                                        match byte {
+                                            b'%' => {
+                                                let h1 = *bytes.next().unwrap() as char;
+                                                let h2 = *bytes.next().unwrap() as char;
+                                                let hex = format!("{h1}{h2}");
+                                                decoded
+                                                    .push(u8::from_str_radix(&hex, 16).unwrap()
+                                                        as char);
+                                            }
+                                            b'+' => decoded.push(' '),
+                                            other => decoded.push(other as char),
+                                        }
+                                    }
+                                    state = Some(decoded);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some(ref resolved) = state {
+                    writeln!(stdin, "testcode#{resolved}").unwrap();
+                    break;
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(_) => break,
+        }
+    }
+    let resolved = state.expect("never saw the authorize URL");
+    let _ = resolved;
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() >= deadline + Duration::from_secs(10) {
+            let _ = child.kill();
+            panic!("login did not complete promptly; output so far: {output}");
+        }
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(line) => output.push_str(&line),
+            Err(_) => std::thread::sleep(Duration::from_millis(10)),
+        }
+    };
+    while let Ok(line) = rx.try_recv() {
+        output.push_str(&line);
+    }
+    let stderr = stderr_thread.join().unwrap();
+    let combined = output + &stderr;
+    token_thread.join().expect("token thread");
+    (status.success(), combined)
+}
+
+fn list_providers(vault: &GrantCliVault, id: &str) -> String {
+    let out = vault.run(&["list"]);
+    assert!(
+        out.status.success(),
+        "list failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let line = stdout
+        .lines()
+        .find(|line| line.contains(id))
+        .unwrap_or_else(|| panic!("{id} missing from:\n{stdout}"));
+    line.split_whitespace()
+        .last()
+        .expect("list row has a providers column")
+        .to_string()
+}
+
+#[test]
+fn login_applies_anthropic_default_provider_id() {
+    if std::env::var_os(CLI_BIN_ENV).is_some() {
+        eprintln!("SKIPPING login_applies_anthropic_default_provider_id: {CLI_BIN_ENV} is set");
+        return;
+    }
+    if !cfg!(debug_assertions) {
+        eprintln!(
+            "SKIPPING login_applies_anthropic_default_provider_id: needs the debug-only login wire"
+        );
+        return;
+    }
+    let vault = GrantCliVault::new("login-default-anthropic");
+    vault.bootstrap();
+    let (ok, output) = drive_anthropic_oauth_login(&vault.data_dir, &vault.key_path, &[]);
+    assert!(ok, "anthropic login failed: {output}");
+    assert!(
+        output.contains("logged in and stored oauth:anthropic"),
+        "{output}"
+    );
+    assert_eq!(list_providers(&vault, "oauth:anthropic"), "anthropic");
+}
+
+#[test]
+fn login_explicit_provider_id_overrides_default() {
+    if std::env::var_os(CLI_BIN_ENV).is_some() {
+        eprintln!("SKIPPING login_explicit_provider_id_overrides_default: {CLI_BIN_ENV} is set");
+        return;
+    }
+    if !cfg!(debug_assertions) {
+        eprintln!("SKIPPING login_explicit_provider_id_overrides_default: needs the debug-only login wire");
+        return;
+    }
+    let vault = GrantCliVault::new("login-override-default");
+    vault.bootstrap();
+    let (ok, output) =
+        drive_anthropic_oauth_login(&vault.data_dir, &vault.key_path, &["--provider-id", "bb"]);
+    assert!(ok, "anthropic login with --provider-id failed: {output}");
+    assert!(
+        output.contains("logged in and stored oauth:anthropic"),
+        "{output}"
+    );
+    assert_eq!(list_providers(&vault, "oauth:anthropic"), "bb");
+}
+
+#[test]
+fn login_replace_keeps_existing_provider_ids() {
+    if std::env::var_os(CLI_BIN_ENV).is_some() {
+        eprintln!("SKIPPING login_replace_keeps_existing_provider_ids: {CLI_BIN_ENV} is set");
+        return;
+    }
+    if !cfg!(debug_assertions) {
+        eprintln!(
+            "SKIPPING login_replace_keeps_existing_provider_ids: needs the debug-only login wire"
+        );
+        return;
+    }
+    let vault = GrantCliVault::new("login-replace-keeps");
+    vault.bootstrap();
+    let (ok, output) = drive_anthropic_oauth_login(&vault.data_dir, &vault.key_path, &[]);
+    assert!(ok, "initial anthropic login failed: {output}");
+    assert_eq!(list_providers(&vault, "oauth:anthropic"), "anthropic");
+    let set = vault.run(&["set-providers", "--id", "oauth:anthropic", "--set", "aa"]);
+    assert!(
+        set.status.success(),
+        "set-providers failed: {}",
+        String::from_utf8_lossy(&set.stderr)
+    );
+    assert_eq!(list_providers(&vault, "oauth:anthropic"), "aa");
+    let (ok, output) =
+        drive_anthropic_oauth_login(&vault.data_dir, &vault.key_path, &["--replace"]);
+    assert!(ok, "anthropic --replace failed: {output}");
+    assert!(output.contains("replaced oauth:anthropic"), "{output}");
+    assert_eq!(
+        list_providers(&vault, "oauth:anthropic"),
+        "aa",
+        "a --replace must keep the stored set rather than re-applying the default"
+    );
+}
+
+#[test]
+fn login_without_default_leaves_no_provider_ids() {
+    if std::env::var_os(CLI_BIN_ENV).is_some() {
+        eprintln!("SKIPPING login_without_default_leaves_no_provider_ids: {CLI_BIN_ENV} is set");
+        return;
+    }
+    let vault = GrantCliVault::new("login-no-default");
+    vault.bootstrap();
+    let key_file = vault.root.join("dummy.key");
+    std::fs::write(&key_file, "sk-dummy-key\n").unwrap();
+    let out = cli()
+        .args([
+            "login",
+            "--provider",
+            "zai",
+            "--payload-file",
+            key_file.to_str().unwrap(),
+            "--no-browser",
+            "--data-dir",
+            vault.data_dir.to_str().unwrap(),
+            "--key-path",
+            vault.key_path.to_str().unwrap(),
+        ])
+        .env("CORTEXKIT_TEST_BYPASS_VALIDATION", "1")
+        .output()
+        .expect("run login");
+    assert!(
+        out.status.success(),
+        "zai login failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("logged in and stored apikey:zai"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert_eq!(list_providers(&vault, "apikey:zai"), "-");
+}

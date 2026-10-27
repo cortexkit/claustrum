@@ -82,7 +82,10 @@ use cortexkit_store::{open_sqlite, Isolation, StorageBackend, StorageDescriptor,
 use credentials_core::admin_ops::{
     AdminAuditOp, AdminOpBody, StoreMode, ADMIN_OP_SCHEMA_V1, ADMIN_OP_SCHEMA_V2,
 };
-use credentials_core::catalog::{login_provider, DeviceKind, ExchangeWire, LoginProvider};
+use credentials_core::catalog::{
+    default_provider_ids as catalog_default_provider_ids, login_provider, DeviceKind, ExchangeWire,
+    LoginProvider,
+};
 use credentials_core::contract::{MODULE_ID, STORAGE_NAMESPACE};
 use credentials_core::credential_id::{default_refresh_adapter, parse_credential_id, AuthMethod};
 use credentials_core::key::MasterKey;
@@ -755,6 +758,11 @@ fn help_verb(verb: &str) -> String {
              api-key providers prompt for a key, validated before\n\
              storing where the provider offers a check; otherwise login says the key\n\
              was stored unchecked, and why.\n\
+             Subscription logins for anthropic, openai, xai, meta and\n\
+             antigravity store a default provider id (anthropic, openai,\n\
+             xai, meta, google) when no --provider-id is given. An explicit\n\
+             --provider-id replaces the default; --replace keeps an existing\n\
+             set and only fills a credential that holds none.\n\
              \n\
              Providers: anthropic, openai, xai, google, gmail, antigravity, github-copilot,\n\
              kimi, cursor, devin, snowflake, digitalocean, plus api-key providers\n\
@@ -1370,18 +1378,52 @@ fn commit_login_admin(
     preflighted_key: MasterKey,
     args: &[String],
 ) -> Result<serde_json::Value, CliError> {
-    let ids = provider_id_flags(args)?;
+    let explicit = provider_id_flags(args)?;
     let id = match &op {
         AdminOpBody::Store { id, .. } | AdminOpBody::StoreWithIdentityPolicy { id, .. } => {
             id.clone()
         }
         _ => return Err(CliError::Usage("login requires a deposit op".into())),
     };
+    // A subscription login stores its catalog provider id when the operator
+    // passes no `--provider-id`, through the same audited admin path an explicit
+    // flag takes (so the recovery below for a deposit whose provider-id write
+    // fails still applies). An explicit flag always wins; a `--replace` that
+    // already carries provider ids keeps
+    // them, and the default lands only on a credential that holds none.
+    let ids = if explicit.is_empty() {
+        let defaults = catalog_default_provider_ids(&id);
+        if defaults.is_empty() || !stored_login_provider_ids(global, &id).is_empty() {
+            Vec::new()
+        } else {
+            defaults.iter().map(|id| id.to_string()).collect()
+        }
+    } else {
+        explicit
+    };
     let result = commit_login_deposit(global, op, preflighted_key, &id, &ids)?;
     if ids.is_empty() {
         print_missing_provider_note(global, &id);
     }
     Ok(result)
+}
+
+/// The provider ids already stored for `id`, without a lease or a master key.
+/// A read failure or a missing row reads as none, so a fresh credential gets
+/// its catalog default; a replace that already carries ids keeps them.
+fn stored_login_provider_ids(global: &GlobalArgs, id: &str) -> Vec<String> {
+    let path = store_path(global);
+    if !path.exists() {
+        return Vec::new();
+    }
+    match credentials_core::store::list_meta_read_only(&path) {
+        Ok(rows) => rows
+            .into_iter()
+            .find(|(stored_id, _)| stored_id == id)
+            .map(|(_, meta)| meta.provider_ids)
+            .unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
 }
 
 /// Keep the preflighted key and offline lease for both writes: a successful login

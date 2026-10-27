@@ -229,7 +229,7 @@ impl EncryptedStore {
                 {
                     let reply =
                         release(&record, now).map_err(|_| rusqlite_err("secret release failed"))?;
-                    self.commit_agent_release(tx, call, &grant, &record, now)?;
+                    self.commit_agent_release(tx, call, asking_member, &grant, &record, now)?;
                     return Ok(Ok(Ok(SecretUseOutcome {
                         reply,
                         last_use: None,
@@ -246,22 +246,31 @@ impl EncryptedStore {
 
     /// Consume a `once` grant or mark a grant released, and write the release audit the
     /// first time a grant releases.
+    ///
+    /// A release forwarded by a paired computer (a non-empty `asking_member`) adds that
+    /// member id as the last audited field, so the audit chain records which computer the
+    /// secret went to. A local release audits exactly the fields it always has.
     fn commit_agent_release(
         &self,
         tx: &rusqlite::Transaction<'_>,
         call: &SecretUse,
+        asking_member: &str,
         grant: &Grant,
         record: &Record,
         now: i64,
     ) -> rusqlite::Result<()> {
         if !grant.first || grant.duration == "once" {
+            let mut fields: Vec<&[u8]> = vec![grant.id.as_bytes(), record.incarnation.as_bytes()];
+            if asking_member != LOCAL_ASKING_MEMBER {
+                fields.push(asking_member.as_bytes());
+            }
             phone::audit(
                 tx,
                 &self.audit_key,
                 AuditOp::SecretFirstRelease,
                 Some(format!("secret|{}", call.name)),
                 call.sender.actor(),
-                &[grant.id.as_bytes(), record.incarnation.as_bytes()],
+                &fields,
             )?;
         }
         if grant.duration == "once" {
@@ -345,7 +354,7 @@ impl EncryptedStore {
                     return Err(rusqlite_err("secret release seal failed"));
                 }
             };
-            self.commit_agent_release(tx, call, &grant, &record, now)?;
+            self.commit_agent_release(tx, call, request.requester, &grant, &record, now)?;
             let kind = if grant.duration == "once" {
                 ReceiptGrant::Once
             } else {
@@ -1323,5 +1332,92 @@ mod receipt_tests {
                 Err(SecretError::InvalidParams)
             );
         }
+    }
+
+    /// The `payload_hash` an audit row holds for `fields`, computed the way
+    /// `phone::audit` computes it.
+    fn audited(fields: &[&[u8]]) -> String {
+        let mut payload = Vec::new();
+        for field in fields {
+            agent_secret::push_field(&mut payload, field);
+        }
+        phone::hex(&payload_hash(&payload))
+    }
+
+    fn release_audit_hashes(store: &EncryptedStore) -> Vec<String> {
+        store
+            .store
+            .with_conn(|c| {
+                c.prepare("SELECT payload_hash FROM audit_log WHERE op='secret_first_release' ORDER BY seq")?
+                    .query_map([], |r| r.get(0))?
+                    .collect()
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn a_forwarded_release_audits_its_asker_and_a_local_release_audits_what_it_always_did() {
+        let (_root, store) = setup("receipt-audit-asker");
+        // A local permanent grant (asker '') and a forwarded permanent grant for ASKER.
+        store.fenced_write(|tx| tx.execute("INSERT INTO secret_grants (grant_id,secret_name,incarnation,scope_owner,scope_kind,scope_ref,coverage,duration,expires_at_ms,granted_at_ms,envelope_sha256,asking_member_id) SELECT 'local-1',name,incarnation,'reserved:prefrontal-core','head','H','scope','permanent',0,?1,'envelope-hash','' FROM agent_secrets WHERE name='key'", [NOW]).map(|_| ())).unwrap();
+        agent_grant(&store, "forwarded-1", "permanent", 0);
+        store.secret_use(&call(), || NOW).unwrap();
+        let seals = Cell::new(0);
+        assert_eq!(forward(&store, &aad(), NOW, &seals), Ok(sealed(1)));
+        assert_eq!(
+            release_audit_hashes(&store),
+            vec![
+                // Local: the grant id and incarnation only, byte for byte as before.
+                audited(&[b"local-1", FIRST.as_bytes()]),
+                // Forwarded: the same fields, then the asking member.
+                audited(&[b"forwarded-1", FIRST.as_bytes(), ASKER.as_bytes()]),
+            ]
+        );
+
+        // Flow releases follow the same rule.
+        let flow = flow_call().flow;
+        store.fenced_write(|tx| tx.execute("INSERT INTO secret_flow_grants (grant_id,secret_name,incarnation,flow_id,flow_version,flow_code_hash,flow_install_id,methods,granted_at_ms,envelope_sha256,asking_member_id) SELECT 'local-flow',name,incarnation,?1,?2,?3,?4,'[\"GET\"]',?5,'envelope-hash','' FROM agent_secrets WHERE name='key'", rusqlite::params![flow.flow_id, flow.version, flow.code_hash, flow.install_id, NOW]).map(|_| ())).unwrap();
+        flow_grant(&store, "forwarded-flow");
+        store.secret_flow_use(&flow_call(), || NOW).unwrap();
+        let flow_aad = aad().iter().rev().copied().collect::<Vec<_>>();
+        let flow_request = ReleaseRequest {
+            requester: ASKER,
+            nonce: SECOND,
+            aad: &flow_aad,
+        };
+        store
+            .secret_flow_use_sealed(
+                &flow_call(),
+                &flow_request,
+                |_| {
+                    Ok::<_, ()>(SealedRelease {
+                        enc: vec![1],
+                        ciphertext: vec![2],
+                    })
+                },
+                || NOW,
+            )
+            .unwrap()
+            .unwrap();
+        let version = flow.version.to_string();
+        let hashes = release_audit_hashes(&store);
+        assert_eq!(
+            hashes[2..],
+            [
+                audited(&[
+                    b"local-flow",
+                    FIRST.as_bytes(),
+                    flow.flow_id.as_bytes(),
+                    version.as_bytes()
+                ]),
+                audited(&[
+                    b"forwarded-flow",
+                    FIRST.as_bytes(),
+                    flow.flow_id.as_bytes(),
+                    version.as_bytes(),
+                    ASKER.as_bytes()
+                ]),
+            ]
+        );
     }
 }

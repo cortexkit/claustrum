@@ -10,20 +10,21 @@
 //!    on, `callosum-self` keeps callosum's grants, `fed-computer:<fp>` becomes a
 //!    federation channel for that member, and every other harness on callosum's routes
 //!    is refused.
-//! 2. **The closed op allowlist**: a federation channel answers only the three
-//!    federation ops, and refuses bearer params (handles, enrollment tokens) so neither
-//!    can stand in for a member grant. The federation ops answer the uniform
+//! 2. **The closed op allowlist**: a federation channel answers only the federation
+//!    ops on [`FEDERATION_OPS`], and refuses bearer params (handles, enrollment tokens)
+//!    so neither can stand in for a member grant. The federation ops answer the uniform
 //!    `not_found` on every other channel.
-//! 3. **The home-side ops** ([`HomeVault::serve`]): `federation.remote_token` and
-//!    `federation.report_auth_failure`, each running its fixed order of checks and
-//!    stopping at the first refusal.
+//! 3. **The home-side ops** ([`HomeVault::serve`]): `federation.remote_token`,
+//!    `federation.report_auth_failure` and the three `federation.secret_*` ops, each
+//!    running its fixed order of checks and stopping at the first refusal.
 //!
 //! Every credential-shaped refusal is the same `not_found` body a local scoped read
 //! answers, byte for byte, so a member cannot tell "no grant" from "no such id" from
 //! "not servable".
 //!
 //! This file is compiled into the daemon and into the test-only library, so it depends
-//! on nothing in the daemon outside `federation`.
+//! on nothing in the daemon outside `federation` and `secret_use`, which the test-only
+//! library also contains.
 
 #[cfg(any(test, feature = "test-support"))]
 use std::future::Future;
@@ -33,6 +34,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use base64::Engine as _;
+use credentials_core::agent_secret::SecretSender;
 use credentials_core::audit::{AuditCtx, AuditOp, AuthEventKind, ReporterSource};
 use credentials_core::engine::{EngineError, GetWithRefreshStatus, RefreshEngine};
 use credentials_core::federation::{
@@ -42,12 +44,16 @@ use credentials_core::federation::{
 use credentials_core::plan_detection::DetectedPlan;
 use credentials_core::record::{CredentialKind, RecordIdentity, VaultRecord};
 use credentials_core::refresh_adapters::RefreshError;
-use credentials_core::store::{AuthEventPrincipal, AuthObservation, GrantOperation, StoreOpError};
+use credentials_core::store::{
+    AuthEventPrincipal, AuthObservation, GrantOperation, ReleaseRequest, SealedRelease,
+    SecretHomeRole, StoreOpError,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use subc_protocol::Principal;
 
 use super::outbound::{management_surface, OutboundClient, RouteCall, HOME_OP_DEADLINE};
+use crate::secret_use::{ForwardedUseAnswer, UseAnswer};
 
 /// A peer asks the home for a short-lived access token (a `query`: callosum keeps no
 /// reply body on disk).
@@ -57,13 +63,31 @@ pub const OP_REPORT_AUTH_FAILURE: &str = "federation.report_auth_failure";
 /// A peer delivers a sealed static-key transfer.
 pub const OP_TRANSFER_DELIVER: &str = "federation.transfer_deliver";
 
+/// A peer forwards its local sender's `secret.use` to the secret home (a `query`:
+/// callosum keeps no reply body on disk, and the release in it is sealed).
+pub const OP_SECRET_USE: &str = "federation.secret_use";
+/// A peer forwards its basal's `secret.request_flow_approval` to the secret home.
+pub const OP_SECRET_REQUEST_FLOW_APPROVAL: &str = "federation.secret_request_flow_approval";
+/// A peer forwards its basal's `secret.revoke_flow_grants` to the secret home.
+pub const OP_SECRET_REVOKE_FLOW_GRANTS: &str = "federation.secret_revoke_flow_grants";
+
 /// The closed allowlist of a federation channel. Nothing else is dispatched there.
-pub const FEDERATION_OPS: [&str; 3] =
-    [OP_REMOTE_TOKEN, OP_REPORT_AUTH_FAILURE, OP_TRANSFER_DELIVER];
+pub const FEDERATION_OPS: [&str; 6] = [
+    OP_REMOTE_TOKEN,
+    OP_REPORT_AUTH_FAILURE,
+    OP_TRANSFER_DELIVER,
+    OP_SECRET_USE,
+    OP_SECRET_REQUEST_FLOW_APPROVAL,
+    OP_SECRET_REVOKE_FLOW_GRANTS,
+];
 
 /// The HPKE `info` of a sealed token reply. A transfer envelope uses a different
 /// literal, so a reply can never be opened as a transfer or the other way round.
 pub const REMOTE_TOKEN_INFO: &[u8] = b"cortexkit/claustrum/remote-token/v1";
+
+/// The HPKE `info` of a sealed `federation.secret_use` release. Distinct from the token
+/// reply's and the transfer envelope's, so none of the three opens as another.
+pub const SECRET_RELEASE_INFO: &[u8] = b"cortexkit/claustrum/secret-release/v1";
 
 /// The module id of callosum, which relays other computers' calls on routes it opens
 /// as itself.
@@ -84,7 +108,7 @@ const CALLOSUM_ROUTE_KEY: &str = "callosum";
 /// credential (an unpaired member, a malformed request).
 const UNADDRESSED_SUBJECT: &str = "federation.remote_token";
 
-/// True for the three federation ops.
+/// True for the federation ops on [`FEDERATION_OPS`].
 pub fn is_federation_op(method: &str) -> bool {
     FEDERATION_OPS.contains(&method)
 }
@@ -443,6 +467,10 @@ enum Refusal {
     HomeUnavailable,
     /// A setup fact about the attested caller or this home, naming who must fix it.
     SetupIncomplete(String),
+    /// This vault's own secret-home setting names a member while its self id is unset
+    /// or equal to it, so it cannot tell whether it is the home. Names this vault when
+    /// its self id is known.
+    SecretHomeSetupIncomplete(Option<String>),
     /// A report whose provider status is not evidence of credential death.
     StatusNotCredentialDeath,
     /// The request is malformed. Answered as an `Error` frame, like every other
@@ -479,6 +507,9 @@ impl Refusal {
                 "permanent",
                 Some(member.as_str()),
             ),
+            Self::SecretHomeSetupIncomplete(member) => {
+                ("remote_setup_incomplete", "permanent", member.as_deref())
+            }
             Self::StatusNotCredentialDeath => {
                 ("report_status_not_credential_death", "permanent", None)
             }
@@ -686,6 +717,138 @@ fn parse_token_aad(bytes: &str) -> Result<TokenAad, Refusal> {
     Ok(aad)
 }
 
+/// `federation.secret_use` params: exactly `{aad, sender, call}`. Unknown fields are
+/// refused.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SecretUseParams {
+    /// The release `aad` exactly as the requester serialized it. The home seals over
+    /// these bytes, never a rebuilt copy.
+    aad: String,
+    /// Which local sender the asking vault authenticated: `aft`, `cerebellum` or `basal`.
+    sender: String,
+    /// The sender's `secret.use` params, unchanged.
+    call: Value,
+}
+
+/// The release `aad`: `{secret_name, requester, home, nonce, recipient_key_id,
+/// call_sha256}`. Unknown, missing and duplicate fields are refused.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SecretAad {
+    secret_name: String,
+    requester: String,
+    home: String,
+    nonce: String,
+    recipient_key_id: String,
+    call_sha256: String,
+}
+
+/// Parse the received release aad bytes strictly, as [`parse_token_aad`] does.
+fn parse_secret_aad(bytes: &str) -> Result<SecretAad, Refusal> {
+    if bytes.len() > credentials_core::kem::MAX_SEAL_AAD {
+        return Err(Refusal::InvalidParams("aad is over its size cap".into()));
+    }
+    let aad: SecretAad = serde_json::from_str(bytes)
+        .map_err(|error| Refusal::InvalidParams(format!("aad: {error}")))?;
+    if aad.secret_name.is_empty()
+        || !credentials_core::federation::is_lower_hex_16_bytes(&aad.nonce)
+        || !valid_member_id(&aad.requester)
+        || !valid_member_id(&aad.home)
+        || aad.recipient_key_id.is_empty()
+        || !credentials_core::federation::is_lower_hex_sha256(&aad.call_sha256)
+    {
+        return Err(Refusal::InvalidParams(
+            "aad fields are not well formed".into(),
+        ));
+    }
+    Ok(aad)
+}
+
+/// The local sender a `federation.secret_use` names. Anything else is malformed.
+fn forwarded_sender(sender: &str) -> Option<SecretSender> {
+    match sender {
+        "aft" => Some(SecretSender::Aft),
+        "cerebellum" => Some(SecretSender::Cerebellum),
+        "basal" => Some(SecretSender::Basal),
+        _ => None,
+    }
+}
+
+/// The release aad's `call_sha256`: the lower-hex SHA-256 of the RFC 8785 encoding of
+/// `{"sender": sender, "call": call}`.
+///
+/// `None` when `call` holds a number that is not an integer within JSON's exact range
+/// (magnitude at most 2^53 - 1): no `secret.use` param is such a number, and leaving
+/// them out keeps the encoding here exactly RFC 8785's without its float rules.
+pub fn secret_call_sha256(sender: &str, call: &Value) -> Option<String> {
+    let mut canonical = Vec::new();
+    write_canonical(&json!({ "sender": sender, "call": call }), &mut canonical)?;
+    let digest = ring::digest::digest(&ring::digest::SHA256, &canonical);
+    Some(digest.as_ref().iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Append the RFC 8785 encoding of `value` to `out`: object members sorted by their
+/// keys' UTF-16 code units, as the RFC requires; no whitespace; strings in serde_json's
+/// minimal escaping, which matches the RFC's; numbers only as exact-range integers.
+fn write_canonical(value: &Value, out: &mut Vec<u8>) -> Option<()> {
+    const MAX_EXACT: u64 = 9_007_199_254_740_991;
+    match value {
+        Value::Null | Value::Bool(_) | Value::String(_) => {
+            out.extend_from_slice(&serde_json::to_vec(value).ok()?);
+        }
+        Value::Number(number) => {
+            let exact = number.as_u64().is_some_and(|n| n <= MAX_EXACT)
+                || number
+                    .as_i64()
+                    .is_some_and(|n| n.unsigned_abs() <= MAX_EXACT);
+            if !exact {
+                return None;
+            }
+            out.extend_from_slice(number.to_string().as_bytes());
+        }
+        Value::Array(items) => {
+            out.push(b'[');
+            for (index, item) in items.iter().enumerate() {
+                if index > 0 {
+                    out.push(b',');
+                }
+                write_canonical(item, out)?;
+            }
+            out.push(b']');
+        }
+        Value::Object(members) => {
+            let mut keys: Vec<&String> = members.keys().collect();
+            keys.sort_by(|a, b| a.encode_utf16().cmp(b.encode_utf16()));
+            out.push(b'{');
+            for (index, key) in keys.into_iter().enumerate() {
+                if index > 0 {
+                    out.push(b',');
+                }
+                out.extend_from_slice(&serde_json::to_vec(key).ok()?);
+                out.push(b':');
+                write_canonical(&members[key], out)?;
+            }
+            out.push(b'}');
+        }
+    }
+    Some(())
+}
+
+/// The refusal for a failed seal to `member`'s announced key from this home's
+/// (`self_id`) transfer key: a bad recipient key is the member's setup to fix, an
+/// unusable sender key this home's.
+fn seal_refusal(error: credentials_core::kem::SealError, member: &str, self_id: &str) -> Refusal {
+    match error {
+        credentials_core::kem::SealError::InvalidRecipient => {
+            Refusal::SetupIncomplete(member.to_string())
+        }
+        credentials_core::kem::SealError::TooLarge => CORRUPT,
+        credentials_core::kem::SealError::UnusableKey
+        | credentials_core::kem::SealError::Failed => Refusal::SetupIncomplete(self_id.to_string()),
+    }
+}
+
 // ---------------------------------------------------------------------------------
 // The home vault
 // ---------------------------------------------------------------------------------
@@ -705,6 +868,11 @@ pub enum HomeAnswer {
 #[cfg(any(test, feature = "test-support"))]
 pub type IssueAuditGate = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
+/// A stand-in for callosum's management surface: the answer to one lookup by method
+/// name, `None` for no answer. See [`HomeVault::with_callosum_stub`].
+#[cfg(any(test, feature = "test-support"))]
+pub type CallosumStub = Arc<dyn Fn(&str) -> Option<Value> + Send + Sync>;
+
 /// This vault in its role as home: it answers other members' federation ops.
 pub struct HomeVault {
     engine: Arc<RefreshEngine>,
@@ -714,9 +882,14 @@ pub struct HomeVault {
     /// The clock the engine's report cooldown runs on, so `recheck_in_ms` is measured
     /// on the same clock that decided to defer. Real time unless a test replaces both.
     cooldown_clock: Arc<dyn Fn() -> i64 + Send + Sync>,
+    /// The clock forwarded secret ops decide grant, request and receipt expiry on. Real
+    /// time unless a test replaces it.
+    secret_clock: Arc<dyn Fn() -> i64 + Send + Sync>,
     op_deadline: Duration,
     #[cfg(any(test, feature = "test-support"))]
     issue_audit_gate: Option<IssueAuditGate>,
+    #[cfg(any(test, feature = "test-support"))]
+    callosum_stub: Option<CallosumStub>,
 }
 
 impl std::fmt::Debug for HomeVault {
@@ -734,9 +907,12 @@ impl HomeVault {
             engine,
             callosum: OnceLock::new(),
             cooldown_clock: Arc::new(wall_now_ms),
+            secret_clock: Arc::new(wall_now_ms),
             op_deadline: HOME_OP_DEADLINE,
             #[cfg(any(test, feature = "test-support"))]
             issue_audit_gate: None,
+            #[cfg(any(test, feature = "test-support"))]
+            callosum_stub: None,
         }
     }
 
@@ -747,6 +923,12 @@ impl HomeVault {
         self
     }
 
+    /// Decide forwarded secret ops on `clock` instead of real time. Only tests change it.
+    pub fn with_secret_clock(mut self, clock: Arc<dyn Fn() -> i64 + Send + Sync>) -> Self {
+        self.secret_clock = clock;
+        self
+    }
+
     /// Await `gate` after the serving read and before the `remote_issue` audit
     /// transaction. A test seam with no production caller: it is how a test pauses a
     /// fetch at exactly that point to re-create or refresh the record underneath it
@@ -754,6 +936,16 @@ impl HomeVault {
     #[cfg(any(test, feature = "test-support"))]
     pub fn with_issue_audit_gate(mut self, gate: IssueAuditGate) -> Self {
         self.issue_audit_gate = Some(gate);
+        self
+    }
+
+    /// Answer every callosum lookup from `stub` instead of the outbound client. A test
+    /// seam with no production caller: it lets a test drive the home's pairing and
+    /// announced-key checks, including callosum timing out or not being ready, without
+    /// a callosum.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_callosum_stub(mut self, stub: CallosumStub) -> Self {
+        self.callosum_stub = Some(stub);
         self
     }
 
@@ -808,6 +1000,10 @@ impl HomeVault {
                     )
                     .await
                     .map_err(Refusal::InvalidParams),
+                    OP_SECRET_USE => self.secret_use(member, params, budget).await,
+                    OP_SECRET_REQUEST_FLOW_APPROVAL | OP_SECRET_REVOKE_FLOW_GRANTS => {
+                        self.secret_flow_op(member, method, params, budget).await
+                    }
                     _ => Err(Refusal::NotFound),
                 }
             };
@@ -905,14 +1101,7 @@ impl HomeVault {
             REMOTE_TOKEN_INFO,
             request.aad.as_bytes(),
         )
-        .map_err(|error| match error {
-            credentials_core::kem::SealError::InvalidRecipient => {
-                Refusal::SetupIncomplete(member.to_string())
-            }
-            credentials_core::kem::SealError::TooLarge => CORRUPT,
-            credentials_core::kem::SealError::UnusableKey
-            | credentials_core::kem::SealError::Failed => Refusal::SetupIncomplete(self_id.clone()),
-        })?;
+        .map_err(|error| seal_refusal(error, member, &self_id))?;
         // First use is diagnostic, as on local scoped reads. Record it only after the
         // issue audit and sealing succeed, so a refused serve cannot look successful.
         let _ = store.record_scoped_first_use_by(
@@ -977,6 +1166,239 @@ impl HomeVault {
         Ok(json!({ "accepted": true }))
     }
 
+    /// `federation.secret_use`: a paired computer's local sender asks for a secret this
+    /// home holds. The checks below run in order and the first refusal ends the call;
+    /// the allowlist already ran in [`Self::serve`]. Every check runs again on a retry
+    /// of the same request, so a release receipt is replayed only while the pairing,
+    /// the `secret_use` member grant and the announced key still hold. A check that
+    /// could not be made (callosum unavailable, a store fault) keeps its transient code
+    /// and writes no refusal diagnostic.
+    async fn secret_use(
+        &self,
+        member: &str,
+        params: &Value,
+        budget: tokio::time::Instant,
+    ) -> Result<Value, Refusal> {
+        // 1. Only a home-role vault serves forwarded secret ops; nothing else falls back
+        // to local state or forwards again.
+        let self_id = self.secret_home_self()?;
+        // 2. The member's current pairing id.
+        let pairing_id = self.current_pairing(member, OP_SECRET_USE, budget).await?;
+        // 3. Strict parse of the params, the aad and the sender.
+        let request: SecretUseParams = serde_json::from_value(params.clone())
+            .map_err(|error| Refusal::InvalidParams(error.to_string()))?;
+        let aad = parse_secret_aad(&request.aad)?;
+        let sender = forwarded_sender(&request.sender).ok_or_else(|| {
+            Refusal::InvalidParams("sender is not aft, cerebellum or basal".into())
+        })?;
+        let call_sha256 = secret_call_sha256(&request.sender, &request.call).ok_or_else(|| {
+            Refusal::InvalidParams("call holds a number outside the exact integer range".into())
+        })?;
+        // 4. The requester's own self id must name the attested caller.
+        if aad.requester != member {
+            return Err(Refusal::SetupIncomplete(member.to_string()));
+        }
+        // 5. This home's self id and Active transfer key.
+        let Some(self_id) = self_id else {
+            return Err(Refusal::SetupIncomplete(aad.home.clone()));
+        };
+        let sender_pem = self.active_transfer_key(&self_id)?;
+        // 6. The aad must be meant for this home and bound to exactly these params.
+        let subject = format!("secret|{}", aad.secret_name);
+        if aad.home != self_id {
+            return Err(self.secret_refusal(&subject, member, "home_mismatch"));
+        }
+        if aad.call_sha256 != call_sha256 {
+            return Err(self.secret_refusal(&subject, member, "call_sha256_mismatch"));
+        }
+        if request.call.get("name").and_then(Value::as_str) != Some(aad.secret_name.as_str()) {
+            return Err(self.secret_refusal(&subject, member, "secret_name_mismatch"));
+        }
+        // 7. A `secret_use` member grant under the current pairing.
+        self.require_secret_use_grant(member, &pairing_id, &subject)?;
+        // 8. The requester's announced key, matching the aad's key id.
+        let peer = match self.peer_key(member, budget).await {
+            Ok(peer) => peer,
+            Err(Refusal::SetupIncomplete(_)) => {
+                return Err(self.secret_refusal(&subject, member, "no_announced_key"));
+            }
+            Err(refusal) => return Err(refusal),
+        };
+        if peer.key_id != aad.recipient_key_id {
+            return Err(self.secret_refusal(&subject, member, "recipient_key_mismatch"));
+        }
+        // 9. The local sender's grammar, then the store's grant choice, release receipt
+        // and seal, all under the asking member. The seal runs inside the store's
+        // transaction, over the received aad bytes.
+        let release = ReleaseRequest {
+            requester: member,
+            nonce: &aad.nonce,
+            aad: request.aad.as_bytes(),
+        };
+        let seal = |released: &Value| -> Result<SealedRelease, Refusal> {
+            let plaintext = serde_json::to_vec(released).map_err(|_| CORRUPT)?;
+            let (enc, ciphertext) = credentials_core::kem::seal_auth(
+                &sender_pem,
+                &peer.public,
+                &plaintext,
+                SECRET_RELEASE_INFO,
+                request.aad.as_bytes(),
+            )
+            .map_err(|error| seal_refusal(error, member, &self_id))?;
+            Ok(SealedRelease { enc, ciphertext })
+        };
+        let clock = Arc::clone(&self.secret_clock);
+        let answer = crate::secret_use::serve_forwarded(
+            self.engine.store(),
+            sender,
+            &request.call,
+            &release,
+            seal,
+            move || clock(),
+        );
+        match answer {
+            ForwardedUseAnswer::Sealed(sealed) => {
+                let b64 = base64::engine::general_purpose::STANDARD;
+                Ok(json!({
+                    "status": "sealed",
+                    "enc": b64.encode(sealed.enc),
+                    "ciphertext": b64.encode(sealed.ciphertext),
+                }))
+            }
+            ForwardedUseAnswer::Reply(reply) => {
+                self.note_forwarded_refusal(&subject, member, &reply);
+                Ok(reply)
+            }
+            ForwardedUseAnswer::InvalidParams => {
+                Err(Refusal::InvalidParams("invalid secret use call".into()))
+            }
+            ForwardedUseAnswer::SealFailed(refusal) => Err(refusal),
+        }
+    }
+
+    /// `federation.secret_request_flow_approval` and
+    /// `federation.secret_revoke_flow_grants`: a paired computer's basal asks for, or
+    /// gives up, a flow's consent. They carry no sender and no stamp: they are basal's
+    /// by their op name, and everything they create or remove belongs to the asking
+    /// member only. The home role, pairing and `secret_use` member-grant checks run
+    /// before the params are parsed, so a member without the grant cannot drive the
+    /// grammar diagnostics either.
+    async fn secret_flow_op(
+        &self,
+        member: &str,
+        method: &str,
+        params: &Value,
+        budget: tokio::time::Instant,
+    ) -> Result<Value, Refusal> {
+        self.secret_home_self()?;
+        let pairing_id = self.current_pairing(member, method, budget).await?;
+        self.require_secret_use_grant(member, &pairing_id, method)?;
+        let store = self.engine.store();
+        let answer = if method == OP_SECRET_REQUEST_FLOW_APPROVAL {
+            let clock = Arc::clone(&self.secret_clock);
+            crate::secret_use::serve_flow_approval_forwarded(store, member, params, move || clock())
+        } else {
+            crate::secret_use::serve_revoke_flow_grants_forwarded(store, member, params)
+        };
+        match answer {
+            UseAnswer::Reply(reply) => {
+                self.note_forwarded_refusal(method, member, &reply);
+                Ok(reply)
+            }
+            UseAnswer::InvalidParams => Err(Refusal::InvalidParams(
+                "invalid flow secret parameters".into(),
+            )),
+        }
+    }
+
+    /// Whether this vault is the secret home, and its self id if it has one. A vault
+    /// whose setting is unset (single) or names another member (remote) is not the
+    /// home: it answers the uniform `not_found` and writes nothing, so a misrouted call
+    /// ends here after one hop. A setting this vault cannot place answers
+    /// `remote_setup_incomplete` naming this vault, and an unreadable store
+    /// `store_error`.
+    fn secret_home_self(&self) -> Result<Option<String>, Refusal> {
+        match self.engine.store().secret_home_role() {
+            SecretHomeRole::Home { self_member } => Ok(self_member),
+            SecretHomeRole::Single | SecretHomeRole::Remote { .. } => Err(Refusal::NotFound),
+            SecretHomeRole::RemoteSetupIncomplete { self_member } => {
+                Err(Refusal::SecretHomeSetupIncomplete(self_member))
+            }
+            SecretHomeRole::StoreError => Err(STORE_ERROR),
+        }
+    }
+
+    /// A selector-free `secret_use` member grant stored under the member's CURRENT
+    /// pairing id. A grant recorded under an older pairing is ignored, so re-pairing a
+    /// computer stops its forwarded secret calls until the grant is made again.
+    fn require_secret_use_grant(
+        &self,
+        member: &str,
+        pairing_id: &str,
+        subject: &str,
+    ) -> Result<(), Refusal> {
+        // A store fault is transient here, not the authoritative `not_found`.
+        let grants = self
+            .engine
+            .store()
+            .list_member_grants()
+            .map_err(|_| STORE_ERROR)?;
+        if grants.iter().any(|grant| {
+            grant.member_id == member
+                && grant.operation == MemberGrantOperation::SecretUse
+                && grant.selector == MemberGrantSelector::None
+                && grant.pairing_id == pairing_id
+        }) {
+            Ok(())
+        } else {
+            Err(self.secret_refusal(subject, member, "no_secret_use_grant"))
+        }
+    }
+
+    /// Record a forwarded secret refusal naming the member, and answer the uniform
+    /// `not_found`.
+    fn secret_refusal(&self, subject: &str, member: &str, reason: &'static str) -> Refusal {
+        self.note_secret_event(subject, member, reason);
+        Refusal::NotFound
+    }
+
+    /// When the store refused a forwarded call, add a diagnostic row naming the
+    /// member, beside the store's own row (which names only the local sender), so an
+    /// operator can tell which computer was refused. A transient refusal (`store_error`)
+    /// decided nothing and is not recorded; neither are releases and approval requests,
+    /// whose audit rows and pending requests already carry the member, and which would
+    /// otherwise push refusal rows out of the trimmed diagnostics table.
+    fn note_forwarded_refusal(&self, subject: &str, member: &str, reply: &Value) {
+        let code = reply
+            .get("error")
+            .and_then(|error| error.get("code"))
+            .and_then(Value::as_str);
+        let reason = match code {
+            Some("not_found") => "forwarded_not_found",
+            Some("invalid_params") => "forwarded_invalid_params",
+            Some("limit_exceeded") => "forwarded_limit_exceeded",
+            Some("pending_limit") => "forwarded_pending_limit",
+            _ => return,
+        };
+        self.note_secret_event(subject, member, reason);
+    }
+
+    /// One `secret_use_refusal` diagnostic row naming the member. Best effort, like
+    /// [`Self::note_refusal`].
+    fn note_secret_event(&self, subject: &str, member: &str, reason: &str) {
+        let _ = self.engine.store().record_auth_event(
+            subject,
+            AuthObservation {
+                kind: AuthEventKind::SecretUseRefusal.as_str(),
+                provider_status: None,
+                detail: Some(reason),
+                reporter_source: None,
+                principal: Some(AuthEventPrincipal::Member(member)),
+            },
+            None,
+        );
+    }
+
     /// Step 2: the member's current pairing id from callosum.
     async fn current_pairing(
         &self,
@@ -1021,6 +1443,10 @@ impl HomeVault {
     /// One callosum call within what is left of the home's budget. `None` for no
     /// client, no time or no answer, all of which are transient for the caller.
     async fn callosum_call(&self, method: &str, budget: tokio::time::Instant) -> Option<Value> {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(stub) = self.callosum_stub.as_ref() {
+            return stub(method);
+        }
         callosum_lookup(self.callosum.get(), method, budget).await
     }
 
@@ -1281,6 +1707,89 @@ mod tests {
             let body = json!({ "code": code, "message": "refused" });
             assert_eq!(decode_paired_devices(&body, MEMBER), expected, "{code}");
         }
+    }
+
+    /// The release aad's `call_sha256` hashes the RFC 8785 bytes of `{sender, call}`:
+    /// keys sorted at every level whatever order they arrived in, control characters,
+    /// backslash and quote escaped, other text raw UTF-8. The expected digest is of the
+    /// canonical bytes written out by hand.
+    #[test]
+    fn the_call_digest_is_over_the_rfc_8785_bytes_of_sender_and_call() {
+        let call: Value = serde_json::from_str(
+            "{\"\u{e9}\":{},\"b\":\"\\u001f\\\\\\\"\u{e9}\",\"a\":[1,-2,null,true]}",
+        )
+        .unwrap();
+        assert_eq!(
+            secret_call_sha256("aft", &call).as_deref(),
+            Some("0590da2688b02f294eff26e009b9dbf898730b710dbab7a96f6ad27d7de85b1a")
+        );
+        assert_ne!(
+            secret_call_sha256("cerebellum", &call),
+            secret_call_sha256("aft", &call)
+        );
+        // Numbers RFC 8785 would print with its float rules are refused, not guessed.
+        for number in [
+            json!(1.5),
+            json!(9_007_199_254_740_992u64),
+            json!(-9_007_199_254_740_992i64),
+        ] {
+            assert_eq!(
+                secret_call_sha256("aft", &json!({ "n": number })),
+                None,
+                "{number}"
+            );
+        }
+        assert!(secret_call_sha256("aft", &json!({ "n": 9_007_199_254_740_991u64 })).is_some());
+    }
+
+    /// The release aad is parsed strictly: exactly its six fields, each well formed.
+    #[test]
+    fn the_release_aad_is_parsed_strictly() {
+        let good = json!({
+            "secret_name": "key",
+            "requester": MEMBER,
+            "home": "fed-computer:00000000000000000000000000000001",
+            "nonce": "0123456789abcdef0123456789abcdef",
+            "recipient_key_id": "kem-1",
+            "call_sha256": "ab".repeat(32),
+        });
+        assert!(parse_secret_aad(&good.to_string()).is_ok());
+        let mut cases = Vec::new();
+        for field in good.as_object().unwrap().keys() {
+            let mut missing = good.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            cases.push(missing);
+        }
+        for (field, bad) in [
+            ("secret_name", json!("")),
+            (
+                "requester",
+                json!("fed-phone:0123456789abcdef0123456789abcdef"),
+            ),
+            ("home", json!("self")),
+            ("nonce", json!("0123456789ABCDEF0123456789ABCDEF")),
+            ("recipient_key_id", json!("")),
+            ("call_sha256", json!("AB".repeat(32))),
+            ("extra", json!("x")),
+        ] {
+            let mut case = good.clone();
+            case[field] = bad;
+            cases.push(case);
+        }
+        for case in cases {
+            assert!(
+                matches!(
+                    parse_secret_aad(&case.to_string()),
+                    Err(Refusal::InvalidParams(_))
+                ),
+                "{case}"
+            );
+        }
+        // A duplicated field is refused too.
+        let duplicated =
+            good.to_string()
+                .replacen('{', r#"{"nonce":"0123456789abcdef0123456789abcdef","#, 1);
+        assert!(parse_secret_aad(&duplicated).is_err());
     }
 
     fn peers(key: Value) -> Value {

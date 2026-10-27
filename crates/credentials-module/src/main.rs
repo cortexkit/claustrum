@@ -2319,6 +2319,8 @@ fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> 
             ManagementOperation { name: "secret.list".into(), description: None, kind: ManagementOperationKind::Query },
             ManagementOperation { name: "secret.delete".into(), description: None, kind: ManagementOperationKind::Mutate },
             ManagementOperation { name: "secret.revoke_grant".into(), description: None, kind: ManagementOperationKind::Mutate },
+            // Which vault holds this account's secrets, so a phone finds the home from a field it reads.
+            ManagementOperation { name: "secret.home".into(), description: None, kind: ManagementOperationKind::Query },
             // A use can consume a grant with duration `once`, so it must not be relayed as a retryable query.
             ManagementOperation { name: "secret.use".into(), description: None, kind: ManagementOperationKind::Mutate },
             ManagementOperation { name: "secret.request_flow_approval".into(), description: None, kind: ManagementOperationKind::Mutate },
@@ -2426,9 +2428,9 @@ fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> 
                 description: Some("Accept a consumer's report that a served token was refused, at the version it was served.".to_string()),
                 kind: ManagementOperationKind::Mutate,
             },
-            // The three ops another computer's vault calls on this one, relayed by
-            // callosum. Callosum only offers a paired computer what this catalog declares,
-            // so leaving them out made federation unreachable however the profile was set.
+            // The ops another computer's vault calls on this one, relayed by callosum.
+            // Callosum only offers a paired computer what this catalog declares, so
+            // leaving them out made federation unreachable however the profile was set.
             // Declaring them grants nothing: dispatch answers them only on a mapped member
             // channel, and only with that member's own grants.
             ManagementOperation {
@@ -2444,6 +2446,24 @@ fn manifest(module_id: &str, launch_nonce_source: Option<LaunchNonceSource>) -> 
             ManagementOperation {
                 name: federation::ingress::OP_TRANSFER_DELIVER.to_string(),
                 description: Some("Accept a sealed static-key transfer from a member vault into the pending queue.".to_string()),
+                kind: ManagementOperationKind::Mutate,
+            },
+            // A query: the reply is either sealed to the asking vault or holds no
+            // material, so callosum keeping no reply body is right. A query may still
+            // write home state, as `federation.remote_token` commits its issue audit.
+            ManagementOperation {
+                name: federation::ingress::OP_SECRET_USE.to_string(),
+                description: Some("Release an agent secret this vault holds to a member vault's sender, sealed to that vault's announced key. Never returns plaintext.".to_string()),
+                kind: ManagementOperationKind::Query,
+            },
+            ManagementOperation {
+                name: federation::ingress::OP_SECRET_REQUEST_FLOW_APPROVAL.to_string(),
+                description: Some("Record a member vault's flow consent request for an agent secret this vault holds.".to_string()),
+                kind: ManagementOperationKind::Mutate,
+            },
+            ManagementOperation {
+                name: federation::ingress::OP_SECRET_REVOKE_FLOW_GRANTS.to_string(),
+                description: Some("Revoke a member vault's flow grants for one flow install.".to_string()),
                 kind: ManagementOperationKind::Mutate,
             },
         ],
@@ -2608,6 +2628,7 @@ mod tests {
             panic!("management surface")
         };
         for name in secret_phone::PHONE_OPS.into_iter().chain([
+            "secret.home",
             "secret.use",
             "secret.request_flow_approval",
             "secret.revoke_flow_grants",
@@ -2625,7 +2646,7 @@ mod tests {
             );
             let kind = if matches!(
                 name,
-                "secret.deposit_keys" | "secret.list" | "permissions.list"
+                "secret.deposit_keys" | "secret.list" | "secret.home" | "permissions.list"
             ) {
                 ManagementOperationKind::Query
             } else {
@@ -2710,6 +2731,18 @@ mod tests {
                 federation::ingress::OP_TRANSFER_DELIVER,
                 ManagementOperationKind::Mutate,
             ),
+            (
+                federation::ingress::OP_SECRET_USE,
+                ManagementOperationKind::Query,
+            ),
+            (
+                federation::ingress::OP_SECRET_REQUEST_FLOW_APPROVAL,
+                ManagementOperationKind::Mutate,
+            ),
+            (
+                federation::ingress::OP_SECRET_REVOKE_FLOW_GRANTS,
+                ManagementOperationKind::Mutate,
+            ),
         ] {
             assert!(
                 declared.iter().any(|(name, k)| name == op && *k == kind),
@@ -2719,9 +2752,14 @@ mod tests {
         }
         assert_eq!(
             federation::ingress::FEDERATION_OPS.len(),
-            3,
+            6,
             "a new federation op must be added to the manifest and to this test"
         );
+        // `secret.home` is a phone op: declared, but never on the member allowlist.
+        assert!(declared
+            .iter()
+            .any(|(name, k)| name == "secret.home" && *k == ManagementOperationKind::Query));
+        assert!(!federation::is_federation_op("secret.home"));
     }
 
     /// The two fields protocol 0.19 moved OUT of `builder()` are still declared.
@@ -5543,7 +5581,7 @@ mod tests {
         ));
     }
 
-    /// A federation channel answers only the three federation ops, and never resolves
+    /// A federation channel answers only the federation ops, and never resolves
     /// a handle or an enrollment token: an existing op with a valid handle, or a
     /// `read` row forced for the member's name, returns no secret.
     #[tokio::test]
@@ -5575,6 +5613,8 @@ mod tests {
             (OP_LIST_SCOPED, json!({})),
             (OP_PUBLIC_KEY, json!({ "credential_id": FORWARDED_TEST_ID })),
             (OP_ADMIN_CHALLENGE, json!({})),
+            // A phone op, not a member one.
+            ("secret.home", json!({})),
         ] {
             let (ty, body) = routed_reply(&surface, &admin, 90, method, params).await;
             assert_eq!(ty, FrameType::Response, "{method}");
@@ -5602,17 +5642,578 @@ mod tests {
         }
     }
 
-    /// The three federation ops answer the uniform not_found on every channel that is
-    /// not a federation channel, whatever the principal holds.
+    /// On a mapped member channel the three `federation.secret_*` ops reach the home's
+    /// own checks. A vault that is not the secret home refuses them with the uniform
+    /// not_found before anything else. A home-role vault goes on to ask callosum about
+    /// the member's pairing; with no outbound client attached that lookup fails, which
+    /// is the transient `home_unavailable`.
+    #[tokio::test]
+    async fn a_federation_channel_dispatches_the_secret_ops_only_on_the_secret_home() {
+        let (surface, admin, store, routes) = granted_scoped_rig(198, "callosum");
+        set_member_mapping(&store, true);
+        bind_reserved_route(&surface, &admin, &routes, 97, 1, "callosum", MEMBER_HARNESS).await;
+        let secret_ops = [
+            federation::ingress::OP_SECRET_USE,
+            federation::ingress::OP_SECRET_REQUEST_FLOW_APPROVAL,
+            federation::ingress::OP_SECRET_REVOKE_FLOW_GRANTS,
+        ];
+        let not_found = serde_json::to_vec(&uniform_not_found()).unwrap();
+        for op in secret_ops {
+            let (ty, body) = routed_reply(&surface, &admin, 97, op, json!({})).await;
+            assert_eq!(ty, FrameType::Response, "{op}");
+            assert_eq!(body, not_found, "single role: {op}");
+        }
+        store
+            .set_secret_home_audited(
+                Some(credentials_core::store::SECRET_HOME_SELF),
+                credentials_core::audit::AuditCtx::admin(
+                    credentials_core::audit::AuditOp::SecretHomeSet,
+                ),
+            )
+            .unwrap();
+        for op in secret_ops {
+            let (ty, body) = routed_reply(&surface, &admin, 97, op, json!({})).await;
+            assert_eq!(ty, FrameType::Response, "{op}");
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(
+                body["result"]["error"]["code"], "home_unavailable",
+                "home role: {op} {body}"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------------
+    // The secret home's federation ingress
+    // -----------------------------------------------------------------------------
+
+    /// The paired computer that forwards secret calls to the home in these tests.
+    const HOME_ASKER: &str = "fed-computer:33333333333333333333333333333333";
+    const HOME_ASKER_FP: &str = "33333333333333333333333333333333";
+    /// The pairing id callosum reports for [`HOME_ASKER`], under which its
+    /// `secret_use` member grant is stored.
+    const HOME_ASKER_PAIRING: &str = "pair-M";
+
+    /// A home-role vault (the contract tests' [`SecretFlow`] vault, `secrets.home_member`
+    /// set to `self`, with a transfer key and a `secret_use` member grant for
+    /// [`HOME_ASKER`]) and its [`federation::HomeVault`], whose callosum lookups are
+    /// answered from `callosum`.
+    struct SecretHome {
+        flow: SecretFlow,
+        home: federation::HomeVault,
+        /// The answer for each callosum method; a missing entry is no answer.
+        callosum: Arc<std::sync::Mutex<std::collections::HashMap<String, serde_json::Value>>>,
+        asker_pem: String,
+        asker_key_id: String,
+        home_pub: Vec<u8>,
+        nonces: std::sync::atomic::AtomicU64,
+    }
+
+    impl SecretHome {
+        async fn new(seed: u8, home_setting: Option<&str>) -> Self {
+            let flow = SecretFlow::new(seed).await;
+            flow.store
+                .set_secret_home_audited(home_setting, AuditCtx::admin(AuditOp::SecretHomeSet))
+                .expect("home setting");
+            let transfer = credentials_core::kem::generate_key().expect("transfer key");
+            let (home_pub, _) = credentials_core::kem::public_half(&transfer).unwrap();
+            flow.store
+                .create_audited(
+                    credentials_core::federation::VAULT_TRANSFER_ID,
+                    &VaultRecord::new_static(
+                        CredentialKind::KemKey,
+                        "operator",
+                        transfer.into_bytes(),
+                        None,
+                    ),
+                    AuditCtx::admin(AuditOp::Put),
+                )
+                .expect("transfer key");
+            flow.store
+                .create_member_grant_audited(
+                    HOME_ASKER,
+                    credentials_core::federation::MemberGrantOperation::SecretUse,
+                    &credentials_core::federation::MemberGrantSelector::None,
+                    HOME_ASKER_PAIRING,
+                )
+                .expect("secret_use member grant");
+            let asker_pem = credentials_core::kem::pem_from_scalar(&[9; 32]);
+            let (asker_pub, asker_key_id) = credentials_core::kem::public_half(&asker_pem).unwrap();
+            let callosum = Arc::new(std::sync::Mutex::new(std::collections::HashMap::from([
+                (
+                    "callosum.paired_devices_read".to_string(),
+                    json!({"devices":[{"class":"computer","fingerprint":HOME_ASKER_FP,"pairing_id":HOME_ASKER_PAIRING}]}),
+                ),
+                (
+                    "callosum.peer_keys_read".to_string(),
+                    json!({"peers":[{"fingerprint":HOME_ASKER_FP,"key_record":{"keys":{"vault_transfer_x25519":{"pub":sc_hex(&asker_pub)}}}}]}),
+                ),
+            ])));
+            let answers = Arc::clone(&callosum);
+            let engine = Arc::new(RefreshEngine::new(
+                Arc::clone(&flow.store),
+                Vec::new(),
+                Arc::new(crate::test_support::NoHttp),
+            ));
+            let home = federation::HomeVault::new(engine)
+                .with_secret_clock(Arc::new(sc_now_ms))
+                .with_callosum_stub(Arc::new(move |method: &str| {
+                    answers.lock().unwrap().get(method).cloned()
+                }));
+            SecretHome {
+                flow,
+                home,
+                callosum,
+                asker_pem,
+                asker_key_id,
+                home_pub,
+                nonces: std::sync::atomic::AtomicU64::new(1),
+            }
+        }
+
+        fn set_callosum(&self, method: &str, answer: Option<serde_json::Value>) {
+            let mut answers = self.callosum.lock().unwrap();
+            match answer {
+                Some(answer) => answers.insert(method.to_string(), answer),
+                None => answers.remove(method),
+            };
+        }
+
+        /// A release aad in the documented field order, with a fresh nonce.
+        fn aad(&self, sender: &str, call: &serde_json::Value) -> String {
+            let nonce = format!(
+                "{:032x}",
+                self.nonces
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            );
+            self.aad_with(
+                call["name"].as_str().unwrap(),
+                HOME_ASKER,
+                SC_MEMBER,
+                &nonce,
+                &self.asker_key_id,
+                &federation::ingress::secret_call_sha256(sender, call).unwrap(),
+            )
+        }
+
+        fn aad_with(
+            &self,
+            name: &str,
+            requester: &str,
+            home: &str,
+            nonce: &str,
+            key_id: &str,
+            call_sha256: &str,
+        ) -> String {
+            format!(
+                r#"{{"secret_name":"{name}","requester":"{requester}","home":"{home}","nonce":"{nonce}","recipient_key_id":"{key_id}","call_sha256":"{call_sha256}"}}"#
+            )
+        }
+
+        async fn serve(&self, method: &str, params: serde_json::Value) -> serde_json::Value {
+            match self.home.serve(HOME_ASKER, method, &params).await {
+                federation::HomeAnswer::Reply(reply) => reply,
+                federation::HomeAnswer::InvalidParams(_) => json!({"transport":"invalid_params"}),
+            }
+        }
+
+        async fn forward_with(
+            &self,
+            aad: &str,
+            sender: &str,
+            call: &serde_json::Value,
+        ) -> serde_json::Value {
+            self.serve(
+                federation::ingress::OP_SECRET_USE,
+                json!({"aad":aad, "sender":sender, "call":call}),
+            )
+            .await
+        }
+
+        /// Forward one sender call with a fresh aad; returns the reply and the aad.
+        async fn forward(
+            &self,
+            sender: &str,
+            call: &serde_json::Value,
+        ) -> (serde_json::Value, String) {
+            let aad = self.aad(sender, call);
+            (self.forward_with(&aad, sender, call).await, aad)
+        }
+
+        /// Open a sealed reply as the asking computer does, over the aad bytes it sent.
+        fn open(&self, reply: &serde_json::Value, aad: &str) -> Result<serde_json::Value, String> {
+            use base64::Engine as _;
+            let b64 = base64::engine::general_purpose::STANDARD;
+            let field = |key: &str| b64.decode(reply[key].as_str().unwrap()).unwrap();
+            let plaintext = credentials_core::kem::open_auth(
+                &self.asker_pem,
+                &self.home_pub,
+                &field("enc"),
+                &field("ciphertext"),
+                federation::ingress::SECRET_RELEASE_INFO,
+                aad.as_bytes(),
+            )?;
+            Ok(serde_json::from_slice(&plaintext).unwrap())
+        }
+
+        fn statement(reply: &serde_json::Value) -> serde_json::Value {
+            assert_eq!(reply["status"], "approval_required", "{reply}");
+            serde_json::from_slice(&sc_unb64(reply["statement_b64url"].as_str().unwrap())).unwrap()
+        }
+    }
+
+    fn sealed_keys(reply: &serde_json::Value) -> std::collections::BTreeSet<String> {
+        reply.as_object().unwrap().keys().cloned().collect()
+    }
+
+    fn sh_not_found() -> serde_json::Value {
+        json!({"error":{"code":"not_found","class":"permanent"}})
+    }
+
+    /// A forwarded agent call gets its own v2 approval naming the home and the asking
+    /// computer. Once the phone grants it, the retry is released sealed to the asker's
+    /// announced key under the secret-release info, over the aad bytes it sent, and the
+    /// plaintext is exactly the local `released` object. The home's own agent with the
+    /// same stamp is not served by that grant.
+    #[tokio::test]
+    async fn a_forwarded_secret_use_is_approved_for_its_asker_and_released_sealed() {
+        use base64::Engine as _;
+        let h = SecretHome::new(230, Some("self")).await;
+        h.flow.deposit_both().await;
+        let api = secret_golden("use.request.api_key");
+        let login = secret_golden("use.request.site_login");
+
+        let (asked, _) = h.forward("aft", &api).await;
+        let statement = SecretHome::statement(&asked);
+        assert_eq!(statement["v"], "ck-secret-use-statement/v2", "{statement}");
+        assert_eq!(statement["member_id"], SC_MEMBER);
+        assert_eq!(statement["asking_member_id"], HOME_ASKER);
+        let approved = h.flow.approve(&asked, "permanent", false).await;
+        assert_eq!(approved["results"][0]["outcome"], "granted", "{approved}");
+
+        // The home's own AFT, with the same stamp, has no grant of its own.
+        let local = h.flow.use_secret("aft", &api);
+        assert_eq!(local["status"], "approval_required", "{local}");
+        assert!(SecretHome::statement(&local)
+            .get("asking_member_id")
+            .is_none());
+
+        let (released, aad) = h.forward("aft", &api).await;
+        assert_eq!(
+            sealed_keys(&released),
+            ["ciphertext", "enc", "status"].map(String::from).into(),
+            "{released}"
+        );
+        assert_eq!(released["status"], "sealed");
+        let key_b64url = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"sk-example");
+        assert!(!released.to_string().contains(&key_b64url));
+        let opened = h.open(&released, &aad).unwrap();
+        assert_eq!(
+            opened,
+            json!({
+                "status":"released",
+                "kind":"agent_api_key",
+                "key_b64url":key_b64url,
+                "location":opened["location"].clone(),
+            })
+        );
+        assert!(opened["location"].is_string());
+        // Sealed over the received aad bytes: one changed byte and it will not open.
+        assert!(h
+            .open(&released, &aad.replace("\"nonce\"", "\"nonce\" "))
+            .is_err());
+        // A transport retry with the same aad gets the same sealed bytes.
+        assert_eq!(h.forward_with(&aad, "aft", &api).await, released);
+
+        // A site login for Cerebellum releases username, password and the TOTP code.
+        let (asked, _) = h.forward("cerebellum", &login).await;
+        let approved = h.flow.approve(&asked, "hour", false).await;
+        assert_eq!(approved["results"][0]["outcome"], "granted", "{approved}");
+        let (released, aad) = h.forward("cerebellum", &login).await;
+        let opened = h.open(&released, &aad).unwrap();
+        assert_eq!(opened["kind"], "site_login", "{opened}");
+        assert_eq!(opened["username"], "alice");
+        assert_eq!(opened["password"], "correct horse");
+        assert!(
+            opened["totp"].as_str().is_some_and(|code| code.len() == 6),
+            "{opened}"
+        );
+    }
+
+    /// The aad binds the release to this home, these exact params and the requester's
+    /// announced key. Any mismatch releases nothing.
+    #[tokio::test]
+    async fn a_forwarded_secret_use_bound_elsewhere_releases_nothing() {
+        let h = SecretHome::new(231, Some("self")).await;
+        h.flow.deposit_both().await;
+        let api = secret_golden("use.request.api_key");
+        let (asked, _) = h.forward("aft", &api).await;
+        h.flow.approve(&asked, "permanent", false).await;
+        let digest = federation::ingress::secret_call_sha256("aft", &api).unwrap();
+        let name = api["name"].as_str().unwrap();
+        let nonce = "0123456789abcdef0123456789abcdef";
+        let other = "fed-computer:44444444444444444444444444444444";
+        let mut other_call = api.clone();
+        other_call["target"]["path"] = json!("/elsewhere");
+        let other_digest = federation::ingress::secret_call_sha256("aft", &other_call).unwrap();
+        let key_id = h.asker_key_id.as_str();
+        for (aad, detail) in [
+            (
+                h.aad_with("other-name", HOME_ASKER, SC_MEMBER, nonce, key_id, &digest),
+                "secret_name_mismatch",
+            ),
+            (
+                h.aad_with(name, HOME_ASKER, other, nonce, key_id, &digest),
+                "home_mismatch",
+            ),
+            (
+                h.aad_with(name, HOME_ASKER, SC_MEMBER, nonce, key_id, &other_digest),
+                "call_sha256_mismatch",
+            ),
+            (
+                h.aad_with(name, HOME_ASKER, SC_MEMBER, nonce, "kem-other", &digest),
+                "recipient_key_mismatch",
+            ),
+        ] {
+            assert_eq!(
+                h.forward_with(&aad, "aft", &api).await,
+                sh_not_found(),
+                "{detail}"
+            );
+            let event = &h.flow.store.recent_auth_events(1).unwrap()[0];
+            assert_eq!(event.detail.as_deref(), Some(detail));
+            assert_eq!(event.principal_id.as_deref(), Some(HOME_ASKER));
+        }
+        // The same digest under another sender does not match either.
+        let aad = h.aad("aft", &api);
+        assert_eq!(
+            h.forward_with(&aad, "cerebellum", &api).await,
+            sh_not_found()
+        );
+        // An aad naming another requester is that requester's setup fault, not a release.
+        let aad = h.aad_with(name, other, SC_MEMBER, nonce, key_id, &digest);
+        let refused = h.forward_with(&aad, "aft", &api).await;
+        assert_eq!(
+            refused["error"]["code"], "remote_setup_incomplete",
+            "{refused}"
+        );
+        assert_eq!(refused["error"]["remedy_member"], HOME_ASKER);
+
+        // The params, the aad and the sender are closed and strict.
+        let aad = h.aad("aft", &api);
+        let invalid = json!({"transport":"invalid_params"});
+        for params in [
+            json!({"aad":aad, "sender":"aft", "call":api, "extra":1}),
+            json!({"aad":aad, "call":api}),
+            json!({"aad":aad, "sender":"phone", "call":api}),
+            json!({"aad":aad.replace("}", r#","extra":"x"}"#), "sender":"aft", "call":api}),
+            json!({"aad":aad.replace(r#""nonce":""#, r#""nonce":"X"#), "sender":"aft", "call":api}),
+        ] {
+            assert_eq!(
+                h.serve(federation::ingress::OP_SECRET_USE, params.clone())
+                    .await,
+                invalid,
+                "{params}"
+            );
+        }
+        // The agent path needs its ScopeStamp.
+        let mut stampless = api.clone();
+        stampless.as_object_mut().unwrap().remove("stamp");
+        let aad = h.aad("aft", &stampless);
+        assert_eq!(h.forward_with(&aad, "aft", &stampless).await, invalid);
+    }
+
+    /// A pairing or key lookup that callosum cannot answer, or answers `fed_not_ready`,
+    /// is `home_unavailable`: it writes no refusal diagnostic and leaves the release
+    /// receipt in place, so the same aad is answered with the same sealed bytes once
+    /// callosum answers again.
+    #[tokio::test]
+    async fn a_forwarded_secret_use_that_cannot_be_checked_is_transient() {
+        let h = SecretHome::new(232, Some("self")).await;
+        h.flow.deposit_both().await;
+        let api = secret_golden("use.request.api_key");
+        let (asked, _) = h.forward("aft", &api).await;
+        h.flow.approve(&asked, "permanent", false).await;
+        let (released, aad) = h.forward("aft", &api).await;
+        assert_eq!(released["status"], "sealed", "{released}");
+        let events = h.flow.store.recent_auth_events(1000).unwrap().len();
+        let unavailable = json!({"error":{"code":"home_unavailable","class":"transient"}});
+        for (method, answer) in [
+            ("callosum.paired_devices_read", None),
+            (
+                "callosum.paired_devices_read",
+                Some(json!({"code":"fed_not_ready"})),
+            ),
+            ("callosum.peer_keys_read", None),
+            (
+                "callosum.peer_keys_read",
+                Some(json!({"code":"fed_not_ready"})),
+            ),
+        ] {
+            let saved = h.callosum.lock().unwrap().get(method).cloned();
+            h.set_callosum(method, answer);
+            assert_eq!(
+                h.forward_with(&aad, "aft", &api).await,
+                unavailable,
+                "{method}"
+            );
+            h.set_callosum(method, saved);
+        }
+        assert_eq!(h.flow.store.recent_auth_events(1000).unwrap().len(), events);
+        assert_eq!(h.forward_with(&aad, "aft", &api).await, released);
+    }
+
+    /// Only a home-role vault serves the forwarded secret ops, and only to a member
+    /// paired now and holding a `secret_use` grant under that pairing.
+    #[tokio::test]
+    async fn only_the_secret_home_serves_forwarded_secret_ops_to_a_granted_member() {
+        let api = secret_golden("use.request.api_key");
+        // Single (unset) and remote roles: not_found for all three ops, and nothing is
+        // written, so a misrouted call ends after one hop.
+        for setting in [None, Some("fed-computer:44444444444444444444444444444444")] {
+            let h = SecretHome::new(233, setting).await;
+            let events = h.flow.store.recent_auth_events(1000).unwrap().len();
+            let (reply, _) = h.forward("aft", &api).await;
+            assert_eq!(reply, sh_not_found(), "{setting:?}");
+            for (op, params) in [
+                (
+                    federation::ingress::OP_SECRET_REQUEST_FLOW_APPROVAL,
+                    sf_install(false),
+                ),
+                (
+                    federation::ingress::OP_SECRET_REVOKE_FLOW_GRANTS,
+                    json!({"flow_install_id":"install-A"}),
+                ),
+            ] {
+                assert_eq!(
+                    h.serve(op, params).await,
+                    sh_not_found(),
+                    "{setting:?} {op}"
+                );
+            }
+            assert_eq!(sf_pending(&h.flow), 0);
+            assert_eq!(h.flow.store.recent_auth_events(1000).unwrap().len(), events);
+        }
+
+        let h = SecretHome::new(234, Some("self")).await;
+        h.flow.deposit_both().await;
+        // Re-paired: the grant was made under the old pairing.
+        h.set_callosum(
+            "callosum.paired_devices_read",
+            Some(json!({"devices":[{"class":"computer","fingerprint":HOME_ASKER_FP,"pairing_id":"pair-N"}]})),
+        );
+        let (reply, _) = h.forward("aft", &api).await;
+        assert_eq!(reply, sh_not_found());
+        assert_eq!(
+            h.flow.store.recent_auth_events(1).unwrap()[0]
+                .detail
+                .as_deref(),
+            Some("no_secret_use_grant")
+        );
+        assert_eq!(
+            h.serve(
+                federation::ingress::OP_SECRET_REQUEST_FLOW_APPROVAL,
+                sf_install(false)
+            )
+            .await,
+            sh_not_found()
+        );
+        // Unpaired.
+        h.set_callosum("callosum.paired_devices_read", Some(json!({"devices":[]})));
+        let (reply, _) = h.forward("aft", &api).await;
+        assert_eq!(reply, sh_not_found());
+        assert_eq!(sf_pending(&h.flow), 0);
+        // The grant revoked under the current pairing.
+        h.set_callosum(
+            "callosum.paired_devices_read",
+            Some(json!({"devices":[{"class":"computer","fingerprint":HOME_ASKER_FP,"pairing_id":HOME_ASKER_PAIRING}]})),
+        );
+        let (reply, _) = h.forward("aft", &api).await;
+        assert_eq!(reply["status"], "approval_required", "{reply}");
+        h.flow
+            .store
+            .revoke_member_grant_audited(
+                HOME_ASKER,
+                credentials_core::federation::MemberGrantOperation::SecretUse,
+                &credentials_core::federation::MemberGrantSelector::None,
+            )
+            .unwrap();
+        let (reply, _) = h.forward("aft", &api).await;
+        assert_eq!(reply, sh_not_found());
+    }
+
+    /// Basal's forwarded flow consent and flow runs belong to the asking computer: the
+    /// consent is a v2 flow statement naming it, the run is released sealed, the home's
+    /// own basal with the same flow identity is not served by it, and the asker's revoke
+    /// leaves the home's own flow grant in place.
+    #[tokio::test]
+    async fn forwarded_flow_consent_runs_and_revokes_belong_to_the_asking_computer() {
+        let h = SecretHome::new(235, Some("self")).await;
+        h.flow.deposit_both().await;
+        let asked = h
+            .serve(
+                federation::ingress::OP_SECRET_REQUEST_FLOW_APPROVAL,
+                sf_install(false),
+            )
+            .await;
+        let statement = SecretHome::statement(&asked);
+        assert_eq!(statement["v"], "ck-secret-flow-statement/v2", "{statement}");
+        assert_eq!(statement["asking_member_id"], HOME_ASKER);
+        let approved = h.flow.approve(&asked, "version", false).await;
+        assert_eq!(approved["results"][0]["outcome"], "granted", "{approved}");
+
+        let run = sf_run(false);
+        let (released, aad) = h.forward("basal", &run).await;
+        assert_eq!(released["status"], "sealed", "{released}");
+        assert_eq!(h.open(&released, &aad).unwrap()["status"], "released");
+        // The home's own basal has no grant for this flow.
+        assert_eq!(h.flow.use_secret("basal", &run), sh_not_found());
+        // The flow path needs the flow attributes on its stamp.
+        let (agent_stamped, _) = h.forward("basal", &api_without_flow()).await;
+        assert_eq!(agent_stamped, sh_not_found());
+
+        // The flow mutates carry no sender: their key sets are §15's, unchanged.
+        let mut with_sender = sf_install(false);
+        with_sender["sender"] = json!("basal");
+        assert_eq!(
+            h.serve(
+                federation::ingress::OP_SECRET_REQUEST_FLOW_APPROVAL,
+                with_sender
+            )
+            .await,
+            json!({"transport":"invalid_params"})
+        );
+
+        // The home's own basal approves the same flow; the asker's revoke removes only
+        // the asker's grant.
+        sf_approve(&h.flow, &sf_install(false)).await;
+        let revoked = h
+            .serve(
+                federation::ingress::OP_SECRET_REVOKE_FLOW_GRANTS,
+                json!({"flow_install_id":"install-A"}),
+            )
+            .await;
+        assert_eq!(revoked, json!({"status":"revoked","grants":1}));
+        assert_eq!(h.flow.use_secret("basal", &run)["status"], "released");
+        let (after, _) = h.forward("basal", &run).await;
+        assert_eq!(after, sh_not_found());
+    }
+
+    fn api_without_flow() -> serde_json::Value {
+        let mut run = sf_run(false);
+        run["stamp"]["attributes"]
+            .as_object_mut()
+            .unwrap()
+            .retain(|key, _| !key.starts_with("flow_"));
+        run
+    }
+
+    /// The federation ops answer the uniform not_found on every channel that is not a
+    /// federation channel, whatever the principal holds.
     #[tokio::test]
     async fn the_federation_ops_are_not_found_everywhere_else() {
         let (surface, admin, store, routes) = granted_scoped_rig(193, "callosum");
         let not_found = serde_json::to_vec(&uniform_not_found()).unwrap();
-        let ops = [
-            federation::ingress::OP_REMOTE_TOKEN,
-            federation::ingress::OP_REPORT_AUTH_FAILURE,
-            federation::ingress::OP_TRANSFER_DELIVER,
-        ];
+        let ops = federation::ingress::FEDERATION_OPS;
         // Gate off: callosum's own route, a forwarded route, another module, direct.
         bind_reserved_route(
             &surface,

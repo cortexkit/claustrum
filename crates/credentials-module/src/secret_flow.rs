@@ -81,9 +81,36 @@ pub fn serve_approval(
     if !admitted(principal) {
         return UseAnswer::Reply(SecretError::NotFound.body());
     }
+    match parse_approval(store, params) {
+        Ok(call) => outcome(store, store.secret_request_flow_approval(&call, clock)),
+        Err(answer) => answer,
+    }
+}
+
+/// `secret.request_flow_approval` forwarded by `asking_member`, a paired computer whose
+/// basal asked its own vault. The params are parsed exactly as a local request's; the
+/// pending request records the asker, so its approval grants that computer's flow only.
+/// The caller must have authenticated `asking_member` and checked its `secret_use`
+/// member grant.
+pub fn serve_approval_forwarded(
+    store: &Arc<EncryptedStore>,
+    asking_member: &str,
+    params: &Value,
+    clock: impl Fn() -> i64,
+) -> UseAnswer {
+    match parse_approval(store, params) {
+        Ok(call) => outcome(
+            store,
+            store.secret_request_flow_approval_from(&call, asking_member, clock),
+        ),
+        Err(answer) => answer,
+    }
+}
+
+fn parse_approval(store: &EncryptedStore, params: &Value) -> Result<SecretFlowApproval, UseAnswer> {
     let parsed: ApprovalParams = match serde_json::from_value(params.clone()) {
         Ok(p) => p,
-        Err(_) => return invalid(store, ValidationError::InvalidParams),
+        Err(_) => return Err(invalid(store, ValidationError::InvalidParams)),
     };
     let target = parsed.target.into_use_target();
     let validation = (|| {
@@ -102,22 +129,15 @@ pub fn serve_approval(
         }
         validate_flow_methods(&target, parsed.methods.as_deref())
     })();
-    let methods = match validation {
-        Ok(methods) => methods,
-        Err(error) => return invalid(store, error),
-    };
-    outcome(
-        store,
-        store.secret_request_flow_approval(
-            &SecretFlowApproval {
-                name: parsed.name,
-                flow: parsed.flow,
-                target,
-                methods,
-            },
-            clock,
-        ),
-    )
+    match validation {
+        Ok(methods) => Ok(SecretFlowApproval {
+            name: parsed.name,
+            flow: parsed.flow,
+            target,
+            methods,
+        }),
+        Err(error) => Err(invalid(store, error)),
+    }
 }
 
 // Admission is performed by secret_use::serve before entering the flow parser.
@@ -126,9 +146,31 @@ pub(super) fn serve_use(
     params: &Value,
     clock: impl Fn() -> i64,
 ) -> UseAnswer {
+    match parse_use(store, params) {
+        Ok(call) => outcome(store, store.secret_flow_use(&call, clock)),
+        Err(answer) => answer,
+    }
+}
+
+/// A flow run forwarded by a paired computer, whose release crosses back sealed. See
+/// [`super::serve_forwarded`] for the caller's duties.
+pub(super) fn serve_use_forwarded<E>(
+    store: &Arc<EncryptedStore>,
+    params: &Value,
+    request: &ReleaseRequest<'_>,
+    seal: impl FnOnce(&Value) -> Result<SealedRelease, E>,
+    clock: impl Fn() -> i64,
+) -> ForwardedUseAnswer<E> {
+    match parse_use(store, params) {
+        Ok(call) => forwarded_answer(store.secret_flow_use_sealed(&call, request, seal, clock)),
+        Err(answer) => answer.into(),
+    }
+}
+
+fn parse_use(store: &EncryptedStore, params: &Value) -> Result<SecretFlowUse, UseAnswer> {
     let parsed: UseParams = match serde_json::from_value(params.clone()) {
         Ok(p) => p,
-        Err(_) => return invalid(store, ValidationError::InvalidParams),
+        Err(_) => return Err(invalid(store, ValidationError::InvalidParams)),
     };
     let target = parsed.target.into_use_target();
     let validation = (|| {
@@ -142,15 +184,15 @@ pub(super) fn serve_use(
         Ok(())
     })();
     if let Err(error) = validation {
-        return invalid(store, error);
+        return Err(invalid(store, error));
     }
     let stamp: ScopeStamp = match serde_json::from_value(parsed.stamp) {
         Ok(stamp) => stamp,
         Err(error) if error.to_string().starts_with("missing field ") => {
             store.record_secret_use_refusal(SecretSender::Basal, None, "unmapped");
-            return UseAnswer::Reply(SecretError::NotFound.body());
+            return Err(UseAnswer::Reply(SecretError::NotFound.body()));
         }
-        Err(_) => return invalid(store, ValidationError::InvalidParams),
+        Err(_) => return Err(invalid(store, ValidationError::InvalidParams)),
     };
     if stamp.scope_epoch > MAX_SECRET_JSON_INTEGER
         || stamp
@@ -162,7 +204,7 @@ pub(super) fn serve_use(
             .flow_version
             .is_some_and(|v| v > MAX_SECRET_JSON_INTEGER)
     {
-        return invalid(store, ValidationError::InvalidParams);
+        return Err(invalid(store, ValidationError::InvalidParams));
     }
     let attributes = stamp.attributes;
     let (Some(flow_id), Some(version), Some(code_hash), Some(install_id)) = (
@@ -172,25 +214,19 @@ pub(super) fn serve_use(
         attributes.flow_install_id,
     ) else {
         store.record_secret_use_refusal(SecretSender::Basal, None, "flow_identity");
-        return UseAnswer::Reply(SecretError::NotFound.body());
+        return Err(UseAnswer::Reply(SecretError::NotFound.body()));
     };
-    outcome(
-        store,
-        store.secret_flow_use(
-            &SecretFlowUse {
-                name: parsed.name,
-                flow: FlowIdentity {
-                    flow_id,
-                    version,
-                    code_hash,
-                    install_id,
-                },
-                target,
-                method: parsed.method,
-            },
-            clock,
-        ),
-    )
+    Ok(SecretFlowUse {
+        name: parsed.name,
+        flow: FlowIdentity {
+            flow_id,
+            version,
+            code_hash,
+            install_id,
+        },
+        target,
+        method: parsed.method,
+    })
 }
 
 pub fn serve_revoke(
@@ -201,9 +237,45 @@ pub fn serve_revoke(
     if !admitted(principal) {
         return UseAnswer::Reply(SecretError::NotFound.body());
     }
+    match parse_revoke(store, params) {
+        Ok(parsed) => {
+            revoked(store.revoke_flow_grants(&parsed.flow_install_id, parsed.flow_version))
+        }
+        Err(answer) => answer,
+    }
+}
+
+/// `secret.revoke_flow_grants` forwarded by `asking_member`, a paired computer whose
+/// basal uninstalled a flow. It removes only that computer's grants and requests for
+/// the flow; the same flow identity's grants on the home or on another computer stay.
+/// The caller must have authenticated `asking_member` and checked its `secret_use`
+/// member grant.
+pub fn serve_revoke_forwarded(
+    store: &Arc<EncryptedStore>,
+    asking_member: &str,
+    params: &Value,
+) -> UseAnswer {
+    match parse_revoke(store, params) {
+        Ok(parsed) => revoked(store.revoke_flow_grants_from(
+            &parsed.flow_install_id,
+            parsed.flow_version,
+            asking_member,
+        )),
+        Err(answer) => answer,
+    }
+}
+
+fn revoked(result: Result<usize, SecretError>) -> UseAnswer {
+    UseAnswer::Reply(match result {
+        Ok(grants) => json!({"status":"revoked", "grants":grants}),
+        Err(error) => error.body(),
+    })
+}
+
+fn parse_revoke(store: &EncryptedStore, params: &Value) -> Result<RevokeParams, UseAnswer> {
     let parsed: RevokeParams = match serde_json::from_value(params.clone()) {
         Ok(p) => p,
-        Err(_) => return invalid(store, ValidationError::InvalidParams),
+        Err(_) => return Err(invalid(store, ValidationError::InvalidParams)),
     };
     if !(1..=256).contains(&parsed.flow_install_id.len())
         || !parsed
@@ -222,12 +294,7 @@ pub fn serve_revoke(
                 .any(|key| !matches!(key.as_str(), "flow_install_id" | "flow_version"))
         })
     {
-        return invalid(store, ValidationError::InvalidParams);
+        return Err(invalid(store, ValidationError::InvalidParams));
     }
-    UseAnswer::Reply(
-        match store.revoke_flow_grants(&parsed.flow_install_id, parsed.flow_version) {
-            Ok(grants) => json!({"status":"revoked", "grants":grants}),
-            Err(error) => error.body(),
-        },
-    )
+    Ok(parsed)
 }

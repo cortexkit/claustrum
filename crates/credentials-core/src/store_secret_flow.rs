@@ -137,7 +137,7 @@ impl EncryptedStore {
                 let now = clock();
                 let reply =
                     release(&record, now).map_err(|_| rusqlite_err("secret release failed"))?;
-                self.commit_flow_release(tx, call, &grant, &record, now)?;
+                self.commit_flow_release(tx, call, asking_member, &grant, &record, now)?;
                 Ok(Ok(SecretUseOutcome {
                     reply,
                     last_use: None,
@@ -150,27 +150,37 @@ impl EncryptedStore {
     }
 
     /// Mark a flow grant released, and write the release audit the first time it releases.
+    ///
+    /// As for agent releases, a release forwarded by a paired computer (a non-empty
+    /// `asking_member`) adds that member id as the last audited field; a local release
+    /// audits exactly the fields it always has.
     fn commit_flow_release(
         &self,
         tx: &rusqlite::Transaction<'_>,
         call: &SecretFlowUse,
+        asking_member: &str,
         grant: &Grant,
         record: &Record,
         now: i64,
     ) -> rusqlite::Result<()> {
         if !grant.first {
+            let version = call.flow.version.to_string();
+            let mut fields: Vec<&[u8]> = vec![
+                grant.id.as_bytes(),
+                record.incarnation.as_bytes(),
+                call.flow.flow_id.as_bytes(),
+                version.as_bytes(),
+            ];
+            if asking_member != LOCAL_ASKING_MEMBER {
+                fields.push(asking_member.as_bytes());
+            }
             phone::audit(
                 tx,
                 &self.audit_key,
                 AuditOp::SecretFirstRelease,
                 Some(format!("secret|{}", call.name)),
                 SecretSender::Basal.actor(),
-                &[
-                    grant.id.as_bytes(),
-                    record.incarnation.as_bytes(),
-                    call.flow.flow_id.as_bytes(),
-                    call.flow.version.to_string().as_bytes(),
-                ],
+                &fields,
             )?;
         }
         tx.execute(
@@ -236,7 +246,7 @@ impl EncryptedStore {
                     return Err(rusqlite_err("secret release seal failed"));
                 }
             };
-            self.commit_flow_release(tx, call, &grant, &record, now)?;
+            self.commit_flow_release(tx, call, request.requester, &grant, &record, now)?;
             write_receipt(
                 tx,
                 request,

@@ -1,5 +1,8 @@
 //! The trusted sender boundary for secret release. Scope authority comes only from ScopeStamp.
-use credentials_core::{agent_secret::*, store::EncryptedStore};
+use credentials_core::{
+    agent_secret::*,
+    store::{EncryptedStore, ForwardedUse, ReleaseRequest, SealedRelease},
+};
 use serde::Deserialize;
 use serde_json::Value;
 use std::sync::Arc;
@@ -10,7 +13,12 @@ use subc_protocol::{
 
 #[path = "secret_flow.rs"]
 mod flow;
-pub use flow::{serve_approval as serve_flow_approval, serve_revoke as serve_revoke_flow_grants};
+pub use flow::{
+    serve_approval as serve_flow_approval,
+    serve_approval_forwarded as serve_flow_approval_forwarded,
+    serve_revoke as serve_revoke_flow_grants,
+    serve_revoke_forwarded as serve_revoke_flow_grants_forwarded,
+};
 
 pub enum UseAnswer {
     Reply(Value),
@@ -134,6 +142,30 @@ pub fn serve(
         }
         _ => return UseAnswer::Reply(SecretError::NotFound.body()),
     };
+    let call = match parse_use(store, sender, params) {
+        Ok(call) => call,
+        Err(answer) => return answer,
+    };
+    match store.secret_use(&call, clock) {
+        Ok(outcome) => {
+            if let Some((id, now)) = outcome.last_use {
+                let store = Arc::clone(store);
+                tokio::task::spawn_blocking(move || store.secret_use_last_use(&id, now));
+            }
+            UseAnswer::Reply(outcome.reply)
+        }
+        Err(error) => UseAnswer::Reply(error.body()),
+    }
+}
+
+/// Parse and validate `secret.use` params from an agent sender (AFT or Cerebellum) into
+/// the call the store authorizes, or the answer that ends the request. Every refusal
+/// here writes its diagnostic under `sender`.
+fn parse_use(
+    store: &EncryptedStore,
+    sender: SecretSender,
+    params: &Value,
+) -> Result<SecretUse, UseAnswer> {
     let invalid = |error: ValidationError| {
         store.record_secret_use_refusal(
             sender,
@@ -151,17 +183,17 @@ pub fn serve(
     };
     let params: Params = match serde_json::from_value(params.clone()) {
         Ok(p) => p,
-        Err(_) => return invalid(ValidationError::InvalidParams),
+        Err(_) => return Err(invalid(ValidationError::InvalidParams)),
     };
     if let Err(e) = validate_name(&params.name) {
-        return invalid(e);
+        return Err(invalid(e));
     }
     if !matches!(params.coverage.as_str(), "scope" | "agent_and_workers") {
-        return invalid(ValidationError::InvalidParams);
+        return Err(invalid(ValidationError::InvalidParams));
     }
     let target = params.target.into_use_target();
     if let Err(e) = target.validate() {
-        return invalid(e);
+        return Err(invalid(e));
     }
     // Decode the dependency's ScopeStamp, including its required scope_epoch.
     // Missing required fields are unmapped, not an invitation to infer authority.
@@ -169,9 +201,9 @@ pub fn serve(
         Ok(s) => s,
         Err(e) if e.to_string().starts_with("missing field ") => {
             store.record_secret_use_refusal(sender, None, "unmapped");
-            return UseAnswer::Reply(SecretError::NotFound.body());
+            return Err(UseAnswer::Reply(SecretError::NotFound.body()));
         }
-        Err(_) => return invalid(ValidationError::InvalidParams),
+        Err(_) => return Err(invalid(ValidationError::InvalidParams)),
     };
     // The store encodes pending approval statements as RFC 8785 canonical JSON;
     // its epoch must fit the exact JSON integer range, ending at 2^53 - 1.
@@ -181,17 +213,17 @@ pub fn serve(
             .as_ref()
             .is_some_and(|p| p.scope_epoch > 9_007_199_254_740_991)
     {
-        return invalid(ValidationError::InvalidParams);
+        return Err(invalid(ValidationError::InvalidParams));
     }
     let Some((scope, worker_parent)) = asking(&stamp) else {
         store.record_secret_use_refusal(sender, None, "unmapped");
-        return UseAnswer::Reply(SecretError::NotFound.body());
+        return Err(UseAnswer::Reply(SecretError::NotFound.body()));
     };
     if params.coverage == "agent_and_workers" && scope.kind != "head" {
         store.record_secret_use_refusal(sender, None, "coverage");
-        return UseAnswer::InvalidParams;
+        return Err(UseAnswer::InvalidParams);
     }
-    let call = SecretUse {
+    Ok(SecretUse {
         name: params.name,
         sender,
         scope,
@@ -199,16 +231,67 @@ pub fn serve(
         coverage: params.coverage,
         agent_id: stamp.attributes.agent_id,
         target,
+    })
+}
+
+/// The home's answer to a `secret.use` that a paired computer forwarded, before the
+/// federation layer renders it.
+#[derive(Debug)]
+pub enum ForwardedUseAnswer<E> {
+    /// The secret was released, sealed to the asking computer: sealed just now, or the
+    /// stored bytes answering a retry of the same request.
+    Sealed(SealedRelease),
+    /// `approval_required` or a refusal body. It never holds secret material.
+    Reply(Value),
+    /// The call params are malformed.
+    InvalidParams,
+    /// Sealing failed. Nothing was consumed, audited or stored.
+    SealFailed(E),
+}
+
+/// Serve a `secret.use` that `request.requester`, a paired computer, forwarded on
+/// behalf of its local `sender`, parsed from `call` exactly as a local call from that
+/// sender is. AFT and Cerebellum take the agent path with a required `ScopeStamp`;
+/// basal takes the flow path, whose stamp must carry the flow attributes. Only grants
+/// made for the asking computer release, and a release crosses only through `seal`.
+///
+/// The caller must already have authenticated the requester and checked its pairing,
+/// its `secret_use` member grant and its announced key, on every request.
+pub fn serve_forwarded<E>(
+    store: &Arc<EncryptedStore>,
+    sender: SecretSender,
+    call: &Value,
+    request: &ReleaseRequest<'_>,
+    seal: impl FnOnce(&Value) -> Result<SealedRelease, E>,
+    clock: impl Fn() -> i64,
+) -> ForwardedUseAnswer<E> {
+    if sender == SecretSender::Basal {
+        return flow::serve_use_forwarded(store, call, request, seal, clock);
+    }
+    let call = match parse_use(store, sender, call) {
+        Ok(call) => call,
+        Err(answer) => return answer.into(),
     };
-    match store.secret_use(&call, clock) {
-        Ok(outcome) => {
-            if let Some((id, now)) = outcome.last_use {
-                let store = Arc::clone(store);
-                tokio::task::spawn_blocking(move || store.secret_use_last_use(&id, now));
-            }
-            UseAnswer::Reply(outcome.reply)
+    forwarded_answer(store.secret_use_sealed(&call, request, seal, clock))
+}
+
+impl<E> From<UseAnswer> for ForwardedUseAnswer<E> {
+    fn from(answer: UseAnswer) -> Self {
+        match answer {
+            UseAnswer::Reply(reply) => Self::Reply(reply),
+            UseAnswer::InvalidParams => Self::InvalidParams,
         }
-        Err(error) => UseAnswer::Reply(error.body()),
+    }
+}
+
+fn forwarded_answer<E>(
+    result: Result<Result<ForwardedUse, E>, SecretError>,
+) -> ForwardedUseAnswer<E> {
+    match result {
+        Ok(Ok(ForwardedUse::Sealed(sealed))) => ForwardedUseAnswer::Sealed(sealed),
+        Ok(Ok(ForwardedUse::Reply(reply))) => ForwardedUseAnswer::Reply(reply),
+        Ok(Err(error)) => ForwardedUseAnswer::SealFailed(error),
+        Err(error) => ForwardedUseAnswer::Reply(error.body()),
     }
 }
 

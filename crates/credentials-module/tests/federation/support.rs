@@ -192,6 +192,156 @@ pub enum Ledger {
     Closed { target: String },
 }
 
+/// Whether the vault's production management catalogue declares an op a query or a
+/// mutate. Callosum keeps no reply body for a query and records a mutate's outcome in
+/// its serving ledger, so the kind says where a reply body may end up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpKind {
+    Query,
+    Mutate,
+}
+
+/// One reply body the stand-in sent back on a route, kept in test memory only (never
+/// written anywhere), so a test can check what a reply carried and what callosum would
+/// have been handed to keep.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RoutedReply {
+    /// The route's target, as the ledger names it.
+    pub target: String,
+    pub method: String,
+    /// The method's kind in the vault's production catalogue; `None` for a method the
+    /// catalogue does not declare (callosum's own lookups, say).
+    pub kind: Option<OpKind>,
+    /// The `result` body of the `Response` frame.
+    pub body: Value,
+}
+
+/// The vault's production management catalogue: every operation its manifest declares,
+/// with its kind, in declaration order.
+///
+/// The catalogue is built in the daemon binary (`fn manifest` in `src/main.rs`), which a
+/// test cannot link, so it is read from that source: each `ManagementOperation { .. }`
+/// between the manifest's `operations: vec![` and its `config_schema:`. A name written
+/// as a constant is resolved from `main.rs`'s own `const` lines, or, for the
+/// `federation::ingress::` constants, from the library this test links. Anything the
+/// reader cannot resolve fails the test rather than being guessed.
+pub fn production_catalogue() -> &'static [(String, OpKind)] {
+    static CATALOGUE: std::sync::OnceLock<Vec<(String, OpKind)>> = std::sync::OnceLock::new();
+    CATALOGUE.get_or_init(|| {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs");
+        let source = std::fs::read_to_string(&path).expect("read src/main.rs");
+        parse_catalogue(&source)
+    })
+}
+
+/// The kind the production catalogue declares for `method`, if it declares it.
+pub fn catalogue_kind(method: &str) -> Option<OpKind> {
+    production_catalogue()
+        .iter()
+        .find(|(name, _)| name == method)
+        .map(|(_, kind)| *kind)
+}
+
+fn parse_catalogue(source: &str) -> Vec<(String, OpKind)> {
+    use claustrum_module_probe::federation::ingress;
+    let start = source
+        .find("operations: vec![")
+        .expect("the manifest lists its operations");
+    let end = start
+        + source[start..]
+            .find("config_schema:")
+            .expect("the operations list ends before config_schema");
+    let region = &source[start..end];
+    let library_constants = [
+        ("OP_REMOTE_TOKEN", ingress::OP_REMOTE_TOKEN),
+        ("OP_REPORT_AUTH_FAILURE", ingress::OP_REPORT_AUTH_FAILURE),
+        ("OP_TRANSFER_DELIVER", ingress::OP_TRANSFER_DELIVER),
+        ("OP_SECRET_USE", ingress::OP_SECRET_USE),
+        (
+            "OP_SECRET_REQUEST_FLOW_APPROVAL",
+            ingress::OP_SECRET_REQUEST_FLOW_APPROVAL,
+        ),
+        (
+            "OP_SECRET_REVOKE_FLOW_GRANTS",
+            ingress::OP_SECRET_REVOKE_FLOW_GRANTS,
+        ),
+    ];
+    let main_constant = |name: &str| -> String {
+        let marker = format!("\nconst {name}: &str = \"");
+        let at = source
+            .find(&marker)
+            .unwrap_or_else(|| panic!("main.rs declares no `const {name}: &str`"))
+            + marker.len();
+        let close = source[at..].find('"').expect("closing quote");
+        source[at..at + close].to_string()
+    };
+    let entries: Vec<&str> = region.split("ManagementOperation {").skip(1).collect();
+    let mut catalogue = Vec::new();
+    for entry in entries {
+        let name_at = entry.find("name: ").expect("an operation names itself") + 6;
+        let name_text = entry[name_at..]
+            .split(',')
+            .next()
+            .expect("name field")
+            .trim();
+        let name = if let Some(literal) = name_text
+            .strip_prefix('"')
+            .and_then(|rest| rest.strip_suffix("\".into()"))
+        {
+            literal.to_string()
+        } else if let Some(path) = name_text.strip_suffix(".to_string()") {
+            match path.strip_prefix("federation::ingress::") {
+                Some(constant) => library_constants
+                    .iter()
+                    .find(|(known, _)| *known == constant)
+                    .unwrap_or_else(|| panic!("unknown ingress constant {constant}"))
+                    .1
+                    .to_string(),
+                None => main_constant(path),
+            }
+        } else {
+            panic!("cannot read the operation name `{name_text}`");
+        };
+        let kind = if entry.contains("kind: ManagementOperationKind::Query") {
+            OpKind::Query
+        } else if entry.contains("kind: ManagementOperationKind::Mutate") {
+            OpKind::Mutate
+        } else {
+            panic!("operation {name} declares no kind");
+        };
+        assert!(
+            catalogue.iter().all(|(seen, _)| *seen != name),
+            "operation {name} is declared twice"
+        );
+        catalogue.push((name, kind));
+    }
+    catalogue
+}
+
+/// Who records a route reply: the stand-in's state, and the route and method the reply
+/// answers.
+#[derive(Clone)]
+struct ReplyNote {
+    state: Arc<Mutex<StandInState>>,
+    target: String,
+    method: String,
+}
+
+impl ReplyNote {
+    fn record(&self, body: &Value) {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .routed_replies
+            .push(RoutedReply {
+                target: self.target.clone(),
+                method: self.method.clone(),
+                kind: catalogue_kind(&self.method),
+                body: body.clone(),
+            });
+    }
+}
+
 /// The one reply the stand-in returns for a method.
 #[derive(Debug, Clone)]
 pub enum Reply {
@@ -370,6 +520,8 @@ struct StandInState {
     connections: Vec<tokio::sync::mpsc::UnboundedSender<Command>>,
     /// `(target module, channel)` for every route the stand-in opened, in order.
     route_channels: Vec<(String, u16)>,
+    /// Every successful reply body sent on a route, in the order it was sent.
+    routed_replies: Vec<RoutedReply>,
 }
 
 /// What a test asks a live connection to do, outside any request it sent.
@@ -622,6 +774,16 @@ impl SharedCallosumStandIn {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .peer_keys
             .insert(member.to_string(), key.to_string());
+    }
+
+    /// Every successful reply body this stand-in sent on a route, with its op's kind in
+    /// the production catalogue, in the order sent. Held in test memory only.
+    pub fn routed_replies(&self) -> Vec<RoutedReply> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .routed_replies
+            .clone()
     }
 
     /// Every ledger row this stand-in wrote.
@@ -906,6 +1068,7 @@ async fn serve_one(
                             frame.header.epoch,
                             frame.header.corr,
                             Arc::clone(&writer),
+                            None,
                         );
                         continue;
                     }
@@ -964,6 +1127,11 @@ async fn serve_one(
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
+        let note = ReplyNote {
+            state: Arc::clone(&state),
+            target: ledger_target.clone(),
+            method: method.clone(),
+        };
         let params = body.get("params").cloned().unwrap_or(Value::Null);
         push(
             &ledger,
@@ -1002,6 +1170,7 @@ async fn serve_one(
         };
         match reply {
             Reply::Ok(body) => {
+                note.record(&body);
                 let reply = response_on_channel(
                     frame.header.channel,
                     frame.header.epoch,
@@ -1059,6 +1228,7 @@ async fn serve_one(
                     frame.header.epoch,
                     frame.header.corr,
                     Arc::clone(&writer),
+                    Some(note),
                 );
             }
             Reply::Handler(responder) => {
@@ -1077,10 +1247,13 @@ async fn serve_one(
                     }
                     let answer = match reply {
                         Reply::Hold(held) => {
-                            hold_reply(held, channel, epoch, corr, writer);
+                            hold_reply(held, channel, epoch, corr, writer, Some(note));
                             return;
                         }
-                        Reply::Ok(body) => response_on_channel(channel, epoch, corr, body),
+                        Reply::Ok(body) => {
+                            note.record(&body);
+                            response_on_channel(channel, epoch, corr, body)
+                        }
                         Reply::RouteRefusal(code) => route_error_frame(channel, epoch, corr, &code),
                         Reply::Permanent(code) | Reply::RetrySafe(code) => {
                             error_frame(corr, &code, "callosum refused the routed request")
@@ -1104,7 +1277,10 @@ async fn serve_one(
                 tokio::spawn(async move {
                     tokio::time::sleep(delay).await;
                     let answer = match *inner {
-                        Reply::Ok(body) => response_on_channel(channel, epoch, corr, body),
+                        Reply::Ok(body) => {
+                            note.record(&body);
+                            response_on_channel(channel, epoch, corr, body)
+                        }
                         Reply::Permanent(code) | Reply::RetrySafe(code) => {
                             push(
                                 &ledger,
@@ -1151,11 +1327,19 @@ fn hold_reply(
     epoch: u32,
     corr: u64,
     writer: Arc<tokio::sync::Mutex<tokio::io::WriteHalf<tokio::net::TcpStream>>>,
+    // Records the reply when it answers a route request; a held `route.open` is a
+    // control reply and passes `None`.
+    note: Option<ReplyNote>,
 ) {
     held.note_arrival();
     tokio::spawn(async move {
         let answer = match held.released().await {
-            Some(Reply::Ok(body)) => response_on_channel(channel, epoch, corr, body),
+            Some(Reply::Ok(body)) => {
+                if let Some(note) = &note {
+                    note.record(&body);
+                }
+                response_on_channel(channel, epoch, corr, body)
+            }
             Some(Reply::RouteRefusal(code)) => route_error_frame(channel, epoch, corr, &code),
             Some(Reply::Permanent(code) | Reply::RetrySafe(code)) => {
                 error_frame(corr, &code, "held refusal")

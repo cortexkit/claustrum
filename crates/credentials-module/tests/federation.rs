@@ -29,6 +29,9 @@ mod transfer;
 #[path = "federation/admin.rs"]
 mod admin;
 
+#[path = "federation/secret_forward.rs"]
+mod secret_forward;
+
 #[path = "federation/callosum_vectors.rs"]
 mod callosum_vectors;
 

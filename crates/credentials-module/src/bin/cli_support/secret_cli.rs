@@ -14,7 +14,7 @@
 //! the rule that failed, never a byte of what was read.
 use crate::{commit_admin, optional, required, store_path, CliError, GlobalArgs};
 use base64::Engine;
-use credentials_core::admin_ops::{AdminOpBody, ADMIN_OP_SCHEMA_V2};
+use credentials_core::admin_ops::{AdminOpBody, SecretHomeTarget, ADMIN_OP_SCHEMA_V2};
 
 const BEARER: &str = "authorization_bearer";
 const NO_TABLES: &str = "no agent-secret tables yet";
@@ -32,6 +32,7 @@ pub fn cmd_secret(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> 
         "grants" => grants(global, rest),
         "delete" => delete(global, rest),
         "revoke" => revoke(global, rest),
+        "home" => home(global, rest),
         other => Err(CliError::Usage(format!(
             "unknown secret verb '{other}'\n\n{}",
             help_text()
@@ -79,6 +80,9 @@ pub fn guard_args(args: &[String]) -> Result<(), CliError> {
         "put" => (put_flags(), true),
         "revoke" => (REVOKE_FLAGS, false),
         "list" | "grants" => (&[][..], false),
+        // `home` takes an action and, for `set`, one member id or `self`, and no flags.
+        // `home` itself checks that exact shape, which a one-positional table cannot say.
+        "home" => return Ok(()),
         // An unknown verb is diagnosed by `cmd_secret`, which names it.
         _ => return Ok(()),
     };
@@ -146,7 +150,8 @@ pub fn help_text() -> &'static str {
       put creates a secret. list shows secrets, scopes and grants. grants shows one\n\
       row per live grant. delete removes a secret with its grants and pending\n\
       requests. revoke removes one grant. phone-gate turns the phone channel on or\n\
-      off, or prints its state.\n\
+      off, or prints its state. home set <member-id>|self names the vault that\n\
+      holds agent secrets, home unset clears it, and home show prints it.\n\
       \n\
       NOTES\n\
       The material is never read from a flag. Without --material-file, a site login\n\
@@ -159,8 +164,10 @@ pub fn help_text() -> &'static str {
       Secrets are addressed by name only (1-64 bytes of A-Z a-z 0-9 . _ -) and\n\
       never by a credential id. Names are create-only: a second put of a name is\n\
       refused, and reusing a name means deleting it first. Writes use the admin MAC\n\
-      online or the offline lease; list, grants and phone-gate status read the store\n\
-      without either. Keep the phone setting off until callosum derives the forwarded\n\
+      online or the offline lease; list, grants, phone-gate status and home show\n\
+      read the store without either. home set <member-id> needs the daemon, which\n\
+      checks the member against callosum's pairing; it is refused while this vault\n\
+      still holds secrets, grants or pending requests. Keep the phone setting off until callosum derives the forwarded\n\
       harness from the authenticated phone peer on every call."
 }
 
@@ -639,5 +646,59 @@ fn revoke(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
         // and an unknown id mean the same thing to whoever asked.
         _ => println!("no live grant {grant_id}"),
     }
+    Ok(())
+}
+
+/// `ck auth secret home show | set <member-id>|self | unset`.
+///
+/// `show` reads the store without the daemon or the lease, like `list`. `set self` and
+/// `unset` are local writes that also run offline; `set <member-id>` needs the daemon,
+/// because only callosum can say whether that member is paired.
+fn home(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
+    let usage = || CliError::Usage("secret home takes show, set <member-id>|self, or unset".into());
+    let target = match args {
+        [action] if action == "show" => return home_show(global),
+        [action] if action == "unset" => SecretHomeTarget::Unset,
+        [action, value] if action == "set" && value == "self" => SecretHomeTarget::ThisVault,
+        [action, value] if action == "set" && !value.starts_with("--") => {
+            SecretHomeTarget::Member(value.clone())
+        }
+        _ => return Err(usage()),
+    };
+    let reply = commit_admin(
+        global,
+        AdminOpBody::SecretHomeSet {
+            v: ADMIN_OP_SCHEMA_V2,
+            home: target,
+        },
+    )?;
+    println!(
+        "secrets.home_member {}{}",
+        reply["home_member"].as_str().unwrap_or("unset"),
+        if reply["changed"] == serde_json::Value::Bool(false) {
+            " (unchanged)"
+        } else {
+            ""
+        }
+    );
+    Ok(())
+}
+
+/// Print the stored setting and the role it resolves to with the live self id.
+fn home_show(global: &GlobalArgs) -> Result<(), CliError> {
+    let db = store_path(global);
+    let status = if db.exists() {
+        credentials_core::store::secret_home_read_only(&db).map_err(CliError::Store)?
+    } else {
+        credentials_core::store::SecretHomeStatus {
+            setting: None,
+            role: credentials_core::store::SecretHomeRole::Single,
+        }
+    };
+    println!(
+        "secrets.home_member {}\nrole {}",
+        status.setting.as_deref().unwrap_or("unset"),
+        status.role.as_str()
+    );
     Ok(())
 }

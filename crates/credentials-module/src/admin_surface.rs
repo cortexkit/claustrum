@@ -27,9 +27,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use credentials_core::admin_auth::{AdminMacKey, TranscriptParts, ADMIN_NONCE_LEN, VAULT_ID_LEN};
-use credentials_core::admin_ops::AdminOpBody;
 #[cfg(test)]
 use credentials_core::admin_ops::ADMIN_OP_SCHEMA_V1;
+use credentials_core::admin_ops::{AdminOpBody, SecretHomeTarget};
 use credentials_core::audit::{AuditCtx, AuditOp};
 use credentials_core::engine::RefreshEngine;
 use credentials_core::federation::{
@@ -760,12 +760,74 @@ impl AdminSurface {
                     Err(error) => store_err(error),
                 }
             }
+            AdminOpBody::SecretHomeSet {
+                home: SecretHomeTarget::Member(member),
+                ..
+            } => {
+                let stored = match self.check_home_member(&member, budget).await {
+                    Ok(stored) => stored,
+                    Err(refusal) => return refusal,
+                };
+                match store.set_secret_home_audited(
+                    Some(&stored),
+                    AuditCtx::route_admin(AuditOp::SecretHomeSet, ROUTE_ADMIN_ACTOR),
+                ) {
+                    Ok(change) => AdminOutcome::Ok(serde_json::json!({
+                        "home_member": change.stored,
+                        "changed": change.changed,
+                    })),
+                    Err(error) => store_err(error),
+                }
+            }
             // `requires_daemon` sent only the ops above here; anything else is a
             // mismatch between that table and this match, and is refused unrun.
             other => AdminOutcome::Refused(format!(
                 "internal: {} has no federation admin path",
                 other.op_name()
             )),
+        }
+    }
+
+    /// The value `home set <member>` stores: `self` when the id is this computer's (the
+    /// stored self id, or the id callosum computes from this computer's own static key),
+    /// otherwise the id itself once callosum's pairing shows that member is paired. A
+    /// member callosum does not know is refused, and so is a lookup that fails, so an id
+    /// is never stored unchecked.
+    async fn check_home_member(
+        &self,
+        member: &str,
+        budget: tokio::time::Instant,
+    ) -> Result<String, AdminOutcome> {
+        if !valid_member_id(member) {
+            return Err(store_err(StoreOpError::InvalidMemberId));
+        }
+        let this_vault = || credentials_core::store::SECRET_HOME_SELF.to_string();
+        match self.engine.store().federation_self_member() {
+            Ok(Some(self_member)) if self_member == member => return Ok(this_vault()),
+            Ok(_) => {}
+            Err(error) => return Err(store_err(error)),
+        }
+        let Some(body) =
+            crate::federation::callosum_lookup(self.home.outbound(), PAIRED_DEVICES_READ, budget)
+                .await
+        else {
+            return Err(refused("callosum_unavailable", "transient", None));
+        };
+        if let crate::federation::Lookup::Found(actual) =
+            crate::federation::decode_self_member(&body)
+        {
+            if actual == member {
+                return Ok(this_vault());
+            }
+        }
+        match crate::federation::decode_paired_devices(&body, member) {
+            crate::federation::Lookup::Found(_) => Ok(member.to_string()),
+            crate::federation::Lookup::Absent => {
+                Err(refused("member_not_paired", "permanent", Some(member)))
+            }
+            crate::federation::Lookup::Unavailable => {
+                Err(refused("callosum_unavailable", "transient", None))
+            }
         }
     }
 
@@ -964,6 +1026,16 @@ fn store_err(e: StoreOpError) -> AdminOutcome {
     // would drop them, and the operator then could not tell which id broke which rule. The
     // full Display is the same string the CLI's offline path prints, so both paths agree.
     if let StoreOpError::InvalidProviderId { .. } = e {
+        return AdminOutcome::Refused(e.to_string());
+    }
+    // The secret-home refusals already print the route's `code/class: detail` shape,
+    // with the member to act on or the counts that block the change.
+    if matches!(
+        e,
+        StoreOpError::SecretHomeElsewhere { .. }
+            | StoreOpError::SecretRemoteSetupIncomplete { .. }
+            | StoreOpError::SecretHomeNotEmpty { .. }
+    ) {
         return AdminOutcome::Refused(e.to_string());
     }
     if let (Some(code), Some(class)) = (e.wire_code(), e.wire_class()) {

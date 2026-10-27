@@ -229,6 +229,15 @@ impl EncryptedStore {
         d: &PhoneDeposit,
         now: i64,
     ) -> rusqlite::Result<Result<Value, SecretError>> {
+        // A vault whose secrets live on another member's vault stores nothing, so the phone
+        // is sent to the home before any other check. The role is read in this transaction,
+        // so a concurrent `home set` either sees this deposit's row or refuses it here.
+        // `SecretError` names a code only, while this refusal must also name the home, so
+        // the full refusal body is returned as the reply; the transport passes it through
+        // unchanged, exactly as it would `SecretError::body()`.
+        if let Some(refusal) = super::operator::secret_home_role_conn(tx).phone_deposit_refusal() {
+            return Ok(refusal);
+        }
         // All deposit checks use this transaction, including key and member reads. Reading
         // either through a public store method would reacquire the connection lock.
         let prepared = (|| {

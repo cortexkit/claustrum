@@ -6024,6 +6024,55 @@ fn provider_cli_live_count_refusal_and_deposit_add_order_use_the_route() {
     );
 }
 
+/// `ck auth secret home` offline: `show` reads the setting without the lease, `set self`
+/// and `unset` write it under the lease, and naming a member is refused because only
+/// the daemon can check that member against callosum's pairing.
+#[test]
+fn secret_home_cli_sets_self_and_unsets_offline_and_show_reads_it() {
+    if std::env::var_os(CLI_BIN_ENV).is_some() {
+        return;
+    }
+    let vault = GrantCliVault::new("secret-home");
+    vault.bootstrap();
+    let show = || {
+        let out = vault.run(&["secret", "home", "show"]);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+    assert_eq!(show(), "secrets.home_member unset\nrole single\n");
+    let set = vault.run(&["secret", "home", "set", "self"]);
+    assert!(
+        set.status.success(),
+        "{}",
+        String::from_utf8_lossy(&set.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&set.stdout),
+        "secrets.home_member self\n"
+    );
+    assert_eq!(show(), "secrets.home_member self\nrole home\n");
+    let member = vault.run(&[
+        "secret",
+        "home",
+        "set",
+        "fed-computer:0123456789abcdef0123456789abcdef",
+    ]);
+    assert!(!member.status.success());
+    assert!(
+        String::from_utf8_lossy(&member.stderr).contains("federation_requires_daemon"),
+        "{}",
+        String::from_utf8_lossy(&member.stderr)
+    );
+    assert_eq!(show(), "secrets.home_member self\nrole home\n");
+    assert!(vault.run(&["secret", "home", "unset"]).status.success());
+    assert_eq!(show(), "secrets.home_member unset\nrole single\n");
+    assert!(!vault.run(&["secret", "home", "set"]).status.success());
+}
+
 #[test]
 fn phone_gate_cli_persists_online_and_offline_and_status_reads_both_gates() {
     if std::env::var_os(CLI_BIN_ENV).is_some() {

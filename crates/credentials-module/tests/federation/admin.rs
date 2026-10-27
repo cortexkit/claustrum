@@ -16,8 +16,10 @@ use claustrum_module_probe::federation::ingress::{OP_REMOTE_TOKEN, OP_TRANSFER_D
 use claustrum_module_probe::federation::{HomeAnswer, RemoteReader};
 use credentials_core::admin_auth::{AdminMacKey, TranscriptParts};
 use credentials_core::admin_ops::{
-    AdminOpBody, ADMIN_OP_SCHEMA_V1, ADMIN_OP_SCHEMA_V2, FEDERATION_REQUIRES_DAEMON,
+    AdminOpBody, SecretHomeTarget, ADMIN_OP_SCHEMA_V1, ADMIN_OP_SCHEMA_V2,
+    FEDERATION_REQUIRES_DAEMON,
 };
+use credentials_core::agent_secret::{deposit_plaintext, SecretMaterial, SecretPut, SecretScope};
 use credentials_core::audit::{AuditCtx, AuditOp};
 use credentials_core::federation::{
     member_grant_payload_hash, MemberGrantOperation, MemberGrantSelector, VAULT_TRANSFER_ID,
@@ -25,7 +27,10 @@ use credentials_core::federation::{
 use credentials_core::key::MasterKey;
 use credentials_core::oauth::OAuthCredential;
 use credentials_core::record::{CredentialKind, VaultRecord};
-use credentials_core::store::{EncryptedStore, GrantOperation, SelectorKind, SetCategoryMode};
+use credentials_core::store::{
+    resolve_secret_home_role, EncryptedStore, GrantOperation, PhoneDeposit, PhoneOperation,
+    SecretHomeRole, SelectorKind, SetCategoryMode, StoreOpError, SECRET_HOME_SETTING,
+};
 use serde_json::{json, Value};
 use subc_protocol::Principal;
 
@@ -481,6 +486,417 @@ async fn a_secret_use_grant_is_selector_free_and_records_the_current_pairing() {
 }
 
 // ---------------------------------------------------------------------------------
+// The secret home
+// ---------------------------------------------------------------------------------
+
+const OTHER_HOME: &str = "fed-computer:0000000000000000000000000000000a";
+const UNPAIRED: &str = "fed-computer:0000000000000000000000000000000b";
+
+fn home_set(home: SecretHomeTarget) -> AdminOpBody {
+    AdminOpBody::SecretHomeSet {
+        v: ADMIN_OP_SCHEMA_V2,
+        home,
+    }
+}
+
+fn secret_put_op(name: &str) -> AdminOpBody {
+    let put = api_key_put(name);
+    AdminOpBody::SecretPut {
+        v: ADMIN_OP_SCHEMA_V2,
+        kind: put.kind,
+        name: put.name,
+        host: put.host,
+        path_prefix: put.path_prefix,
+        location: put.location,
+        origin: put.origin,
+        material_b64url: put.material_b64url,
+    }
+}
+
+fn api_key_put(name: &str) -> SecretPut {
+    use base64::Engine;
+    SecretPut {
+        kind: "agent_api_key".into(),
+        name: name.into(),
+        host: Some("x.test".into()),
+        path_prefix: None,
+        location: Some("authorization_bearer".into()),
+        origin: None,
+        material_b64url: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            deposit_plaintext(&SecretMaterial::ApiKey(
+                credentials_core::secret::Secret::new(b"sk-agent".to_vec()),
+            ))
+            .expose(),
+        ),
+    }
+}
+
+fn secret_names(data_dir: &std::path::Path) -> Vec<String> {
+    credentials_core::store::list_agent_secrets_read_only(&data_dir.join("store.db"))
+        .unwrap()
+        .map(|listing| listing.secrets.into_iter().map(|row| row.name).collect())
+        .unwrap_or_default()
+}
+
+/// Write the setting straight into the store file, bypassing `home set` and its count,
+/// to stand for a vault that holds leftover secrets while naming another home.
+fn force_home_setting(data_dir: &std::path::Path, value: &str) {
+    let conn = rusqlite::Connection::open(data_dir.join("store.db")).unwrap();
+    conn.execute(
+        "INSERT INTO settings (name, value, updated_at_ms) VALUES (?1, ?2, 0) \
+         ON CONFLICT(name) DO UPDATE SET value=excluded.value",
+        rusqlite::params![SECRET_HOME_SETTING, value],
+    )
+    .unwrap();
+}
+
+/// `home set <member>` is checked against callosum's pairing like `federation self`: a
+/// malformed id, an unpaired member and a failed lookup are refused with nothing
+/// written. `set self`, and a member id that is this computer's own (by the stored self
+/// id, or by callosum's `self` key), store the literal `self`. Setting self and unsetting
+/// also run offline; naming a member needs the daemon.
+#[tokio::test]
+async fn home_set_checks_the_member_against_callosum_and_stores_this_vault_as_self() {
+    let root = crate::support::temp_root("admin-secret-home");
+    let vaults = TwoVaults::new(&root).await;
+    let a = Vault::open(&vaults.a, Some(Duration::from_millis(800)));
+    let set_rows = || audit_count(a.store(), AuditOp::SecretHomeSet);
+    let member = |id: &str| home_set(SecretHomeTarget::Member(id.into()));
+
+    let refused = refusal(a.run(&member("fed-computer:XYZ")).await);
+    assert!(refused.starts_with("invalid_member_id"), "{refused}");
+    assert!(!vaults.callosum.saw_method(PAIRED_DEVICES_READ));
+    let refused = refusal(a.run(&member(UNPAIRED)).await);
+    assert_eq!(
+        refused,
+        format!("member_not_paired/permanent: remedy_member={UNPAIRED}")
+    );
+    vaults.callosum.answer(
+        TARGET_MODULE,
+        PAIRED_DEVICES_READ,
+        Reply::RouteRefusal("fed_not_ready".into()),
+    );
+    vaults.callosum.set_pairing(OTHER_HOME, Some(PAIRING));
+    let refused = refusal(a.run(&member(OTHER_HOME)).await);
+    assert_eq!(refused, "callosum_unavailable/transient");
+    vaults.callosum.forget_answers();
+    assert_eq!(a.store().secret_home_role(), SecretHomeRole::Single);
+    assert_eq!(set_rows(), 0);
+
+    // With no self id stored, the id callosum computes from this computer's own static
+    // key (the stand-in's `self` is 0xab repeated) is this vault, so it is stored as self.
+    let callosum_self = member_for_static_key(&[0xab; 32]);
+    let stored = ok(a.run(&member(&callosum_self)).await);
+    assert_eq!(stored, json!({ "home_member": "self", "changed": true }));
+    assert_eq!(
+        a.store().secret_home_role(),
+        SecretHomeRole::Home { self_member: None }
+    );
+
+    // Clearing and setting self are local writes that the offline applier runs too.
+    let cleared = credentials_core::admin_ops::apply(
+        a.store(),
+        home_set(SecretHomeTarget::Unset),
+        "offline-cli",
+    )
+    .unwrap();
+    assert_eq!(cleared, json!({ "home_member": null, "changed": true }));
+    a.install_transfer_key();
+    let own = a.member.clone();
+    let stored = ok(a.run(&home_set(SecretHomeTarget::ThisVault)).await);
+    assert_eq!(stored, json!({ "home_member": "self", "changed": true }));
+    assert_eq!(
+        a.store().secret_home_role(),
+        SecretHomeRole::Home {
+            self_member: Some(own.clone())
+        }
+    );
+    // This vault's own stored id is stored as self too, which it already is.
+    let again = ok(a.run(&member(&own)).await);
+    assert_eq!(again, json!({ "home_member": "self", "changed": false }));
+
+    let remote = ok(a.run(&member(OTHER_HOME)).await);
+    assert_eq!(
+        remote,
+        json!({ "home_member": OTHER_HOME, "changed": true })
+    );
+    assert_eq!(
+        a.store().secret_home_role(),
+        SecretHomeRole::Remote {
+            home_member: OTHER_HOME.into()
+        }
+    );
+    let shown = credentials_core::store::secret_home_read_only(&vaults.a.data_dir.join("store.db"))
+        .unwrap();
+    assert_eq!(shown.setting.as_deref(), Some(OTHER_HOME));
+    assert_eq!(shown.role.as_str(), "remote");
+    assert_eq!(set_rows(), 4);
+
+    // Naming a member offline is refused before any write; self and unset are not.
+    assert!(member(OTHER_HOME).requires_daemon());
+    assert!(!home_set(SecretHomeTarget::ThisVault).requires_daemon());
+    assert!(!home_set(SecretHomeTarget::Unset).requires_daemon());
+}
+
+/// The role follows the intent table: unset is single, `self` is home whatever the self
+/// id, another member is remote, a member with the self id absent or equal to it is
+/// `remote_setup_incomplete`, and an unreadable value is `store_error`.
+#[test]
+fn the_secret_home_role_follows_the_setting_and_the_live_self_id() {
+    let own = "fed-computer:0000000000000000000000000000000c";
+    let cases = [
+        (None, Some(own), SecretHomeRole::Single),
+        (None, None, SecretHomeRole::Single),
+        (
+            Some("self"),
+            Some(own),
+            SecretHomeRole::Home {
+                self_member: Some(own.into()),
+            },
+        ),
+        (
+            Some("self"),
+            None,
+            SecretHomeRole::Home { self_member: None },
+        ),
+        (
+            Some(OTHER_HOME),
+            Some(own),
+            SecretHomeRole::Remote {
+                home_member: OTHER_HOME.into(),
+            },
+        ),
+        (
+            Some(OTHER_HOME),
+            None,
+            SecretHomeRole::RemoteSetupIncomplete { self_member: None },
+        ),
+        (
+            Some(own),
+            Some(own),
+            SecretHomeRole::RemoteSetupIncomplete {
+                self_member: Some(own.into()),
+            },
+        ),
+        (
+            Some("fed-computer:XYZ"),
+            Some(own),
+            SecretHomeRole::StoreError,
+        ),
+    ];
+    for (setting, self_member, role) in cases {
+        assert_eq!(
+            resolve_secret_home_role(setting, self_member),
+            role,
+            "{setting:?} with self {self_member:?}"
+        );
+    }
+}
+
+/// `home set <other member>` is refused while this vault holds secret state, naming
+/// the counts; setting self and unsetting stay allowed. A home whose federation self id
+/// changes afterwards stays a home and still takes puts, because `self` is symbolic.
+#[tokio::test]
+async fn naming_another_home_is_refused_with_the_counts_and_a_self_id_change_keeps_a_home() {
+    let root = crate::support::temp_root("admin-secret-home-counts");
+    let vaults = TwoVaults::new(&root).await;
+    let a = Vault::open(&vaults.a, None);
+    a.install_transfer_key();
+    vaults.callosum.set_pairing(OTHER_HOME, Some(PAIRING));
+    ok(a.run(&home_set(SecretHomeTarget::ThisVault)).await);
+    ok(a.run(&secret_put_op("ops-key")).await);
+
+    let rows = audit_count(a.store(), AuditOp::SecretHomeSet);
+    let refused = refusal(
+        a.run(&home_set(SecretHomeTarget::Member(OTHER_HOME.into())))
+            .await,
+    );
+    assert!(
+        refused.starts_with(
+            "secret_home_not_empty/permanent: agent_secrets=1 grants=0 flow_grants=0 \
+             pending_requests=0"
+        ),
+        "{refused}"
+    );
+    assert_eq!(audit_count(a.store(), AuditOp::SecretHomeSet), rows);
+
+    // A changed self id moves nothing: the setting is still the literal `self`.
+    a.store()
+        .set_federation_self_member_audited(
+            "fed-computer:0000000000000000000000000000000d",
+            AuditCtx::admin(AuditOp::FederationSelfSet),
+        )
+        .unwrap();
+    assert_eq!(
+        a.store().secret_home_role(),
+        SecretHomeRole::Home {
+            self_member: Some("fed-computer:0000000000000000000000000000000d".into())
+        }
+    );
+    ok(a.run(&secret_put_op("second-key")).await);
+
+    // Clearing is always allowed, secrets or not, and so is setting self again.
+    ok(a.run(&home_set(SecretHomeTarget::Unset)).await);
+    assert_eq!(a.store().secret_home_role(), SecretHomeRole::Single);
+    ok(a.run(&home_set(SecretHomeTarget::ThisVault)).await);
+    assert_eq!(
+        secret_names(&vaults.a.data_dir),
+        vec!["ops-key".to_string(), "second-key".to_string()]
+    );
+}
+
+/// On a remote-role vault, `admin.secret_put` online and offline and a phone deposit are
+/// refused `secret_home_elsewhere` with the home as `remedy_member`, and create no row.
+/// Leftover state can still be listed, deleted and revoked.
+#[tokio::test]
+async fn a_remote_role_vault_refuses_puts_and_deposits_but_allows_cleanup() {
+    let root = crate::support::temp_root("admin-secret-home-remote");
+    let vaults = TwoVaults::new(&root).await;
+    let a = Vault::open(&vaults.a, None);
+    a.install_transfer_key();
+    a.store().ensure_secret_deposit_key().unwrap();
+    ok(a.run(&secret_put_op("leftover")).await);
+    force_home_setting(&vaults.a.data_dir, OTHER_HOME);
+    let stores = || audit_count(a.store(), AuditOp::SecretStore);
+    let before = stores();
+    let elsewhere = format!("secret_home_elsewhere/permanent: remedy_member={OTHER_HOME}");
+
+    assert_eq!(refusal(a.run(&secret_put_op("new-key")).await), elsewhere);
+    match credentials_core::admin_ops::apply(a.store(), secret_put_op("new-key"), "offline-cli") {
+        Err(error) => assert_eq!(error.to_string(), elsewhere),
+        Ok(value) => panic!("offline put stored {value}"),
+    }
+
+    let fingerprint = "33333333333333333333333333333333";
+    let phone = |op: &PhoneOperation| {
+        a.store()
+            .secret_phone_operation(fingerprint, Some("pair-p"), 1, op, || true, || 1)
+            .unwrap()
+    };
+    phone(&PhoneOperation::Register {
+        deposit_pub: vec![2; 32],
+        approval_pub: vec![3; 65],
+    });
+    let deposit = phone(&PhoneOperation::Deposit(PhoneDeposit {
+        deposit_id: "0123456789abcdef0123456789abcdef".into(),
+        member_id: a.member.clone(),
+        name: "phone-key".into(),
+        scope: SecretScope::ApiKey {
+            host: "x.test".into(),
+            path_prefix: None,
+            location: "authorization_bearer".into(),
+        },
+        enc: vec![0; 32],
+        ciphertext: vec![0; 48],
+    }));
+    assert_eq!(
+        deposit,
+        json!({"error":{"code":"secret_home_elsewhere","class":"permanent","remedy_member":OTHER_HOME}})
+    );
+    assert_eq!(stores(), before);
+    assert_eq!(
+        secret_names(&vaults.a.data_dir),
+        vec!["leftover".to_string()]
+    );
+
+    // Cleanup stays open: revoke answers for an unknown grant, delete removes the row.
+    let revoked = ok(a
+        .run(&AdminOpBody::SecretRevokeGrant {
+            v: ADMIN_OP_SCHEMA_V2,
+            grant_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
+        })
+        .await);
+    assert!(revoked.get("outcome").is_some(), "{revoked}");
+    credentials_core::store::list_agent_secret_grants_read_only(
+        &vaults.a.data_dir.join("store.db"),
+    )
+    .unwrap();
+    ok(a.run(&AdminOpBody::SecretDelete {
+        v: ADMIN_OP_SCHEMA_V2,
+        name: "leftover".into(),
+    })
+    .await);
+    assert!(secret_names(&vaults.a.data_dir).is_empty());
+}
+
+/// A put held at a test gate inside its write transaction while `home set <other>` runs
+/// cannot end with both committed: the set waits for the put and then refuses with the
+/// count, or, had the set committed first, the put would be refused by the new setting.
+/// The sequential half checks that second order directly.
+#[test]
+fn a_put_held_at_a_gate_during_home_set_blocks_the_set_or_is_refused() {
+    let root = crate::support::temp_root("admin-secret-home-gate");
+    let home = HomeStore::open(&root.join("vault"));
+    let store = Arc::clone(&home.store);
+    store
+        .set_federation_self_member_audited(
+            "fed-computer:0000000000000000000000000000000c",
+            AuditCtx::admin(AuditOp::FederationSelfSet),
+        )
+        .unwrap();
+
+    let (entered_tx, entered) = std::sync::mpsc::channel::<()>();
+    let (release, release_rx) = std::sync::mpsc::channel::<()>();
+    let release_rx = std::sync::Mutex::new(release_rx);
+    let putter = {
+        let store = Arc::clone(&store);
+        std::thread::spawn(move || {
+            store.secret_put_audited_with_gate(&api_key_put("gated"), "test", &|| {
+                entered_tx.send(()).unwrap();
+                release_rx.lock().unwrap().recv().unwrap();
+            })
+        })
+    };
+    entered.recv().unwrap();
+    let (started_tx, started) = std::sync::mpsc::channel::<()>();
+    let setter = {
+        let store = Arc::clone(&store);
+        std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            store.set_secret_home_audited(Some(OTHER_HOME), AuditCtx::admin(AuditOp::SecretHomeSet))
+        })
+    };
+    started.recv().unwrap();
+    release.send(()).unwrap();
+    let put = putter.join().unwrap();
+    let set = setter.join().unwrap();
+    match (&put, &set) {
+        (Ok(_), Err(StoreOpError::SecretHomeNotEmpty { agent_secrets, .. })) => {
+            assert_eq!(*agent_secrets, 1);
+            assert_eq!(store.secret_home_role().as_str(), "single");
+        }
+        (Err(StoreOpError::SecretHomeElsewhere { home_member }), Ok(_)) => {
+            assert_eq!(home_member, OTHER_HOME);
+        }
+        other => panic!("the put and the set did not serialize: {other:?}"),
+    }
+
+    // The other order: a committed `home set` refuses the next put, and nothing is stored.
+    store
+        .secret_operator_delete_audited("gated", "test")
+        .unwrap_or_default();
+    store
+        .set_secret_home_audited(Some(OTHER_HOME), AuditCtx::admin(AuditOp::SecretHomeSet))
+        .unwrap();
+    let gate_reached = std::sync::atomic::AtomicBool::new(false);
+    let refused = store.secret_put_audited_with_gate(&api_key_put("late"), "test", &|| {
+        gate_reached.store(true, Ordering::SeqCst);
+    });
+    assert!(
+        matches!(&refused, Err(StoreOpError::SecretHomeElsewhere { home_member }) if home_member == OTHER_HOME),
+        "{refused:?}"
+    );
+    assert!(!gate_reached.load(Ordering::SeqCst));
+    assert!(credentials_core::store::list_agent_secrets_read_only(
+        &root.join("vault").join("store.db")
+    )
+    .unwrap()
+    .unwrap()
+    .secrets
+    .is_empty());
+}
+
+// ---------------------------------------------------------------------------------
 // Send, accept and the budget
 // ---------------------------------------------------------------------------------
 
@@ -919,9 +1335,13 @@ async fn offline_runs_of_the_outbound_admin_ops_answer_federation_requires_daemo
         },
         AdminOpBody::MemberGrant {
             v,
-            member,
+            member: member.clone(),
             operation: MemberGrantOperation::TransferDeliver,
             selector: MemberGrantSelector::None,
+        },
+        AdminOpBody::SecretHomeSet {
+            v,
+            home: SecretHomeTarget::Member(member),
         },
     ];
     let snapshot = |store: &EncryptedStore| {
@@ -932,6 +1352,7 @@ async fn offline_runs_of_the_outbound_admin_ops_answer_federation_requires_daemo
             store.list_member_grants().unwrap().len(),
             store.list_outgoing_transfers().unwrap().len(),
             store.federation_self_member().unwrap(),
+            store.secret_home_role(),
         )
     };
     let before = snapshot(store);

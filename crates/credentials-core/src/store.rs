@@ -1394,6 +1394,23 @@ pub enum StoreOpError {
     /// An agent secret already exists under the requested name, live or `corrupt`.
     /// Names are create-only, so the operator must delete before storing again.
     SecretNameExists,
+    /// This vault's `secrets.home_member` setting names another member, so agent secrets
+    /// live in that member's vault and none may be created here. `home_member` is the
+    /// member whose vault the operator should use instead.
+    SecretHomeElsewhere { home_member: String },
+    /// The `secrets.home_member` setting names a member, but this vault's own member id
+    /// is unset or equal to it, so the vault cannot tell whether it is the home. The
+    /// operator of this vault (`remedy_member`, when its id is known) must fix it.
+    SecretRemoteSetupIncomplete { remedy_member: Option<String> },
+    /// Pointing `secrets.home_member` at another member was refused because this vault
+    /// still holds agent secret state that would be stranded there. The counts say what
+    /// must be deleted or revoked first.
+    SecretHomeNotEmpty {
+        agent_secrets: u64,
+        grants: u64,
+        flow_grants: u64,
+        pending_requests: u64,
+    },
     /// The cipher envelope failed to decode/decrypt. The id has been quarantined.
     Decrypt(EnvelopeError),
     /// The decrypted body failed to parse as a record. The id has been quarantined.
@@ -1442,6 +1459,32 @@ impl std::fmt::Display for StoreOpError {
         match self {
             StoreOpError::SecretSetupIncomplete => f.write_str("secret_setup_incomplete"),
             StoreOpError::SecretNameExists => f.write_str("name_exists: an agent secret already holds this name; delete it first"),
+            // These three print the same `code/class: detail` text the daemon's admin
+            // route answers with, so the online and offline `ck auth secret` paths agree.
+            StoreOpError::SecretHomeElsewhere { home_member } => write!(
+                f,
+                "secret_home_elsewhere/permanent: remedy_member={home_member}"
+            ),
+            StoreOpError::SecretRemoteSetupIncomplete {
+                remedy_member: Some(member),
+            } => write!(
+                f,
+                "remote_setup_incomplete/permanent: remedy_member={member}"
+            ),
+            StoreOpError::SecretRemoteSetupIncomplete {
+                remedy_member: None,
+            } => f.write_str("remote_setup_incomplete/permanent"),
+            StoreOpError::SecretHomeNotEmpty {
+                agent_secrets,
+                grants,
+                flow_grants,
+                pending_requests,
+            } => write!(
+                f,
+                "secret_home_not_empty/permanent: agent_secrets={agent_secrets} grants={grants} \
+                 flow_grants={flow_grants} pending_requests={pending_requests}; delete the \
+                 secrets on this vault before naming another member as the home"
+            ),
             StoreOpError::NotFound => f.write_str("credential not found"),
             StoreOpError::AlreadyExists => {
                 f.write_str("credential already exists (create-only; use a CAS overwrite)")
@@ -16200,6 +16243,11 @@ mod store_agent_secrets;
 pub use store_agent_secrets::{
     list_agent_secret_grants_read_only, list_agent_secrets_read_only, OperatorFlowGrantRow,
     OperatorGrantRow, OperatorPhoneRow, OperatorSecretListing, OperatorSecretRow,
+};
+/// Where agent secrets live: the `secrets.home_member` setting and the role it resolves to.
+pub use store_agent_secrets::{
+    resolve_secret_home_role, secret_home_read_only, SecretHomeChange, SecretHomeRole,
+    SecretHomeStatus, SECRET_HOME_SELF, SECRET_HOME_SETTING,
 };
 pub use store_agent_secrets::{
     secret_phone_gate_status_read_only, PhoneDeposit, PhoneOperation, SecretDepositPublicKey,

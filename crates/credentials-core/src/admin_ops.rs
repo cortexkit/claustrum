@@ -283,6 +283,14 @@ pub enum AdminOpBody {
     /// `ck auth secret revoke`: remove one grant by id, keeping the secret itself.
     #[serde(rename = "admin.secret_revoke_grant")]
     SecretRevokeGrant { v: u32, grant_id: String },
+    /// `ck auth secret home set <member-id>|self` and `ck auth secret home unset`: name
+    /// the vault that holds this account's agent secrets (`secrets.home_member`).
+    ///
+    /// Setting `self` or clearing the setting is a local write and runs offline too.
+    /// Naming a member runs only on the live daemon, which first checks the id against
+    /// callosum's pairing and stores an id equal to this vault's own as `self`.
+    #[serde(rename = "admin.secret_home_set")]
+    SecretHomeSet { v: u32, home: SecretHomeTarget },
     /// Set this vault's own member id (`fed-computer:<fp>`), which it writes into every
     /// `requester`, `home`, `sender` and `receiver` field it emits. Peers check those
     /// against the authenticated caller, so a wrong value fails closed.
@@ -645,6 +653,11 @@ impl std::fmt::Debug for AdminOpBody {
                 .field("v", v)
                 .field("grant_id", grant_id)
                 .finish(),
+            AdminOpBody::SecretHomeSet { v, home } => f
+                .debug_struct("SecretHomeSet")
+                .field("v", v)
+                .field("home", home)
+                .finish(),
             AdminOpBody::FederationGateSet { v, enabled } => f
                 .debug_struct("FederationGateSet")
                 .field("v", v)
@@ -784,6 +797,7 @@ impl AdminOpBody {
             | AdminOpBody::SecretPut { v, .. }
             | AdminOpBody::SecretDelete { v, .. }
             | AdminOpBody::SecretRevokeGrant { v, .. }
+            | AdminOpBody::SecretHomeSet { v, .. }
             | AdminOpBody::FederationSelfSet { v, .. }
             | AdminOpBody::TransferInit { v, .. }
             | AdminOpBody::TransferRecover { v }
@@ -821,6 +835,7 @@ impl AdminOpBody {
             | AdminOpBody::SecretPut { .. }
             | AdminOpBody::SecretDelete { .. }
             | AdminOpBody::SecretRevokeGrant { .. }
+            | AdminOpBody::SecretHomeSet { .. }
             | AdminOpBody::FederationSelfSet { .. }
             | AdminOpBody::TransferInit { .. }
             | AdminOpBody::TransferRecover { .. }
@@ -928,6 +943,7 @@ impl AdminOpBody {
             | AdminOpBody::SecretPut { .. }
             | AdminOpBody::SecretDelete { .. }
             | AdminOpBody::SecretRevokeGrant { .. }
+            | AdminOpBody::SecretHomeSet { .. }
             | AdminOpBody::FederationSelfSet { .. }
             // A resume, receive, reject, list or member grant writes no credential
             // record. An accept's record id is known only from its stored pending row,
@@ -987,6 +1003,7 @@ impl AdminOpBody {
             AdminOpBody::SecretPut { .. } => "admin.secret_put",
             AdminOpBody::SecretDelete { .. } => "admin.secret_delete",
             AdminOpBody::SecretRevokeGrant { .. } => "admin.secret_revoke_grant",
+            AdminOpBody::SecretHomeSet { .. } => "admin.secret_home_set",
             AdminOpBody::FederationSelfSet { .. } => "admin.federation_self_set",
             AdminOpBody::TransferInit { .. } => "admin.transfer_init",
             AdminOpBody::TransferRecover { .. } => "admin.transfer_recover",
@@ -1049,6 +1066,11 @@ impl AdminOpBody {
             | AdminOpBody::SecretPut { .. }
             | AdminOpBody::SecretDelete { .. }
             | AdminOpBody::SecretRevokeGrant { .. }
+            // Setting the secret home to this vault, or clearing it, is a local write.
+            | AdminOpBody::SecretHomeSet {
+                home: SecretHomeTarget::ThisVault | SecretHomeTarget::Unset,
+                ..
+            }
             // Local reads and writes with no outbound call.
             | AdminOpBody::TransferRecover { .. }
             | AdminOpBody::TransferReceive { .. }
@@ -1060,14 +1082,52 @@ impl AdminOpBody {
             // The self id is checked against the member id callosum computes for this
             // computer; a send and an accept look up a peer's announced key, a send and
             // a resume deliver, a remote add fetches from the home, and a member grant
-            // reads the member's current pairing id.
+            // reads the member's current pairing id, as does naming another member's
+            // vault as the secret home.
             AdminOpBody::FederationSelfSet { .. }
+            | AdminOpBody::SecretHomeSet {
+                home: SecretHomeTarget::Member(_),
+                ..
+            }
             | AdminOpBody::TransferInit { .. }
             | AdminOpBody::TransferSend { .. }
             | AdminOpBody::TransferResume { .. }
             | AdminOpBody::TransferAccept { .. }
             | AdminOpBody::RemoteAdd { .. }
             | AdminOpBody::MemberGrant { .. } => true,
+        }
+    }
+}
+
+/// Where `admin.secret_home_set` points `secrets.home_member`. On the wire it is the
+/// `home` field: `"self"`, a member id, or `null` to clear the setting.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "Option<String>", into = "Option<String>")]
+pub enum SecretHomeTarget {
+    /// Clear the setting: this vault serves its own secrets, as a single computer does.
+    Unset,
+    /// This vault is the home. Stored as the literal `self`.
+    ThisVault,
+    /// Another member's vault is the home (or this one, when the id equals the self id).
+    Member(String),
+}
+
+impl From<Option<String>> for SecretHomeTarget {
+    fn from(value: Option<String>) -> Self {
+        match value.as_deref() {
+            None => SecretHomeTarget::Unset,
+            Some(crate::store::SECRET_HOME_SELF) => SecretHomeTarget::ThisVault,
+            Some(_) => SecretHomeTarget::Member(value.expect("matched Some")),
+        }
+    }
+}
+
+impl From<SecretHomeTarget> for Option<String> {
+    fn from(value: SecretHomeTarget) -> Self {
+        match value {
+            SecretHomeTarget::Unset => None,
+            SecretHomeTarget::ThisVault => Some(crate::store::SECRET_HOME_SELF.to_owned()),
+            SecretHomeTarget::Member(member) => Some(member),
         }
     }
 }
@@ -1539,6 +1599,20 @@ pub fn apply(
         AdminOpBody::SecretRevokeGrant { grant_id, .. } => {
             store.secret_operator_revoke_audited(&grant_id, actor)
         }
+        AdminOpBody::SecretHomeSet {
+            home: home @ (SecretHomeTarget::ThisVault | SecretHomeTarget::Unset),
+            ..
+        } => {
+            let wanted = match home {
+                SecretHomeTarget::ThisVault => Some(crate::store::SECRET_HOME_SELF),
+                _ => None,
+            };
+            let change = store.set_secret_home_audited(
+                wanted,
+                AuditCtx::route_admin(AuditOp::SecretHomeSet, actor),
+            )?;
+            Ok(serde_json::json!({ "home_member": change.stored, "changed": change.changed }))
+        }
         AdminOpBody::FederationGateSet { enabled, .. } => {
             let changed = store.set_federation_member_mapping_audited(
                 enabled,
@@ -1553,7 +1627,11 @@ pub fn apply(
         | AdminOpBody::TransferResume { .. }
         | AdminOpBody::TransferAccept { .. }
         | AdminOpBody::RemoteAdd { .. }
-        | AdminOpBody::MemberGrant { .. }) => Err(requires_daemon_refusal(&op)),
+        | AdminOpBody::MemberGrant { .. }
+        | AdminOpBody::SecretHomeSet {
+            home: SecretHomeTarget::Member(_),
+            ..
+        }) => Err(requires_daemon_refusal(&op)),
         AdminOpBody::TransferRecover { .. } => recover_transfer_key(store, actor),
         AdminOpBody::TransferReceive { .. } => {
             store.expire_incoming_transfers(wall_now_ms())?;
@@ -2299,6 +2377,15 @@ mod admin_schema_v2_tests {
                 AdminOpBody::SecretRevokeGrant {
                     v: v2,
                     grant_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
+                },
+                v2,
+                None,
+            ),
+            (
+                "SecretHomeSet",
+                AdminOpBody::SecretHomeSet {
+                    v: v2,
+                    home: SecretHomeTarget::ThisVault,
                 },
                 v2,
                 None,

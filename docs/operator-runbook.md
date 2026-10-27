@@ -897,6 +897,7 @@ These values come from the closed `AuditOp` enum and name the mutation or chain 
 | `federation_self_set` | Set the vault's own canonical member id. |
 | `secret_deposit_key_create` | Vault bootstrap creates the dedicated deposit key; target `kem:secret-deposit:1`, payload fields: key id. |
 | `secret_phone_gate_set` | Operator changes the phone mapping gate; no target, payload fields: enabled. |
+| `secret_home_set` | Operator sets or clears `secrets.home_member`, the vault that holds agent secrets; no target, payload fields: the stored value (`self` or a member id), or empty when cleared. |
 | `secret_phone_register` | Phone registers create-only keys for the current pairing; target `secret-phone\|<fp>`, payload fields: pairing id, deposit public key, approval public key. |
 | `secret_store` | Phone or operator stores a secret; target `secret\|<name>`, payload fields: kind, incarnation, sealed scope fields, and the deposit id for a phone deposit. The operator's `ck auth secret put` payload omits the deposit id, because there is none. |
 | `secret_grant_create` | Phone approves a grant; target `secret\|<name>`, payload hash is the SHA-256 of the exact accepted envelope bytes. |

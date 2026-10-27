@@ -5352,6 +5352,69 @@ fn an_exact_grant_to_a_missing_credential_id_warns_and_succeeds() {
     assert!(!stderr.contains("warning"), "{stderr}");
 }
 
+// A credential created with no covering grant gets a note pointing at `ck auth grant`,
+// because modules and enrolled consumers read under a grant, and never at minting a
+// capability handle, which is bearer material. The suggested command is run here as
+// printed, so a flag the grant verb does not take fails this test.
+#[test]
+fn put_without_a_covering_grant_points_at_ck_auth_grant_and_not_at_a_handle() {
+    let vault = GrantCliVault::new("put-unreached-note");
+    vault.bootstrap();
+
+    let out = vault.run(&["put", "--id", "apikey:unreached", "--payload", "secret"]);
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(out.status.success(), "{stderr}");
+    let suggested = "`ck auth grant --principal <principal> --selector-kind exact \
+                     --selector apikey:unreached --operation read`";
+    assert!(
+        stderr.contains("no grant covers this credential yet"),
+        "{stderr}"
+    );
+    assert!(stderr.contains(suggested), "{stderr}");
+    assert!(!stderr.contains("mint-handle"), "{stderr}");
+    assert!(!stderr.contains("capability handle"), "{stderr}");
+    assert!(
+        !stderr.contains('\u{2014}'),
+        "no em dash in the note: {stderr}"
+    );
+
+    // The suggested command, with a principal filled in, is accepted and reaches the
+    // credential the note was about.
+    let suggested_args: Vec<&str> = suggested
+        .trim_matches('`')
+        .split_whitespace()
+        .skip(2)
+        .map(|arg| {
+            if arg == "<principal>" {
+                "consumer"
+            } else {
+                arg
+            }
+        })
+        .collect();
+    let granted = vault.run(&suggested_args);
+    assert!(
+        granted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&granted.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&granted.stdout).lines().nth(1),
+        Some("  reaches 1 credential")
+    );
+
+    // Once a grant covers an id, creating it prints no note.
+    let (ok, _, stderr) = grant_on(&vault, "consumer", "exact", "apikey:covered", "read");
+    assert!(ok, "{stderr}");
+    let out = vault.run(&["put", "--id", "apikey:covered", "--payload", "secret"]);
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(out.status.success(), "{stderr}");
+    assert!(
+        !stderr.contains("no grant covers this credential"),
+        "{stderr}"
+    );
+}
+
 // `deposit` reach is about cookies the module has not written yet, so zero is its normal
 // starting state and a warning would be noise on every correct deposit grant.
 #[test]

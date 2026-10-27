@@ -18,6 +18,8 @@ use credentials_core::admin_ops::{AdminOpBody, ADMIN_OP_SCHEMA_V2};
 
 const BEARER: &str = "authorization_bearer";
 const NO_TABLES: &str = "no agent-secret tables yet";
+const NO_SECRETS: &str = "no agent secrets stored";
+const NO_SECRET_GRANTS: &str = "no agent-secret grants";
 
 pub fn cmd_secret(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
     let Some((verb, rest)) = args.split_first() else {
@@ -437,6 +439,11 @@ fn list(global: &GlobalArgs, _args: &[String]) -> Result<(), CliError> {
         Some(at) => at.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
         None => at_ms.to_string(),
     };
+    // Say so when nothing is stored: silent output would look the same as a verb that
+    // failed to read the store, and the pre-migration case already prints its own line.
+    if listing.secrets.is_empty() && listing.phones.is_empty() {
+        println!("{NO_SECRETS}");
+    }
     for secret in &listing.secrets {
         let scope = match (&secret.host, &secret.origin) {
             (Some(host), _) => format!(
@@ -510,6 +517,13 @@ fn grants(global: &GlobalArgs, _args: &[String]) -> Result<(), CliError> {
         println!("{NO_TABLES}");
         return Ok(());
     };
+    if listing
+        .secrets
+        .iter()
+        .all(|secret| secret.grants.is_empty())
+    {
+        println!("{NO_SECRET_GRANTS}");
+    }
     for secret in &listing.secrets {
         for grant in &secret.grants {
             println!(

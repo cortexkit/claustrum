@@ -16,7 +16,8 @@ use super::cli_support::import_detect::{
 };
 use super::{
     attach_import_identity, build_import_record, commit_admin, created_id_is_already_reachable,
-    login_id_is_valid, resolve_store_key, store_op, CliError, GlobalArgs, IdentityFlags,
+    login_id_is_valid, no_covering_grant_note, resolve_store_key, store_op, CliError, GlobalArgs,
+    IdentityFlags,
 };
 use credentials_core::admin_ops::{AdminAuditOp, AdminOpBody, StoreMode, ADMIN_OP_SCHEMA_V1};
 
@@ -521,9 +522,7 @@ where
                 ImportAction::Create => {
                     println!("{final_id}: stored");
                     if !created_id_is_already_reachable(global, final_id) {
-                        eprintln!(
-                            "(not reachable by any consumer yet: no capability handle and no covering grant. When a consumer needs it, mint a handle with `ck auth mint-handle --id {final_id}` and place it where that consumer reads handles — the vault cannot write that file. A handle is bearer material, so it is worth minting when there is a reader rather than ahead of one.)"
-                        );
+                        eprintln!("{}", no_covering_grant_note(final_id));
                     }
                 }
                 ImportAction::Replace { record_version } => {

@@ -13,10 +13,11 @@
 use credentials_core::admin_ops::{AdminOpBody, ADMIN_OP_SCHEMA_V2};
 use credentials_core::federation::{
     is_lower_hex_16_bytes, valid_member_id, MemberGrantOperation, MemberGrantSelector,
+    SELF_MEMBER_SETTING,
 };
 use serde_json::Value;
 
-use crate::{commit_admin, has_flag, optional, CliError, GlobalArgs};
+use crate::{commit_admin, has_flag, optional, store_path, CliError, GlobalArgs};
 
 /// `ck auth transfer init|send|receive|accept|reject`.
 pub fn cmd_transfer(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
@@ -57,11 +58,24 @@ pub fn cmd_transfer(global: &GlobalArgs, args: &[String]) -> Result<(), CliError
                 text(&reply, "receiver"),
                 text(&reply, "reply")
             );
-            if reply.get("row_kept").and_then(Value::as_bool) == Some(true) {
-                eprintln!(
-                    "(the transfer is kept; deliver it again with \
-                     `ck auth transfer send --resume {transfer_id}`)"
-                );
+            let reply_code = text(&reply, "reply");
+            let reply_class = reply.get("reply_class").and_then(Value::as_str);
+            let row_kept = reply.get("row_kept").and_then(Value::as_bool) == Some(true);
+            // Only a delivered-and-waiting reply needs this vault's member id, so the
+            // store is read for it only then.
+            let self_member = if reply_class.is_none() && reply_code == "pending" {
+                self_member_read_only(&store_path(global))
+            } else {
+                None
+            };
+            for line in send_reply_hint(
+                transfer_id,
+                reply_code,
+                reply_class,
+                row_kept,
+                self_member.as_deref(),
+            ) {
+                eprintln!("{line}");
             }
         }
         AdminOpBody::TransferReceive { .. } => {
@@ -99,6 +113,90 @@ pub fn cmd_transfer(global: &GlobalArgs, args: &[String]) -> Result<(), CliError
         _ => {}
     }
     Ok(())
+}
+
+/// The stderr lines that explain a `transfer send` or `send --resume` reply.
+///
+/// A reply either names the state the receiver holds the transfer in (`reply_class`
+/// absent) or is a refusal (`reply_class` present). A state reply proves delivery, so
+/// it never gets the `--resume` hint: telling an operator to resend a transfer the
+/// receiver already holds sends them to the wrong computer. A refusal leaves delivery
+/// unconfirmed, and `row_kept` decides whether `--resume` can still deliver it (a
+/// final refusal deletes the row).
+///
+/// `self_member` is this vault's member id, which the receiving operator types as
+/// `--from`. Without it the accept command shows a placeholder and says how to set
+/// the id.
+fn send_reply_hint(
+    transfer_id: &str,
+    reply: &str,
+    reply_class: Option<&str>,
+    row_kept: bool,
+    self_member: Option<&str>,
+) -> Vec<String> {
+    match (reply_class, reply) {
+        (None, "pending") => {
+            let from = self_member.unwrap_or("<this computer's member id>");
+            let mut lines = vec![format!(
+                "(delivered: the receiving computer holds the transfer and is waiting for \
+                 its operator to accept it. On that computer, run `ck auth transfer receive`, \
+                 then `ck auth transfer accept {transfer_id} --from {from}`.)"
+            )];
+            if self_member.is_none() {
+                lines.push(
+                    "(this vault has no member id recorded; `ck auth federation self <member>` \
+                     sets it.)"
+                        .to_string(),
+                );
+            }
+            lines
+        }
+        (None, "accepted") => vec![
+            "(delivered and accepted by the receiving computer; the transfer is complete.)"
+                .to_string(),
+        ],
+        (None, "rejected") => vec![
+            "(delivered, and the receiving computer rejected it; the transfer is closed \
+             and is no longer kept here.)"
+                .to_string(),
+        ],
+        (None, "expired") => vec![
+            "(delivered, but it expired on the receiving computer before anyone accepted \
+             it; it is no longer kept here. Start a new transfer with `ck auth transfer \
+             send --id <credential> --to <member>`.)"
+                .to_string(),
+        ],
+        // A refusal that may succeed later, or any reply this build does not know. The
+        // row is kept, and a repeat delivery sends the same bytes, so it is safe even
+        // when an earlier attempt did reach the receiver.
+        _ if row_kept => vec![format!(
+            "(no delivery was confirmed ({reply}); the transfer is kept. Deliver it again \
+             with `ck auth transfer send --resume {transfer_id}`.)"
+        )],
+        _ => vec![format!(
+            "(not delivered ({reply}), and the refusal is final: the transfer is no longer \
+             kept, so `--resume` cannot deliver it.)"
+        )],
+    }
+}
+
+/// This vault's federation member id, read from the store file without the daemon,
+/// the lease or the master key: it is a plaintext settings row. `None` when the file,
+/// the settings table or the row is missing, the read fails, or the value is not a
+/// canonical member id; the caller then prints a placeholder instead.
+fn self_member_read_only(db: &std::path::Path) -> Option<String> {
+    if !db.exists() {
+        return None;
+    }
+    let conn = credentials_core::usable::open_store_read_only(db).ok()?;
+    let member: String = conn
+        .query_row(
+            "SELECT value FROM settings WHERE name = ?1",
+            [SELF_MEMBER_SETTING],
+            |row| row.get(0),
+        )
+        .ok()?;
+    valid_member_id(&member).then_some(member)
 }
 
 /// The admin op a `transfer` invocation asks for.
@@ -608,5 +706,161 @@ mod tests {
             "remote_read",
         ])));
         usage(federation_op(&args(&["mapping", "maybe"])));
+    }
+
+    const OLD_RESUME_HINT: &str = "deliver it again with";
+
+    #[test]
+    fn a_pending_reply_says_delivered_and_names_the_receiver_side_commands() {
+        let lines = send_reply_hint(TRANSFER_ID, "pending", None, true, Some(MEMBER));
+        let all = lines.join("\n");
+        assert_eq!(lines.len(), 1, "{all}");
+        assert!(all.contains("delivered"), "{all}");
+        assert!(
+            all.contains("waiting for its operator to accept it"),
+            "{all}"
+        );
+        assert!(all.contains("`ck auth transfer receive`"), "{all}");
+        assert!(
+            all.contains(&format!(
+                "`ck auth transfer accept {TRANSFER_ID} --from {MEMBER}`"
+            )),
+            "{all}"
+        );
+        assert!(!all.contains(OLD_RESUME_HINT), "{all}");
+        assert!(!all.contains("--resume"), "{all}");
+        assert!(!all.contains('\u{2014}'), "{all}");
+    }
+
+    #[test]
+    fn a_pending_reply_without_a_recorded_self_id_shows_a_placeholder_and_how_to_set_it() {
+        let lines = send_reply_hint(TRANSFER_ID, "pending", None, true, None);
+        let all = lines.join("\n");
+        assert_eq!(lines.len(), 2, "{all}");
+        assert!(
+            all.contains(&format!(
+                "`ck auth transfer accept {TRANSFER_ID} --from <this computer's member id>`"
+            )),
+            "{all}"
+        );
+        assert!(
+            all.contains("`ck auth federation self <member>` sets it"),
+            "{all}"
+        );
+        assert!(!all.contains(OLD_RESUME_HINT), "{all}");
+    }
+
+    #[test]
+    fn settled_replies_never_suggest_resending() {
+        for (reply, expected) in [
+            ("accepted", "delivered and accepted"),
+            ("rejected", "the receiving computer rejected it"),
+            ("expired", "expired on the receiving computer"),
+        ] {
+            let all = send_reply_hint(TRANSFER_ID, reply, None, false, Some(MEMBER)).join("\n");
+            assert!(all.contains(expected), "{reply}: {all}");
+            assert!(!all.contains("--resume"), "{reply}: {all}");
+        }
+    }
+
+    #[test]
+    fn only_a_kept_refusal_gets_the_resume_hint() {
+        // A kept refusal: delivery is unconfirmed and a resume may succeed.
+        for (code, class) in [
+            ("home_unreachable", "transient"),
+            ("transfer_queue_full", "transient"),
+            ("unrecognised", "unknown"),
+        ] {
+            let all = send_reply_hint(TRANSFER_ID, code, Some(class), true, None).join("\n");
+            assert!(all.contains("no delivery was confirmed"), "{code}: {all}");
+            assert!(
+                all.contains(&format!("`ck auth transfer send --resume {TRANSFER_ID}`")),
+                "{code}: {all}"
+            );
+        }
+        // A final refusal deletes the row, so `--resume` would answer transfer_gone.
+        let all = send_reply_hint(
+            TRANSFER_ID,
+            "remote_seal_invalid",
+            Some("permanent"),
+            false,
+            None,
+        )
+        .join("\n");
+        assert!(all.contains("not delivered (remote_seal_invalid)"), "{all}");
+        assert!(all.contains("`--resume` cannot deliver it"), "{all}");
+        assert!(!all.contains(OLD_RESUME_HINT), "{all}");
+        // A refusal whose code happens to read like a state is still a refusal.
+        let all = send_reply_hint(TRANSFER_ID, "pending", Some("transient"), true, None).join("\n");
+        assert!(!all.contains("delivered:"), "{all}");
+        assert!(all.contains("--resume"), "{all}");
+    }
+
+    fn scratch_db(label: &str) -> std::path::PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "ck-fed-self-{label}-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("store.db")
+    }
+
+    #[test]
+    fn the_self_member_is_read_from_the_settings_row() {
+        let db = scratch_db("present");
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE settings (name TEXT PRIMARY KEY, value TEXT NOT NULL, \
+             updated_at_ms INTEGER NOT NULL)",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO settings (name, value, updated_at_ms) VALUES (?1, ?2, 0)",
+            [SELF_MEMBER_SETTING, MEMBER],
+        )
+        .unwrap();
+        drop(conn);
+        assert_eq!(self_member_read_only(&db).as_deref(), Some(MEMBER));
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
+    }
+
+    #[test]
+    fn a_missing_or_malformed_self_member_reads_as_none() {
+        // No store file at all: nothing is created by the read.
+        let missing = scratch_db("missing");
+        assert_eq!(self_member_read_only(&missing), None);
+        assert!(!missing.exists());
+
+        // A store with no settings table.
+        let bare = scratch_db("bare");
+        rusqlite::Connection::open(&bare)
+            .unwrap()
+            .execute_batch("CREATE TABLE other (x INTEGER)")
+            .unwrap();
+        assert_eq!(self_member_read_only(&bare), None);
+
+        // A value that is not a canonical member id.
+        let bad = scratch_db("bad");
+        let conn = rusqlite::Connection::open(&bad).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE settings (name TEXT PRIMARY KEY, value TEXT NOT NULL, \
+             updated_at_ms INTEGER NOT NULL)",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO settings (name, value, updated_at_ms) VALUES (?1, 'fed-computer:XYZ', 0)",
+            [SELF_MEMBER_SETTING],
+        )
+        .unwrap();
+        drop(conn);
+        assert_eq!(self_member_read_only(&bad), None);
+
+        for db in [missing, bare, bad] {
+            let _ = std::fs::remove_dir_all(db.parent().unwrap());
+        }
     }
 }

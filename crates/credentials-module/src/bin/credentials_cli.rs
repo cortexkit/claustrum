@@ -2181,10 +2181,9 @@ fn cmd_put(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             // SAID ONLY ON THE CREATE ARM, and only when nothing already reaches the id.
             //
             // A deposit is not a delivery. The vault now holds the material and no
-            // consumer can ask for it: a handle must be minted AND placed in whatever
-            // file that consumer reads, and the vault must never write that file --
-            // it does not own the path or the schema, and a credential store that edits
-            // its callers' config is a worse object than one that leaves a gap.
+            // consumer can ask for it until a grant covers it: modules and enrolled
+            // consumers read under a grant, and only the operator can decide who that
+            // should be.
             //
             // So the operator is the only party who can close it, and this is the one
             // moment they are standing in the flow.
@@ -2211,26 +2210,7 @@ fn cmd_put(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
             // caller had to tail past it to find `created <id>`. An operator reads both
             // either way; a script capturing stdout now gets the verdict alone.
             if !created_id_is_already_reachable(global, &id) {
-                // STATE THE FACT, AND MAKE THE STEP CONDITIONAL ON A CONSUMER EXISTING.
-                //
-                // This used to read "mint one with ...", which assumes the operator
-                // deposited FOR a consumer that is already waiting. Depositing AHEAD of
-                // one is equally legitimate, and there the advice is wrong: a capability
-                // handle is bearer material, so minting it early creates a live
-                // credential surface whose only property is that nobody can use it yet.
-                //
-                // Corrected 2026-09-06 after an operator declined the advice with better
-                // reasoning than the advice had -- they deposited a key whose consumer
-                // could not select it until a field ships, and minting would have left a
-                // reachable secret with no reader in the meantime.
-                eprintln!(
-                    "(not reachable by any consumer yet: no capability handle and no \
-                     covering grant. When a consumer needs it, mint a handle with \
-                     `ck auth mint-handle --id {id}` and place it where that consumer \
-                     reads handles — the vault cannot write that file. A handle is bearer \
-                     material, so it is worth minting when there is a reader rather than \
-                     ahead of one.)"
-                );
+                eprintln!("{}", no_covering_grant_note(&id));
             }
         }
     }
@@ -3748,6 +3728,26 @@ fn cmd_remove(global: &GlobalArgs, args: &[String]) -> Result<(), CliError> {
         println!("  one to a consumer, drop it from that consumer's config now.");
     }
     Ok(())
+}
+
+/// The note `put` and `import` print on stderr after creating a credential that no
+/// grant covers yet.
+///
+/// It points at `ck auth grant`, because modules and enrolled consumers read under a
+/// grant. It does not suggest a capability handle: a handle is bearer material that
+/// has to be copied to its reader, while a grant names the reader and needs nothing
+/// copied. It states the gap as a fact and does not urge a grant: depositing
+/// ahead of any consumer is legitimate, and a grant made before a reader exists only
+/// widens access early.
+///
+/// Only print it where `created_id_is_already_reachable` returned false, so the
+/// "no covering grant" claim has been checked against the vault's grant set.
+fn no_covering_grant_note(id: &str) -> String {
+    format!(
+        "(no grant covers this credential yet, so no consumer can read it. When a module \
+         or an enrolled consumer needs it, grant access with `ck auth grant --principal \
+         <principal> --selector-kind exact --selector {id} --operation read`.)"
+    )
 }
 
 /// `status` = the one command for "why does the health table say degraded": the

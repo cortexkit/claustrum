@@ -120,6 +120,10 @@ pub enum MemberGrantOperation {
     RemoteRead,
     /// Deliver sealed static-key transfers to this vault.
     TransferDeliver,
+    /// Forward agent-secret calls (`secret.use` and the flow-grant calls) to this vault,
+    /// which holds the account's secrets. Takes no selector: the secret grants made
+    /// here, not the member grant, decide which secret a call may use.
+    SecretUse,
 }
 
 impl MemberGrantOperation {
@@ -128,6 +132,7 @@ impl MemberGrantOperation {
         match self {
             Self::RemoteRead => "remote_read",
             Self::TransferDeliver => "transfer_deliver",
+            Self::SecretUse => "secret_use",
         }
     }
 
@@ -135,13 +140,14 @@ impl MemberGrantOperation {
         match value {
             "remote_read" => Some(Self::RemoteRead),
             "transfer_deliver" => Some(Self::TransferDeliver),
+            "secret_use" => Some(Self::SecretUse),
             _ => None,
         }
     }
 }
 
 /// Which credentials a member grant reaches. `remote_read` takes an exact id or a
-/// category; `transfer_deliver` takes no selector.
+/// category; `transfer_deliver` and `secret_use` take no selector.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "selector", rename_all = "snake_case")]
 pub enum MemberGrantSelector {

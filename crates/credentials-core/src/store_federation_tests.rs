@@ -126,7 +126,7 @@ fn release_2_migrations_follow_release_1_and_keep_existing_rows_and_grants() {
         .copied()
         .filter(|version| *version > VAULT_RELEASE_1_SCHEMA_VERSION)
         .collect();
-    assert_eq!(release_2, (19..=28).collect::<Vec<_>>());
+    assert_eq!(release_2, (19..=29).collect::<Vec<_>>());
     assert_eq!(*versions.last().unwrap(), newest_migration_version());
 
     let (_root, sqlite) = sqlite("federation-migrate", 190);
@@ -920,6 +920,195 @@ fn member_grants_are_audited_with_the_member_and_the_stored_pairing_id() {
         );
     }
     assert_eq!(audit_rows(&store, AuditOp::MemberGrantCreate).len(), 3);
+    assert_eq!(store.verify_audit_chain().unwrap(), None);
+}
+
+/// Every `member_grants` column of every row, read raw so a value the store API would
+/// not surface (the creation time) is compared too.
+fn member_grant_rows(store: &EncryptedStore) -> Vec<(String, String, String, String, String, i64)> {
+    store
+        .with_raw_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT member_id, operation, selector_kind, selector, pairing_id, created_at_ms \
+                 FROM member_grants ORDER BY member_id, operation, selector_kind, selector",
+            )?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        })
+        .unwrap()
+}
+
+/// Insert one `member_grants` row directly, skipping the store's shape check, so the
+/// table's own CHECK constraints are what accept or refuse it.
+fn raw_member_grant_insert(
+    store: &EncryptedStore,
+    member: &str,
+    operation: &str,
+    kind: &str,
+    selector: &str,
+) -> bool {
+    store
+        .with_raw_conn(|conn| {
+            conn.execute(
+                "INSERT INTO member_grants \
+                 (member_id, operation, selector_kind, selector, pairing_id, created_at_ms) \
+                 VALUES (?1, ?2, ?3, ?4, 'pair-raw', 1)",
+                rusqlite::params![member, operation, kind, selector],
+            )
+        })
+        .is_ok()
+}
+
+/// The migration admitting `secret_use` rebuilds `member_grants`. A store upgraded
+/// across it keeps every `remote_read` and `transfer_deliver` row exactly, pairing id
+/// and creation time included. Afterwards a selector-free `secret_use` grant is stored
+/// and listed, and `secret_use` with an exact or category selector is refused both by
+/// the store and by the table itself.
+#[test]
+fn the_secret_use_migration_keeps_member_grants_and_admits_only_selector_free_secret_use() {
+    assert_eq!(SECRET_USE_MEMBER_GRANT_SCHEMA_VERSION, 29);
+    let (_root, sqlite) = sqlite("federation-member-grant-secret-use", 244);
+    migrate_through_for_test(&sqlite, SECRET_USE_MEMBER_GRANT_SCHEMA_VERSION - 1).unwrap();
+    let store = EncryptedStore::open(sqlite, MasterKey::from_bytes([244; 32])).unwrap();
+    let exact = MemberGrantSelector::Exact("oauth:anthropic".into());
+    let category = MemberGrantSelector::Category("llm-provider".into());
+    for (member, operation, selector, pairing) in [
+        (OTHER, MemberGrantOperation::RemoteRead, &exact, "pair-1"),
+        (OTHER, MemberGrantOperation::RemoteRead, &category, "pair-1"),
+        (
+            OTHER,
+            MemberGrantOperation::TransferDeliver,
+            &MemberGrantSelector::None,
+            "pair-1",
+        ),
+        (
+            HOME,
+            MemberGrantOperation::TransferDeliver,
+            &MemberGrantSelector::None,
+            "pair-2",
+        ),
+    ] {
+        assert!(store
+            .create_member_grant_audited(member, operation, selector, pairing)
+            .unwrap());
+    }
+    // One row with a creation time no clock would give, so a copy that re-stamped it
+    // would show.
+    assert!(raw_member_grant_insert(
+        &store,
+        HOME,
+        "remote_read",
+        "exact",
+        "apikey:zai"
+    ));
+    // Before the migration the table refuses the new operation outright.
+    assert!(!raw_member_grant_insert(
+        &store,
+        OTHER,
+        "secret_use",
+        "none",
+        ""
+    ));
+    let before = member_grant_rows(&store);
+    assert_eq!(before.len(), 5);
+    let listed_before = store.list_member_grants().unwrap();
+    let audit_before = store.read_audit(None).unwrap();
+
+    EncryptedStore::migrate(&store.store).unwrap();
+
+    assert_eq!(
+        store.store.with_conn(read_schema_version).unwrap(),
+        newest_migration_version()
+    );
+    assert_eq!(member_grant_rows(&store), before);
+    assert_eq!(store.list_member_grants().unwrap(), listed_before);
+    assert_eq!(store.read_audit(None).unwrap(), audit_before);
+
+    // A selector-free grant is stored with the member's pairing id and read back.
+    assert!(store
+        .create_member_grant_audited(
+            OTHER,
+            MemberGrantOperation::SecretUse,
+            &MemberGrantSelector::None,
+            "pair-1",
+        )
+        .unwrap());
+    let secret_use: Vec<_> = store
+        .list_member_grants()
+        .unwrap()
+        .into_iter()
+        .filter(|grant| grant.operation == MemberGrantOperation::SecretUse)
+        .collect();
+    assert_eq!(secret_use.len(), 1);
+    assert_eq!(secret_use[0].member_id, OTHER);
+    assert_eq!(secret_use[0].selector, MemberGrantSelector::None);
+    assert_eq!(secret_use[0].pairing_id, "pair-1");
+    let created = audit_rows(&store, AuditOp::MemberGrantCreate);
+    assert_eq!(
+        created.last().unwrap().payload_hash.as_deref(),
+        Some(
+            member_grant_payload_hash(
+                MemberGrantOperation::SecretUse,
+                &MemberGrantSelector::None,
+                "pair-1"
+            )
+            .as_str()
+        )
+    );
+
+    // With a selector it is refused by the store, before any write or audit row.
+    let rows_with_secret_use = member_grant_rows(&store);
+    for selector in [&exact, &category] {
+        assert!(
+            matches!(
+                store.create_member_grant_audited(
+                    OTHER,
+                    MemberGrantOperation::SecretUse,
+                    selector,
+                    "pair-1"
+                ),
+                Err(StoreOpError::Encode(_))
+            ),
+            "{selector:?}"
+        );
+    }
+    assert_eq!(member_grant_rows(&store), rows_with_secret_use);
+    assert_eq!(
+        audit_rows(&store, AuditOp::MemberGrantCreate).len(),
+        created.len()
+    );
+
+    // And by the table, for a writer that skips the store's check. `none` stays
+    // invalid for `remote_read`, and a selector stays invalid for `transfer_deliver`.
+    for (operation, kind, selector) in [
+        ("secret_use", "exact", "oauth:other"),
+        ("secret_use", "category", "other-category"),
+        ("remote_read", "none", ""),
+        ("transfer_deliver", "exact", "oauth:other"),
+    ] {
+        assert!(
+            !raw_member_grant_insert(&store, HOME, operation, kind, selector),
+            "{operation} {kind}"
+        );
+    }
+    assert!(raw_member_grant_insert(
+        &store,
+        HOME,
+        "secret_use",
+        "none",
+        ""
+    ));
     assert_eq!(store.verify_audit_chain().unwrap(), None);
 }
 

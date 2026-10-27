@@ -853,7 +853,7 @@ fn init_transfer_key(
 }
 
 /// The selector a member grant operation takes: `remote_read` an exact id or a valid
-/// category, `transfer_deliver` none. Checked before the pairing lookup, so a
+/// category, `transfer_deliver` and `secret_use` none. Checked before the pairing lookup, so a
 /// malformed grant costs no outbound call; the store checks again when it writes.
 fn member_grant_shape(
     operation: MemberGrantOperation,
@@ -873,6 +873,8 @@ fn member_grant_shape(
         }
         (MemberGrantOperation::TransferDeliver, MemberGrantSelector::None) => Ok(()),
         (MemberGrantOperation::TransferDeliver, _) => Err("transfer_deliver takes no selector"),
+        (MemberGrantOperation::SecretUse, MemberGrantSelector::None) => Ok(()),
+        (MemberGrantOperation::SecretUse, _) => Err("secret_use takes no selector"),
     }
 }
 

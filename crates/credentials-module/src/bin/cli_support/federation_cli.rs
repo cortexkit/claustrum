@@ -305,9 +305,10 @@ fn member_op(args: &[String]) -> Result<AdminOpBody, CliError> {
     let operation = match optional(rest, "--operation").as_deref() {
         Some("remote_read") => MemberGrantOperation::RemoteRead,
         Some("transfer_deliver") => MemberGrantOperation::TransferDeliver,
+        Some("secret_use") => MemberGrantOperation::SecretUse,
         _ => {
             return Err(CliError::Usage(
-                "--operation must be remote_read or transfer_deliver".into(),
+                "--operation must be remote_read, transfer_deliver or secret_use".into(),
             ))
         }
     };
@@ -324,7 +325,9 @@ fn member_op(args: &[String]) -> Result<AdminOpBody, CliError> {
         {
             MemberGrantSelector::Category(category)
         }
-        (MemberGrantOperation::TransferDeliver, None, None) => MemberGrantSelector::None,
+        (MemberGrantOperation::TransferDeliver | MemberGrantOperation::SecretUse, None, None) => {
+            MemberGrantSelector::None
+        }
         (MemberGrantOperation::RemoteRead, _, _) => {
             return Err(CliError::Usage(
                 "invalid_params: remote_read takes exactly one of --id <credential> and \
@@ -335,6 +338,11 @@ fn member_op(args: &[String]) -> Result<AdminOpBody, CliError> {
         (MemberGrantOperation::TransferDeliver, _, _) => {
             return Err(CliError::Usage(
                 "invalid_params: transfer_deliver takes no --id or --category".into(),
+            ))
+        }
+        (MemberGrantOperation::SecretUse, _, _) => {
+            return Err(CliError::Usage(
+                "invalid_params: secret_use takes no --id or --category".into(),
             ))
         }
     };
@@ -575,6 +583,53 @@ mod tests {
             federation_op(&args(&["mapping", "on"])).unwrap(),
             AdminOpBody::FederationGateSet { enabled: true, .. }
         ));
+    }
+
+    /// `secret_use` is selector-free like `transfer_deliver`: it builds a grant and a
+    /// revoke with selector `none`, and refuses `--id` or `--category` before anything
+    /// is sent.
+    #[test]
+    fn secret_use_takes_no_selector() {
+        for verb in ["grant", "revoke"] {
+            let op = member_op(&args(&[
+                verb,
+                "--member",
+                MEMBER,
+                "--operation",
+                "secret_use",
+            ]))
+            .unwrap();
+            assert!(
+                matches!(
+                    op,
+                    AdminOpBody::MemberGrant {
+                        operation: MemberGrantOperation::SecretUse,
+                        selector: MemberGrantSelector::None,
+                        ..
+                    } | AdminOpBody::MemberRevoke {
+                        operation: MemberGrantOperation::SecretUse,
+                        selector: MemberGrantSelector::None,
+                        ..
+                    }
+                ),
+                "{op:?}"
+            );
+            for selector in [["--id", "apikey:x"], ["--category", "llm-provider"]] {
+                let refused = usage(member_op(&args(&[
+                    verb,
+                    "--member",
+                    MEMBER,
+                    "--operation",
+                    "secret_use",
+                    selector[0],
+                    selector[1],
+                ])));
+                assert_eq!(
+                    refused,
+                    "invalid_params: secret_use takes no --id or --category"
+                );
+            }
+        }
     }
 
     #[test]

@@ -28,7 +28,7 @@ fn insert_secret(store: &EncryptedStore, name: &str, incarnation: &str) {
 #[test]
 fn secret_migrations_create_exactly_eight_secret_tables() {
     let (_root, store) = rig("secret-schema", 50);
-    assert_eq!(newest_migration_version(), 28);
+    assert_eq!(newest_migration_version(), 29);
     let tables = store.store.with_conn(|conn| {
         let mut stmt = conn.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND (name = 'agent_secrets' OR name LIKE 'secret_%') ORDER BY name")?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;

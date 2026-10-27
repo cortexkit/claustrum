@@ -431,6 +431,55 @@ async fn member_grant_reads_the_pairing_and_refuses_with_no_row() {
     assert_eq!(last.actor, member);
 }
 
+/// A `secret_use` grant takes no selector and records the member's current pairing id
+/// exactly as `remote_read` does, so a re-pair replaces the stored id and voids the
+/// grant made under the old one. An exact or category selector is refused before the
+/// pairing lookup, with no row and no audit entry.
+#[tokio::test]
+async fn a_secret_use_grant_is_selector_free_and_records_the_current_pairing() {
+    let root = crate::support::temp_root("admin-member-secret-use");
+    let vaults = TwoVaults::new(&root).await;
+    let a = Vault::open(&vaults.a, None);
+    let member = vaults.requester_member().to_string();
+    let grant = |selector: MemberGrantSelector| AdminOpBody::MemberGrant {
+        v: ADMIN_OP_SCHEMA_V2,
+        member: member.clone(),
+        operation: MemberGrantOperation::SecretUse,
+        selector,
+    };
+
+    for selector in [
+        MemberGrantSelector::Exact(API_ID.into()),
+        MemberGrantSelector::Category(CATEGORY.into()),
+    ] {
+        let refused = refusal(a.run(&grant(selector)).await);
+        assert!(refused.starts_with("invalid_params/permanent"), "{refused}");
+        assert!(
+            refused.contains("secret_use takes no selector"),
+            "{refused}"
+        );
+    }
+    assert!(!vaults.callosum.saw_method(PAIRED_DEVICES_READ));
+    assert!(a.store().list_member_grants().unwrap().is_empty());
+    assert_eq!(audit_count(a.store(), AuditOp::MemberGrantCreate), 0);
+
+    vaults.callosum.set_pairing(&member, Some(PAIRING));
+    let granted = ok(a.run(&grant(MemberGrantSelector::None)).await);
+    assert_eq!(granted["operation"], "secret_use");
+    assert_eq!(granted["selector_kind"], "none");
+    assert_eq!(granted["selector"], "");
+    assert_eq!(granted["pairing_id"], PAIRING);
+    vaults.callosum.set_pairing(&member, Some("pair-2"));
+    ok(a.run(&grant(MemberGrantSelector::None)).await);
+    let grants = a.store().list_member_grants().unwrap();
+    assert_eq!(grants.len(), 1);
+    assert_eq!(grants[0].member_id, member);
+    assert_eq!(grants[0].operation, MemberGrantOperation::SecretUse);
+    assert_eq!(grants[0].selector, MemberGrantSelector::None);
+    assert_eq!(grants[0].pairing_id, "pair-2");
+    assert_eq!(audit_count(a.store(), AuditOp::MemberGrantCreate), 2);
+}
+
 // ---------------------------------------------------------------------------------
 // Send, accept and the budget
 // ---------------------------------------------------------------------------------

@@ -134,6 +134,10 @@ pub const AGENT_SECRET_SCHEMA_VERSION: u32 = 27;
 /// Flow grants have their own holder and never satisfy an agent-session request.
 pub const FLOW_SECRET_SCHEMA_VERSION: u32 = 28;
 
+/// The migration that lets `member_grants` hold the selector-free `secret_use`
+/// operation, which allows a paired computer to forward agent-secret calls here.
+const SECRET_USE_MEMBER_GRANT_SCHEMA_VERSION: u32 = 29;
+
 /// The audit ops that DEPOSIT a credential, so the earliest entry carrying one of
 /// them is that credential's birth instant.
 ///
@@ -871,6 +875,33 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         version: FLOW_SECRET_SCHEMA_VERSION,
         statements: include_str!("flow_secrets.sql"),
+    },
+    // Admit the `secret_use` member operation: a paired computer may forward agent-secret
+    // calls to this vault, which holds the account's secrets. Like `transfer_deliver` it
+    // takes no selector, so kind `none` is now valid for exactly those two operations.
+    // SQLite cannot alter a CHECK in place, so the table is rebuilt the way migrations 13,
+    // 14, 17 and 18 rebuilt `read_grants`, and the migration that created `member_grants`
+    // stays as it was. Every row is copied unchanged, pairing id and creation time
+    // included, so no existing grant gains or loses authority.
+    Migration {
+        version: SECRET_USE_MEMBER_GRANT_SCHEMA_VERSION,
+        statements: "CREATE TABLE member_grants_v29 (\
+                         member_id     TEXT NOT NULL, \
+                         operation     TEXT NOT NULL CHECK (operation IN ('remote_read','transfer_deliver','secret_use')), \
+                         selector_kind TEXT NOT NULL CHECK (selector_kind IN ('exact','category','none')), \
+                         selector      TEXT NOT NULL, \
+                         pairing_id    TEXT NOT NULL, \
+                         created_at_ms INTEGER NOT NULL, \
+                         CHECK ((operation IN ('transfer_deliver','secret_use')) = (selector_kind = 'none')), \
+                         CHECK ((selector_kind = 'none') = (selector = '')), \
+                         PRIMARY KEY (member_id, operation, selector_kind, selector)\
+                     ); \
+                     INSERT INTO member_grants_v29 \
+                         (member_id, operation, selector_kind, selector, pairing_id, created_at_ms) \
+                         SELECT member_id, operation, selector_kind, selector, pairing_id, created_at_ms \
+                         FROM member_grants; \
+                     DROP TABLE member_grants; \
+                     ALTER TABLE member_grants_v29 RENAME TO member_grants;",
     },
 ];
 
@@ -12186,7 +12217,7 @@ mod tests {
     fn the_newest_migration_version_is_pinned_because_the_manifest_declares_it() {
         assert_eq!(
             newest_migration_version(),
-            28,
+            29,
             "the newest migration changed. This value is DECLARED in the module manifest \
              as store_schema_version, so a supervisor comparing declared-against-actual \
              sees it. Update the literal, and note the manifest consequence."

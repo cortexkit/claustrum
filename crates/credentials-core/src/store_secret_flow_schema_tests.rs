@@ -76,7 +76,7 @@ fn migration_28_conserves_every_agent_row_and_only_appends_nullable_pending_colu
     ];
     let before: Vec<_> = tables.iter().map(|table| rows(&sqlite, table)).collect();
     EncryptedStore::migrate(&sqlite).unwrap();
-    assert_eq!(sqlite.with_conn(read_schema_version).unwrap(), 28);
+    assert_eq!(sqlite.with_conn(read_schema_version).unwrap(), 29);
     for (table, before) in tables.into_iter().zip(before) {
         let after = rows(&sqlite, table);
         assert_eq!(after.len(), before.len(), "{table}");
@@ -134,7 +134,7 @@ fn read_only_listing_works_at_all_three_schema_generations_without_migrating() {
         None,
     );
     let after = list_agent_secrets_read_only(&path).unwrap().unwrap();
-    assert_eq!(sqlite.with_conn(read_schema_version).unwrap(), 28);
+    assert_eq!(sqlite.with_conn(read_schema_version).unwrap(), 29);
     assert_eq!(after.phones, before.phones);
     let key = after.secrets.iter().find(|s| s.name == "ops-key").unwrap();
     assert_eq!(key.grants, before.secrets[0].grants);
@@ -170,7 +170,7 @@ fn read_only_listing_works_at_all_three_schema_generations_without_migrating() {
         .collect();
     ids.sort();
     assert_eq!(ids, ["agent-grant", "flow-A", "flow-B", "flow-login"]);
-    assert_eq!(sqlite.with_conn(read_schema_version).unwrap(), 28);
+    assert_eq!(sqlite.with_conn(read_schema_version).unwrap(), 29);
 }
 
 #[test]

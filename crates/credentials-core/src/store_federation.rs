@@ -124,13 +124,19 @@ fn check_member_grant_shape(
                 Err(StoreOpError::InvalidCategoryName)
             }
         }
-        (MemberGrantOperation::TransferDeliver, MemberGrantSelector::None) => Ok(()),
+        (
+            MemberGrantOperation::TransferDeliver | MemberGrantOperation::SecretUse,
+            MemberGrantSelector::None,
+        ) => Ok(()),
         (MemberGrantOperation::RemoteRead, MemberGrantSelector::None) => Err(StoreOpError::Encode(
             "remote_read needs an exact or category selector".into(),
         )),
         (MemberGrantOperation::TransferDeliver, _) => Err(StoreOpError::Encode(
             "transfer_deliver takes no selector".into(),
         )),
+        (MemberGrantOperation::SecretUse, _) => {
+            Err(StoreOpError::Encode("secret_use takes no selector".into()))
+        }
     }
 }
 

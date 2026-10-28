@@ -434,6 +434,28 @@ fn list_json_carries_provider_ids_and_plan_tier_when_set() {
 /// Nothing secret reaches the document: a payload carrying a recognisable
 /// marker string must not appear anywhere in stdout (or stderr), in either
 /// rendering.
+/// A shell that cannot reach the master key must not print a listing whose every
+/// `auth_method` is null: a script would read that as "these credentials have no
+/// auth method", a statement about the credentials, when the fact is about the shell.
+#[test]
+fn list_json_refuses_when_the_master_key_cannot_be_read() {
+    let vault = JsonVault::new("list-json-keyless");
+    seed_three_credentials(&vault);
+    let moved = vault.root.join("master.key.moved");
+    std::fs::rename(&vault.key_path, &moved).expect("move the key file aside");
+    let out = vault.run(&["list", "--json"]);
+    assert!(
+        !out.status.success(),
+        "--json must refuse without the key: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("\"credentials\""),
+        "no listing may be printed: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
 #[test]
 fn list_json_never_prints_secret_material() {
     let vault = JsonVault::new("list-json-no-secrets");

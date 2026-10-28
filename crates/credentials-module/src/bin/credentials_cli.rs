@@ -5482,7 +5482,11 @@ fn inventory_json_rows(
     global: &GlobalArgs,
 ) -> Result<Vec<serde_json::Value>, CliError> {
     let rows = parse_inventory(result)?;
-    let methods = inventory_auth_methods(global);
+    let methods = if rows.is_empty() {
+        std::collections::BTreeMap::new()
+    } else {
+        inventory_auth_methods(global)?
+    };
     let mut out: Vec<serde_json::Value> = rows
         .iter()
         .map(
@@ -5531,22 +5535,33 @@ fn inventory_json_rows(
 ///
 /// Lease-free and read-only (the same property `ck auth list` already keeps):
 /// the store file is opened `SQLITE_OPEN_READ_ONLY` and no lease is taken, so
-/// this works beside a running daemon and against a stopped one. A missing key
-/// or an unreadable envelope degrades that row to null rather than failing the
-/// listing, the way the detected-plan enrichment degrades when no key resolves.
+/// this works beside a running daemon and against a stopped one.
+///
+/// A missing store, an unresolvable master key or a failed read refuses the whole
+/// listing. Scripts treat a null `auth_method` as "this credential has none", so
+/// printing null for every row when the key was simply unreachable would read as a
+/// fact about the credentials rather than about this shell. Only a single envelope
+/// that will not open degrades its own row to null; that row's state already says
+/// what is wrong with it.
 fn inventory_auth_methods(
     global: &GlobalArgs,
-) -> std::collections::BTreeMap<String, Option<credentials_core::list_auth_method::ListAuthMethod>>
-{
+) -> Result<
+    std::collections::BTreeMap<String, Option<credentials_core::list_auth_method::ListAuthMethod>>,
+    CliError,
+> {
     let db = store_path(global);
     if !db.exists() {
-        return std::collections::BTreeMap::new();
+        return Err(CliError::Usage(format!(
+            "--json needs the local store to derive auth_method, and {} does not exist",
+            db.display()
+        )));
     }
-    let key = match resolve_store_key(global) {
-        Ok(key) => key,
-        Err(_) => return std::collections::BTreeMap::new(),
-    };
-    credentials_core::store::auth_methods_read_only(&db, &key).unwrap_or_default()
+    let key = resolve_store_key(global)?;
+    credentials_core::store::auth_methods_read_only(&db, &key).map_err(|error| {
+        CliError::Usage(format!(
+            "--json could not read auth_method from the store: {error}"
+        ))
+    })
 }
 
 /// `ck auth enroll <list|approve|deny|revoke|reissue>` — the operator half of consumer

@@ -61,7 +61,18 @@ pub async fn poll_once<F: std::future::Future>(future: F) -> Option<F::Output> {
 pub async fn resolved_before_deadline<T: std::fmt::Debug>(
     mut call: tokio::task::JoinHandle<T>,
 ) -> T {
-    let before = poll_once(&mut call).await;
+    // The refusal arrives over a real socket from the stand-in, so a single poll can run
+    // before the reader task has been scheduled to read it, which failed this check
+    // under build-server load. Give the runtime scheduler turns, without moving the
+    // paused clock, until the call resolves or a wall-clock bound passes. Only the
+    // bound uses real time; the assertion is still that the call resolved before any
+    // deadline could fire.
+    let started = std::time::Instant::now();
+    let mut before = poll_once(&mut call).await;
+    while before.is_none() && started.elapsed() < Duration::from_secs(5) {
+        tokio::task::yield_now().await;
+        before = poll_once(&mut call).await;
+    }
     tokio::time::advance(CONSUMER_FACING_DEADLINE + Duration::from_millis(1)).await;
     tokio::task::yield_now().await;
     let after = if before.is_none() {
